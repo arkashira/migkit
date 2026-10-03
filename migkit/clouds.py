@@ -7,7 +7,9 @@ service for most managed databases - `*.rds.amazonaws.com`,
 (a CNAME, a private IP, a proxy in front): RDS and Aurora give their
 administrator a role of their own (`rds_superuser`), Aurora answers
 `aurora_version()`, Cloud SQL `cloudsqlsuperuser`, Azure
-`azure_pg_admin`, AlloyDB `alloydbsuperuser`; an RDS MySQL server runs
+`azure_pg_admin`, AlloyDB `alloydbsuperuser` - and, read before a role,
+which a copy restored elsewhere keeps, the settings each defines for
+itself (`rds.*`, `cloudsql.*`, `azure.*`, `alloydb.*`); an RDS MySQL server runs
 from `/rdsdbbin/`, Aurora MySQL has `aurora_version`, Cloud SQL MySQL
 `cloudsql_*` variables. Only what a service says of itself names it - a
 server that says nothing recognisable is "run by its owner", which is
@@ -192,11 +194,21 @@ PG_SIGNS = {
     "azure_pg_admin": ("azure", "flexible"),
     "alloydbsuperuser": ("gcp", "alloydb"),
 }
+#: PostgreSQL: the settings a service defines for itself, by their
+#: prefix - a server's own settings, which a copy restored elsewhere does
+#: not carry, where its roles (`PG_SIGNS`) come along with every dump of
+#: the roles (audit 2026-10-01, K18)
+PG_SETTINGS = {"rds": ("aws", "rds"), "cloudsql": ("gcp", "cloud-sql"),
+               "azure": ("azure", "flexible"),
+               "alloydb": ("gcp", "alloydb")}
 PG_PROBE = ("select coalesce((select string_agg(rolname, ',') from pg_roles"
             " where rolname in ('rds_superuser', 'cloudsqlsuperuser',"
             " 'azure_pg_admin', 'alloydbsuperuser')), '') || chr(31) ||"
             " exists(select 1 from pg_proc where proname ="
-            " 'aurora_version')::text")
+            " 'aurora_version')::text || chr(31) || coalesce((select"
+            " string_agg(distinct split_part(name, '.', 1), ',') from"
+            " pg_settings where name ~ '^(rds|cloudsql|azure|alloydb)\\.'),"
+            " '')")
 
 
 def _signs(kind):
@@ -216,12 +228,23 @@ def _listed(names):
 def _pg(eng, side):
     signs = {**_signs("pg_roles"), **PG_SIGNS}
     probe = PG_PROBE.replace(_listed(PG_SIGNS), _listed(sorted(signs)))
-    roles, _, aurora = eng._psql(side, "postgres", probe).strip(
-        ).partition("\x1f")
+    roles, aurora, settings = (eng._psql(side, "postgres", probe).strip(
+        ).split("\x1f") + ["", ""])[:3]
     roles = [r for r in roles.split(",") if r]
     aurora = aurora.strip() == "true"
     if aurora:
         return Where("aws", "aurora", ["the server (aurora_version())"])
+    # a service's own settings first: its roles survive a dump of the
+    # roles, so a server restored from one read as the service and its
+    # page copy was refused
+    own = sorted(s for s in settings.strip().split(",") if s in PG_SETTINGS)
+    if own:
+        cloud, service = PG_SETTINGS[own[0]]
+        return Where(cloud, service, [f"the server (its {own[0]}.*"
+                                      " settings)"],
+                     alike=tuple(dict.fromkeys(
+                         PG_SETTINGS[s][0] for s in own[1:]
+                         if PG_SETTINGS[s][0] != cloud)))
     # the clouds' own roles first, as `PG_SIGNS` has them; where the roles
     # name more than one cloud, each is kept for the address to decide
     named = [(r, signs[r]) for r in sorted(roles, key=lambda r: (

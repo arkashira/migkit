@@ -331,6 +331,13 @@ class Sandbox:
                             " docker is not on this machine")
         prefix = str(opts.get("name") or f"migkit-sandbox-{self.hop.name}")
         ports = list(opts.get("ports") or [])
+        from .convert import emulating
+        kept = emulating(self.pair.dst_engine, "dst", self.db) - {"mariadb"}
+        if kept:
+            raise NoSandbox("the target is an emulation of another engine"
+                            f" ({', '.join(sorted(kept))}), which migkit"
+                            " cannot start a copy of itself; name one in"
+                            " the hop's proof_sandbox")
         out = []
         for k, (engine, eng, side) in enumerate((
                 (self.pair.src_name, self.pair.src_engine, "src"),

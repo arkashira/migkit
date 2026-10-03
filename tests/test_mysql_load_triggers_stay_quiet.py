@@ -17,6 +17,9 @@ from click.testing import CliRunner
 
 from migkit import movers
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.load-window", "mysql")]
+
 pytestmark = [pytest.mark.docker]
 
 SRC, DST = "migkit-test-mytrig-src", "migkit-test-mytrig-dst"

@@ -307,6 +307,17 @@ DEFINITIONS = {d.name: d for d in (
         "the right to read the binary log (replication)",
         make=lambda c: [f"grant replication slave, replication client on"
                         f" *.* to {c.who};"]),
+    # the commits under way when a copy's position is taken are waited out
+    # (`MySQLEngine._commits_under_way`): an account that sees only its own
+    # session cannot, and the copy is refused
+    Definition(
+        "process_grant", "mysql",
+        "the right to see the other sessions (PROCESS)",
+        make=lambda c: [f"grant process on *.* to {c.who};"],
+        without="a copy followed by the change tail is refused: which"
+                " commits are under way when it starts cannot be read, and"
+                " one in the binary log but not yet visible would be in"
+                " neither"),
     # -- MongoDB ------------------------------------------------------------
     Definition(
         "replica_set", "mongodb", "a change stream (a replica set)",
@@ -828,11 +839,8 @@ def _record(hop):
 
 
 def _save(hop, rec):
-    import os
-    path = _path(hop)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=1, default=str))
-    os.replace(tmp, path)
+    from . import durable
+    durable.write_json(_path(hop), rec, indent=1)
 
 
 def _audit(hop, entry):

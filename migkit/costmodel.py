@@ -443,19 +443,12 @@ class Knowledge:
         return 0, 0
 
     def _change(self, apply):
-        import fcntl
-        d = os.path.dirname(self.path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        with self._lock, open(self.path + ".lock", "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        from . import durable
+        with self._lock, durable.locked(self.path):
             got = self._read()
             apply(got)
             got["at"] = time.time()
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(got, f)
-            os.replace(tmp, self.path)
+            durable.write_json(self.path, got)
             self._got = got
 
     def learn(self, rung, pair, fit):
@@ -737,22 +730,17 @@ class CostModel:
         if not own:
             return
         if self.hop is not None:
-            try:
-                path = self.hop.report_dir() / HOP_FILE
-                try:
-                    got = json.loads(path.read_text())
-                except (OSError, ValueError):
-                    got = {}
+            from . import durable
+
+            def add(got):
                 kept = got.setdefault(self.prefix + self.work, {})
                 for n, f in own.items():
                     old = Fit.from_dict(kept[n]) if n in kept else Fit()
                     old.forget(KEEP_OLD)
                     old.add(f)
                     kept[n] = old.to_dict()
-                path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(got))
-                os.replace(tmp, path)
+            try:
+                durable.change_json(self.hop.report_dir() / HOP_FILE, add)
             except (OSError, AttributeError):
                 pass
         kb = self.kb

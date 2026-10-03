@@ -98,15 +98,21 @@ def hop_row(hop):
 
 def _text_files(where):
     from .cli import RUN_FILES
+    from .checkpoint import journal_of
     names = list(RUN_FILES) + list(MORE_TEXT)
     # the ways a restart stands on, kept beside each position
     names += sorted(p.name for p in where.glob("*-ways.json"))
+    # a copy's checkpoint goes with its journal (`checkpoint.read_move`)
+    names += [journal_of(where / n).name for n in names
+              if n.endswith(".json")]
     return list(dict.fromkeys(names))
 
 
 def _blob_files(where):
     from . import kept, tailtables
-    out = [kept.FILE]
+    # the tail's own state (`tailtables.Store`), and what an earlier
+    # version kept in files of their own
+    out = [tailtables.STORE, kept.FILE]
     spools = where / tailtables.SPOOLS
     if spools.is_dir():
         out += sorted(f"{tailtables.SPOOLS}/{p.name}"
@@ -123,10 +129,10 @@ def _stamp(path):
 
 
 def _blob_bytes(path):
-    """A file's bytes as of one moment: the kept proof through SQLite's own
-    backup, which a writer beside it cannot tear."""
-    from . import kept
-    if path.name == kept.FILE:
+    """A file's bytes as of one moment: a SQLite file - the tail's own
+    state, the kept proof - through SQLite's own backup, which a writer
+    beside it cannot tear."""
+    if path.name.endswith(".sqlite"):
         import sqlite3
         src = sqlite3.connect(str(path))
         mem = sqlite3.connect(":memory:")
@@ -146,15 +152,84 @@ def _write(path, data):
     durable.write_atomic(path, data)
 
 
+def bundle(where, store):
+    """{"files": {name: text}, "blobs": {name: digest}, "gen": the
+    position's generation} of what another machine needs to go on with
+    `where`'s move: the tail's position, its own state, the kept proof,
+    the copy's position - the text files first, then the ones that are
+    not text, each as of one moment, so a state saved after the position
+    is read is at most one batch ahead of it, which the one that goes on
+    takes back out (`tailtables.Store.align`). A store that keeps no
+    files (`shared.Target`) takes the tail's state as text, where it holds
+    nothing set aside."""
+    from . import tailctl, tailtables
+    files = {}
+    for name in _text_files(where):
+        try:
+            files[name] = (where / name).read_text()
+        except OSError:
+            continue
+    blobs = {}
+    for name in _blob_files(where):
+        p = where / name
+        if not p.exists():
+            continue
+        if not store.blobs:
+            text = tailtables.Store.of(where).dump() \
+                if name == tailtables.STORE else None
+            if text is None:
+                raise SystemExit(
+                    f"the tail keeps {name}, which the machines' store"
+                    " cannot hold; keep the hop's run state in a bucket or"
+                    " a directory every machine sees")
+            files[STATE_TEXT] = text
+            continue
+        blobs[name] = store.put_blob(_blob_bytes(p))
+    at = _position(files.get(tailctl.TOKEN))
+    return {"files": files, "blobs": blobs,
+            "gen": int((at or {}).get("gen") or 0)}
+
+
+#: the tail's own state as text, in a store that keeps no files
+STATE_TEXT = "tail-state.json"
+
+
+def place(where, files, blobs, store):
+    """What `bundle` kept, put where this machine's move reads it: each
+    file written whole (`durable`), and this machine's own from before
+    that the bundle does not hold removed - it is not the last holder's."""
+    from . import tailtables
+    tailtables.Store.forget(where)
+    for name in dict.fromkeys(_text_files(where) + list(files)):
+        if name == STATE_TEXT:
+            continue
+        if name in files:
+            _write(where / name, files[name])
+        else:
+            (where / name).unlink(missing_ok=True)
+    for name in _blob_files(where) + [n for n in blobs
+                                      if n not in _blob_files(where)]:
+        if name in blobs:
+            _write(where / name, store.get_blob(blobs[name]))
+        elif not (name == tailtables.STORE and STATE_TEXT in files):
+            (where / name).unlink(missing_ok=True)
+        if name.endswith(".sqlite"):
+            for extra in ("-wal", "-shm", "-journal"):
+                (where / (name + extra)).unlink(missing_ok=True)
+    if STATE_TEXT in files:
+        tailtables.Store.load(where, files[STATE_TEXT])
+
+
 def _position(text):
-    """{"batch", "token"} a tail's token file holds, or None."""
+    """{"batch", "token", "gen"} a tail's position holds, or None."""
     try:
         got = json.loads(text) if text else None
     except ValueError:
         return None
     if not isinstance(got, dict) or "token" not in got:
         return None
-    return {"batch": got.get("batch"), "token": got.get("token")}
+    return {"batch": got.get("batch"), "token": got.get("token"),
+            "gen": got.get("gen")}
 
 
 def _change(store, path, fn, sealed=True, tries=200):
@@ -181,6 +256,36 @@ def _change(store, path, fn, sealed=True, tries=200):
 _HELD = {}
 _HELD_LOCK = threading.Lock()
 _PROVED = set()
+
+
+def settled(where):
+    """Whether the tail's last save is whole: its own state set down for a
+    batch (`tailtables.Store`) no further than the position - the
+    generations the two carry - and the kept proof at the position. A
+    push between the two carries them one batch apart, which the one that
+    goes on takes back out, where it is one batch; this keeps it so."""
+    from . import kept, tailctl, tailtables
+    try:
+        env = tailctl.position(where / tailctl.TOKEN)
+    except SystemExit:
+        return False
+    if env is None:
+        return True
+    if (where / tailtables.STORE).exists():
+        st = tailtables.Store.of(where)
+        if st.get("stream") == (env.get("id") or "v0") and \
+                st.gen() != int(env.get("gen") or 0):
+            return False
+    if (where / kept.FILE).exists():
+        try:
+            k = kept.Store(where / kept.FILE)
+            got = k.get("token")
+            k.conn.close()
+        except Exception:  # noqa: BLE001 - read at the next push
+            return False
+        if got is not None and got != kept._tok(env.get("token")):
+            return False
+    return True
 
 
 def held(hop):
@@ -339,22 +444,7 @@ class Holding:
         # in the ledger now: the pushes after this carry this holding alone
         self.previous[db] = []
         files = have.get("files") or {}
-        for name in dict.fromkeys(_text_files(where) + list(files)):
-            if name in files:
-                _write(where / name, files[name])
-            else:
-                # this machine's own from before is not the last holder's
-                (where / name).unlink(missing_ok=True)
-        blobs = have.get("blobs") or {}
-        for name in _blob_files(where) + [n for n in blobs
-                                          if n not in _blob_files(where)]:
-            if name in blobs:
-                _write(where / name, self.store.get_blob(blobs[name]))
-            else:
-                (where / name).unlink(missing_ok=True)
-            if name.endswith(".sqlite"):
-                for extra in ("-wal", "-shm", "-journal"):
-                    (where / (name + extra)).unlink(missing_ok=True)
+        place(where, files, have.get("blobs") or {}, self.store)
         self.stamps[db] = self._stamps(where)
         taken = have.get("epoch") or {}
         self.took_over = taken or self.took_over
@@ -396,23 +486,8 @@ class Holding:
 
     def _record(self, db, blobs_before):
         where = self.hop.report_dir(db)
-        files = {}
-        for name in _text_files(where):
-            try:
-                files[name] = (where / name).read_text()
-            except OSError:
-                continue
-        blobs = {}
-        for name in _blob_files(where):
-            p = where / name
-            if not p.exists():
-                continue
-            if not self.store.blobs:
-                raise SystemExit(
-                    f"{self.hop.name}: the tail keeps {name}, which the"
-                    " machines' store cannot hold; keep the hop's run"
-                    " state in a bucket or a directory every machine sees")
-            blobs[name] = self.store.put_blob(_blob_bytes(p))
+        got = bundle(where, self.store)
+        files, blobs = got["files"], got["blobs"]
         at = _position(files.get("tail-token.json"))
         epoch = self._epoch(db, at)
         epoch["last"], epoch["last_at"] = at, time.time()
@@ -425,17 +500,7 @@ class Holding:
 
     @staticmethod
     def _settled(where):
-        """Whether the last save of the tail's position is whole: the
-        tables' states and the kept proof are written before the position
-        in the step that saves it, so either newer than the position is a
-        save half done - a push now would carry the two out of step."""
-        from . import kept, tailtables
-        at = _stamp(where / "tail-token.json")
-        for name in (tailtables.STATE, kept.FILE):
-            got = _stamp(where / name)
-            if at is not None and got is not None and got[0] > at[0]:
-                return False
-        return True
+        return settled(where)
 
     def push(self, db, force=False, settled=False):
         """`db`'s files put in the store where they changed since the last

@@ -2138,8 +2138,10 @@ class Engine:
         dst = list(self.neutral_tables("dst", db))
 
         def rename(t):
+            # as listed, a bare name kept bare: its rename is said in the
+            # parts it was given, and told from it by them
             return self.hop.target_table_in(
-                db, *[p for p in str(t).split(".") if p])
+                db, *self.hop.parts_of(t, bare_in=""))
         moved = [t for t in src if str(rename(t)) != str(t)]
         pairs, _, _, _ = HeteroEngine.match_tables(moved, dst, rename)
         taken = {d for _, d in pairs}
@@ -2358,6 +2360,13 @@ class Engine:
     AUTHORITY_SCOPE = "(fix DDL)"
     OBJECT_SCOPE = "(object changes)"
 
+    #: `options.schema_authority`: the schema-aware reading has the last
+    #: word (the default), or every reading counts. Named for what decides,
+    #: not for the program behind it - an older hop's word for the default
+    #: (`LEGACY_AUTHORITY`) is read as it
+    AUTHORITIES = ("schema-aware", "every-reading")
+    LEGACY_AUTHORITY = "atlas"
+
     def _atlas_authoritative(self, res):
         """When the schema-aware reading says clean, demote the noisier
         textual opinions - the native dump diff and the object-change list -
@@ -2365,8 +2374,10 @@ class Engine:
         understands what a schema *is* rather than how it is spelled. The
         object inventory still stands, and so does the structural diff: that
         one compares objects rather than text and is never demoted. Opt out
-        with `options.schema_authority` set to anything but `atlas`."""
-        if self.hop.options.get("schema_authority", "atlas") != "atlas":
+        with `options.schema_authority: every-reading`."""
+        said = str(self.hop.options.get("schema_authority")
+                   or "schema-aware").strip().lower()
+        if said not in ("schema-aware", self.LEGACY_AUTHORITY):
             return res
         if not any(r.scope.endswith(self.AUTHORITY_SCOPE) and r.status == "ok"
                    for r in res):
@@ -3651,7 +3662,7 @@ class Engine:
         known = self.__dict__.setdefault("_column_rules_of", {})
         at = (db, str(table))
         if at not in known:
-            rules = self.hop.column_rules(db, *str(table).split(".")) or {}
+            rules = self.hop.column_rules(db, *self.hop.parts_of(table)) or {}
             known[at] = rules if (rules.get("keep") or rules.get("drop")
                                   or rules.get("rename")) else {}
         return known[at]
@@ -3859,7 +3870,7 @@ class Engine:
 
     def _reader_where(self, db, src_t):
         """The hop's row filter on each side, in each side's SQL."""
-        pred = self.hop.row_filter(db, *str(src_t).split("."))
+        pred = self.hop.row_filter(db, *self.hop.parts_of(src_t))
         return pred, pred
 
     def _can_read_twice(self):
@@ -5077,8 +5088,9 @@ class Engine:
         proof = []
         for rnd in (1, 2):
             lsn = self.src_lsn(db)
-            ok = self.fence_wait(db, lsn, timeout=int(
-                self.hop.options.get("fence_timeout", 300)))
+            from ..hopkeys import opt
+            ok = self.fence_wait(db, lsn,
+                                 timeout=opt(self.hop, "fence_timeout"))
             if ok is None:
                 return None
             proof.append(f"round {rnd}: fence lsn={lsn}"
@@ -5101,7 +5113,9 @@ class Engine:
         deterministically when a fence is available, by sleep-settle as
         the fallback."""
         still, healed, how = [], [], []
-        settle = int(self.hop.options.get("settle", 0))
+        from ..hopkeys import opt
+        # left out, no wait: the re-check reads again at once
+        settle = opt(self.hop, "settle") or 0
         slept = False
         for t in bad:
             keys = self._suspect_keys(db, t)

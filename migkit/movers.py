@@ -119,6 +119,26 @@ def _ladder():
     )
 
 
+#: what a stop costs each bulk way, as the plan says it before it starts:
+#: a way not named starts over, and every table it had copied is copied
+#: again (DTS says it as "resumable dump status"; nobody here did)
+AFTER_A_STOP = {
+    "builtin": "a stop goes on from the ranges it had finished",
+    "pgcopydb": "a stop goes on from the tables it had finished - a table"
+                " cut in parts, a copy run in a container, or one begun"
+                " under another scope starts over",
+    "mysqlsh": "a stop goes on loading from the dump it kept, where the"
+               " source has not been written since; otherwise it starts"
+               " over",
+}
+
+
+def after_a_stop(via):
+    """What a stop costs the bulk way `via`, in words (`AFTER_A_STOP`)."""
+    return AFTER_A_STOP.get(via, "a stop starts it over: every table it"
+                                 " had copied is copied again")
+
+
 def pick(engine, table="", hop=None, go=False):
     """Fastest installed tool for whole-db moves, builtin for single tables
     (chunk resume matters more than raw speed there)."""
@@ -3463,10 +3483,10 @@ def _my_mask_facts(hop, db):
 
 
 def _streams_back(hop):
+    from .hopkeys import topology
     opts = getattr(hop, "options", None) or {}
-    topo = str(opts.get("topology") or "").lower()
     return bool(opts.get("reverse") or opts.get("two_way")
-                or topo in ("two-way", "two_way", "bidirectional"))
+                or topology(hop) == "two_way")
 
 
 def mask_plan(hop, db, keys, columns=None):
@@ -4139,8 +4159,9 @@ def mydumper_move(hop, db, workers, go, log, only=None):
             f"{db}: " + "; ".join(f"{t}: {c.reason}" for t, c in
                                   sorted(choice.items()) if not c.rung))
     _masked_record(hop, db).unlink(missing_ok=True)
-    cnf.write_text(settings)
-    cnf.chmod(0o600)
+    from . import durable
+    # both sides' passwords: 0600 from its first byte, not after (SEC10)
+    durable.write_atomic(cnf, settings)
     if skip or routed or shell_tables:
         omit.write_text("".join(f"{n}\n" for n in
                                 skip + routed
@@ -4174,8 +4195,8 @@ def mydumper_move(hop, db, workers, go, log, only=None):
             else:
                 dump_tables = []
         if shell_tables:
-            script.write_text(SHELL_RUN)
-            script.chmod(0o600)
+            from . import durable
+            durable.write_atomic(script, SHELL_RUN)
             if resumable:
                 resumed = _shell_resumable(hop, db, shell_tables, shell_dir)
                 if resumed is None:
@@ -6511,16 +6532,19 @@ def _follow_runs(hop):
 def _follow_until_asked(hop, db, d, env, proc, log=None):
     """A leg left applying until someone asks it to end - ctrl-c, a
     service manager's stop, or `tail.stop` beside the hop's position
-    (`tailctl`) - and then ended as a catch-up is: its end named at the
-    source's position of that moment, so what was written before the
-    request reaches the target. Marked running while it waits, for
-    `/metrics` and for a repair to see it; returns once the end is
-    named, for the caller to wait for the leg to reach it."""
+    (`tailctl`), or the end of the schedule's slot it runs in (audit
+    K14: it held the slot until `max_duration` cut it off) - and then
+    ended as a catch-up is: its end named at the source's position of
+    that moment, so what was written before the request reaches the
+    target. Marked running while it waits, for `/metrics` and for a
+    repair to see it; returns once the end is named, for the caller to
+    wait for the leg to reach it."""
     import signal
     import time as _t
 
-    from . import tailctl
+    from . import schedule, tailctl
     where = hop.report_dir(db)
+    ends = schedule.slot_end()
     asked = []
 
     def ask(*_):
@@ -6530,21 +6554,25 @@ def _follow_until_asked(hop, db, d, env, proc, log=None):
     except ValueError:
         before = None
     try:
-        with tailctl.Running(where):
+        with tailctl.Running(where, hop):
             if log:
                 log("the change leg applies until it is asked to end:"
-                    f" ctrl-c, or `tail.stop` in {where}")
+                    f" ctrl-c, or `tail.stop` in {where}"
+                    + (", or the schedule's slot ends" if ends else ""))
             try:
                 while proc.poll() is None and not asked \
-                        and not tailctl.stop_asked(where):
+                        and not tailctl.stop_asked(where) \
+                        and (ends is None or _t.time() < ends):
                     _t.sleep(2)
             except KeyboardInterrupt:
                 asked.append(True)
             if proc.poll() is not None:
                 return
             if log:
-                log("asked to end: the leg applies up to the source's"
-                    " position of now, then stops")
+                log(("asked to end" if asked or ends is None
+                     or _t.time() < ends else "the schedule's slot ended")
+                    + ": the leg applies up to the source's position of"
+                    " now, then stops")
             _follow_end(d, env, log)
     finally:
         if before is not None:
@@ -6967,7 +6995,7 @@ def _skipped_operations(hop, tables):
     leaves a truncate out too, which takes away what a delete would -
     else none."""
     from .config import OPS
-    seen = {hop.carries(one, *[p for p in str(t).split(".") if p])
+    seen = {hop.carries(one, *hop.parts_of(t))
             for one, listed in tables.items() for t in listed or ()
             if hop.takes_table(one, t)}
     if len(seen) != 1:
@@ -7067,8 +7095,9 @@ def stream_codegen(hop, dbs, engine):
             " given: every database's tables would land in the first's."
             " Nothing has been started - follow one database a hop, or"
             " with migkit's own change tail")
-    out = hop.report_dir() / "stream"
-    out.mkdir(parents=True, exist_ok=True)
+    from .config import private
+    # it holds the connectors' passwords: only this user's (SEC10)
+    out = private(hop.report_dir() / "stream")
     s, t = hop.source, hop.target
     src_is_mysql = engine in ("mysql", "hetero")
     connector_class = ("io.debezium.connector.mysql.MySqlConnector"
@@ -7231,18 +7260,19 @@ Third-party components are pinned in docker-compose.yml; see NOTICE for
 licences and attribution.
 """
     import json as _json
-    (out / "docker-compose.yml").write_text(compose)
+    _write_private(out / "docker-compose.yml", compose)
     _write_private(out / "connect.env", _env_file({
         "MIGKIT_SOURCE_PASSWORD": s.password or "",
         "MIGKIT_TARGET_PASSWORD": t.password or ""}))
-    (out / "source-connector.json").write_text(
-        _json.dumps(source, indent=2) + "\n")
-    (out / "sink-connector.json").write_text(
-        _json.dumps(sink, indent=2) + "\n")
-    (out / "README.md").write_text(readme)
+    _write_private(out / "source-connector.json",
+                   _json.dumps(source, indent=2) + "\n")
+    _write_private(out / "sink-connector.json",
+                   _json.dumps(sink, indent=2) + "\n")
+    _write_private(out / "README.md", readme)
+    # every file 0600 from the moment it exists, the directory 0700 before
+    # the first is written: they were written, then chmodded (SEC10)
     for f in out.iterdir():
         f.chmod(0o600)
-    out.chmod(0o700)
     return out
 
 

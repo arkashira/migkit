@@ -2318,7 +2318,7 @@ and 1,000,000 rows across four pairs:
 | hetero | has no deep battery |
 | sqlglot | decided (2026-09-25): kept, for what a type map cannot do. It translates each column default into the target's SQL: `uuid()` becomes `gen_random_uuid()`, `now()` becomes `CURRENT_TIMESTAMP()`. The target is then asked whether it takes the result, and a default it refuses is named rather than guessed at |
 | to measure before wrapping | boto3 Secrets Manager, `mongodump --query/--oplog`, datacompy `all_mismatch()`, mydumper `--regex/--rows` |
-| resumable-dump flag | tell the operator when a restart loses the dump's progress (DTS `DumperResumeCtrl`) |
+| resumable-dump flag | done (2026-10-04): the bulk plan says what a stop costs the way it took (`movers.after_a_stop`) |
 | timed start and auto-retry window | low value next to cron |
 | two-way and many-to-one topologies with loop detection | moved up to item 36 |
 | waiting on the owner | should dry-run plans hide the command lines they print? |
@@ -2676,8 +2676,18 @@ documentation, and says what migkit took from each:
 
 HVR, Qlik, Striim and Bytebase are learned from and not wrapped. They
 are commercial or bring a platform of their own. Trino is a candidate
-second reader, to measure first. sqlpipe and schemachange are not read
-yet.
+second reader, to measure first. *Read (2026-10-04):* sqlpipe (CSV
+through each target's bulk client, no comparison) has nothing to wrap;
+schemachange's history table, with Flyway's, Liquibase's, Alembic's,
+Django's, Rails' and Entity Framework's, is the application's record of
+its schema version, which migkit should read (26.versions):
+
+* **26.versions** - the schema version each side stands on, from the
+  application's migration history table, said by `check` and the
+  cutover's gate; a migration run on one side and not the other found;
+  where migkit changes the target's schema itself (the schema fix, a DDL
+  the tail applies), said that the application's tool does not know of
+  it.
 
 **27. SQL Server depth.** Closed as untestable on this arm64 machine. Either
 find an x86 runner, or list it plainly in section H of
@@ -2750,8 +2760,8 @@ store). What was still nowhere:
   way (`waiting for handler commit`), or takes `Binlog_snapshot_*` where
   the server gives it; replaying from the start of the binlog file was
   tried and dropped - measured, it brought back rows from before a `DROP
-  DATABASE`. Still open: the wait needs `PROCESS` (without it nothing is
-  waited for, as before); MongoDB's resume token and MariaDB's/Percona's
+  DATABASE`. The wait needs `PROCESS`: without it the copy is refused,
+  saying the grant (done 2026-10-04, `sees_every_session`). Still open: MongoDB's resume token and MariaDB's/Percona's
   snapshot position are not measured here.
 * **Uniform time shift and type narrowing on MySQL.** #22 of the smart
   check work: the PostgreSQL deep checks for a constant per-row epoch
@@ -2779,12 +2789,14 @@ store). What was still nowhere:
   of the ALTERs that add its deferred indexes are the server's). A name
   an application could choose too (`_archive_old`) counts only beside the
   table it would copy. Left out of the move's table list, the counts, the
-  data, the object inventory and the shape watch. Still open: the change
-  tail reads gh-ost's and pt-osc's names by the name alone.
+  data, the object inventory and the shape watch. The change tail reads them beside
+  the tables it knows too (done 2026-10-04, `TableSet._names_among`).
   Test: `test_an_online_rewrites_working_tables_are_left_alone.py`.
 * **`schema_authority: atlas` needs an alias shape** (4-จ from the old
-  queue): how the hop names the authority's own alias for a table the
-  hop renames; open, small.
+  queue): *done (2026-10-04)* - the words name what decides,
+  `schema-aware` (the default) or `every-reading`, never the program
+  behind it; an older hop's `atlas` is read as the default, any other
+  word refused at load.
 * **reladiff as a rung, not a default:** it has no jsonb rendering and
   breaks on Python 3.14; the decision engine keeps it for the pairs it
   proves on and says why it was not used elsewhere (0f).
@@ -2962,6 +2974,38 @@ though the job never took it.
    d. `include` read by a live tail's filter (Debezium `table.include.list`
       instead of a resolved exclude list) so a table made later under a
       taken pattern joins the stream without a restart.
+   e. left by 6d (merged `dfd78df`): the document store's check does not
+      read renames, so a renamed collection reads as different after the
+      move; the table copier (own and pair) deletes its key ranges before
+      loading whatever `mapping.ops` says - only the bulk truncate honours
+      it; schema creation does not leave out the sequences `objects`
+      leaves out (a kept table would not create without its sequence);
+      a comment on a left-out function, trigger or constraint is still
+      restored and refused by the target; the schema comparers and deep
+      checks read partitions by their own names, not their root's; three
+      program behaviours read from documentation, not measured (the
+      dump's pattern against `db.table`, the online sync's regex fields
+      and its 1.6 cut-off, the restore's first matching rename); the
+      streaming copy's filter file is names one by one, its reading of
+      mixed case unchecked.
+   f. the two-axis review of the scope work (2026-10-04) closed in
+      `8650feb`: `mapping.ops` held to every reading of a leaf name and to
+      the pair's own name for it (`Result.table`); the counts a check
+      counted carried as fields (`Result.rows_apart`, `Result.tables`)
+      on PostgreSQL, MySQL, SQL Server, the pair and the document store,
+      the words read only where an engine says none; a service's word
+      held to every answer, a warn or an error `unproved`, never agreed,
+      a database's one answer held table by table, names matched without
+      case only where one table can be meant; the cutover's final check
+      given whole answers; one reading of what a hop narrows
+      (`config.narrowed_by`) for the copy of pages, the backup seed, the
+      servers' own replication and the evidence; `Hop.reversed` keeping
+      schemas, turning name rules round and refusing ones that cannot be;
+      a listed name asked one way (`Hop.takes_table`, an AST guard); the
+      target's names read back (`Hop.source_table_in`); one PostgreSQL
+      sequence reading (`_seq_gone`); named roles (`users.role_taken`);
+      Oracle's counters scoped; SQL Server's data check scoped. Still to
+      carry the fields on every other engine (P0-PARITY.verify).
 
 ## P0-CLOUDS. Any cloud to any cloud, every database service in each (owner, 2026-10-01)
 
@@ -3182,6 +3226,32 @@ owner's rule); every verdict touched is proved able to say "different".
 * Running work: `twoway.py` (conflict resolution), `repairlog.py` (repair
   ladder).
 
+*Done (2026-10-01), with ST17's journal (`checkpoint.read_move`) handed
+over from AUD-A.* The tail's own state is one SQLite store set down a
+batch at a time before the target commits it and taken back out where
+the position never passed it (`tailtables.Store`); the target's batch
+mark decides the rest (`twoway.committed_ahead`, `hetero._committed_
+ahead`). A cutover holds a lease of its own while it acts, so the next
+run is refused instead of undoing it in flight (`cutover._held`); every
+lease a process holds is asked between a copy's ranges and a tail's
+batches (`lease.check_held`); every read-modify-write of a kept file goes
+through `durable.change_json` under the file's lock, and no file is
+written through a temporary name another writer shares (ST23).
+Every source whose tail asks its shape digests its catalogue on the
+server first - PostgreSQL, SQL Server, Oracle, MySQL and TiDB, SQLite
+(`shape_mark`, over exactly the rows the whole read reads) - and the
+whole shape is read only where the digest moved; a MySQL tail asks only
+once a minute, its binlog carrying every DDL (SP8). A restore point's copy under
+the reports is sealed file by file to the hop's `at_rest` recipients and
+opened into a directory of the run's own to read (ST15). Spool frames
+are still pickled: read back only into the classes a change log's values
+come as, and a frame that would not read back is refused before the
+batch is kept; `file:` secrets and the approvals' signers list are
+refused where another user may change them (SEC21). `schedule` was
+already lease-based (ST10, AUD-A); the PostgreSQL undo's `\copy` (SEC9)
+and its fence on one kept connection (SP10) were done in `postgres.py`
+by the groups that hold it.
+
 **AUD-C. The dashboard, metrics, the run log and what leaves the machine
 (P0/P1, L).** Files: `migkit/ui.py`, `migkit/notify.py`, `migkit/traces.py`,
 `migkit/digests.py`, `migkit/export.py`, `migkit/diagnostics.py`,
@@ -3248,6 +3318,52 @@ line each).
   did-you-mean (K24).
 * Every `MIGKIT_*` read in these files through `envkeys` (K13); the
   warehouse builder passes `key` to `ddl_type` (SC6, its line).
+
+*Done (2026-10-04).* Every key under an option is declared with its own
+`Key` - type, words (`choices`, `fold` for spellings, built in the
+choice's own), least, default - and an unknown one is an error with the
+nearest; the owning module's reader of an option (`Key.check`: the
+cutover's settings, the follow's end, the limits, the deadline, the
+subset's rules, a stream's format, a page copy's source address, the
+business rules, the origin table, the spool) is asked at load, each
+given the hop without the other options that have readers of their own;
+`approvals.steps` by `approvals.STEPS`, `count` at least 1; a schedule's
+cron and zone read as its slot reads them. `hopkeys.opt` is the one
+reader of a default (`fence_timeout`, `repair_window`, `settle` moved
+onto it), `topology()`/`reverse()` the one reading of those words. A key
+written twice in one mapping is refused (`config.read_yaml`, the C
+parser, merges allowed), at load, in `doctor` and in the tail's reload.
+A side's host, user and password are read where a connection needs
+them, once (`SideEndpoint`), a secret option through
+`Endpoint.option_secret` (registry, redo miner, key passphrase, the
+pooler's password through `config.secret`), a failure naming
+`hops.<hop>.<side>.<key>`; `get_hop` builds the one hop, the file read
+and checked again only when its content or mode changes; Vault over its
+HTTP API with either version of its store; one failure sentence for
+every store. A hops file anyone may change (or replace) is refused, one
+others may read with a secret written out is said. Reports and run
+state beside a project's `conf/` or in `$XDG_STATE_HOME/migkit`, never
+the working directory; `doctor` says both paths; report directories and
+the restore points' mirror (now under the state directory, the old one
+still read) private, files written 0600 from their first byte. Engine
+names: one table of other names, schemes derived from it, ports for 20
+engines, the hop built with the engine's own name and the brand kept
+apart (`Hop.brand`). `noise_prefix` and migkit's own tables (`own`,
+`OWN_PREFIX`, `OWN_LIKE`) in `Hop.excluded` for every engine. Imports
+quote a filter by the source's own quoting, carry a task's include as
+the hop's own where every entry is a shell pattern and say each one
+that is not; an address's reference may hold `/`; a PostgreSQL
+service's own settings (`rds.*`, `cloudsql.*`, `azure.*`, `alloydb.*`)
+say it before its roles; a rule asking one side is refused and answers
+are compared by count; the zone in use read against the server's own
+clock as well as UTC; a cutover's counter margin is its own thread's
+(`SEQUENCE_MARGIN`). Unknown `MIGKIT_*` said at start with the nearest,
+a declared one set wrong a usage error there.
+Left: the MySQL engine's `'migkit%%'` filters are AUD-G2's (DU26's
+engine part); a role alone still names a PostgreSQL service where no
+setting says, since which settings each service shows every user is
+not verified here; the diagnostics bundle still reads a broken file as
+YAML keeps it, to show it.
 
 **AUD-E. External programs: one runner, stop means stop, pinned installs,
 the offline bundle (P0/P1, L).** Files: `migkit/runner.py` (new),
@@ -3747,6 +3863,37 @@ they are three cross-cutting gaps, not 26 engine problems:
   the application while migkit moves into it, or its writes named - the
   same hold-writes primitives the cutover's freezes use on the source
   (one primitive per engine, used for both).
+  **Built (2026-10-04): `freeze.protect` on `freeze.Hold`**, the target's
+  ladder the ways that leave migkit's own account writing per database
+  (`Hold.keep_rungs`, `KEEPS`), taken before the copy and again after it,
+  read back in the cutover's preflight (`kept_rows`), given back at the
+  flip, by `rollback --apply` and put on again by a cutover undone. Held by
+  rights: PostgreSQL and MySQL as before, TiDB (MySQL's way, `KILL
+  TIDB`), MongoDB (roles swapped for read; a server checking nobody has no
+  way), SQL Server (deny), Redis (every account's writes but migkit's own,
+  which must be an account of its own; one server, not a cluster), Kafka
+  (a deny for every principal where migkit's is a super user, else each
+  allowed principal denied by name on a cluster that refuses the
+  unnamed), Cassandra/ScyllaDB (revoke, the cache waited out), CockroachDB
+  and Aurora DSQL (revoke), ClickHouse (revoke on `db.*` with partial
+  revokes, a user still writing through migkit's role made `readonly`),
+  Oracle (table, view and definer's-rights code grants revoked, the
+  schema's owner locked), Db2 (tables, CONTROL, and EXECUTE on the
+  packages and routines that write the schema; z/OS and i by their own
+  catalogues), SAP ASE, Teradata, Redshift, Snowflake (and its future
+  grants), Couchbase (roles swapped for read, the user put back whole).
+  Offered as a change of an access policy (`target_access`, asked at a
+  terminal under --go): DynamoDB (a deny in each table's own policy) and
+  BigQuery (the dataset's writing entries made reading ones). Named:
+  OpenSearch (each index's own count of operations less migkit's,
+  `freeze.counted`), drift at the cutover's gate. Not applicable with the
+  reason: files, lakes, Cosmos DB, the read-only sources, the generic
+  engine. The source's freeze at cutover (F2.freeze) stands on the same
+  holds for TiDB (`tidb_super_read_only` or per database), CockroachDB,
+  ClickHouse, Oracle, Db2, ASE, Teradata, Redshift, Snowflake and
+  Couchbase, each ending the application's sessions and reading back
+  what is held open; Db2 for i and z/OS, DSQL, BigQuery, DynamoDB, Cosmos
+  DB, the lakes and the SaaS/SAP sources not applicable, with the reason.
 * Smaller: missing grant on MongoDB and pairs; capability gaps on
   warehouses, ASE, Db2 and lakes (6-11 cells each); the generic engine
   is not yet on every shape (decide whether it deepens or is declared
@@ -3803,6 +3950,72 @@ owed every one of them -
 cell is "not yet" without either a backlog row naming it or a written
 "not applicable" reason - so an engine left thinner than PostgreSQL and
 MySQL is a red test, never a silent gap.
+
+*Built 2026-10-04, 9fd2442 (P0-PARITY.matrix, P0-PARITY.guard):*
+`capabilities.depth()`, beside the capability table it extends - 86 items
+in 10 areas, each read off the code an engine runs: its own methods, a
+mixin's or another engine's it inherits, the base's helpers they call, and
+the pair's machinery where it hands the work to it (`_as_pair`), never a
+base placeholder or a method that only refuses (a skip, an error, None or
+an empty answer - `_refuses_only`, which now catches the last two as well).
+* *scope* (10): the counts, data and schema checks' listings asked of the
+  one scope answer (`in_scope`, `_scoped_rows`, `takes`, `takes_table`),
+  the deep checks', the copy's (`list_move_tables`), the repairs', the
+  counters'; the objects beside the tables (`takes`, `takes_object`);
+  `mapping.ops` where changes are applied (its own tail asks `carries`, or
+  its changes go through the pair's tail); the row filter, the transforms
+  and the name rules read by the copy and the check alike.
+* *verify* (39): each of the 30 categories of `engines.base.CATEGORIES` an
+  engine's checks can say (the last word of a finding's scope, a finding
+  that can only skip or fail not counted, one made by another module's
+  function the check calls counted); delta, fence, confirm and users (the
+  capability table's own probes and gaps); repair; repair with exact undo
+  (`RepairAction.undo` filled, or the rows kept by `repairlog`); the
+  fields a verdict reads (`Result.rows_apart`, `.tables`, `.table`).
+* *tail* (6): follows (the capability), per-table states (the tail it runs
+  keeps a `TableSet`), a table added at an exact seam, a table back with
+  only its changes since, the per-table DDL policy (its change reader hands
+  `canon.ddl`), renames and swaps (`table_oids`, or a DDL naming where to).
+* *assess* (7), *schema* (6), *move* (7: table copy, bulk, large values and
+  partitioned from the shapes, rows sized, the load window, missing tables
+  made), *cutover* (8: freeze, read-only target, counters and rollback
+  from the two tables; the drain, the servers' own replication paused for
+  a repair, two-way marks, scheduled jobs), *security* (a TLS posture that
+  can come out verified), *managed* (its own services catalogued),
+  *operations* (fencing).
+
+A way counts only once a test proves it on that engine: a test module's
+`PROVES = [(item, engine or engines)]`, read from its source and never
+imported (`capabilities.proofs`); 208 modules carry one. Every gap is
+declared: `DEPTH_GAPS` (not applicable only where the thing does not exist
+on the engine, the reason said once for a family or taken from `GAPS`; not
+yet with its P0-PARITY row, the generic engine's with P0-PARITY.small) and
+`UNPROVED` (a way in the code whose test on that engine is owed; it reads
+as not yet). The guard,
+`tests/test_every_engine_is_as_deep_as_postgres_and_mysql.py`, fails on a
+cell nobody declared, a way with no test nobody declared, a declaration the code or a test has closed, a test claiming a
+way the code does not show, a "not yet" whose row is not in
+`docs/backlog-index.md`, and an item or engine nobody knows. STATE.md
+shows the matrix: per engine the ways proved of the items that apply, area
+by area, and per item the engines in each state.
+
+Measured at 9fd2442: 3,096 cells - yes 435, test owed
+252, not applicable 869, not yet 1,540. By area (yes / owed / n/a / not
+yet): scope 37/92/50/181, verify 124/74/499/707, tail 26/18/59/113,
+assess 32/16/26/178, schema 37/20/74/85, move 83/20/52/97, cutover
+53/5/103/127, security 22/6/1/7, managed 19/0/2/15, operations 2/1/3/30.
+PostgreSQL proves 72 of the 84 that apply to it and MySQL 63 of 78; the
+furthest behind are the SaaS sources (0 of 24), Db2 for z/OS (1 of 69),
+Snowflake (2 of 78), Db2 for i (2 of 81), SAP ASE (4 of 80), the generic
+engine (4 of 86), Redshift (5 of 75), BigQuery (5 of 76), Db2 (6 of 81)
+and TiDB (6 of 76, with 36 ways in its code - MySQL's, inherited - and no
+TiDB test for 30 of them). Found by building it, each now a declared gap
+rather than a counted way: Kafka's version read only says it cannot tell;
+SQL Server's connection never checks a certificate, and Oracle's, Db2's
+and SAP ASE's ask for no TLS; MySQL's index-state check only skips;
+ClickHouse's and Oracle's deep findings and the shared capacity check's
+end in words no category reads (`mutations`, `constraints`, `capacity`),
+so they reach the verdict unclassified.
 
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
@@ -4460,6 +4673,106 @@ three-valued solver), P13 (the collation matrix on the column's own
 values) and P14 (types sized from the data, `types_from_data`) written
 2026-09-30 with their tests (R11).
 
+*Built 2026-10-04 (conversion breadth; its tests written, the one run
+of the suite to come):*
+* *P5, where two versions part* (`storedcode/trace.py`): on a differing
+  call, a copy of each version made beside it reports every variable and
+  parameter of its outermost scope after each statement of its outermost
+  block - PostgreSQL by `RAISE NOTICE`, MySQL into a MyISAM table, SQL
+  Server by `PRINT`, Oracle through an autonomous procedure - each copy
+  first held to its routine's own answer; the two reports aligned in
+  order (a target that runs more statements repeats a state), names met
+  across the rules' renames, values by class. The verdict's reason then
+  says after which source statement the two first part and which
+  variable holds what on each side. Left alone where a report would
+  change what the routine reads (`ROW_COUNT()`, `@@ROWCOUNT`, `SQL%`), a
+  T-SQL function (no `PRINT` there), a trigger, a package's member.
+* *P9, a target that runs the source's own code* (`convert.as_written`,
+  `convert.emulating`, the rung `emulator`): MariaDB in its Oracle mode,
+  IvorySQL and openGauss (A) for Oracle's PL/SQL, Babelfish for T-SQL,
+  openGauss (B) and openHalo for MySQL's - each asked of the target
+  itself (version, database compatibility, extension, setting); the
+  source's own statement made there in the session settings that read
+  it and proved like any other version. A docker sandbox of such a
+  target is not started (named instead); MariaDB's is.
+* *P10, the workload corpus* (`storedcode/corpus.py`, hop option
+  `workload_replay`): every statement on the source's record that reads
+  or writes rows - not migkit's, not the catalogue's, not a routine's
+  call - weighed by its runs, translated through the hop's
+  restructuring, run on both sandboxes with the routines in place and
+  compared by answer, rows written, error and counters
+  (`storedcode/statements.py`); a sample's values only where the masking
+  allows, else the fixture's; kept in `workload-corpus.json` normalised,
+  never a value, growing as the server's record turns over. The same
+  corpus is the workload comparison's list of statements, so an Oracle
+  source joins it through its shared pool and captured binds (plans
+  from `V$SQL_PLAN`, times from the pool's own averages - nothing run on
+  the source to plan or time it).
+* *P11, the application's code* (`storedcode/appscan.py`, hop option
+  `application_sql`): every string literal of Python, Java, Kotlin,
+  Scala, Go, JavaScript, TypeScript, C#, PHP, Ruby, Rust and Swift read
+  by the language's own parser, joined literals as one, `.sql` files and
+  XML mapper statements; SQL only where the translator reads it as a
+  statement; interpolated, formatted and joined-around-a-variable ones
+  found and said as built at run time; an object mapper's own query
+  language left to it. Each proved as the corpus is;
+  `application-sql.sql` holds each translated statement with where it
+  was found. The application is read, never written.
+* *P15, index and partition advice* (`storedcode/indexadvice.py`,
+  `storedcode/partitions.py`, hop option `index_advice`): candidates from
+  each translated statement's equality, range, join and order columns,
+  made on the target hypothetically (the extension must already be
+  there) and advised only where the target's planner chooses one and its
+  estimate falls by half, the largest gains weighted by runs, with the
+  costs, the size and the writes that pay for it; a MySQL or Oracle
+  table partitioned by range or list where its target is not gets the
+  partitioning in PostgreSQL's words, made on the sandbox target in a
+  transaction rolled back, the fixture's rows put in, and each row's
+  partition held to the source's (`partitions-for-the-target.sql`); a
+  hash partitioning is advised and said to route otherwise.
+* *P17, the engines' own tests* (`storedcode/builtins.py`, hop option
+  `builtin_suites`): PostgreSQL's regression files, sqllogictest and
+  MySQL's mysql-test read as data for the cases calling a function the
+  source's code calls on constants, run on both sandboxes; a case
+  answered apart is kept with its file and line and refuses a call with
+  exactly its constants in the translator, adds its constants to every
+  routine calling the function, and is said beside such a routine's
+  verdict.
+* *P19, the source's answers after the cutover* (`storedcode/reference.py`,
+  hop option `code_reference_days`): the proof's calls of each function
+  whose answers need no rows, with the source's answers, kept (never
+  under `mask: all`); after a flip, each check asks the target's version
+  the same calls read-only for the period and says any that answers
+  otherwise.
+* *P20, every input the solver reaches* (`storedcode/scalar.py`): a
+  function of one expression on both sides asked of the constraints'
+  encoder for an input answered apart; each found is run, only the run
+  decides; none found is said with its bound (declared ranges, no
+  overflow modelled). Stops at bodies of statements: their model needs a
+  symbolic executor per procedural language, and the search, the solver
+  for untaken branches and coverage stand in for it.
+* *P21, restructuring proved* (`statements.restructured`,
+  `statements.transformed`): the application's statements read through
+  the hop's column renames and drops (refused by name where they read a
+  column left out) and held to the source on the restructured fixture; a
+  statement reading a column written transformed is said, not compared.
+  A table split or merged is no restructuring a hop can say, and is not
+  claimed.
+* *W3*: PL/SQL by migkit's own rules (`storedcode/plsql_pg.py`,
+  `storedcode/packages.py`) - a package a schema, its state in session
+  settings through its own functions and initialised once a session, its
+  members proved one by one; cursors and their attributes, named and
+  declared exceptions (Oracle's statement-level rollback kept), SELECT
+  INTO's strictness, `''` as NULL, `||`, SUBSTR and `/` as Oracle means
+  them, triggers, autonomous procedures over a loopback connection.
+  T-SQL at depth (`tsql_pg.py`): the procedure-wide transaction under
+  TRY/CATCH, OUTPUT into a table variable, a temporary table or to the
+  caller, MERGE by the target's version, a table variable through a
+  ROLLBACK refused; and the END after a semicolon the translator's
+  tokenizer had read as text (no TRY ending in a semicolon could be
+  read). Found on the way: Oracle's no-row and too-many-rows errors were
+  compared by message, and every proof of them said "different".
+
 ### Leapfrog: engine reach (docs/research/leapfrog-engine-reach-2026-09-28.md)
 
 Today: Db2 is LUW only; warehouse sides write rows with no staged bulk
@@ -4923,7 +5236,7 @@ the gaps nothing above covers yet, now items of their own.
   packages with the emulation libraries they need (orafce and the
   like), T-SQL at depth, and the SQL embedded in application code
   (AWS SCT scans Java, C# and .NET) found and converted, with the same
-  proof by execution.
+  proof by execution. *Built 2026-10-04: see "Leapfrog: conversion".*
 * **W4. Transformation in flight and masking for compliance** - built on
   what migkit already holds rather than a streaming engine of its own
   (the owner, 2026-09-29: "faster, smarter, deeper than Striim"): each

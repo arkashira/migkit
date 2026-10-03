@@ -791,9 +791,11 @@ def _write(path, name, small, force, replace=False):
             new = text + body
     else:
         new = HEADER + "hops:\n" + body
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(new)
-    tmp.chmod(0o600)
+    # a name of its own: two guides writing beside one file each check
+    # their own before it goes in place; 0600 from its first byte (SEC10)
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    from . import durable
+    durable.write_atomic(tmp, new)
     # the file as written must load: a guide that wrote a configuration
     # migkit then refuses has handed the operator its own mistake
     from .config import load_hops

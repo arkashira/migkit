@@ -31,6 +31,9 @@ from migkit import canon, tailtables
 from migkit.config import Endpoint, Hop
 from migkit.engines.hetero import HeteroEngine
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("tail.renames", "mysql")]
+
 EP = Endpoint(host="x", port=1, user="x", password="x")
 
 
@@ -190,8 +193,9 @@ def test_a_scope_changed_while_the_tail_was_stopped_is_a_change(tmp_path):
     t = _tables(tmp_path, include=["public.a"])
     t.boundary("0/1", None, force=True)
     t.save()
-    assert json.loads((tmp_path / tailtables.STATE).read_text())[
-        "scope"]["include"] == ["public.a"]
+    # kept beside the tables' states, in the tail's own store
+    assert tailtables.Store.of(tmp_path).get("scope")["include"] == \
+        ["public.a"]
     said = []
     t = _tables(tmp_path, said=said, include=["public.a", "public.b"])
     assert not t.fresh and t.was["include"] == ["public.a"]
@@ -292,15 +296,30 @@ def test_two_schemas_tables_of_one_name_are_two_tables(tmp_path):
     assert t.key('crm."Orders"') == "crm.Orders"
 
 
+def _legacy_frame(at, changes):
+    """A frame of an earlier version's spool file."""
+    import pickle
+    import struct
+
+    import zstandard
+    blob = zstandard.ZstdCompressor(level=3).compress(
+        pickle.dumps((at, list(changes))))
+    return struct.pack(">Q", len(blob)) + blob
+
+
 def test_a_state_kept_by_its_last_part_moves_to_its_whole_name(tmp_path):
     (tmp_path / tailtables.STATE).write_text(json.dumps({"tables": {
         "t2": {"state": "parked", "name": "public.t2"}}}))
     spool = tmp_path / tailtables.SPOOLS / "t2.spool"
     spool.parent.mkdir()
-    spool.write_bytes(b"held")
+    held = canon.change("insert", "public.t2", {"id": 4}, {"id": 4})
+    spool.write_bytes(_legacy_frame('"0/1"', [held]))
     t = _tables(tmp_path)
     assert set(t.tables) == {"public.t2"}
-    assert t.spool("public.t2").path.read_bytes() == b"held"
+    # what it set aside goes with it, into the tail's own store
+    assert t.spool("public.t2").changes() == [held]
+    assert t.spool("t2").changes() == []
+    assert set(tailtables.states(tmp_path)) == {"public.t2"}
     assert not spool.exists()
 
 

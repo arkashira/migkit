@@ -14,6 +14,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("tail.follows", "hetero")]
+
 PG, MY = "migkit-test-tail-pg", "migkit-test-tail-my"
 PG_PORT, MY_PORT = 15453, 13353
 

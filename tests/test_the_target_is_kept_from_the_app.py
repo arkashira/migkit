@@ -16,6 +16,9 @@ import time
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.read-only-target", ("postgres", "mysql"))]
+
 pytestmark = needs_docker
 
 ROLES = ("create role app login password 'CHANGE_ME';"
@@ -147,14 +150,17 @@ def test_an_engine_without_it_refuses_before_copying(tmp_path, monkeypatch):
 
     import migkit.config as cfg
     from migkit import cli, movers
+    import sqlite3
+    # a file: nothing in it can hold a writer, and its writes are named
+    # by nobody (`decide.WAYS["read-only target"]`)
+    for name in ("a.db", "b.db"):
+        sqlite3.connect(tmp_path / name).close()
     conf = tmp_path / "hops.yaml"
     conf.write_text(
-        "hops:\n  m:\n    engine: mongodb\n"
-        "    source: {host: 10.0.0.1, port: 27017, user: u,"
-        " password: CHANGE_ME}\n"
-        "    target: {host: 10.0.0.2, port: 27017, user: u,"
-        " password: CHANGE_ME}\n"
-        "    databases: [app]\n    options: {protect_target: true}\n")
+        "hops:\n  m:\n"
+        f"    source: sqlite://{tmp_path}/a.db\n"
+        f"    target: sqlite://{tmp_path}/b.db\n"
+        "    options: {protect_target: true}\n")
     monkeypatch.setattr(cfg, "CONF", str(conf))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
     copied = []
@@ -162,7 +168,8 @@ def test_an_engine_without_it_refuses_before_copying(tmp_path, monkeypatch):
     got = CliRunner().invoke(cli.main, ["move", "m", "--mode", "full",
                                         "--go"])
     said = str(got.exception or "") + got.output
-    assert got.exit_code != 0 and "not available for mongodb" in said, said
+    assert got.exit_code != 0 and "not available for sqlite" in said, said
+    assert "a file is written by whoever opens it" in said, said
     assert copied == []
 
 

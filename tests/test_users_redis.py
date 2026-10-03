@@ -15,6 +15,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.users", "redis")]
+
 SRC, DST = "migkit-test-racl-src", "migkit-test-racl-dst"
 SRC_PORT, DST_PORT = 15665, 15666
 

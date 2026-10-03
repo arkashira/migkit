@@ -23,7 +23,6 @@ measures them, for the modules that hold them to adopt.
 """
 import json
 import math
-import os
 import threading
 from dataclasses import dataclass
 
@@ -151,18 +150,10 @@ def observe(name, measured, hop=None, weight=1.0):
         pass
     if hop is None:
         return
+    from . import durable
     with _LOCK:
         try:
-            path = hop.report_dir() / HOP_FILE
-            try:
-                got = json.loads(path.read_text())
-            except (OSError, ValueError):
-                got = {}
-            apply(got)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(got))
-            os.replace(tmp, path)
+            durable.change_json(hop.report_dir() / HOP_FILE, apply)
         except (OSError, AttributeError):
             pass
 

@@ -16,6 +16,9 @@ from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.listings", "mysql")]
+
 pytestmark = needs_docker
 
 

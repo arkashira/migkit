@@ -334,7 +334,8 @@ def _assessment(root):
 def _moved(root, entries, session):
     dbs = {}
     for d in _dbs(root):
-        ck = _json(d / "move.json", {}) or {}
+        from . import checkpoint
+        ck = checkpoint.read_move(d / "move.json", "cache") or {}
         tables = {str(k): {"rows": v.get("moved"), "done": bool(
                   v.get("done"))} for k, v in ck.items()
                   if isinstance(v, dict) and ("moved" in v or "done" in v)}
@@ -1151,8 +1152,10 @@ def write(hop, session=None, log=None):
               "files": {name: _raw_sha(out / name)[0] for name in FILES},
               "plain_sha256": hashlib.sha256(body.encode()).hexdigest(),
               "dir": str(out.relative_to(root))}
-    audit.append(root / "changelog.jsonl", anchor)
-    _anchor_remote(hop, out, anchor, say)
+    # the chain's head goes with the digests to where the record is
+    # anchored: a record rewritten from its start since does not end there
+    head = audit.append(root / "changelog.jsonl", anchor)
+    _anchor_remote(hop, out, {**anchor, "head": head}, say)
     return out
 
 

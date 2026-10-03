@@ -14,6 +14,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.counters", "sqlite")]
+
 
 def _file(path, sql):
     con = sqlite3.connect(path)

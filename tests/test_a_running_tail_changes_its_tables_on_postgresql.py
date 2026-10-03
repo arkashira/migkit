@@ -17,7 +17,6 @@ every other table going on:
 Each ends by `tail.stop` (`tailctl`): the tail applies what it read,
 saves its position and returns.
 """
-import json
 import threading
 import time
 
@@ -26,6 +25,13 @@ import pytest
 from migkit import tailctl
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
+
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("tail.table-states", "postgres"),
+    ("tail.added", "postgres"),
+    ("tail.ddl", "postgres"),
+]
 
 pytestmark = needs_docker
 
@@ -101,11 +107,8 @@ class _Tail:
 
     def state(self, table):
         # each table is kept by its whole name (`TableSet.key`)
-        try:
-            got = json.loads((self.where / "tail-tables.json").read_text())
-        except (OSError, ValueError):
-            return {}
-        return got["tables"].get(f"public.{table}") or {}
+        from migkit import tailtables
+        return tailtables.states(self.where).get(f"public.{table}") or {}
 
     def stop(self):
         tailctl.stop(self.where)
@@ -181,7 +184,8 @@ def test_a_table_taken_out_of_exclude_joins_the_running_tail(
         assert _dst(pg_pair, "select count(*) from public.t2 where"
                              " id = 9002") == "0"
         # its changes after it joined were applied, each accounted for
-        accounts = json.loads((where / "tail-accounts.json").read_text())
+        from migkit import tailtables
+        accounts = tailtables.accounts(where)
         assert accounts["public.t2"]["applied"] > 0, accounts
     finally:
         tail.stop()
@@ -204,7 +208,9 @@ def test_a_column_added_parks_only_its_table(pg_pair, tmp_path):
         tail.wait(lambda: tail.state("pa").get("state") == "parked",
                   "pa parked")
         assert _dst(pg_pair, "select count(*) from public.pa") == "0"
-        assert (where / "tail-spool").is_dir()
+        from migkit import tailtables
+        # set aside in the tail's own store, with the batch that read it
+        assert tailtables.Store.of(where).spooled().get("public.pa", 0) > 0
         assert tail.said("pa: parked")
         _dst(pg_pair, "alter table public.pa add column w int")
         tail.wait(lambda: tail.state("pa").get("state") == "live",

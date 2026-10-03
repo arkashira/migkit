@@ -28,6 +28,12 @@ import types
 from migkit.config import Endpoint, Hop
 from migkit.engines.base import LEFT_OUT, RepairAction, Result
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("scope.repair", ("postgres", "mysql", "mongodb", "mssql", "redis",
+                      "hetero", "generic")),
+]
+
 
 def _hop(engine, tmp_path, **kw):
     hop = Hop(name="h", engine=engine, source=Endpoint(), target=Endpoint(),

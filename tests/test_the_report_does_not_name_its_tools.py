@@ -52,7 +52,8 @@ _LIBRARIES = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
               "dsbulk", "connect-mirror-maker", "reindex-from-snapshot",
               "documentsfromsnapshot", "pg_upgrade", "initdb",
               "mssql-scripter", "data_validation", "data-validation",
-              "teradatasql", "pyodata", "singer", "airbyte")
+              "teradatasql", "pyodata", "singer", "airbyte",
+              "ast-grep", "ast_grep", "tree-sitter", "hypopg")
 
 
 def _registry_names():

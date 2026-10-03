@@ -191,6 +191,10 @@ PROGRAM = {
     # (`engines.saas`), under the Elastic License 2.0 they carry: any use
     # but offering them to others as a managed service
     "teradatasql": Program("LicenseRef-Teradata-SQL-Driver", role="driver"),
+    # SQL Server's bulk-load driver for Python (MIT), which brings
+    # Microsoft's ODBC driver with it - free to use, not open source - so
+    # it is installed on the operator's acceptance like Teradata's
+    "mssql-bulk": Program("LicenseRef-Microsoft-ODBC-Driver", role="driver"),
     "airbyte-connectors": Program("Elastic-2.0", role="connectors"),
 }
 
@@ -426,6 +430,14 @@ TERMS = {
         "Db2 for z/OS is reached only where its subsystem is activated for"
         " Db2 Connect by its administrator; Db2 for i through its ODBC"
         " driver or its Mapepire server"),
+    "mssql-bulk": Terms(
+        "Microsoft's licence for its ODBC Driver for SQL Server, which the"
+        " bulk-load driver for Python brings with it (no charge)",
+        "https://pypi.org/project/mssql-python-odbc/",
+        "writing whole batches into a SQL Server target through the"
+        " server's own bulk insert",
+        "a SQL Server target is written by statements, in batches - the"
+        " same rows, more slowly"),
     "teradatasql": Terms(
         "Teradata's licence for its SQL driver for Python (no charge; its"
         " early-release features, FastLoad and FastExport among them,"
@@ -485,23 +497,15 @@ def terms_accepted(program):
 def _record(program, how):
     import datetime
     import getpass
-    import json
-    import os
     home = _home()
     home.mkdir(parents=True, exist_ok=True)
-    path = home / TERMS_FILE
-    try:
-        got = json.loads(path.read_text())
-    except (OSError, ValueError):
-        got = {}
-    got[program] = {"licence": TERMS[program].licence,
-                    "url": TERMS[program].url, "how": how,
-                    "by": getpass.getuser(),
-                    "at": datetime.datetime.now(datetime.timezone.utc)
-                    .isoformat(timespec="seconds")}
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(got, indent=1))
-    os.replace(tmp, path)
+    from . import durable
+    durable.change_json(home / TERMS_FILE, lambda got: got.__setitem__(
+        program, {"licence": TERMS[program].licence,
+                  "url": TERMS[program].url, "how": how,
+                  "by": getpass.getuser(),
+                  "at": datetime.datetime.now(datetime.timezone.utc)
+                  .isoformat(timespec="seconds")}), indent=1)
 
 
 def accept_terms(programs, ask=None, log=print):
@@ -594,30 +598,48 @@ def db2_connect_present():
     return db2_connect_licence() is not None
 
 
-#: Teradata's driver, and the terms the certified SaaS connectors run
-#: under: not programs on PATH
+#: Teradata's driver, SQL Server's bulk-load driver, and the terms the
+#: certified SaaS connectors run under: not programs on PATH
 TERADATA_DRIVER, SAAS_CONNECTORS = "teradatasql", "airbyte-connectors"
+MSSQL_BULK = "mssql-bulk"
+
+#: the Python packages under closed terms installed into migkit's own
+#: environment once accepted: (what is installed, the modules that say it
+#: is here)
+DRIVERS = {TERADATA_DRIVER: ("teradatasql", ("teradatasql",)),
+           MSSQL_BULK: ("mssql-python>=1.15",
+                        ("mssql_python", "mssql_py_core"))}
 
 
-def teradata_driver_present():
+def driver_present(name):
     import importlib.util
-    return importlib.util.find_spec("teradatasql") is not None
+    return all(importlib.util.find_spec(m) is not None
+               for m in DRIVERS[name][1])
 
 
-def install_teradata(log=print):
-    """Teradata's driver into migkit's own environment, once its terms are
-    accepted: by the package manager migkit runs under where there is
+def install_driver(name, log=print):
+    """A driver of `DRIVERS` into migkit's own environment, once its terms
+    are accepted: by the package manager migkit runs under where there is
     one, else by pip. True once it imports."""
     import sys
+    package = DRIVERS[name][0]
     uv = which("uv")
-    step = ([uv, "pip", "install", "--python", sys.executable,
-             TERADATA_DRIVER] if uv else
-            [sys.executable, "-m", "pip", "install", "-q", TERADATA_DRIVER])
+    step = ([uv, "pip", "install", "--python", sys.executable, package]
+            if uv else
+            [sys.executable, "-m", "pip", "install", "-q", package])
     if not _step(step, log, "it did not install"):
         return False
     import importlib
     importlib.invalidate_caches()
-    return teradata_driver_present()
+    return driver_present(name)
+
+
+def teradata_driver_present():
+    return driver_present(TERADATA_DRIVER)
+
+
+def install_teradata(log=print):
+    return install_driver(TERADATA_DRIVER, log)
 
 
 def install_ibm(component, log=print):
@@ -729,6 +751,8 @@ def _present(cmd):
         return db2_connect_present()
     if cmd == TERADATA_DRIVER:
         return teradata_driver_present()
+    if cmd in DRIVERS:
+        return driver_present(cmd)
     if cmd == SAAS_CONNECTORS:
         return terms_accepted(SAAS_CONNECTORS)
     if cmd in SOURCE_BUILDS:
@@ -951,6 +975,10 @@ CAPABILITIES = [
     ("SQL Server: verify",
      "compare rows and objects",
      [], ["sqlcmd"]),
+    ("SQL Server: bulk load",
+     "write whole batches into a SQL Server target through the server's"
+     " own bulk insert",
+     [], [MSSQL_BULK]),
     ("Db2 for i (IBM i): verify, copy and follow",
      "compare and copy tables, and follow their journal; its own driver"
      " carries the types as IBM i keeps them",
@@ -1102,7 +1130,7 @@ def by_hand(programs):
             continue    # built from its source (`install_from_source`)
         if c in (IBMI_ODBC, DB2_CONNECT):
             continue    # IBM's, put in place by `install_ibm`
-        if c in (TERADATA_DRIVER, SAAS_CONNECTORS):
+        if c in DRIVERS or c == SAAS_CONNECTORS:
             continue    # put in place, or accepted, by `install_missing`
         formula, apt = PROGRAMS.get(c, ("", ""))
         if not (mgr and (formula if mgr == "brew" else apt)):
@@ -1237,6 +1265,8 @@ def install_missing(log=print, ask=None):
     # for here and used where a hop runs one - docker pulls a container
     # where it runs, as it pulls the pipeline's images
     teradata = TERADATA_DRIVER in wanted and not _present(TERADATA_DRIVER)
+    drivers = [c for c in wanted if c in DRIVERS and c != TERADATA_DRIVER
+               and not _present(c)]
     redo = REDO_READER in wanted and not _present(REDO_READER)
     # the terms first, all of them, before anything is fetched or built: a
     # question asked halfway through a long download is one nobody is
@@ -1246,7 +1276,7 @@ def install_missing(log=print, ask=None):
     answer = accept_terms(fetch_them + ibm + [i for i in IMAGES if i in TERMS]
                           + ([REDO_READER_CLIENT] if redo else [])
                           + ([TERADATA_DRIVER] if teradata else [])
-                          + [SAAS_CONNECTORS], ask, log)
+                          + drivers + [SAAS_CONNECTORS], ask, log)
     if _bundle() is not None:
         _load_images(answer, log)
     java = sorted({NEEDS_JAVA[c][0 if mgr == "brew" else 1]
@@ -1277,6 +1307,11 @@ def install_missing(log=print, ask=None):
         if not install_teradata(log):
             log("  the Teradata driver is not in place; run migkit doctor"
                 " again to see which capability is still short")
+    for n, cmd in enumerate([c for c in drivers if answer.get(c)], 1):
+        log(f"installing driver {n} ...")
+        if not install_driver(cmd, log):
+            log(f"  driver {n} is not in place; run migkit doctor again to"
+                " see which capability is still short")
     for n, cmd in enumerate([c for c in ibm if answer.get(c)], 1):
         log(f"putting IBM component {n} in place ...")
         if not install_ibm(cmd, log):

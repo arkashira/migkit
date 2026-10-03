@@ -277,6 +277,33 @@ def test_the_server_says_it_where_the_address_does_not():
     assert got.service == "aurora-reader" and len(got.evidence) == 2
 
 
+def test_a_services_own_settings_say_it_before_its_roles():
+    """A service's roles come along with every dump of the roles, so a
+    server restored from one read as the service; the settings it defines
+    for itself do not (audit 2026-10-01, K18)."""
+    class Pg:
+        CANON_ENGINE = "postgres"
+
+        def __init__(self, rows):
+            self.rows, self.asked = rows, ""
+
+        def _psql(self, side, db, sql):
+            self.asked = sql
+            return self.rows
+    from migkit.config import Endpoint
+    ep = Endpoint(host="10.0.0.5")
+    eng = Pg("rds_superuser\x1ffalse\x1fcloudsql")
+    got = clouds.of(eng, "src", ep)
+    assert (got.cloud, got.service) == ("gcp", "cloud-sql"), got
+    assert got.evidence == ["the server (its cloudsql.* settings)"], got
+    assert "pg_settings" in eng.asked
+    got = clouds.of(Pg("\x1ffalse\x1fazure"), "src", ep)
+    assert (got.cloud, got.service) == ("azure", "flexible"), got
+    # no setting of a service's: its role still says it
+    got = clouds.of(Pg("rds_superuser\x1ffalse\x1f"), "src", ep)
+    assert got.service == "rds" and "role rds_superuser" in got.evidence[0]
+
+
 def test_a_goal_stands_for_options_and_the_hop_wins(tmp_path):
     hops = _load(tmp_path, """
         hops:
@@ -297,14 +324,30 @@ def test_a_goal_stands_for_options_and_the_hop_wins(tmp_path):
             source: postgres://app@db1/shop
             target: postgres://app@db2/shop
             goal: two-way
+          e:
+            source: dynamodb://us-east-1/shop
+            target: dynamodb://us-east-1/shop2
+            goal: keep-in-sync
+          f:
+            source: sqlite:///tmp/a.db
+            target: sqlite:///tmp/b.db
+            goal: keep-in-sync
     """)
     assert hops["a"].options == {"reverse": "at_cutover",
                                  "protect_target": True}
     assert hops["b"].options == {"reverse": "at_cutover",
                                  "protect_target": False}
-    # a target migkit cannot keep the application off: not set at all
-    assert hops["c"].options == {}
+    # a target migkit keeps itself - MongoDB's roles - set by the goal, and
+    # said to have come from it
+    assert hops["c"].options == {"protect_target": True}
+    assert vars(hops["c"])["_from_goal"] == ["protect_target"]
+    assert vars(hops["a"])["_from_goal"] == ["protect_target", "reverse"]
+    assert vars(hops["b"])["_from_goal"] == ["reverse"]
     assert hops["d"].options == {"topology": "two_way", "two_way": True}
+    # one kept only by a change of its access policy, which waits on an
+    # answer no goal gives, and one migkit cannot keep: not set at all
+    assert hops["e"].options == {}
+    assert hops["f"].options == {}
 
 
 def test_a_verify_hop_writes_nothing(tmp_path):

@@ -22,6 +22,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import _wait_tcp, needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.two-way", ("postgres", "mysql"))]
+
 pytestmark = needs_docker
 
 MY, MY_PORT = "migkit-test-rung-my", 15962

@@ -17,6 +17,9 @@ import pytest
 
 from migkit import variants as v
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.brands", ("mongodb", "kafka"))]
+
 MG, RP, AK = ("migkit-test-brand-mg", "migkit-test-brand-rp",
               "migkit-test-brand-ak")
 MG_PORT, RP_PORT, AK_PORT = 27065, 9096, 9095

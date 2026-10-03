@@ -16,6 +16,15 @@ import pytest
 from migkit import clouds, decide, freeze, managed
 from migkit.engines import NAMES
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("managed.catalogued", ("postgres", "mysql", "mongodb", "mssql", "redis",
+                            "kafka", "clickhouse", "dynamodb", "oracle",
+                            "db2", "opensearch", "cassandra", "redshift",
+                            "bigquery", "kinesis", "pubsub", "cockroachdb",
+                            "dsql", "cosmosdb")),
+]
+
 #: every provider the owner named, and the vendors'
 PROVIDERS = ("aws", "gcp", "azure", "tencent", "alibaba", "huawei", "oracle",
              "ibm")

@@ -18,6 +18,9 @@ from migkit.config import Endpoint, Hop
 from migkit.util import which
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.bulk", "redis")]
+
 pytestmark = [needs_docker, pytest.mark.skipif(
     not which("redis-shake"), reason="the replica-protocol copy is not"
                                      " installed here")]

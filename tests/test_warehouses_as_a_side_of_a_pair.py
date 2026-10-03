@@ -12,6 +12,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", ("redshift", "snowflake"))]
+
 COLUMNS = [("id", "integer", (), {"null": False}),
            ("amount", "decimal", (12, 2)), ("name", "text", (40,)),
            ("raw", "bytes", ()), ("at", "timestamp", (6,)),

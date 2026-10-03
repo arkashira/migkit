@@ -68,7 +68,8 @@ def _all(*pairs, kinds=KINDS):
 def candidates(pair, routine, ctx):
     """[Candidate] for one routine of this pair, in their listed order."""
     from . import model, programs
-    from .convert import by_hand, emulate, translator, rules
+    from .convert import EMULATORS, as_written, by_hand, emulate, \
+        translator, rules
     src = pair.src_engine.SQL_DIALECT
     dst = pair.dst_engine.SQL_DIALECT
     pg_version = ctx.get("pg_version")
@@ -86,7 +87,7 @@ def candidates(pair, routine, ctx):
                   make=lambda r: translator(pair, ctx, r)),
         Candidate("rules", "migkit's rules",
                   _all("mysql->postgres", "tsql->postgres") |
-                  _all("postgres->mysql",
+                  _all("postgres->mysql", "oracle->postgres",
                        kinds=("function", "procedure", "trigger")),
                   make=lambda r: rules(pair, ctx, r)),
         Candidate("emulate", "the target's emulation of Oracle's functions",
@@ -100,6 +101,18 @@ def candidates(pair, routine, ctx):
                         "an emulation carries only a view or a function of"
                         " one expression")),
                   footprint=1, make=lambda r: emulate(pair, ctx, r)),
+        Candidate("emulator", "the target's own emulation of the source's"
+                  " engine",
+                  _all("oracle->mysql", "oracle->postgres", "tsql->postgres",
+                       "mysql->postgres", kinds=("function", "procedure")),
+                  (Need("a target that runs the source's own code",
+                        lambda f: any(EMULATORS.get(m, (None,))[0] ==
+                                      f["src"] for m in
+                                      f.get("emulating") or ()),
+                        "the target runs no emulation of the source's"
+                        " engine (MariaDB's Oracle mode, IvorySQL,"
+                        " openGauss, Babelfish, openHalo)"),),
+                  footprint=1, make=lambda r: as_written(pair, ctx, r)),
         Candidate("plsql-converter", "the PL/SQL converter",
                   _all("oracle->postgres", "mysql->postgres",
                        "tsql->postgres",
@@ -155,9 +168,9 @@ class Ledger:
 
     def save(self):
         if self.path:
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data, indent=1, sort_keys=True))
-            tmp.replace(self.path)
+            from .. import durable
+            durable.write_atomic(self.path, json.dumps(
+                self.data, indent=1, sort_keys=True))
 
 
 def ranked(cands, ledger, facts):

@@ -17,6 +17,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "opensearch"), ("move.table-copy", "opensearch")]
+
 pytestmark = [pytest.mark.docker]
 
 OS, OS_PORT = "migkit-test-opensearch", 15836

@@ -1,3 +1,4 @@
+import contextvars
 import json
 import os
 import re
@@ -112,13 +113,24 @@ select 'extension|'||extname from pg_extension
 """
 
 
+#: the head-room one run's own counters take (a cutover's `keys: apart`),
+#: set for the thread that plans them: it went through the process's
+#: environment, which every other thread of the process read too (audit
+#: 2026-10-01, K24)
+SEQUENCE_MARGIN = contextvars.ContextVar("sequence_margin", default=None)
+
+
 def _seq_buffer():
-    """Head-room to add above the highest known id, from SEQUENCE_BUFFER.
+    """Head-room to add above the highest known id: the run's own margin
+    (`SEQUENCE_MARGIN`), else SEQUENCE_BUFFER.
 
     Zero (the default) reseeds to exactly the highest id in use, which is
     correct when the source is quiet. Anything above zero trades a gap in the
     id space for tolerance of rows that arrive a moment later.
     """
+    own = SEQUENCE_MARGIN.get()
+    if own is not None:
+        return max(0, int(own))
     try:
         n = int(os.environ.get("SEQUENCE_BUFFER", "0") or 0)
     except ValueError:
@@ -1270,6 +1282,17 @@ select json_build_object(
         statement a table, about 16,000 for a check of 2,000 tables (audit
         2026-10-01, SC15, SP2)."""
         return self._shapes(side, db)["catalog"]
+
+    def shape_mark(self, side, db):
+        """One digest of everything `shape_catalog` reads, computed by the
+        server over the same statement (`_catalog_sql`): a row of 32
+        characters where the catalogue is a row a relation. The same
+        catalogue gives the same digest, and any change to what drift
+        compares gives another - what a tail asks every batch before it
+        reads the whole shape again (`hetero._shape_now`, audit SP8)."""
+        return self._psql(side, db, (
+            "select md5(coalesce(string_agg(r, chr(10) order by r), ''))"
+            f" from ({self._catalog_sql(side, db)}) q(r)")).strip() or None
 
     def shape_catalog(self, side, db):
         """The catalogue of the tables in scope (`neutral_tables`), read
@@ -4550,21 +4573,17 @@ select json_build_object(
         caller matches against the whole tuple. Returns () when unset, which
         makes `startswith(())` false and every `any()` below empty.
         """
-        return tuple(p.strip() for p in
-                     self.hop.options.get("noise_prefix", "").split(",")
-                     if p.strip())
+        from ..hopkeys import noise
+        return noise(self.hop)
 
     def _keep_tbl(self, db, t):
         """False if the 'schema.table' is excluded for this db, so it is
         neither verified nor repaired (protects target-owned tables).
 
-        Tables the mover keeps for itself (noise_prefix) are excluded too: they
-        exist on one side by nature and would count as a difference every time
-        while holding no application data."""
-        sch, tbl = self._split(t)
-        noise = self._noise()
-        if noise and tbl.startswith(noise):
-            return False
+        Tables the mover keeps for itself (noise_prefix) are excluded too,
+        by the hop's scope as every engine's are (`Hop.excluded`): they
+        exist on one side by nature and would count as a difference every
+        time while holding no application data."""
         from .. import drift
         if drift.maybe_transient(t) and t in self._working_tables(db):
             return False

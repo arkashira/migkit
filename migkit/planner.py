@@ -174,16 +174,9 @@ def record_rate(hop, path, rows, seconds, size=None, cpu_seconds=None,
     this machine spent on it out of its `cpus`, which is what tells the
     next plan whether this machine or something beyond it held the copy
     back (`machine.stages_for`)."""
-    import json
     import time
     if not rows or seconds <= 0:
         return
-    f = _rates_path(hop)
-    try:
-        got = json.loads(f.read_text())
-    except (OSError, ValueError):
-        got = {}
-    runs = got.setdefault(path, [])
     run = {"rows": int(rows), "seconds": round(seconds, 3),
            "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": _kind(hop)}
     if size:
@@ -191,10 +184,20 @@ def record_rate(hop, path, rows, seconds, size=None, cpu_seconds=None,
     if cpu_seconds is not None and cpus:
         run["cpu_seconds"] = round(float(cpu_seconds), 3)
         run["cpus"] = int(cpus)
-    runs.append(run)
-    del runs[:-10]
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(got, indent=1))
+    _add_run(hop, path, run)
+
+
+def _add_run(hop, key, run):
+    """One run kept under `key` in the hop's throughput file, the last ten
+    of each: read, added to and written back under the file's lock, since
+    the databases of one move finish their copies side by side."""
+    from . import durable
+
+    def add(got):
+        runs = got.setdefault(key, [])
+        runs.append(run)
+        del runs[:-10]
+    durable.change_json(_rates_path(hop), add, indent=1)
 
 
 def _runs(path_file, path):
@@ -252,24 +255,14 @@ def record_variant(hop, path, way, carried, seconds, stream, tables=None):
     second one of its streams carried - with what each table took, as the
     copy's own catalogue says. What the next run chooses its way and sizes
     its parts from."""
-    import json
     import time
     if not carried or not seconds or seconds <= 0:
         return
-    f = _rates_path(hop)
-    try:
-        got = json.loads(f.read_text())
-    except (OSError, ValueError):
-        got = {}
-    runs = got.setdefault(f"{path}:{way}", [])
-    runs.append({"bytes": int(carried), "seconds": round(seconds, 3),
-                 "stream": round(stream, 1) if stream else None,
-                 "tables": tables or {},
-                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                 "kind": _kind(hop)})
-    del runs[:-10]
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(got, indent=1))
+    _add_run(hop, f"{path}:{way}", {
+        "bytes": int(carried), "seconds": round(seconds, 3),
+        "stream": round(stream, 1) if stream else None,
+        "tables": tables or {},
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": _kind(hop)})
 
 
 def variants(hop, path):
@@ -819,7 +812,6 @@ def progress(where, pace, total_rows, model=None, done=False, ways=()):
     resource whose own limit holds it now, measured while the move runs,
     before the one the model named from its probes. `done` once the copy
     has ended: its whole rate then."""
-    import json
     import os
     import time
     rate, rows = pace.recent, pace.total
@@ -844,11 +836,8 @@ def progress(where, pace, total_rows, model=None, done=False, ways=()):
                      "way": w.get("chosen"),
                      "seconds_a_row": w.get("seconds_a_row")}
                     for w in ways or ()][:50]}
-    path = os.path.join(str(where), "progress.json")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(got, f)
-    os.replace(tmp, path)
+    from . import durable
+    durable.write_json(os.path.join(str(where), "progress.json"), got)
 
 
 def read_progress(where):

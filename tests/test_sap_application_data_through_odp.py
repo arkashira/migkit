@@ -32,6 +32,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.drain", "sapodp")]
+
 ROOT = "/sap/opu/odata/sap/ZSALES_SRV/"
 
 METADATA = b"""<?xml version="1.0" encoding="utf-8"?>

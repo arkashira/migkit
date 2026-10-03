@@ -105,6 +105,33 @@ def test_one_taken_over_stops_renewing(tmp_path, monkeypatch):
     assert json.loads(path.read_text())["holder"] == "new"
 
 
+def test_a_run_that_lost_its_lease_begins_no_range(tmp_path):
+    """The heartbeat that found its lease taken returned, and the copy
+    went on writing beside the run that took it (audit ST11): no range
+    is begun once a lease this process holds is lost, and one let go is
+    not asked again."""
+    from migkit import lease, ranges
+    path = tmp_path / "lease.json"
+    held = Lease(path, "move").acquire()
+    st = {}
+    try:
+        ranges.started(st, 0, "m0", lambda: None)
+        assert st["ranges_seen"] == {"0": "m0"}
+        path.write_text(json.dumps({"holder": "new",
+                                    "host": "far.example.com", "pid": 2,
+                                    "since": time.time(),
+                                    "expires": time.time() + 60}))
+        # not heard from for its term
+        held.renewed -= held.term()
+        with pytest.raises(lease.Lost, match="far.example.com"):
+            ranges.started(st, 10, "m1", lambda: None)
+        assert "10" not in st["ranges_seen"]
+    finally:
+        held.release()
+    ranges.started(st, 10, "m1", lambda: None)
+    assert st["ranges_seen"]["10"] == "m1"
+
+
 def test_a_move_on_a_held_hop_is_refused(tmp_path, monkeypatch):
     import migkit.config as cfg
     from migkit import cli

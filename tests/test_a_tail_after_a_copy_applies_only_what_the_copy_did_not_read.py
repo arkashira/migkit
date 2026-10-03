@@ -20,6 +20,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("tail.follows", "postgres")]
+
 pytestmark = needs_docker
 
 ROWS = 200_000
@@ -170,7 +173,8 @@ def _run(pg_pair, where, monkeypatch, apply_all):
     src, dst = _same(pg_pair)
     assert src == dst, (src, dst, lines[-5:])
     # every change read accounted for, as the tail kept it
-    counted = json.loads((where / "tail-accounts.json").read_text())
+    from migkit import tailtables
+    counted = tailtables.accounts(where)
     got = counted["public.big"]
     left = got.get("already in what the copy read", 0)
     assert got["read"] == got["applied"] + left, got

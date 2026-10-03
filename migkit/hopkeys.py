@@ -40,19 +40,183 @@ ANY = ()
 @dataclass(frozen=True)
 class Key:
     """One key: what it is, the types it is written as, the engines that
-    read it (`ANY`: every one), the keys under it where they are checked
-    (None: a free mapping), and what it is to migkit's own decisions:
-    `ceiling` (the most migkit may choose), `size` (a number migkit
-    would otherwise use its own of), `nothing` (read by nothing) or `way`
-    (turns off one of the ways migkit may choose to do something)."""
+    read it (`ANY`: every one), the keys under it (a list of names, or
+    each name's own `Key`; None: a free mapping), and what it is to
+    migkit's own decisions: `ceiling` (the most migkit may choose), `size`
+    (a number migkit would otherwise use its own of), `nothing` (read by
+    nothing) or `way` (turns off one of the ways migkit may choose to do
+    something).
+
+    Every one is held to all of it before anything runs (audit
+    2026-10-01, K1). Measured before: a hop with `approvals: {step:
+    [cutover]}`, `mapping: {colums: {public.users: {drop: [ssn]}}}`,
+    `notify: {too: ...}`, `on_conflict: keep_target`, `ddl: parkk` and
+    `cutover: {freeze: servr}` loaded with no error - approvals off, the
+    SSN column copied, nobody told - since a key under an option was a
+    warning only `doctor` said and a value was read where it was first
+    used, the whole copy later."""
     what: str
+    #: the types it is written as, `|` between them; `secret` is text that
+    #: is a reference to one (`config.secret` reads it, the first time a
+    #: connection needs it) and is said where it is written out in plain
     kind: str = "any"
     engines: tuple = ANY
-    subs: tuple = None
+    subs: object = None
     knob: str = ""
     #: the key's own name is a program's, and is not offered back as a
     #: "did you mean" (programs are not named in what migkit says)
     named_for_a_program: bool = False
+    #: the words the value may be - a tuple, a mapping of a word to the
+    #: one it stands for, or "module:NAME" of the module that owns them
+    choices: object = None
+    #: words compared without case and without telling `-`, `_` and a
+    #: space apart; the hop is built with the choice's own spelling, so
+    #: every reader meets one (`normalised`)
+    fold: bool = False
+    #: "module:function" - the owning module's own reader of the option,
+    #: called at load with a hop of what the file says: its refusal is
+    #: the configuration's error, before anything runs rather than where
+    #: the option is first read
+    check: str = ""
+    #: the value where the key is left out, read through `opt`
+    default: object = None
+    #: the `Key` every item of a list, or every value of a mapping of the
+    #: operator's own names (tables), is held to
+    each: object = None
+    #: the least a number may be
+    least: float = None
+
+
+def _lazy(ref):
+    """`module:NAME` read from its module; anything else as it is - so a
+    registry entry names the owner's list without importing every owner
+    to load a hop."""
+    if not isinstance(ref, str) or ":" not in ref:
+        return ref
+    import importlib
+    module, _, name = ref.partition(":")
+    return getattr(importlib.import_module(module), name)
+
+
+def _words(key):
+    """{word: the one it stands for} of a key's choices, or None."""
+    got = _lazy(key.choices)
+    if got is None:
+        return None
+    if isinstance(got, dict):
+        return {str(k): str(v) for k, v in got.items()}
+    return {str(c): str(c) for c in got}
+
+
+def _fold(word):
+    return str(word).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _chosen(key, value):
+    """The choice `value` is, in its own spelling, or None."""
+    words = _words(key)
+    said = str(value).strip()
+    if said in words:
+        return words[said]
+    if key.fold:
+        for w, means in words.items():
+            if _fold(w) == _fold(said):
+                return means
+    return None
+
+
+def normalised(registry, mapping):
+    """`mapping` with every word a key folds (`Key.fold`) in the choice's
+    own spelling: `topology: two-way` read as `two_way` by every reader
+    rather than as two-way by one and refused by the next (audit
+    2026-10-01, K20)."""
+    out = dict(mapping or {})
+    for k, v in out.items():
+        key = registry.get(k)
+        if key is None or not key.fold or isinstance(v, (dict, list, bool)) \
+                or v is None:
+            continue
+        got = _chosen(key, v)
+        if got is not None:
+            out[k] = got
+    return out
+
+
+def _option(hop, name):
+    """Option `name` of a hop, of a mapping of a hop's options or keys, or
+    `hop` itself where it is already the value."""
+    if isinstance(hop, dict):
+        return hop.get(name)
+    if hasattr(hop, "options"):
+        return (hop.options or {}).get(name)
+    return hop
+
+
+def opt(hop, name, registry=None):
+    """The value of option `name` - what the hop says, else the registry's
+    default for it - as its kind reads: the one reader of a default.
+    `hop` is a hop (its options) or a mapping; `registry` the keys it is
+    read against (a hop's options where not said). Measured before:
+    `settle` read as 2.0 seconds by one reader and 0 by another, `workers`
+    4 in two places while the registry said it had no ceiling (audit
+    2026-10-01, K15)."""
+    registry = HOP_OPTIONS if registry is None else registry
+    key = registry[name]
+    got = _option(hop, name)
+    if got is None or got == "":
+        got = key.default
+    if got is None:
+        return None
+    kinds = key.kind.split("|")
+    try:
+        if "int" in kinds and not isinstance(got, bool):
+            return int(got)
+        if "number" in kinds and not isinstance(got, bool):
+            return float(got)
+    except (TypeError, ValueError):
+        raise SystemExit(f"{name}: {got!r} - {_kind_words(key.kind)}")
+    if kinds == ["bool"]:
+        return bool(got)
+    return got
+
+
+def topology(hop):
+    """A hop's `topology:` in its own spelling - `one_way` or `two_way` -
+    whichever way it was written (`two-way`, `bidirectional`); `one_way`
+    where it says none. `hop` is a hop, its options, or the value."""
+    value = _option(hop, "topology")
+    if value in (None, ""):
+        return "one_way"
+    got = _chosen(HOP_OPTIONS["topology"], value)
+    if got is None:
+        raise SystemExit(f"topology: {value} - one_way or two_way")
+    return got
+
+
+def reverse(hop):
+    """A hop's `reverse:` in its own spelling - `at_cutover` - or "" where
+    it asks for no stream back. `hop` is a hop, its options, or the
+    value."""
+    value = _option(hop, "reverse")
+    if value in (None, "", False):
+        return ""
+    got = _chosen(HOP_OPTIONS["reverse"], value)
+    if got is None:
+        raise SystemExit(f"reverse: {value} - at_cutover")
+    return got
+
+
+def noise(hop):
+    """The beginnings of the names of tables another tool keeps for itself
+    that the hop leaves out (`noise_prefix`, comma-separated)."""
+    said = str((hop.options or {}).get("noise_prefix") or "")
+    return tuple(p.strip() for p in said.split(",") if p.strip())
+
+
+def _named(names, **typed):
+    """{name: Key} of the keys under an option: each name of `names` as
+    any value, those in `typed` as their own `Key`."""
+    return {**{n: Key("") for n in names}, **typed}
 
 
 STREAMS = ("kafka", "kinesis", "pubsub")
@@ -88,19 +252,51 @@ HOP_KEYS = {
                    " as if excluded; exclude wins where both name one."
                    " Written as exclude is", "list|dict"),
     "service": Key("the playbook `migkit advise` shows", "str"),
-    "big_rows": Key("read by nothing", "int", knob="nothing"),
+    "big_rows": Key("read by nothing", "int", knob="nothing",
+                    default=5_000_000),
     "slice": Key("the rows one compared range of a large table holds",
-                 "int", knob="size"),
+                 "int", knob="size", default=1_000_000, least=1),
     "workers": Key("the most workers migkit's own sizing may reach",
-                   "int", knob="ceiling"),
+                   "int", knob="ceiling", default=4, least=1),
     "options": Key("the hop's options", "dict"),
     "db_map": Key("source database name -> target database name", "dict"),
     "mapping": Key("renames, column rules, row filters, the changes"
                    " carried per table (ops: insert, update, delete), and"
                    " the percentage a table's aggregates may drift by when"
                    " read a second way", "dict",
-                   subs=("tables", "columns", "where", "tolerance",
-                         "ops", "names")),
+                   subs={"tables": Key("source table -> its name on the"
+                                       " target", "dict",
+                                       each=Key("a table's name", "str")),
+                         "columns": Key(
+                             "each table's columns: keep (only these),"
+                             " drop (all but these), rename", "dict",
+                             each=Key("a table's column rules", "dict",
+                                      subs={"keep": Key("the only columns"
+                                                        " copied", "list"),
+                                            "drop": Key("columns left"
+                                                        " behind", "list"),
+                                            "rename": Key("source column ->"
+                                                          " target column",
+                                                          "dict")})),
+                         "where": Key("each table's row filter, in the"
+                                      " source's SQL", "dict",
+                                      each=Key("a condition, or {expr, tz}",
+                                               "str|dict",
+                                               subs={"expr": Key(
+                                                   "the condition", "str"),
+                                                   "tz": Key(
+                                                       "the zone its times"
+                                                       " are read in",
+                                                       "str")})),
+                         "tolerance": Key("each table's drift allowed, a"
+                                          " percentage", "dict",
+                                          each=Key("a percentage",
+                                                   "number", least=0)),
+                         # held by their own readers (`_ops_problems`,
+                         # `_names_problems`)
+                         "ops": Key("each table's changes carried", "dict"),
+                         "names": Key("how names are written on the"
+                                      " target, by level", "dict")}),
 }
 
 #: the keys under a hop's `options`
@@ -119,8 +315,21 @@ HOP_OPTIONS = {
                     "bool"),
     "app_roles": Key("the application's roles protect_target holds",
                      "list"),
+    "application_sql": Key("where the application's code is on this"
+                           " machine: the SQL written in it is found,"
+                           " carried into the target's SQL and proved on"
+                           " the sandbox, and never changed", "str|list",
+                           ("hetero",)),
     "approvals": Key("the steps that wait for an approval", "dict",
-                     subs=("steps", "signers", "count", "expires")),
+                     subs={"steps": Key("the steps held", "list",
+                                        each=Key("a step", "str",
+                                                 choices="migkit.approvals"
+                                                         ":STEPS")),
+                           "signers": Key("the allowed signers file", "str"),
+                           "count": Key("distinct approvers a step needs",
+                                        "int", least=1, default=1),
+                           "expires": Key("seconds a request stands",
+                                          "number", least=1)}),
     "at_rest": Key("who may read the files holding values", "dict",
                    subs=("recipients",)),
     "atlas": Key("the structural schema reading, on or off", "bool",
@@ -156,7 +365,8 @@ HOP_OPTIONS = {
     "cdc_confidence_seconds": Key("seconds the follow of a change log"
                                   " stays behind the source's clock",
                                   "number", ("cassandra",)),
-    "checksum": Key("text or jsonb row rendering", "str", ("postgres",)),
+    "checksum": Key("text or jsonb row rendering", "str", ("postgres",),
+                    choices=("text", "jsonb"), default="text"),
     "checksum_workers": Key("tables checksummed at once", "int",
                             ("postgres",), knob="size"),
     "closure": Key("what assess says of a table the hop takes that needs"
@@ -169,6 +379,15 @@ HOP_OPTIONS = {
                  " machine and the target's class are named in it", "str"),
     "code_dir": Key("where the operator's own versions of routines are"
                     " kept, one <name>.sql each", "str", ("hetero",)),
+    "builtin_suites": Key("where the engines' own test suites are on this"
+                          " machine: each case calling a function the"
+                          " source's code calls is run on both sandboxes,"
+                          " and the ones answered apart become the"
+                          " translator's rules", "str|list", ("hetero",)),
+    "code_reference_days": Key("days after the cutover the source's"
+                               " answers stay the reference the target's"
+                               " routines are held to (true: 30)",
+                               "int|bool", ("hetero",)),
     "code_model": Key("the model a routine no converter proves is asked"
                       " of", "dict", ("hetero",),
                       subs=("provider", "url", "model")),
@@ -181,9 +400,39 @@ HOP_OPTIONS = {
     "create_streams": Key("create a missing stream", "bool", ("kinesis",)),
     "cutover": Key("the cutover as one timed path that freezes the source"
                    " and undoes itself (`migkit.cutover`)", "dict|bool",
-                   subs=("budget", "start_below", "freeze", "pooler",
-                         "flip", "flip_undo", "keys", "jobs",
-                         "no_return", "restore_points")),
+                   subs={"budget": Key("seconds the write outage may last",
+                                       "number"),
+                         "start_below": Key("seconds the stream's lag must"
+                                            " be under to start", "number"),
+                         "freeze": Key("how the source's writes are"
+                                       " stopped", "str"),
+                         "pooler": Key("the connection pooler paused and"
+                                       " repointed", "dict",
+                                       subs={"kind": Key("pgbouncer or"
+                                                         " pgcat", "str"),
+                                             "host": Key("its address",
+                                                         "str"),
+                                             "port": Key("its port", "int"),
+                                             "user": Key("its admin user",
+                                                         "str"),
+                                             "password": Key(
+                                                 "a reference to its"
+                                                 " admin password",
+                                                 "secret"),
+                                             "databases": Key(
+                                                 "the databases it fronts",
+                                                 "list")}),
+                         "flip": Key("the command that points the"
+                                     " application at the target", "str"),
+                         "flip_undo": Key("the command that points it"
+                                          " back", "str"),
+                         "keys": Key("exact, or apart:<n>", "str"),
+                         "jobs": Key("move or leave", "str"),
+                         "no_return": Key("later or at_flip", "str"),
+                         "restore_points": Key("the sides a provider's"
+                                               " restore point is taken"
+                                               " of first", "list")},
+                   check="migkit.cutover:settings"),
     "ddl": Key("what a DDL on the source does to a running tail: stop"
                " it, park only the table it touched, or apply what can be"
                " carried at its place in the log - one word, or a mapping"
@@ -193,7 +442,7 @@ HOP_OPTIONS = {
     "deadline": Key("when the move must be done by - a duration (6h,"
                     " 90m, 2d) or a moment (2026-10-01T02:00): the plan"
                     " names the cheapest machine for migkit that meets it",
-                    "str|number"),
+                    "str|number", check="migkit.machine:deadline"),
     "edition": Key("what a change of edition may leave behind on the"
                    " target - accept: [the features whose loss the hop"
                    " accepts, as assess names them: encryption at rest,"
@@ -206,7 +455,7 @@ HOP_OPTIONS = {
                          " so a stop resumes after the last committed", "bool",
                          knob="way"),
     "follow_until": Key("stopped or caught_up: how long a follow runs",
-                        "str"),
+                        "str", check="migkit.tailctl:until"),
     "exclude_schema": Key("schemas left out of the schema dump", "str",
                           ("postgres",)),
     "export_bucket": Key("s3://bucket/prefix (gs:// for Firestore) the"
@@ -214,12 +463,14 @@ HOP_OPTIONS = {
                          " target's own loader reads, is written under",
                          "str", ("dynamodb", "firestore", "datastore",
                                  "neptune", "timestream")),
-    "fence_timeout": Key("seconds a fenced re-check waits", "int"),
+    "fence_timeout": Key("seconds a fenced re-check waits", "int",
+                         default=300, least=0),
     "fk_scan_seconds": Key("the budget of the orphaned-row scan", "int",
                            ("postgres",)),
     "float_tolerance": Key("how far two floats may differ", "number",
                            ("postgres",)),
-    "format": Key("the change stream's message format", "str", STREAMS),
+    "format": Key("the change stream's message format", "str", STREAMS,
+                  check="migkit.streamout:options"),
     "keep_proof": Key("the tail keeps every table's digest leaves up as"
                       " it applies, so a check reads only what changed",
                       "bool"),
@@ -233,9 +484,17 @@ HOP_OPTIONS = {
                   " seconds), replica_lag (seconds the source's replica"
                   " may fall behind), target_memory and"
                   " target_connections",
-                  "dict", subs=("source_load", "money", "bytes_billed",
-                                "outage", "replica_lag", "target_memory",
-                                "target_connections")),
+                  "dict",
+                  subs={"source_load": Key("a share: 0.3 or 30%",
+                                           "str|number"),
+                        "money": Key("a sum", "number", least=0),
+                        "bytes_billed": Key("a size: 500GB", "str|number"),
+                        "outage": Key("seconds", "number", least=0),
+                        "replica_lag": Key("seconds", "number", least=0),
+                        "target_memory": Key("a size: 8GiB", "str|number"),
+                        "target_connections": Key("connections", "int",
+                                                  least=1)},
+                  check="migkit.jointplan:limits_of"),
     "liquibase": Key("the second schema reading, on or off", "bool",
                      ("postgres",), knob="way", named_for_a_program=True),
     "lob_scan_seconds": Key("the budget of the large-value scan", "int",
@@ -246,17 +505,31 @@ HOP_OPTIONS = {
     "max_message_bytes": Key("the largest message a stream takes", "int",
                              STREAMS),
     "mongodb_entitlement": Key("atlas or enterprise: the MongoDB licence"
-                               " the hop has", "str", ("mongodb",)),
+                               " the hop has", "str", ("mongodb",),
+                               choices="migkit.movers:ENTITLEMENTS",
+                               fold=True),
     "newer_wins": Key("the column that keeps the newer row", "str"),
-    "noise_prefix": Key("object names a schema check leaves out", "str",
-                        ("postgres",)),
+    "noise_prefix": Key("the beginnings of the names of tables another"
+                        " tool keeps for itself, left out of everything"
+                        " (`Hop.excluded`), comma-separated", "str"),
     "notify": Key("who is told what the migration is doing - an address,"
                   " a list of them, or {to, events, lag, detail}: the"
                   " events told (verdict, drift, lag, cutover, approval,"
                   " failure, fallback, done), the seconds a change tail may"
                   " be behind, and whether an error's words are sent and"
                   " not only its kind", "str|list|dict",
-                  subs=("to", "events", "lag", "detail")),
+                  subs={"to": Key("an address or a list of them",
+                                  "str|list"),
+                        "events": Key("the events told", "list",
+                                      each=Key("an event", "str",
+                                               choices="migkit.notify"
+                                                       ":EVENTS")),
+                        "lag": Key("the seconds a change tail may be"
+                                   " behind before it is said", "number",
+                                   least=0),
+                        "detail": Key("true sends an error's words, false"
+                                      " (the default) only its kind",
+                                      "bool")}),
     "egress": Key("what may leave the machine for this hop - none, or"
                   " the kinds that may (notify, traces, assist, evidence),"
                   " or {allow, to}: the kinds and the hosts they may go"
@@ -267,15 +540,20 @@ HOP_OPTIONS = {
                          " partition and offset in a header, so a group's"
                          " position is placed on the target exactly", "bool",
                          ("kafka",)),
-    "on_conflict": Key("source-wins or keep-target", "str"),
+    "on_conflict": Key("source-wins or keep-target", "str",
+                       choices=("source-wins", "keep-target"), fold=True,
+                       default="source-wins"),
     "origin_table": Key("keep or drop: the table of migkit's batches on a"
                         " one-way target (migkit_origin), taken away when"
                         " the stream is torn down for good - at a --drop,"
                         " and at the cutover's point of no return - once no"
-                        " tail of the hop runs", "str"),
+                        " tail of the hop runs", "str",
+                        check="migkit.hopkeys:origin_dropped",
+                        default="keep"),
     "partition_by": Key("the column a stream partitions by", "str",
                         STREAMS),
-    "performance": Key("gate: a slower target fails the check", "str"),
+    "performance": Key("gate: a slower target fails the check", "str",
+                       choices=("gate",), fold=True),
     "physical": Key("the target may be seeded from a copy of the source's"
                     " pages, SQL Server's own backup restored, or a cloud's"
                     " own copy (`physical`, `backupseed`, `cloudseed`), and"
@@ -288,7 +566,8 @@ HOP_OPTIONS = {
                           "subscription", "resource_group", "location",
                           "project", "address", "upgrade", "backup",
                           "restore_from", "profile", "role", "product",
-                          "zone", "vpc", "subnet", "spec", "storage")),
+                          "zone", "vpc", "subnet", "spec", "storage"),
+                    check="migkit.hopkeys:_physical_read"),
     "proof_sandbox": Key("the two scratch servers stored code, the"
                          " constraints, the collations and the sized types"
                          " are run and compared on, or docker for migkit"
@@ -301,7 +580,11 @@ HOP_OPTIONS = {
                              " on purpose, by a name it answers to",
                              "str|list"),
     "protect_target": Key("the application may not write the target"
-                          " while migkit moves into it", "bool"),
+                          " while migkit moves into it: its rights taken"
+                          " where the engine grants rights, its access"
+                          " policy changed where the hop answers yes"
+                          " (target_access), its writes named before the"
+                          " cutover where nothing holds a writer", "bool"),
     "pt_apply": Key("the online schema change path, on or off", "bool",
                     ("mysql",), knob="way", named_for_a_program=True),
     "region": Key("the region the machine and the target's class are"
@@ -313,18 +596,34 @@ HOP_OPTIONS = {
     "reladiff": Key("the second data reading, on or off", "bool",
                     ("mysql",), knob="way", named_for_a_program=True),
     "repair_window": Key("seconds a writer is paused for a repair",
-                         "int"),
+                         "int", default=300, least=0),
     "replication_factor": Key("a created topic's replicas", "int",
                               ("kafka",)),
-    "reverse": Key("at_cutover: a stream back starts at cutover", "str"),
-    "rules": Key("questions both sides must answer alike", "dict"),
+    "reverse": Key("at_cutover: a stream back starts at cutover", "str",
+                   choices=("at_cutover",), fold=True),
+    "rules": Key("questions both sides must answer alike", "dict",
+                 check="migkit.rules:configured"),
     "sample": Key("how many keys or messages are compared", "int",
                   ("redis", "kafka")),
     "schedule": Key("when the hop runs by itself", "dict",
-                    subs=("cron", "timezone", "run", "args", "catchup",
-                          "pause_after_failures", "max_duration",
-                          "retry_window")),
-    "schema_authority": Key("which schema reading decides", "str"),
+                    subs={"cron": Key("five fields of cron", "str"),
+                          "timezone": Key("a zone of the tz database",
+                                          "str"),
+                          "run": Key("the command it runs", "str"),
+                          "args": Key("what the command is given",
+                                      "list"),
+                          "catchup": Key("seconds a missed slot may still"
+                                         " start", "int", least=0),
+                          "pause_after_failures": Key(
+                              "slots in a row that fail before the"
+                              " schedule stops", "int", least=1),
+                          "max_duration": Key("seconds a slot's run may"
+                                              " take", "int", least=1),
+                          "retry_window": Key("seconds a failed run is"
+                                              " tried again", "int",
+                                              least=0)}),
+    "schema_authority": Key("which schema reading decides: schema-aware"
+                            " (the default) or every-reading", "str"),
     "server_id": Key("the replica id the binlog reader uses", "int",
                      ("mysql",)),
     "server_to_server": Key("the target may pull the rows from the source"
@@ -333,8 +632,10 @@ HOP_OPTIONS = {
                             " true, or {source: host:port} where the target"
                             " reaches the source at another address",
                             "bool|dict", ("postgres",), subs=("source",)),
-    "settle": Key("seconds a re-check waits for a stream to settle",
-                  "int"),
+    "settle": Key("seconds a re-check waits for a stream to settle - left"
+                  " out, none before a re-check of what a stream may still"
+                  " carry, and 2 between the proof's generations", "number",
+                  least=0),
     "share_tables": Key("machines share one move's tables: true, each"
                         " table to one machine; ranges, a large table's"
                         " ranges as well, every write held to the number"
@@ -349,11 +650,15 @@ HOP_OPTIONS = {
                 " takes to reach the far end as the operator states it"
                 " (shipping), and who must have signed its manifest"
                 " (signers)", "dict",
-                subs=("carrier", "path", "endpoint", "bucket", "container",
-                      "prefix", "region", "profile", "ca_bundle",
-                      "credential", "model", "capacity", "load_from",
-                      "load_endpoint", "load_region", "load_profile",
-                      "load_credential", "shipping", "signers")),
+                subs=_named(("carrier", "path", "endpoint", "bucket",
+                             "container", "prefix", "region", "profile",
+                             "ca_bundle", "model", "capacity", "load_from",
+                             "load_endpoint", "load_region", "load_profile",
+                             "shipping", "signers"),
+                            credential=Key("a reference to the carrier's"
+                                           " credential", "secret"),
+                            load_credential=Key("a reference to the far"
+                                                " end's", "secret"))),
     "slot": Key("the slot a pipeline migkit did not set up reads, which"
                 " the fence waits for", "str|list", ("postgres",)),
     "standby": Key("the same move run on two or more machines: one moves"
@@ -372,20 +677,46 @@ HOP_OPTIONS = {
                          ("hetero",)),
     "spool_limit": Key("bytes a parked table's changes may take on this"
                        " machine before the table is copied again instead",
-                       "int", knob="size"),
+                       "int", knob="size",
+                       check="migkit.tailtables:spool_most"),
     "state": Key("where run state is kept, and a directory every"
                  " machine of the hop sees (shared)", "dict",
-                 subs=("backend", "bucket", "prefix", "region",
-                       "endpoint_url", "mirror", "shared")),
+                 subs={"backend": Key("local or s3", "str",
+                                      choices=("local", "s3"),
+                                      default="local"),
+                       "bucket": Key("the bucket", "str"),
+                       "prefix": Key("the prefix in it", "str"),
+                       "region": Key("its region", "str"),
+                       "endpoint_url": Key("an S3-compatible endpoint",
+                                           "str"),
+                       "mirror": Key("a directory restore points are"
+                                     " mirrored to", "str"),
+                       "shared": Key("a directory every machine sees",
+                                     "str")}),
     "stream_lag": Key("seconds a change stream is taken to trail a write,"
                       " which the follow's fence waits past", "number",
-                      ("keyspaces",), knob="size"),
+                      ("keyspaces",), knob="size", least=0),
     "subset": Key("goal subset: the rows a copy for testing starts from -"
                   " start: {table: a condition, a share like 10% or a"
                   " number of rows} - whether the rows that refer to them"
                   " come too (children), and the most rows it may hold"
-                  " (most)", "dict", subs=("start", "children", "most")),
+                  " (most)", "dict",
+                  subs={"start": Key("table -> a condition, a share or a"
+                                     " number of rows", "dict",
+                                     each=Key("a rule", "str|number")),
+                        "children": Key("the rows that refer to them come"
+                                        " too", "bool"),
+                        "most": Key("the most rows it may hold", "int",
+                                    least=1)},
+                  check="migkit.hopkeys:_subset_read"),
     "tables": Key("the tables of a generic hop", "list", ("generic",)),
+    "target_access": Key("the answer, given ahead, to the change of the"
+                         " target's access policy protect_target offers"
+                         " where the engine's writes are allowed outside"
+                         " the data (a table's own policy, a dataset's"
+                         " access): yes - migkit makes it and gives it back"
+                         " at cutover - or no", "str|bool",
+                         ("dynamodb", "bigquery")),
     "target_engine": Key("the target's engine of a hetero hop", "str",
                          ("hetero",)),
     "target_has_replicas": Key("false: the target has no replicas and no"
@@ -397,7 +728,10 @@ HOP_OPTIONS = {
                        "str"),
     "tombstones": Key("carry deletes' empty messages", "bool", ("kafka",)),
     "topic": Key("the stream name template", "str", STREAMS),
-    "topology": Key("one_way or two_way", "str"),
+    "topology": Key("one_way or two_way", "str",
+                    choices={"one_way": "one_way", "two_way": "two_way",
+                             "bidirectional": "two_way"}, fold=True,
+                    default="one_way"),
     "transfer_price_per_gb": Key("what a carried gigabyte costs",
                                  "number"),
     "two_readings": Key("a second, independent reading of every table,"
@@ -420,6 +754,11 @@ HOP_OPTIONS = {
                            " narrowing recorded and proved", "bool",
                            ("hetero",)),
     "verify_batches": Key("compare a bulk copy with the source", "bool"),
+    "workload_replay": Key("the source's record of what the application"
+                           " ran, every statement on it translated, run on"
+                           " both sandboxes and compared by its answers and"
+                           " the rows it writes, and timed on both sides,"
+                           " weighted by how often each ran", "bool"),
 }
 
 #: the keys of a side written in the long form
@@ -428,7 +767,7 @@ ENDPOINT_KEYS = {
     "port": Key("the server's port", "int"),
     "user": Key("the user migkit signs in as", "str"),
     "password": Key("a reference to the password - env:, file:, vault:,"
-                    " keyring:, aws-sm:, gcp-sm:, azure-kv:", "str"),
+                    " keyring:, aws-sm:, gcp-sm:, azure-kv:", "secret"),
     "options": Key("the endpoint's options, the same as writing them"
                    " beside host", "dict"),
 }
@@ -444,7 +783,8 @@ TLS_OWN = ("mongodb", "redis", "cassandra")
 #: the keys of a side's own options (under it, or under its `options`)
 ENDPOINT_OPTIONS = {
     "auth": Key("password, or aws_iam for a token the cloud signs", "str",
-                ("postgres", "mysql", "dsql", "neptune", "keyspaces")),
+                ("postgres", "mysql", "dsql", "neptune", "keyspaces"),
+                choices=("password", "aws_iam"), fold=True),
     "changes": Key("where the source publishes its changes, where a"
                    " client cannot read its log: a Kafka topic (servers,"
                    " topic or topics, format, and how to sign in), a"
@@ -452,19 +792,23 @@ ENDPOINT_OPTIONS = {
                    " order_window), or a changefeed streamed to migkit"
                    " (via: changefeed)", "dict",
                    ("tidb", "cockroachdb", "dsql", "couchbase"),
-                   subs=("via", "servers", "hosts", "topic", "topics",
-                         "format", "security_protocol", "sasl_mechanism",
-                         "user", "password", "ssl_cafile", "stream",
-                         "region", "endpoint_url", "cdc_stream",
-                         "order_window")),
+                   subs=_named(("via", "servers", "hosts", "topic",
+                                "topics", "format", "security_protocol",
+                                "sasl_mechanism", "user", "ssl_cafile",
+                                "stream", "region", "endpoint_url",
+                                "cdc_stream", "order_window"),
+                               password=Key("a reference to the topic's"
+                                            " password", "secret"))),
     "change_feed": Key("latest: follow by the latest-version change feed,"
                        " which carries no delete - where the account has"
                        " no all-versions-and-deletes feed", "str",
-                       ("cosmosdb",)),
+                       ("cosmosdb",), choices=("latest", "latest_version"),
+                       fold=True),
     "priority": Key("low: reads yield to the application where the"
                     " account runs priority-based execution (Cosmos DB), or"
                     " as a low-priority request (Spanner)", "str",
-                    ("cosmosdb", "spanner")),
+                    ("cosmosdb", "spanner"), choices=("low", "high"),
+                    fold=True),
     "instance": Key("the Spanner instance its databases are in", "str",
                     ("spanner",)),
     "emulator": Key("the host:port of the service's emulator, which is"
@@ -478,7 +822,10 @@ ENDPOINT_OPTIONS = {
                          ("spanner",)),
     "dialect": Key("postgresql: a database migkit makes speaks the"
                    " PostgreSQL dialect, where the source is not Spanner",
-                   "str", ("spanner",)),
+                   "str", ("spanner",),
+                   choices={"postgresql": "postgresql",
+                            "postgres": "postgresql", "pg": "postgresql",
+                            "googlesql": "googlesql"}, fold=True),
     "collection_groups": Key("the collection ids beyond the top-level ones,"
                              " each read as one table across every parent",
                              "str|list", ("firestore",)),
@@ -486,25 +833,33 @@ ENDPOINT_OPTIONS = {
                      ("datastore",)),
     "decoding": Key("the logical decoding plugin the follow's slot is made"
                     " with: mppdb_decoding or test_decoding", "str",
-                    ("gaussdb",)),
+                    ("gaussdb",), choices="migkit.engines.gaussdb:PLUGINS"),
     "sets": Key("each set's primary (host:port), whose own binlog the"
                 " follow reads", "str|list", ("dcdb",)),
     "shardkey": Key("the column a table made on the target is sharded by,"
                     " or none - one for every table, or {table: column}",
                     "str|dict", ("dcdb",)),
     "graph_api": Key("gremlin or opencypher: how the property graph is"
-                     " read", "str", ("neptune",)),
+                     " read", "str", ("neptune",),
+                     choices=("gremlin", "opencypher"), fold=True),
     "sparql": Key("the SPARQL query endpoint's URL, where not the"
                   " cluster's /sparql", "str", ("neptune",)),
     "sparql_update": Key("the SPARQL update endpoint's URL, where not the"
                          " query endpoint", "str", ("neptune",)),
     "rdf_default": Key("union or separate: whether the store's default"
                        " graph is the union of its named graphs", "str",
-                       ("neptune",)),
+                       ("neptune",), choices=("union", "separate"),
+                       fold=True),
     "retention": Key("a table made on the target: how long its memory"
                      " store keeps a record (memory_hours) and its"
                      " magnetic store (magnetic_days)", "dict",
-                     ("timestream",), subs=("memory_hours", "magnetic_days")),
+                     ("timestream",),
+                     subs={"memory_hours": Key("hours the memory store"
+                                               " keeps a record", "int",
+                                               least=1),
+                           "magnetic_days": Key("days the magnetic store"
+                                                " keeps a record", "int",
+                                                least=1)}),
     "network": Key("external: reach the cluster's nodes at their"
                    " alternate addresses", "str", ("couchbase",)),
     "mgmt_port": Key("the cluster manager's port, where not 8091 (18091"
@@ -514,7 +869,8 @@ ENDPOINT_OPTIONS = {
     "aws_role_arn": Key("the role an aws_iam token is signed as", "str",
                         ("postgres", "mysql")),
     "sslmode": Key("TLS: disable ... verify-full", "str",
-                   PG_FAMILY + ("teradata",)),
+                   PG_FAMILY + ("teradata",),
+                   choices="migkit.addresses:LIBPQ_MODES", fold=True),
     "sslrootcert": Key("the authority's certificate file", "str",
                        PG_FAMILY + ("teradata",)),
     "logmech": Key("how a Teradata side signs in, where not by its own"
@@ -569,13 +925,16 @@ ENDPOINT_OPTIONS = {
     "codepage": Key("the EBCDIC code page the files' text is in (cp037,"
                     " cp838, cp1047 ...)", "str", ("copybook",)),
     "recfm": Key("the files' record format: F, FB, V, VB or ZOSMF",
-                 "str", ("copybook",)),
+                 "str", ("copybook",),
+                 choices=("F", "FB", "V", "VB", "ZOSMF"), fold=True),
     "unreadable": Key("stop (the default) or null: a value that is not"
                       " one stops the read, or lands as NULL and is"
-                      " listed", "str", ("copybook",)),
+                      " listed", "str", ("copybook",),
+                      choices=("stop", "null"), fold=True),
     "odo": Key("actual (the default) or max: whether a table OCCURS"
                " DEPENDING ON its count takes the room of its count or"
-               " of its most", "str", ("copybook",)),
+               " of its most", "str", ("copybook",),
+               choices=("actual", "max"), fold=True),
     "url": Key("the whole connection address (Snowflake's account URL a"
                " streaming channel signs in at, a Cosmos DB account's"
                " endpoint, a Couchbase connection string)", "str",
@@ -592,7 +951,7 @@ ENDPOINT_OPTIONS = {
                         ("oracle",)),
     "mine_user": Key("the user the redo is mined as, where not the side's"
                      " own", "str", ("oracle",)),
-    "mine_password": Key("that user's password reference", "str",
+    "mine_password": Key("that user's password reference", "secret",
                          ("oracle",)),
     "mine_standby": Key("a physical standby of the source the redo is"
                         " mined on instead (host:port/service)", "str",
@@ -620,8 +979,8 @@ ENDPOINT_OPTIONS = {
     "private_key_file": Key("a key pair's private key file, which a"
                             " streaming channel signs in with", "str",
                             ("snowflake",)),
-    "private_key_passphrase": Key("the private key's passphrase", "str",
-                                  ("snowflake",)),
+    "private_key_passphrase": Key("the private key's passphrase",
+                                  "secret", ("snowflake",)),
     "location": Key("the datasets' region", "str", ("bigquery",)),
     "credentials_file": Key("a service account's key file", "str",
                             ("bigquery", "pubsub", "spanner", "bigtable",
@@ -669,6 +1028,10 @@ ENDPOINT_OPTIONS = {
                          "keyspaces", "timestream")),
     "table_prefix": Key("the table names' template", "str",
                         ("dynamodb",)),
+    "index_advice": Key("indexes the translated workload needs, made on"
+                        " the target hypothetically and advised only where"
+                        " its own planner's estimate falls by half",
+                        "bool"),
     "index_prefix": Key("the index names' template", "str",
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
@@ -685,10 +1048,13 @@ ENDPOINT_OPTIONS = {
                         " certificate)", "bool",
                         ("db2i", "couchbase", "cosmosdb", "sapodp")
                         + TLS_OWN),
-    "encrypt": Key("require, request or off", "str|bool", ("mssql",)),
+    "encrypt": Key("require, request or off", "str|bool", ("mssql",),
+                   choices=("require", "request", "off", "strict", "true",
+                            "false", "yes", "no", "on"), fold=True),
     "redis_product": Key("community, cloud or software: the Redis product"
                          " the target is, where its name cannot say",
-                         "str", ("redis",)),
+                         "str", ("redis",),
+                         choices="migkit.movers:REDIS_PRODUCTS", fold=True),
     "rdb_file": Key("a backup file of the source's keyspace, read in its"
                     " place so the server is left alone", "str",
                     ("redis",)),
@@ -707,7 +1073,9 @@ ENDPOINT_OPTIONS = {
     "replication": Key("a created keyspace's replication", "str|dict",
                        ("cassandra",)),
     "security_protocol": Key("PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL",
-                             "str", ("kafka",)),
+                             "str", ("kafka",),
+                             choices=("PLAINTEXT", "SSL", "SASL_PLAINTEXT",
+                                      "SASL_SSL"), fold=True),
     "sasl_mechanism": Key("how SASL signs in", "str", ("kafka",)),
     "ssl_cafile": Key("the authority's certificate file", "str",
                       ("kafka",)),
@@ -716,7 +1084,7 @@ ENDPOINT_OPTIONS = {
     "schema_registry_user": Key("the schema registry's user", "str",
                                 ("kafka",)),
     "schema_registry_password": Key("the schema registry's password",
-                                    "str", ("kafka",)),
+                                    "secret", ("kafka",)),
     "managed": Key("the managed service this side is and how its provider's"
                    " API reaches it: service (its name in the managed-service"
                    " catalogue, where neither its address nor its server"
@@ -968,17 +1336,24 @@ GOALS = {
 #: run says it before `--go`
 MODES = {
     ("move", "full"): "one copy of every table the hop carries: the source"
-                      " read, the target written",
+                      " read, the target written - kept from the"
+                      " application's writes before the first row and"
+                      " again after the last where the hop asks"
+                      " (protect_target): its rights taken, its access"
+                      " policy changed on an answer of yes, or its writes"
+                      " named, the way the target allows",
     ("move", "cdc"): "the stream of changes started, or resumed from where"
                      " it stood: the source's log read, the target written"
                      " change by change",
     ("move", "full+cdc"): "the copy, then the stream from a position taken"
                           " before the copy began, so nothing changed"
                           " during it is lost",
-    ("move", "cdc --drop"): "the cutover: the stream torn down, and what"
-                            " else happens on each side is what cutover:"
-                            " says (below); run again once a cutover of the"
-                            " hop has flipped, its point of no return",
+    ("move", "cdc --drop"): "the cutover: the stream torn down, the target"
+                            " given back to the application where"
+                            " protect_target kept it, and what else happens"
+                            " on each side is what cutover: says (below);"
+                            " run again once a cutover of the hop has"
+                            " flipped, its point of no return",
     ("sync", "reconcile"): "the last check's differences shown; --apply"
                            " writes the target to match the source",
     ("sync", "verify"): "read only: every table compared as of one moment",
@@ -1001,8 +1376,9 @@ CUTOVER = {
         " chosen from what the source allows - the whole server made"
         " read-only where it may, or the application's accounts kept from"
         " writing and their sessions ended - and reads it back; PostgreSQL,"
-        " MySQL, MongoDB, Redis, SQL Server, Cassandra, Kafka and OpenSearch"
-        " sources alike",
+        " MySQL, TiDB, CockroachDB, MongoDB, Redis, SQL Server, Oracle,"
+        " Db2, SAP ASE, Teradata, ClickHouse, Cassandra, Couchbase, Kafka,"
+        " OpenSearch, Redshift and Snowflake sources alike",
         "the drain: the source's position taken after the freeze, and the"
         " hop's own stream waited for until it passes it - or, where the"
         " stream keeps no position migkit can read, a mark written on the"
@@ -1012,6 +1388,11 @@ CUTOVER = {
         "the fenced check: the rows changed since the last verified pass"
         " compared inside the outage, and the schema compared with the"
         " preflight's",
+        "the target's hold read back first (protect_target): the"
+        " application's accounts write nothing there, or, where nothing"
+        " holds a writer, the writes that are not migkit's named - one"
+        " named is drift, and stops the cutover - and given back at the"
+        " flip, put on again if the cutover is undone",
         "the counters: the target's sequences and auto-increments raised"
         " past every key the source handed out",
         "the stream back: from the new primary to the old source"
@@ -1241,7 +1622,7 @@ def cutover_lines(hop):
     and what turning it on would add."""
     name = getattr(hop, "name", "HOP")
     back = (" and starts the stream back"
-            if (hop.options or {}).get("reverse") == "at_cutover" else "")
+            if reverse(hop) == "at_cutover" else "")
     adds = [f"    - {a}" for a in CUTOVER["adds"]]
     if cutover_on(hop):
         return (["cutover: on - migkit runs the cutover itself, as one"
@@ -1307,10 +1688,15 @@ def goal_options(hop, goal):
 
 def apply_goal(hop):
     """The hop's options with its goal's under them - an option the hop
-    says itself is kept."""
+    says itself is kept. Which came from the goal is kept beside them: a
+    target the goal keeps "where the engine allows it" and this server
+    does not is said and moved into, where the hop's own word stops the
+    move (`freeze.protect`)."""
     if not hop.goal:
         return
-    hop.options = {**goal_options(hop, hop.goal), **(hop.options or {})}
+    got = goal_options(hop, hop.goal)
+    vars(hop)["_from_goal"] = sorted(set(got) - set(hop.options or {}))
+    hop.options = {**got, **(hop.options or {})}
 
 
 def refuse_writes(hop, what):
@@ -1353,7 +1739,8 @@ def _near(word, keys):
 
 
 KINDS = {"str": (str,), "int": (int,), "number": (int, float),
-         "bool": (bool,), "list": (list, tuple), "dict": (dict,)}
+         "bool": (bool,), "list": (list, tuple), "dict": (dict,),
+         "secret": (str,)}
 
 
 def _fits(kind, value):
@@ -1376,41 +1763,125 @@ def _fits(kind, value):
 
 def _kind_words(kind):
     words = {"str": "text", "int": "a whole number", "number": "a number",
-             "bool": "true or false", "list": "a list", "dict": "a mapping"}
+             "bool": "true or false", "list": "a list", "dict": "a mapping",
+             "secret": "a reference to a secret (env:NAME, file:/path,"
+                       " vault:path#key, keyring:name)",
+             "any": "anything"}
     return " or ".join(words[k] for k in kind.split("|"))
 
 
-def _keys(out, where, got, registry, level="error"):
-    """Unknown keys and wrong types of a mapping against a registry."""
+#: what a secret written out in the file is told to become
+PLAIN = ("written in plain text - keep it in this machine's keychain"
+         " (`migkit init` does) or write a reference: env:NAME,"
+         " file:/path, vault:path#key, keyring:name")
+
+
+def _subs(key):
+    """{name: Key} of the keys under `key`, or None for a free mapping."""
+    got = _lazy(key.subs)
+    if got is None:
+        return None
+    if isinstance(got, dict):
+        return got
+    return {str(s): Key("") for s in got}
+
+
+def _keys(out, where, got, registry):
+    """Unknown keys, wrong types and values of a mapping against a
+    registry, at every depth it declares."""
     for k, v in got.items():
         key = registry.get(k)
         if key is None:
-            out.append(Problem(level, f"{where}.{k}",
+            out.append(Problem("error", f"{where}.{k}",
                                f"not a key migkit knows{_near(k, registry)}"))
             continue
-        if not _fits(key.kind, v):
-            out.append(Problem("error", f"{where}.{k}",
-                               f"{v!r} - {_kind_words(key.kind)} is"
-                               " expected here"))
+        _value(out, f"{where}.{k}", key, v)
+
+
+def _value(out, where, key, v):
+    """One value held to its key: its type, its words, its least, the keys
+    under it and each of its items - and a secret written out said."""
+    from . import addresses
+    if v is None:
+        return
+    if not _fits(key.kind, v):
+        out.append(Problem("error", where, f"{v!r} - {_kind_words(key.kind)}"
+                           " is expected here"))
+        return
+    if key.choices is not None and not isinstance(v, (dict, list, tuple,
+                                                      bool)):
+        if _chosen(key, v) is None:
+            words = _words(key)
+            out.append(Problem("error", where,
+                               f"{v!r} - one of {', '.join(words)}"
+                               + _near(v, {w: Key("") for w in words})))
+            return
+    if key.least is not None and not isinstance(v, bool) and _fits(
+            "number", v) and not isinstance(v, (dict, list, tuple)):
+        if float(v) < key.least:
+            out.append(Problem("error", where,
+                               f"{v!r} - at least {key.least:g}"))
+            return
+    if "secret" in key.kind.split("|") and isinstance(v, str) and v \
+            and not addresses.is_reference(v) and v != "CHANGE_ME":
+        out.append(Problem("warn", where, PLAIN))
+    subs = _subs(key)
+    if subs is not None and isinstance(v, dict):
+        _keys(out, where, v, subs)
+    if key.each is not None:
+        if isinstance(v, dict):
+            for name, x in v.items():
+                _value(out, f"{where}.{name}", key.each, x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                _value(out, where, key.each, x)
+
+
+def _probe(name, engine, goal, opts):
+    """A hop of what the file says, for the owning modules' readers to be
+    asked at load: nothing is resolved, nothing connected."""
+    from .config import Endpoint, Hop
+    return Hop(name=name, engine=engine, source=Endpoint(),
+               target=Endpoint(), options=normalised(HOP_OPTIONS, opts),
+               goal=str(goal or "") if goal in GOALS else "",
+               workers_set=False)
+
+
+def _owners(where, name, engine, goal, opts, out):
+    """Each option the hop sets read by its owning module's own reader
+    (`Key.check`), now: a refusal there is this configuration's error,
+    said before anything runs instead of hours into a copy. An option
+    already wrong by its registry is not asked twice, and each reader is
+    given the hop without the other options that have readers of their
+    own, so a wrong one is said once, under its own name."""
+    bad = {p.where for p in out if p.level == "error"}
+    own = {k for k in opts if HOP_OPTIONS.get(k) is not None
+           and HOP_OPTIONS[k].check}
+    for k, v in opts.items():
+        key = HOP_OPTIONS.get(k)
+        at = f"{where}.options.{k}"
+        if key is None or not key.check or v is None or any(
+                b == at or b.startswith(at + ".") for b in bad):
             continue
-        if key.subs is not None and isinstance(v, dict):
-            # said, not refused: the keys under an option are read where
-            # the option is used, which the registry's test cannot follow
-            # as surely as it follows the options themselves
-            subs = {s: Key("") for s in key.subs}
-            for s in v:
-                if s not in subs:
-                    out.append(Problem("warn", f"{where}.{k}.{s}",
-                                       "not a key migkit knows"
-                                       + _near(s, subs)))
+        probe = _probe(name, engine, goal,
+                       {o: x for o, x in opts.items()
+                        if o == k or o not in own})
+        try:
+            _lazy(key.check)(probe)
+        except SystemExit as e:
+            out.append(Problem("error", at, str(e)))
+        except Exception as e:  # noqa: BLE001 - its reader could not read it
+            out.append(Problem("error", at, f"{v!r} could not be read:"
+                               f" {type(e).__name__}: {e}"))
 
 
 def sides(raw):
     """(source engine, target engine, hop engine) a hop's raw mapping
-    names, or raises where they disagree - the one reading of it that
-    `config` builds the hop from as well."""
+    names - each the engine's own name (`engines.canonical`), whatever
+    other name it was written as - or raises where they disagree: the one
+    reading of it that `config` builds the hop from as well."""
     from . import addresses
-    from .engines import ALIASES
+    from .engines import canonical
     ends = {}
     for side in ("source", "target"):
         got = raw.get(side)
@@ -1425,22 +1896,23 @@ def sides(raw):
         s = opts.get("source_engine") or src or "mysql"
         t = opts.get("target_engine") or dst or "postgres"
         for said, got, side in ((src, s, "source"), (dst, t, "target")):
-            if said and ALIASES.get(got, got) != said:
+            if said and (canonical(got) or got) != said:
                 raise SystemExit(f"{side}_engine: {got}, and the {side}"
                                  f" address is a {said} one")
-        return s, t, "hetero"
+        return canonical(s) or s, canonical(t) or t, "hetero"
     engine = declared or src or dst or "postgres"
-    canon = ALIASES.get(engine, engine)
+    canon = canonical(engine) or engine
     for said, side in ((src, "source"), (dst, "target")):
         if said and said != canon:
             raise SystemExit(f"engine: {engine}, and the {side} address is"
                              f" a {said} one - leave engine out and the"
                              " two addresses say what the pair is")
-    return engine, engine, engine
+    return canon, canon, canon
 
 
-def check(data):
-    """Every problem of a configuration's mapping, errors first."""
+def check(data, path=None):
+    """Every problem of a configuration's mapping, errors first - and of
+    the file it was read from, where `path` names it."""
     out = []
     if not isinstance(data, dict):
         return [Problem("error", "the file", "is not a mapping of keys")]
@@ -1460,7 +1932,49 @@ def check(data):
     for name, raw in hops.items():
         out += check_hop(str(name), raw)
     out += _two_way_pairs(hops)
+    if path is not None:
+        out += _file(path, out)
     return sorted(out, key=lambda p: p.level != "error")
+
+
+def _file(path, found):
+    """Who else on this machine may read or change the file. Anyone who
+    may write it, or put another file in its place, may point a hop's
+    target elsewhere or turn its approvals off, so such a file is refused
+    (`config.trusted_file`, the rule a secret file is held to); one its
+    group may write is said, and one every user or the group may read
+    where it holds a secret written out."""
+    import os
+    import stat
+
+    from .config import trusted_file
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    mode = stat.S_IMODE(st.st_mode)
+    where = str(path)
+    out = []
+    try:
+        trusted_file(path, "the hops file")
+    except SystemExit as e:
+        out.append(Problem("error", where,
+                           f"{e} - so anyone of them may point a hop's"
+                           " target elsewhere or turn its approvals off"))
+    if mode & stat.S_IWGRP and not mode & stat.S_IWOTH:
+        out.append(Problem("warn", where,
+                           f"its group may change it (mode {mode:o}) - chmod"
+                           " 600 it unless everyone in the group runs these"
+                           " hops"))
+    plain = [p for p in found if p.text == PLAIN]
+    if plain and mode & (stat.S_IROTH | stat.S_IRGRP):
+        out.append(Problem("warn", where,
+                           f"readable by other users of this machine (mode"
+                           f" {mode:o}) and {len(plain)} secret"
+                           f"{'s are' if len(plain) > 1 else ' is'} written"
+                           " out in it - chmod 600 it, and keep them in the"
+                           " keychain or write references"))
+    return out
 
 
 def check_hop(name, raw):
@@ -1479,9 +1993,9 @@ def check_hop(name, raw):
         src_e, dst_e, engine = sides(raw)
     except SystemExit as e:
         return out + [Problem("error", where, str(e))]
-    from .engines import ALIASES, NAMES
+    from .engines import ALIASES, NAMES, canonical
     said = raw.get("engine")
-    if said is not None and said not in NAMES and said not in ALIASES:
+    if said is not None and canonical(said) is None:
         near = _near(said, {n: Key("") for n in list(NAMES) + list(ALIASES)})
         out.append(Problem("error", f"{where}.engine",
                            f"{said!r} is not an engine migkit has{near}"))
@@ -1496,10 +2010,14 @@ def check_hop(name, raw):
         out += _notify(f"{where}.options.notify", opts.get("notify"))
         out += _egress(f"{where}.options.egress", opts.get("egress"))
         out += _two_way(f"{where}.options.two_way", opts.get("two_way"))
+        out += _schedule(f"{where}.options.schedule", opts.get("schedule"))
         out += _ddl_problems(f"{where}.options.ddl", opts.get("ddl"))
+        out += _authority_problems(f"{where}.options.schema_authority",
+                                   opts.get("schema_authority"))
         from .web import roles
         for w, text in roles.hop_problems(opts.get("access")):
             out.append(Problem("error", f"{where}.options.{w}", text))
+        _owners(where, name, engine, goal, opts, out)
     for side, e in (("source", src_e), ("target", dst_e)):
         got = raw.get(side)
         if got is None:
@@ -1522,7 +2040,6 @@ def check_hop(name, raw):
 
 
 def _check_endpoint(where, engine, raw):
-    from . import addresses
     out = []
     flat = {k: v for k, v in raw.items() if k != "options"}
     nested = raw.get("options")
@@ -1532,49 +2049,18 @@ def _check_endpoint(where, engine, raw):
     registry = {**ENDPOINT_KEYS, **ENDPOINT_OPTIONS}
     registry.pop("options")
     _keys(out, where, flat, registry)
-    pw = flat.get("password")
-    if isinstance(pw, str) and pw and not addresses.is_reference(pw) \
-            and pw != "CHANGE_ME":
-        out.append(Problem(
-            "warn", f"{where}.password",
-            "written in plain text - keep it in this machine's keychain"
-            " (`migkit init` does) or write a reference: env:NAME,"
-            " file:/path, vault:path#key, keyring:name"))
-    for k in ("schema_registry_password",):
-        v = flat.get(k)
-        if isinstance(v, str) and v and not addresses.is_reference(v):
-            out.append(Problem("warn", f"{where}.{k}",
-                               "written in plain text - write a reference"
-                               " (env:NAME, file:/path, ...)"))
     return out
 
 
 def _notify(where, got):
     """A receiver written out in the file, which is its own password (a
-    webhook's address is enough to post to it); an event nobody tells; a
-    lag that is not a number of seconds."""
+    webhook's address is enough to post to it). The events, the lag and
+    the detail are held to their keys (`HOP_OPTIONS["notify"]`)."""
     from . import addresses
-    from .notify import EVENTS
     out = []
     if got is None:
         return out
     to = got.get("to") if isinstance(got, dict) else got
-    if isinstance(got, dict):
-        for e in got.get("events") or []:
-            if str(e) not in EVENTS:
-                out.append(Problem("error", f"{where}.events",
-                                   f"{e!r} - one of {', '.join(EVENTS)}"
-                                   + _near(e, {x: Key("") for x in EVENTS})))
-        lag = got.get("lag")
-        if lag is not None and not _fits("number", lag):
-            out.append(Problem("error", f"{where}.lag",
-                               f"{lag!r} - the seconds a change tail may be"
-                               " behind before it is said"))
-        detail = got.get("detail")
-        if detail is not None and not isinstance(detail, bool):
-            out.append(Problem("error", f"{where}.detail",
-                               f"{detail!r} - true sends an error's words,"
-                               " false (the default) only its kind"))
     plain = 0
     for r in [to] if isinstance(to, str) else list(to or []):
         r = str(r)
@@ -1587,6 +2073,55 @@ def _notify(where, got):
             " in the file, and an address is its own password - keep it in"
             " this machine's keychain or write a reference: env:NAME,"
             " keyring:name, file:/path, vault:path#key"))
+    return out
+
+
+def _subset_read(hop):
+    """A subset's settings and each table's rule read as the copy reads
+    them (`subset.settings`, `subset.rule`)."""
+    from . import subset
+    got = subset.settings(hop)
+    for table, said in ((got or {}).get("start") or {}).items():
+        subset.rule(table, said)
+    return got
+
+
+def _physical_read(hop):
+    """The address the target reaches the source at, where the hop says
+    one, read as the page copy reads it."""
+    from . import physical
+    got = (hop.options or {}).get("physical")
+    if isinstance(got, dict) and got.get("source"):
+        physical._source_address(hop, got)
+
+
+def _schedule(where, got):
+    """A schedule's cron and zone read now, as its slot will read them: a
+    cron no slot matches or a zone that is not one stopped the scheduler
+    the first time it looked (audit 2026-10-01, K6)."""
+    if not isinstance(got, dict):
+        return []
+    out = []
+    cron = got.get("cron")
+    if isinstance(cron, str):
+        from croniter import croniter
+        if not croniter.is_valid(cron):
+            out.append(Problem("error", f"{where}.cron",
+                               f"{cron!r} - five fields of cron: minute,"
+                               " hour, day of the month, month, day of the"
+                               " week"))
+    elif got and cron is None:
+        out.append(Problem("warn", f"{where}.cron",
+                           "not given, so the schedule never runs"))
+    zone = got.get("timezone")
+    if isinstance(zone, str) and zone:
+        from zoneinfo import ZoneInfo
+        try:
+            ZoneInfo(zone)
+        except Exception:  # noqa: BLE001 - not a zone, whatever the reason
+            out.append(Problem("error", f"{where}.timezone",
+                               f"{zone!r} is not a time zone (Asia/Bangkok,"
+                               " UTC)"))
     return out
 
 
@@ -1617,6 +2152,20 @@ def _two_way(where, got):
     except SystemExit as e:
         return [Problem("error", where, str(e))]
     return []
+
+
+def _authority_problems(where, got):
+    """`schema_authority` said as neither of its words: read as every
+    reading counting, which is likely not what was meant - an error, said
+    before anything runs."""
+    from .engines.base import Engine
+    if got is None:
+        return []
+    word = str(got).strip().lower()
+    if word in Engine.AUTHORITIES or word == Engine.LEGACY_AUTHORITY:
+        return []
+    return [Problem("error", where, f"{got!r} - one of"
+                                    f" {', '.join(Engine.AUTHORITIES)}")]
 
 
 def _ddl_problems(where, got):
@@ -1914,7 +2463,8 @@ def _contradictions(where, raw, opts, goal, engine):
                 exclude=_patterns_or_none(raw.get("exclude")),
                 options={k: v for k, v in opts.items()
                          if k == "source_engine"})
-    mapping = raw.get("mapping") or {}
+    mapping = raw.get("mapping") if isinstance(raw.get("mapping"),
+                                               dict) else {}
     for part in ("where", "tables", "columns", "ops"):
         rules = mapping.get(part) or {}
         if not isinstance(rules, dict):
@@ -1933,6 +2483,18 @@ def _contradictions(where, raw, opts, goal, engine):
                     "error", f"{where}.mapping.{part}.{table}",
                     f"{table} is also excluded, so this rule touches"
                     " nothing - drop one of the two"))
+    columns = mapping.get("columns")
+    for table, said in (columns.items() if isinstance(columns, dict)
+                        else ()):
+        if not isinstance(said, dict):
+            continue
+        keep, drop = said.get("keep"), said.get("drop")
+        both = sorted({str(c) for c in keep} & {str(c) for c in drop}) \
+            if isinstance(keep, list) and isinstance(drop, list) else []
+        if both:
+            out.append(Problem(
+                "error", f"{where}.mapping.columns.{table}",
+                f"{', '.join(both)} both kept and dropped - say one"))
     out += _include_problems(where, raw, probe)
     out += _ops_problems(where, mapping)
     out += _objects_problems(where, raw)
@@ -2184,8 +2746,8 @@ def _source_changes(where, opts, goal):
 def said_by_doctor(hop, raw):
     """(key, sentence) for every key of this hop that does nothing here,
     or sets what migkit would otherwise decide."""
-    from .engines import ALIASES, may_be
-    engine = ALIASES.get(hop.engine, hop.engine)
+    from .engines import canonical, may_be
+    engine = canonical(hop.engine) or hop.engine
     opts = hop.options or {}
     if engine == "hetero":
         on = may_be(opts.get("source_engine", "mysql")) | may_be(
@@ -2232,7 +2794,7 @@ def said_by_doctor(hop, raw):
         ep = getattr(hop, side)
         named = opts.get(f"{side}_engine") or (
             "mysql" if side == "source" else "postgres")
-        e = ALIASES.get(named, named) if engine == "hetero" else engine
+        e = (canonical(named) or named) if engine == "hetero" else engine
         could = may_be(named if engine == "hetero" else hop.engine)
         for k in (ep.options or {}):
             key = ENDPOINT_OPTIONS.get(k)
@@ -2246,6 +2808,25 @@ def said_by_doctor(hop, raw):
 
 
 # ---- the smallest configuration ------------------------------------------
+
+def brands(raw):
+    """{side: the name it was written as} for each side of a hop's raw
+    mapping named by another name than its engine's own (`mariadb`,
+    `aurora-postgres`): the hop is built with the engine's own name, and
+    this is kept apart, for what tells two brands apart (audit
+    2026-10-01, DU6)."""
+    from .engines import canonical
+    opts = raw.get("options") if isinstance(raw.get("options"), dict) \
+        else {}
+    declared = raw.get("engine")
+    out = {}
+    for side in ("source", "target"):
+        said = opts.get(f"{side}_engine") if declared == "hetero" or (
+            declared is None and opts.get(f"{side}_engine")) else declared
+        if isinstance(said, str) and canonical(said) not in (None, said):
+            out[side] = said
+    return out
+
 
 def decisions(hop):
     """What a hop decides, in a form two configurations can be compared
@@ -2261,9 +2842,11 @@ def decisions(hop):
     def side(ep):
         return {"host": ep.host, "port": ep.port, "user": ep.user,
                 "password": ep.password, "options": dict(ep.options or {}),
-                "class": type(ep).__name__.replace("Keychain", "")}
-    return {"engine": hop.engine, "source": side(hop.source),
-            "target": side(hop.target),
+                # a password from the keychain or a reference is a password
+                "class": type(ep).__name__.replace("Keychain", "")
+                .replace("Side", "")}
+    return {"engine": hop.engine, "brand": dict(hop.brand or {}),
+            "source": side(hop.source), "target": side(hop.target),
             "databases": [str(d) for d in hop.databases or []],
             "exclude": list(hop.exclude or []),
             "include": list(getattr(hop, "include", None) or []),
@@ -2283,9 +2866,13 @@ def smallest(name, raw):
     then left out), and every key equal to what migkit would decide on
     its own dropped."""
     from . import addresses
-    from .config import DEFAULT_PORTS, keychain_name
+    from .config import keychain_name
+    from .engines import PORTS
     raw = dict(raw)
     src_e, dst_e, engine = sides(raw)
+    # a side named by a brand (mariadb, aurora-postgres) keeps the long
+    # form, where the name it was written as is kept
+    branded = bool(brands(raw))
     opts = dict(raw.get("options") or {})
     dbs = [str(d) for d in raw.get("databases") or []]
     db_map = {str(k): str(v) for k, v in (raw.get("db_map") or {}).items()
@@ -2308,18 +2895,13 @@ def smallest(name, raw):
         flat.update(got.get("options") or {})
         if flat.get("password") == f"keyring:{keychain_name(name, side)}":
             flat.pop("password")
-        if engine != "hetero" and not flat.get("port"):
+        if not flat.get("port"):
             # the long form's side took its engine's port where it named
-            # none (a cross-engine hop's took none at all)
-            flat["port"] = DEFAULT_PORTS.get(e, 0)
-        from .engines import ALIASES
-        canon = ALIASES.get(e, e)
+            # none
+            flat["port"] = PORTS.get(e, 0)
         rendered[side] = addresses.render(
-            canon, flat, names if maps_known else [],
-            DEFAULT_PORTS.get(e, 0))
-        if canon != e:
-            rendered[side] = None
-    whole = rendered["source"] and rendered["target"]
+            e, flat, names if maps_known else [], PORTS.get(e, 0))
+    whole = rendered["source"] and rendered["target"] and not branded
     for side in ("source", "target"):
         out[side] = rendered[side] if whole else raw.get(side)
     if not whole:
@@ -2339,7 +2921,7 @@ def smallest(name, raw):
         out["service"] = raw["service"]
     if "workers" in raw:
         out["workers"] = raw["workers"]
-    if "slice" in raw and int(raw["slice"]) != 1_000_000:
+    if "slice" in raw and int(raw["slice"]) != HOP_KEYS["slice"].default:
         out["slice"] = raw["slice"]
     for k in ("exclude", "include", "objects", "mapping"):
         if raw.get(k):

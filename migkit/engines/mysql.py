@@ -150,6 +150,24 @@ def _like(pattern):
     return "".join(out)
 
 
+
+#: a stored body's comments and quoted text, set aside before its names
+#: are read: a word in a string or a comment is no column of the body's
+_CODE_ASIDE = re.compile(r"--[^\n]*|#[^\n]*|/\*.*?\*/|'(?:[^'\\]|\\.|'')*'"
+                         r'|"(?:[^"\\]|\\.|"")*"', re.S)
+_CODE_COLLATE = re.compile(r"\bcollate\s+`?([A-Za-z0-9_]+)`?", re.I)
+_CODE_NAME = re.compile(r"`((?:[^`]|``)+)`|\b([A-Za-z_][A-Za-z0-9_$]*)\b")
+
+
+def code_words(body):
+    """(the names a stored body uses, lower-cased; the collations its
+    COLLATE clauses name) - its comments and quoted text set aside."""
+    text = _CODE_ASIDE.sub(" ", str(body or ""))
+    named = {m.group(1).lower() for m in _CODE_COLLATE.finditer(text)}
+    words = {(m.group(1) or m.group(2)).replace("``", "`").lower()
+             for m in _CODE_NAME.finditer(text)}
+    return words, named
+
 class MySQLEngine(Engine):
     ENGINE_FAMILY = "mysql"
     checks = ("schema", "counts", "autoinc", "data")
@@ -343,17 +361,40 @@ class MySQLEngine(Engine):
                          "index_bytes": None if idx is None else int(idx)}
         return out
 
+    #: the columns `column_catalog` reads and `shape_mark` digests: one row
+    #: a column - its table, name, declared type and place
+    _CATALOG_READS = ("select table_name ct, column_name cn, column_type cd,"
+                      " ordinal_position cp from information_schema.columns"
+                      " where table_schema = %s")
+
     def column_catalog(self, side, db):
         """{table: [(column, type), ...]} in one query - what a move reads
         before and after itself to notice a DDL on the source."""
         out = {}
-        for t, c, ty in self._q(side, "select table_name, column_name,"
-                                      " column_type from"
-                                      " information_schema.columns"
-                                      " where table_schema = %s",
-                                (self._d(side, db),)):
+        for t, c, ty, _place in self._q(side, self._CATALOG_READS,
+                                        (self._d(side, db),)):
             out.setdefault(str(t), []).append((str(c), str(ty)))
         return {t: sorted(cols) for t, cols in out.items()}
+
+    def shape_mark(self, side, db):
+        """One digest of what `column_catalog` reads, computed by the
+        server (`_CATALOG_READS`): the columns counted, and each column's
+        row - its values as their lengths and texts - hashed on its own
+        (MD5, its first 60 bits) and the hashes summed. A sum, not one
+        hash over the rows strung together: `group_concat` stops at
+        `group_concat_max_len` with a warning, not an error, and a digest
+        cut short would miss every change past it. What a tail asks
+        before it reads the whole shape again (`hetero._shape_now`, audit
+        SP8) - a MySQL tail only once a minute, its binlog carrying every
+        DDL; a TiDB tail every batch, its feed's DDL left to this."""
+        row = ", ".join(f"char_length(q.{c}), q.{c}"
+                        for c in ("ct", "cn", "cd", "cp"))
+        got = self._q(side, (
+            "select count(*), sum(cast(conv(substr(md5(concat_ws(char(31),"
+            f" {row})), 1, 15), 16, 10) as unsigned)) from"
+            f" ({self._CATALOG_READS}) q"), (self._d(side, db),))
+        return ":".join(str(v if v is not None else 0) for v in got[0]) \
+            if got else None
 
     def neutral_columns(self, side, db, table):
         rows = self._q(side, "select column_name, column_type"
@@ -2001,8 +2042,20 @@ class MySQLEngine(Engine):
         out of sight. A thread seen committing again later is committing a
         later transaction, whose events are after the position; waiting
         for it costs only the wait. Without `PROCESS` the server shows only
-        this session's threads, and nothing is waited for.
+        this session's threads: nothing was waited for, and a copy read
+        then could miss a commit the tail starts after - so that is
+        refused, saying what to grant (`sees_every_session`).
         """
+        if not self.sees_every_session(side):
+            raise SystemExit(
+                "the source's account cannot see the other sessions"
+                " (PROCESS), so which commits are under way when the copy"
+                " starts cannot be read, and a commit written to the binary"
+                " log before the copy's position but not yet visible would"
+                " be in neither the copy nor the tail. Grant it - `grant"
+                " process on *.* to <the account>;` - or use a server that"
+                " says its snapshot's binary log position (MariaDB,"
+                " Percona). Nothing was copied")
         q = ("select id from information_schema.processlist"
              " where id <> connection_id()"
              " and lower(coalesce(state, '')) like '%commit%'")
@@ -2020,6 +2073,23 @@ class MySQLEngine(Engine):
                     " are through.")
             if first:
                 time.sleep(0.05)
+
+    def sees_every_session(self, side):
+        """Whether this account sees every client session in the process
+        list - `PROCESS`, or a server where it is the only one: the
+        sessions it lists against the server's own count of connections
+        (`Threads_connected`, which needs no privilege). Asked a few times,
+        as a session may connect between the two reads."""
+        for _ in range(3):
+            seen = int(self._q(side, "select count(*) from"
+                                     " information_schema.processlist")[0][0])
+            rows = self._q(side, "show global status like"
+                                 " 'Threads\\_connected'")
+            connected = int(rows[0][1]) if rows else 0
+            if seen >= connected:
+                return True
+            time.sleep(0.05)
+        return False
 
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
@@ -4084,6 +4154,54 @@ class MySQLEngine(Engine):
         # answered before execution (`max` over an index): nothing ran
         return 0.0 if "before execution" in text else None
 
+    def _errant_transactions(self, db):
+        """Where the target follows the source as its replica by GTID: the
+        transactions the target executed that the source never did - a
+        write made on the replica itself, which the cutover carries into
+        production and a failover back replays nowhere - and the source's
+        the target has not applied yet. Two sets of the servers' own,
+        subtracted by the target's server (`GTID_SUBTRACT`): an exact
+        answer, not a count. None where the target is no replica of this
+        source or GTIDs are off; MariaDB's GTIDs, by domain and server,
+        are said as not compared."""
+        brands = [b.name for b in self._brands()]
+        try:
+            if "mariadb" in brands:
+                return None
+            on, _ = self._gtid_state(brands[0])
+            if not on:
+                return None
+            src_uuid = str(self._q("src", "select @@server_uuid")[0][0])
+            rows = self._q_named("dst", "show replica status")
+            if not any(str(self._repl_field(r, ("Source_UUID", "Master_UUID"))
+                           or "").lower() == src_uuid.lower() for r in rows):
+                return None
+            src_set = str(self._q("src", "select @@global.gtid_executed")
+                          [0][0] or "")
+            errant, behind = self._q(
+                "dst", "select gtid_subtract(@@global.gtid_executed, %s),"
+                       " gtid_subtract(%s, @@global.gtid_executed)",
+                (src_set, src_set))[0]
+        except Exception as e:  # noqa: BLE001 - said, never as clean
+            return Result("deep", f"{db} errant", "warn",
+                          "the target's executed transactions could not be"
+                          " held to the source's: "
+                          + str(e).strip().splitlines()[0][:120])
+        errant = str(errant or "").replace("\n", "").strip()
+        behind = str(behind or "").replace("\n", "").strip()
+        if errant:
+            return Result("deep", f"{db} errant", "diff",
+                          "the target executed transactions the source"
+                          f" never did - written on the replica itself:"
+                          f" {errant[:200]}", "",
+                          "find what wrote them on the target before the"
+                          " cutover; the change it made is not the"
+                          " source's")
+        return Result("deep", f"{db} errant", "ok",
+                      "every transaction the target executed is the"
+                      " source's" + (f"; still to apply: {behind[:120]}"
+                                     if behind else ""))
+
     def stream_identity(self, side, db):
         """The server's own id: a binlog file and offset mean something in
         one server's log only."""
@@ -4404,7 +4522,9 @@ class MySQLEngine(Engine):
                self._duplicate_keys(db),
                self._temporal_meaning(db),
                self._time_zone_rules(db),
-               self._capacity_gaps(db)]
+               self._capacity_gaps(db),
+               self._errant_transactions(db)]
+        res = [r for r in res if r is not None]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified
@@ -4856,24 +4976,31 @@ class MySQLEngine(Engine):
                           "could not read the partitions:"
                           f" {str(e).splitlines()[-1][:120]}")
 
+    def partition_scheme(self, side, db, schema=None):
+        """{table: {"m": method, "e": expression, "p": {partition: its
+        description}}} of every partitioned table in scope - the
+        partitions in their order, a partition's subpartitions read as it.
+        `schema` is the database as the side names it, `db` where it is
+        left out."""
+        out = {}
+        for t, meth, expr, name, desc in self._q(side,
+                "select table_name, partition_method,"
+                " coalesce(partition_expression, ''), partition_name,"
+                " coalesce(partition_description, '')"
+                " from information_schema.partitions where table_schema=%s"
+                " and partition_name is not null"
+                " order by table_name, partition_ordinal_position",
+                (schema or db,)):
+            if self.hop.excluded(db, t):
+                continue
+            e = out.setdefault(t, {"m": meth, "e": expr, "p": {}})
+            # a partition's subpartitions answer a row each
+            e["p"].setdefault(name, desc)
+        return out
+
     def _partitions_compared(self, db, ddb):
-        def scheme_of(side, dbn):
-            out = {}
-            for t, meth, expr, name, desc in self._q(side,
-                    "select table_name, partition_method,"
-                    " coalesce(partition_expression, ''), partition_name,"
-                    " coalesce(partition_description, '')"
-                    " from information_schema.partitions where table_schema=%s"
-                    " and partition_name is not null"
-                    " order by table_name, partition_ordinal_position",
-                    (dbn,)):
-                if self.hop.excluded(db, t):
-                    continue
-                e = out.setdefault(t, {"m": meth, "e": expr, "p": {}})
-                # a partition's subpartitions answer a row each
-                e["p"].setdefault(name, desc)
-            return out
-        sp, dp = scheme_of("src", db), scheme_of("dst", ddb)
+        sp, dp = self.partition_scheme("src", db, db), \
+            self.partition_scheme("dst", db, ddb)
         plain = {side: set(self._all_tables(side, db))
                  for side in ("src", "dst")}
         scheme, tables = [], {}
@@ -6241,6 +6368,7 @@ class MySQLEngine(Engine):
                     "charset and collation match",
                     f"src {cs[0]} / dst {cd[0]}")
                 items.extend(self._code_collations(db, cd[0][1]))
+                items.extend(self._code_collation_mix(db, cd[0][1]))
             items.extend(self._large_values(db))
         items.extend(self._target_replicas())
 
@@ -6294,6 +6422,60 @@ class MySQLEngine(Engine):
                             " differently there" if odd else
                             f"{len(rows)} routines, triggers and events,"
                             f" all under {target_collation}")}]
+
+    def _code_collation_mix(self, db, target_collation):
+        """Stored code that may compare strings under two collations on the
+        target - `Illegal mix of collations`, which arrives only when the
+        routine runs (problems B4). Recreated in the target database, a
+        routine's variables, parameters and literals take its collation;
+        a text column it names that keeps another, or a COLLATE clause in
+        its body naming another, is compared across the two. Read from
+        each body's own words: comments and quoted text set aside, the
+        names it uses held against the database's text columns."""
+        cols = {}
+        for table, col, coll in self._q(
+                "src", "select table_name, column_name, collation_name"
+                       " from information_schema.columns where"
+                       " table_schema = %s and collation_name is not null",
+                (db,)):
+            cols.setdefault(str(col).lower(), set()).add(
+                (str(table), str(coll)))
+        bodies = self._q("src", "select concat(routine_type, ' ',"
+                                " routine_name), routine_definition from"
+                                " information_schema.routines where"
+                                " routine_schema = %s union all select"
+                                " concat('TRIGGER ', trigger_name),"
+                                " action_statement from"
+                                " information_schema.triggers where"
+                                " trigger_schema = %s union all select"
+                                " concat('EVENT ', event_name),"
+                                " event_definition from"
+                                " information_schema.events where"
+                                " event_schema = %s", (db, db, db))
+        mixed = []
+        for name, body in bodies:
+            words, named = code_words(body)
+            other = sorted({f"{t}.{c} ({coll})" for c in words & set(cols)
+                            for t, coll in cols[c]
+                            if coll != target_collation})
+            other += sorted(f"COLLATE {x}" for x in named
+                            if x != str(target_collation).lower())
+            if other:
+                mixed.append(f"{name}: {', '.join(other[:4])}"
+                             + (" ..." if len(other) > 4 else ""))
+        if not bodies:
+            return []
+        return [{"level": "warn" if mixed else "pass", "scope": db,
+                 "item": "stored code compares strings under one collation"
+                         " on the target",
+                 "detail": (f"{len(mixed)} of {len(bodies)} name text under"
+                            " another collation than the"
+                            f" {target_collation} they run under there - a"
+                            " comparison of the two stops with `Illegal mix"
+                            " of collations` when it runs: "
+                            + "; ".join(mixed[:5]) if mixed else
+                            f"{len(bodies)} routines, triggers and events name"
+                            f" text only under {target_collation}")}]
 
     #: rows of a table read to measure its large values
     SAMPLE_ROWS = 20000

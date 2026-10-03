@@ -22,6 +22,12 @@ from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("schema.indexes", ("postgres", "mysql")),
+    ("schema.defaults", ("postgres", "mysql")),
+]
+
 pytestmark = needs_docker
 
 MY, MY_PORT = "migkit-test-rules-my", 15760

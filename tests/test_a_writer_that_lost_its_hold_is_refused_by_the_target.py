@@ -22,6 +22,9 @@ import pytest
 from migkit import fencing
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("operations.fencing", ("postgres", "mysql"))]
+
 pytestmark = [pytest.mark.docker]
 
 PG, PG_PORT = "migkit-test-w1-fence-pg", 16420

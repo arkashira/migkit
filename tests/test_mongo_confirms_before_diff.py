@@ -17,6 +17,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.fence", "mongodb"), ("verify.confirm", "mongodb")]
+
 MG, PORT = "migkit-test-mgfence", 15695
 
 

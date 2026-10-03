@@ -18,6 +18,9 @@ import pytest
 
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.versions", "opensearch"), ("assess.brands", "opensearch")]
+
 pytestmark = needs_docker
 
 ES = ("migkit-test-side-es", 16406, "elasticsearch:8.15.3")

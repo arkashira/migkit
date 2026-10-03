@@ -19,6 +19,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("tail.follows", "mysql")]
+
 pytestmark = needs_docker
 
 MY, PORT = "migkit-test-wm-my", 15980
@@ -195,7 +198,8 @@ def test_the_tail_leaves_out_what_the_mysql_copy_read(server, tmp_path,
     finished.wait(timeout=120)
     src, dst = _same()
     assert src == dst, (src, dst, lines[-5:])
-    got = json.loads((tmp_path / "tail-accounts.json").read_text())["big"]
+    from migkit import tailtables
+    got = tailtables.accounts(tmp_path)["big"]
     left = got.get("already in what the copy read", 0)
     assert got["read"] == got["applied"] + left, got
     assert left > 0, (got, lines[-5:])
