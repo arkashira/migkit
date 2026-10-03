@@ -3481,10 +3481,10 @@ def _my_mask_facts(hop, db):
 
 
 def _streams_back(hop):
+    from .hopkeys import topology
     opts = getattr(hop, "options", None) or {}
-    topo = str(opts.get("topology") or "").lower()
     return bool(opts.get("reverse") or opts.get("two_way")
-                or topo in ("two-way", "two_way", "bidirectional"))
+                or topology(hop) == "two_way")
 
 
 def mask_plan(hop, db, keys, columns=None):
@@ -4157,8 +4157,9 @@ def mydumper_move(hop, db, workers, go, log, only=None):
             f"{db}: " + "; ".join(f"{t}: {c.reason}" for t, c in
                                   sorted(choice.items()) if not c.rung))
     _masked_record(hop, db).unlink(missing_ok=True)
-    cnf.write_text(settings)
-    cnf.chmod(0o600)
+    from . import durable
+    # both sides' passwords: 0600 from its first byte, not after (SEC10)
+    durable.write_atomic(cnf, settings)
     if skip or routed or shell_tables:
         omit.write_text("".join(f"{n}\n" for n in
                                 skip + routed
@@ -4192,8 +4193,8 @@ def mydumper_move(hop, db, workers, go, log, only=None):
             else:
                 dump_tables = []
         if shell_tables:
-            script.write_text(SHELL_RUN)
-            script.chmod(0o600)
+            from . import durable
+            durable.write_atomic(script, SHELL_RUN)
             if resumable:
                 resumed = _shell_resumable(hop, db, shell_tables, shell_dir)
                 if resumed is None:
@@ -7092,8 +7093,9 @@ def stream_codegen(hop, dbs, engine):
             " given: every database's tables would land in the first's."
             " Nothing has been started - follow one database a hop, or"
             " with migkit's own change tail")
-    out = hop.report_dir() / "stream"
-    out.mkdir(parents=True, exist_ok=True)
+    from .config import private
+    # it holds the connectors' passwords: only this user's (SEC10)
+    out = private(hop.report_dir() / "stream")
     s, t = hop.source, hop.target
     src_is_mysql = engine in ("mysql", "hetero")
     connector_class = ("io.debezium.connector.mysql.MySqlConnector"
@@ -7256,18 +7258,19 @@ Third-party components are pinned in docker-compose.yml; see NOTICE for
 licences and attribution.
 """
     import json as _json
-    (out / "docker-compose.yml").write_text(compose)
+    _write_private(out / "docker-compose.yml", compose)
     _write_private(out / "connect.env", _env_file({
         "MIGKIT_SOURCE_PASSWORD": s.password or "",
         "MIGKIT_TARGET_PASSWORD": t.password or ""}))
-    (out / "source-connector.json").write_text(
-        _json.dumps(source, indent=2) + "\n")
-    (out / "sink-connector.json").write_text(
-        _json.dumps(sink, indent=2) + "\n")
-    (out / "README.md").write_text(readme)
+    _write_private(out / "source-connector.json",
+                   _json.dumps(source, indent=2) + "\n")
+    _write_private(out / "sink-connector.json",
+                   _json.dumps(sink, indent=2) + "\n")
+    _write_private(out / "README.md", readme)
+    # every file 0600 from the moment it exists, the directory 0700 before
+    # the first is written: they were written, then chmodded (SEC10)
     for f in out.iterdir():
         f.chmod(0o600)
-    out.chmod(0o700)
     return out
 
 

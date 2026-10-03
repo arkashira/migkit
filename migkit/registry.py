@@ -106,10 +106,12 @@ def frame_of(raw):
 
 
 def of(ep):
-    """The registry an endpoint names (`schema_registry`), or None."""
+    """The registry an endpoint names (`schema_registry`), or None. Its
+    password is read as a secret (`env:NAME`, `vault:...`): it went out as
+    the reference's own text (audit 2026-10-01, K7)."""
     opts = getattr(ep, "options", None) or {}
     url = opts.get("schema_registry")
     if not url:
         return None
     return Registry(url, opts.get("schema_registry_user", ""),
-                    opts.get("schema_registry_password", ""))
+                    ep.option_secret("schema_registry_password") or "")
