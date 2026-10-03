@@ -147,8 +147,14 @@ class LocalStore:
 
     def __init__(self, hop, cfg):
         self.hop = hop
-        self.mirror = Path(cfg.get("mirror", str(
-            Path.home() / ".migkit-state" / hop.name)))
+        said = cfg.get("mirror")
+        # beside the rest of what runs keep, in the user's state directory
+        # (`config.state_home`), only this user's (audit 2026-10-01, ST7,
+        # SEC10); where an earlier version kept them is still read
+        self.mirror = Path(said) if said else (
+            _config.state_home() / "restore-points" / hop.name)
+        self.older = None if said else (
+            Path.home() / ".migkit-state" / hop.name)
 
     def _root(self, db):
         # read when asked: a copy taken at import is where the reports were
@@ -166,8 +172,10 @@ class LocalStore:
         if dst.exists():
             shutil.rmtree(dst)
         shutil.copytree(src_dir, dst)
-        self.mirror.mkdir(parents=True, exist_ok=True)
-        (self.mirror / f"{db}-{ts}.tar.gz").write_bytes(_tar(src_dir))
+        from . import durable
+        # the undo of a repair holds whole rows: 0600 from its first byte
+        durable.write_atomic(_config.private(self.mirror)
+                             / f"{db}-{ts}.tar.gz", _tar(src_dir))
         shutil.rmtree(src_dir, ignore_errors=True)
 
     def list(self, db):
@@ -191,11 +199,12 @@ class LocalStore:
         d = self._root(db) / ts
         if d.exists():
             return d
-        tar = self.mirror / f"{db}-{ts}.tar.gz"
-        if tar.exists():
-            d.mkdir(parents=True, exist_ok=True)
-            _untar(tar.read_bytes(), d)
-            return d
+        for where in (self.mirror, self.older):
+            tar = where / f"{db}-{ts}.tar.gz" if where else None
+            if tar is not None and tar.exists():
+                d.mkdir(parents=True, exist_ok=True)
+                _untar(tar.read_bytes(), d)
+                return d
         return None
 
 

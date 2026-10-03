@@ -65,6 +65,17 @@ DYNAMIC = {
                                      "tls_insecure")),
     ("hopkeys.py", "said_by_doctor"): ("hop", ("source_engine",
                                                "target_engine")),
+    # the one reader of an option and its default (`hopkeys.opt`,
+    # `topology`, `reverse`)
+    ("hopkeys.py", "_option"): ("hop", ("topology", "reverse",
+                                        "fence_timeout", "repair_window",
+                                        "on_conflict", "origin_table",
+                                        "checksum")),
+    # a side's secret options, read once where used
+    # (`Endpoint.option_secret`)
+    ("config.py", "option_secret"): ("endpoint", (
+        "schema_registry_password", "mine_password",
+        "private_key_passphrase")),
 }
 
 
@@ -126,6 +137,14 @@ def reads(src, name="x.py"):
                 alias[n.targets[0].id] = n.value
         for n in ast.walk(fn):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+                    and n.func.attr == "option_secret" and n.args \
+                    and isinstance(n.args[0], ast.Constant) \
+                    and isinstance(n.args[0].value, str):
+                # a side's secret option, read through the side
+                found.append(("endpoint", (n.args[0].value,),
+                              f"{name}:{n.lineno}"))
+                continue
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
                     and n.func.attr in ("get", "pop", "setdefault") \
                     and n.args:
                 recv, key = n.func.value, n.args[0]
@@ -173,7 +192,8 @@ def test_a_planted_read_is_caught():
                "    a = o.get('undeclared_knob')\n"
                "    b = ep.options['undeclared_side_key']\n"
                "    c = (hop.options or {}).get('state', {}).get('bucket')\n"
-               "    d = hop.options.get(name)\n")
+               "    d = hop.options.get(name)\n"
+               "    e = ep.option_secret('undeclared_secret')\n")
     found, dynamic = reads(planted)
     assert ("hop", ("undeclared_knob",), "x.py:3") in found
     assert ("endpoint", ("undeclared_side_key",), "x.py:4") in found
@@ -181,7 +201,9 @@ def test_a_planted_read_is_caught():
     assert dynamic == [("f", "x.py:6")]
     assert _undeclared(found) == ["hop options.undeclared_knob (x.py:3)",
                                   "endpoint options.undeclared_side_key"
-                                  " (x.py:4)"]
+                                  " (x.py:4)",
+                                  "endpoint options.undeclared_secret"
+                                  " (x.py:7)"]
 
 
 def _undeclared(found):
