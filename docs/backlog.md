@@ -2962,6 +2962,38 @@ though the job never took it.
    d. `include` read by a live tail's filter (Debezium `table.include.list`
       instead of a resolved exclude list) so a table made later under a
       taken pattern joins the stream without a restart.
+   e. left by 6d (merged `dfd78df`): the document store's check does not
+      read renames, so a renamed collection reads as different after the
+      move; the table copier (own and pair) deletes its key ranges before
+      loading whatever `mapping.ops` says - only the bulk truncate honours
+      it; schema creation does not leave out the sequences `objects`
+      leaves out (a kept table would not create without its sequence);
+      a comment on a left-out function, trigger or constraint is still
+      restored and refused by the target; the schema comparers and deep
+      checks read partitions by their own names, not their root's; three
+      program behaviours read from documentation, not measured (the
+      dump's pattern against `db.table`, the online sync's regex fields
+      and its 1.6 cut-off, the restore's first matching rename); the
+      streaming copy's filter file is names one by one, its reading of
+      mixed case unchecked.
+   f. the two-axis review of the scope work (2026-10-04) closed in
+      `8650feb`: `mapping.ops` held to every reading of a leaf name and to
+      the pair's own name for it (`Result.table`); the counts a check
+      counted carried as fields (`Result.rows_apart`, `Result.tables`)
+      on PostgreSQL, MySQL, SQL Server, the pair and the document store,
+      the words read only where an engine says none; a service's word
+      held to every answer, a warn or an error `unproved`, never agreed,
+      a database's one answer held table by table, names matched without
+      case only where one table can be meant; the cutover's final check
+      given whole answers; one reading of what a hop narrows
+      (`config.narrowed_by`) for the copy of pages, the backup seed, the
+      servers' own replication and the evidence; `Hop.reversed` keeping
+      schemas, turning name rules round and refusing ones that cannot be;
+      a listed name asked one way (`Hop.takes_table`, an AST guard); the
+      target's names read back (`Hop.source_table_in`); one PostgreSQL
+      sequence reading (`_seq_gone`); named roles (`users.role_taken`);
+      Oracle's counters scoped; SQL Server's data check scoped. Still to
+      carry the fields on every other engine (P0-PARITY.verify).
 
 ## P0-CLOUDS. Any cloud to any cloud, every database service in each (owner, 2026-10-01)
 
