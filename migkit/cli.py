@@ -1709,14 +1709,14 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
             console.print(f"  {_esc('[' + str(d) + ']')} {_esc(line)}")
         return s
 
-    from . import archive, consolidate, rehearsal, subset
+    from . import archive, consolidate, rehearsal, reshard, subset
 
     def run_db(d):
         if subset.settings(hop) is not None:
             # a copy for testing holds the rows chosen, not the source's
             # every row: it is proved against what it was to hold
             return [r.__dict__ for r in subset.check(hop, eng, d)]
-        for goal in (consolidate, archive):
+        for goal in (consolidate, reshard, archive):
             if goal.settings(hop) is not None:
                 # the target holds other sources' rows, or rows the source
                 # no longer has: each is proved against what it holds
@@ -2392,7 +2392,7 @@ def sync(hop_name, db, kind, mode, do_apply, go, serve, interval,
     stand in for a managed migration service on a trusted VM - the same
     move, the same repair and the same check as the commands of their
     own, and the exit code the last check's."""
-    from . import archive, consolidate, subset
+    from . import archive, consolidate, reshard, subset
     from .verdict import Usage
     if kind != "all" and mode != "reconcile" and _given("kind"):
         raise Usage(f"--kind picks what a repair of the last check's"
@@ -2417,7 +2417,7 @@ def sync(hop_name, db, kind, mode, do_apply, go, serve, interval,
                          f" {hop_name} --mode full --go, and proved by"
                          f" migkit check {hop_name}; sync makes a target"
                          " equal to the whole source. Nothing was written")
-    for goal in (consolidate, archive):
+    for goal in (consolidate, reshard, archive):
         if mode != "verify" and goal.settings(get_hop(hop_name)) is not None:
             # the target holds other sources' rows, or rows the source no
             # longer has: made equal to this source it would lose them
@@ -4161,6 +4161,8 @@ def _protect_target(hop, eng, db, release=False, go=True, again=False):
     stream is torn down at cutover (or on `rollback --apply`). Without
     `go`, what it would do is said and nothing is changed; `again`, after
     a copy, takes in what the copy made, where it was taken before."""
+    import sys
+
     from . import freeze
     if not (hop.options or {}).get("protect_target"):
         return
@@ -4365,7 +4367,13 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         return subset.move(hop, eng, [db] if db else eng.databases(),
                            mode, table, go,
                            lambda m: console.print(f"  {m}"))
-    from . import archive, consolidate
+    from . import archive, consolidate, reshard
+    if reshard.settings(hop) is not None:
+        return reshard.move(hop, eng, [db] if db else eng.databases(),
+                            mode, table, go,
+                            lambda m: console.print(f"  {_esc(m)}"))
+    if mode in ("cdc", "full+cdc") and reshard.follows(hop):
+        return _follow_group(hop, eng, db, mode, table, chunk, go)
     if consolidate.settings(hop) is not None:
         return consolidate.move(hop, eng, [db] if db else eng.databases(),
                                 mode, table, go,
@@ -4733,16 +4741,54 @@ def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
     return facts, rungs
 
 
+def _follow_group(hop, eng, db, mode, table, chunk, go):
+    """`move --mode cdc` or `full+cdc` of a split's part or a
+    consolidation's source: the whole group's changes followed in one loop
+    (`reshard.follow`) - a row a rule moves between parts removed from one
+    before it is written on the other, which a tail a part could not
+    order. With `full+cdc`, every source's position is taken first, then
+    each part or source copied by its own hop's move, then the follow."""
+    from . import reshard
+    if table:
+        raise SystemExit(f"{hop.name}: a group's changes are followed whole"
+                         " - leave out --table")
+    dbs = [db] if db else eng.databases()
+    if len(dbs) != 1:
+        raise SystemExit(f"{hop.name}: the follow of a group runs one"
+                         " database a process - --db one of"
+                         f" {', '.join(dbs)}")
+
+    def say(m):
+        console.print(f"  {_esc(m)}")
+    g = reshard.group(hop, dbs[0])
+    say(f"[{dbs[0]}] its group: {len(g.sources)} sources"
+        f" ({', '.join(s.name for s in g.sources)}) onto {len(g.targets)}"
+        f" targets ({', '.join(t.name for t in g.targets)})")
+    if mode == "full+cdc":
+        reshard.begin(g, go, say)
+        for name, d in reshard.copies(g):
+            console.print(f"\n[bold]{_esc(name)}[/bold] - its copy, before"
+                          " the group's changes are followed")
+            _move(name, d, "", "full", chunk, False, go)
+    reshard.follow(g, go, say)
+
+
 def _cutover(hop, eng, db, go, engine):
     """`move --mode cdc --drop`: the cutover, as `migkit.cutover` runs it
-    - and once one has flipped, its point of no return."""
-    from . import approvals, cutover
+    - and once one has flipped, its point of no return. A reshard's, a
+    split's or a consolidation's hop cuts its whole group over at once
+    (`reshard.cut_over`)."""
+    from . import approvals, cutover, reshard
     dbs = [db] if db else eng.databases()
 
     def approve(detail, step="cutover"):
         return approvals.require(hop, step, db,
                                  lambda m: console.print(f"  {m}"),
                                  detail=detail)
+    if reshard.kind_of(hop) is not None:
+        from . import rehearsal
+        rehearsal.mark(hop)
+        return reshard.cut_over(hop, dbs, go, console.print, approve)
     leg = _stream_leg(hop, eng, db, dbs, engine)
     from . import rehearsal
     rehearsal.mark(hop)

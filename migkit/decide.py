@@ -2029,6 +2029,8 @@ SHAPES = {
     "slow link": "a link too slow for one stream",
     "writes held": "a side whose writes are held and let go again, read"
                    " back - the source at cutover",
+    "spread target": "a target that spreads a table across nodes of its"
+                     " own, its rows placed and loaded as it places them",
 }
 
 _BY_KEY_ORDER = ("read by {}, never in key order, so the key's shape does"
@@ -2296,6 +2298,41 @@ WAYS = {
 # the copier reads a table whose only index is not unique as one with no
 # key: `neutral_key` answers the primary key or nothing
 WAYS["no unique index"] = dict(WAYS["keyless"])
+#: a reshard's one target that is a cluster (`reshard`): its own
+#: distribution read and each row placed and loaded as it places it
+#: (`Engine.distribution`); where the cluster places every row itself
+#: whatever a client does, there is nothing of it to honour
+_KEY_SPANS = ("it spreads a table by spans of its key and every server of"
+              " it is a gateway to every span: the copy writes a table in"
+              " key order, a batch a span, the order its spans are laid out"
+              " in")
+_ROUTES = ("the {} places each item it is given by its own key, and no"
+           " node of it is addressed by a client")
+WAYS["spread target"] = {
+    **_NONE,
+    # Citus, the nodes' own parts written directly where they are reached
+    "postgres": ("yes", "@distribution"),
+    # Vitess, through its gate by its vindex
+    "mysql": ("yes", "@distribution"),
+    "mongodb": ("yes", "@distribution"),
+    "cassandra": ("yes", "@distribution"),
+    # a pair's target is asked as its own engine is
+    "hetero": ("yes", "reshard._spread"),
+    "generic": (NOT_APPLICABLE, _COMPARES_ONLY),
+    "tidb": (NOT_APPLICABLE, _KEY_SPANS),
+    "cockroachdb": (NOT_APPLICABLE, _KEY_SPANS),
+    "dsql": (NOT_APPLICABLE, _KEY_SPANS),
+    "clickhouse": (NOT_APPLICABLE, "a Distributed table splits every block"
+                                   " it is given by its own sharding key and"
+                                   " sends each shard its rows"),
+    **{n: (NOT_APPLICABLE, _ROUTES.format(said)) for n, said in (
+        ("dynamodb", "service"), ("cosmosdb", "service"),
+        ("bigquery", "service"), ("snowflake", "service"),
+        ("redshift", "cluster's leader"), ("couchbase", "client"),
+        ("opensearch", "cluster"), ("kafka", "producer"),
+        ("redis", "cluster client"))},
+    "*": (NOT_APPLICABLE, "one server holds every row of a table"),
+}
 
 
 def resolves(engine, where):

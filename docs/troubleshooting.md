@@ -251,6 +251,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * no way to follow a <...> source is set up on this machine - <...> | ; migkit doctor says what is missing
 
+* <...>: a group's changes are followed whole - leave out --table
+
+* <...>: the follow of a group runs one database a process - --db one of <...>
+
 * <...>: the change tail did not end
 
 * <...>: the change tail did not pause
@@ -1577,11 +1581,17 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> refers to <...> by <...>: only a one-column reference to a shifted key is shifted with it
 
-* <...>: a consolidation is carried once (--mode full): each source's changes followed into one target under its value is not a way migkit has. Nothing has been started
+* <...>: a consolidation's rows are carried here once (--mode full); its changes are followed by its group, every source in one loop (`reshard.follow`, --mode cdc or full+cdc). Nothing has been started
 
 * <...>: a consolidation is carried whole - its keys are shifted and proved across every table. Leave out --table
 
 * <...>: the consolidation is not what it was to hold - <...>
+
+* <...>: its changes cannot be followed - <...>
+
+* <...>: <...> keys of <...> arrived since the move that another source holds on the target (<...>) - its keys are kept as they are, and these two rows would be one. The follow stops before them, its position kept: consolidate: {keys: tenant, offset or remap}, and the consolidation carried again
+
+* <...>: a key of <...> arrived since the move (<...>, shifted to <...>) past its range (<...> up to <...>) - it would land among another source's keys. The follow stops before it, its position kept: offsets further apart, and the consolidation carried again
 
 * <...>: <...> is not something migkit sends; one of <...>, or none
 
@@ -1613,6 +1623,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * reshard: <...>
 
+* <...>: the split does not hold together - <...>
+
 * <...>: the reshard does not hold together - <...>
 
 * <...>: <...> holds other columns of it than <...> - the targets of a reshard hold one schema. Nothing more was written
@@ -1629,19 +1641,21 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: a reshard is carried whole - every row is placed and proved across every target. Leave out --table
 
-* <...>: the follow of a reshard runs one database a process - --db one of <...>
+* <...>: the follow of a group runs one database a process - --db one of <...>
 
-* <...>.<...>: <...> on <...> - the reshard's follow stops at a change of a table's shape or of its whole contents, its position kept before it: make the change on every target, then move again (--mode full+cdc)
-
-* <...>: the reshard's follow already runs here - one follow a group
+* <...>.<...>: <...> on <...> - the group's follow stops at a change of a table's shape or of its whole contents, its position kept before it: make the change on every target, then move again (--mode full+cdc)
 
 * <...>.<...>: no way places its rows - <...>
 
-* <...>: the reshard's follow did not pause
+* <...>: the group's follow already runs - one follow a group
 
-* <...>: the reshard's follow did not end
+* <...>: the group's follow did not pause
 
-* <...>: a reshard has no stream back - its targets are other shards than its sources
+* <...>: the group's follow did not end
+
+* <...>: a group is cut over one database at a time - --db one of <...>
+
+* <...>: a group has no stream back - its targets hold other rows than each of its sources
 
 * <...> is not a time zone - an offset (+07:00) or a zone name (Asia/Bangkok)
 
@@ -1710,8 +1724,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * split: is a mapping - with, shared, rest
 
 * split: rest: <...> - refuse, or stays
-
-* <...>: the split does not hold together - <...>
 
 * table_engine: <...> - an engine, or {to, accept, foreign_keys}}
 

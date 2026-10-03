@@ -106,6 +106,76 @@ class CassandraEngine(NeutralCopier, Engine):
             (r for r in rows if r.kind in order),
             key=lambda r: (order[r.kind], r.position))]
 
+    def distribution(self, side, db, table):
+        """Cassandra's spread of a table (`base.Spread`): its partition key,
+        and each row's first replica by the token the cluster's own
+        partitioner gives the key - the driver's token map, which holds the
+        ring as the cluster says it, and hashes the bytes a statement bound
+        to the key routes by (`routing_key`) as the partitioner does. A
+        part is a node; written through the driver, which sends each write
+        to a replica of its token already. None for one node."""
+        from .base import Spread
+        session = self._session(side)
+        cols = self._columns(side, db, table)
+        pkey = [r.column_name for r in sorted(
+            (r for r in cols if r.kind == "partition_key"),
+            key=lambda r: r.position)]
+        meta = session.cluster.metadata
+        hosts = sorted({str(h.address) for h in meta.all_hosts()})
+        if not pkey or len(hosts) < 2 or meta.token_map is None:
+            return None
+        types = {r.column_name: r.type for r in cols}
+        ks = self._ks(side, db)
+        bound = session.prepare(
+            f"select {self._q(pkey[0])} from"
+            f" {self._qualified(side, db, table)} where "
+            + " and ".join(f"{self._q(c)} = ?" for c in pkey))
+        at = {h: k for k, h in enumerate(hosts)}
+
+        def owners(texts):
+            out = []
+            for t in texts:
+                try:
+                    key = bound.bind([self._cql_value(types[c], v)
+                                      for c, v in zip(pkey, t)])
+                    got = meta.get_replicas(ks, key.routing_key)
+                except Exception:  # noqa: BLE001 - not placed here
+                    got = None
+                out.append(at.get(str(got[0].address)) if got else None)
+            return out
+        return Spread(pkey, f"Cassandra's partitioner token of"
+                            f" {', '.join(pkey)} across {len(hosts)} nodes",
+                      [(h, table) for h in hosts], owners)
+
+    @staticmethod
+    def _cql_value(typ, text):
+        """A key's canonical text as the driver binds a value of CQL type
+        `typ`."""
+        import datetime
+        import decimal
+        import uuid
+        if text is None:
+            return None
+        t = str(typ).lower()
+        if t in ("int", "bigint", "smallint", "tinyint", "varint",
+                 "counter"):
+            return int(text)
+        if t in ("float", "double"):
+            return float(text)
+        if t == "decimal":
+            return decimal.Decimal(str(text))
+        if t == "boolean":
+            return str(text).lower() in ("true", "t", "1")
+        if t in ("uuid", "timeuuid"):
+            return uuid.UUID(str(text))
+        if t == "timestamp":
+            return datetime.datetime.fromisoformat(str(text))
+        if t == "date":
+            return datetime.date.fromisoformat(str(text))
+        if t == "blob":
+            return bytes.fromhex(str(text))
+        return str(text)
+
     # ---- values -----------------------------------------------------------
 
     @staticmethod

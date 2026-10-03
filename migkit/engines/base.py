@@ -149,6 +149,28 @@ class RepairAction:
     table: str = ""
 
 
+@dataclass
+class Spread:
+    """How a target that is a cluster spreads one table across its nodes,
+    as its own engine reads it (`Engine.distribution`) - what a reshard
+    places rows by and loads them along (`reshard`).
+
+    `columns` the columns it spreads the table by; `said` whose function
+    of them, in an operator's words; `parts` [(node, the part's own table
+    there)] - a shard, a chunk's shard, a token range's replica; `owners`
+    [shard key texts, or None] -> [part index, or None where the cluster
+    cannot say], asked of the cluster's own function, a batch at once;
+    `reference` - every node holds the whole table; `address` part index
+    -> (host, port) where migkit writes the part's own table on its node
+    directly, or None where only the cluster's router is written."""
+    columns: list
+    said: str
+    parts: list
+    owners: object
+    reference: bool = False
+    address: object = None
+
+
 #: the kind of a repair action that carries nothing out and only says
 #: what the repair leaves alone - a drilldown the last check left for a
 #: table the hop no longer takes (`Engine._drills_in_scope`). Printed with
@@ -1985,6 +2007,14 @@ class Engine:
         nothing."""
         import contextlib
         return contextlib.nullcontext()
+
+    def distribution(self, side, db, table):
+        """How this side spreads `table` across nodes of its own (`Spread`),
+        read from the server; None where one server holds every row, or
+        the table is not spread. Asked by a reshard whose one target is a
+        cluster (`reshard.function`), to place rows as the cluster does
+        and load them to the node that owns them."""
+        return None
 
     def create_missing(self, db, log=None):
         """Make on the target the tables in scope it lacks, from the

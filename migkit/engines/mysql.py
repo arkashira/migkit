@@ -381,6 +381,59 @@ class MySQLEngine(Engine):
         return [r[0] for r in self._q(side, self.PK_SQL,
                                       (self._d(side, db), table))]
 
+    def distribution(self, side, db, table):
+        """Vitess's spread of a table (`base.Spread`), read through its gate
+        - a MySQL server says nothing of one: the table's primary vindex
+        (the first `SHOW VSCHEMA VINDEXES ON` names), the keyspace's shards
+        (`SHOW VITESS_SHARDS`), and a row's shard asked of the vindex
+        itself, read through the gate as a table of its own (`select id,
+        shard from <vindex> where id in (...)`) - the keyspace id is
+        Vitess's, never worked out here. Written through the gate, which
+        routes each row by the same vindex; a value the gate does not
+        answer for is the router's to place."""
+        from .base import Spread
+        try:
+            said = str(self._q(side, "select @@version")[0][0])
+        except Exception:  # noqa: BLE001 - not a server that says
+            return None
+        if "vitess" not in said.lower():
+            return None
+        ks = self._d(side, db)
+        q = self._quote_ident
+        got = self._q(side, f"show vschema vindexes on {q(ks)}.{q(table)}")
+        if not got:
+            return None
+        columns = [c.strip() for c in str(got[0][0]).split(",")]
+        vindex = str(got[0][1])
+        shards = sorted(str(r[0]).split("/", 1)[1]
+                        for r in self._q(side, "show vitess_shards")
+                        if str(r[0]).startswith(f"{ks}/"))
+        if len(shards) < 2:
+            return None
+        at = {s: k for k, s in enumerate(shards)}
+
+        def owners(texts):
+            vals = [t[0] if t else None for t in texts]
+            asked = sorted({str(v) for v in vals if v is not None})
+            if not asked:
+                return [None] * len(vals)
+            given = [int(v) if v.lstrip("-").isdigit() else v
+                     for v in asked]
+            try:
+                rows = self._q(side, f"select id, shard from {q(ks)}."
+                                     f"{q(vindex)} where id in ("
+                               + ", ".join(["%s"] * len(given)) + ")",
+                               tuple(given))
+            except Exception:  # noqa: BLE001 - the router's to place
+                return [None] * len(vals)
+            shard_of = {str(i): str(s) for i, s in rows}
+            return [at.get(shard_of.get(str(v))) if v is not None else None
+                    for v in vals]
+        return Spread(columns, f"Vitess's vindex {vindex} of"
+                               f" {', '.join(columns)} across"
+                               f" {len(shards)} shards",
+                      [(s, table) for s in shards], owners)
+
     def json_rewritten(self, side, db, numbers):
         """Asked of this server: the numbers go in as one JSON array and
         what it gives back is held to them by value, so `1.10` read back

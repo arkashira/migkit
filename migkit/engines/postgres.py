@@ -1339,6 +1339,87 @@ select json_build_object(
              order by array_position(i.indkey, a.attnum)""")
         return [l for l in out.splitlines() if l]
 
+    def distribution(self, side, db, table):
+        """Citus's spread of a table (`base.Spread`), read from its own
+        catalogue: the distribution column `pg_dist_partition` holds for
+        it - a reference table on every node, a table it does not hold the
+        coordinator's own - each shard with the node its active primary
+        placement is on, and a row's shard asked of Citus's own function
+        (`get_shard_id_for_distribution_column`, the value given as text,
+        which it reads in the column's type), never worked out here. A
+        node is written at the address Citus names it by, with this
+        side's own account."""
+        from .base import Spread
+        sch, tbl = self._split(table)
+        ref = f'"{sch}"."{tbl}"'
+        name = self._d(side, db)
+        conn = self._conn(side, name)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("select to_regclass('pg_catalog.pg_dist_partition')"
+                            " is not null")
+                if not cur.fetchone()[0]:
+                    return None
+                cur.execute("select partmethod::text, repmodel::text,"
+                            " column_to_column_name(logicalrelid, partkey)"
+                            " from pg_dist_partition where logicalrelid ="
+                            " to_regclass(%s)", (ref,))
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                method, model, column = row
+                cur.execute("select s.shardid, shard_name(s.logicalrelid,"
+                            " s.shardid), n.nodename, n.nodeport"
+                            " from pg_dist_shard s"
+                            " join pg_dist_placement p on p.shardid ="
+                            " s.shardid"
+                            " join pg_dist_node n on n.groupid = p.groupid"
+                            " where s.logicalrelid = to_regclass(%s)"
+                            " and n.noderole = 'primary' and n.isactive"
+                            " order by s.shardid, n.nodeid", (ref,))
+                placed = cur.fetchall()
+        finally:
+            conn.close()
+        shards, nodes = [], {}
+        for shard, part, host, port in placed:
+            if shard not in nodes:
+                shards.append((shard, part))
+                nodes[shard] = (host, int(port))
+        at = {shard: k for k, (shard, _) in enumerate(shards)}
+        parts = [(f"{nodes[s][0]}:{nodes[s][1]}", p) for s, p in shards]
+        hashed = method == "h"
+        reference = method == "n" and model == "t"
+
+        def owners(texts):
+            if not column or not shards:
+                return [0 if shards else None for _ in texts]
+            asked = [(x, t[0]) for x, t in enumerate(texts)
+                     if t and t[0] is not None]
+            out = [None] * len(texts)
+            if not asked:
+                return out
+            conn = self._conn(side, name)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "select get_shard_id_for_distribution_column("
+                        "to_regclass(%s), v) from unnest(%s::text[]) with"
+                        " ordinality as x(v, i) order by i",
+                        (ref, [str(v) for _, v in asked]))
+                    got = [r[0] for r in cur.fetchall()]
+            finally:
+                conn.close()
+            for (x, _), shard in zip(asked, got):
+                out[x] = at.get(shard)
+            return out
+        return Spread([column] if column else [],
+                      (f"Citus's {'hash' if hashed else 'range'} of {column}"
+                       f" across {len(set(nodes.values()))} nodes"
+                       if column else "Citus's one node for it"),
+                      parts, owners, reference,
+                      lambda k: nodes[shards[k][0]] if 0 <= k < len(shards)
+                      else None)
+
     def _conn(self, side, db):
         """A connection of the driver the rows are read through, to the
         database `db` as it is named on that side (not mapped: other

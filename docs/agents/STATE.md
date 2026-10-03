@@ -4,46 +4,46 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Capabilities by engine
 
-16 capabilities (`capabilities.CAPABILITIES`) and 11 shapes (`decide.coverage()`); a row lists what is not yet there.
+16 capabilities (`capabilities.CAPABILITIES`) and 12 shapes (`decide.coverage()`); a row lists what is not yet there.
 
 | engine | capabilities | shapes | not yet |
 |---|---|---|---|
-| ase | 6/16 | 10/11 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
-| bigquery | 5/16 | 10/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
-| cassandra | 16/16 | 11/11 | - |
-| clickhouse | 16/16 | 11/11 | - |
-| cockroachdb | 11/16 | 9/11 | sequences, params, bulk-move, users, snapshot, large values, partitioned |
-| copybook | 16/16 | 11/11 | - |
-| cosmosdb | 14/16 | 10/11 | bulk-move, snapshot, large values |
-| couchbase | 11/16 | 10/11 | params, bulk-move, users, statistics, snapshot, large values |
-| db2 | 6/16 | 10/11 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
-| db2i | 12/16 | 10/11 | sequences, params, bulk-move, snapshot, partitioned |
-| db2zos | 10/16 | 10/11 | sequences, params, bulk-move, users, statistics, snapshot, partitioned |
-| delta | 9/16 | 10/11 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
-| dsql | 12/16 | 9/11 | sequences, users, statistics, snapshot, large values, partitioned |
-| duckdb | 16/16 | 11/11 | - |
-| dynamodb | 16/16 | 11/11 | - |
-| generic | 4/16 | 2/11 | sequences, params, bulk-move, table-copy, stream, fence, confirm, delta, users, guard, statistics, snapshot, keyless, no unique index, wide key, too large, large values, partitioned, read-only source, missing grant, slow link |
-| hetero | 15/16 | 9/11 | users, partitioned, missing grant |
-| iceberg | 9/16 | 10/11 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
-| kafka | 16/16 | 11/11 | - |
-| kinesis | 16/16 | 11/11 | - |
-| mongodb | 16/16 | 10/11 | missing grant |
-| mssql | 16/16 | 10/11 | partitioned |
-| mysql | 16/16 | 11/11 | - |
-| opensearch | 16/16 | 11/11 | - |
-| oracle | 16/16 | 10/11 | partitioned |
-| parquet | 16/16 | 10/11 | partitioned |
-| postgres | 16/16 | 11/11 | - |
-| pubsub | 16/16 | 11/11 | - |
-| redis | 16/16 | 10/11 | partitioned |
-| redshift | 5/16 | 10/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
-| saas | 16/16 | 11/11 | - |
-| sapodp | 16/16 | 11/11 | - |
-| snowflake | 5/16 | 10/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
-| sqlite | 16/16 | 11/11 | - |
-| teradata | 16/16 | 9/11 | large values, partitioned |
-| tidb | 13/16 | 9/11 | bulk-move, users, snapshot, large values, partitioned |
+| ase | 6/16 | 11/12 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| bigquery | 5/16 | 11/12 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| cassandra | 16/16 | 12/12 | - |
+| clickhouse | 16/16 | 12/12 | - |
+| cockroachdb | 11/16 | 10/12 | sequences, params, bulk-move, users, snapshot, large values, partitioned |
+| copybook | 16/16 | 12/12 | - |
+| cosmosdb | 14/16 | 11/12 | bulk-move, snapshot, large values |
+| couchbase | 11/16 | 11/12 | params, bulk-move, users, statistics, snapshot, large values |
+| db2 | 6/16 | 11/12 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| db2i | 12/16 | 11/12 | sequences, params, bulk-move, snapshot, partitioned |
+| db2zos | 10/16 | 11/12 | sequences, params, bulk-move, users, statistics, snapshot, partitioned |
+| delta | 9/16 | 11/12 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
+| dsql | 12/16 | 10/12 | sequences, users, statistics, snapshot, large values, partitioned |
+| duckdb | 16/16 | 12/12 | - |
+| dynamodb | 16/16 | 12/12 | - |
+| generic | 4/16 | 3/12 | sequences, params, bulk-move, table-copy, stream, fence, confirm, delta, users, guard, statistics, snapshot, keyless, no unique index, wide key, too large, large values, partitioned, read-only source, missing grant, slow link |
+| hetero | 15/16 | 10/12 | users, partitioned, missing grant |
+| iceberg | 9/16 | 11/12 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
+| kafka | 16/16 | 12/12 | - |
+| kinesis | 16/16 | 12/12 | - |
+| mongodb | 16/16 | 11/12 | missing grant |
+| mssql | 16/16 | 11/12 | partitioned |
+| mysql | 16/16 | 12/12 | - |
+| opensearch | 16/16 | 12/12 | - |
+| oracle | 16/16 | 11/12 | partitioned |
+| parquet | 16/16 | 11/12 | partitioned |
+| postgres | 16/16 | 12/12 | - |
+| pubsub | 16/16 | 12/12 | - |
+| redis | 16/16 | 11/12 | partitioned |
+| redshift | 5/16 | 11/12 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| saas | 16/16 | 12/12 | - |
+| sapodp | 16/16 | 12/12 | - |
+| snowflake | 5/16 | 11/12 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| sqlite | 16/16 | 12/12 | - |
+| teradata | 16/16 | 10/12 | large values, partitioned |
+| tidb | 13/16 | 10/12 | bulk-move, users, snapshot, large values, partitioned |
 
 ## Backlog (445 items, `docs/backlog-index.md`)
 

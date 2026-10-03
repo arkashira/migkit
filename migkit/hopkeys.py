@@ -66,7 +66,7 @@ CLOSURE = ("warn", "accept")
 HOP_KEYS = {
     "goal": Key("what the hop is for - copy, cutover, verify, two-way,"
                 " keep-in-sync, rehearse, upgrade, subset, consolidate,"
-                " split or archive", "str"),
+                " split, reshard or archive", "str"),
     "engine": Key("the engine both sides run, or hetero - read from the"
                   " addresses when they are addresses", "str"),
     "source": Key("where the data is: an address or the long form",
@@ -152,6 +152,16 @@ HOP_OPTIONS = {
                  " shared - tables every part takes whole, rest - refuse"
                  " or stays (the rows no part takes stay on the source)",
                  "dict", subs=("with", "shared", "rest")),
+    "reshard": Key("goal reshard: with - the other hops of the group (their"
+                   " sources and targets the group's), by - auto, hash,"
+                   " range, list, lookup or target (the one target"
+                   " cluster's own distribution), key - {table: shard key"
+                   " columns}, shared - tables every target takes whole,"
+                   " ranges - {target hop: upper bound or null}, values -"
+                   " {target hop: [values]}, lookup - {value: target hop},"
+                   " default - the target hop of a value not named",
+                   "dict", subs=("with", "by", "key", "shared", "ranges",
+                                 "values", "lookup", "default")),
     "table_engine": Key("the storage engine the target's tables are made"
                         " in - a name, or {to, accept: [group numbering,"
                         " remote rows], foreign_keys: {child.column:"
@@ -882,40 +892,89 @@ GOALS = {
                     "options": {}, "writes": True,
                     "next": ["migkit assess {hop}",
                              "migkit move {hop} --mode full",
-                             "migkit move {hop} --mode full --go",
-                             "migkit check {hop}"],
+                             "migkit move {hop} --mode full+cdc --go",
+                             "migkit check {hop}",
+                             "migkit move {hop} --mode cdc --drop --go"],
                     "source": "read, never written: each table through its"
-                              " row filter",
+                              " row filter, and its changes followed with"
+                              " every other source's in one loop; frozen"
+                              " with every other source at the cutover"
+                              " only where the hop turns cutover: on",
                     "target": "one database the sources share: this"
                               " source's rows there replaced by its own,"
                               " under its value, keys shifted where the"
                               " rule shifts them; the other sources' rows"
-                              " left as they are; the counters raised past"
-                              " every source's keys",
+                              " left as they are; each change after the"
+                              " copy shifted and under its value the same"
+                              " way; the counters raised past every"
+                              " source's keys",
                     "guarantees": "keys two sources hold found before"
                                   " anything is written and refused, or kept"
                                   " apart by the rule (tenant, offset,"
-                                  " remap); every source's rows proved in"
+                                  " remap); a key arrived since that would"
+                                  " meet another source's stops the follow"
+                                  " before it; every source's rows proved in"
                                   " the target under its value; no row"
-                                  " under a value no source has"},
+                                  " under a value no source has; every"
+                                  " source cut over at once"},
     "split": {"what": "one database into many - a service extracted, a"
                       " database split by region: each part's rows by its"
-                      " rule, every row placed exactly once, proved",
+                      " rule, every row placed exactly once, proved, and"
+                      " followed until every part is cut over at once",
               "options": {}, "writes": True,
               "next": ["migkit assess {hop}",
                        "migkit move {hop} --mode full",
-                       "migkit move {hop} --mode full --go",
-                       "migkit check {hop}"],
+                       "migkit move {hop} --mode full+cdc --go",
+                       "migkit check {hop}",
+                       "migkit move {hop} --mode cdc --drop --go"],
               "source": "read, never written: every row counted against"
-                        " every part's rule before the move",
+                        " every part's rule before the move, its changes"
+                        " followed for every part in one loop; frozen at"
+                        " the cutover only where the hop turns cutover: on",
               "target": "this part's tables (the hop's scope) filled with"
-                        " the rows its rule takes (mapping.where)",
+                        " the rows its rule takes (mapping.where), and"
+                        " kept so: a row a change moves out of its rule"
+                        " removed here before it is written on the part"
+                        " it moves to",
               "guarantees": "rows no part takes and rows two parts take"
                             " found before the move and refused (rest:"
                             " stays, shared); each key in exactly one"
                             " part's target, the targets together the"
-                            " source's; references across the split"
+                            " source's; no row on two parts at once while"
+                            " followed; references across the split"
                             " counted and said"},
+    "reshard": {"what": "N sources onto M targets by one shard function -"
+                        " shards split or merged, a new shard key, a"
+                        " cluster's own distribution - every row placed"
+                        " exactly once, proved, followed until every"
+                        " source and target is cut over at once",
+                "options": {}, "writes": True,
+                "next": ["migkit assess {hop}",
+                         "migkit move {hop} --mode full",
+                         "migkit move {hop} --mode full+cdc --go",
+                         "migkit check {hop}",
+                         "migkit move {hop} --mode cdc --drop --go"],
+                "source": "read, never written: every row placed by the"
+                          " function before the move, every change of"
+                          " every source followed in one loop; frozen"
+                          " together at the cutover only where the hop"
+                          " turns cutover: on",
+                "target": "the rows the function places there: hash,"
+                          " range, list or lookup of the shard key, or the"
+                          " target cluster's own distribution - each batch"
+                          " sent to the node that owns its rows where"
+                          " migkit reaches it; a row whose key moves it"
+                          " removed from the target it left before it is"
+                          " written on the one it reaches",
+                "guarantees": "rows no target takes, keys two sources hold"
+                              " and tables with no key found before the"
+                              " move and refused; each key on exactly the"
+                              " target its key places it, as its source has"
+                              " it, the targets together the sources - per"
+                              " target and across them, before the copy"
+                              " ends and inside the cutover; no row on two"
+                              " targets at once while followed; each"
+                              " target's batch one numbered transaction"},
     "archive": {"what": "old rows to cheaper storage: the rows each rule"
                         " picks added to an archive and proved there, then"
                         " removed from the source only once proved and"
@@ -1275,10 +1334,13 @@ WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover",
 #: options that stream, which a one-off copy contradicts
 STREAMING = ("reverse", "topology", "two_way")
 #: the goals that move the data once
-ONCE = ("copy", "subset", "consolidate", "split", "archive")
+ONCE = ("copy", "subset", "archive")
+#: the goals whose targets hold other rows than each of their sources
+#: (`reshard.group`): followed one way, never streamed back
+GROUPS = ("consolidate", "split", "reshard")
 #: each goal's own setting, read by no other goal
 GOAL_OPTION = {"subset": "subset", "consolidate": "consolidate",
-               "split": "split", "archive": "archive"}
+               "split": "split", "reshard": "reshard", "archive": "archive"}
 
 
 def goal_options(hop, goal):
@@ -1963,6 +2025,14 @@ def _contradictions(where, raw, opts, goal, engine):
                     f"goal {goal} moves the data once, and {k} keeps a"
                     " stream running - make the goal cutover or two-way,"
                     " or drop the option"))
+    if goal in GROUPS:
+        for k in STREAMING:
+            if opts.get(k):
+                out.append(Problem(
+                    "error", f"{where}.options.{k}",
+                    f"goal {goal}'s targets hold other rows than each of"
+                    f" its sources, and {k} streams one target back into"
+                    " one source - drop the option"))
     out += _goal_settings(where, opts, goal, engine)
     out += _source_changes(where, opts, goal)
     out += _ship(where, opts)
@@ -2059,17 +2129,18 @@ def _goal_settings(where, opts, goal, engine):
 def _scenario_settings(where, opts, goal):
     """The settings of the scenarios a hop may say, each read as its own
     module reads it (`charsets`, `tableengine`, `consolidate`, `split`,
-    `archive`) - one reading, so what loads is what runs - and what a
-    goal needs of its own: a consolidation's column."""
+    `reshard`, `archive`) - one reading, so what loads is what runs - and
+    what a goal needs of its own: a consolidation's column."""
     from types import SimpleNamespace
 
-    from . import archive, charsets, consolidate, split, tableengine
+    from . import archive, charsets, consolidate, reshard, split, tableengine
     out = []
     probe = SimpleNamespace(goal=goal, options=opts)
     for key, read in (("charset", charsets.settings),
                       ("table_engine", tableengine.settings),
                       ("consolidate", consolidate.settings),
                       ("split", split.settings),
+                      ("reshard", reshard.settings),
                       ("archive", archive.settings)):
         try:
             read(probe)

@@ -71,7 +71,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
 - `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
 - `migkit/fencing.py` - A mover's token, carried into every transaction it writes, so that a mover which lost its hold is refused by the target itself (backlog W1). Classes: Fenced, Token.
-- `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, PostgresHold, MySQLHold, TiDBHold, MongoHold, RedisHold.
+- `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, GroupHold, PostgresHold, MySQLHold, TiDBHold, MongoHold.
 - `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog
 - `migkit/geo.py` - A shape - a geometry or a geography - as its SRID and its well-known binary, with x the longitude and y the latitude. Classes: Shape.
 - `migkit/guarantees.py` - What a way guarantees, and what a whole strategy of ways does (backlog P0-SMART, the owner's note C of 2026-09-30: "guarantees never traded" Classes: Lift.
@@ -120,7 +120,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/repairlog.py` - A statement-level record of a repair, beside its undo (problems C3, backlog C3.repair). Classes: Record, CanonIO, DocumentIO, DumpIO, TableIO.
 - `migkit/repairways.py` - The way a table's rows are repaired, chosen by how far it drifted and what each way costs here (backlog P0-DEPTH 1). Classes: Sides, Span, Outcome, RepairCosts, Ladder.
 - `migkit/report.py` - (no docstring)
-- `migkit/reshard.py` - Resharding (backlog W7): the rows of N sources placed on M targets by one shard function - a split, a merge, a new shard key - each row once Classes: Side, Group, Function, Placed, Unplaced, Planned.
+- `migkit/reshard.py` - Resharding (backlog W7): rows of N sources placed on M targets by one function - a database split, many merged into one, a new shard key - e Classes: Side, Group, Function, Placed, Unplaced, Planned.
 - `migkit/revert.py` - The way back, handed over at the same moment as the way forward.
 - `migkit/rowfilter.py` - A hop's row filter, read one way and said in every engine's own words (backlog P0-SCOPE.7).
 - `migkit/rowtext.py` - How a row becomes one string before it is hashed.
@@ -176,7 +176,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 
 - `migkit/engines/__init__.py` - (no docstring)
 - `migkit/engines/ase.py` - SAP ASE (Sybase) as one side of a pair (backlog 34). Classes: AseEngine.
-- `migkit/engines/base.py` - (no docstring) Classes: Result, RepairAction, Engine, Enough, Counted, NotHere.
+- `migkit/engines/base.py` - (no docstring) Classes: Result, RepairAction, Spread, Engine, Enough, Counted.
 - `migkit/engines/cassandra.py` - Cassandra (and ScyllaDB) as one side of a pair (backlog 34). Classes: CassandraEngine.
 - `migkit/engines/clickhouse.py` - ClickHouse as one side of a pair (backlog 33). Classes: ClickHouseEngine.
 - `migkit/engines/cockroachdb.py` - CockroachDB as a side of a pair (backlog ER4), over PostgreSQL's wire. Classes: SinklessFeed, CockroachEngine.

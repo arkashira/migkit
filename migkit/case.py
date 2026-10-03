@@ -454,9 +454,10 @@ def _servers(hop, eng, dbs, quick):
 #: what a move may change beside the servers, between any two engines: a
 #: character set or a collation (`charsets`), a table's storage engine
 #: (`tableengine`) - and the goals that place rows by rule: many sources
-#: into one (`consolidate`), one into many (`split`), old rows to an
-#: archive (`archive`)
-SCENARIOS = ("charsets", "tableengine", "consolidate", "split", "archive")
+#: into one (`consolidate`), one into many (`split`), N into M by one
+#: shard function (`reshard`), old rows to an archive (`archive`)
+SCENARIOS = ("charsets", "tableengine", "consolidate", "split", "reshard",
+             "archive")
 
 
 def _scenario(name):
@@ -510,7 +511,7 @@ def scenario_rows(hop, eng, dbs, quick=False):
         for d in dbs:
             for why in m.problems(hop, eng, d):
                 out.append(_row("fail", f"{d}: {name}", why))
-            if name == "split" and not quick:
+            if name in ("split", "reshard") and not quick:
                 out += [dict(r, scope=SCOPE) for r in m.rows(hop, eng, d)]
     return out
 
