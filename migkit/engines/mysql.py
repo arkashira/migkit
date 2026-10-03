@@ -150,6 +150,24 @@ def _like(pattern):
     return "".join(out)
 
 
+
+#: a stored body's comments and quoted text, set aside before its names
+#: are read: a word in a string or a comment is no column of the body's
+_CODE_ASIDE = re.compile(r"--[^\n]*|#[^\n]*|/\*.*?\*/|'(?:[^'\\]|\\.|'')*'"
+                         r'|"(?:[^"\\]|\\.|"")*"', re.S)
+_CODE_COLLATE = re.compile(r"\bcollate\s+`?([A-Za-z0-9_]+)`?", re.I)
+_CODE_NAME = re.compile(r"`((?:[^`]|``)+)`|\b([A-Za-z_][A-Za-z0-9_$]*)\b")
+
+
+def code_words(body):
+    """(the names a stored body uses, lower-cased; the collations its
+    COLLATE clauses name) - its comments and quoted text set aside."""
+    text = _CODE_ASIDE.sub(" ", str(body or ""))
+    named = {m.group(1).lower() for m in _CODE_COLLATE.finditer(text)}
+    words = {(m.group(1) or m.group(2)).replace("``", "`").lower()
+             for m in _CODE_NAME.finditer(text)}
+    return words, named
+
 class MySQLEngine(Engine):
     ENGINE_FAMILY = "mysql"
     checks = ("schema", "counts", "autoinc", "data")
@@ -6271,6 +6289,7 @@ class MySQLEngine(Engine):
                     "charset and collation match",
                     f"src {cs[0]} / dst {cd[0]}")
                 items.extend(self._code_collations(db, cd[0][1]))
+                items.extend(self._code_collation_mix(db, cd[0][1]))
             items.extend(self._large_values(db))
         items.extend(self._target_replicas())
 
@@ -6324,6 +6343,60 @@ class MySQLEngine(Engine):
                             " differently there" if odd else
                             f"{len(rows)} routines, triggers and events,"
                             f" all under {target_collation}")}]
+
+    def _code_collation_mix(self, db, target_collation):
+        """Stored code that may compare strings under two collations on the
+        target - `Illegal mix of collations`, which arrives only when the
+        routine runs (problems B4). Recreated in the target database, a
+        routine's variables, parameters and literals take its collation;
+        a text column it names that keeps another, or a COLLATE clause in
+        its body naming another, is compared across the two. Read from
+        each body's own words: comments and quoted text set aside, the
+        names it uses held against the database's text columns."""
+        cols = {}
+        for table, col, coll in self._q(
+                "src", "select table_name, column_name, collation_name"
+                       " from information_schema.columns where"
+                       " table_schema = %s and collation_name is not null",
+                (db,)):
+            cols.setdefault(str(col).lower(), set()).add(
+                (str(table), str(coll)))
+        bodies = self._q("src", "select concat(routine_type, ' ',"
+                                " routine_name), routine_definition from"
+                                " information_schema.routines where"
+                                " routine_schema = %s union all select"
+                                " concat('TRIGGER ', trigger_name),"
+                                " action_statement from"
+                                " information_schema.triggers where"
+                                " trigger_schema = %s union all select"
+                                " concat('EVENT ', event_name),"
+                                " event_definition from"
+                                " information_schema.events where"
+                                " event_schema = %s", (db, db, db))
+        mixed = []
+        for name, body in bodies:
+            words, named = code_words(body)
+            other = sorted({f"{t}.{c} ({coll})" for c in words & set(cols)
+                            for t, coll in cols[c]
+                            if coll != target_collation})
+            other += sorted(f"COLLATE {x}" for x in named
+                            if x != str(target_collation).lower())
+            if other:
+                mixed.append(f"{name}: {', '.join(other[:4])}"
+                             + (" ..." if len(other) > 4 else ""))
+        if not bodies:
+            return []
+        return [{"level": "warn" if mixed else "pass", "scope": db,
+                 "item": "stored code compares strings under one collation"
+                         " on the target",
+                 "detail": (f"{len(mixed)} of {len(bodies)} name text under"
+                            " another collation than the"
+                            f" {target_collation} they run under there - a"
+                            " comparison of the two stops with `Illegal mix"
+                            " of collations` when it runs: "
+                            + "; ".join(mixed[:5]) if mixed else
+                            f"{len(bodies)} routines, triggers and events name"
+                            f" text only under {target_collation}")}]
 
     #: rows of a table read to measure its large values
     SAMPLE_ROWS = 20000
