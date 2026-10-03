@@ -1599,6 +1599,39 @@ def _patterns_or_none(value):
         return []
 
 
+def _where_problems(where, mapping, engine):
+    """A row filter that is not SQL the source reads, or that takes other
+    rows at every reading (the clock, another table), or whose time zone
+    is not one - refused before anything is read, since the copy and the
+    check would each take other rows (`rowfilter.problems`)."""
+    from . import rowfilter
+    rules = mapping.get("where") if isinstance(mapping, dict) else None
+    if not isinstance(rules, dict):
+        return []
+    dialect = rowfilter.dialect_of(engine)
+    out = []
+    for table, rule in rules.items():
+        at = f"{where}.mapping.where.{table}"
+        pred = rule.get("expr") if isinstance(rule, dict) else rule
+        if isinstance(rule, dict):
+            extra = sorted(set(rule) - {"expr", "tz"})
+            if extra or not pred:
+                out.append(Problem("error", at, "expr (the predicate) and"
+                                   " tz (the zone its times are read in)"))
+                continue
+            if rule.get("tz"):
+                try:
+                    rowfilter.zone_offset(rule["tz"])
+                except SystemExit as e:
+                    out.append(Problem("error", f"{at}.tz", str(e)))
+        try:
+            for said in rowfilter.problems(str(pred), dialect):
+                out.append(Problem("error", at, said))
+        except SystemExit as e:
+            out.append(Problem("error", at, str(e)))
+    return out
+
+
 def _names_problems(where, mapping):
     """`mapping.names` said wrong: a level that is not one, a rule that
     is not one, a case that is neither lower nor upper."""
@@ -1729,6 +1762,8 @@ def _contradictions(where, raw, opts, goal, engine):
     out += _ops_problems(where, mapping)
     out += _objects_problems(where, raw)
     out += _names_problems(where, mapping)
+    out += _where_problems(where, mapping, opts.get("source_engine")
+                           if engine == "hetero" else engine)
     if goal in GOALS and not GOALS[goal]["writes"]:
         for k in WRITING:
             if opts.get(k):
