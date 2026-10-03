@@ -346,7 +346,6 @@ GAPS = {
     # (CN1), accounts (CN2) and the follows not built (CN4)
     "spanner": {
         "bulk-move": (NOT_YET, "CN1"),
-        "users": (NOT_YET, "CN2"),
     },
     "bigtable": {
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("row")),
@@ -376,17 +375,14 @@ GAPS = {
     },
     "gaussdb": {
         "bulk-move": (NOT_YET, "CN1"),
-        "users": (NOT_YET, "CN2"),
     },
     **{name: {
         "bulk-move": (NOT_YET, "CN1"),
-        "users": (NOT_YET, "CN2"),
     } for name in ("oceanbase", "polardbx", "dcdb")},
     "oceanbase-oracle": {
         "bulk-move": (NOT_YET, "CN1"),
         **{cap: (NOT_YET, "CN4")
            for cap in ("stream", "fence", "confirm", "delta")},
-        "users": (NOT_YET, "CN2"),
     },
     "keyspaces": {
         "sequences": (NOT_APPLICABLE, "Cassandra has no sequences or"
@@ -421,7 +417,6 @@ GAPS = {
         "bulk-move": (NOT_YET, "CN1"),
         **{cap: (NOT_YET, "CN4")
            for cap in ("stream", "fence", "confirm", "delta")},
-        "users": (NOT_YET, "CN2"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "geminidb-cassandra": {
@@ -430,7 +425,6 @@ GAPS = {
         **{cap: (NOT_APPLICABLE, "GeminiDB's Cassandra API keeps no change"
                                  " log a client can read")
            for cap in ("stream", "fence", "confirm", "delta")},
-        "users": (NOT_YET, "CN2"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "geminidb-redis": {
@@ -440,14 +434,12 @@ GAPS = {
                                  " a replica, and keeps no change stream a"
                                  " client can read")
            for cap in ("stream", "fence", "confirm")},
-        "users": (NOT_YET, "CN2"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "geminidb-mongo": {
         "sequences": (NOT_APPLICABLE,
                       "collections have no sequences or auto-increment"),
         "bulk-move": (NOT_YET, "CN1"),
-        "users": (NOT_YET, "CN2"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "kinesis": {cap: (NOT_APPLICABLE, STREAM_ONLY.format("Kinesis",
@@ -521,7 +513,9 @@ def _users_engines():
             for c in ast.walk(right):
                 if isinstance(c, ast.Constant) and isinstance(c.value, str):
                     names.add(c.value)
-    return names
+    # and those whose accounts are one of them in every way it reads them
+    return names | {e for e, kept in users.ACCOUNTS_AS.items()
+                    if kept in names}
 
 
 def _bulk(name):

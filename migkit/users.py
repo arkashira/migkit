@@ -39,7 +39,39 @@ SYSTEM = {
     "mssql": (frozenset({"sa", "public", "sysadmin", "rdsa", "rdsadmin",
                          "dbo", "guest", "sys", "INFORMATION_SCHEMA"}),
               ("##", "NT ", "BUILTIN\\")),
+    # openGauss's installation account and its built-in roles
+    "gaussdb": (frozenset({"omm"}), ("gs_role_", "pg_")),
+    # a Spanner database's own roles (`information_schema.roles`
+    # is_system says them too)
+    "spanner": (frozenset({"public", "spanner_info_reader",
+                           "spanner_sys_reader"}), ("spanner_",)),
+    # Lindorm's first account and the names it keeps for itself
+    "lindorm": (frozenset({"root", "system", "anonymous", "lindorm"}), ()),
 }
+
+#: the engines whose accounts are another's in every way `users` reads
+#: and makes them - the account model of the API or the wire they speak:
+#: OceanBase's MySQL mode, PolarDB-X and TDSQL keep MySQL's accounts,
+#: OceanBase's Oracle mode Oracle's, and GeminiDB's APIs their engines'
+ACCOUNTS_AS = {"oceanbase": "mysql", "polardbx": "mysql", "dcdb": "mysql",
+               "oceanbase-oracle": "oracle",
+               "geminidb-cassandra": "cassandra", "geminidb-redis": "redis",
+               "geminidb-mongo": "mongodb"}
+
+
+def _speaking(hop):
+    """The hop as `users` reads its accounts: one whose engine keeps
+    another's (`ACCOUNTS_AS`) read as that one's, its own engine kept for
+    what reaches the server (`_ora_engine`)."""
+    import copy
+    from .engines import ALIASES
+    own = ALIASES.get(hop.engine, hop.engine)
+    if own not in ACCOUNTS_AS:
+        return hop
+    got = copy.copy(hop)
+    got.engine = ACCOUNTS_AS[own]
+    got._accounts_of = own
+    return got
 #: the whole names alone, as the MySQL grant check reads them
 MYSQL_SYS = set(SYSTEM["mysql"][0]) | {
     "rdsadmin", "rds_superuser_role", "rdswriteforwarduser", "tencentroot",
@@ -422,7 +454,8 @@ def compare(hop, say=print, sides=None):
     `not_compared`; `result` is `pass`, `gap`, or `unknown` where
     something that could differ was not read. The engines it branches on
     are the ones `users` covers (`capabilities._users_engines` reads them
-    here)."""
+    here, with those that keep another's accounts, `ACCOUNTS_AS`)."""
+    hop = _speaking(hop)
     eng = hop.engine
     notes, not_compared = [], []
     ad, gm, gx, pw = [], [], [], []
@@ -567,6 +600,34 @@ def compare(hop, say=print, sides=None):
             not_compared.append(
                 f"passwords of {len(blind)} user(s): the target hides their"
                 f" hashes ({blind[:8]})")
+    elif eng == "gaussdb":
+        s = _gauss_roles(hop.source)
+        t = _gauss_roles(hop.target)
+        skeys, tkeys = set(s), set(t)
+        ad = _attr_gaps(s, t, GAUSS_ATTRS)
+        gm, gx = _grant_gaps(s, t, "member_of")
+        pw = None
+        notes.append("GaussDB keeps a password salted and shows no hash a"
+                     " target takes: create sets the one in the passwords"
+                     " file")
+    elif eng == "spanner":
+        s = _sp_roles(hop, "src")
+        t = _sp_roles(hop, "dst")
+        skeys, tkeys = set(s), set(t)
+        gm, gx = [sorted(set(a) | set(b)) for a, b in zip(
+            _grant_gaps(s, t), _grant_gaps(s, t, "member_of"))]
+        pw = None
+        notes.append("a Spanner database's roles hold its privileges; who"
+                     " may take a role is the cloud's access policies',"
+                     " outside the database")
+    elif eng == "lindorm":
+        s = _ld_users(hop, "src")
+        t = _ld_users(hop, "dst")
+        skeys, tkeys = set(s), set(t)
+        gm, gx = _grant_gaps(s, t)
+        pw = None
+        notes.append("Lindorm shows no password or its hash: create sets"
+                     " the one in the passwords file")
     else:
         from .capabilities import require
         require(eng, "users")
@@ -1656,8 +1717,10 @@ def _td_rollback(hop, apply, say):
 
 
 def _ora_engine(hop):
-    from .engines.oracle import OracleEngine
-    return OracleEngine(hop)
+    """The engine the hop's accounts are reached through: Oracle's, or
+    the one that keeps Oracle's accounts (`_speaking`)."""
+    from .engines import engine_named
+    return engine_named(getattr(hop, "_accounts_of", None) or "oracle", hop)
 
 
 def _ora_rows(hop, side, sql, args=None):
@@ -2887,13 +2950,17 @@ def _pg_options(a, only=None):
     return " ".join(text), args
 
 
-def _pg_plan(out, s, t, hashes, passwords):
+def _pg_plan(out, s, t, hashes, passwords, attrs=PG_ATTRS,
+             options=None):
     """(steps, skipped): every missing role made first, with
     none of its memberships - so no role waits on another -, then each
     membership the target lacks, then the attributes of roles on both
     sides. A login role is made with the source's password hash where the
     source shows it, else the passwords file's; one with neither is
-    skipped and said."""
+    skipped and said. `attrs` and `options` are the role attributes the
+    engine keeps and how its CREATE ROLE says them (GaussDB's are not all
+    PostgreSQL's)."""
+    options = options or _pg_options
     steps, skipped = [], []
     missing = set(out["missing_on_target"])
     made = set()
@@ -2911,13 +2978,13 @@ def _pg_plan(out, s, t, hashes, passwords):
             continue
         # defaults left out: a managed target refuses to be told even
         # NOREPLICATION by a role that is not a superuser
-        only = [k for k in PG_ATTRS if k not in ("connlimit", "valid_until")
+        only = [k for k in attrs if k not in ("connlimit", "valid_until")
                 and bool(a.get(k)) != (k == "inherit")]
         if a["connlimit"] not in (None, -1):
             only.append("connlimit")
         if a.get("valid_until"):
             only.append("valid_until")
-        opts, args = _pg_options(a, only)
+        opts, args = options(a, only)
         sql = f"CREATE ROLE {q(r)} {opts}".rstrip()
         shown = sql.replace("%%", "%").replace(
             "VALID UNTIL %s", f"VALID UNTIL '{a.get('valid_until')}'")
@@ -2960,12 +3027,378 @@ def _pg_plan(out, s, t, hashes, passwords):
                 undo=None if r in made else (back, ())))
     for r in out["attributes_differ"]:
         a, b = s[r], t[r]
-        only = [k for k in PG_ATTRS if a.get(k) != b.get(k)]
-        opts, args = _pg_options(a, only)
-        back, bargs = _pg_options(b, only)
+        only = [k for k in attrs if a.get(k) != b.get(k)]
+        opts, args = options(a, only)
+        back, bargs = options(b, only)
         steps.append(_step(r, f"ALTER ROLE {q(r)} {opts}", args,
                            undo=(f"ALTER ROLE {q(r)} {back}", bargs)))
     return steps, skipped
+
+
+# --- GaussDB -----------------------------------------------------------------
+
+#: a role's attributes, as GaussDB's pg_roles keeps them and its CREATE
+#: ROLE says them - its own administrators in place of PostgreSQL's
+#: superuser and row-level bypass
+GAUSS_ATTRS = ("login", "sysadmin", "createdb", "createrole", "replication",
+               "inherit", "auditadmin", "monadmin", "opradmin", "poladmin",
+               "connlimit", "valid_until")
+_GAUSS_FLAGS = (("login", "LOGIN"), ("sysadmin", "SYSADMIN"),
+                ("createdb", "CREATEDB"), ("createrole", "CREATEROLE"),
+                ("replication", "REPLICATION"), ("inherit", "INHERIT"),
+                ("auditadmin", "AUDITADMIN"), ("monadmin", "MONADMIN"),
+                ("opradmin", "OPRADMIN"), ("poladmin", "POLADMIN"))
+
+
+def _gauss_options(a, only=None):
+    """(text, args) of a role's attributes as GaussDB's CREATE ROLE and
+    ALTER ROLE take them."""
+    text, args = [], []
+    for attr, word in _GAUSS_FLAGS:
+        if only is None or attr in only:
+            text.append(word if a.get(attr) else f"NO{word}")
+    if only is None or "connlimit" in only:
+        limit = a.get("connlimit")
+        text.append(f"CONNECTION LIMIT {-1 if limit is None else int(limit)}")
+    if only is None or "valid_until" in only:
+        text.append("VALID UNTIL %s")
+        args.append(a.get("valid_until") or "infinity")
+    return " ".join(text), args
+
+
+def _gauss_roles(ep):
+    """{role: its attributes and `member_of`}, as GaussDB's catalogue
+    keeps them."""
+    c = _pg_conn(ep)
+    try:
+        cur = c.cursor()
+        cur.execute("""select r.rolname, r.rolcanlogin, r.rolsystemadmin,
+                              r.rolcreatedb, r.rolcreaterole,
+                              r.rolreplication, r.rolinherit,
+                              r.rolauditadmin, r.rolmonitoradmin,
+                              r.roloperatoradmin, r.rolpolicyadmin,
+                              r.rolconnlimit, r.rolvaliduntil,
+                              array(select b.rolname || case when
+                                           m.admin_option then ' WITH ADMIN'
+                                           else '' end
+                                    from pg_auth_members m join pg_roles b
+                                      on m.roleid = b.oid
+                                    where m.member = r.oid)
+                       from pg_roles r""")
+        out = {}
+        for row in cur.fetchall():
+            name = row[0]
+            if system_principal("gaussdb", name):
+                continue
+            got = {a: bool(v) for (a, _), v in zip(_GAUSS_FLAGS, row[1:11])}
+            got["connlimit"] = row[11]
+            got["valid_until"] = str(row[12]) if row[12] else None
+            got["member_of"] = sorted(
+                m for m in row[13] or ()
+                if not system_principal("gaussdb", m.split(" WITH ")[0]))
+            out[name] = got
+        return out
+    finally:
+        c.close()
+
+
+# --- Spanner -----------------------------------------------------------------
+#
+# A Spanner database keeps roles, each holding privileges on its tables,
+# columns and change streams and other roles; who may take a role is the
+# cloud's access policies', outside the database. Roles are a database's
+# own: an account here is `database.role`.
+
+def _sp_engine(hop):
+    from .engines import engine_named
+    return engine_named("spanner", hop)
+
+
+def _sp_said(eng, side, db, schema, name):
+    """A name as the target's dialect quotes it - both sides' grants are
+    said in it, so they compare, and are statements the target takes."""
+    return ".".join(eng._qd("dst", db, p) for p in (schema, name) if p)
+
+
+def _sp_roles(hop, side):
+    """{"database.role": {"grants": [...], "member_of": [...]}} of each of
+    the hop's databases, the database as the source names it."""
+    eng = _sp_engine(hop)
+    out = {}
+    for db in hop.databases or []:
+        here = {}
+        for name, system in eng._execute(side, db, "select role_name,"
+                                                   " is_system from"
+                                                   " information_schema.roles"):
+            if str(system).upper() in ("TRUE", "YES") or \
+                    system_principal("spanner", name):
+                continue
+            here[name] = {"grants": [], "member_of": []}
+        for who, sch, table, priv in eng._execute(
+                side, db, "select grantee, table_schema, table_name,"
+                          " privilege_type from"
+                          " information_schema.table_privileges"):
+            if who in here:
+                here[who]["grants"].append(
+                    f"{priv} ON TABLE {_sp_said(eng, side, db, sch, table)}")
+        for who, sch, table, col, priv in eng._execute(
+                side, db, "select grantee, table_schema, table_name,"
+                          " column_name, privilege_type from"
+                          " information_schema.column_privileges"):
+            if who in here:
+                here[who]["grants"].append(
+                    f"{priv}({eng._qd('dst', db, col)}) ON TABLE"
+                    f" {_sp_said(eng, side, db, sch, table)}")
+        try:
+            streams = eng._execute(
+                side, db, "select grantee, change_stream_schema,"
+                          " change_stream_name, privilege_type from"
+                          " information_schema.change_stream_privileges")
+        except Exception:  # noqa: BLE001 - a release without the view
+            streams = []
+        for who, sch, stream, priv in streams:
+            if who in here:
+                here[who]["grants"].append(
+                    f"{priv} ON CHANGE STREAM"
+                    f" {_sp_said(eng, side, db, sch, stream)}")
+        for role, who in eng._execute(side, db, "select role_name, grantee"
+                                                " from information_schema"
+                                                ".role_grantees"):
+            if who in here and not system_principal("spanner", role):
+                here[who]["member_of"].append(str(role))
+        for role, got in here.items():
+            got["grants"].sort()
+            got["member_of"].sort()
+            out[f"{db}.{role}"] = got
+    return out
+
+
+def _sp_grant(eng, db, grant, role, pg, revoke=False):
+    """A role's privilege given (or taken back) as the dialect says it."""
+    to = (" FROM " if revoke else " TO ") + ("" if pg else "ROLE ") + \
+        eng._qd("dst", db, role)
+    return ("REVOKE " if revoke else "GRANT ") + grant + to
+
+
+def _sp_create(hop, apply, say):
+    """Each missing role made, then every privilege and membership the
+    target lacks given - every one with the statement that takes it back
+    - by the database's own DDL, a statement at a time into the ledger."""
+    eng = _sp_engine(hop)
+    out, s, t = _compare(hop, say)
+    steps = []
+    missing = set(out["missing_on_target"])
+    for key in sorted(missing):
+        db, role = key.split(".", 1)
+        steps.append(_step(key, f"CREATE ROLE {eng._qd('dst', db, role)}",
+                           undo=(f"DROP ROLE {eng._qd('dst', db, role)}",
+                                 [db]), made=True))
+        steps[-1]["args"] = [db]
+    for key in sorted(missing | set(out["grants_missing"])):
+        db, role = key.split(".", 1)
+        pg = eng._pg("dst", db)
+        have = t.get(key) or {"grants": [], "member_of": []}
+        wanted = [g for g in s[key]["grants"] if g not in have["grants"]] + [
+            f"{'' if pg else 'ROLE '}{eng._qd('dst', db, m)}"
+            for m in s[key]["member_of"] if m not in have["member_of"]]
+        for grant in wanted:
+            step = _step(key, _sp_grant(eng, db, grant, role, pg),
+                         undo=(_sp_grant(eng, db, grant, role, pg, True),
+                               [db]))
+            step["args"] = [db]
+            steps.append(step)
+    say(f"\nplan: {len(steps)} statement(s) on TARGET"
+        f" ({'APPLY' if apply else 'dry-run'})")
+    for st in steps:
+        say(f"     {st['shown'][:160]}")
+    if not steps or not apply:
+        say("nothing to create" if not steps else
+            "\ndry-run only. Add --apply to execute on the target.")
+        return
+    ledger = []
+    for st in steps:
+        entry = {"key": st["key"], "sql": st["shown"], "undo": st["undo"],
+                 "made": st["made"]}
+        try:
+            eng.execute_ddl("dst", st["args"][0], st["sql"])
+            entry["ok"] = True
+        except Exception as e:  # noqa: BLE001 - recorded and said
+            entry["ok"] = False
+            entry["error"] = f"{type(e).__name__}: {str(e).strip()[:160]}"
+            say(f"   FAILED {st['shown']}: {entry['error']}")
+        ledger.append(entry)
+    rec = _record(hop, "spanner", ledger)
+    failed = [e for e in ledger if not e["ok"]]
+    say(f"\nran={len(ledger) - len(failed)} failed={len(failed)}"
+        f"  record: {rec}")
+    if failed:
+        raise SystemExit(f"users: {len(failed)} statement(s) failed, each"
+                         f" named above and in {rec}")
+
+
+# --- Lindorm -----------------------------------------------------------------
+#
+# A Lindorm instance keeps users, each granted READ, WRITE, ADMIN, TRASH or
+# SYSTEM on the whole instance, a database or a table (`SHOW USERS`, `SHOW
+# PRIVILEGES`). A password is never shown.
+
+#: the names `SHOW PRIVILEGES` may give each part of a grant
+_LD_PARTS = {"user": ("user_name", "user", "username", "grantee"),
+             "privilege": ("privilege", "privilege_type", "permission"),
+             "scope": ("resource_type", "scope", "level"),
+             "on": ("resource_name", "resource", "object", "name")}
+
+
+def _ld_engine(hop):
+    from .engines import engine_named
+    return engine_named("lindorm", hop)
+
+
+def _ld_part(row, part):
+    return next((row[k] for k in _LD_PARTS[part] if row.get(k) is not None),
+                None)
+
+
+def _ld_said(hop, side, scope, name):
+    """A database a grant is on, as the source names it: the target's
+    named back through the hop's map, so the two sides' grants compare."""
+    if scope not in ("DATABASE", "SCHEMA") or side != "dst":
+        return name
+    back = {str(v): str(k) for k, v in (hop.db_map or {}).items()}
+    return back.get(str(name), name)
+
+
+def _ld_there(hop, grant):
+    """A source's grant as the target takes it: a database the hop maps
+    named as the target calls it."""
+    import re
+    m = re.match(r"(\w+ ON (?:DATABASE|SCHEMA) )`((?:[^`]|``)+)`$", grant)
+    if not m:
+        return grant
+    name = m.group(2).replace("``", "`")
+    there = hop.target_db(name) if name in (hop.databases or []) else name
+    return m.group(1) + "`" + str(there).replace("`", "``") + "`"
+
+
+def _ld_users(hop, side):
+    """{user: {"grants": ["READ ON DATABASE `shop`", ...]}}."""
+    eng = _ld_engine(hop)
+    out = {}
+    for r in eng._answered(side, "", "show users"):
+        name = _ld_part(r, "user") or next(iter(r.values()), None)
+        if name and not system_principal("lindorm", name):
+            out[str(name)] = {"grants": []}
+    for r in eng._answered(side, "", "show privileges"):
+        who = str(_ld_part(r, "user") or "")
+        if who not in out:
+            continue
+        scope = str(_ld_part(r, "scope") or "GLOBAL").upper()
+        on = _ld_said(hop, side, scope, _ld_part(r, "on"))
+        out[who]["grants"].append(
+            f"{str(_ld_part(r, 'privilege')).upper()} ON {scope}"
+            + (f" {eng._q(on)}" if on and scope != "GLOBAL" else ""))
+    for v in out.values():
+        v["grants"].sort()
+    return out
+
+
+def _ld_create(hop, apply, passwords, say):
+    """Each missing user made with the passwords file's password, then
+    every grant the target lacks - each with the statement that takes it
+    back - into the ledger."""
+    eng = _ld_engine(hop)
+    out, s, t = _compare(hop, say)
+    steps, skipped = [], []
+    missing = set(out["missing_on_target"])
+    for u in sorted(missing):
+        if u not in passwords:
+            skipped.append((u, "Lindorm shows no password, and the passwords"
+                               " file has none for it"))
+            continue
+        steps.append(_step(u, f"CREATE USER {eng._q(u)} IDENTIFIED BY %s",
+                           shown=f"CREATE USER {eng._q(u)} IDENTIFIED BY"
+                                 " <from --passwords file>",
+                           undo=(f"DROP USER IF EXISTS {eng._q(u)}", ()),
+                           made=True))
+        steps[-1]["secret"], steps[-1]["given"] = passwords[u], True
+    for u in sorted((missing - {n for n, _ in skipped})
+                    | set(out["grants_missing"])):
+        have = set((t.get(u) or {}).get("grants") or ())
+        for g in s[u]["grants"]:
+            if g in have:
+                continue
+            g = _ld_there(hop, g)
+            steps.append(_step(u, f"GRANT {g} TO {eng._q(u)}",
+                               undo=(f"REVOKE {g} FROM {eng._q(u)}", ())))
+    say(f"\nplan: {len(steps)} statement(s) on TARGET"
+        f" ({'APPLY' if apply else 'dry-run'})")
+    for st in steps:
+        say(f"     {st['shown'][:160]}")
+    for name, why in skipped:
+        say(f"  skipped {name}: {why}")
+    if not steps or not apply:
+        say("nothing to create" if not steps else
+            "\ndry-run only. Add --apply to execute on the target.")
+        return
+    conn = eng._connect("dst", "")
+    try:
+        ledger = _run_steps(conn.cursor(), steps, say)
+    finally:
+        conn.close()
+    rec = _record(hop, "lindorm", ledger,
+                  skipped=[f"{n}: {why}" for n, why in skipped])
+    failed = [e for e in ledger if not e["ok"]]
+    say(f"\nran={len(ledger) - len(failed)} failed={len(failed)}"
+        f"  record: {rec}")
+    if failed:
+        raise SystemExit(f"users: {len(failed)} statement(s) failed, each"
+                         f" named above and in {rec}")
+    return {st["key"] for st in steps if "secret" in st}
+
+
+def _ledger_rollback(hop, apply, say):
+    """Spanner and Lindorm: every statement a `create` ran that took,
+    undone last first, by the statement its ledger keeps for it."""
+    rf = hop.report_dir() / "user-sync-created.json"
+    runs = json.loads(rf.read_text()) if rf.exists() else []
+    undo = [(st["key"], st["undo"]) for run in runs
+            if run.get("engine") == hop.engine
+            for st in run.get("steps") or () if st.get("ok") and st["undo"]]
+    if not undo:
+        say("record has nothing to undo")
+        return
+    say(f"rollback plan ({'APPLY' if apply else 'dry-run'}): {len(undo)}"
+        " statement(s), last first")
+    for key, (sql, _) in reversed(undo):
+        say(f"  {key}: {sql}")
+    if not apply:
+        say("dry-run only. Add --apply to execute.")
+        return
+    failed = []
+    if hop.engine == "spanner":
+        eng = _sp_engine(hop)
+
+        def run(sql, args):
+            eng.execute_ddl("dst", args[0], sql)
+        conn = None
+    else:
+        conn = _ld_engine(hop)._connect("dst", "")
+
+        def run(sql, args):
+            conn.cursor().execute(sql, tuple(args) or None)
+    try:
+        for key, (sql, args) in reversed(undo):
+            try:
+                run(sql, args)
+                say(f"  undone {key}: {sql[:100]}")
+            except Exception as e:  # noqa: BLE001 - said, the rest go on
+                failed.append(key)
+                say(f"  FAILED {key}: {type(e).__name__}: {str(e)[:100]}")
+    finally:
+        if conn is not None:
+            conn.close()
+    if not failed:
+        rf.rename(str(rf) + ".rolled-back")
 
 
 def _redis_client(ep):
@@ -3039,7 +3472,10 @@ def create(hop, apply=False, passwords=None, say=print):
     password, a statement the target refused) ends it with an error
     naming it, never with a clean exit over a target that still differs
     (`_after`)."""
-    ways = {"redis": lambda: _redis_create(hop, apply, say),
+    hop = _speaking(hop)
+    ways = {"spanner": lambda: _sp_create(hop, apply, say),
+            "lindorm": lambda: _ld_create(hop, apply, passwords or {}, say),
+            "redis": lambda: _redis_create(hop, apply, say),
             "kafka": lambda: _kafka_create(hop, apply, passwords, say),
             "clickhouse": lambda: _ch_create(hop, apply, passwords, say),
             "cassandra": lambda: _cs_create(hop, apply, say),
@@ -3086,6 +3522,9 @@ def _sql_create(hop, apply, passwords, say):
         steps, skipped = _my_plan(
             out, s, t, _mysql_plugins(hop.target) if out["missing_on_target"]
             else None, passwords)
+    elif hop.engine == "gaussdb":
+        steps, skipped = _pg_plan(out, s, t, {}, passwords, GAUSS_ATTRS,
+                                  _gauss_options)
     else:
         hashes = _pg_hashes(hop.source) if out["missing_on_target"] else {}
         steps, skipped = _pg_plan(out, s, t, hashes or {}, passwords)
@@ -3187,6 +3626,9 @@ def _mongo_rollback(hop, apply, say):
 
 
 def rollback(hop, apply=False, say=print):
+    hop = _speaking(hop)
+    if hop.engine in ("spanner", "lindorm"):
+        return _ledger_rollback(hop, apply, say)
     if hop.engine == "redis":
         return _redis_rollback(hop, apply, say)
     if hop.engine == "kafka":
@@ -3261,7 +3703,7 @@ def _sql_rollback(hop, apply, say):
                 try:
                     cur.execute(sql, tuple(args))
                 except Exception:
-                    if hop.engine != "postgres" or not made:
+                    if hop.engine not in ("postgres", "gaussdb") or not made:
                         raise
                     _pg_revoke_everywhere(hop, key)
                     cur.execute(sql, tuple(args))
@@ -3312,7 +3754,7 @@ def _pg_revoke_everywhere(hop, role):
 
 
 def run(hop_name, mode, apply=False, pw_file="", say=print):
-    hop = get_hop(hop_name)
+    hop = _speaking(get_hop(hop_name))
     passwords = {}
     if pw_file:
         import yaml as _y
