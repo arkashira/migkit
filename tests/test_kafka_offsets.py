@@ -31,6 +31,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.repair", "kafka"), ("verify.repair-undo", "kafka")]
+
 SRC, DST = "migkit-test-off-src", "migkit-test-off-dst"
 SRC_PORT, DST_PORT = 19411, 19412
 

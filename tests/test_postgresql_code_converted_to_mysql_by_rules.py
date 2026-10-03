@@ -25,6 +25,9 @@ from migkit.storedcode.mysql_pg import Context
 from migkit.storedcode.routines import Param, Routine
 from migkit.storedcode.translate import Refused
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.routines", "postgres")]
+
 # ---- routines as the PostgreSQL engine reads them --------------------------
 
 _VOLATILE = {"NO SQL": " IMMUTABLE", "READS SQL DATA": " STABLE",

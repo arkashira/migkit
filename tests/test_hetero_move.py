@@ -14,6 +14,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.table-copy", "hetero")]
+
 PG, MY = "migkit-test-mv-pg", "migkit-test-mv-my"
 PG_PORT, MY_PORT = 15471, 13371
 ROWS = 250

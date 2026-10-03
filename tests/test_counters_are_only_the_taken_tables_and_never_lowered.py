@@ -32,6 +32,13 @@ from tests import mysql_pair
 from tests.conftest import psql
 from tests.mysql_pair import my, my_pair  # noqa: F401 - a fixture
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("scope.counters", ("postgres", "mysql", "mssql")),
+    ("verify.identity.sequence-parity", "mysql"),
+    ("cutover.counters", ("postgres", "mysql")),
+]
+
 
 def _pg(pg_pair, tmp_path, **scope):
     from migkit.engines.postgres import PostgresEngine

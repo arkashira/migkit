@@ -23,6 +23,9 @@ from migkit.config import Endpoint, Hop
 from migkit.engines.base import Engine
 from migkit.engines.dbapi import DbapiRows
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.large-values", "redis"), ("move.sized", "sqlite")]
+
 MB = 2 ** 20
 
 

@@ -24,6 +24,9 @@ from click.testing import CliRunner
 from tests import cutover_harness as harness
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.drain", "postgres")]
+
 pytestmark = needs_docker
 
 SRC, DST = "migkit-test-pg-src", "migkit-test-pg-dst"

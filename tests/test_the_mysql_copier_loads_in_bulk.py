@@ -21,6 +21,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.capacity", "mysql")]
+
 pytestmark = needs_docker
 
 MY, PORT = "migkit-test-mysql-load", 15872

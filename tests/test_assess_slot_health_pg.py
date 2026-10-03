@@ -3,6 +3,9 @@ source disk - a source outage mid-migration. assess must flag it (source-side
 operational health), not just count slots."""
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.engine-checks", "postgres")]
+
 pytestmark = needs_docker
 
 

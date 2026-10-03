@@ -16,6 +16,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.delta", "redis")]
+
 pytestmark = needs_docker
 
 SRC, DST = ("migkit-test-rdelta-src", 15925), ("migkit-test-rdelta-dst",

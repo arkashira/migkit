@@ -24,6 +24,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.writers", "mysql"), ("cutover.pause-replication", "mysql")]
+
 pytestmark = pytest.mark.docker
 
 NET = "migkit-test-mypause-net"

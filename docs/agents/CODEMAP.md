@@ -10,7 +10,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/base.py` - Engine: the contract every engine fills (`in_scope`, `takes`, checks, repairs, the pre-flight items)
 - `migkit/engines/__init__.py` - the engine names and aliases, `engine_named`, `get_engine`
 - `migkit/decide.py` - the decision engine: rungs, `climb`, `attempt`, `coverage()` - what each engine can do, cell by cell
-- `migkit/capabilities.py` - `matrix()`: the capability table the docs show
+- `migkit/capabilities.py` - `matrix()`: the capability table the docs show; `depth()`: every engine against every depth item, read off the code and proved by the tests' `PROVES`
 - `migkit/verdict.py` - `decide`: the one verdict rule; VERDICTS and exit codes; `hop_scope`; the envelope (`summarize`)
 - `migkit/cli.py` - every command and its options
 - `migkit/movers.py` - the bulk ways and the stream ways (`stream_ways`)

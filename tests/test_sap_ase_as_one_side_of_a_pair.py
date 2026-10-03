@@ -12,6 +12,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "ase")]
+
 
 def _ase(**options):
     from migkit.engines import engine_named

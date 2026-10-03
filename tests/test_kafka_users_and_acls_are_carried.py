@@ -19,6 +19,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.users", "kafka")]
+
 pytestmark = needs_docker
 
 SRC, DST = ("migkit-test-kacl-src", 15911), ("migkit-test-kacl-dst", 15912)

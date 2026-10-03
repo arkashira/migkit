@@ -31,6 +31,9 @@ from migkit.config import Endpoint, Hop
 from migkit.util import which
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.engine-checks", "generic")]
+
 pytestmark = needs_docker
 
 # migkit's own lookup, not `shutil.which`: the tool is installed beside the

@@ -27,6 +27,14 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "redis"),
+    ("verify.confirm", "redis"),
+    ("tail.follows", "redis"),
+    ("assess.writers", "redis"),
+]
+
 pytestmark = needs_docker
 
 SRC, DST, OLD = ("migkit-test-rrepl-src", "migkit-test-rrepl-dst",

@@ -29,6 +29,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.delta", "kafka")]
+
 NET = "migkit-test-knet"
 CTL, B1, B2 = "migkit-test-kctl", "migkit-test-kbr1", "migkit-test-kbr2"
 B1_PORT, B2_PORT = 19292, 19293

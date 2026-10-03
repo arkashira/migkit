@@ -19,6 +19,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import mssql_run, needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.users", "mssql")]
+
 pytestmark = needs_docker
 
 MS, PORT, PW = "migkit-test-ms-sums", 15943, "Migkit-Test-9x!"

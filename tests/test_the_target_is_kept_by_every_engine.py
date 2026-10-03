@@ -17,6 +17,15 @@ from migkit import decide, freeze
 from migkit.config import Endpoint, Hop
 from migkit.engines import NAMES
 
+PROVES = [
+    ("cutover.read-only-target", ("clickhouse", "db2", "oracle", "snowflake",
+                                  "redshift", "ase", "teradata",
+                                  "cockroachdb", "redis", "kafka", "mongodb",
+                                  "cassandra", "opensearch", "dynamodb",
+                                  "tidb", "couchbase", "bigquery")),
+    ("cutover.freeze", ("clickhouse", "cockroachdb", "tidb")),
+]
+
 
 def _hop(tmp_path, engine, **options):
     hop = Hop(name="kt", engine=engine,
