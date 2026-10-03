@@ -240,7 +240,8 @@ Running (each on its own `worktree-agent-<id>` branch; I merge, run compileall a
 - a0fb2973757acdcf0 - conversion breadth (CV.P5, P9-P11, P15, P17, P19-P21, W3) - MERGED `9a091c4`
 - a88f190644bf5cea1 - AUD-D (options, environment and addresses checked at load)
 - a629ecb2da1a93623 - P0-CLOUDS.native, then P0-CLOUDS.more
-- a4acdb02ff0191804 - AUD-B (durable tail state, dirty tracking) - MERGED `a0ab528`; resumed for SP8's catalogue digest on every other source
+- a4acdb02ff0191804 - AUD-B (durable tail state, dirty tracking) - MERGED `a0ab528`, SP8 on every source MERGED
+- af3ae769cfcef053c - W6 (types only commercial engines have)
 - a76b06af6ac782986 - W7 (resharding: split, merge, distribution-aware load)
 - a3d309a6543a96c68 - read-only target and writes held on every engine (BAR-3) - MERGED (unproved on servers: Db2 for i `SYSTABAUTH` columns, Teradata `LogonTime`, ClickHouse `ALTER USER ... SETTINGS`, Snowflake `SHOW LOCKS` order - the suite tells)
 - a2602d2c2bffb1f1b - AUD-G2 (the MySQL engine's connections, TLS, zone, keepalives, grants)
