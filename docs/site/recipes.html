@@ -219,7 +219,7 @@ migkit move catalog --mode cdc --drop --go</code></pre>
 <pre><code>migkit check proof</code></pre>
 <p>What it leans on, each done by the code for this pair: comparing the data itself.</p>
 <h2 id="verify-what-a-service-moved">What a cloud's migration service moved, proved table by table, and only that</h2>
-<p>A service told to take some databases, schemas and tables - leaving its log tables behind, renaming one, filtering another's rows, taking some columns - is checked against exactly that: <code>include</code> names what it took, <code>exclude</code> what it was told to leave, <code>mapping</code> its renames, filters and columns. A table it never took is neither compared nor called missing, and the verdict says the scope it covers. Given the job's own file where it asks for the source, <code>migkit init</code> writes this hop from it, with every setting of the job that makes a correct move look different said beside it.</p>
+<p>A service told to take some databases, schemas and tables - leaving its log tables behind, renaming one, filtering another's rows, taking some columns - is checked against exactly that: <code>include</code> names what it took, <code>exclude</code> what it was told to leave, <code>mapping</code> its renames, filters and columns. A table it never took is neither compared nor called missing, and the verdict says the scope it covers. Given the job's own file where it asks for the source, <code>migkit init</code> writes this hop from it, with every setting of the job that makes a correct move look different said beside it - and the changes it does not carry (<code>mapping.ops</code>) are the contract the check holds each table to. Given the service's own check report as <code>compare_with</code>, the evidence says table by table where its "consistent" falls short: what it called the same that differs, what it skipped, what it never checked.</p>
 <p>MySQL -&gt; MySQL. The hop, in <code>conf/hops.yaml</code> - two addresses and what it is for; the passwords are kept by <code>migkit init</code>, never in the file:</p>
 <pre><code>hops:
   orders-moved:
@@ -242,11 +242,18 @@ migkit move catalog --mode cdc --drop --go</code></pre>
           keep:
           - id
           - status
-          - total</code></pre>
+          - total
+      ops:
+        billing.payments:
+        - insert
+        - update
+    options:
+      compare_with: service-check-report.json</code></pre>
 <p>What <code>migkit init</code> and every dry run say of it:</p>
 <ul><li>goal verify: prove two databases hold the same; nothing is written to either</li><li>on the source: read only</li><li>on the target: read only</li><li>it guarantees: equal, or every table and row that differs named; nothing written to either side</li></ul>
 <p>The commands, in order - one that writes shows its plan until it is given <code>--go</code>:</p>
 <pre><code>migkit check orders-moved</code></pre>
+<ul><li><code>compare_with</code>: another tool's own check of this move - a Tencent or Alibaba DTS data check's report, AWS DMS's table statistics - held table by table against migkit's answers in the evidence</li></ul>
 <p>What it leans on, each done by the code for this pair: comparing the data itself.</p>
 <h2 id="masked-test-copy">Production to a staging database, as a masked subset</h2>
 <p>The rows chosen and every row they refer to, masked where the hop says, so every reference in the copy resolves inside it.</p>

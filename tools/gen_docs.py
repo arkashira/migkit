@@ -1205,7 +1205,12 @@ RECIPES = (
            " verdict says the scope it covers. Given the job's own file"
            " where it asks for the source, `migkit init` writes this hop"
            " from it, with every setting of the job that makes a correct"
-           " move look different said beside it.",
+           " move look different said beside it - and the changes it does"
+           " not carry (`mapping.ops`) are the contract the check holds"
+           " each table to. Given the service's own check report as"
+           " `compare_with`, the evidence says table by table where its"
+           " \"consistent\" falls short: what it called the same that"
+           " differs, what it skipped, what it never checked.",
            {"orders-moved": {"goal": "verify",
                              "source": "mysql://app@db1.example.com:3306/"
                                        "billing,logistics",
@@ -1218,7 +1223,11 @@ RECIPES = (
                                  "tables": {"logistics.parcels": "parcel"},
                                  "where": {"logistics.parcels": "id > 10"},
                                  "columns": {"logistics.orders": {
-                                     "keep": ["id", "status", "total"]}}}}},
+                                     "keep": ["id", "status", "total"]}},
+                                 "ops": {"billing.payments":
+                                         ["insert", "update"]}},
+                             "options": {"compare_with":
+                                         "service-check-report.json"}}},
            needs=(("source", "data"), ("target", "data")),
            then=("migkit check orders-moved",)),
     Recipe("masked-test-copy",
