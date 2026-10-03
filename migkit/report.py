@@ -75,9 +75,10 @@ footer { color: #52514e; font-size: 12px; text-align: center; margin-top: 24px; 
 """
 
 
-def _chip(status):
-    label = {"ok": "OK", "diff": "DIFF", "error": "ERROR", "warn": "WARN",
-             "skip": "SKIP"}.get(status, str(status).upper())
+def _chip(status, label=None):
+    label = label or {"ok": "OK", "diff": "DIFF", "error": "ERROR",
+                      "warn": "WARN", "skip": "SKIP"}.get(status,
+                                                          str(status).upper())
     return (f'<span class="chip {status}"><span class="dot {status}"></span>'
             f'{label}</span>')
 
@@ -246,7 +247,9 @@ def render(hop, results, generated=None, decided=None):
         fix = r.get("fix_hint", "")
         fix_html = f'<div class="fix">{html.escape(fix)}</div>' if fix else ""
         cards.append(
-            f'<div class="finding {sev}"><div class="head">{_chip(st)}'
+            f'<div class="finding {sev}"><div class="head">'
+            # rows the hop keeps by the changes it does not carry
+            f'{_chip(st, "KEPT" if r.get("kept_by_hop") else None)}'
             f'<span>{html.escape(str(r.get("check", "")))} &middot; '
             f'{html.escape(str(r.get("scope", "")))}</span></div>'
             f'<div class="what">{html.escape(str(r.get("detail", "")))}</div>'

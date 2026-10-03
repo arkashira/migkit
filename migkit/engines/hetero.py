@@ -2598,8 +2598,17 @@ class HeteroEngine(Engine):
         bad = [(scope, status, detail) for scope, status, detail, a, b in rows
                if status != "ok" or a != b]
         if bad:
+            # ten said in full, the rest named: a table left unsaid read as
+            # one that counted alike beside ten the hop keeps apart
+            # (`verdict.hold`)
+            more = [scope for scope, _, _ in bad[10:]]
             return [Result("counts", scope, status, detail)
-                    for scope, status, detail in bad[:10]]
+                    for scope, status, detail in bad[:10]] + (
+                [Result("counts", db, "diff",
+                        f"{len(more)} more tables count differently or"
+                        " could not be counted: " + ", ".join(more[:20])
+                        + (" ..." if len(more) > 20 else ""))]
+                if more else [])
         total = sum(a for _, _, _, a, _ in rows if a is not None)
         return [Result("counts", db, "ok",
                        f"rows {total:,}=={total:,} across"
@@ -2910,26 +2919,27 @@ class HeteroEngine(Engine):
                                                     key, raw)
             missing, extra, changed = self._rows_differ(sc, dc, a, b)
             if missing or extra or changed:
-                clean = False
                 self._write_drill(db, self._leaf(table),
                                   missing=[json.dumps(list(k)) for k in
                                            missing],
                                   extra=[json.dumps(list(k)) for k in extra],
                                   changed=[json.dumps(list(k)) for k in
                                            changed])
-                res.append(Result(
+                got, held_back = self._delta_held(Result(
                     "delta", f"{db}.{table}", "diff",
                     f"of {len(keyed)} changed rows: missing={len(missing)}"
                     f" extra={len(extra)} changed={len(changed)}{compared}",
                     str(self.hop.report_dir(db)),
                     f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                clean = clean and not held_back
+                res.append(got)
             else:
                 res.append(Result("delta", f"{db}.{table}", "ok",
                                   f"{len(keyed)} changed rows verified equal"
                                   f" on both sides{compared}"))
             if log:
                 log(f"{table}: {len(keyed)} changed, "
-                    + ("clean" if res[-1].status == "ok" else "DIFF"))
+                    + self._delta_said(res[-1]))
         if clean:
             state.write_text(json.dumps(end))
         res.insert(0, Result(
