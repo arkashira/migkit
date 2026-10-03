@@ -216,3 +216,18 @@ Then the queue above (live tail L/R/C/P items after tail_apply owners merge; eng
 - Before any push: reword commit 1ac3bd6's message (company project name); pin the 34 vendor files only with the owner's OK to download.
 - (merge, paused round) W2 + GUI (a5a1fa8): migkit/web/ (OIDC code+PKCE, SAML signed-only, SCIM 2.0, one local Argon2id account, sessions/tokens as digests in SQLite), roles viewer<operator<approver<admin from top-level `access:` + hop options.access, web approvals signed and never by the requester, standing source-change offers answered in the view, 33 API routes /api/v1 + generated OpenAPI (docs/site/openapi.json), runs = the CLI's own process with checked args, one writing run per hop, safe defaults (TLS or loopback/proxies, host check, CSRF, CSP). BEHAVIOUR: `report --serve` serves the web view (old dashboard stays `migkit ui`); compose sets MIGKIT_WEB_PLAIN=on. Not done: SAML encrypted/signed requests/SLO, fleet/Terraform/K8s operator, egress gate for IdP calls (owner's call), archive removal offer in the view, ui.role vs web roles (two role logics -> AUD-Z).
 - STOPPED ALL 2026-10-01 07:19 (owner: "ปิดไปก่อน"): the 10 running agents were stopped mid-task; their edits stay in their worktrees (cloud-native 6 commits + 6 dirty, AUD-B 3 commits + 3 dirty, conversion 21 dirty, read-only target 6 dirty, AUD-G2 1 dirty, AUD-D 11 dirty, W7 1 dirty; partitions, W6, W4 had not started editing). No tests, containers or docker locks left running. RESUME = SendMessage to each id with its last step (see each agent's last line), then the queue above. IdP calls: left outside the egress gate (owner said off for now).
+
+## 2026-10-04 - paused (the owner: weekly budget), scope work state
+
+Merged into master: P0-SCOPE 6a, 6b, 6c, 6e (change tail and DDL), 6f, the Huawei DRS / Google Cloud DMS and Datastream / Azure DMS importers, plus the cores of item 7 (row filter, transforms, objects, name rules) and the where/tz validation.
+
+Kept, not merged:
+- 6d (the bulk paths) was stopped mid-way: its work is a WIP commit `a45a596` on branch `worktree-agent-a8e86fe046716b281` (worktree kept). Resume the same agent to finish, then run compileall and the guards, then merge.
+
+Open from the two-axis review of `f3cb404...HEAD` (fix before the full suite):
+- false "same": `verdict.carried` reads `mapping.ops` its own way (use `Hop.carries` / `most_particular`); `servicecheck.reconcile` drops tables whose answers are warn/skip/error and `said()` claims agreement; its names match with case kept.
+- the cutover's final check passes records without `check`, so `verdict.hold` does nothing and a hop that keeps deletes never cuts over.
+- "does the hop narrow anything" is read seven ways (`config.scoped`, `base._taken`, postgres, `backupseed._covers`, `physical._covers`, `verdict.hop_scope`, cli): one place, covering objects, ops and names.
+- `Hop.reversed`: schema lost from reversed renames, `mapping.names` dropped, `_on_target` maps the database only.
+- hand-written `hop.excluded(...split("."))` beside `in_scope` (model.py, mysql.py, postgres.py, cli.py, ship.py, base.py); `digests.py` rename lookup without the database; two PostgreSQL sequence-scope readings; `objects: {roles: [names]}` read as all roles; Oracle counters unscoped; broad excepts; counts parsed back from finding text (fields on `Result` instead).
+- item 7 still to wire: transforms, the row filter's translations and zone, `takes_object` beyond the PostgreSQL/MySQL inventories, "a check scope narrower than the move's is incomplete".
