@@ -124,8 +124,9 @@ What that leaves on the floor:
   to name the program so it could be installed, which is the one place the
   name bought something; it buys less than `migkit doctor --install`, which
   is migkit's own command and installs whatever that machine is short of,
-  so the messages point there and the name goes too. Still to do:
-  `options.schema_authority: atlas` is a config value an operator writes.
+  so the messages point there and the name goes too. The one config value
+  that named a program, `options.schema_authority: atlas`, is now
+  `schema-aware` (the default) or `every-reading`.
   `test_crosscheck_schema.py`.
 * **`snapshot`** - and the interesting part is that migkit does not need
   pgcopydb for it. `pg_export_snapshot` is a PostgreSQL function, and the

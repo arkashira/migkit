@@ -23,9 +23,19 @@ def _own_script_dirs():
     return out
 
 
-# migkit's own environment first, then a source checkout's venv (developing in
-# place), then the paths Homebrew keeps off the default PATH.
-TOOL_PATHS = _own_script_dirs() + [
+def _pinned_bin():
+    """Where `doctor --install` links the builds it pins (`tools.
+    tools_home()/bin`): this user's, so nothing is written where only root
+    may, and first, so a pinned build is the one that runs."""
+    import os
+    return str(Path(os.environ.get("MIGKIT_TOOLS")
+                    or Path.home() / ".migkit" / "tools") / "bin")
+
+
+# the builds migkit pinned first, migkit's own environment next, then a
+# source checkout's venv (developing in place), then the paths Homebrew
+# keeps off the default PATH.
+TOOL_PATHS = [_pinned_bin()] + _own_script_dirs() + [
     str(_BASE / ".venv" / "bin"),
     "/opt/homebrew/opt/libpq/bin", "/opt/homebrew/opt/mysql-client/bin",
     "/opt/homebrew/bin", "/usr/local/bin"]
@@ -70,7 +80,7 @@ def quiet_argv(cmd):
 def tool_env(extra=None):
     import os
     env = dict(os.environ)
-    env["PATH"] = ":".join(TOOL_PATHS) + ":" + env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(TOOL_PATHS + [env.get("PATH", "")])
     env.update(NO_CALL_HOME_ENV)
     if extra:
         env.update(extra)
@@ -211,13 +221,29 @@ def run(cmd, env=None, input=None, timeout=None, check=True, retries=3,
     failure while connecting). A command that runs out of `timeout` is
     not run again. check=False still returns the (failed) process for
     callers that read returncode themselves (e.g. atlas diff = non-zero on
-    diff); a transient failure is retried regardless of check."""
-    cmd = quiet_argv(cmd)
+    diff); a transient failure is retried regardless of check.
+
+    Started, like every program migkit runs, through the one runner
+    (`runner.run`): in a session of its own, listed where the run lists
+    its programs, its command line in the run's debug log, stopped with
+    everything it started when migkit is. Its time running out is
+    `subprocess.TimeoutExpired`, and a program not there `OSError`, as
+    they always were here."""
+    import os
+
+    from . import runner
+    shell = ([os.environ.get("COMSPEC") or "cmd.exe", "/c"] if os.name == "nt"
+             else ["/bin/sh", "-c"])
+    argv = (shell + [cmd] if isinstance(cmd, str)
+            else [str(a) for a in cmd])
     for i in range(retries + 1):
-        p = subprocess.run(
-            cmd, shell=isinstance(cmd, str), capture_output=True, text=True,
-            env=tool_env(env), input=input, timeout=timeout,
-        )
+        try:
+            p = runner.run(argv, env, input=input, timeout=timeout,
+                           check=False, check_flags=False)
+        except runner.Transient:
+            raise subprocess.TimeoutExpired(cmd, timeout) from None
+        except runner.Blocked as e:
+            raise FileNotFoundError(2, str(e), argv[0]) from None
         if not p.returncode or i == retries \
                 or not retryable(p.stderr, writes):
             break
@@ -267,7 +293,11 @@ class Timer:
 class PrivateFile:
     """A file readable by this user only, for as long as a program needs
     it, then gone: where a secret goes instead of a command line, which
-    every process listing on the machine can read."""
+    every process listing on the machine can read. Made new under a name
+    of its own (`O_EXCL`, mode 0600 from the start, never after), so two
+    copies running side by side never share one; in memory where the
+    system keeps a directory there (`/dev/shm`), so it never reaches a
+    disk."""
 
     def __init__(self, text, suffix=""):
         self.text, self.suffix, self.path = text, suffix, None
@@ -275,8 +305,13 @@ class PrivateFile:
     def __enter__(self):
         import os
         import tempfile
-        fd, self.path = tempfile.mkstemp(prefix="migkit-", suffix=self.suffix)
-        os.fchmod(fd, 0o600)
+        shm = "/dev/shm"
+        where = shm if os.path.isdir(shm) and os.access(shm, os.W_OK) \
+            else None
+        fd, self.path = tempfile.mkstemp(prefix="migkit-", suffix=self.suffix,
+                                         dir=where)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(self.text)
         return self.path
@@ -288,6 +323,21 @@ class PrivateFile:
         except OSError:
             pass
         return False
+
+
+def report_name(name):
+    """A file or directory name made from a table's name, which the
+    database lets hold anything: `/` and `..` wrote outside the report
+    directory, and a newline in a table name added a section to the
+    filter file a copy program read. Letters, digits, `_`, `.` and `-`
+    are kept, the rest become `_`, and a short digest of the name as it
+    was keeps two names apart that come out the same (`a/b`, `a_b`)."""
+    import hashlib
+    import re
+    text = str(name)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", text).lstrip(".") or "_"
+    tag = hashlib.sha256(text.encode()).hexdigest()[:8]
+    return f"{safe[:80]}-{tag}"
 
 
 def diff_run_config(url1, table1, url2, table2):
@@ -356,6 +406,11 @@ def _parts(engine, name):
         i += 1
     parts.append(cur)
     return parts
+
+
+#: the schema a table named without one is in, where the engine reads a
+#: bare name in one - PostgreSQL's `regclass` on the search path
+DEFAULT_SCHEMA = {"postgres": "public"}
 
 
 def split_table(engine, name, default=""):

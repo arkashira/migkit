@@ -82,6 +82,7 @@ margin-top:40px;padding-top:16px}
 <a href="commands.html">Commands</a>
 <a href="troubleshooting.html">Troubleshooting</a>
 <a href="evidence.html">Evidence</a>
+<a href="web.html">Web and API</a>
 <a href="releases.html">Releases</a>
 </nav>
 <main>
@@ -111,7 +112,7 @@ migkit move shop --mode full+cdc --go</code></pre>
 <p>every row compared after the copy (migkit check): equal, or each row that differs named</p>
 <h2 id="step-6">6. Cut over</h2>
 <pre><code>migkit move shop --mode cdc --drop --go</code></pre>
-<p>the cutover: the stream torn down, and what else happens on each side is what cutover: says (below); run again once a cutover of the hop has flipped, its point of no return</p>
+<p>the cutover: the stream torn down, the target given back to the application where protect_target kept it, and what else happens on each side is what cutover: says (below); run again once a cutover of the hop has flipped, its point of no return</p>
 <p>Without <code>cutover:</code> in the hop's options, the steps around it are the operator's, in the order <a href="goals.html#cutover">the cutover section</a> gives; with it, migkit runs them as one timed path that undoes itself.</p>
 <footer>migkit 0.2.0 - this page is written from the code by
 <code>tools/gen_docs.py</code>, so it says what this version does.

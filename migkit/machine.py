@@ -986,4 +986,4 @@ def size_of(eng, db, hop):
         return 0
     return sum(int(f.get("bytes") or 0) for name, f in facts.items()
                if isinstance(f, dict)
-               and not hop.excluded(db, *str(name).split(".")))
+               and hop.takes_table(db, name))

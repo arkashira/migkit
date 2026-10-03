@@ -52,7 +52,8 @@ def test_a_signed_in_move_with_no_password_on_any_command_line(tmp_path,
             if str(cmd[0]).startswith("mongo"):
                 seen.append(list(cmd))
             return real(cmd, *a, **k)
-        monkeypatch.setattr(movers.subprocess, "Popen", spy)
+        from migkit import runner
+        monkeypatch.setattr(runner.subprocess, "Popen", spy)
         movers.mongodump_move(hop, "app", 1, True, None)
         n = subprocess.run(shell + ["app2", "--eval",
                                     "db.t.countDocuments()"],

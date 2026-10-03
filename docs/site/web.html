@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The web view and the API - migkit 0.2.0</title>
+<meta name="description" content="Several people, each with a role on each hop, signed in by the organisation&#x27;s identity provider; a REST API over the command line&#x27;s own functions.">
+<style>
+:root{--bg:#fbfbfa;--panel:#f2f3f1;--ink:#1d232b;--mut:#5b6573;
+--line:#dfe2e6;--acc:#0b63c4;--ok:#1f7a3d;--warn:#9a6700;--no:#b42318;
+--code:#f3f4f6;--codeink:#1d232b}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--panel:#111721;
+--ink:#d6dee8;--mut:#8b98a8;--line:#222c39;--acc:#4aa3ff;--ok:#39b96a;
+--warn:#e0a93b;--no:#e5534b;--code:#0a0e14;--codeink:#cbd6e4}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,
+Helvetica,Arial,sans-serif}
+a{color:var(--acc);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+code{background:var(--code);color:var(--codeink);padding:.1em .35em;
+border-radius:4px;font-size:.9em}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+padding:14px 16px;overflow:auto;font-size:13px;line-height:1.55}
+pre code{background:none;padding:0}
+.layout{display:flex;max-width:1240px;margin:0 auto}
+nav{position:sticky;top:0;align-self:flex-start;width:250px;height:100vh;
+overflow:auto;padding:26px 16px 40px 22px;border-right:1px solid var(--line)}
+nav .brand{font-weight:700;font-size:19px}
+nav .tag{color:var(--mut);font-size:12px;margin:4px 0 18px}
+nav a{display:block;color:var(--mut);padding:3px 0;font-size:13.5px}
+nav a.here{color:var(--ink);font-weight:600}
+nav a.sub{padding-left:12px;font-size:12.5px}
+main{flex:1;min-width:0;padding:34px 40px 120px;max-width:980px}
+h1{font-size:30px;margin:.2em 0 .1em}
+h2{font-size:22px;margin:2em 0 .5em;padding-top:.4em;
+border-top:1px solid var(--line)}
+h3{font-size:16px;margin:1.6em 0 .4em}
+.lede{color:var(--mut);font-size:16px;margin:.2em 0 1.4em}
+.rule{background:var(--panel);border-left:3px solid var(--acc);
+border-radius:0 8px 8px 0;padding:12px 16px;margin:18px 0}
+.mut{color:var(--mut);font-size:13px}
+.wide{overflow-x:auto}
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;
+vertical-align:top}
+th{background:var(--panel);font-weight:600}
+.wide table{font-size:12.5px}
+.wide td,.wide th{padding:4px 6px}
+td.y{color:var(--ok);font-weight:600}
+td.p{color:var(--warn);font-weight:600}
+td.na{color:var(--mut)}
+.pill{display:inline-block;background:var(--panel);
+border:1px solid var(--line);
+color:var(--mut);border-radius:20px;padding:2px 10px;font-size:12px;
+margin:2px 4px 2px 0}
+footer{color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);
+margin-top:40px;padding-top:16px}
+@media(max-width:820px){nav{display:none}main{padding:24px 18px 80px}}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+<div class="brand">migkit</div>
+<div class="tag">version 0.2.0</div>
+<a href="index.html">Overview</a>
+<a href="quickstart.html">Quickstart</a>
+<a href="engines.html">Engines</a>
+<a href="goals.html">Goals and modes</a>
+<a href="recipes.html">Recipes</a>
+<a href="options.html">Hop options</a>
+<a href="environment.html">Environment</a>
+<a href="commands.html">Commands</a>
+<a href="troubleshooting.html">Troubleshooting</a>
+<a href="evidence.html">Evidence</a>
+<a href="web.html" class="here">Web and API</a>
+<a class="sub" href="#signing-in">Signing in</a>
+<a class="sub" href="#roles">Roles</a>
+<a class="sub" href="#runs">What a person may start</a>
+<a class="sub" href="#api">The API</a>
+<a class="sub" href="#setting-up">Setting it up</a>
+<a href="releases.html">Releases</a>
+</nav>
+<main>
+<h1>The web view and the API</h1>
+<p class="lede">Several people, each with a role on each hop, signed in by the organisation's identity provider; a REST API over the command line's own functions.</p>
+<p><code>migkit report --serve</code> serves it: every hop's outcomes - what happens to each side, the time and outage predicted with their spread, the guarantees - its progress, the approvals and the changes on the source waiting for an answer, and the evidence, for the people each hop names, each signed in by the organisation's identity provider. The decision record is shown only when asked. The command line is not needed for any of it, and the view does nothing the command line does not: a run started here is the same command, with the same guards.</p>
+<h2 id="signing-in">Signing in</h2>
+<ul><li>OpenID Connect: the code flow with PKCE; the ID token checked against the provider's published keys, issuer, audience, expiry and nonce (<code>MIGKIT_WEB_OIDC_ISSUER</code>).</li><li>SAML 2.0: the provider's signed answer to a request this view made, read only out of the element the signature covers (<code>MIGKIT_WEB_SAML_METADATA</code>).</li><li>SCIM 2.0 at <code>/scim/v2</code>: the provider provisions who may sign in and their groups; a person deactivated there is signed out everywhere at once (<code>MIGKIT_WEB_SCIM_TOKEN</code>).</li><li>Without a provider, one local operator, the admin of every hop, set once through an address the view prints when it starts.</li><li>Multi-factor sign-in is the provider's.</li></ul>
+<h2 id="roles">Roles</h2>
+<p>Written in the hops file's <code>access</code> - for every hop, a group of hops by name pattern, or one hop's <code>options.access</code> - by a person's name (shell patterns allowed) or <code>group:NAME</code>. Each role holds the ones before it; nobody has a role the file does not give.</p>
+<table><tr><th>Role</th><th>What it may do</th></tr><tr id="role-viewer"><td><code>viewer</code></td><td>reads the hop: what it does to each side, the prediction with its spread, the progress, the evidence, the approvals and offers standing, and the decision record when asked</td></tr><tr id="role-operator"><td><code>operator</code></td><td>also starts runs, holds or lets go a change tail, and answers a change on the source a faster way needs</td></tr><tr id="role-approver"><td><code>approver</code></td><td>also approves a step the hop's approvals hold back - never one they asked for</td></tr><tr id="role-admin"><td><code>admin</code></td><td>also sends the hop's receivers a test message; a global admin also reads the users, groups, sessions and the view's record</td></tr></table>
+<h2 id="runs">What a person may start</h2>
+<table><tr><th>Run</th><th>What it does</th><th>Takes</th></tr><tr id="run-plan"><td><code>plan</code></td><td>the plan: what the move would do to each side, how long it would take with its spread, the case it is - nothing is written to either side</td><td><code>mode</code>, <code>db</code>, <code>table</code></td></tr><tr id="run-assess"><td><code>assess</code></td><td>readiness: what would stop a move, before anything moves</td><td>-</td></tr><tr id="run-check"><td><code>check</code></td><td>the read-only comparison of the two sides</td><td><code>db</code>, <code>table</code>, <code>only</code>, <code>deep</code></td></tr><tr id="run-move"><td><code>move</code></td><td>the move, as the plan says it</td><td><code>mode</code>, <code>db</code>, <code>table</code></td></tr><tr id="run-sync"><td><code>sync</code></td><td>the target made equal to the source: dry run, --apply or --go with a restore point</td><td><code>db</code>, <code>kind</code>, <code>mode</code>, <code>on_conflict</code>, <code>tag</code>, <code>apply</code>, <code>go</code></td></tr><tr id="run-cutover"><td><code>cutover</code></td><td>the cutover: the stream torn down and the application moved - the hop's approvals first; a dry run without go</td><td><code>db</code>, <code>go</code></td></tr><tr id="run-rollback"><td><code>rollback</code></td><td>a saved state restored on the target - a dry run without apply</td><td><code>db</code>, <code>state</code>, <code>apply</code></td></tr><tr id="run-report"><td><code>report</code></td><td>the hop's evidence exported again</td><td>-</td></tr></table>
+<h2 id="api">The API</h2>
+<p>Every route is served under <code>/api/v1</code>, answers JSON, and needs an API token made on the account page (<code>Authorization: Bearer ...</code>) or a signed-in page. A hop the caller may not see answers 404; a role too low, 403. The whole description: <a href="openapi.json">openapi.json</a>.</p>
+<table><tr><th>Method</th><th>Path</th><th>Needs</th><th>What it does</th></tr><tr id="api-me"><td><code>GET</code></td><td><code>/api/v1/me</code></td><td>signed-in</td><td>who is signed in, and their role on each hop</td></tr><tr id="api-hops"><td><code>GET</code></td><td><code>/api/v1/hops</code></td><td>signed-in</td><td>the hops the caller may see, each with its verdict, runs going on and what waits</td></tr><tr id="api-hop"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;</code></td><td>viewer</td><td>the hop as its file says it, every secret hidden, and what its goal does to each side</td></tr><tr id="api-validation"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/validation</code></td><td>viewer</td><td>what is wrong with the hop in its file, and what doctor would say of its keys</td></tr><tr id="api-outcome"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/outcome</code></td><td>viewer</td><td>what the hop does to each side and guarantees; each planned database's phases with their p50 and p90, and the outage held to the hop's limits</td></tr><tr id="api-progress"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/progress</code></td><td>viewer</td><td>where the hop stands: the verdict, each move's progress and tail, and the metrics /metrics serves for it</td></tr><tr id="api-plan"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/plan</code></td><td>operator</td><td>a dry run of the move: what it would do and how long it would take - a run of its own, nothing written to either side</td></tr><tr id="api-runs"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/runs</code></td><td>viewer</td><td>the runs started from the view and the API, newest first</td></tr><tr id="api-start"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/runs</code></td><td>operator</td><td>start a run: the plan, assess, a check, the move, a sync, the cutover, a rollback or the evidence export - the command line's own command, with the hop's guards and approvals</td></tr><tr id="api-run"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/runs/&lt;run&gt;</code></td><td>viewer</td><td>one run: its state, exit, verdict and evidence</td></tr><tr id="api-output"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/runs/&lt;run&gt;/output</code></td><td>viewer</td><td>a run's output from <code>offset</code>, secrets hidden</td></tr><tr id="api-stop"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/runs/&lt;run&gt;/stop</code></td><td>operator</td><td>stop a run as ctrl-c at its terminal would</td></tr><tr id="api-approvals"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/approvals</code></td><td>viewer</td><td>the steps waiting for approval: what each will do, what approving lets happen, who has approved</td></tr><tr id="api-approve"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/approvals/&lt;request&gt;</code></td><td>approver</td><td>approve a step as the person signed in - never one they asked for</td></tr><tr id="api-offers"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/offers</code></td><td>viewer</td><td>the changes on the source a faster way needs, offered and not answered: what each buys and what not taking it means</td></tr><tr id="api-answer"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/offers/&lt;change&gt;</code></td><td>operator</td><td>answer an offered change on the source: yes, no or dba</td></tr><tr id="api-evidence"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/evidence</code></td><td>viewer</td><td>the hop's evidence bundles and its record's chain</td></tr><tr id="api-evidence_file"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/evidence/&lt;name&gt;</code></td><td>viewer</td><td>one file of the hop's whole-history bundle, as written</td></tr><tr id="api-evidence_run_file"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/evidence/&lt;run&gt;/&lt;name&gt;</code></td><td>viewer</td><td>one file of a run's bundle, as written</td></tr><tr id="api-decisions"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/decisions</code></td><td>viewer</td><td>the decision record, on request: each work, the way taken and why, every way passed over and why</td></tr><tr id="api-notifications"><td><code>GET</code></td><td><code>/api/v1/hops/&lt;hop&gt;/notifications</code></td><td>viewer</td><td>who is told what: the receivers by kind, the events, the lag</td></tr><tr id="api-notify_test"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/notifications/test</code></td><td>admin</td><td>send the hop's receivers a test message</td></tr><tr id="api-hold"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/tails/&lt;db&gt;/hold</code></td><td>operator</td><td>hold a change tail between batches, its position saved</td></tr><tr id="api-resume"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/tails/&lt;db&gt;/resume</code></td><td>operator</td><td>let a held change tail go on</td></tr><tr id="api-tail_stop"><td><code>POST</code></td><td><code>/api/v1/hops/&lt;hop&gt;/tails/&lt;db&gt;/stop</code></td><td>operator</td><td>end a change tail at its next batch, its position saved</td></tr><tr id="api-tokens"><td><code>GET</code></td><td><code>/api/v1/tokens</code></td><td>signed-in</td><td>the caller's API tokens</td></tr><tr id="api-token_new"><td><code>POST</code></td><td><code>/api/v1/tokens</code></td><td>signed-in</td><td>a new API token for the caller, shown once</td></tr><tr id="api-token_revoke"><td><code>DELETE</code></td><td><code>/api/v1/tokens/&lt;token&gt;</code></td><td>signed-in</td><td>end one of the caller's API tokens</td></tr><tr id="api-people"><td><code>GET</code></td><td><code>/api/v1/admin/people</code></td><td>global admin</td><td>the people and groups the identity provider provisioned, and the local account</td></tr><tr id="api-sessions"><td><code>GET</code></td><td><code>/api/v1/admin/sessions</code></td><td>global admin</td><td>every session open</td></tr><tr id="api-record"><td><code>GET</code></td><td><code>/api/v1/admin/record</code></td><td>global admin</td><td>the view's own record: sign-ins, provisioning, tokens, refusals</td></tr><tr id="api-openapi"><td><code>GET</code></td><td><code>/api/v1/openapi.json</code></td><td>anyone</td><td>this document</td></tr></table>
+<h2 id="setting-up">Setting it up</h2>
+<p>On this machine alone, nothing needs setting. Anywhere else it takes TLS - its own certificate, or a reverse proxy in front that does TLS, named so only it is answered. Deployment, the proxy's configuration and each provider's settings: <a href="https://github.com/arkashira/migkit/blob/master/docs/web.md">docs/web.md</a>.</p>
+<table><tr><th>Variable</th><th>Kind</th><th>What it does</th></tr><tr id="web-MIGKIT_METRICS_TOKEN"><td><code>MIGKIT_METRICS_TOKEN</code></td><td>secret</td><td>the bearer a scraper reads /metrics with; without it only someone signed in reads it, their own hops</td></tr><tr id="web-MIGKIT_UI_BIND"><td><code>MIGKIT_UI_BIND</code></td><td>text</td><td>the address the web view (and the dashboard) listens on; for the web view, anything but this machine's loopback needs TLS</td></tr><tr id="web-MIGKIT_UI_HOSTS"><td><code>MIGKIT_UI_HOSTS</code></td><td>list</td><td>more host names the web view and the dashboard answer to</td></tr><tr id="web-MIGKIT_WEB_IDLE_MINUTES"><td><code>MIGKIT_WEB_IDLE_MINUTES</code></td><td>number</td><td>minutes without a request before a sign-in ends</td></tr><tr id="web-MIGKIT_WEB_OIDC_CLIENT_ID"><td><code>MIGKIT_WEB_OIDC_CLIENT_ID</code></td><td>text</td><td>the client the provider registered for the web view</td></tr><tr id="web-MIGKIT_WEB_OIDC_CLIENT_SECRET"><td><code>MIGKIT_WEB_OIDC_CLIENT_SECRET</code></td><td>secret</td><td>its secret, or a reference to where it is kept</td></tr><tr id="web-MIGKIT_WEB_OIDC_GROUPS"><td><code>MIGKIT_WEB_OIDC_GROUPS</code></td><td>text</td><td>the claim a person's groups are in</td></tr><tr id="web-MIGKIT_WEB_OIDC_ISSUER"><td><code>MIGKIT_WEB_OIDC_ISSUER</code></td><td>text</td><td>the OpenID Connect provider people sign in through, its issuer's address</td></tr><tr id="web-MIGKIT_WEB_OIDC_SCOPES"><td><code>MIGKIT_WEB_OIDC_SCOPES</code></td><td>list</td><td>the scopes asked for</td></tr><tr id="web-MIGKIT_WEB_PLAIN"><td><code>MIGKIT_WEB_PLAIN</code></td><td>flag</td><td>serve the web view without TLS beyond this machine's loopback - only where the network to it is the operator's own: a container published on the host's loopback</td></tr><tr id="web-MIGKIT_WEB_PROXIES"><td><code>MIGKIT_WEB_PROXIES</code></td><td>list</td><td>the addresses of the reverse proxies in front of the web view: the only ones answered, and whose forwarded headers are read</td></tr><tr id="web-MIGKIT_WEB_RESET"><td><code>MIGKIT_WEB_RESET</code></td><td>flag</td><td>print an address that sets the local operator's password again</td></tr><tr id="web-MIGKIT_WEB_SAML_GROUPS"><td><code>MIGKIT_WEB_SAML_GROUPS</code></td><td>text</td><td>the attribute a person's groups are in</td></tr><tr id="web-MIGKIT_WEB_SAML_METADATA"><td><code>MIGKIT_WEB_SAML_METADATA</code></td><td>path</td><td>the SAML identity provider's metadata, as it publishes it</td></tr><tr id="web-MIGKIT_WEB_SAML_NAME"><td><code>MIGKIT_WEB_SAML_NAME</code></td><td>text</td><td>the attribute naming the person, where not the name identifier</td></tr><tr id="web-MIGKIT_WEB_SCIM_TOKEN"><td><code>MIGKIT_WEB_SCIM_TOKEN</code></td><td>secret</td><td>the bearer token the provider provisions people and groups with; set, only people it provisioned sign in</td></tr><tr id="web-MIGKIT_WEB_SESSION_HOURS"><td><code>MIGKIT_WEB_SESSION_HOURS</code></td><td>number</td><td>the longest a sign-in lasts</td></tr><tr id="web-MIGKIT_WEB_STATE"><td><code>MIGKIT_WEB_STATE</code></td><td>path</td><td>where the web view keeps its sessions, the people provisioned and its signing key</td></tr><tr id="web-MIGKIT_WEB_TLS_CERT"><td><code>MIGKIT_WEB_TLS_CERT</code></td><td>path</td><td>the web view's certificate (PEM, its chain after it)</td></tr><tr id="web-MIGKIT_WEB_TLS_KEY"><td><code>MIGKIT_WEB_TLS_KEY</code></td><td>path</td><td>the certificate's private key</td></tr><tr id="web-MIGKIT_WEB_TOKEN_DAYS"><td><code>MIGKIT_WEB_TOKEN_DAYS</code></td><td>number</td><td>the longest an API token lasts</td></tr><tr id="web-MIGKIT_WEB_URL"><td><code>MIGKIT_WEB_URL</code></td><td>text</td><td>the address people open the web view at, https:// behind a proxy or with a certificate</td></tr></table>
+<footer>migkit 0.2.0 - this page is written from the code by
+<code>tools/gen_docs.py</code>, so it says what this version does.
+Source: <a href="https://github.com/arkashira/migkit">github.com/arkashira/migkit</a>.
+AGPL-3.0-or-later.</footer>
+</main>
+</div>
+</body>
+</html>

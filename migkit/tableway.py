@@ -391,7 +391,7 @@ def _needs(eng, db, name, masked=False, begun=False):
     need = []
     if masked:
         need.append("masked on the way")
-    if eng.hop.row_filter(db, *str(name).split(".")):
+    if eng.hop.row_filter(db, *eng.hop.parts_of(name)):
         need.append("row filter")
     if begun:
         need.append("resume by chunk")
@@ -723,7 +723,13 @@ def carry(eng, job):
         decide.record(eng.hop, dataclasses.replace(
             choice, work=job.key, reason=why), say=job.log)
         began = time.monotonic()
-        done = runs[choice.path](job, choice)
+        # the programs a way starts for the table are listed where the
+        # database's are (`runner.listing`), so a run after a crash finds
+        # one still writing, as it finds a bulk path's
+        from . import runner
+        with runner.listing(eng.hop.report_dir(job.db)
+                            / "running-programs.json"):
+            done = runs[choice.path](job, choice)
         took = time.monotonic() - began
         if done is not UNTIMED and job.fresh:
             trials.took(choice.path, max(int(unit.get("rows") or 0), 1),

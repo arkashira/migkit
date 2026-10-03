@@ -188,9 +188,9 @@ def test_db_map_resolves_target_name():
     hop = Hop(name="m", engine="postgres",
               source=Endpoint(host="s", user="u", password="p"),
               target=Endpoint(host="t", user="u", password="p"),
-              db_map={"cart_uat": "cart"})
-    assert hop.target_db("cart_uat") == "cart"     # mapped
-    assert hop.target_db("order_uat") == "order_uat"  # identity when unmapped
+              db_map={"shop_staging": "shop"})
+    assert hop.target_db("shop_staging") == "shop"     # mapped
+    assert hop.target_db("reports") == "reports"  # identity when unmapped
 
 
 def test_engine_side_resolution_maps_only_dst():
@@ -203,13 +203,13 @@ def test_engine_side_resolution_maps_only_dst():
         return Hop(name="m", engine=engine,
                    source=Endpoint(host="s", user="u", password="p"),
                    target=Endpoint(host="t", user="u", password="p"),
-                   db_map={"cart_uat": "cart"})
+                   db_map={"shop_staging": "shop"})
     for cls, eng_name in ((PostgresEngine, "postgres"),
                           (MySQLEngine, "mysql"),
                           (MongoEngine, "mongodb")):
         eng = cls(hop(eng_name))
-        assert eng._d("src", "cart_uat") == "cart_uat"   # source never maps
-        assert eng._d("dst", "cart_uat") == "cart"       # target maps
+        assert eng._d("src", "shop_staging") == "shop_staging"   # source never maps
+        assert eng._d("dst", "shop_staging") == "shop"       # target maps
         assert eng._d("dst", "other") == "other"         # unmapped identity
     # pg must never remap the maintenance db
     assert PostgresEngine(hop("postgres"))._d("dst", "postgres") == "postgres"
@@ -306,10 +306,30 @@ def test_atlas_authoritative_demotes_textual_diff():
     assert out["db (structural)"] == "diff"
     assert out["db objects"] == "diff"
     # opt-out keeps everything as-is
-    eng2 = Engine(_hop(options={"schema_authority": "strict"}))
+    eng2 = Engine(_hop(options={"schema_authority": "every-reading"}))
     res2 = [Result("schema", "db", "diff", "x"),
             Result("schema", "db (fix DDL)", "ok", "clean")]
     assert eng2._atlas_authoritative(res2)[0].status == "diff"
+
+
+def test_the_schema_authority_is_said_without_naming_a_program():
+    """The words a hop writes name what decides, not the program behind
+    it; an older hop's word for the default is read as it, and a word
+    that is neither is refused before anything runs."""
+    from migkit import hopkeys
+    from migkit.engines.base import Engine, Result
+    assert all("atlas" not in w for w in Engine.AUTHORITIES)
+    res = [Result("schema", "db", "diff", "x"),
+           Result("schema", "db (fix DDL)", "ok", "clean")]
+    for word in ("schema-aware", "atlas", None):
+        opts = {"schema_authority": word} if word else {}
+        got = Engine(_hop(options=opts))._atlas_authoritative(
+            [Result(r.check, r.scope, r.status, r.detail) for r in res])
+        assert got[0].status == "ok", word
+    assert hopkeys._authority_problems("x", "schema-aware") == []
+    assert hopkeys._authority_problems("x", "atlas") == []
+    bad = hopkeys._authority_problems("x", "schema_aware")
+    assert bad and bad[0].level == "error"
 
 
 def test_delta_available_on_all_engines():
@@ -354,6 +374,7 @@ def test_capabilities_and_install_selection(monkeypatch):
     monkeypatch.setattr(tools, "ase_driver_present", lambda: True)
     monkeypatch.setattr(tools, "install_second_reader",
                         lambda log=None: pytest.fail("nothing to install"))
+    monkeypatch.setattr(tools, "own_env_python", lambda name: "/bin/python")
     assert {st for _, _, st, _ in tools.capabilities()} == {"ready"}
     assert tools.install_missing(lambda m: None) == []
 
@@ -387,9 +408,10 @@ def test_installing_says_how_many_not_which(monkeypatch, tmp_path):
                         lambda n: "/bin/brew" if n == "brew" else None)
     monkeypatch.setattr(tools.platform, "system", lambda: "Darwin")
     ran = []
-    monkeypatch.setattr(tools.subprocess, "run",
-                        lambda argv, **k: ran.append(argv) or
-                        type("P", (), {"returncode": 1, "stderr": "x"})())
+    # the package manager fails every package, so each is said by number
+    monkeypatch.setattr(tools, "_step",
+                        lambda argv, log, failed, cwd=None, env=None:
+                        ran.append(argv) and False)
     monkeypatch.setattr(tools, "second_reader_present", lambda: False)
     built, fetched = [], []
     monkeypatch.setattr(tools, "install_second_reader",
@@ -405,12 +427,21 @@ def test_installing_says_how_many_not_which(monkeypatch, tmp_path):
     said = []
     tools.install_missing(said.append)
     assert built, "the second reading is part of installing everything"
-    assert fetched == list(tools.VENDOR), fetched
+    # fetched side by side, each once
+    assert sorted(fetched) == sorted(tools.VENDOR), fetched
     assert "fetching vendor component 1 ..." in said, said
     assert compiled == list(tools.SOURCE_BUILDS), compiled
     assert "building component 1 from its source ..." in said, said
-    assert ran and len([s for s in said if "installing component" in s]) \
-        == len(ran), said
+    # the package manager is called once for every package, then - that
+    # failing - once for each, and each that fails is said by its number
+    batch = ran[0]
+    assert batch[:2] == ["brew", "install"] and len(batch) > 3, ran
+    pkgs = batch[2:]
+    assert ran[1:1 + len(pkgs)] == [["brew", "install", p]
+                                    for p in pkgs], ran
+    assert f"installing {len(pkgs)} components with the package manager" \
+        " ..." in said, said
+    assert len([s for s in said if "did not install" in s]) == len(pkgs)
     low = " ".join(said).lower()
     assert not [t for t in TOOLS + ("pgloader", "percona") if t in low], said
 
@@ -440,14 +471,19 @@ def test_the_second_reading_installs_in_migkits_words(monkeypatch, tmp_path):
                         __import__("pathlib").Path, "home",
                         lambda: tmp_path)
     ran = []
-    monkeypatch.setattr(tools.subprocess, "run",
-                        lambda argv, **k: ran.append(argv) or
-                        type("P", (), {"returncode": 0})())
+    monkeypatch.setattr(tools, "_step",
+                        lambda argv, log, failed, cwd=None, env=None:
+                        ran.append(argv) or True)
     said = []
     monkeypatch.setattr(tools, "which", lambda n: None)
     assert tools.install_second_reader(said.append) is True
     assert ran[0][1:3] == ["-m", "venv"], ran
-    assert ran[1][-1] == tools.SECOND_READER_PACKAGE, ran
+    # every package held to its digests: the lock of them, and nothing
+    # else taken
+    assert ran[1][-3:] == ["-r", str(tools.SECOND_READER_LOCK),
+                           "--require-hashes"], ran
+    assert "google-pso-data-validator==8.9.3" in \
+        tools.SECOND_READER_LOCK.read_text()
     # with the package manager that can fetch the Python it needs: 3.12,
     # past which numpy 1.26.4 has no wheels
     ran.clear()
@@ -456,7 +492,8 @@ def test_the_second_reading_installs_in_migkits_words(monkeypatch, tmp_path):
     assert tools.install_second_reader(said.append) is True
     assert ran[0][:5] == ["/x/uv", "venv", "-q", "--python", "3.12"], ran
     assert ran[1][:3] == ["/x/uv", "pip", "install"], ran
-    assert ran[1][-1] == tools.SECOND_READER_PACKAGE, ran
+    assert ran[1][-3:] == ["-r", str(tools.SECOND_READER_LOCK),
+                           "--require-hashes"], ran
     assert ran[1][ran[1].index("--python") + 1] == ran[0][-1] + "/bin/python"
     low = " ".join(said).lower()
     assert said and not [t for t in TOOLS + ("validator", "google", "pso")

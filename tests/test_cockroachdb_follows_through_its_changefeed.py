@@ -199,3 +199,44 @@ def test_a_table_without_a_key_is_copied_and_not_followed(shop, tmp_path):
     with pytest.raises(SystemExit) as e:
         _engine(tmp_path).change_point("src", "csrc")
     assert "bare" in str(e.value) and "primary key" in str(e.value)
+
+
+def test_a_table_that_joins_the_tail_is_followed_after_its_copy(shop,
+                                                                tmp_path):
+    """The changefeed names its tables when it is opened: a table made on
+    the source while the tail ran was copied (`ddl: park`) and then never
+    followed - its changes after the copy went nowhere. The feed is let go
+    and opened again over the tables the tail takes now
+    (`FOLLOWS_LISTED_TABLES`)."""
+    from migkit.engines.cockroachdb import CockroachEngine
+    eng = _engine(tmp_path)
+    eng.hop.options["ddl"] = "park"
+    eng.tail_start("csrc", tmp_path / "tail-token.json")
+    _move(eng, tmp_path)
+    thread, ended = _tail(eng, tmp_path)
+    try:
+        run(["create table joined (id int8 primary key, v string)",
+             "insert into joined values (1, 'copied')"], db="csrc")
+        end = time.time() + 120
+        while time.time() < end:
+            try:
+                if run(["select count(*) from joined"], db="cdst")[0][0]:
+                    break
+            except Exception:  # noqa: BLE001 - not made there yet
+                pass
+            time.sleep(1)
+        run(["insert into joined values (2, 'followed')",
+             "update joined set v = 'changed' where id = 1"], db="csrc")
+        time.sleep(2)
+        at = eng.src_lsn("csrc")
+        assert eng.fence_wait("csrc", at, timeout=120) is True
+        end = time.time() + 60
+        while time.time() < end and run(
+                ["select count(*) from joined"], db="cdst")[0][0] < 2:
+            time.sleep(1)
+    finally:
+        _stop(thread)
+    assert not ended or isinstance(ended["e"], KeyboardInterrupt), ended
+    assert CockroachEngine.FOLLOWS_LISTED_TABLES
+    got = run(["select id, v from joined order by id"], db="cdst")
+    assert [tuple(r) for r in got] == [(1, "changed"), (2, "followed")]

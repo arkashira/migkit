@@ -478,11 +478,14 @@ do this (`test_deep_collation_pg.py`, `test_mysql_smart_checks.py`
 target's collation says the collapse is untestable, rather than calling
 it clean.
 
-**Missing:** which comparisons *inside stored code* now mix two
-collations. A routine keeps the database collation it was created under,
-and `Illegal mix of collations` arrives only when the routine runs.
-Finding it means reading the routines' bodies, which migkit does not
-parse.
+Stored code is read too (done 2026-10-04): a routine, trigger or event
+recreated in the target database compares its variables, parameters and
+literals under that database's collation, so `assess` names each body
+that uses a text column keeping another collation, or a COLLATE clause
+naming another - read from the body's own words, its comments and quoted
+text set aside (`MySQLEngine._code_collation_mix`,
+`test_stored_code_compares_under_one_collation.py`). It names where the
+two may meet; whether a given statement compares them is the run's.
 
 ### B5. The timestamp that lost its offset
 

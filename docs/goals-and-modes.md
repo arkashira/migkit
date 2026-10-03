@@ -21,6 +21,9 @@ into this page from it by `tools/gen_docs.py`, so they say the same.
 | `rehearse` | the whole path the real run will take - copy, follow, prove, cut over - on a copy or a sample of the source into a target of its own, every phase timed, so the hop it rehearses (rehearses:) is forecast from what it measured | a copy or a sample of the real run's source, read and followed as a cutover follows it; written only by a cutover the hop turns on, as the real run's would be | a target of its own, filled, followed and cut over to as the real run's will be; its own writes are timed there, rolled back | every phase measured and kept for the real run's forecast; the two sides proved equal before the real run is allowed to start |
 | `upgrade` | the same engine at a newer version, a higher edition (SQL Server Web to Enterprise), or both, with the least downtime: what the new version or edition changes checked first, then the data moved into it and followed, or a copy of its pages taken to the target where the hop allows it - upgraded there where the version moves - and switched over | read and followed as a cutover follows it; never upgraded where it runs - its downtime is the cutover's alone | a server of the new version or edition filled and followed, or a copy of the source's pages taken there - SQL Server's own backup restored, MySQL's clone, PostgreSQL's pages - upgraded by the new version's own upgrade where the version moves, then followed from the copy's position | what the new version removes or changes, and what the new edition lacks of what the source uses, said before anything is written; the source's own statements planned, timed and held to the same answers on both versions |
 | `subset` | a copy for testing: the rows chosen and every row they refer to, masked where the hop says, into a staging or developer database, proved row by row | read, never written: the rows chosen and those they refer to | its tables in scope emptied and filled with the subset, masked on the way where the hop says | every reference in the copy resolves inside it; every row as the source's, its masked columns as the rule writes them, none beyond the subset |
+| `consolidate` | many databases or tenants into one: each source's rows under a column the hop names, filled with its own value, keys kept apart by the hop's rule, proved source by source | read, never written: each table through its row filter | one database the sources share: this source's rows there replaced by its own, under its value, keys shifted where the rule shifts them; the other sources' rows left as they are; the counters raised past every source's keys | keys two sources hold found before anything is written and refused, or kept apart by the rule (tenant, offset, remap); every source's rows proved in the target under its value; no row under a value no source has |
+| `split` | one database into many - a service extracted, a database split by region: each part's rows by its rule, every row placed exactly once, proved | read, never written: every row counted against every part's rule before the move | this part's tables (the hop's scope) filled with the rows its rule takes (mapping.where) | rows no part takes and rows two parts take found before the move and refused (rest: stays, shared); each key in exactly one part's target, the targets together the source's; references across the split counted and said |
+| `archive` | old rows to cheaper storage: the rows each rule picks added to an archive and proved there, then removed from the source only once proved and only where the hop allows it | read; written only with archive: {remove: true} and the source's own answer by name (source_changes: {archived_rows: yes}) behind the hop's approvals: each archived row removed once the archive holds it as the source has it now, a row other rows still name never | the archive: the rows each rule picks added, what it holds already kept, never overwritten | every row the rule picks in the archive as the source has it; every row removed from the source in the archive with the digest it had, in the ledger; put back from the archive by archive: {restore: true} |
 <!-- /gen_docs: goals -->
 
 **`goal: cutover` does not turn `cutover:` on.** The goal sets up the
@@ -34,10 +37,10 @@ operator does the steps by hand, with migkit proving around them (below).
 <!-- gen_docs: modes -->
 | Command | What it does |
 |---|---|
-| `move --mode full` | one copy of every table the hop carries: the source read, the target written |
+| `move --mode full` | one copy of every table the hop carries: the source read, the target written - kept from the application's writes before the first row and again after the last where the hop asks (protect_target): its rights taken, its access policy changed on an answer of yes, or its writes named, the way the target allows |
 | `move --mode cdc` | the stream of changes started, or resumed from where it stood: the source's log read, the target written change by change |
 | `move --mode full+cdc` | the copy, then the stream from a position taken before the copy began, so nothing changed during it is lost |
-| `move --mode cdc --drop` | the cutover: the stream torn down, and what else happens on each side is what cutover: says (below); run again once a cutover of the hop has flipped, its point of no return |
+| `move --mode cdc --drop` | the cutover: the stream torn down, the target given back to the application where protect_target kept it, and what else happens on each side is what cutover: says (below); run again once a cutover of the hop has flipped, its point of no return |
 | `sync --mode reconcile` | the last check's differences shown; --apply writes the target to match the source |
 | `sync --mode verify` | read only: every table compared as of one moment |
 | `sync --mode seed` | the schema aligned, the copy, the differences repaired and a consistent check, one after another |
@@ -65,9 +68,10 @@ starts with what each side will see.
 **On** (`cutover: true`, or its settings): migkit does all of that itself, and adds:
 
 - a timed path: the write outage clocked from the pooler's pause or the freeze to the flip, against the hop's budget - past it, all of it is undone
-- the freeze: migkit stops the source's writes itself, the way chosen from what the source allows - the whole server made read-only where it may, or the application's accounts kept from writing and their sessions ended - and reads it back; PostgreSQL, MySQL, MongoDB, Redis, SQL Server, Cassandra, Kafka and OpenSearch sources alike
+- the freeze: migkit stops the source's writes itself, the way chosen from what the source allows - the whole server made read-only where it may, or the application's accounts kept from writing and their sessions ended - and reads it back; PostgreSQL, MySQL, TiDB, CockroachDB, MongoDB, Redis, SQL Server, Oracle, Db2, SAP ASE, Teradata, ClickHouse, Cassandra, Couchbase, Kafka, OpenSearch, Redshift and Snowflake sources alike
 - the drain: the source's position taken after the freeze, and the hop's own stream waited for until it passes it - or, where the stream keeps no position migkit can read, a mark written on the source after the freeze and waited for on the target; a streaming pipeline and a leg run from here drained by their own offsets and positions
 - the fenced check: the rows changed since the last verified pass compared inside the outage, and the schema compared with the preflight's
+- the target's hold read back first (protect_target): the application's accounts write nothing there, or, where nothing holds a writer, the writes that are not migkit's named - one named is drift, and stops the cutover - and given back at the flip, put on again if the cutover is undone
 - the counters: the target's sequences and auto-increments raised past every key the source handed out
 - the stream back: from the new primary to the old source (reverse: at_cutover), made and proven before the freeze where its engine lets it wait idle, so the flip only starts it, and proven to reach the old source
 - the undo: every step recorded before it acts and put back, the last first, on any failure, on the budget passing, or on the next run after one killed half way
@@ -110,6 +114,58 @@ What a change of edition may leave behind, the hop may accept by name:
     options:
       edition:
         accept: [TransparentDataEncryption, audit]   # as assess names them
+
+## What the move changes on the way
+
+The plan's first line names these too, between any two engines, and the
+check before the first write holds to each (`migkit/case.py`,
+`scenario_rows`):
+
+| Scenario | What migkit reads | What it holds to |
+|---|---|---|
+| **a character set or a collation** - latin1 or a Windows code page into utf8mb4, EUC or TIS-620 into UTF-8, a collation changed (`charset: {to, collation, repair}`, or read where the two sides differ) | each text column's character set and collation on both sides - MySQL, PostgreSQL, SQL Server, Oracle and Db2 from their catalogues | a value the target's character set has no code for refused by key; text stored twice as UTF-8 repaired on the target (`repair: double-encoded`); every unique key over text put to the target's own comparison, two values it takes for one refused; MySQL's index and row limits counted in the new character set; on MySQL the target converted once its rows are in, each column keeping its type; every row proved by key as converted, never by a range either side orders |
+| **a storage engine** - MyISAM, Aria, MEMORY, ARCHIVE and MariaDB's own engines into InnoDB (`table_engine: {to, accept, foreign_keys}`, or where the target lacks the source's engine) | each table's engine on both sides, the target's own engines, each side's full-text settings | the table made in its new engine in the schema step; transactions, foreign keys, full-text, locking said; rows a foreign key would now refuse counted and refused; numbering per group refused unless accepted (`accept: [group numbering]`); a MERGE table refused, with the view to make; after the move, each table's engine proved |
+
+## Many into one, one into many, old rows out
+
+    hops:
+      shop-eu:                              # goal consolidate
+        goal: consolidate
+        options:
+          consolidate: {column: tenant_id, value: eu, keys: tenant, with: [shop-us]}
+      billing:                              # goal split, one part of it
+        goal: split
+        exclude: [shipments]
+        mapping: {where: {customers: "region = 'eu'"}}
+        options:
+          split: {with: [shipping], shared: [countries], rest: stays}
+      orders-archive:                       # goal archive
+        goal: archive
+        mapping: {where: {orders: "created < '2024-01-01'"}}
+        options:
+          archive: {remove: true}
+          source_changes: {archived_rows: yes}
+
+- **consolidate**: each source's rows under the column the hop names,
+  its own value in it; every key two sources hold found before the move -
+  refused (`keys: refuse`, the default), or kept apart: `tenant` (the
+  column leads the target's key), `offset` (each source's whole-number
+  keys, and every column referring to them, shifted by its offset),
+  `remap` (the offsets worked out a stride apart and kept); the counters
+  raised past every source's keys; every source's rows proved by key under
+  its value.
+- **split**: each part is a hop - its tables its scope, its rows its row
+  filter; every row of the source counted against every part's rule
+  before the move - one no part takes refused unless `rest: stays`, one
+  two parts take unless the table is `shared` - and proved after it on
+  the parts' targets; references a part's rows make to rows another part
+  takes counted and said.
+- **archive**: the rows each rule picks added to the archive, never
+  overwriting what it holds; removed from the source only with `remove:
+  true`, the source's own answer by name and the hop's approvals, each row
+  read again on both sides first and removed only where the archive holds
+  it as the source has it now - never a row other rows still name - each
+  batch kept in a ledger; `restore: true` puts them back.
 
 ## A change on the source a faster way needs
 

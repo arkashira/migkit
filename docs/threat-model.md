@@ -103,11 +103,44 @@ What is written for someone to hand over:
   hop masks them
 * the diagnostics bundle, which drops every finding's detail
 
+## The web view and the API
+
+`migkit report --serve` serves the web view and its API (`migkit.web`,
+`docs/web.md`). It listens on 127.0.0.1 unless `MIGKIT_UI_BIND` says
+otherwise, and then only with TLS - its own certificate, or a reverse
+proxy named in `MIGKIT_WEB_PROXIES`, the only connection answered and
+the only forwarded headers read. It answers only to the name in
+`MIGKIT_WEB_URL` and those `MIGKIT_UI_HOSTS` adds.
+* Who: signed in by the organisation's provider (OpenID Connect with
+  PKCE, the ID token checked against the provider's keys; or SAML, only a
+  signed answer to a request the view made, once), or the one local
+  operator of an install without one (Argon2id, a doubling wait after
+  five wrong passwords, set through a one-time printed address).
+  Provisioned by SCIM, a deactivated person is signed out at once.
+* What: a role per hop from the hops file's `access` only; a hop not
+  the person's answers as one that is not there; every refusal and every
+  change written to the hop's record or the view's own.
+* Sessions: a random cookie, HttpOnly, SameSite=Lax, `__Host-` and
+  Secure over https, kept on the server as its digest, new at each
+  sign-in, ended idle, at its term and by deprovisioning; every change
+  carries the page's CSRF token and comes from the view's own origin.
+  API tokens are kept as digests and end with their person.
+* What runs: only the command line's own commands, from a fixed list,
+  every value checked before it is an argument; never a shell.
+* What it shows: the hop's secrets hidden, no program named, its own
+  script and style only (no inline code), no framing, nothing cached.
+* `/metrics`: a scraper with `MIGKIT_METRICS_TOKEN`, or a person signed
+  in, their own hops.
+* Not covered: an encrypted SAML assertion, a signed authentication
+  request, single logout.
+
+(`test_web_*.py`)
+
 ## The dashboard
 
-`migkit report --serve` listens on 127.0.0.1 unless `MIGKIT_UI_BIND` says
-otherwise (the shipped container, published on the host's 127.0.0.1
-only). It answers only to this machine's names and those
+`migkit ui` (the earlier view) listens on 127.0.0.1 unless
+`MIGKIT_UI_BIND` says otherwise (the shipped container, published on the
+host's 127.0.0.1 only). It answers only to this machine's names and those
 `MIGKIT_UI_HOSTS` adds. The printed address opens it once; a proxy that
 signs people in is believed only with its secret
 (`MIGKIT_UI_PROXY_SECRET`), and does not start without one. Each person

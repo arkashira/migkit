@@ -254,23 +254,17 @@ class Facts(dict):
 
     def _covers(self):
         """True where a copy of the whole server is what this hop asks
-        for, or the reason it is not."""
-        hop = self.hop
-        if hop.exclude:
-            return (f"the hop excludes {', '.join(map(str, hop.exclude))},"
-                    " and a copy of the pages carries every table")
-        mapping = hop.mapping or {}
-        if mapping.get("where"):
-            return ("the hop filters rows, and a copy of the pages carries"
-                    " every row")
-        if mapping.get("columns") or mapping.get("tables"):
-            return ("the hop maps tables or columns, and a copy of the pages"
-                    " carries them under the source's names")
-        renamed = {k: v for k, v in (hop.db_map or {}).items() if k != v}
-        if renamed:
-            pairs = ", ".join(f"{a} to {b}" for a, b in renamed.items())
-            return (f"the hop renames {pairs}, and a copy of the pages"
-                    " carries each database under its own name")
+        for, or the reason it is not: anything the hop narrows
+        (`config.narrowed_by`) - names left out, rows filtered, columns
+        chosen or masked, names changed, changes not carried - a copy of
+        the pages carries whole, under the source's names, and the
+        server's own stream applies every change after it."""
+        from .config import narrowed_said
+        said = narrowed_said(self.hop)
+        if said:
+            return (f"the hop {said}, and a copy of the pages carries every"
+                    " table and row whole under the source's names, every"
+                    " change after it applied")
         # a database with tables the hop does not follow would arrive as it
         # was at the copy and never change again - the maintenance database
         # too, which a hop naming none leaves out
@@ -647,6 +641,17 @@ def _pg_changes():
     )
 
 
+def _far_tls(hop):
+    """The source's TLS for a program on the target's host, as the
+    variables libpq reads: as far as another machine can carry it
+    (`legs._far_tls` - `verify-*` as `require`, the authority's file
+    being on this machine). The page copy dialled the source with
+    whatever that host's environment held (audit 2026-10-01, SEC2)."""
+    from .legs import _far_tls as far
+    return "".join(f" export PG{k.upper()}={shlex.quote(str(v))};"
+                   for k, v in far(hop).items())
+
+
 def _pg_prove(facts):
     """The copy's own path tried before anything is stopped: the program
     on the target's host is the source's major version, and a replication
@@ -654,8 +659,8 @@ def _pg_prove(facts):
     is the source's)."""
     opts, hop = facts["options"], facts.hop
     host, port = _source_address(hop, opts)
-    script = ("IFS= read -r PGPASSWORD; export PGPASSWORD;"
-              " pg_basebackup --version &&"
+    script = ("IFS= read -r PGPASSWORD; export PGPASSWORD;" + _far_tls(hop)
+              + " pg_basebackup --version &&"
               " psql " + shlex.quote(
                   f"host={host} port={port} user={hop.source.user}"
                   " dbname=replication replication=true connect_timeout=15")
@@ -1189,25 +1194,32 @@ def _source_address(hop, opts):
 def _on_target(opts, script, secret="", timeout=None):
     """`script`, a shell command line, run where the target's data
     directory is, with `secret` as its first line of input - never on a
-    command line, where the host's process list would show it."""
+    command line, where the host's process list would show it. Through the
+    one runner (`runner.run`): stopped with what it started when migkit
+    is, which stops the connection to that host; what the script started
+    there is held by its lock (`runner.locked_script`)."""
+    from . import runner
     argv = shlex.split(str(opts["run"])) + [script]
     try:
-        return subprocess.run(argv, input=f"{secret}\n", capture_output=True,
-                              text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        return subprocess.CompletedProcess(argv, 124, e.stdout or "",
+        return runner.run(argv, input=f"{secret}\n", check=False,
+                          timeout=timeout, secrets=(secret,),
+                          check_flags=False)
+    except runner.Transient:
+        return subprocess.CompletedProcess(argv, 124, "",
                                            f"no answer in {timeout}s")
-    except OSError as e:
+    except runner.Blocked as e:
         return subprocess.CompletedProcess(argv, 127, "", str(e))
 
 
 def _local(command, what, timeout=600):
     """One of the hop's own commands (`stop`, `start`, `restart`), run
-    here as written; a failure stops the move with its own words."""
+    here as written, through the one runner; a failure stops the move with
+    its own words."""
+    from . import runner
     try:
-        got = subprocess.run(shlex.split(str(command)), capture_output=True,
-                             text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        got = runner.run(shlex.split(str(command)), check=False,
+                         timeout=timeout, check_flags=False)
+    except (runner.Transient, runner.Blocked) as e:
         raise SystemExit(f"the hop's {what} command failed: {e}")
     if got.returncode != 0:
         raise SystemExit(f"the hop's {what} command failed"
@@ -1373,8 +1385,8 @@ def _pg_script(hop, opts, compressed):
     q = shlex.quote
     comp = " --compress=server-zstd:level=1" if compressed else ""
     return (
-        "IFS= read -r PGPASSWORD; export PGPASSWORD;"
-        f" D={q(str(opts['data']))};"
+        "IFS= read -r PGPASSWORD; export PGPASSWORD;" + _far_tls(hop)
+        + f" D={q(str(opts['data']))};"
         # only a data directory, or nothing at all, is emptied
         ' if [ -n "$(ls -A "$D" 2>/dev/null)" ] && [ ! -f "$D/PG_VERSION" ];'
         ' then echo "$D holds files and no PG_VERSION: not a data'
@@ -1397,8 +1409,13 @@ def _pg_copy(hop, eng, opts, version, log):
     log("the target's server stopped; copying the source's pages into its"
         f" data directory, {way.said} ({why})")
     began = time.time()
-    got = _on_target(opts, _pg_script(hop, opts, way is ZSTD),
-                     hop.source.password)
+    # under a lock beside the data directory: a copy migkit was stopped
+    # during goes on on that host, and a run after it that emptied the
+    # directory under it would take two copies into one
+    from . import runner
+    got = _on_target(opts, runner.locked_script(
+        _pg_script(hop, opts, way is ZSTD), f"{opts['data']}.migkit-lock"),
+        hop.source.password)
     if got.returncode != 0 or "verified" not in got.stdout:
         raise SystemExit(
             "the copy of the source's pages failed, and the target's server"

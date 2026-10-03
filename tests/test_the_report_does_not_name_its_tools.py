@@ -38,18 +38,30 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
-#: names of things migkit drives, which an operator has no way to act on
-TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
-         "myloader", "pgloader", "mongodump", "debezium", "redpanda",
-         "atlas", "liquibase", "pg_dump", "pg_restore", "mongorestore",
-         "mongosync", "mysqldump", "sqlcmd", "riot", "redis-shake",
-         "mirrormaker", "pgcompare", "ora2pg", "sqlines", "plpgsql_check",
-         "sqlglot", "pglast", "mysqlsh", "mysql shell", "pg_basebackup",
-         "pg_verifybackup", "openlogreplicator", "cobrix", "stingray",
-         "jt400", "apprise", "redisshake", "dsbulk",
-         "connect-mirror-maker", "reindex-from-snapshot",
-         "documentsfromsnapshot", "pg_upgrade", "initdb",
-         "teradatasql", "pyodata", "singer", "airbyte")
+#: names of things migkit drives, which an operator has no way to act on:
+#: every name the registry of programs knows (`tools.names`), and the
+#: libraries and programs no install recipe carries
+_LIBRARIES = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
+              "myloader", "pgloader", "mongodump", "debezium", "redpanda",
+              "atlas", "liquibase", "pg_dump", "pg_restore", "mongorestore",
+              "mongosync", "mysqldump", "sqlcmd", "riot", "redis-shake",
+              "mirrormaker", "pgcompare", "ora2pg", "sqlines",
+              "plpgsql_check", "sqlglot", "pglast", "mysqlsh", "mysql shell",
+              "pg_basebackup", "pg_verifybackup", "openlogreplicator",
+              "cobrix", "stingray", "jt400", "apprise", "redisshake",
+              "dsbulk", "connect-mirror-maker", "reindex-from-snapshot",
+              "documentsfromsnapshot", "pg_upgrade", "initdb",
+              "mssql-scripter", "data_validation", "data-validation",
+              "teradatasql", "pyodata", "singer", "airbyte",
+              "ast-grep", "ast_grep", "tree-sitter", "hypopg")
+
+
+def _registry_names():
+    from migkit import tools
+    return {n.lower() for n in tools.names()}
+
+
+TOOLS = tuple(sorted(set(_LIBRARIES) | _registry_names()))
 
 
 def _engine(tmp_path):
@@ -154,9 +166,12 @@ def test_what_the_line_still_tells_them(tmp_path):
     assert "unverified" in missed.detail, missed.detail
 
 
-#: call sites whose strings a person driving migkit reads
+#: call sites whose strings a person driving migkit reads: the result rows
+#: and the lines said, and the failures the runner raises a program's end
+#: as (`runner.classify`), which a move says as they are
 FACING = {"Result", "SystemExit", "print", "log", "chat", "say", "Refused",
-          "Verdict", "NoSandbox", "HarnessError"}
+          "Verdict", "NoSandbox", "HarnessError", "Failed", "Transient",
+          "Blocked", "Stalled", "Exhausted"}
 
 
 def _facing_strings():
@@ -372,3 +387,90 @@ def test_the_evidence_export_names_no_program(tmp_path):
         "0/16B3748", doc["positions"]
     assert doc["tables"][0]["src"]["statement"].startswith(
         "select count(*) from public.t"), doc["tables"]
+
+
+# ---- the runner's own words, read as they are said ---------------------------
+#
+# The scan above reads string constants only: `f"{tool} ..."` and a command
+# line joined into a message are invisible to it. What the runner says of a
+# program is built from what the program printed and from its command line,
+# so it is read here as it comes out, each program named as one migkit drives
+# and printing the names of others.
+
+
+def _leaks_in(text):
+    low = str(text).lower()
+    return [t for t in TOOLS if t in low]
+
+
+def _program(tmp_path, name, body):
+    """A stand-in program named as one migkit drives: `body` is its shell."""
+    path = tmp_path / name
+    path.write_text("#!/bin/sh\n" + body + "\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_the_runner_says_a_failure_without_a_name_or_a_command_line(
+        tmp_path):
+    from migkit import runner
+    prog = _program(tmp_path, "pg_dump",
+                    "echo 'pg_dump: error: mydumper could not read table"
+                    " orders' >&2; exit 3")
+    with pytest.raises(runner.Failed) as e:
+        runner.run([prog, "--password=CHANGE_ME_x", "--host", "10.0.0.9"])
+    said = str(e.value)
+    assert "could not read table orders" in said, said
+    assert not _leaks_in(said), said
+    # its command line is not in it: neither the flag nor the value
+    assert "CHANGE_ME_x" not in said and "--password" not in said, said
+    assert "10.0.0.9" not in said, said
+
+
+@pytest.mark.parametrize("printed,kind", [
+    ("pg_restore: FATAL:  password authentication failed for user app",
+     "Refused"),
+    ("mydumper: ERROR:  permission denied for table orders", "Refused"),
+    ("pgcopydb: [TARGET 1] [53100] ERROR:  could not extend file", "Refused"),
+    ("myloader: server has gone away, lost connection", "Transient"),
+    ("dsbulk: some fault of its own", "Failed"),
+])
+def test_each_kind_of_failure_is_said_without_a_name(printed, kind):
+    from migkit import runner
+    got = runner.classify(1, printed, "the copy")
+    assert type(got).__name__ == kind, (type(got), got)
+    assert not _leaks_in(got), got
+
+
+def test_a_program_ended_by_a_signal_or_a_limit_is_said_without_a_name(
+        tmp_path):
+    from migkit import runner
+    got = runner.classify(-9, "mongorestore: restoring")
+    assert "SIGKILL" in str(got) and not _leaks_in(got), got
+    prog = _program(tmp_path, "dsbulk", "echo 'dsbulk: starting';"
+                    " sleep 30")
+    with pytest.raises(runner.Transient) as e:
+        runner.run([prog], timeout=1, what="the online sync")
+    assert "did not finish in 1s" in str(e.value), e.value
+    assert not _leaks_in(e.value), e.value
+
+
+def test_a_missing_program_points_at_migkits_installer_by_no_name():
+    from migkit import runner
+    with pytest.raises(runner.Blocked) as e:
+        runner.run(["/nonexistent/riotx", "replicate"])
+    assert "migkit doctor --install" in str(e.value), e.value
+    assert not _leaks_in(e.value), e.value
+
+
+def test_a_build_that_does_not_take_an_option_is_said_by_its_role(
+        monkeypatch):
+    from migkit import runner, toolversion
+    monkeypatch.setattr(toolversion, "options",
+                        lambda program, *sub, **kw: frozenset({"--threads"}))
+    monkeypatch.setattr(toolversion, "version", lambda program: "0.9.1")
+    said = runner.flags_refused(["mydumper", "--threads", "4",
+                                 "--trx-tables"])
+    assert "--trx-tables" in said and "dump program" in said, said
+    assert "0.9.1" in said and "migkit doctor --install" in said, said
+    assert not _leaks_in(said), said

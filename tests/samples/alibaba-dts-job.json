@@ -1,0 +1,23 @@
+{
+ "DtsJobId": "dtsexample1",
+ "DtsJobName": "shop-to-polardb",
+ "JobType": "SYNC",
+ "SourceEndpoint": {
+  "EngineName": "MYSQL",
+  "Ip": "10.0.0.41",
+  "Port": "3306",
+  "UserName": "dts",
+  "InstanceType": "OTHER"
+ },
+ "DestinationEndpoint": {
+  "EngineName": "POLARDB",
+  "InstanceID": "pc-example",
+  "InstanceType": "POLARDB"
+ },
+ "MigrationMode": {
+  "DataInitialization": true,
+  "DataSynchronization": true,
+  "StructureInitialization": true
+ },
+ "DbObject": "{\"shop\": {\"name\": \"shop_new\", \"all\": false, \"Table\": {\"orders\": {\"name\": \"orders\", \"all\": true, \"filter\": \"id>10\", \"dml_op\": \"i,u\"}, \"users\": {\"name\": \"members\", \"all\": false, \"column\": {\"id\": {\"name\": \"id\", \"key\": \"PRI\", \"state\": \"checked\"}, \"mail\": {\"name\": \"email\", \"state\": \"checked\"}}}}}, \"crm\": {\"name\": \"crm\", \"all\": true}}"
+}

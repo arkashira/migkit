@@ -16,7 +16,8 @@ module.
 import ast
 import pathlib
 
-RUNNERS = {"_sh", "run", "Popen", "check_output", "check_call"}
+RUNNERS = {"_sh", "run", "Popen", "check_output", "check_call",
+           "start", "pipe", "container", "start_container"}
 
 
 def _reads_password(node, tainted, helpers):

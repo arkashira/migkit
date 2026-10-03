@@ -119,13 +119,12 @@ def test_the_dump_plan_is_said_in_phases_and_runs_its_own_command(tmp_path):
 
 def test_a_command_goes_to_the_debug_log_not_the_screen(tmp_path,
                                                          monkeypatch):
-    from migkit import movers
+    from migkit import movers, runner
     said = []
-    monkeypatch.setattr(movers, "_DEBUG",
-                        (progress.DebugLog(tmp_path / "commands.log"),
-                         ("CHANGE_ME_42",)))
-    movers._sh(["sh", "-c", "true", "--password=CHANGE_ME_42"],
-               {"PGPASSWORD": "CHANGE_ME_env"}, said.append)
+    with runner.recording(progress.DebugLog(tmp_path / "commands.log"),
+                          ("CHANGE_ME_42",)):
+        movers._sh(["sh", "-c", "true", "--password=CHANGE_ME_42"],
+                   {"PGPASSWORD": "CHANGE_ME_env"}, said.append)
     assert said == [], said
     body = (tmp_path / "commands.log").read_text()
     assert "sh -c true" in body, body
@@ -133,8 +132,10 @@ def test_a_command_goes_to_the_debug_log_not_the_screen(tmp_path,
 
 
 def test_a_failing_program_keeps_the_databases_words_and_loses_its_name():
-    from migkit import movers
-    with pytest.raises(RuntimeError) as e:
+    """A refused sign-in stops the move (`runner.Refused`): every other
+    way would meet it too."""
+    from migkit import movers, runner
+    with pytest.raises(runner.Refused) as e:
         movers._sh(["sh", "-c",
                     "echo 'pg_restore: error: connection to server at"
                     " 10.0.0.2 failed: password authentication failed"
@@ -159,7 +160,8 @@ def test_every_bulk_path_writes_its_commands_to_the_runs_debug_log(
     movers.run_via("pgdump", _pghop(tmp_path), "appdb", 1, True, None)
     body = (tmp_path / "commands.log").read_text()
     assert "sh -c true ***" in body, body
-    assert movers._DEBUG is None
+    from migkit import runner
+    assert runner._RUN["debug"] is None
 
 
 def test_a_missing_program_is_not_named(tmp_path, monkeypatch):

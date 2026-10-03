@@ -57,10 +57,16 @@ class Key:
 
 STREAMS = ("kafka", "kinesis", "pubsub")
 
+#: what assess does with a table the hop takes that needs one it leaves
+#: out (`Engine._closure_items`): names it with both ways out, or says the
+#: hop accepted it
+CLOSURE = ("warn", "accept")
+
 #: the keys of a hop itself
 HOP_KEYS = {
     "goal": Key("what the hop is for - copy, cutover, verify, two-way,"
-                " keep-in-sync, rehearse, upgrade or subset", "str"),
+                " keep-in-sync, rehearse, upgrade, subset, consolidate,"
+                " split or archive", "str"),
     "engine": Key("the engine both sides run, or hetero - read from the"
                   " addresses when they are addresses", "str"),
     "source": Key("where the data is: an address or the long form",
@@ -69,7 +75,18 @@ HOP_KEYS = {
                   "str|dict"),
     "databases": Key("the source databases to move, all of them when left"
                      " out", "list"),
-    "exclude": Key("databases, schemas or tables left alone", "list"),
+    "exclude": Key("databases, schemas or tables left alone - dotted"
+                   " names and patterns, or databases each with all, its"
+                   " tables or its schemas", "list|dict"),
+    "objects": Key("the kinds of object beside the tables carried: views,"
+                   " routines, triggers, events, sequences, roles - each"
+                   " all (the default), none, or a list of names; one not"
+                   " carried is out of scope as an excluded table is",
+                   "dict"),
+    "include": Key("the only databases, schemas or tables taken - moved,"
+                   " followed, checked and repaired - the rest left alone"
+                   " as if excluded; exclude wins where both name one."
+                   " Written as exclude is", "list|dict"),
     "service": Key("the playbook `migkit advise` shows", "str"),
     "big_rows": Key("read by nothing", "int", knob="nothing"),
     "slice": Key("the rows one compared range of a large table holds",
@@ -78,10 +95,12 @@ HOP_KEYS = {
                    "int", knob="ceiling"),
     "options": Key("the hop's options", "dict"),
     "db_map": Key("source database name -> target database name", "dict"),
-    "mapping": Key("renames, column rules, row filters, and the"
-                   " percentage a table's aggregates may drift by when"
+    "mapping": Key("renames, column rules, row filters, the changes"
+                   " carried per table (ops: insert, update, delete), and"
+                   " the percentage a table's aggregates may drift by when"
                    " read a second way", "dict",
-                   subs=("tables", "columns", "where", "tolerance")),
+                   subs=("tables", "columns", "where", "tolerance",
+                         "ops", "names")),
 }
 
 #: the keys under a hop's `options`
@@ -89,10 +108,22 @@ HOP_OPTIONS = {
     "accept_changes": Key("table.column patterns whose values may arrive"
                           " as the target keeps them", "list",
                           ("hetero",)),
-    "access": Key("who may use the dashboard's pages", "dict",
-                  subs=("operator", "viewer")),
+    "access": Key("who sees and does what on this hop in the web view and"
+                  " the API - viewer, operator, approver, admin - added to"
+                  " the file's own `access`", "dict",
+                  subs=("viewer", "operator", "approver", "admin")),
+    "accounts": Key("false: the move does not carry users, roles or grants"
+                    " - the target's are made apart from it - so their"
+                    " checks are skipped and said as not compared, and no"
+                    " repair grants them (as objects: {roles: false})",
+                    "bool"),
     "app_roles": Key("the application's roles protect_target holds",
                      "list"),
+    "application_sql": Key("where the application's code is on this"
+                           " machine: the SQL written in it is found,"
+                           " carried into the target's SQL and proved on"
+                           " the sandbox, and never changed", "str|list",
+                           ("hetero",)),
     "approvals": Key("the steps that wait for an approval", "dict",
                      subs=("steps", "signers", "count", "expires")),
     "at_rest": Key("who may read the files holding values", "dict",
@@ -100,31 +131,79 @@ HOP_OPTIONS = {
     "atlas": Key("the structural schema reading, on or off", "bool",
                  ("postgres", "mysql"), knob="way",
                  named_for_a_program=True),
+    "archive": Key("goal archive: remove - the archived rows removed from"
+                   " the source once proved (with the source's answer,"
+                   " source_changes: {archived_rows: yes}), restore - the"
+                   " removed rows put back from the archive, batch - rows"
+                   " a batch", "dict", subs=("remove", "restore", "batch")),
+    "charset": Key("the character set, and the collation, the target's"
+                   " text is converted to - a name, or {to, collation,"
+                   " repair: double-encoded | none}; converted by MySQL's"
+                   " own conversion after the copy, held to elsewhere",
+                   "str|dict", subs=("to", "collation", "repair")),
+    "consolidate": Key("goal consolidate: column - the column each"
+                       " source's rows are held under, value or values -"
+                       " this source's, keys - refuse, tenant, offset or"
+                       " remap, offsets - each value's under offset, with"
+                       " - the other hops writing the same target",
+                       "dict", subs=("column", "value", "values", "keys",
+                                     "offsets", "with")),
+    "split": Key("goal split: with - the other parts of the same source,"
+                 " shared - tables every part takes whole, rest - refuse"
+                 " or stays (the rows no part takes stay on the source)",
+                 "dict", subs=("with", "shared", "rest")),
+    "table_engine": Key("the storage engine the target's tables are made"
+                        " in - a name, or {to, accept: [group numbering,"
+                        " remote rows], foreign_keys: {child.column:"
+                        " parent.column}}", "str|dict",
+                        ("mysql", "hetero"),
+                        subs=("to", "accept", "foreign_keys")),
     "cdc_confidence_seconds": Key("seconds the follow of a change log"
                                   " stays behind the source's clock",
                                   "number", ("cassandra",)),
     "checksum": Key("text or jsonb row rendering", "str", ("postgres",)),
     "checksum_workers": Key("tables checksummed at once", "int",
                             ("postgres",), knob="size"),
+    "closure": Key("what assess says of a table the hop takes that needs"
+                   " one it leaves out - a foreign key's parent, a view's,"
+                   " a routine's or a trigger's table, a sequence's owner,"
+                   " a partition: warn (each named, with the tables to"
+                   " take) or accept (said as accepted)", "str"),
     "cloud": Key("the cloud the servers run in - aws, gcp or azure -"
                  " where their addresses and the servers do not say; the"
                  " machine and the target's class are named in it", "str"),
     "code_dir": Key("where the operator's own versions of routines are"
                     " kept, one <name>.sql each", "str", ("hetero",)),
+    "builtin_suites": Key("where the engines' own test suites are on this"
+                          " machine: each case calling a function the"
+                          " source's code calls is run on both sandboxes,"
+                          " and the ones answered apart become the"
+                          " translator's rules", "str|list", ("hetero",)),
+    "code_reference_days": Key("days after the cutover the source's"
+                               " answers stay the reference the target's"
+                               " routines are held to (true: 30)",
+                               "int|bool", ("hetero",)),
     "code_model": Key("the model a routine no converter proves is asked"
                       " of", "dict", ("hetero",),
                       subs=("provider", "url", "model")),
     "code_model_rounds": Key("rounds the model gets on one routine", "int",
                              ("hetero",), knob="size"),
+    "compare_with": Key("another tool's own check of this move - a Tencent"
+                        " or Alibaba DTS data check's report, AWS DMS's"
+                        " table statistics - held table by table against"
+                        " migkit's answers in the evidence", "str"),
     "create_streams": Key("create a missing stream", "bool", ("kinesis",)),
     "cutover": Key("the cutover as one timed path that freezes the source"
                    " and undoes itself (`migkit.cutover`)", "dict|bool",
                    subs=("budget", "start_below", "freeze", "pooler",
                          "flip", "flip_undo", "keys", "jobs",
-                         "no_return")),
+                         "no_return", "restore_points")),
     "ddl": Key("what a DDL on the source does to a running tail: stop"
                " it, park only the table it touched, or apply what can be"
-               " carried at its place in the log", "str"),
+               " carried at its place in the log - one word, or a mapping"
+               " of `default`, tables or patterns to a word each, and"
+               " `skip`: the kinds left out (truncate, drop, create)",
+               "str|dict"),
     "deadline": Key("when the move must be done by - a duration (6h,"
                     " 90m, 2d) or a moment (2026-10-01T02:00): the plan"
                     " names the cheapest machine for migkit that meets it",
@@ -220,7 +299,8 @@ HOP_OPTIONS = {
                           "way", "subnet_group", "security_groups",
                           "subscription", "resource_group", "location",
                           "project", "address", "upgrade", "backup",
-                          "restore_from")),
+                          "restore_from", "profile", "role", "product",
+                          "zone", "vpc", "subnet", "spec", "storage")),
     "proof_sandbox": Key("the two scratch servers stored code, the"
                          " constraints, the collations and the sized types"
                          " are run and compared on, or docker for migkit"
@@ -233,7 +313,11 @@ HOP_OPTIONS = {
                              " on purpose, by a name it answers to",
                              "str|list"),
     "protect_target": Key("the application may not write the target"
-                          " while migkit moves into it", "bool"),
+                          " while migkit moves into it: its rights taken"
+                          " where the engine grants rights, its access"
+                          " policy changed where the hop answers yes"
+                          " (target_access), its writes named before the"
+                          " cutover where nothing holds a writer", "bool"),
     "pt_apply": Key("the online schema change path, on or off", "bool",
                     ("mysql",), knob="way", named_for_a_program=True),
     "region": Key("the region the machine and the target's class are"
@@ -256,7 +340,8 @@ HOP_OPTIONS = {
                     subs=("cron", "timezone", "run", "args", "catchup",
                           "pause_after_failures", "max_duration",
                           "retry_window")),
-    "schema_authority": Key("which schema reading decides", "str"),
+    "schema_authority": Key("which schema reading decides: schema-aware"
+                            " (the default) or every-reading", "str"),
     "server_id": Key("the replica id the binlog reader uses", "int",
                      ("mysql",)),
     "server_to_server": Key("the target may pull the rows from the source"
@@ -315,6 +400,13 @@ HOP_OPTIONS = {
                   " come too (children), and the most rows it may hold"
                   " (most)", "dict", subs=("start", "children", "most")),
     "tables": Key("the tables of a generic hop", "list", ("generic",)),
+    "target_access": Key("the answer, given ahead, to the change of the"
+                         " target's access policy protect_target offers"
+                         " where the engine's writes are allowed outside"
+                         " the data (a table's own policy, a dataset's"
+                         " access): yes - migkit makes it and gives it back"
+                         " at cutover - or no", "str|bool",
+                         ("dynamodb", "bigquery")),
     "target_engine": Key("the target's engine of a hetero hop", "str",
                          ("hetero",)),
     "target_has_replicas": Key("false: the target has no replicas and no"
@@ -349,6 +441,11 @@ HOP_OPTIONS = {
                            " narrowing recorded and proved", "bool",
                            ("hetero",)),
     "verify_batches": Key("compare a bulk copy with the source", "bool"),
+    "workload_replay": Key("the source's record of what the application"
+                           " ran, every statement on it translated, run on"
+                           " both sandboxes and compared by its answers and"
+                           " the rows it writes, and timed on both sides,"
+                           " weighted by how often each ran", "bool"),
 }
 
 #: the keys of a side written in the long form
@@ -547,6 +644,10 @@ ENDPOINT_OPTIONS = {
                         ("dynamodb", "kinesis", "parquet", "delta")),
     "table_prefix": Key("the table names' template", "str",
                         ("dynamodb",)),
+    "index_advice": Key("indexes the translated workload needs, made on"
+                        " the target hypothetically and advised only where"
+                        " its own planner's estimate falls by half",
+                        "bool"),
     "index_prefix": Key("the index names' template", "str",
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
@@ -594,6 +695,18 @@ ENDPOINT_OPTIONS = {
                                 ("kafka",)),
     "schema_registry_password": Key("the schema registry's password",
                                     "str", ("kafka",)),
+    "managed": Key("the managed service this side is and how its provider's"
+                   " API reaches it: service (its name in the managed-service"
+                   " catalogue, where neither its address nor its server"
+                   " says), id (its instance at the provider, where its"
+                   " address does not find it), region, profile (the"
+                   " provider CLI's profile its credentials come from), role"
+                   " (one assumed), and what else the provider asks for",
+                   "dict", subs=("service", "id", "region", "profile",
+                                 "role", "project", "subscription",
+                                 "resource_group", "compartment",
+                                 "project_id", "zone", "cluster", "vpc",
+                                 "subnet", "spec", "storage")),
     "tunnel": Key("reach the server through a tunnel", "str|dict"),
     "tunnel_to": Key("what carries the connection, for the report",
                      "str"),
@@ -762,23 +875,93 @@ GOALS = {
                              " it; every row as the source's, its masked"
                              " columns as the rule writes them, none"
                              " beyond the subset"},
+    "consolidate": {"what": "many databases or tenants into one: each"
+                            " source's rows under a column the hop names,"
+                            " filled with its own value, keys kept apart"
+                            " by the hop's rule, proved source by source",
+                    "options": {}, "writes": True,
+                    "next": ["migkit assess {hop}",
+                             "migkit move {hop} --mode full",
+                             "migkit move {hop} --mode full --go",
+                             "migkit check {hop}"],
+                    "source": "read, never written: each table through its"
+                              " row filter",
+                    "target": "one database the sources share: this"
+                              " source's rows there replaced by its own,"
+                              " under its value, keys shifted where the"
+                              " rule shifts them; the other sources' rows"
+                              " left as they are; the counters raised past"
+                              " every source's keys",
+                    "guarantees": "keys two sources hold found before"
+                                  " anything is written and refused, or kept"
+                                  " apart by the rule (tenant, offset,"
+                                  " remap); every source's rows proved in"
+                                  " the target under its value; no row"
+                                  " under a value no source has"},
+    "split": {"what": "one database into many - a service extracted, a"
+                      " database split by region: each part's rows by its"
+                      " rule, every row placed exactly once, proved",
+              "options": {}, "writes": True,
+              "next": ["migkit assess {hop}",
+                       "migkit move {hop} --mode full",
+                       "migkit move {hop} --mode full --go",
+                       "migkit check {hop}"],
+              "source": "read, never written: every row counted against"
+                        " every part's rule before the move",
+              "target": "this part's tables (the hop's scope) filled with"
+                        " the rows its rule takes (mapping.where)",
+              "guarantees": "rows no part takes and rows two parts take"
+                            " found before the move and refused (rest:"
+                            " stays, shared); each key in exactly one"
+                            " part's target, the targets together the"
+                            " source's; references across the split"
+                            " counted and said"},
+    "archive": {"what": "old rows to cheaper storage: the rows each rule"
+                        " picks added to an archive and proved there, then"
+                        " removed from the source only once proved and"
+                        " only where the hop allows it",
+                "options": {}, "writes": True,
+                "next": ["migkit assess {hop}",
+                         "migkit move {hop} --mode full",
+                         "migkit move {hop} --mode full --go",
+                         "migkit check {hop}"],
+                "source": "read; written only with archive: {remove: true}"
+                          " and the source's own answer by name"
+                          " (source_changes: {archived_rows: yes}) behind"
+                          " the hop's approvals: each archived row removed"
+                          " once the archive holds it as the source has it"
+                          " now, a row other rows still name never",
+                "target": "the archive: the rows each rule picks added,"
+                          " what it holds already kept, never overwritten",
+                "guarantees": "every row the rule picks in the archive as"
+                              " the source has it; every row removed from"
+                              " the source in the archive with the digest"
+                              " it had, in the ledger; put back from the"
+                              " archive by archive: {restore: true}"},
 }
 
 #: each mode of `move` and `sync`: what it does on each side, as the dry
 #: run says it before `--go`
 MODES = {
     ("move", "full"): "one copy of every table the hop carries: the source"
-                      " read, the target written",
+                      " read, the target written - kept from the"
+                      " application's writes before the first row and"
+                      " again after the last where the hop asks"
+                      " (protect_target): its rights taken, its access"
+                      " policy changed on an answer of yes, or its writes"
+                      " named, the way the target allows",
     ("move", "cdc"): "the stream of changes started, or resumed from where"
                      " it stood: the source's log read, the target written"
                      " change by change",
     ("move", "full+cdc"): "the copy, then the stream from a position taken"
                           " before the copy began, so nothing changed"
                           " during it is lost",
-    ("move", "cdc --drop"): "the cutover: the stream torn down, and what"
-                            " else happens on each side is what cutover:"
-                            " says (below); run again once a cutover of the"
-                            " hop has flipped, its point of no return",
+    ("move", "cdc --drop"): "the cutover: the stream torn down, the target"
+                            " given back to the application where"
+                            " protect_target kept it, and what else happens"
+                            " on each side is what cutover: says (below);"
+                            " run again once a cutover of the hop has"
+                            " flipped, its point of no return",
     ("sync", "reconcile"): "the last check's differences shown; --apply"
                            " writes the target to match the source",
     ("sync", "verify"): "read only: every table compared as of one moment",
@@ -801,8 +984,9 @@ CUTOVER = {
         " chosen from what the source allows - the whole server made"
         " read-only where it may, or the application's accounts kept from"
         " writing and their sessions ended - and reads it back; PostgreSQL,"
-        " MySQL, MongoDB, Redis, SQL Server, Cassandra, Kafka and OpenSearch"
-        " sources alike",
+        " MySQL, TiDB, CockroachDB, MongoDB, Redis, SQL Server, Oracle,"
+        " Db2, SAP ASE, Teradata, ClickHouse, Cassandra, Couchbase, Kafka,"
+        " OpenSearch, Redshift and Snowflake sources alike",
         "the drain: the source's position taken after the freeze, and the"
         " hop's own stream waited for until it passes it - or, where the"
         " stream keeps no position migkit can read, a mark written on the"
@@ -812,6 +996,11 @@ CUTOVER = {
         "the fenced check: the rows changed since the last verified pass"
         " compared inside the outage, and the schema compared with the"
         " preflight's",
+        "the target's hold read back first (protect_target): the"
+        " application's accounts write nothing there, or, where nothing"
+        " holds a writer, the writes that are not migkit's named - one"
+        " named is drift, and stops the cutover - and given back at the"
+        " flip, put on again if the cutover is undone",
         "the counters: the target's sequences and auto-increments raised"
         " past every key the source handed out",
         "the stream back: from the new primary to the old source"
@@ -1085,6 +1274,11 @@ WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover",
            "ship")
 #: options that stream, which a one-off copy contradicts
 STREAMING = ("reverse", "topology", "two_way")
+#: the goals that move the data once
+ONCE = ("copy", "subset", "consolidate", "split", "archive")
+#: each goal's own setting, read by no other goal
+GOAL_OPTION = {"subset": "subset", "consolidate": "consolidate",
+               "split": "split", "archive": "archive"}
 
 
 def goal_options(hop, goal):
@@ -1102,10 +1296,15 @@ def goal_options(hop, goal):
 
 def apply_goal(hop):
     """The hop's options with its goal's under them - an option the hop
-    says itself is kept."""
+    says itself is kept. Which came from the goal is kept beside them: a
+    target the goal keeps "where the engine allows it" and this server
+    does not is said and moved into, where the hop's own word stops the
+    move (`freeze.protect`)."""
     if not hop.goal:
         return
-    hop.options = {**goal_options(hop, hop.goal), **(hop.options or {})}
+    got = goal_options(hop, hop.goal)
+    vars(hop)["_from_goal"] = sorted(set(got) - set(hop.options or {}))
+    hop.options = {**got, **(hop.options or {})}
 
 
 def refuse_writes(hop, what):
@@ -1239,10 +1438,15 @@ def check(data):
     if not isinstance(data, dict):
         return [Problem("error", "the file", "is not a mapping of keys")]
     for k in data:
-        if k != "hops":
+        if k not in ("hops", "access"):
             out.append(Problem("warn", str(k), "read by nothing - only"
-                               " `hops` is (a YAML anchor kept here is"
-                               " fine)"))
+                               " `hops` and `access` are (a YAML anchor"
+                               " kept here is fine)"))
+    # who may do what in the web view, for every hop or a group of them
+    # (`web.roles`)
+    from .web import roles
+    for where, text in roles.problems(data.get("access")):
+        out.append(Problem("error", where, text))
     hops = data.get("hops") or {}
     if not isinstance(hops, dict):
         return [Problem("error", "hops", "is not a mapping of hops")]
@@ -1285,6 +1489,12 @@ def check_hop(name, raw):
         out += _notify(f"{where}.options.notify", opts.get("notify"))
         out += _egress(f"{where}.options.egress", opts.get("egress"))
         out += _two_way(f"{where}.options.two_way", opts.get("two_way"))
+        out += _ddl_problems(f"{where}.options.ddl", opts.get("ddl"))
+        out += _authority_problems(f"{where}.options.schema_authority",
+                                   opts.get("schema_authority"))
+        from .web import roles
+        for w, text in roles.hop_problems(opts.get("access")):
+            out.append(Problem("error", f"{where}.options.{w}", text))
     for side, e in (("source", src_e), ("target", dst_e)):
         got = raw.get(side)
         if got is None:
@@ -1404,6 +1614,82 @@ def _two_way(where, got):
     return []
 
 
+def _authority_problems(where, got):
+    """`schema_authority` said as neither of its words: read as every
+    reading counting, which is likely not what was meant - an error, said
+    before anything runs."""
+    from .engines.base import Engine
+    if got is None:
+        return []
+    word = str(got).strip().lower()
+    if word in Engine.AUTHORITIES or word == Engine.LEGACY_AUTHORITY:
+        return []
+    return [Problem("error", where, f"{got!r} - one of"
+                                    f" {', '.join(Engine.AUTHORITIES)}")]
+
+
+def _ddl_problems(where, got):
+    """The hop's `ddl` said wrong (`tailtables.policy`, `skipped`): a word
+    that is not stop, park or apply - for every table, the default, or a
+    table or pattern - and a kind `skip` cannot leave out. Said before
+    anything runs rather than when the tail meets its first DDL."""
+    from .tailtables import POLICIES, SKIPPABLE
+    if got is None:
+        return []
+    out = []
+    if not isinstance(got, dict):
+        if str(got).strip().lower() not in POLICIES:
+            out.append(Problem("error", where,
+                               f"{got!r} - one of {', '.join(POLICIES)}"))
+        return out
+    for k, v in got.items():
+        if k == "skip":
+            words = [v] if isinstance(v, str) else v
+            if not isinstance(words, (list, tuple)):
+                out.append(Problem("error", f"{where}.skip",
+                                   "a list of the kinds left out"))
+                continue
+            for w in words:
+                if str(w).strip().lower() not in SKIPPABLE:
+                    out.append(Problem(
+                        "error", f"{where}.skip",
+                        f"{w!r} - one of {', '.join(SKIPPABLE)}: an ALTER"
+                        " or a rename left out would have every change"
+                        " after it written where the target has no column"
+                        " or table for it"))
+            continue
+        if not isinstance(v, str) or v.strip().lower() not in POLICIES:
+            out.append(Problem("error", f"{where}.{k}",
+                               f"{v!r} - one of {', '.join(POLICIES)}"))
+    return out
+
+
+def _scope_apart(ra, rb):
+    """What one hop takes that its way back does not, in words; "" where
+    the two take the same tables. The way back's `include` and `exclude`
+    are read in the first's names (`Hop.reversed` reads them the other
+    way), so a pair that names one table on each side as the database it
+    lands in is the same scope."""
+    from .config import Endpoint, Hop
+    try:
+        a = Hop(name="", engine="", source=Endpoint(), target=Endpoint(),
+                include=_patterns_or_none(ra.get("include")),
+                exclude=_patterns_or_none(ra.get("exclude")),
+                db_map=dict(ra.get("db_map") or {}))
+        back = a.reversed()
+    except Exception:  # noqa: BLE001 - each hop's own check says it
+        return ""
+    for k in ("include", "exclude"):
+        there = sorted(str(p) for p in getattr(back, k) or [])
+        theirs = sorted(_patterns_or_none(rb.get(k)))
+        if there != theirs:
+            return (f"one takes {k} {there or 'nothing'} in the other's"
+                    f" names and the other {theirs or 'nothing'} - a change"
+                    " to a table only one of them takes is carried one way"
+                    " and never back")
+    return ""
+
+
 def _two_way_pairs(hops):
     """Two hops of the file that are each other's way back, both two-way:
     every conflict is settled at both ends, so a rule that would settle
@@ -1424,6 +1710,208 @@ def _two_way_pairs(hops):
                                      gb if isinstance(gb, dict) else {}):
                 out.append(Problem("error", f"hops.{a} and hops.{b}",
                                    f"each is the other's way back: {said}"))
+            # and the same tables both ways
+            said = _scope_apart(ra, rb)
+            if said:
+                out.append(Problem("error", f"hops.{a} and hops.{b}",
+                                   f"each is the other's way back: {said}"))
+    return out
+
+
+def _ops_problems(where, mapping):
+    """`mapping.ops` said wrong: not a mapping, a word that is not a
+    change, or a table that carries nothing at all - which is a table
+    left out, and said as one (`exclude`)."""
+    from .config import parse_ops
+    rules = mapping.get("ops") if isinstance(mapping, dict) else None
+    if rules is None:
+        return []
+    if not isinstance(rules, dict):
+        return [Problem("error", f"{where}.mapping.ops", "is not a mapping")]
+    out = []
+    for table, value in rules.items():
+        try:
+            got = parse_ops(value)
+        except SystemExit as e:
+            out.append(Problem("error", f"{where}.mapping.ops.{table}",
+                               str(e)))
+            continue
+        if not got:
+            out.append(Problem(
+                "error", f"{where}.mapping.ops.{table}",
+                "carries no change at all - leave the table out with"
+                " exclude instead"))
+    return out
+
+
+def _patterns_or_none(value):
+    """`exclude` as patterns, or none where it is said wrong - which its
+    own check says."""
+    from .config import scope_patterns
+    try:
+        return scope_patterns(value)
+    except SystemExit:
+        return []
+
+
+def _where_problems(where, mapping, engine):
+    """A row filter that is not SQL the source reads, or that takes other
+    rows at every reading (the clock, another table), or whose time zone
+    is not one - refused before anything is read, since the copy and the
+    check would each take other rows (`rowfilter.problems`)."""
+    from . import rowfilter
+    rules = mapping.get("where") if isinstance(mapping, dict) else None
+    if not isinstance(rules, dict):
+        return []
+    dialect = rowfilter.dialect_of(engine)
+    out = []
+    for table, rule in rules.items():
+        at = f"{where}.mapping.where.{table}"
+        pred = rule.get("expr") if isinstance(rule, dict) else rule
+        if isinstance(rule, dict):
+            extra = sorted(set(rule) - {"expr", "tz"})
+            if extra or not pred:
+                out.append(Problem("error", at, "expr (the predicate) and"
+                                   " tz (the zone its times are read in)"))
+                continue
+            if rule.get("tz"):
+                try:
+                    rowfilter.zone_offset(rule["tz"])
+                except SystemExit as e:
+                    out.append(Problem("error", f"{at}.tz", str(e)))
+        try:
+            for said in rowfilter.problems(str(pred), dialect):
+                out.append(Problem("error", at, said))
+        except SystemExit as e:
+            out.append(Problem("error", at, str(e)))
+    return out
+
+
+def _names_problems(where, mapping):
+    """`mapping.names` said wrong: a level that is not one, a rule that
+    is not one, a case that is neither lower nor upper."""
+    got = mapping.get("names") if isinstance(mapping, dict) else None
+    if got is None:
+        return []
+    if not isinstance(got, dict):
+        return [Problem("error", f"{where}.mapping.names", "is not a mapping")]
+    out = []
+    for level, rule in got.items():
+        at = f"{where}.mapping.names.{level}"
+        if level not in ("databases", "schemas", "tables"):
+            out.append(Problem("error", at, "databases, schemas or tables"))
+            continue
+        if not isinstance(rule, dict):
+            out.append(Problem("error", at, "is not a mapping"))
+            continue
+        for k, v in rule.items():
+            if k not in ("case", "prefix", "suffix", "strip_prefix",
+                         "strip_suffix"):
+                out.append(Problem("error", f"{at}.{k}", "case, prefix,"
+                                   " suffix, strip_prefix or strip_suffix"))
+            elif k == "case" and str(v).lower() not in ("lower", "upper"):
+                out.append(Problem("error", f"{at}.case", f"{v!r} - lower or"
+                                   " upper"))
+            elif k != "case" and (not isinstance(v, str) or not v
+                                  or any(c in v for c in ".\"'`")):
+                out.append(Problem("error", f"{at}.{k}", f"{v!r} - text a"
+                                   " name may hold"))
+    return out
+
+
+def _objects_problems(where, raw):
+    """`objects` said wrong: a kind that is not one, a value that is
+    neither all, none nor names."""
+    from .config import objects_of
+    got = raw.get("objects")
+    if not isinstance(got, dict):
+        return []
+
+    class _Said:
+        objects = got
+    try:
+        objects_of(_Said)
+    except SystemExit as e:
+        return [Problem("error", f"{where}.objects", str(e))]
+    return []
+
+
+def _takes_back(probe, entry, back):
+    """Whether exclude entry `back` leaves out every table under include
+    entry `entry` - a database or a schema it names - read as `excluded`
+    reads a table there whatever its name: `exclude: [shop.*]` beside
+    `include: [shop]`. A name no table has stands in for each part below
+    the entry, down to a table's whole name on the hop's engine."""
+    import dataclasses
+    parts = [x for x in str(entry).split(".") if x]
+    depth = probe.whole_name() or len(parts) + 1
+    if not parts or len(parts) >= depth:
+        return False
+    leaver = dataclasses.replace(probe, include=[], exclude=[back])
+    return leaver.excluded(*parts, *(f"\x00{n}" for n in
+                                     range(depth - len(parts))))
+
+
+def _include_problems(where, raw, probe):
+    """`include` said wrong, or said against the rest of the hop: an
+    entry that is not a name, one `exclude` takes back whole, a mapping
+    rule for a table it does not take. Each is a table the operator
+    believes is moved and checked while nothing looks at it."""
+    from .config import name_matches, scope_patterns
+    out = []
+    if isinstance(raw.get("exclude"), dict):
+        try:
+            scope_patterns(raw["exclude"])
+        except SystemExit as e:
+            out.append(Problem("error", f"{where}.exclude", str(e)))
+    got = raw.get("include")
+    if got is None or not isinstance(got, (list, dict)):
+        # its type is said with every other key's
+        return out
+    try:
+        got = scope_patterns(got)
+        excluded = scope_patterns(raw.get("exclude"))
+    except SystemExit as e:
+        return [Problem("error", f"{where}.include", str(e))]
+    fold = probe.folds_case()
+    for i, p in enumerate(got):
+        if not isinstance(p, str) or not p.strip() or p.strip() != p \
+                or ".." in p or p.startswith(".") or p.endswith("."):
+            out.append(Problem("error", f"{where}.include[{i}]",
+                               f"{p!r} is not a dotted name"))
+            continue
+        if any(name_matches(p, x, fold) for x in excluded):
+            out.append(Problem(
+                "error", f"{where}.include[{i}]",
+                f"{p} is excluded as a whole as well, so it takes nothing"
+                " - drop one of the two"))
+            continue
+        back = [x for x in excluded if _takes_back(probe, p, x)]
+        if back:
+            out.append(Problem(
+                "warn", f"{where}.include[{i}]",
+                f"exclude {back[0]} leaves out every table under {p}, so"
+                f" include {p} takes none of them - drop one of the two"))
+    probe.include = [p for p in got if isinstance(p, str) and p.strip()]
+    if not probe.include:
+        return out
+    whole = probe.whole_name()
+    for part in ("where", "tables", "columns", "tolerance", "ops"):
+        rules = (raw.get("mapping") or {}).get(part) or {}
+        if not isinstance(rules, dict):
+            continue
+        for table in rules:
+            if any(c in str(table) for c in "*?["):
+                continue
+            names = str(table).split(".")
+            # only a rule that names its database says which table it is;
+            # a shorter one may be any database's, one include takes
+            if whole and len(names) == whole and \
+                    not probe.included(*names):
+                out.append(Problem(
+                    "error", f"{where}.mapping.{part}.{table}",
+                    f"{table} is not among what include takes, so this rule"
+                    " touches nothing - add it to include or drop the rule"))
     return out
 
 
@@ -1432,20 +1920,34 @@ def _contradictions(where, raw, opts, goal, engine):
     out = []
     probe = Hop(name="", engine=engine, source=Endpoint(),
                 target=Endpoint(),
-                exclude=[str(p) for p in (raw.get("exclude") or [])])
+                exclude=_patterns_or_none(raw.get("exclude")),
+                options={k: v for k, v in opts.items()
+                         if k == "source_engine"})
     mapping = raw.get("mapping") or {}
-    for part in ("where", "tables", "columns"):
+    for part in ("where", "tables", "columns", "ops"):
         rules = mapping.get(part) or {}
         if not isinstance(rules, dict):
-            out.append(Problem("error", f"{where}.mapping.{part}",
-                               "is not a mapping"))
+            if part != "ops":
+                # `ops` said wrong is said by its own check
+                out.append(Problem("error", f"{where}.mapping.{part}",
+                                   "is not a mapping"))
             continue
         for table in rules:
+            if part == "ops" and any(c in str(table) for c in "*?["):
+                # a pattern takes what it takes; only a table named
+                # outright is one the hop may leave out whole
+                continue
             if probe.excluded(*str(table).split(".")):
                 out.append(Problem(
                     "error", f"{where}.mapping.{part}.{table}",
                     f"{table} is also excluded, so this rule touches"
                     " nothing - drop one of the two"))
+    out += _include_problems(where, raw, probe)
+    out += _ops_problems(where, mapping)
+    out += _objects_problems(where, raw)
+    out += _names_problems(where, mapping)
+    out += _where_problems(where, mapping, opts.get("source_engine")
+                           if engine == "hetero" else engine)
     if goal in GOALS and not GOALS[goal]["writes"]:
         for k in WRITING:
             if opts.get(k):
@@ -1453,7 +1955,7 @@ def _contradictions(where, raw, opts, goal, engine):
                     "error", f"{where}.options.{k}",
                     f"goal {goal} writes to neither side, and {k} writes"
                     " - drop one of the two"))
-    if goal in ("copy", "subset"):
+    if goal in ONCE:
         for k in STREAMING:
             if opts.get(k):
                 out.append(Problem(
@@ -1468,6 +1970,10 @@ def _contradictions(where, raw, opts, goal, engine):
     if isinstance(share, str) and share.lower() != "ranges":
         out.append(Problem("error", f"{where}.options.share_tables",
                            f"{share!r} - true, or ranges"))
+    closure = opts.get("closure")
+    if closure is not None and str(closure).lower() not in CLOSURE:
+        out.append(Problem("error", f"{where}.options.closure",
+                           f"{closure!r} - one of {', '.join(CLOSURE)}"))
     from .interlock import CHOICES
     rows = opts.get("target_rows")
     if rows is not None and str(rows).lower() not in CHOICES:
@@ -1509,10 +2015,16 @@ def _goal_settings(where, opts, goal, engine):
                 " refer to, and no rows are chosen - subset: {start:"
                 " {table: a condition, a share like 10% or a number of"
                 " rows}}"))
-    elif subset is not None:
+    for g, k in GOAL_OPTION.items():
+        if g != goal and k != "subset" and opts.get(k) is not None:
+            out.append(Problem("warn", f"{where}.options.{k}",
+                               f"read only by a hop whose goal is {g}, so"
+                               " it does nothing here"))
+    if subset is not None and goal != "subset":
         out.append(Problem("warn", f"{where}.options.subset",
                            "read only by a hop whose goal is subset, so it"
                            " does nothing here"))
+    out += _scenario_settings(where, opts, goal)
     said = opts.get("rehearses")
     rehearsed = (said.get("hop") if isinstance(said, dict) else said) or ""
     if goal == "rehearse":
@@ -1541,6 +2053,54 @@ def _goal_settings(where, opts, goal, engine):
         out.append(Problem("warn", f"{where}.options.physical.upgrade",
                            "read only by a hop whose goal is upgrade, so it"
                            " does nothing here"))
+    return out
+
+
+def _scenario_settings(where, opts, goal):
+    """The settings of the scenarios a hop may say, each read as its own
+    module reads it (`charsets`, `tableengine`, `consolidate`, `split`,
+    `archive`) - one reading, so what loads is what runs - and what a
+    goal needs of its own: a consolidation's column."""
+    from types import SimpleNamespace
+
+    from . import archive, charsets, consolidate, split, tableengine
+    out = []
+    probe = SimpleNamespace(goal=goal, options=opts)
+    for key, read in (("charset", charsets.settings),
+                      ("table_engine", tableengine.settings),
+                      ("consolidate", consolidate.settings),
+                      ("split", split.settings),
+                      ("archive", archive.settings)):
+        try:
+            read(probe)
+        except SystemExit as e:
+            out.append(Problem("error", f"{where}.options.{key}", str(e)))
+    if goal == "consolidate":
+        got = opts.get("consolidate")
+        if not isinstance(got, dict) or not got.get("column"):
+            out.append(Problem(
+                "error", f"{where}.options.consolidate",
+                "goal consolidate holds each source's rows under a column,"
+                " and none is named - consolidate: {column: tenant_id,"
+                " value: <this source's>}"))
+        elif str(got.get("keys") or "") == "offset" and not got.get(
+                "offsets"):
+            out.append(Problem(
+                "error", f"{where}.options.consolidate.offsets",
+                "keys: offset shifts each source's keys by its own offset,"
+                " and none is given - offsets: {<value>: <number>}, or"
+                " keys: remap for migkit to work them out"))
+    got = opts.get("archive")
+    if goal == "archive" and isinstance(got, dict) and got.get("remove"):
+        answers = opts.get("source_changes")
+        named = isinstance(answers, dict) and "archived_rows" in answers
+        if not named:
+            out.append(Problem(
+                "warn", f"{where}.options.archive.remove",
+                "the archived rows are removed only with the source's own"
+                " answer by its name, and the hop gives none ahead - a"
+                " terminal asks it under --go; without one they stay"
+                " (source_changes: {archived_rows: yes})"))
     return out
 
 
@@ -1713,6 +2273,8 @@ def decisions(hop):
             "target": side(hop.target),
             "databases": [str(d) for d in hop.databases or []],
             "exclude": list(hop.exclude or []),
+            "include": list(getattr(hop, "include", None) or []),
+            "objects": dict(getattr(hop, "objects", None) or {}),
             "service": hop.service or "native", "slice": hop.slice,
             "workers": hop.workers if hop.workers_set else None,
             "options": opts,
@@ -1786,7 +2348,7 @@ def smallest(name, raw):
         out["workers"] = raw["workers"]
     if "slice" in raw and int(raw["slice"]) != 1_000_000:
         out["slice"] = raw["slice"]
-    for k in ("exclude", "mapping"):
+    for k in ("exclude", "include", "objects", "mapping"):
         if raw.get(k):
             out[k] = raw[k]
     if opts:

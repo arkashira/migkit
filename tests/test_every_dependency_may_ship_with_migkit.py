@@ -165,6 +165,8 @@ def _install(monkeypatch, home, accept=""):
     monkeypatch.setattr(tools, "teradata_driver_present", lambda: False)
     monkeypatch.setattr(tools, "install_teradata", lambda log: False)
     monkeypatch.setattr(tools, "_java_home", lambda: "/jdk")
+    # every environment of its own in place: nothing is fetched for one
+    monkeypatch.setattr(tools, "own_env_python", lambda name: "/bin/python")
     # a machine the redo-file reader runs on, whatever this one is
     monkeypatch.setattr(tools, "_redo_reader_here", lambda: True)
     from migkit.engines import oracle_redo
@@ -234,10 +236,9 @@ def test_every_closed_term_is_asked_in_one_question_first(home,
     monkeypatch.setattr(tools, "install_from_source",
                         lambda program, log: order.append(("build", program)))
     ran = []
-    monkeypatch.setattr(tools.subprocess, "run",
-                        lambda argv, **k: ran.append(argv) or
-                        type("P", (), {"returncode": 0, "stderr": "",
-                                       "stdout": ""})())
+    monkeypatch.setattr(tools, "_step",
+                        lambda argv, log, failed, cwd=None, env=None:
+                        ran.append(argv) or True)
 
     def ask(program, terms):
         order.append(("asked", program))
@@ -294,6 +295,16 @@ def vendor(monkeypatch, home):
     base = f"http://127.0.0.1:{srv.server_port}/"
     monkeypatch.setattr(tools, "VENDOR_URLS", {
         p: base + "{version}/" for p in tools.VENDOR_URLS})
+
+    def pinned(url):
+        # the lock this vendor's files are held to: each one's digest
+        body = files.get(url.rsplit("/", 1)[-1])
+        if body is None or not url.startswith(base):
+            return {}
+        import hashlib
+        return {"digest": "sha256:" + hashlib.sha256(body).hexdigest(),
+                "size": len(body)}
+    monkeypatch.setattr(tools, "pinned", pinned)
     monkeypatch.setattr(tools.platform, "system", lambda: "Linux")
     monkeypatch.setattr(tools.platform, "machine", lambda: "x86_64")
     yield files
@@ -434,3 +445,25 @@ def test_doctor_asks_with_the_licence_and_where_to_read_it(monkeypatch):
     assert "Competitive" in text or "overlaps" in text
     # never yes by default
     assert asked == [("  accept the terms of riotx?", False)]
+
+
+def test_the_sql_server_bulk_driver_waits_for_its_terms():
+    """SQL Server's bulk-load driver brings Microsoft's ODBC driver, which
+    is not open source: not a base dependency, installed only once its
+    terms are accepted, and a target written by statements without it."""
+    deps = " ".join(_requirements())
+    assert "mssql-python" not in deps
+    extras = tomllib.loads((ROOT / "pyproject.toml").read_text())[
+        "project"]["optional-dependencies"]
+    assert any("mssql-python" in d for d in extras["mssql-bulk"])
+    assert tools.MSSQL_BULK in tools.TERMS
+    assert tools.PROGRAM_LICENCES[tools.MSSQL_BULK] not in \
+        tools.OPEN_LICENCES
+    assert "statements" in tools.TERMS[tools.MSSQL_BULK].otherwise
+
+
+def test_without_its_driver_the_bulk_load_says_how_to_get_it(monkeypatch):
+    from migkit.engines.mssql import MSSQLEngine
+    monkeypatch.setattr(tools, "driver_present", lambda name: False)
+    why = MSSQLEngine._bulk_unusable()
+    assert why and "terms are accepted" in why

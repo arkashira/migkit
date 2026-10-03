@@ -90,12 +90,12 @@ def test_a_command_that_runs_out_of_time_is_not_run_again(monkeypatch):
     import subprocess
     import sys
     starts = []
-    real = subprocess.run
+    real = subprocess.Popen
 
     def counted(*a, **k):
         starts.append(1)
         return real(*a, **k)
-    monkeypatch.setattr(util.subprocess, "run", counted)
+    monkeypatch.setattr(util.subprocess, "Popen", counted)
     with pytest.raises(subprocess.TimeoutExpired):
         util.run([sys.executable, "-c", "import time; time.sleep(5)"],
                  timeout=0.2)

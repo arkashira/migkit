@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Account - migkit{% endblock %}
+{% block main %}
+<section class="card">
+  <h1>{{ me.name or me.id }}</h1>
+  <p>Signed in as <b>{{ me.id }}</b> through {{ me.issuer or me.via }}{% if me.groups %}, in {{ me.groups|join(", ") }}{% endif %}.</p>
+  <table>
+    <thead><tr><th>Hop</th><th>Your role</th><th>What it lets you do</th></tr></thead>
+    <tbody>{% for name, hop, role in hops %}<tr><td><a href="/hops/{{ name|urlencode }}">{{ name }}</a></td><td>{{ role }}</td><td>{{ roles.WHAT[role] }}</td></tr>
+    {% else %}<tr><td colspan="3" class="muted">No hop is yours to see.</td></tr>{% endfor %}</tbody>
+  </table>
+</section>
+<section class="card">
+  <h2>The decision record</h2>
+  <form method="post" action="/account/prefs" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label><input type="checkbox" name="explain" value="1" {% if prefs.get("explain", s.explain) %}checked{% endif %}>
+      Show why each way was chosen on every hop's page</label>
+    <button type="submit">Keep</button>
+  </form>
+</section>
+<section class="card">
+  <h2>API tokens</h2>
+  <p class="muted">A token stands for you on the API, with your roles, until
+  it ends (at most {{ days|int }} days) or you end it. It is shown once and
+  kept only as its digest. Send it as <code>Authorization: Bearer ...</code>.</p>
+  <form data-api="/api/v1/tokens" data-show-token class="row">
+    <label>Name <input name="name" required placeholder="what it is for"></label>
+    <label>Days <input name="days" type="number" min="1" max="{{ days|int }}" value="{{ days|int }}"></label>
+    <button type="submit">Make a token</button>
+  </form>
+  <pre class="token" data-token hidden></pre>
+  <table>
+    <thead><tr><th>Name</th><th>Made</th><th>Ends</th><th>Last used</th><th></th></tr></thead>
+    <tbody>{% for t in tokens %}<tr><td>{{ t.name }}</td><td>{{ t.created|when }}</td><td>{{ t.expires|when }}</td><td>{{ t.used|when }}</td>
+      <td><button data-post="/api/v1/tokens/{{ t.id|urlencode }}" data-method="DELETE" data-confirm="End the token {{ t.name }}?">End it</button></td></tr>
+    {% else %}<tr><td colspan="5" class="muted">No token.</td></tr>{% endfor %}</tbody>
+  </table>
+</section>
+{% endblock %}

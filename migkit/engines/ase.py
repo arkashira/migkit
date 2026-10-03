@@ -31,6 +31,7 @@ DECLARED = ("t.name + case when t.name in ('numeric', 'decimal') then '('"
 class AseEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "ase"
+    CHARSETS = True
     SQL_DIALECT = None
     FOLDED_BECAUSE = ("is rendered by migkit's own renderer rather than by"
                       " an ASE one nobody has run")
@@ -100,11 +101,15 @@ class AseEngine(DbapiRows, Engine):
     def databases(self):
         return list(self.hop.databases)
 
+    def check_deep(self, db):
+        """Text stored twice as UTF-8 on the source (`_mojibake`)."""
+        return [self._mojibake(db)]
+
     def neutral_tables(self, side, db):
         return [t for (t,) in self._rows(
             side, db, "select user_name(uid) + '.' + name from sysobjects"
                       " where type = 'U' order by 1")
-            if not self.hop.excluded(db, *t.split(".", 1))]
+            if self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         return [(n, t) for n, t in self._rows(

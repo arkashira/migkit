@@ -125,27 +125,24 @@ def test_a_load_that_reports_failures_is_not_called_copied(monkeypatch,
     case above, before the load was told to keep such documents."""
     import io
 
-    from migkit import movers
+    from migkit import movers, runner
 
     class Fake:
         def __init__(self, cmd, **kw):
-            self.returncode = 0
-            said = (b"finished restoring `app.orders` (3 documents,"
-                    b" 2 failures)\n" if cmd[0] == "mongorestore" else b"")
-            self.stdout = io.BytesIO(b"")
-            self.stderr = io.BytesIO(said)
+            self.returncode, self.pid = 0, 0
+            said = ("finished restoring `app.orders` (3 documents,"
+                    " 2 failures)\n" if cmd[0] == "mongorestore" else "")
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO(said)
 
-        def wait(self):
+        def wait(self, timeout=None):
             return 0
 
         # finished, as a process that has exited says
         def poll(self):
             return self.returncode
 
-        def communicate(self):
-            return b"", b""
-
-    monkeypatch.setattr(movers.subprocess, "Popen", Fake)
+    monkeypatch.setattr(runner.subprocess, "Popen", Fake)
     hop = _hop()
     hop.report_dir = lambda db=None: tmp_path
     with pytest.raises(RuntimeError) as e:
