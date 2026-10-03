@@ -20,6 +20,17 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "cockroachdb"),
+    ("tail.follows", "cockroachdb"),
+    ("tail.table-states", "cockroachdb"),
+    ("tail.added", "cockroachdb"),
+    ("schema.create", "cockroachdb"),
+    ("move.table-copy", "cockroachdb"),
+    ("cutover.drain", "cockroachdb"),
+]
+
 pytestmark = needs_docker
 
 CRDB, PORT = "migkit-test-cockroach", 16341

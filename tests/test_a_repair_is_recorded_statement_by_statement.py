@@ -16,6 +16,9 @@ import pytest
 from migkit import repairlog
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.repair-undo", "hetero")]
+
 
 def _pair(tmp_path, newer_wins=None):
     from migkit.engines.hetero import HeteroEngine

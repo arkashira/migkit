@@ -10,6 +10,12 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("assess.versions", "postgres"),
+    ("assess.brands", ("postgres", "mysql", "redis")),
+]
+
 
 def _docker():
     try:

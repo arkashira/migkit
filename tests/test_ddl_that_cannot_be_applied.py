@@ -48,6 +48,9 @@ from migkit.config import Endpoint, Hop
 from migkit import ddl
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.structure.schema-diff", "postgres")]
+
 GENERATED = (
     'alter table "public"."t" add column "note" text not null;\n\n'
     'alter table "public"."t" add column "tagged" text not null'

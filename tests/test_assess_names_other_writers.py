@@ -12,6 +12,9 @@ import subprocess
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.writers", "postgres")]
+
 
 def _pg(pg_pair, tmp_path):
     from migkit.engines.postgres import PostgresEngine

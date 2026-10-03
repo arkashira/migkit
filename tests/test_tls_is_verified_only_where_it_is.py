@@ -12,6 +12,14 @@ import pytest
 
 from migkit.config import Endpoint
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("security.tls", ("kafka", "sqlite", "clickhouse", "dynamodb", "db2i",
+                      "teradata", "opensearch", "redshift", "snowflake",
+                      "bigquery", "kinesis", "pubsub", "iceberg", "delta",
+                      "couchbase", "cosmosdb", "sapodp")),
+]
+
 FAR = "10.0.0.9"
 
 

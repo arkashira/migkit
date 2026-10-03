@@ -15,6 +15,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("schema.create", ("iceberg", "delta")),
+    ("move.table-copy", ("iceberg", "delta")),
+]
+
 TABLE = """
     create table main.items (id bigint primary key, name varchar,
         price decimal(12, 2), ratio double, active boolean, raw blob,

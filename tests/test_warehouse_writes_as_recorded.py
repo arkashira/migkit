@@ -19,6 +19,12 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("assess.engine-checks", ("redshift", "bigquery")),
+    ("move.sized", "bigquery"),
+]
+
 
 def _engine(name, **target):
     from migkit.engines import engine_named

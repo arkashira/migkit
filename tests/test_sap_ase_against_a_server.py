@@ -17,6 +17,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.table-copy", "ase")]
+
 pytestmark = needs_docker
 
 ASE, PORT, PW = "migkit-test-ms-ase", 16133, "myPassword"

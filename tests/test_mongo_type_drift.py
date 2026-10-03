@@ -18,6 +18,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.value.type-drift", "mongodb")]
+
 SRC, DST = "migkit-test-mongotype-src", "migkit-test-mongotype-dst"
 SRC_PORT, DST_PORT = 15492, 15493
 

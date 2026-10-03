@@ -39,6 +39,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.defaults", "sqlite")]
+
 pytestmark = needs_docker
 
 PORT, NAME = 15609, "migkit-test-hetero-schema"

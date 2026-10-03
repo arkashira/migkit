@@ -10,7 +10,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/base.py` - Engine: the contract every engine fills (`in_scope`, `takes`, checks, repairs, the pre-flight items)
 - `migkit/engines/__init__.py` - the engine names and aliases, `engine_named`, `get_engine`
 - `migkit/decide.py` - the decision engine: rungs, `climb`, `attempt`, `coverage()` - what each engine can do, cell by cell
-- `migkit/capabilities.py` - `matrix()`: the capability table the docs show
+- `migkit/capabilities.py` - `matrix()`: the capability table the docs show; `depth()`: every engine against every depth item, read off the code and proved by the tests' `PROVES`
 - `migkit/verdict.py` - `decide`: the one verdict rule; VERDICTS and exit codes; `hop_scope`; the envelope (`summarize`)
 - `migkit/cli.py` - every command and its options
 - `migkit/movers.py` - the bulk ways and the stream ways (`stream_ways`)
@@ -48,7 +48,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/clouds.py` - Which cloud runs a side, and how that cloud spells a change to it. Classes: Where.
 - `migkit/cloudseed.py` - What only a cloud's control plane can do, driven through its API (backlog R19 lever 1; the owner's "structural four", 2026-09-28): the targe Classes: Aws, Azure, Google, ByApi.
 - `migkit/commercial.py` - The types only the commercial engines have (backlog W6; the type-fidelity research, docs/research/type-fidelity-2026-09-28.md, sections 6, 8 Classes: Variant.
-- `migkit/config.py` - (no docstring) Classes: Endpoint, IamEndpoint, KeychainEndpoint, Hop.
+- `migkit/config.py` - (no docstring) Classes: Endpoint, SideEndpoint, IamEndpoint, KeychainEndpoint, Hop.
 - `migkit/consolidate.py` - Many databases or tenants into one (backlog P0-SCENARIOS): each source's rows carried into one target under a column the hop names, filled w Classes: Source, TablePlan.
 - `migkit/copybook.py` - COBOL copybooks, and the records they describe, read and written exactly. Classes: CopybookError, Unreadable, Figurative, Item, Picture, Leaf.
 - `migkit/costmodel.py` - What a way costs, as a function of the work, with how sure that is (backlog P0-SMART, items 1, 2, 6 and learning across hops). Classes: Estimate, Fit, Knowledge, CostModel.

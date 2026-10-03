@@ -20,6 +20,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.names", "hetero")]
+
 
 def _hetero(mapping=None):
     from migkit.engines.hetero import HeteroEngine

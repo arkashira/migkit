@@ -23,6 +23,15 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "clickhouse"),
+    ("tail.follows", "clickhouse"),
+    ("move.bulk", "clickhouse"),
+    ("move.partitioned", "clickhouse"),
+    ("cutover.drain", "clickhouse"),
+]
+
 pytestmark = needs_docker
 
 NET = "migkit-test-eng-net"

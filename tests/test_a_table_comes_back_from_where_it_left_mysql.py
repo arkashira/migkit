@@ -19,6 +19,9 @@ from migkit import tailctl
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("tail.table-states", "mysql"), ("tail.readded", "mysql")]
+
 pytestmark = needs_docker
 
 MY, PORT = "migkit-test-livetail-readd-my", 16261

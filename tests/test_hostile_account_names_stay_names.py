@@ -17,6 +17,9 @@ from types import SimpleNamespace
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.users", ("postgres", "mysql"))]
+
 HOSTILE_PG = ['x" SUPERUSER --', "a;b", "evil'--", "100%s",
               "ｘ＂ SUPERUSER"]
 

@@ -17,6 +17,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.freeze", "mongodb")]
+
 pytestmark = pytest.mark.docker
 
 NAME, PORT = "migkit-test-cut-mongo", 16075

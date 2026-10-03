@@ -24,6 +24,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.structure.keys", "redis")]
+
 SRC, DST = "migkit-test-rx-src", "migkit-test-rx-dst"
 SRC_PORT, DST_PORT = 16403, 16404
 

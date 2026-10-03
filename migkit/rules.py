@@ -30,19 +30,32 @@ def configured(hop):
     A question is SQL, or - for MongoDB, whose questions are aggregation
     pipelines - a `{collection, pipeline}` mapping, carried as JSON to the
     engine that runs it. A mapping with `source` and `target` asks each
-    side its own."""
+    side its own. A rule that asks one side only, or nothing, is refused:
+    it was dropped without a word, so a rule the operator believed held
+    was never asked (audit 2026-10-01, K19) - `hopkeys` asks this at
+    load."""
     import json
     out = {}
 
     def text(q):
         return json.dumps(q) if isinstance(q, (dict, list)) else str(q)
-    for name, rule in ((hop.options or {}).get("rules") or {}).items():
+    said = (hop.options or {}).get("rules") or {}
+    if not isinstance(said, dict):
+        raise SystemExit("rules: a mapping of each rule's name to its"
+                         " question")
+    for name, rule in said.items():
         if isinstance(rule, dict) and ("source" in rule or "target" in rule):
             src, dst = rule.get("source"), rule.get("target")
         else:
             src = dst = rule
-        if src and dst:
-            out[str(name)] = (text(src), text(dst))
+        if not (src and dst):
+            missing = [s for s, q in (("source", src), ("target", dst))
+                       if not q]
+            raise SystemExit(
+                f"rules.{name}: asks {' or '.join(missing)} nothing - a"
+                " rule is one question both sides answer, or a question"
+                " for each (source: ..., target: ...)")
+        out[str(name)] = (text(src), text(dst))
     return out
 
 
@@ -76,6 +89,18 @@ def _answer(rows):
                   key=lambda r: tuple((x is None, str(x)) for x in r))
 
 
+def _apart(a, b):
+    """(rows of `a` not in `b`, rows of `b` not in `a`), counted: a row
+    one side answers twice and the other once is one row apart. By a
+    count of each row - it was a list searched for each row, 2,000 rows
+    0.21 s and 8,000 rows 2.61 s, some seven minutes at 100,000 (audit
+    2026-10-01, K19); and a row repeated on one side was not said."""
+    from collections import Counter
+    ca, cb = Counter(a), Counter(b)
+    # a Counter keeps the order its rows came in, and both are sorted
+    return list((ca - cb).elements()), list((cb - ca).elements())
+
+
 def check(engine, db):
     """One Result per rule; `run_rule(side, db, sql)` is the engine's."""
     out = []
@@ -94,8 +119,7 @@ def check(engine, db):
             out.append(Result("rules", scope, "ok",
                               f"{len(a)} rows, the same on both sides"))
             continue
-        only_src = [r for r in a if r not in b]
-        only_dst = [r for r in b if r not in a]
+        only_src, only_dst = _apart(a, b)
         show = "; ".join(
             [f"source {r}" for r in only_src[:3]]
             + [f"target {r}" for r in only_dst[:3]])

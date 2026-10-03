@@ -34,6 +34,9 @@ from tests import mysql_pair
 from tests.conftest import psql, verdict
 from tests.mysql_pair import my, my_pair  # noqa: F401 - a fixture
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.partitioned", ("postgres", "mysql"))]
+
 pytestmark = pytest.mark.docker
 
 
