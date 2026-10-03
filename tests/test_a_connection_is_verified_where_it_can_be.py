@@ -19,6 +19,11 @@ import pytest
 from migkit import tls
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("security.tls", ("postgres", "mysql", "mongodb", "redis", "cassandra")),
+]
+
 FAR = "10.0.0.7"
 
 

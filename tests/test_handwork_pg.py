@@ -13,6 +13,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.handwork", "postgres")]
+
 SRC, DST = "migkit-test-hwpg-src", "migkit-test-hwpg-dst"
 SRC_PORT, DST_PORT = 15495, 15496
 

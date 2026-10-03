@@ -20,6 +20,9 @@ from tests import large_values_rig as rig
 from tests.cap_pairs import remove
 from tests.conftest import mssql_run, needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.large-values", "mssql"), ("move.sized", "mssql")]
+
 pytestmark = needs_docker
 
 MS, PORT, PW = "migkit-test-lv-mssql", 16378, "CHANGE_ME-lv1a"

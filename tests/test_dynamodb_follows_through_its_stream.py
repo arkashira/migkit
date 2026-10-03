@@ -20,6 +20,15 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.delta", "dynamodb"),
+    ("verify.fence", "dynamodb"),
+    ("tail.follows", "dynamodb"),
+    ("cutover.rollback", "dynamodb"),
+    ("cutover.drain", "dynamodb"),
+]
+
 pytestmark = needs_docker
 
 DDB, PORT = "migkit-test-ddbstream", 15929

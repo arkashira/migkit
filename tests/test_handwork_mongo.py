@@ -12,6 +12,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.engine-checks", "mongodb"), ("assess.handwork", "mongodb")]
+
 SRC, DST = "migkit-test-hwmg-src", "migkit-test-hwmg-dst"
 SRC_PORT, DST_PORT = 15497, 15498
 

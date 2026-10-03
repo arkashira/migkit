@@ -38,6 +38,9 @@ from migkit import movers, planner
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.objects", "postgres"), ("scope.names", "postgres")]
+
 
 def _hop(engine="postgres", **kw):
     return Hop(name="sc", engine=engine,

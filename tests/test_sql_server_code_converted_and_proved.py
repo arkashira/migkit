@@ -19,6 +19,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.routines", "mssql")]
+
 pytestmark = [pytest.mark.docker]
 
 MS, SB_MS = "migkit-test-code-ms", "migkit-test-code-sbms"

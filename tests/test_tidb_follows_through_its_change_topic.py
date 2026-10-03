@@ -22,6 +22,16 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "tidb"),
+    ("tail.follows", "tidb"),
+    ("move.table-copy", "tidb"),
+    ("move.create-missing", "tidb"),
+    ("cutover.counters", "tidb"),
+    ("cutover.drain", "tidb"),
+]
+
 pytestmark = needs_docker
 
 TIDB, TIDB_PORT = "migkit-test-tidb", 16340

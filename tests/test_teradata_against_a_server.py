@@ -19,6 +19,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "teradata"), ("move.table-copy", "teradata")]
+
 HOST = os.environ.get("MIGKIT_TERADATA_HOST", "")
 USER = os.environ.get("MIGKIT_TERADATA_USER", "dbc")
 PASSWORD = os.environ.get("MIGKIT_TERADATA_PASSWORD", "dbc")

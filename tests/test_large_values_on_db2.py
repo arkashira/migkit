@@ -23,6 +23,9 @@ from tests import large_values_rig as rig
 from tests.cap_pairs import remove
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.large-values", "db2"), ("move.sized", "db2")]
+
 pytestmark = needs_docker
 
 DB2, PORT, PW = "migkit-test-lv-db2", 16379, "CHANGE_ME-db2"

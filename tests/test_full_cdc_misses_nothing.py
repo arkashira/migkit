@@ -16,6 +16,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.names", "hetero"), ("tail.follows", "mongodb")]
+
 MY, PG = "migkit-test-fcdc-my", "migkit-test-fcdc-pg"
 MY_PORT, PG_PORT = 15672, 15673
 

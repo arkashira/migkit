@@ -12,6 +12,9 @@ from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.load-window", "postgres")]
+
 pytestmark = needs_docker
 
 

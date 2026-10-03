@@ -10,6 +10,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.engine-checks", "kafka")]
+
 SRC, DST = "migkit-test-ak-src", "migkit-test-ak-dst"
 SRC_PORT, DST_PORT = 19092, 19093
 

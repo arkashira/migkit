@@ -24,6 +24,9 @@ from migkit.config import Endpoint, Hop
 from migkit.engines.hetero import HeteroEngine, _Accounts
 from tests.twoway_sides import Side, pair
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.ops", "hetero")]
+
 EP = Endpoint(host="x", port=1, user="x", password="x")
 
 

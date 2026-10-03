@@ -16,6 +16,9 @@ import time
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.read-only-target", ("postgres", "mysql"))]
+
 pytestmark = needs_docker
 
 ROLES = ("create role app login password 'CHANGE_ME';"

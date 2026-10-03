@@ -22,6 +22,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.confirm", "hetero")]
+
 pytestmark = [pytest.mark.docker]
 
 MY, PG = "migkit-test-xconfirm-my", "migkit-test-xconfirm-pg"

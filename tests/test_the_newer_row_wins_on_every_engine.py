@@ -21,6 +21,12 @@ from migkit import repairlog
 from migkit.config import Endpoint, Hop
 from tests.conftest import _have_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.repair", ("mongodb", "redis")),
+    ("verify.repair-undo", ("mongodb", "redis")),
+]
+
 pytestmark = [pytest.mark.docker,
               pytest.mark.skipif(not _have_docker(),
                                  reason="docker not available")]

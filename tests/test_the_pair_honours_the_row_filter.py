@@ -25,6 +25,9 @@ from click.testing import CliRunner
 
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.row-filter", ("sqlite", "hetero"))]
+
 
 def _run(*argv):
     from migkit import cli

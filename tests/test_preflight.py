@@ -35,6 +35,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.preflight", "postgres")]
+
 pytestmark = needs_docker
 
 SRC, DST = 15527, 15528

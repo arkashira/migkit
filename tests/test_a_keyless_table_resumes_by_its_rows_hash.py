@@ -19,6 +19,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.table-copy", "sqlite")]
+
 ROWS = 600
 
 

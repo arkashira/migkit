@@ -20,6 +20,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.repair", "sqlite")]
+
 
 def _pair(tmp_path, exclude=()):
     src, dst = tmp_path / "a.db", tmp_path / "b.db"

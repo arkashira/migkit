@@ -24,6 +24,9 @@ import pytest
 
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.delta", "mongodb")]
+
 pytestmark = needs_docker
 
 MG, PORT = "migkit-test-f0v-mongo", 16050
