@@ -1551,6 +1551,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...>: <...>:<...> is no instance the provider's API lists for these credentials - name it under the side's managed option (id)
 
+* <...> is not a time zone - an offset (+07:00) or a zone name (Asia/Bangkok)
+
 * the row filter <...> is not SQL the source reads: <...>
 
 * the row filter <...> has no translation into the target's SQL: <...>

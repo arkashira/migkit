@@ -1022,10 +1022,26 @@ class Hop:
         half DMS leaves out, and the reason a filtered target reads as
         missing rows there.
         """
+        got = self._where_rule(*parts)
+        if got is None:
+            return None
+        return str(got.get("expr")) if isinstance(got, dict) else str(got)
+
+    def row_filter_zone(self, *parts):
+        """The time zone the row filter's times are read in - `where:
+        {table: {expr: ..., tz: "+07:00"}}` - or None, where each server
+        reads them in its own session's zone. A filter on a time column
+        read in two zones takes other rows on each side; said once, it is
+        read in that one zone by every reader."""
+        got = self._where_rule(*parts)
+        return str(got["tz"]) if isinstance(got, dict) and got.get("tz") \
+            else None
+
+    def _where_rule(self, *parts):
         rules = (self.mapping or {}).get("where") or {}
         for ident in self._ids(*parts):
             if ident in rules:
-                return str(rules[ident])
+                return rules[ident]
         return None
 
     def takes_object(self, kind, *parts):

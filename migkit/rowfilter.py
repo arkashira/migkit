@@ -38,6 +38,41 @@ MOVING = {"currenttimestamp", "currentdate", "currenttime", "now",
           "currentuser", "sessionuser", "user"}
 
 
+#: the SQL each engine's row filter is written in, where the engine's own
+#: class does not say (`Engine.SQL_DIALECT`) - read for parsing it, not a
+#: promise that the engine applies it
+DIALECTS = {"postgres": "postgres", "mysql": "mysql", "tidb": "mysql",
+            "mssql": "tsql", "ase": "tsql", "oracle": "oracle",
+            "sqlite": "sqlite", "duckdb": "duckdb", "clickhouse": "clickhouse",
+            "teradata": "teradata", "snowflake": "snowflake",
+            "bigquery": "bigquery", "redshift": "redshift",
+            "cockroachdb": "postgres", "dsql": "postgres",
+            "mongodb": "postgres"}
+
+
+def dialect_of(engine):
+    """The SQL a hop on `engine` writes its row filters in."""
+    from .util import _canonical
+    return DIALECTS.get(_canonical(str(engine or "")), None)
+
+
+def zone_offset(tz):
+    """A time zone as a filter's times are read in: `+07:00`, `-03:30`,
+    `UTC`, or a name in the zone database (`Asia/Bangkok`); SystemExit for
+    one that is none of them."""
+    text = str(tz).strip()
+    if re.fullmatch(r"[+-](?:0\d|1[0-4]):[0-5]\d", text) or \
+            text.upper() in ("UTC", "Z"):
+        return text
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(text)
+        return text
+    except Exception:
+        raise SystemExit(f"{tz!r} is not a time zone - an offset (+07:00)"
+                         " or a zone name (Asia/Bangkok)")
+
+
 def parse(pred, dialect):
     """The predicate's tree, read in the source's SQL; SystemExit naming
     the filter where it is not one."""

@@ -187,3 +187,40 @@ def test_the_document_store_takes_the_rows_the_reference_takes(mongo):
         got = {d["_id"] for d in coll.find(rowfilter.to_mongo(pred,
                                                               "postgres"))}
         assert got == _taken(pred, rows), pred
+
+
+def _hop_problems(where, engine="postgres"):
+    from migkit import hopkeys
+    raw = {"engine": engine, "source": {"host": "10.0.0.1", "user": "a"},
+           "target": {"host": "10.0.0.2", "user": "a"},
+           "mapping": {"where": where}}
+    return [(p.where, p.text) for p in hopkeys.check({"hops": {"h": raw}})
+            if p.level == "error"]
+
+
+def test_a_hop_whose_filter_would_take_other_rows_each_time_is_refused():
+    assert _hop_problems({"orders": "region = 'TH'"}) == []
+    got = _hop_problems({"orders": "created_at > now() - interval '1 day'"})
+    assert got and "reads the clock" in got[0][1]
+    got = _hop_problems({"orders": "a = = 1"})
+    assert got and "is not SQL" in got[0][1]
+
+
+def test_a_filter_says_the_zone_its_times_are_read_in():
+    from migkit.config import build_hop
+    rule = {"orders": {"expr": "created_at >= '2026-01-01'",
+                       "tz": "+07:00"}}
+    assert _hop_problems(rule) == []
+    hop = build_hop("h", {"engine": "postgres",
+                          "source": {"host": "10.0.0.1", "user": "a"},
+                          "target": {"host": "10.0.0.2", "user": "a"},
+                          "mapping": {"where": rule}})
+    assert hop.row_filter("db", "public", "orders") == \
+        "created_at >= '2026-01-01'"
+    assert hop.row_filter_zone("db", "public", "orders") == "+07:00"
+    assert hop.row_filter_zone("db", "public", "other") is None
+    assert _hop_problems({"orders": {"expr": "x = 1",
+                                     "tz": "Mars/Base"}})[0][0] == \
+        "hops.h.mapping.where.orders.tz"
+    assert _hop_problems({"orders": {"tz": "UTC"}})
+    assert rowfilter.zone_offset("Asia/Bangkok") == "Asia/Bangkok"
