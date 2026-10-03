@@ -244,7 +244,7 @@ def in_scope(engine, db, got):
     online schema change."""
     working = transient_among(got)
     return {t: cols for t, cols in got.items()
-            if not engine.hop.excluded(db, *str(t).split("."))
+            if engine.hop.takes_table(db, t)
             and t not in working}
 
 

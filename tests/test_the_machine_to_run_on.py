@@ -380,7 +380,6 @@ def test_both_engines_read_their_load(monkeypatch):
     # before 16 there is no view of every backend's reads and writes
     assert "pg_stat_io" not in asked[0] and "pg_stat_bgwriter" in asked[0]
     monkeypatch.setattr(pg, "_server_version", lambda side, db: 160002)
-    pg.__dict__.pop("_load_version")
     pg.load_sample("src", "app")
     assert "pg_stat_io" in asked[1]
     my = MySQLEngine(hop)

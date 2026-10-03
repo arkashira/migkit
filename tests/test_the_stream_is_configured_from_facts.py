@@ -125,6 +125,9 @@ def test_wide_rows_keep_the_connectors_own_floor():
 
 def test_the_columns_the_hop_keeps_out_are_left_out_at_the_source(
         gen, monkeypatch):
+    """By the columns the hop carries (`column.include.list`): the columns
+    left out, read once, let a column added later to a table with `keep`
+    through."""
     from migkit.engines.mysql import MySQLEngine
     monkeypatch.setattr(MySQLEngine, "column_catalog",
                         lambda self, side, db: {
@@ -132,8 +135,19 @@ def test_the_columns_the_hop_keeps_out_are_left_out_at_the_source(
                                        ("note", "text")]})
     src, _ = gen(_hop("mysql", mapping={"columns": {
         "orders": {"keep": ["id", "total"]}, "audit": {"drop": ["who"]}}}))
-    assert src["column.exclude.list"] == (
-        "appdb\\.audit\\.who,appdb\\.orders\\.note"), src
+    assert "column.exclude.list" not in src, src
+    taken = src["column.include.list"].split(",")
+
+    def carried(name):
+        return any(re.fullmatch(t, name) for t in taken)
+    assert carried("appdb.orders.id") and carried("appdb.orders.total")
+    assert not carried("appdb.orders.note")
+    # added later: out of a table with keep, in a table with drop
+    assert not carried("appdb.orders.added_later")
+    assert carried("appdb.audit.added_later")
+    assert not carried("appdb.audit.who") and carried("appdb.audit.id")
+    # every column of the tables the hop says nothing of
+    assert carried("appdb.other.anything")
 
 
 def test_kept_columns_that_cannot_be_matched_start_nothing(gen, monkeypatch):
@@ -168,7 +182,7 @@ def test_a_mapping_that_renames_nothing_is_not_a_rename(gen):
 def test_an_excluded_table_is_not_refused_for_its_filter(gen):
     src, _ = gen(_hop(exclude=["audit"],
                       mapping={"where": {"public.audit": "id > 1"}}))
-    assert src["table.exclude.list"] == "public\\.audit"
+    assert src["table.exclude.list"] == "[^.]+\\.audit"
 
 
 def test_the_signals_are_the_shapes_the_connector_reads():

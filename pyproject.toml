@@ -155,6 +155,21 @@ dependencies = [
     # Storage bucket the Google appliance's parts land in
     "azure-storage-blob>=12.20",
     "google-cloud-storage>=2.18",
+    # the web view and its API (`migkit.web`): requests, routes and
+    # templates, served by a threaded production server with TLS; people
+    # signed in by the organisation's OpenID Connect provider (the code
+    # flow with PKCE, the ID token checked against its keys) or SAML
+    # provider (the answer's signature proved), provisioned by SCIM
+    # (filters read as SQL), the local operator's password hashed with
+    # Argon2id
+    "werkzeug>=3.0",
+    "jinja2>=3.1",
+    "cheroot>=10.0",
+    "authlib>=1.3",
+    "joserfc>=1.0",
+    "signxml>=4.0",
+    "argon2-cffi>=23.1",
+    "scim2-filter-parser>=0.7",
 ]
 
 [project.urls]
@@ -198,9 +213,11 @@ include = ["migkit*"]
 
 [tool.setuptools.package-data]
 # the instance catalog the machine advice weighs (`migkit.machine`), the
-# managed-service catalogue (`migkit.managed`), and the locks of what
-# `doctor --install` fetches (`migkit.tools`)
-migkit = ["data/*.json", "data/*.yaml", "data/*.txt"]
+# managed-service catalogue (`migkit.managed`), the locks of what
+# `doctor --install` fetches (`migkit.tools`), and the web view's pages,
+# style and script (`migkit.web`)
+migkit = ["data/*.json", "data/*.yaml", "data/*.txt",
+          "web/templates/*.html", "web/static/*"]
 
 [tool.pytest.ini_options]
 markers = ["docker: needs a docker daemon",

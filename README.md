@@ -256,7 +256,7 @@ off for a hop where the time matters more.
 | `sync` | Make target equal to source, or run a whole migration flow. |
 | `move` | Move data for this hop. |
 | `watch` | Watch a running migration load: row counts, rate, ETA, replication state. |
-| `report` | Render the HTML report from the last check run and export the hop's evidence (what moved, every verdict with both sides' counts and digests and how to take them again, decisions, approvals, repairs, outages - HTML, Markdown, JSON, CSV), or --serve the live localhost dashboard (with a Prometheus /metrics endpoint). |
+| `report` | Render the HTML report from the last check run and export the hop's evidence (what moved, every verdict with both sides' counts and digests and how to take them again, decisions, approvals, repairs, outages - HTML, Markdown, JSON, CSV), or --serve the web view: every hop's outcomes, progress, approvals, offers and evidence for the people each hop names, the REST API, and a Prometheus /metrics endpoint (`migkit.web`). |
 | `history` | Audit trail: saved rollback states and every write migkit made, read from the local changelog and state journals. |
 | `rollback` | Restore target sequences from a saved state, put back the rows the repairs since it wrote, where the target still holds what they wrote; where the hop streamed back or cut over, the old source's counters raised past the new primary's. |
 | `users` | Sync logins source -> target keeping the same password. |

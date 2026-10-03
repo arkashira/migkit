@@ -100,11 +100,12 @@ class _Tail:
         pytest.fail(f"never {what}: {self.lines[-20:]}")
 
     def state(self, table):
+        # each table is kept by its whole name (`TableSet.key`)
         try:
             got = json.loads((self.where / "tail-tables.json").read_text())
         except (OSError, ValueError):
             return {}
-        return got["tables"].get(table) or {}
+        return got["tables"].get(f"public.{table}") or {}
 
     def stop(self):
         tailctl.stop(self.where)

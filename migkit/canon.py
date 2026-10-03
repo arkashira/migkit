@@ -2186,6 +2186,22 @@ def change(op, table, key, values=None, before=None, txn=None):
 #: after its commit and the time the source committed it
 FROM_THE_LOG = ("txn", "txn_end", "txn_at", "txn_ts")
 
+#: on a change, the columns its log left out as unchanged - a large value
+#: stored out of line that an update did not touch (`pgslot.change`):
+#: not written, so the target keeps what it holds, and counted by the
+#: tail's accounts
+UNCHANGED = "unchanged"
+
+#: on a `create`, the table it was renamed from in another database: it
+#: arrives with that table's rows, which no row change carries
+#: (`tailtables.TableSet.ddl` holds it as a rename into the hop's scope)
+CAME_FROM = "came_from"
+
+#: on a delete, that migkit made it of a row that left the hop's row
+#: filter (`hetero._in_scope`) - the source deleted nothing, so a two-way
+#: tail holds it to no conflict (`twoway.resolve`)
+FILTERED = "left_the_filter"
+
 
 def ended(out, begun, at=None, ts=None):
     """At a transaction's commit: mark the last change of it in `out` as

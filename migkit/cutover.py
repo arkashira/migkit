@@ -790,6 +790,11 @@ def _job_rows(hop, eng, d, conf):
         out.append(("warn", f"{d}: jobs already running on the target:"
                             f" {', '.join(on_dst[:5])} - they write there"
                             " before the flip"))
+    alone = jobs.left_alone(hop, eng, d, "src")
+    if alone:
+        out.append(("ok", f"{d}: jobs left as they are on both sides:"
+                          f" {', '.join(alone[:5])} - they write only"
+                          " tables the hop does not take"))
     return out
 
 
@@ -1762,9 +1767,12 @@ def _final_check(hop, eng, d, before, left, say):
             # a check that compared nothing (every answer skipped, or no
             # answer at all) is the one mistake here with no undo
             from . import verdict
+            # every field of each answer: the check it is, the rows it
+            # counted - what holds a hop that keeps some changes off the
+            # target to them (`verdict.hold`); without them such a hop's
+            # kept rows read as a difference and it never cut over
             result["decision"] = verdict.decide(
-                [{"status": r.status, "scope": r.scope, "detail": r.detail}
-                 for r in got], hop)
+                [dict(vars(r)) for r in got], hop)
             result["skipped"] = [r.scope for r in got if r.status == "skip"]
         except Exception as e:  # noqa: BLE001 - a check that fails is a stop
             result["error"] = str(e).strip()[:300]
@@ -1794,9 +1802,21 @@ def _final_check(hop, eng, d, before, left, say):
 def _has_delta(hop, eng, d):
     """Whether a verified pass of `watch --verify --delta` stands to start
     from: only then does the delta check compare what changed, rather
-    than record a starting point and compare nothing."""
+    than record a starting point and compare nothing. A position taken
+    under another scope than the hop's now, or taken again after the
+    scope changed and no whole check since, does not stand: the tables
+    the scope took in were never compared whole (`Engine.delta_covers`),
+    and every table is compared instead."""
     if not hasattr(eng, "delta_verify"):
         return False
+    covers = getattr(eng, "delta_covers", None)
+    if callable(covers):
+        try:
+            if not covers(d):
+                return False
+        except (Exception, SystemExit):  # noqa: BLE001 - not known (a
+            # record cut short too): every table, then
+            return False
     if hasattr(eng, "_delta_slot"):
         try:
             return eng._psql("src", d, "select count(*) from"

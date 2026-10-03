@@ -2818,6 +2818,151 @@ store). What was still nowhere:
     same outcomes the console shows, the approvals and the source-change
     offer answered there.
 
+## P0-SCOPE. The check takes exactly what the move took (owner, 2026-10-03)
+
+"A DTS job can be told to leave the log tables behind, so when we verify
+or compare we must be able to choose where to verify - deep and very
+detailed." A hop said only what it left out (`exclude`); what another
+tool's job *took* was turned into an `exclude` against the source's
+tables once, when `init` connected, so a table made later was in scope
+though the job never took it.
+
+1. **`include`** (done 2026-10-03): the databases, schemas and tables a
+   hop takes - the same names and shell patterns as `exclude`, matched
+   the same right-anchored way, `exclude` winning where both name one.
+   Read inside `Hop.excluded`, the one scope answer every reader asks
+   (the copy, the check, the repair, the tail, the drop list of every
+   bulk mover), so none can verify a table the move left out or leave
+   out one it moved. A database is skipped only where every entry names
+   another one first; where a name may hold a dot of its own (a
+   collection, a topic) every database is opened. Every whole copy (the
+   pages, a backup restore, a replica, the keyspace copy) is refused
+   for a hop that takes only some (`config.scoped`). Validated: an entry
+   that is not a name, one `exclude` takes back whole, a mapping rule
+   naming a table `include` does not take. Before the move: an entry that
+   takes no table, a database it takes nothing of. In the evidence:
+   `verdict.json` and the report say the scope a `same` covers
+   (`verdict.hop_scope`); a `same` within the hop's own scope is a
+   `same` (a run narrowed on the command line stays `incomplete`).
+   Columns and rows go deeper through `mapping.columns` and
+   `mapping.where`, which the compare paths already read.
+2. **A DTS job read as a hop** (done 2026-10-03, `imports`): a Tencent
+   Cloud migration job's detail, a sync job, or a data check's
+   objects; an Alibaba Cloud job's detail or request. Goal `verify`; the
+   job's databases and new names, schemas, tables and new names, row
+   filters, columns and new column names, views; and said beside it,
+   every setting of the job that makes a correct move look different -
+   deletes or updates it does not carry, conflicts it ignores, tables it
+   wrote into that were there, changes-only starts, a target left
+   writable, accounts not moved, its own check off, sampled, counting
+   only or covering less than it moves, an unencrypted leg. AWS DMS
+   tasks' plain includes are now the hop's `include` too.
+3. **Renames read with their database** (done 2026-10-03, found on the
+   way): a rule `appdb.public.orders: orders_v2` - the only way to say
+   which of two databases' `orders` is renamed - was passed over by the
+   pair engine, the PostgreSQL schema check and the parallel copier,
+   which asked without the database; the table was compared against the
+   name it no longer has. `Hop.target_table_in(db, ...)`, one place.
+5. **Every variant of the services, and their own checks** (done
+   2026-10-03): Tencent DTS migration jobs of both APIs (2021, 2018's
+   `DatabaseInfo`), sync jobs, data checks' objects and tasks,
+   subscriptions, and the requests that made any of them; Alibaba DTS
+   `DbList`/`DbObject` and the older `MigrationObject` /
+   `SynchronizationObjects` (`TableExcludes` become `exclude`); the
+   changes a job carries become `mapping.ops`. A service's own check
+   report - Tencent's compare report, AWS DMS's table statistics,
+   Alibaba's data check - given as `compare_with` is held table by table
+   against migkit's answers (`servicecheck`): what it called the same
+   and migkit found different, what it skipped, what it never checked.
+6. **One scope through every part** (owner 2026-10-03: "move, watch,
+   verify, CDC, DDL and everything; deepest, most consistent and
+   idempotent, smartest, easiest; every variant and every engine").
+   Audited 2026-10-03 (three read-only audits and a market survey);
+   shared pieces done: `Engine.in_scope`, `Hop.scope_fingerprint` /
+   `scope_changed`, `Hop.reversed()` reading scope and mapping in the
+   target's names, the nested `include`/`exclude` form, case read the
+   same on every machine and without case where the engine folds it,
+   `mapping.ops` (`Hop.carries`). In progress, by part:
+   a. **counters, orphans, accounts**: sequences and AUTO_INCREMENT only
+      of tables in scope, never lowered (the cutover's counter gate
+      refused on an excluded table's sequence); pg_dump's serial
+      sequences of excluded tables; an orphan whose parent the hop does
+      not take is a warn that says so; a job that moves no accounts is
+      not checked for them; the cutover's jobs and consolidation
+      counters in scope; the second reading pairs renamed tables;
+   b. **deep checks, inventories, repairs**: every listing a deep check,
+      the objects inventory (views, routines, triggers, events,
+      sequences) and every repair builds goes through `in_scope`;
+   c. **reuse, watch, delta, evidence, resume**: the fingerprint beside
+      every answer, position and checkpoint (delta slot, resume records,
+      a seed's manifest), reuse only under the same scope; watch reads
+      the scope every cycle and sums only what is taken; delta reads
+      through the row filter and the renames; the evidence renders the
+      scope it was taken under; sizing counts only what is carried;
+   d. **the bulk paths**: a partition is scoped by its root; renames
+      honoured by every same-engine path (or routed to the copier); a
+      filtered table never emptied whole; a target-only table never
+      emptied; mixed-case names; schema creation leaving out objects
+      that depend on what is not taken; patterns rather than lists where
+      the tool reads them;
+   e. **the change tail and DDL**: the servers' own replication refused
+      or narrowed where a hop filters or renames; partitions by root;
+      renames and swaps into or out of scope under every policy; a
+      scope changed while the tail was stopped; Debezium per database
+      and by pattern; `mapping.ops` applied; a DDL policy per object and
+      kind; online schema change shadow tables; an unchanged large value
+      never written as the decoder's placeholder;
+   f. **contracts and closure**: the check judges a table against the
+      changes its hop carries (deletes kept: the target may hold more,
+      never fewer or other rows), repair never undoes what the contract
+      allows; before the move, the dependency closure of what is taken
+      (foreign keys, views, routines, triggers, owned sequences,
+      partitions) offered or accepted, and every source object explained
+      by the rule that decided it.
+7. **P1, the cores done 2026-10-03, each read in one place:**
+   - one row filter (`rowfilter`): parsed once in the source's SQL,
+     said in another engine's SQL with its column names, as a document
+     store's query with SQL's NULL kept (`NOT` cannot take a NULL row
+     back in), a filter that moves with the clock or reads another table
+     named before anything is read, its text comparisons named for the
+     collation check; `evaluate`, SQL's three-valued logic, the
+     reference every translation is held to on the same rows (17
+     predicates x 25 rows with NULLs and missing fields, and on
+     PostgreSQL, MySQL and a document store in the suite);
+   - column transforms a check can prove (`transforms`): null, constant,
+     a keyed hash (`mask_key`; the same value, the same digest on every
+     run and machine), truncate - one function in Python and in each
+     engine's SQL, held alike by tests;
+   - objects beside the tables (`objects`): views, functions,
+     procedures, triggers, events, sequences, roles - all, none or by
+     name (`Hop.takes_object`); a DTS job's choices by name read into it,
+     a kind it does not carry said as a finding, never left out;
+   - name rules (`mapping.names`): case, prefix, suffix, a prefix or
+     suffix taken off, per level, read where every target name is
+     (`target_table`, `target_db`); DMS's name rules read into them.
+   Still to wire where they are read (after the part merges): the row
+   filter's translations into the pair engine, the document store and
+   the hop's validation (clock and subquery refused there), its time
+   zone (`where: {expr, tz}`) and the collation check; the transforms
+   into `mask_on_write`, the copier and the check's digests (the source
+   side computing the target's value); `takes_object` into the objects
+   inventory, schema creation and repairs; a name rule's collisions
+   (two names one after the rule) refused. Also: a check scope narrower
+   than the move's said as incomplete, never same; partitions carried
+   by root or leaf; every scope change logged with its source position.
+8. **Still open:**
+   a. the Alibaba job's top level for a source with schemas (PostgreSQL,
+      SQL Server) is read as its schemas inside the endpoint's database,
+      from the service's documentation and its errors, not from a real
+      job's detail - confirm against one;
+   b. the change-capture connector and LOAD-file imports still turn a
+      regex or search include into a one-time `exclude`;
+   c. a Huawei DRS / GCP DMS / Azure DMS job read the same way (in
+      progress 2026-10-03, from the providers' documented shapes);
+   d. `include` read by a live tail's filter (Debezium `table.include.list`
+      instead of a resolved exclude list) so a table made later under a
+      taken pattern joins the stream without a restart.
+
 ## P0-CLOUDS. Any cloud to any cloud, every database service in each (owner, 2026-10-01)
 
 "Not just AWS to Tencent - any <-> any from the start: AWS, Tencent,
@@ -3238,6 +3383,33 @@ quoting (P0, L).** Files: `migkit/engines/postgres.py`,
 * Running work: `pg_pass.py` (the table-way ladder), the repair paths
   (repair ladder).
 
+  **Built 2026-10-01 (tests written, the full run to come):** one
+  `postgres.connect` (the side's `tls_forms`, connect timeout, keepalives
+  from `envkeys`, migkit's name, `SESSION` pinned: UTC, ISO, every digit,
+  no statement timeout) behind `_open`/`_connect` (the hop's name mapped
+  once) and `pg_pass.connect`, `legs._connect`; the questions on a kept
+  connection per side and thread (`_kept_conn`: the server's text, every
+  result of a script, the session reset after anything that may leave
+  state, a read asked again on a lost connection, a write never), the
+  client program only for meta-commands, and every program through one
+  `_client` with the side's TLS; the catalogue in one statement a side
+  (`catalog`, `shape_catalog` with column extras, checks and triggers,
+  kept 60 s and read again after migkit's own DDL), every reader of a
+  table's shape from it; `user_tables` the one rule, `row_estimate` with
+  None, the key in key order everywhere, markers with the table's live
+  columns in one statement a side; grants of every kind as effective
+  privileges with the grant option; the optional schema readings said
+  "not run: why"; the subscription's connection string from
+  `legs.conninfo` on a session that is not logged; the row repair through
+  the drivers' COPY, its undo sealed and durable; the text repair under the
+  load's window; JSON digested on the server as canon writes it; `doctor`
+  says verified only of a path that checked (`leg_encryption`'s
+  `verified`, the far paths' rows); the page copy's programs on the
+  target's host take the source's TLS as far as they can (`physical`).
+  Left to others: `cli._leg_said` reading `verified` (AUD-A), the leaves'
+  JSON still folded here (`leaves.py`), the drilldown's file names from
+  table names (base and the readers).
+
 **AUD-G2. The MySQL engine: the same (P0, L).** Files:
 `migkit/engines/mysql.py`, `migkit/engines/my_pass.py`.
 * One `_connect` (read timeout, keepalive, UTC pinned for rules too, TLS
@@ -3582,6 +3754,55 @@ they are three cross-cutting gaps, not 26 engine problems:
 
 Done when every cell is a way or "not applicable" with its reason, and
 the depth tests run on every engine, not only PostgreSQL and MySQL.
+
+Added 2026-10-04 (owner: "if it is not in the backlog, make them equal"):
+the ten shapes above measure what an engine can *move*; three more
+depths were built for PostgreSQL and MySQL (some for MongoDB, SQL Server
+and Oracle) and are owed to every engine:
+
+* **Scope** (P0-SCOPE): `include`, `objects`, `mapping.ops`, the row
+  filter (`rowfilter`), column transforms (`transforms`) and name rules
+  read through `in_scope` / `takes` / `carries` in every path of every
+  engine - its listings, objects inventory, deep checks, repairs,
+  counters, tail and DDL.
+* **Verification**: the whole deep-check catalogue (orphans, constraints
+  not validated, charset/collation, generated columns, boundary, keyless
+  tables, duplicate keys, large values), delta verification and the
+  fence, repair with exact undo, users and grants, the objects inventory.
+* **Change tail and DDL**: per-table states (live/copying/parked/
+  removed) with the exact seam, the per-table DDL policy, renames and
+  swaps, a table added or removed while running, the operation contract.
+
+Done when a depth matrix generated from the code (as
+`capabilities.matrix()` is) shows every engine against every item of
+the three - a way, or "not applicable" with its reason - and each way
+has its test on that engine.
+
+**All of it (owner 2026-10-04: "complete, all of it deep, all of it
+good").** The matrix is not limited to the shapes and the three depths
+above: it enumerates *every* capability migkit has, and every engine is
+owed every one of them -
+
+1. assess and the pre-flight (every check, the managed service's own
+   limits, the closure of what is taken, the scope explained);
+2. schema and conversion (made on the target, compared, fixed, stored
+   code proved);
+3. move (every way the decision engine knows, resumable, parallel and
+   sized, large values, partitions, filtered, mapped, masked);
+4. change tail and DDL (as above);
+5. verification (every check, consistent snapshot, fence, delta,
+   second reading, the service's own check held against it);
+6. repair with exact undo;
+7. cutover (freeze, drain, counters, flip, rollback, the stream back);
+8. scope (as above), accounts, grants and objects;
+9. security (TLS verified, every sign-in form, secrets, egress);
+10. managed services of every provider (P0-CLOUDS);
+11. HA and fencing (W1), evidence, observability and the forecast.
+
+**Enforced, not hoped for:** a test reads the matrix and fails when any
+cell is "not yet" without either a backlog row naming it or a written
+"not applicable" reason - so an engine left thinner than PostgreSQL and
+MySQL is a red test, never a silent gap.
 
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
@@ -4678,6 +4899,26 @@ the gaps nothing above covers yet, now items of their own.
   target, and hundreds of migrations run and watched as one fleet; a
   REST API, a Terraform provider and a Kubernetes operator over it; SSO
   (OIDC/SAML) and SCIM on the view, not only a proxy's header.
+  PARTLY BUILT (the owner's scope of 2026-10-01, "W2 and a GUI";
+  `migkit.web`, served by `migkit report --serve`, `docs/web.md`): sign-in
+  by OpenID Connect (code flow with PKCE, ID token checked against the
+  provider's keys) or SAML (only a signed answer to a request the view
+  made, read out of the element the signature covers), SCIM 2.0
+  provisioning that signs a deactivated person out at once, one local
+  operator without a provider; roles viewer/operator/approver/admin per
+  hop, hop group or file in the hops file's `access`; a versioned REST
+  API whose OpenAPI document is written from the table it dispatches on
+  (`docs/site/openapi.json`); runs started from the view are the command
+  line's own commands in a process of their own, carrying who started
+  them; approvals given in the view counted by `approvals.require`
+  (signed by the view's key, re-checked for the role at count time,
+  never the requester's); source-change offers answered there and
+  recorded by name; pages showing each side's outcome, the plan's phases
+  with p50/p90 and the cutover outage, progress, evidence, the decision
+  record only when asked. Not built: discovery, sizing from performance
+  history, cost, a fleet view, the Terraform provider and the Kubernetes
+  operator; an encrypted SAML assertion, a signed authentication request,
+  single logout.
 * **W3. Code conversion at enterprise breadth.** Beyond R11: PL/SQL
   packages with the emulation libraries they need (orafce and the
   like), T-SQL at depth, and the SQL embedded in application code

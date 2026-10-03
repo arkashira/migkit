@@ -120,22 +120,63 @@ def _count(rows):
         return None
 
 
-def read(hop, session=None):
+def read(hop, session=None, left=None):
     """{(db, table, where): {"src": line, "dst": line}}: each table's
     sides as one run took them - the run `session`, or the last run that
     took the table - the latest line of each side in it. A side with no
-    partner in its run is there alone."""
+    partner in its run is there alone. Only the tables the hop takes now
+    (`taken`): a table it has since left out was listed with its old
+    answer beside the verdict on what it takes; `left`, where given, gets
+    each (db, table) left out."""
     if session:
         from . import runlog
         got = runlog.appended(hop, session, FILE)
         if got is not None:
-            return _paired(got, session)
-    return read_in(hop.report_dir(), session)
+            return _within(hop, _paired(got, session), left)
+    return read_in(hop.report_dir(), session, hop, left)
 
 
-def read_in(where, session=None):
+def taken(hop, db, table, engine=None, side="src"):
+    """Whether the hop takes, now, the table a digest's line names - as
+    `engine` names it (`util.split_table`), the source's where none is
+    said. On the target's side, a name the hop renames a table to is
+    that table's, and is kept."""
+    from .util import split_table
+    names = getattr(hop, "_names_engine", None)
+    eng = engine or (names() if callable(names) else hop.engine)
+    schema, name = split_table(eng, str(table))
+    parts = [schema] if schema else []
+    if side == "dst" and hasattr(hop, "source_table_in"):
+        # the target's name read back to the source's: a table renamed on
+        # the way is asked as the table it was, in its own database
+        back = hop.source_table_in(db, *parts, name)
+        if back is None:
+            return False
+        return not hop.excluded(db, *back)
+    return not hop.excluded(db, *parts, name)
+
+
+def _within(hop, paired, left=None):
+    """`paired` with only the tables the hop takes now (`taken`), each
+    asked by its source's line where there is one."""
+    if hop is None or not hasattr(hop, "excluded"):
+        return paired
+    out = {}
+    for key, sides in paired.items():
+        db, table, _ = key
+        side = "src" if sides.get("src") else "dst"
+        line = sides.get(side) or {}
+        if taken(hop, db, table, line.get("engine"), side):
+            out[key] = sides
+        elif left is not None and (db, table) not in left:
+            left.append((db, table))
+    return out
+
+
+def read_in(where, session=None, hop=None, left=None):
     """`read` of the hop whose reports are at `where`, every part of the
-    file read (`runlog.parts`)."""
+    file read (`runlog.parts`); of the tables `hop` takes now, where it
+    is given."""
     from . import runlog
     lines = []
     for part in runlog.parts(where / FILE):
@@ -148,7 +189,7 @@ def read_in(where, session=None):
                 lines.append(json.loads(raw))
             except ValueError:
                 continue
-    return _paired(lines, session)
+    return _within(hop, _paired(lines, session), left)
 
 
 def _paired(lines, session=None):

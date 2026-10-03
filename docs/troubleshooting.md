@@ -31,6 +31,14 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * ssl-mode=<...> checks the server's certificate against an authority: say which with ssl-ca=<its certificate file> (a managed service publishes its bundle)
 
+* <...> is not a change a tail carries - insert, update or delete
+
+* objects: <...> is not a kind of object - <...>
+
+* <...>: a list of names, or databases each with all, a list of tables, or its schemas
+
+* <...>: <...> - all, a table, a list of tables, or its schemas
+
 * nothing is kept in this machine's keychain as <...>/<...> - `migkit init` keeps it there, or write another reference
 
 * pip install boto3 for AWS sign-in and secrets
@@ -65,6 +73,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * unknown hop <...>, have: <...>
 
+* <...>: mapping.names.<...>.<...> cannot be turned round for the way back - not every name it writes says what it was. Name those tables in mapping.tables, which is turned round exactly
+
 * <...> already has a hop <...> going somewhere else (MIGKIT_HOP=<another name> adds this one beside it)
 
 * MIGKIT_GOAL=<...>: one of <...>
@@ -91,13 +101,41 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: not a file migkit reads a hop from - a replication task's JSON, a connector's configuration, or a LOAD DATABASE command file
 
-* <...>: JSON, but neither a replication task (it has no TableMappings) nor a connector's configuration (it has no connector.class)
+* <...>: JSON, but not a replication task (it has no TableMappings), a DTS job (no MigrateOption, Objects, ObjectItems or DbObject), a DRS job (no base_info or object_info), a migration job or stream (no sourceDatabase or sourceConfig), an Azure migration (no taskType or sourceDatabaseName) or a connector's configuration (no connector.class)
 
 * the file holds <...> replication tasks; give it one (a hop is one task)
 
 * the endpoint <...> is a <...> one, which migkit has no engine for
 
 * filter operator <...>: not one migkit reads
+
+* <...>: a list of migration jobs says no objects; save the job's own detail - tccli dts DescribeMigrationDetail --JobId <...>
+
+* the file holds <...> jobs (<...>); give it one (a hop is one job)
+
+* the job's <...> is a <...> one, which migkit has no engine for
+
+* the job sends database <...> to both <...> and <...>
+
+* the file holds <...> DTS jobs (<...>); give it one (a hop is one job)
+
+* the file holds <...> DRS jobs (<...>); give it one (a hop is one job)
+
+* <...>: its detail says no objects; save the objects it takes beside it, under db_object - GET /v5/{project_id}/jobs/<...>/db-objects
+
+* the job's <...> names no engine migkit has
+
+* the file holds <...> <...>s (<...>); give it one (a hop is one <...>)
+
+* the job's <...> (<...>) names no engine migkit has
+
+* the stream reads <...>, which migkit has no engine for
+
+* the file holds <...> migrations (<...>); give it one (a hop is one migration)
+
+* <...>: a <...> of the migration service, not a migration - save the migration task, or the database migration
+
+* <...>: a task that does not migrate a database - save the project's migration task (its taskType begins Migrate.)
 
 * the file's connector.class reads no database migkit has an engine for
 
@@ -175,7 +213,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * topology: two_way - <...>. Nothing was set up.
 
-* the hop maps columns (mapping.columns), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
+* the hop maps columns or renames tables (mapping.columns, mapping.tables), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
+
+* <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which reads the hop's scope and mapping for every change.
 
 * <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which stops on a schema change instead of carrying half of it. | `migkit move --mode full` copies what the hop covers, and `migkit sync` brings the target level again before cutover.
 
@@ -297,7 +337,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the hop masks <...> on the way, and only the parallel dump of a MySQL hop can: this path would copy the values as they are. Nothing has been copied. Install it with migkit doctor --install, or drop the masking rule
 
-* <...> would be emptied anyway: the table references one of the tables this move replaces, and emptying a table empties everything pointing at it. the hop excludes it, which says its rows are written here and not carried, so they cannot be put back afterwards. either it is not target-owned after all - take it out of the hop's exclude list and let the move carry it - or the reference has to go before the move can run.
+* <...> would be emptied anyway: the table references one of the tables this move replaces, and emptying a table empties everything pointing at it. the hop excludes it, which says its rows are written here and not carried, so they cannot be put back afterwards. either it is not target-owned after all - take it out of the hop's exclude list and let the move carry it - or the reference has to go before the move can run. | <...> the hop carries only the rows its filter selects into it, and the rows outside the filter are the target's own, so they cannot be put back afterwards. Either the filter goes, or the reference has to go before the move can run. | <...> the source has no such table, so the move does not carry it and its rows are the target's own, which cannot be put back afterwards. Either the reference goes before the move can run, or the hop leaves out the table it points at. | <...>
+
+* <...> ... | <...>: the hop carries only some of their changes (mapping.ops), so the rows the target holds of them are kept as they are - a row the source deleted, or changed, stays as it was there - and emptying them for the load would take those rows. Nothing has been emptied. Move them while the target holds none of their rows, or follow only their changes (`migkit move --mode cdc`)
 
 * <...>: <...> ... | <...> have triggers on the target - foreign keys among them - and <...> can neither turn them off for the load nor load as a replica. Loading anyway would either be refused row by row or let the triggers rewrite what arrives. Nothing has been written. Grant it with `GRANT SET ON PARAMETER session_replication_role TO <...>` (PostgreSQL 15 and later), or move as the managed service's admin user.
 
@@ -325,7 +367,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * could not set the <...> on the CDC leg: <...>
 
-* <...>: the columns the hop keeps could not be matched against the source's, so the stream cannot be told which to leave out. Nothing has been started
+* <...>: the columns the hop keeps could not be matched against the source's, so the stream cannot be told which to take. Nothing has been started
+
+* <...>: a name holding a comma cannot be put on <...>'s lists, which a comma divides. Nothing has been started
+
+* the hop moves <...> databases (<...>), and <...> writes into the one database its sink is given: every database's tables would land in the first's. Nothing has been started - follow one database a hop, or with migkit's own change tail
 
 * the source's tables in <...> could not be listed, so what the hop maps cannot be matched against them. Nothing has been started
 
@@ -431,9 +477,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the saved position in <...> cannot be read, and a follow started from anywhere else either skips changes or cannot say it did not. Remove the file and move again with --mode full+cdc
 
-* ddl: <...> is not one of <...> - stop the tail, park the table the DDL touched, or apply what can be carried
+* <...>: <...> is not one of <...> - stop the tail, park the table the DDL touched, or apply what can be carried
+
+* ddl.skip: <...> is not one of <...> - an ALTER or a rename left out would have every change after it written where the target has no column or table for it
 
 * spool_limit: the bytes a parked table's changes may take on this machine, a whole number
+
+* <...>: <...> was replaced on the source - its name names another table now (renamed, or two renames swapped one in under it) - at <...> or after, and nothing after that position was applied. The hop's `ddl` is stop: set `ddl: apply` or `ddl: park` to have it copied again, and run the tail again; it resumes from there
 
 * <...>: <...> was <...> on the source at <...> or after, and nothing after that position was applied. The hop's `ddl` is stop: set `ddl: apply` to carry what can be carried at its place, or `ddl: park` to set only that table aside, and run the tail again; it resumes from there
 
@@ -501,7 +551,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * approvals.steps: <...> - not a step migkit holds; the steps are <...>
 
-* <...> needs approval, and the hop's `approvals.signers` - the list of who may approve - is not there
+* <...> needs approval, and the hop's `approvals.signers` - the list of who may approve - is not there, and no one approves it in the web view either (the hop's `access` names no approver)
 
 * cutover: is `true` or the path's settings (<...>), not <...>
 
@@ -661,7 +711,37 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the model provider <...> is not one of <...>
 
+## The web view and the API
+
+* <...> describes no identity provider (no IDPSSODescriptor)
+
+* <...>: the identity provider offers no sign-in by redirect
+
+* <...>: no signing certificate - an answer could not be proved
+
+* MIGKIT_WEB_URL=<...> is not an address people open: https://host[:port], no path
+
+* MIGKIT_WEB_TLS_CERT and MIGKIT_WEB_TLS_KEY go together: the certificate and its private key
+
+* signing in through an identity provider needs the view at an https:// address (MIGKIT_WEB_URL) - a code or an assertion would cross the network in the clear otherwise
+
+* MIGKIT_WEB_SAML_METADATA=<...> is not a file: the identity provider's metadata, as it publishes it
+
+* MIGKIT_WEB_SCIM_TOKEN is shorter than 24 characters - anyone who guesses it provisions people; draw a long random one
+
+* MIGKIT_METRICS_TOKEN is shorter than 24 characters; draw a long random one
+
+* <...> is not a file this machine can read
+
+* the view would listen on <...> without TLS: give it a certificate (MIGKIT_WEB_TLS_CERT, MIGKIT_WEB_TLS_KEY), or serve it behind a reverse proxy that does TLS - MIGKIT_WEB_URL=https://... and MIGKIT_WEB_PROXIES naming the proxy's address, the only one then answered; or, in a container published on the host's loopback only, MIGKIT_WEB_PLAIN=on
+
+* MIGKIT_WEB_OIDC_ISSUER needs MIGKIT_WEB_OIDC_CLIENT_ID and MIGKIT_WEB_OIDC_CLIENT_SECRET - the client the provider registered for this view
+
+* the identity provider <...> is not an https:// address
+
 ## PostgreSQL
+
+* the <...>: <...>. The connection was refused before it ran anything.
 
 * <...> already exists on the target - migkit will not alter or replace a table that is already there
 
@@ -681,9 +761,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: a tail applies into <...> under a replication origin of migkit's (<...>), and <...> applies into it too. Leaving out what migkit applied there would leave out what the other applies, and those changes would never reach the other side. Tear the two-way tail into this side down (move --mode cdc --drop), or the other; its next start chooses another way to mark what it applies
 
-* no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance('<...>', pg_current_wal_lsn()); -- skips everything pending, including this
-
-* the <...>: <...>. The connection was refused before it ran anything.
+* no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance(<...>, pg_current_wal_lsn()); -- skips everything pending, including this
 
 * <...>: the key column <...> has no text both sides render, so the repair could not be recorded row by row. Nothing was repaired on this table.
 
@@ -1379,6 +1457,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: mapping.columns leaves out part of its key, so a change cannot be placed on the target by it. Keep the key's columns.
 
+* <...>: another table of the source has its name, and the target has no table of its whole name, so its changes would land in a table of the other's. Nothing of the batch was applied: make the target's table of that whole name, or rename one of them with mapping.tables, and run the tail again
+
 * <...>: the source's schema changed under the tail - <...> ... | <...>. The target does not have <...> yet, so nothing after <...> was applied. Bring the target's schema level with the source's, then run the tail again; it resumes from there.
 
 * <...>.<...>: the tail read <...> changes and took back <...> set aside | <...> and accounts for <...> - <...> to apply, <...> left out. Nothing of the batch was applied, and the position stays at <...>: the batch is read again when the tail starts
@@ -1627,6 +1707,24 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...>: <...>:<...> is no instance the provider's API lists for these credentials - name it under the side's managed option (id)
 
+* <...> is not a time zone - an offset (+07:00) or a zone name (Asia/Bangkok)
+
+* the row filter <...> is not SQL the source reads: <...>
+
+* the row filter <...> has no translation into the target's SQL: <...>
+
+* <...> is not a column - a document store is asked of its fields only
+
+* <...> is not a value a document store's query can hold - write it out as a literal
+
+* <...>: no document query says it - filter on comparisons, IN, BETWEEN, LIKE and IS NULL
+
+* <...>: IS takes NULL only here
+
+* IN over a subquery has no document query
+
+* <...>: the reference does not read it
+
 * <...>: no database to keep the machines' records in on the target
 
 * <...>: its machines have nowhere to agree on who writes - <...>. Keep the hop's run state in a bucket (state: {backend: s3}), or name a directory every machine sees (state: {shared: <path>})
@@ -1656,6 +1754,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: the seed is in format <...>, and this migkit reads <...>
 
 * <...>: the manifest's signature does not hold (<...>) - nothing is loaded from it
+
+* <...>: the seed was exported under another scope than the hop's now, and <...> of its tables cannot be held to this one at the load: <...> ... | <...>. Export it again under this scope
 
 * <...>: after the rows that changed were copied, <...> still differ - `migkit check` names the rows
 
@@ -1698,5 +1798,17 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the offline bundle's <...> is not what its sums say. Nothing has been installed from it
 
 * the offline bundle's <...> is not in its sums
+
+* `<...>` is not a transform: null, constant <text>, hash or truncate <n>
+
+* a random value cannot be held to anything after the load, and a second run writes another
+
+* a constant must be text without quotes or line breaks
+
+* <...> takes nothing after it
+
+* truncate takes how many characters to keep, a whole number above 0
+
+* hash needs the hop's mask_key (a secret reference): a digest without a key is a dictionary away from the value
 
 * MIGKIT_UI_USER_HEADER names the header a signing-in proxy puts who it let in into, and anything that reaches the view can send that header: set MIGKIT_UI_PROXY_SECRET too - the value the proxy sends in <...> - and the view believes only the proxy

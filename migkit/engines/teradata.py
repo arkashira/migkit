@@ -1168,7 +1168,8 @@ class TeradataEngine(DbapiRows, Engine):
                 or re.search(r"_ERR_[12]$", t, re.I)]
         stuck = []
         for t in names:
-            if self._own(t) or t in left:
+            # a table the hop leaves out is the target's own
+            if self._own(t) or t in left or not self.in_scope(db, t):
                 continue
             try:
                 self._rows("dst", db, "select top 1 1 from"

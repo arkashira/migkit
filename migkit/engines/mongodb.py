@@ -2,7 +2,7 @@ import time
 
 from .. import pieces
 from ..decide import Rung
-from .base import Engine, RepairAction, Result
+from .base import Engine, RepairAction, Result, clauses, rows_counted
 from ..verdict import difference_kind_from_counts
 
 SKIP_DBS = {"admin", "local", "config"}
@@ -88,7 +88,7 @@ class MongoEngine(Engine):
         c = self._client(side)[self._d(side, db)]
         return sorted(n for n in c.list_collection_names()
                       if not n.startswith("system.")
-                      and not self.hop.excluded(db, n))
+                      and self.in_scope(db, n))
 
     def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a collection")
@@ -215,11 +215,15 @@ class MongoEngine(Engine):
             name, codec_options=self._client("src").codec_options
             .with_options(document_class=RawBSONDocument))
         target = self._client("dst")[self._d("dst", db)]
-        dst = target[name]
+        # under the name the hop gives it there (`mapping.tables`): it was
+        # written under the source's, and the one the hop names stayed
+        # empty
+        there = self.hop.target_table_in(db, name)
+        dst = target[there]
         after = json_util.loads(st["last"]) if "last" in st else None
         started_here = after is None
         if started_here:
-            st["made"] = name not in target.list_collection_names()
+            st["made"] = there not in target.list_collection_names()
             # what the target already holds is not this copy's
             gone = dst.delete_many({}).deleted_count
             st["moved"] = 0
@@ -283,17 +287,21 @@ class MongoEngine(Engine):
         do. A collection the target does not have at all counts too - this
         engine creates collections on the first write, so a missing one is
         one nothing reached. Excluded collections are not listed, so a
-        collection left out on purpose is not reported.
+        collection left out on purpose is not reported. A renamed one is
+        looked for under the name the hop gives it on the target.
         """
         try:
-            dst = set(self.neutral_tables("dst", db))
+            dst = set(self._client("dst")[self._d("dst", db)]
+                      .list_collection_names())
             s = self._client("src")[db]
             t = self._client("dst")[self._d("dst", db)]
             empty = []
             for c in self.neutral_tables("src", db):
                 if s[c].find_one({}, {"_id": 1}) is None:
                     continue
-                if c not in dst or t[c].find_one({}, {"_id": 1}) is None:
+                there = self.hop.target_table_in(db, c)
+                if there not in dst or t[there].find_one(
+                        {}, {"_id": 1}) is None:
                     empty.append(c)
             return empty
         except Exception:
@@ -793,8 +801,13 @@ class MongoEngine(Engine):
                 after = (event.get("_id") or {}).get("_data")
                 ts = self._event_time(event)
                 # a collection the hop leaves alone, dropped or written,
-                # is the target's business and not the tail's
-                if table and self.hop.excluded(db, table):
+                # is the target's business and not the tail's - unless it
+                # is renamed into the hop's scope, which the tail must
+                # meet: dropped here, the collection joined with none of
+                # its documents under every `ddl` (as MySQL's `_ddl_of`
+                # keeps a rename whose either end is in scope)
+                if table and self.hop.excluded(db, table) and not (
+                        op == "rename" and self._renamed_in(db, event)):
                     continue
                 if op in self.STREAM_DDL:
                     got = self._ddl_event(db, op, event)
@@ -854,6 +867,13 @@ class MongoEngine(Engine):
                   "dropIndexes": "alter", "shardCollection": "alter",
                   "reshardCollection": "alter",
                   "refineCollectionShardKey": "alter"}
+
+    def _renamed_in(self, db, event):
+        """Whether a rename event's new name, in this database, is one the
+        hop takes."""
+        dest = event.get("to") or {}
+        return bool(dest.get("coll")) and dest.get("db") == self._d(
+            "src", db) and not self.hop.excluded(db, dest["coll"])
 
     def _ddl_event(self, db, op, event):
         """[canon.ddl] for a collection event, None where it is not one
@@ -992,7 +1012,10 @@ class MongoEngine(Engine):
     def _shape(self, side, db):
         d = self._client(side)[self._d(side, db)]
         shape = {}
-        for name in sorted(d.list_collection_names()):
+        # the collections and views the hop takes, with their indexes: one
+        # it leaves out, on one side only, was "extra on target" every check
+        for name in sorted(n for n in d.list_collection_names()
+                           if self.in_scope(db, n)):
             idx = {}
             for i in d[name].list_indexes():
                 spec = {k: (str(v) if k == "key" else v)
@@ -1276,7 +1299,7 @@ class MongoEngine(Engine):
                     if ca != cb:
                         bad.append(f"{name} src={ca} dst={cb}")
             if bad:
-                cres = Result("counts", db, "diff", "; ".join(bad[:10]))
+                cres = Result("counts", db, "diff", clauses(bad))
             else:
                 cres = Result("counts", db, "ok",
                               f"{len(names)} collections, equality implied"
@@ -1672,7 +1695,10 @@ class MongoEngine(Engine):
                       + (" by their bytes" if exact else "")
                       + (f" kind={kind}" if kind else "")
                       + (f"; {whose}" if whose else ""), str(d),
-                      f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
+                      f"migkit sync {self.hop.name} --db {db} --kind rows --apply",
+                      table=str(name), rows_apart=rows_counted(
+                          name, len(found["missing"]), len(found["extra"]),
+                          len(found["changed"])))
 
     #: stages that write, which a rule may not hold anywhere in it
     WRITING_STAGES = ("$out", "$merge")
@@ -1761,8 +1787,9 @@ class MongoEngine(Engine):
 
     def check_deep(self, db):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
-        names = sorted(set(s.list_collection_names())
-                       & set(t.list_collection_names()))
+        names = sorted(n for n in set(s.list_collection_names())
+                       & set(t.list_collection_names())
+                       if self.in_scope(db, n))
 
         def newest(coll):
             d = coll.find_one(sort=[("_id", -1)], projection={"_id": 1})
@@ -2069,6 +2096,10 @@ class MongoEngine(Engine):
         clean = True
         for coll, ids in sorted(touched.items()):
             bad = []
+            # each document apart said as missing, only on the target or
+            # changed: a hop that keeps what the source deletes is held to
+            # which (`verdict.hold`)
+            apart = {"missing": [], "extra": [], "changed": []}
             # by the stored bytes: decoded, 5 == 5.0 == NumberLong(5) and
             # 1 == True in Python, and two dicts equal in any field order
             one, two = self._raw(src[coll]), self._raw(dst[coll])
@@ -2077,23 +2108,36 @@ class MongoEngine(Engine):
                 b = two.find_one({"_id": _id})
                 if (a and a.raw) != (b and b.raw):
                     bad.append(_id)
+                    apart["missing" if b is None else "extra" if a is None
+                          else "changed"].append(_id)
             if bad:
-                clean = False
                 d = self.hop.report_dir(db)
-                (d / f"data-{coll}.changed").write_text(
-                    "\n".join(dumps(i) for i in bad) + "\n")
-                res.append(Result(
+                for kind, got in apart.items():
+                    p = d / f"data-{coll}.{kind}"
+                    if got:
+                        p.write_text("\n".join(dumps(i) for i in got) + "\n")
+                    elif p.exists():
+                        p.unlink()
+                answer, held_back = self._delta_held(Result(
                     "delta", f"{db}.{coll}", "diff",
-                    f"of {len(ids)} touched docs, {len(bad)} differ",
+                    f"of {len(ids)} touched docs, {len(bad)} differ:"
+                    f" missing={len(apart['missing'])}"
+                    f" extra={len(apart['extra'])}"
+                    f" changed={len(apart['changed'])}",
                     str(d),
-                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                    f"migkit sync {self.hop.name} --db {db} --kind rows",
+                    table=str(coll), rows_apart=rows_counted(
+                        coll, len(apart["missing"]), len(apart["extra"]),
+                        len(apart["changed"]))))
+                clean = clean and not held_back
+                res.append(answer)
             else:
                 res.append(Result("delta", f"{db}.{coll}", "ok",
                                   f"{len(ids)} touched docs verified"
                                   " equal on both sides"))
             if log:
                 log(f"{coll}: {len(ids)} touched, "
-                    + ("clean" if not bad else "DIFF"))
+                    + self._delta_said(res[-1]))
         if clean:
             state.write_text(dumps(end_token))
             note = "token advanced"
@@ -2114,19 +2158,28 @@ class MongoEngine(Engine):
         names = sorted({f.name.split(".")[0][len("data-"):]
                         for k in ("missing", "extra", "changed")
                         for f in d.glob(f"data-*.{k}")})
-        actions = []
+        # a drilldown of a collection the hop has since left out is said,
+        # never acted on
+        names, said = self._drills_in_scope(db, names)
+        actions = [said] if said else []
         for name in names:
-            if self.hop.excluded(db, name):
-                continue
-            counts = []
+            counts, named = [], {}
             for k in ("missing", "extra", "changed"):
                 f = d / f"data-{name}.{k}"
                 if f.exists():
-                    counts.append(f"{k}={sum(1 for _ in f.open())}")
+                    named[k] = range(sum(1 for _ in f.open()))
+                    counts.append(f"{k}={len(named[k])}")
+            # the documents the hop keeps by the changes it does not carry
+            # are left as they are, and said
+            left = self._repairable(db, name, named)
+            kept = self._kept_said(named, left)
+            if kept and not any(left.values()):
+                continue
             actions.append(RepairAction(
                 db, "rows", [f"resync docs for {name} ({', '.join(counts)})"],
                 [], f"{name}: replace/insert from source per _id, deleted and"
-                    " overwritten target docs saved to undo first",
+                    " overwritten target docs saved to undo first"
+                    + (f"; {kept}" if kept else ""),
                 table=name))
         return actions
 
@@ -2135,9 +2188,11 @@ class MongoEngine(Engine):
     ROWS_PUT_BACK = False
 
     def repair_found(self, db, table):
-        """The `_id`s the last check named, each as its Extended JSON."""
-        return {kind: [(line,) for line in self._read_drill(db, table, kind)]
-                for kind in ("missing", "changed", "extra")}
+        """The `_id`s the last check named, each as its Extended JSON -
+        never the ones the hop keeps (`_repairable`)."""
+        return self._repairable(db, table, {
+            kind: [(line,) for line in self._read_drill(db, table, kind)]
+            for kind in ("missing", "changed", "extra")})
 
     def repair_sides(self, db, table):
         """None: a collection's documents are lined up by `_id` alone, the
@@ -2153,10 +2208,14 @@ class MongoEngine(Engine):
         undo = d / "undo"
         undo.mkdir(exist_ok=True)
 
+        kept = self._kept_by_hop(db, name)
+
         def read(kind):
+            # a document the hop keeps by a change it does not carry is
+            # never removed, added or overwritten here
             f = d / f"data-{name}.{kind}"
             return [loads(l) for l in f.read_text().splitlines()] \
-                if f.exists() else []
+                if f.exists() and kind not in kept else []
 
         from .. import repairlog
         extra, missing = read("extra"), read("missing")

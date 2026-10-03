@@ -55,6 +55,7 @@ CONTRIBUTORS = ["migkit.movers", "migkit.verifiers",
                 "migkit.engines.teradata", "migkit.engines.sapodp",
                 "migkit.engines.saas", "migkit.engines.saas_salesforce",
                 "migkit.shared", "migkit.seedtools", "migkit.cloudapi",
+                "migkit.web.uses",
                 "migkit.engines.spanner", "migkit.engines.bigtable",
                 "migkit.engines.firestore", "migkit.engines.keyspaces",
                 "migkit.engines.neptune", "migkit.engines.timestream"]

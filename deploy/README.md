@@ -61,7 +61,7 @@ up and supervises its own streaming pipeline behind the same command.
 
 ## Alerts and notifications
 
-`/metrics` on the dashboard (`migkit report --serve`) carries each hop's last
+`/metrics` on the web view (`migkit report --serve`) carries each hop's last
 verdict (`migkit_verdict`, one sample a verdict: same, different, error,
 incomplete, none) and, for a running change tail, how far behind it is,
 whether it is still going round its loop, and whether it stopped on an

@@ -1109,9 +1109,15 @@ def _leg_said(eng, side, db, ep):
         return (f"verified: {pos['detail']}" if pos
                 and pos["state"] == "verified" else "")
     if got["encrypted"]:
-        return f"encrypted: {got['how']}" + (
-            ", the certificate verified" if pos
-            and pos["state"] == "verified" else "")
+        # the engine says what this connection used where it can; the
+        # hop's own settings speak only for an engine that cannot
+        checked = got.get("verified")
+        if checked is None:
+            checked = bool(pos and pos["state"] == "verified")
+        left = got.get("unverified") or []
+        return (f"encrypted: {got['how']}"
+                + (", the certificate verified" if checked else "")
+                + (f"; not verified on: {', '.join(left)}" if left else ""))
     through = (ep.options or {}).get("tunnel_to")
     if through and tls.tunnel_kind(ep) == "ssh":
         return (f"not encrypted by the database; carried through the"
@@ -1614,13 +1620,19 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
     `prev`: {(check, db): answer} of the run being resumed, from
     `prev_at`; an `ok` of it is reused, marked `reused_from`, and held
     (`reuse_held`) only where the source has made no change since it was
-    taken (`_position`) - it read as fresh however old it was. `show(answer)`
-    as each database's come in. Ctrl-C lets the databases in flight end,
-    says so, and starts no more."""
+    taken (`_position`) - it read as fresh however old it was. An answer
+    taken under another scope than the hop's now is never reused, and
+    every answer carries the scope it was taken under
+    (`Hop.scope_fingerprint`). `show(answer)` as each database's come in.
+    Ctrl-C lets the databases in flight end, says so, and starts no
+    more."""
     from . import drift, traces
     from . import verdict as _verdict
     from .engines.base import Engine
-    prev = prev or {}
+    scope = (hop.scope_fingerprint()
+             if hasattr(hop, "scope_fingerprint") else None)
+    prev = {k: r for k, r in (prev or {}).items()
+            if not (scope and hop.scope_changed(r))}
     merge = _merged(eng, checks, table)
     local_map = {}
     for d in dbs:
@@ -1740,7 +1752,10 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
             # check phase of the next plan, this hop's or the one it
             # rehearses (`rehearsal.record_check`)
             rehearsal.record_check(hop, eng, d, time.time() - began)
-        return _scenario_checks(hop, eng, d, out, table, checks)
+        # held to the changes the hop carries before they are said or
+        # kept: rows it keeps are a note (`verdict.hold`)
+        return _verdict.hold(hop, _scenario_checks(hop, eng, d, out, table,
+                                                   checks))
 
     results = []
     pool = ThreadPoolExecutor(max_workers=max(1, int(workers or 1)))
@@ -1749,6 +1764,9 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
         for fut in as_completed(futs):
             d = futs[fut]
             rs = fut.result()
+            if scope:
+                for r in rs:
+                    r.setdefault("scope_fingerprint", scope)
             results.extend(rs)
             done_jobs += len(local_map[d])
             for r in rs:
@@ -1802,6 +1820,15 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                 for r in json.loads(summary_path.read_text())}
         prev_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
             summary_path.stat().st_mtime))
+        # an answer is about the scope it was taken under: one taken under
+        # another is taken again, whatever the source's schema did since
+        other = [r for r in prev.values() if hop.scope_changed(r)]
+        if other:
+            prev = {k: r for k, r in prev.items()
+                    if not hop.scope_changed(r)}
+            console.print(f"  the hop's scope changed since the run being"
+                          f" resumed, so its {len(other)} answers taken"
+                          " under the scope it had then are taken again")
     timer = Timer()
     from . import rehearsal
     rehearsal.mark(hop)
@@ -1809,6 +1836,16 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                   f" {workers} workers"
                   + (" (counts merged into the checksum pass)"
                      if _merged(eng, checks, table) else ""))
+    if getattr(hop, "include", None):
+        # the verdict is about what the hop takes; said before it is
+        console.print(f"  within the hop's scope: it takes only"
+                      f" {len(hop.include)} names"
+                      + (f" and leaves out {len(hop.exclude)}"
+                         if hop.exclude else "")
+                      + " (the report lists them)")
+    for line in _verdict.hop_scope(hop).get("changes_carried", []):
+        # a target that keeps what the source deletes is held to that
+        console.print(f"  changes carried: {_esc(line)}")
     results, timings = run_checks(
         hop, eng, dbs, checks, table, consistent, workers, prev, prev_at,
         whole=not table and not only, show=_said_row, timer=timer)
@@ -1827,7 +1864,17 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                 return True
             return bool(db) and _verdict.db_of(r.get("scope", "")) != db
 
-        results = [r for r in prev_all if keep(r)] + results
+        # only answers taken under the scope the hop has now: one taken
+        # under another stood beside this run's as if it were about the
+        # same tables, rows and columns
+        other = [r for r in prev_all if keep(r) and hop.scope_changed(r)]
+        if other:
+            console.print(f"  {len(other)} answers of the last check were"
+                          " taken under another scope than the hop's now"
+                          " and are not kept beside this run's - a whole"
+                          " check takes them again")
+        results = [r for r in prev_all if keep(r)
+                   and not hop.scope_changed(r)] + results
     was_same = _verdict.unchanged_since(hop, results)
     summary_path.write_text(json.dumps(results, indent=1, default=str))
     from . import session
@@ -1854,6 +1901,12 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     verdict_path, env = _verdict.write(
         hop, results, engine=eng.__class__.__name__,
         load=getattr(eng, "_last_throttle", None), coverage=coverage or None)
+    if env.get("service_check"):
+        from . import servicecheck
+        theirs = env["service_check"]
+        console.print(f"  {_esc(servicecheck.said(theirs))}")
+        for name in (theirs.get("missed") or [])[:8]:
+            console.print(f"    [red]the service missed[/red] {_esc(name)}")
     from . import notify
     notify.verdict(hop, env, lambda m: console.print(
         f"[yellow]{_esc(m)}[/yellow]"))
@@ -1866,7 +1919,15 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
             console.print(said, markup=False)
     from .report import write_report
     report_path = write_report(hop, results, decided=decided)
-    notes = [r for r, s in zip(results, decided.severity) if s == "note"]
+    notes = [r for r, s in zip(results, decided.severity)
+             if s == "note" and not r.get("kept_by_hop")]
+    kept = [r for r in results if r.get("kept_by_hop")]
+    if kept:
+        # the rows a hop keeps by the changes it does not carry: said as
+        # kept, never as the same
+        console.print(f"[yellow]{len(kept)} answers hold only what the hop"
+                      " keeps by the changes it does not carry"
+                      " (mapping.ops) - said as kept in the report[/yellow]")
     if notes:
         # a slow target holds the same data: said, and it stops the check
         # only where the hop asks for that (`performance: gate`)
@@ -2089,6 +2150,7 @@ def _said_outcome(outcome):
 
 
 def _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state=None):
+    from .engines.base import LEFT_OUT
     _lend_console(eng)
     for i, a in enumerate(actions):
         console.print(f"\n[bold]{_esc(a.kind)} on {_esc(a.scope)}[/bold]"
@@ -2100,6 +2162,9 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state=None):
             say_raw(f"  {s}")
         if len(a.statements) > 20:
             console.print(f"  ... {len(a.statements) - 20} more")
+        if a.kind == LEFT_OUT:
+            # said with the plan, nothing to carry out
+            continue
         ladder = _ladder(hop, eng, db, a)
         if ladder is not None and ladder.ready:
             console.print(f"  {ladder.foreseen()}")
@@ -2403,13 +2468,16 @@ def _table_plan(hop, eng, d, via, go=False):
     costs the operator this view and nothing else: the copy asks the same
     questions again, and stops on its own if they cannot be answered.
     """
-    from . import planner
+    from . import movers, planner
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
     try:
         lister = getattr(eng, "_all_tables", None)
         tables = lister("src", d) if lister else eng.neutral_tables("src", d)
         facts = eng.table_facts("src", d)
+        # a partition planned as its table is (`movers._pg_roots`)
+        roots = (movers._pg_roots(hop, d, eng=eng)
+                 if hasattr(eng, "partition_roots") else None)
     except NotImplementedError:
         # a keyspace or a cluster's topics: no table to plan
         return []
@@ -2422,13 +2490,16 @@ def _table_plan(hop, eng, d, via, go=False):
                 f"{without_programs(why, DRIVEN)})"]
     decisions = planner.plan(hop, d, via, tables,
                              "public" if engine == "postgres" else None,
-                             facts)
+                             facts, roots=roots)
     # the time each table the copier carries takes; its way and why go to
     # the decision record (`decide.record`)
     from . import tableway
     decisions = tableway.annotate(eng, d, decisions,
                                   log=lambda m: console.print(f"  {m}"))
-    rows = sum(int(f.get("rows") or 0) for f in facts.values()
+    # what the move carries, not the whole database: a few tables taken
+    # of many were timed as all of them
+    taken, narrowed = _carried(eng, d, facts)
+    rows = sum(int(f.get("rows") or 0) for f in taken.values()
                if isinstance(f, dict))
     try:
         free = eng.free_bytes("dst", d)
@@ -2442,10 +2513,10 @@ def _table_plan(hop, eng, d, via, go=False):
     size = planner.size_line(decisions, facts,
                              getattr(eng, "dst_name", engine),
                              (hop.options or {}).get("transfer_price_per_gb"),
-                             free, kept)
+                             free, kept, narrowed)
     carried = [d_.table for d_ in decisions if d_.path != planner.LEFT]
     return (["  by table:"] + planner.lines(decisions)
-            + [f"  time: {planner.estimate(hop, via, rows)}"]
+            + [f"  time: {planner.estimate(hop, via, rows, narrowed)}"]
             + ([f"  size: {size}"] if size else [])
             + _where_and_machine(hop, eng, d, via)
             + _resource_plan(hop, eng, d, via, facts,
@@ -2483,17 +2554,25 @@ def _where_and_machine(hop, eng, d, via):
     return out
 
 
-def _record_run(hop, eng, d, via, rows, began, spent):
+def _record_run(hop, eng, d, via, rows, began, spent, narrowed=()):
     """One finished copy of a whole database kept with the hop's rates:
     its rows and seconds, the bytes it carried, and the CPU seconds this
     machine spent - where the copy ran here and not in a container, whose
-    CPU this process does not see."""
+    CPU this process does not see. `rows` are what it carried
+    (`_source_rows`); where a row filter narrows tables of it (`narrowed`)
+    they are only the most it carried, and no rate is kept from them: a
+    rate kept too high is read by every later plan, other hops' too."""
     from . import machine, movers, planner, rehearsal, sizing
     # the programs this machine runs for the way, not the static table: a
     # local build of the streaming copy was taken for its image, and its
     # CPU seconds were lost
     here = movers.programs(via) != ("docker",)
     took = time.time() - began
+    if narrowed:
+        chat(f"  {d}: no rate is kept from this copy - {len(narrowed)}"
+             " tables a row filter narrows are counted whole by the"
+             " source's estimate")
+        rows = None
     planner.record_rate(hop, via, rows, took,
                         machine.size_of(eng, d, hop),
                         spent.seconds() if here else None,
@@ -2583,12 +2662,26 @@ def _planned(hop, m, facts, tables, n, via, d, go=False):
 
 
 def _source_rows(eng, d):
-    """The source's own row estimate for a database, 0 when it has none."""
+    """(the rows a move carries out of a database, by the source's own
+    estimate; the tables in it a row filter narrows): only the tables the
+    hop takes (`Engine.carried`), a narrowed one counted whole - the rows
+    are then the most the move carries. (0, []) where the source has no
+    estimate."""
     try:
-        return sum(int(f.get("rows") or 0)
-                   for f in eng.table_facts("src", d).values())
+        facts, narrowed = _carried(eng, d)
+        return sum(int(f.get("rows") or 0) for f in facts.values()
+                   if isinstance(f, dict)), narrowed
     except Exception:
-        return 0
+        return 0, []
+
+
+def _carried(eng, d, facts=None):
+    """`Engine.carried`, or every table of the catalogue where the engine
+    has no such answer."""
+    ask = getattr(eng, "carried", None)
+    if callable(ask):
+        return ask(d, facts)
+    return (eng.table_facts("src", d) if facts is None else facts), []
 
 
 def _copy_routed(hop, eng, d, via, chunk, log):
@@ -2768,7 +2861,7 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
     joint = _joint_for_move(hop, eng, m, d, names, most, log)
     if joint is not None and joint.workers:
         start = joint.workers
-    total = _source_rows(eng, d)
+    total, _ = _source_rows(eng, d)
     where = hop.report_dir(d)
     ways = getattr(eng, "measured_ways", None) or (lambda: [])
     pace = sizing.Pace(
@@ -2816,14 +2909,15 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
 
 def _units(eng, d, tables=None):
     """How many pieces of work a database's copy can be split into: a
-    range for every `ranges.LEAST` rows of a table, one at least."""
+    range for every `ranges.LEAST` rows of a table, one at least - of the
+    tables the move carries (`Engine.carried`) where none are named."""
     from . import ranges
     try:
         facts = eng.table_facts("src", d)
     except Exception:  # noqa: BLE001 - a table each, then
         return len(tables) if tables else None
     names = ([f"{sch}.{t}" if sch else t for sch, t in tables]
-             if tables is not None else list(facts))
+             if tables is not None else list(_carried(eng, d, facts)[0]))
     n = 0
     for name in names:
         f = facts.get(name) or facts.get(name.split(".")[-1]) or {}
@@ -2917,7 +3011,7 @@ def _refuse_if_nothing_arrived(hop, eng, d, what, log):
         # the copy was told to skip what the hop excludes, so a table it
         # skipped is not one it failed to fill - counting it made a correct
         # move report itself failed and go unrecorded
-        empty = [t for t in empty if not hop.excluded(d, *t.split("."))]
+        empty = [t for t in empty if hop.takes_table(d, t)]
     if empty:
         raise SystemExit(
             f"{what} reported success and {d} is still empty on the"
@@ -3024,7 +3118,7 @@ def _move_full(hop, eng, db, table, chunk, go):
                                  and not st.get("done") else ""))
             from . import planner
             console.print("  time: " + planner.estimate(
-                hop, "builtin", _source_rows(eng, d)))
+                hop, "builtin", *_source_rows(eng, d)))
             for line in (_where_and_machine(hop, eng, d, "builtin")
                          + _resource_plan(hop, eng, d, "builtin", None,
                                           _catalogue_names(eng, d, tables))):
@@ -3043,7 +3137,7 @@ def _move_full(hop, eng, db, table, chunk, go):
         from . import drift
         share = _sharing(hop) if not table else None
         before = drift.shape(eng, "src", d)
-        began, rows = time.time(), _source_rows(eng, d)
+        began, (rows, narrowed) = time.time(), _source_rows(eng, d)
         from . import machine
         spent = machine.Spent()
         point = _kept_point(hop, eng, d, ck) if not table else None
@@ -3083,7 +3177,8 @@ def _move_full(hop, eng, db, table, chunk, go):
         if not table and not share:
             # a whole database's rows over its time; one table's run is not
             # a rate for the rest, and neither is one machine's share
-            _record_run(hop, eng, d, "builtin", rows, began, spent)
+            _record_run(hop, eng, d, "builtin", rows, began, spent,
+                        narrowed)
         _stop_if_the_schema_moved(hop, eng, d, before)
         if not table:
             _refuse_if_nothing_arrived(hop, eng, d, "the table copy",
@@ -3343,6 +3438,41 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
                          "db": db, "drop": bool(do_drop and two_way)})
 
 
+def _own_refused(hop, eng, db):
+    """Why the servers' own replication - a subscription, a replica -
+    would carry this hop's changes wrongly, in words, or "": a table it
+    filters, renames, maps the columns of or carries only some changes of
+    (`movers.stream_cannot_carry` - the publication and the replica apply
+    whole rows under the source's names, so a PostgreSQL hop with
+    `where: {orders: "region='TH'"}` was carried whole, and a renamed table
+    landed in a namesake), or a scope its own filters cannot hold
+    (`native_scope_unsafe`). Asked only of a hop that says any of those;
+    the ladder of change ways then takes migkit's own tail
+    (`movers.stream_ways`)."""
+    from . import movers
+    from .config import BY_NAME, narrowed_by
+    said = []
+    dbs = [db] if db else eng.databases()
+    narrowed = narrowed_by(hop)
+    if [k for k in narrowed if k not in BY_NAME + ("databases_renamed",)]:
+        refused = []
+        for d in dbs:
+            refused += movers.stream_cannot_carry(
+                hop, d, eng.neutral_tables("src", d))
+        if refused:
+            said.append(
+                "the servers' own replication applies whole rows under the"
+                " source's names, and cannot carry what the hop asks for "
+                + "; ".join(f"{t} ({why})" for t, why in refused[:5])
+                + (f" and {len(refused) - 5} more" if len(refused) > 5
+                   else ""))
+    if any(k in narrowed for k in BY_NAME):
+        why = eng.native_scope_unsafe()
+        if why:
+            said.append(why)
+    return "; ".join(said)
+
+
 def _replicate_released(hop, eng, db, copy_data, do_drop, go):
     """`_replicate`, then - where tearing down starts a stream back - the
     target given back to the application, once that stream runs."""
@@ -3366,12 +3496,20 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
     if eng.maps_columns() and not do_drop:
         # a subscription or a replica applies whole rows by the source's
         # column names: the first change to a mapped table stops it on a
-        # column the target does not have, or lands in the wrong one
+        # column the target does not have, or lands in the wrong one - and
+        # a renamed table's in the table it was renamed from
         raise SystemExit(
-            "the hop maps columns (mapping.columns), and the server's own"
-            " replication carries whole rows under the source's names."
+            "the hop maps columns or renames tables (mapping.columns,"
+            " mapping.tables), and the server's own replication carries"
+            " whole rows under the source's names."
             " Nothing was set up. `migkit move --mode cdc` follows this hop"
             " with migkit's own change tail, which applies the mapping.")
+    refused = "" if do_drop else _own_refused(hop, eng, db)
+    if refused:
+        raise SystemExit(
+            f"{refused}. Nothing was set up. `migkit move --mode cdc`"
+            " follows this hop with migkit's own change tail, which reads"
+            " the hop's scope and mapping for every change.")
     why = None if do_drop else eng.native_replica_unsafe()
     if why:
         raise SystemExit(
@@ -3413,6 +3551,23 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
         # cannot
         copied = (_copy_record(hop, d)
                   if not copy_data and not do_drop else None)
+        entered = _entered(hop, eng, d, copied) if copied else []
+        if entered:
+            # the server's replication starts where the copy stood and
+            # carries what changes: a table the scope took in since would
+            # hold only the rows changed from here
+            said = (f"{d}: the hop's scope changed since the copy of"
+                    f" {copied.get('at')} - {len(entered)} tables it takes"
+                    " now were not copied as they are taken now ("
+                    + ", ".join(f"{s}.{t}" if s else t
+                                for s, t in entered[:4])
+                    + (" ..." if len(entered) > 4 else "")
+                    + "), and replication from the copy's position would"
+                    " carry only what changes in them. Move the database"
+                    " again with --mode full+cdc")
+            if go:
+                raise SystemExit(said)
+            console.print(f"  with --go this stops: {_esc(said)}")
         sql = eng.replicate_sql(d, copy_data=copy_data, secret=secret,
                                 copied=copied)
         console.print(f"[bold]{d}[/bold]")
@@ -3537,8 +3692,12 @@ def _copy_record_path(hop, d):
 def _record_copy(hop, d, before):
     """What a later `--mode cdc` needs to know about the copy that just
     finished: when, the change position taken before it, and - where the
-    copy was a snapshot at a position of its own - that position."""
-    rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "before": before}
+    copy was a snapshot at a position of its own - that position; and the
+    scope it copied (`Hop.scope_record`), so a stream started after the
+    scope took more in copies that first (`_entered`)."""
+    rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "before": before,
+           "scope_fingerprint": hop.scope_fingerprint(),
+           "scope": hop.scope_record()}
     dumped = hop.report_dir(d) / "dump-position.json"
     if dumped.exists():
         try:
@@ -3546,7 +3705,7 @@ def _record_copy(hop, d, before):
         except ValueError:
             pass
         dumped.unlink()
-    _copy_record_path(hop, d).write_text(json.dumps(rec))
+    _copy_record_path(hop, d).write_text(json.dumps(rec, default=str))
     shared = _shared(hop, d)
     if shared:
         shared.push(force=True)
@@ -3557,6 +3716,76 @@ def _copy_record(hop, d):
         return json.loads(_copy_record_path(hop, d).read_text())
     except (OSError, ValueError):
         return None
+
+
+def _entered(hop, eng, d, rec):
+    """[(schema, table)] the hop takes now that the copy `rec` did not
+    carry as they are taken now: tables its scope then left out, or
+    filtered, chose the columns of or named otherwise - every table where
+    the database lands elsewhere now. [] where the copy was taken under
+    this scope, or kept none (it predates scopes, and is taken as it
+    always was)."""
+    if not rec or not hop.scope_changed(rec):
+        return []
+    then = hop.under(rec)
+    if then is None:
+        return []
+    tables = [(sch, t) for sch, t in eng.list_move_tables(d)
+              if not hop.excluded(d, *[p for p in (sch, t) if p])]
+    if then.target_db(d) != hop.target_db(d):
+        return tables
+    out = []
+    for sch, t in tables:
+        parts = [p for p in (sch, t) if p]
+        if (then.excluded(d, *parts)
+                or then.row_filter(d, *parts) != hop.row_filter(d, *parts)
+                or then.column_rules(d, *parts) != hop.column_rules(d, *parts)
+                or then.target_table_in(d, *parts)
+                != hop.target_table_in(d, *parts)):
+            out.append((sch, t))
+    return out
+
+
+def _copy_entered(hop, eng, d, rec, go):
+    """The tables the scope took in since the copy `rec` (`_entered`),
+    copied before the stream that follows it starts: a stream carries
+    only what changes, and a table it began to carry with no copy held
+    only the rows changed since. The tail replays by key, on top of them,
+    what changed since the copy's position, which converges. Returns how
+    many."""
+    entered = _entered(hop, eng, d, rec)
+    if not entered:
+        return 0
+    names = [f"{s}.{t}" if s else t for s, t in entered]
+    console.print(f"  {_esc(d)}: the hop's scope changed since the copy of"
+                  f" {_esc(rec.get('at'))} - {len(names)} tables it takes"
+                  " now were not copied as they are taken now ("
+                  + _esc(", ".join(names[:4]))
+                  + (" ..." if len(names) > 4 else "")
+                  + ("), copied before the stream starts" if go else
+                     "); with --go they are copied before the stream"
+                     " starts"))
+    if not go:
+        return len(entered)
+    # the rows the target already holds in them, as the hop says to treat
+    # them: a table that was left out was the target's own
+    entered = _keep_out(hop, eng, d, entered, go)
+    if not entered:
+        return 0
+
+    def log(m):
+        console.print(f"  {m}")
+    eng.create_missing(d, log)
+    ck = _checkpoint(hop, hop.report_dir(d) / "move-entered.json")
+    ck.clear()
+    ck.discard()
+    with eng.load_window(d, log, {t for _, t in entered}):
+        for sch, t in entered:
+            _copy_table(eng, d, sch, t, 500000, ck, log)
+            _changelog(hop, {"op": "move-entered", "db": d,
+                             "table": f"{sch}.{t}" if sch else t})
+    ck.discard()
+    return len(entered)
 
 
 def _copy_record_used(hop, d):
@@ -3589,7 +3818,9 @@ def _tail_held(hop, eng, db, go):
     if not path.exists() and rec and rec.get("before") is not None \
             and hasattr(eng, "tail_seed"):
         # the position taken before the copy: what changed while it ran
-        # and since is replayed by key on top of it, which converges
+        # and since is replayed by key on top of it, which converges -
+        # and on top of the tables the scope took in since, copied first
+        _copy_entered(hop, eng, db, rec, go)
         if go:
             eng.tail_seed(db, path, rec["before"])
             _copy_record_used(hop, db)
@@ -4115,9 +4346,12 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         return _cdc(hop, eng, db, do_drop, go, engine)
     # full+cdc
     if has_repl and getattr(eng, "REPLICA_COPIES", False) \
-            and not eng.maps_columns():
+            and not eng.maps_columns() \
+            and (do_drop or not _own_refused(hop, eng, db)):
         # a subscription with copy_data=true, or a Redis replica, copies
-        # first and follows after: the native full+cdc
+        # first and follows after: the native full+cdc - never for a hop
+        # it would copy whole and follow whole where the hop filters or
+        # renames (`_own_refused`), which the copy and the tail below take
         return _replicate(hop, eng, db, True, do_drop, go)
     # MySQL used to print a replica plan here, from a position taken before
     # the copy. The copy is not a snapshot at that position, and a replica
@@ -4171,7 +4405,8 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
     before = drift.shape(eng, "src", d) if go else None
     for line in _table_plan(hop, eng, d, v, go):
         console.print(line)
-    began, rows = time.time(), _source_rows(eng, d) if go else 0
+    began, (rows, narrowed) = time.time(), (_source_rows(eng, d) if go
+                                             else (0, []))
     spent = machine.Spent()
     point = _position_before_copy(eng, d) if go else None
     if go:
@@ -4186,7 +4421,7 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
     # its work on (`movers.Ran`): its rate and its record are that way's
     ran = getattr(steps, "via", v)
     if go:
-        _record_run(hop, eng, d, ran, rows, began, spent)
+        _record_run(hop, eng, d, ran, rows, began, spent, narrowed)
     for s0 in steps:
         console.print(f"  {s0}")
     if not go:
@@ -4303,8 +4538,24 @@ def _cdc(hop, eng, db, do_drop, go, engine):
             return ""
         return "; ".join(r for d in ([db] if db else eng.databases())
                          for r in [eng.publication_add_risk(d)] if r)
+
+    # what the hop asks that the servers' own replication cannot carry,
+    # read once; migkit's own tail of the engine as a pair of itself then
+    # follows the hop (`_tail_pair`), as it does a hop that maps columns
+    said = {}
+
+    def refused():
+        if "why" not in said:
+            said["why"] = "" if do_drop else _own_refused(hop, eng, db)
+        return said["why"]
+
+    def by_pair():
+        if has_tail or not refused():
+            return False
+        pair = _tail_pair(eng)
+        return pair is not None and _tail_ready(pair)
     facts, rungs = _stream_facts(hop, eng, engine, has_repl, has_tail,
-                                  do_drop, risk)
+                                  do_drop, risk, refused, by_pair)
     where = hop.report_dir(db) / "stream.json"
     work = f"following {hop.name}'s source"
     # a way refused as it starts - a target that cannot dial the source -
@@ -4325,7 +4576,7 @@ def _cdc(hop, eng, db, do_drop, go, engine):
         if path in ("subscription", "replica"):
             return _replicate_released(hop, eng, db, False, do_drop, go)
         if path == "tail":
-            return _tail(hop, eng, db, go)
+            return _tail(hop, eng if has_tail else _tail_pair(eng), db, go)
         if has_tail:
             console.print("[yellow]native change tail needs a driver this"
                           " machine does not have - using migkit's"
@@ -4355,18 +4606,21 @@ def _cdc(hop, eng, db, do_drop, go, engine):
 
 
 def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
-                  risk=None):
+                  risk=None, refused=None, by_pair=None):
     """(facts, rungs) of the ways this hop's changes may follow its source
     (`movers.stream_ways`, read as `movers.stream_way` reads them), the leg
     run from here held also where the servers' own replication could not
     start here: what a target that cannot dial the source falls to.
     `risk()` says why the servers' own replication would lose a table's
-    changes (`PostgresEngine.publication_add_risk`)."""
+    changes (`PostgresEngine.publication_add_risk`), `refused()` why it
+    would carry the hop's tables wrongly (`_own_refused`), and `by_pair()`
+    whether migkit's own tail of the engine as a pair then follows it."""
     import dataclasses
 
     from . import decide, movers
     facts = movers.stream_facts(hop, engine, has_repl, has_tail,
-                                has_tail and _tail_ready(eng), drop, risk)
+                                has_tail and _tail_ready(eng), drop, risk,
+                                refused, by_pair)
     rungs = []
     for r in movers.stream_ways():
         if r.name == "follow":
@@ -4375,7 +4629,7 @@ def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
                 lambda f: movers.follow_selected() == "follow"
                 or bool(f.get("own replication failed")),
                 "the target can dial the source, so its own replication"
-                " carries the changes")))
+                " carries the changes")) + tuple(r.needs[2:]))
         rungs.append(r)
     return facts, rungs
 
@@ -4486,7 +4740,8 @@ def _stream_leg(hop, eng, db, dbs, engine):
                           end=tail_end)
     elif conf is not None and _pipeline_runs(hop):
         leg = _pipeline_leg(hop, eng, dbs)
-    elif has_repl and not follow and not eng.maps_columns():
+    elif has_repl and not follow and not eng.maps_columns() \
+            and not _own_refused(hop, eng, db):
         leg = cutover.Leg("native", fence=eng, down=native_down,
                           up=native_up,
                           after_thaw=engine == "mysql" and _by_gtid(eng, dbs))
@@ -4752,6 +5007,37 @@ def _pipeline_leg(hop, eng, dbs):
                        up=up, after_flip=after_flip)
 
 
+def _hop_again(hop_name, hop, eng, db, dbs):
+    """The hop read again for a watching loop's next cycle: (hop, engine,
+    databases, whether its scope changed). Read once, a loop that ran for
+    days verified and summed the scope it started with, and its engine
+    kept the listings it read then. Where the scope is the same (its
+    fingerprint, `Hop.scope_fingerprint`), all is kept as it was; where
+    it changed, a new engine - nothing it cached carried over - and the
+    databases listed again, said. A hop that cannot be read now is the
+    one the loop has, said."""
+    try:
+        now = get_hop(hop_name)
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - kept, said
+        console.print(f"[yellow]the hop could not be read again"
+                      f" ({_esc(_clean(e, raw=True))}); this cycle goes by"
+                      " the one read before[/yellow]")
+        return hop, eng, dbs, False
+
+    def scope(h):
+        fp = getattr(h, "scope_fingerprint", None)
+        return fp() if callable(fp) else None
+    if scope(now) == scope(hop):
+        return hop, eng, dbs, False
+    _require_configured(now)
+    eng = get_engine(now)
+    dbs = [db] if db else eng.databases()
+    console.print("[yellow]the hop's scope changed since the last cycle:"
+                  " what it takes is read afresh from here, and the rates"
+                  " and quiet start again[/yellow]")
+    return now, eng, dbs, True
+
+
 def _delta_loop(hop_name, db, interval, cycles, teardown):
     """`watch --verify --delta`, and the verifying step of `sync --mode
     stream/migrate`: each cycle verifies what changed since the last
@@ -4769,6 +5055,7 @@ def _delta_loop(hop_name, db, interval, cycles, teardown):
     eng = get_engine(hop)
     dbs = [db] if db else eng.databases()
     if teardown:
+        from .engines.base import Engine
         for d in dbs:
             if hasattr(eng, "delta_teardown"):
                 try:
@@ -4776,8 +5063,7 @@ def _delta_loop(hop_name, db, interval, cycles, teardown):
                 except Exception as e:
                     console.print(f"{_esc(d)}: [yellow]"
                                   f"{_esc(_clean(e, raw=True))}[/yellow]")
-            for f in ("delta-pos.json", "delta-token.json",
-                      "pair-delta-token.json"):
+            for f in Engine.DELTA_FILES + (Engine.DELTA_SCOPE,):
                 p = hop.report_dir(d) / f
                 if p.exists():
                     p.unlink()
@@ -4788,12 +5074,21 @@ def _delta_loop(hop_name, db, interval, cycles, teardown):
     n, last, got = 0, {}, None
     while True:
         n += 1
+        if n > 1:
+            # the hop as it is now: a scope changed while this runs is
+            # verified from here, the source's quiet measured afresh
+            hop, eng, dbs, moved = _hop_again(hop_name, hop, eng, db, dbs)
+            if moved:
+                last = {}
+                secrets = (hop.source.password, hop.target.password)
         stamp = time.strftime("%H:%M:%S")
         all_results = []
         for d in dbs:
             position = _position(eng, d)
+            # the position held to the scope it was taken under
+            verify = getattr(eng, "delta_in_scope", None) or eng.delta_verify
             try:
-                rs = [r.__dict__ for r in eng.delta_verify(
+                rs = [r.__dict__ for r in verify(
                     d, log=lambda m, d=d: chat(
                         f"  {_esc('[' + str(d) + ']')} {_esc(m)}"))]
             except Exception as e:
@@ -4881,6 +5176,11 @@ def _monitor(hop_name, db, interval, only, cycles):
     n, got = 0, None
     while True:
         n += 1
+        if n > 1:
+            # each cycle checks what the hop takes now (`_hop_again`)
+            hop, eng, dbs, moved = _hop_again(hop_name, hop, eng, db, dbs)
+            if moved:
+                checks, _ = _checks_for(eng, only)
         stamp = time.strftime("%H:%M:%S")
         all_results, _ = run_checks(hop, eng, dbs, checks,
                                     workers=hop.workers, whole=False)
@@ -4891,7 +5191,7 @@ def _monitor(hop_name, db, interval, only, cycles):
                       and _verdict.db_of(r.get("scope", "")) == d]
                 bad = [r for r in rs if r.get("status") == "error"]
                 odd = [r for r in rs if r.get("status") not in
-                       ("ok", "skip", "error")]
+                       ("ok", "skip", "error") and not r.get("kept_by_hop")]
                 if bad:
                     statuses.append(f"[red]{c}:ERR[/red]"
                                     f" {_esc(str(bad[0].get('detail'))[:60])}")
@@ -5070,6 +5370,15 @@ def _sample_watch(hop_name, db, interval, count):
     notes, held = 0, False
     while True:
         n += 1
+        if n > 1:
+            # each sample sums what the hop takes now (`_hop_again`); a
+            # scope changed since is a new count, its rate and its quiet
+            # measured afresh
+            hop, eng, dbs, moved = _hop_again(hop_name, hop, eng, db, dbs)
+            if moved:
+                last, stable = {}, {}
+                recent = {d: planner.Ewma() for d in dbs}
+                ahead = {d: _catch_up(hop, eng, d) for d in dbs}
         for d in dbs:
             s = eng.watch_sample(d)
             if "error" in s:
@@ -5077,7 +5386,11 @@ def _sample_watch(hop_name, db, interval, count):
                 continue
             src, dst = s.get("src_rows", 0), s.get("dst_rows", 0)
             line = f"{_esc(d)}: src~{human_int(src)} dst~{human_int(dst)}"
-            if src:
+            # a table a row filter narrows is counted whole on the source:
+            # the target never reaches it, and no share or time left is
+            # said from it
+            narrowed = s.get("narrowed") or []
+            if src and not narrowed:
                 line += f" ({dst * 100 // src}%)"
             prev = last.get(d)
             if prev and s["ts"] > prev["ts"]:
@@ -5086,7 +5399,14 @@ def _sample_watch(hop_name, db, interval, count):
                     avg = recent[d].add(rate)
                     line += (f" rate {human_int(int(rate))}/s"
                              f" (recent {human_int(int(avg))}/s)"
-                             f" eta {human_secs(max(src - dst, 0) / avg)}")
+                             + ("" if narrowed else
+                                f" eta {human_secs(max(src - dst, 0) / avg)}"))
+            if narrowed:
+                line += (f"\n    the source is counted whole in"
+                         f" {len(narrowed)} tables a row filter narrows"
+                         f" ({_esc(', '.join(narrowed[:3]))}"
+                         + (" ..." if len(narrowed) > 3 else "")
+                         + "), so it is more than the target will hold")
             for more in _move_said(hop, d):
                 line += f"\n    {_esc(more)}"
             # the machines that move it, where they work together (`ha`)
@@ -5151,8 +5471,8 @@ def _watch_stream(hop, eng, dbs, out, seen, held):
                    " on disk (no re-check); the answers stay as the check"
                    " took them")
 @click.option("--serve", is_flag=True,
-              help="serve the live dashboard for every hop instead of"
-                   " writing a file")
+              help="serve the web view and the API for every hop - signed"
+                   " in, with roles - instead of writing a file")
 @click.option("--metrics", is_flag=True,
               help="print Prometheus metrics for every hop and exit"
                    " (the dashboard also exposes them at /metrics)")
@@ -5161,8 +5481,10 @@ def report(hop_name, do_open, refresh, serve, metrics, port):
     """Render the HTML report from the last check run and export the
     hop's evidence (what moved, every verdict with both sides' counts and
     digests and how to take them again, decisions, approvals, repairs,
-    outages - HTML, Markdown, JSON, CSV), or --serve the live localhost
-    dashboard (with a Prometheus /metrics endpoint)."""
+    outages - HTML, Markdown, JSON, CSV), or --serve the web view: every
+    hop's outcomes, progress, approvals, offers and evidence for the
+    people each hop names, the REST API, and a Prometheus /metrics
+    endpoint (`migkit.web`)."""
     from .verdict import Usage
     if (serve or metrics) and (refresh or do_open or hop_name):
         raise Usage("--serve and --metrics are for every hop; --refresh,"
@@ -5174,7 +5496,7 @@ def report(hop_name, do_open, refresh, serve, metrics, port):
         print(prometheus(load_hops()), end="")
         return
     if serve:
-        from .ui import serve as _serve
+        from .web import serve as _serve
         return _serve(port)
     if not hop_name:
         from .config import REPORTS

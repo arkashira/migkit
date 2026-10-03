@@ -621,13 +621,13 @@ def plan(hop, eng, db):
     pair = _pair(eng)
     src, dst = pair.src_engine, pair.dst_engine
     tables = [t for t in src.neutral_tables("src", db)
-              if not hop.excluded(db, *str(t).split("."))]
+              if hop.takes_table(db, t)]
     try:
         there = [] if dst.target_missing(db) else dst.neutral_tables("dst",
                                                                       db)
     except Exception:  # noqa: BLE001 - a database not made yet has none
         there = []
-    pairs, _, _, _ = pair.match_tables(tables, there, pair._rename)
+    pairs, _, _, _ = pair.match_tables(tables, there, pair._renamer(db))
     have = dict(pairs)
     p = Plan(db, repair=bool(how and how["repair"]), declared=how)
     mysql_to = _mysql_declared(how) if _family(
@@ -1304,7 +1304,7 @@ def text_plan(eng, db):
     p = Plan(db, repair=True)
     none = Charset("")
     for t in dst.neutral_tables("dst", db):
-        if eng.hop.excluded(db, *str(t).split(".")):
+        if not dst.in_scope(db, t):
             continue
         for n, _ in _text_columns(dst, "dst", db, t):
             p.columns.append(Column(t, t, n, none, none))

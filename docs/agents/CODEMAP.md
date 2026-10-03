@@ -1,0 +1,272 @@
+# migkit code map
+
+Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a commit that leaves it behind. Read it before looking for anything; every symbol with its `file:line` is in `.codemap/SYMBOLS.tsv` (this machine only).
+
+## Hubs: what most changes touch
+
+- `migkit/hopkeys.py` - HOP_KEYS, HOP_OPTIONS: every key a hop may say, and the hop file's validation (`check`)
+- `migkit/envkeys.py` - every MIGKIT_* environment variable
+- `migkit/config.py` - Hop: the scope (`excluded`, `included`, `takes_object`, `carries`, `row_filter`, `target_table_in`, `scope_fingerprint`), `build_hop`, `get_hop`
+- `migkit/engines/base.py` - Engine: the contract every engine fills (`in_scope`, `takes`, checks, repairs, the pre-flight items)
+- `migkit/engines/__init__.py` - the engine names and aliases, `engine_named`, `get_engine`
+- `migkit/decide.py` - the decision engine: rungs, `climb`, `attempt`, `coverage()` - what each engine can do, cell by cell
+- `migkit/capabilities.py` - `matrix()`: the capability table the docs show
+- `migkit/verdict.py` - `decide`: the one verdict rule; VERDICTS and exit codes; `hop_scope`; the envelope (`summarize`)
+- `migkit/cli.py` - every command and its options
+- `migkit/movers.py` - the bulk ways and the stream ways (`stream_ways`)
+- `migkit/tailtables.py` - a running tail's per-table states and the DDL policy
+- `migkit/imports.py` - another tool's task read as a hop (DMS, DTS, DRS, Google, Azure, connectors, LOAD files)
+- `tools/gen_docs.py` - the manual and the site, written from the code
+- `tools/final_suite.py` - the full suite, run once at the end
+
+## `migkit/` (149 modules)
+
+- `migkit/__init__.py` - (no docstring)
+- `migkit/addresses.py` - A hop from two addresses (backlog R21).
+- `migkit/advisors.py` - (no docstring)
+- `migkit/approvals.py` - A step the hop says needs approval waits for it: approvers sign the step's request with their own SSH keys, and migkit checks each signature
+- `migkit/archive.py` - Old rows moved to cheaper storage (backlog P0-SCENARIOS): the rows a rule picks carried to an archive, proved there, and removed from the so Classes: Table.
+- `migkit/assist.py` - Help from a language model, from any provider, off unless configured (backlog 43).
+- `migkit/audit.py` - The run's own record of what migkit did, written so a changed record shows.
+- `migkit/avrostream.py` - Changes as Avro messages through a schema registry, in Debezium's envelope: `before`, `after`, `source`, `op` and `ts_ms`, the key a record  Classes: Encoder.
+- `migkit/backupseed.py` - SQL Server's own backup, restored on the target: a database's pages carried whole, and its changes followed from the version the restored co Classes: MsFacts.
+- `migkit/binlog_marks.py` - The binlog events a two-way tail's marks travel in, as migkit reads them (`marks`): MySQL's tagged GTID, which the binlog reader does not kn
+- `migkit/binlog_payload.py` - MySQL's compressed transactions, read rather than stopped on (backlog 6). Classes: TransactionPayloadEvent.
+- `migkit/bsontype.py` - A MongoDB value compared as its BSON type and its value, both.
+- `migkit/bulkways.py` - The whole-database ways of the keyed engines, ranked by what each has measured on the hop (backlog F7.rshake, F7.mm2).
+- `migkit/canon.py` - One text rendering of a value that two different engines both produce. Classes: Added, Kept, Limits.
+- `migkit/capabilities.py` - What each engine can do, read off the code, with every gap declared.
+- `migkit/carriers.py` - Where a seed shipped on media is written, and where the far end reads it back (`ship`; the owner's scope, 2026-10-01). Classes: Limits, Store, LocalStore, S3Store, AzureBlobStore, GcsStore.
+- `migkit/case.py` - The case migkit recognised between a hop's two servers, said and held to before anything is written (backlog P0-SCENARIOS). Classes: Case.
+- `migkit/catalog.py` - What one side's catalogue says about its tables, in one shape every reader and every comparer meets on (audit 2026-10-01, SC3, SC15). Classes: Column, Index, ForeignKey, Shape, Catalog.
+- `migkit/changetopic.py` - One reader for a source that hands its changes out as a feed in a known envelope (backlog ER4, ER5): TiDB through TiCDC, CockroachDB through Classes: Row, Mark, Envelope, TicdcCanalJson, TicdcSimple, CrdbChangefeed.
+- `migkit/charsets.py` - A change of character set or collation, planned and proved (backlog P0-SCENARIOS): latin1, cp1252 and the other Windows code pages into utf8 Classes: Charset, Unfit, Column, Plan, Found.
+- `migkit/checkpoint.py` - Make a long verify restartable. Classes: Checkpoint, Rate.
+- `migkit/claims.py` - One table across machines: its ranges handed out through one record each machine writes only over the version it read (backlog W1; R5 looked Classes: Lost, Table.
+- `migkit/cli.py` - (no docstring)
+- `migkit/cloudapi.py` - What a managed database's provider says and does about it, asked through that provider's own API (backlog P0-SCENARIOS): the facts of the in Classes: NotOffered, Param, Instance, RestorePoint, Adapter, Aws.
+- `migkit/clouds.py` - Which cloud runs a side, and how that cloud spells a change to it. Classes: Where.
+- `migkit/cloudseed.py` - What only a cloud's control plane can do, driven through its API (backlog R19 lever 1; the owner's "structural four", 2026-09-28): the targe Classes: Aws, Azure, Google, ByApi.
+- `migkit/config.py` - (no docstring) Classes: Endpoint, IamEndpoint, KeychainEndpoint, Hop.
+- `migkit/consolidate.py` - Many databases or tenants into one (backlog P0-SCENARIOS): each source's rows carried into one target under a column the hop names, filled w Classes: Source, TablePlan.
+- `migkit/copybook.py` - COBOL copybooks, and the records they describe, read and written exactly. Classes: CopybookError, Unreadable, Figurative, Item, Picture, Leaf.
+- `migkit/costmodel.py` - What a way costs, as a function of the work, with how sure that is (backlog P0-SMART, items 1, 2, 6 and learning across hops). Classes: Estimate, Fit, Knowledge, CostModel.
+- `migkit/crossmove.py` - Cross-engine table copies where rows never pass through Python (backlog R20.13 and R20.14), as ways of the table copier chosen per table. Classes: TableWay.
+- `migkit/cutover.py` - The cutover as one timed path that undoes itself. Classes: Leg.
+- `migkit/dba.py` - What the DBA must do before migkit can, written for them (backlog R21). Classes: Need.
+- `migkit/ddbexport.py` - A DynamoDB table copied through the service's own export to S3, and its import from S3 (backlog F7.ddbexp), beside migkit's own parallel sca
+- `migkit/ddl.py` - Statements migkit generates that should not simply be applied.
+- `migkit/decide.py` - One way of deciding for every choice migkit makes (backlog P0, decided 2026-09-27). Classes: Facts, Need, Rung, Choice, Costs, HopCosts.
+- `migkit/diagnostics.py` - A bundle to report a problem with, holding nothing to hand over.
+- `migkit/digests.py` - Every table's digest as a check took it, kept so anyone can take it again (backlog R23.1).
+- `migkit/drainmark.py` - A drain proved by a mark written on the source, where the stream keeps no position migkit can hold it to.
+- `migkit/drift.py` - Did the source's shape change while it was being moved.
+- `migkit/dsbulk.py` - A Cassandra or ScyllaDB table copied by the bulk loader (backlog F7.dsbulk), beside migkit's own copier by token ranges.
+- `migkit/durable.py` - State that survives a crash and a power loss, written one way. Classes: Torn.
+- `migkit/editions.py` - An edition change: the same engine, sold or built as another edition (backlog P0-SCENARIOS - "SQL Server Web edition to Datacenter (Enterpri Classes: Edition, Feature, Use.
+- `migkit/egress.py` - What leaves the machine, and the one gate it goes through (audit 2026-10-01, SEC12, SEC20, W8).
+- `migkit/envkeys.py` - Every environment variable migkit reads, in one place, and one way of reading each kind (audit 2026-10-01, K13). Classes: Var, Bad.
+- `migkit/evidence.py` - The files migkit writes that hold the application's values, kept encrypted where the hop asks (backlog R17b): Classes: EvidencePath.
+- `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an
+- `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
+- `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
+- `migkit/fencing.py` - A mover's token, carried into every transaction it writes, so that a mover which lost its hold is refused by the target itself (backlog W1). Classes: Fenced, Token.
+- `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, PostgresHold, MySQLHold, MongoHold, RedisHold, MSSQLHold.
+- `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog
+- `migkit/geo.py` - A shape - a geometry or a geography - as its SRID and its well-known binary, with x the longitude and y the latitude. Classes: Shape.
+- `migkit/guarantees.py` - What a way guarantees, and what a whole strategy of ways does (backlog P0-SMART, the owner's note C of 2026-09-30: "guarantees never traded" Classes: Lift.
+- `migkit/guide.py` - `migkit init` as the guide (backlog R21): two addresses and the passwords, and migkit does the rest.
+- `migkit/ha.py` - The mover highly available: a standby that takes a hop's move over from the last position committed, and the proof that one machine wrote at Classes: Holding.
+- `migkit/handwork.py` - What the migration will not do for you, counted and named. Classes: Inventory.
+- `migkit/hopkeys.py` - Every key a hop may say, in one place, and the configuration checked against it before anything runs (backlog R21). Classes: Key, Problem.
+- `migkit/huawei_sdk.py` - Huawei Cloud's API for migkit, run in the environment its SDK lives in.
+- `migkit/imports.py` - A hop from another tool's task (backlog R21: switching costs nothing). Classes: Imported.
+- `migkit/indexes.py` - Getting the indexes out of the way of a bulk load, and putting them back.
+- `migkit/integrations.py` - migkit inside the team's tools: a task for Airflow and Dagster, a step for GitHub Actions and Argo Workflows, each a thin wrapper over migki
+- `migkit/interlock.py` - The interlock on the target (backlog R23, 3): before a step writes to a target - a copy, a stream, a repair, a cutover, users, a converted s
+- `migkit/intervals.py` - An interval as the three parts every engine that has one keeps apart: months, days, and a time of nanoseconds. Classes: Interval.
+- `migkit/jobs.py` - Scheduled jobs inside the databases, on exactly one side at a time.
+- `migkit/jointplan.py` - One plan for a move's tables, made jointly (backlog P0-SMART, item 4). Classes: Way, Job, Limits, Placed, Plan.
+- `migkit/kept.py` - The proof kept up as the data moves (backlog R20.8; incremental multiset hashing, docs/research/diff-algorithms-2026-09-28.md section 8). Classes: Store, Table, Keeper.
+- `migkit/lacks.py` - What the source uses that the target does not have, asked of both servers (backlog P0-SCENARIOS: a version down, a fork, an edition). Classes: Side, Feature.
+- `migkit/lease.py` - A write operation's hold on a hop, as a lease with a heartbeat (backlog 30). Classes: Held, Lost, Lease.
+- `migkit/leaves.py` - A table's digest as a tree, every leaf of it in one scan a side, and the rows that differ read only from the leaves that differ (backlog R20 Classes: Spec, Side, Hasher, Tree, Found, Localized.
+- `migkit/leftovers.py` - What a mover added to the source and never took away. Classes: Named.
+- `migkit/legs.py` - The fewest legs the rows can take, and where migkit should stand (backlog R22, item 4). Classes: Footprint.
+- `migkit/loadtext.py` - The source renders the target's load format in SQL (backlog R20.14).
+- `migkit/locks.py` - What the repair DDL will lock, said before anyone applies it.
+- `migkit/logddl.py` - A DDL statement as a change log carries it, read for the tables it touches and what it does to each (`canon.ddl`).
+- `migkit/machine.py` - The machine to run on, and the class the target needs (backlog R22, item 6). Classes: Machine, Stages, Advice, Spent.
+- `migkit/managed.py` - Every managed database service in one catalogue, read one way for any pair (the owner, 2026-10-01: "any <-> any from the start"). Classes: Service, Side, Plan.
+- `migkit/marks.py` - How a two-way tail tells its own writes apart on a side: the rungs (backlog R3, decided 2026-09-27). Classes: Rung.
+- `migkit/masking.py` - Values from the rows, masked where the hop asks, wherever a person or a report sees them (G2).
+- `migkit/mirror.py` - A Kafka cluster copied through the cluster mirror Kafka ships (backlog F7.mm2).
+- `migkit/model.py` - Every resource a move uses, in one model: which one binds, how many at once carry it, what it takes of this machine's memory, and why (backl Classes: Stage, Model.
+- `migkit/movers.py` - Best-tool movers. Classes: Beside, builds_beside, client_defaults, Ran.
+- `migkit/nanotime.py` - A timestamp or a time of day that keeps the digits past the microsecond. Classes: Datetime9, Time9.
+- `migkit/notify.py` - Telling the team, wherever it is, what a migration is doing (backlog 32, R23.10).
+- `migkit/ownership.py` - Who an object belongs to, and whose privileges it runs with.
+- `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text.
+- `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Rung, Facts, PgFacts, MyFacts.
+- `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Hashed, hashing, Way, Sql, ReadPlan, DigestPlan.
+- `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp.
+- `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: Slots, WorkerGone, Keyless.
+- `migkit/ready.py` - Right the first time, not a runbook to recover with (backlog R23, 6). Classes: Item.
+- `migkit/redact.py` - One way of hiding secrets in what migkit writes or says (audit 2026-10-01, SEC12). Classes: Redactor.
+- `migkit/redisshake.py` - A Redis keyspace copied by the replica protocol's own copy (backlog F7.rshake).
+- `migkit/registry.py` - A schema registry spoken to over its HTTP API (the one Confluent's registry defines and Redpanda's, Apicurio's and Karapace's also speak), a Classes: Refused, Registry.
+- `migkit/rehearsal.py` - Rehearse, then forecast (backlog R23, 2).
+- `migkit/render.py` - The canonical text of a column's values, with the rendering chosen once for the column rather than once for every value.
+- `migkit/repairlog.py` - A statement-level record of a repair, beside its undo (problems C3, backlog C3.repair). Classes: Record, CanonIO, DocumentIO, DumpIO, TableIO.
+- `migkit/repairways.py` - The way a table's rows are repaired, chosen by how far it drifted and what each way costs here (backlog P0-DEPTH 1). Classes: Sides, Span, Outcome, RepairCosts, Ladder.
+- `migkit/report.py` - (no docstring)
+- `migkit/revert.py` - The way back, handed over at the same moment as the way forward.
+- `migkit/rowfilter.py` - A hop's row filter, read one way and said in every engine's own words (backlog P0-SCOPE.7).
+- `migkit/rowtext.py` - How a row becomes one string before it is hashed.
+- `migkit/rules.py` - Business-rule checks: the operator's own questions, asked of both sides.
+- `migkit/runlog.py` - The run log: every event of a run as one JSON line, in migkit's words (audit 2026-10-01, LG5, LG12, LG13). Classes: RunLog.
+- `migkit/runner.py` - Every program migkit runs is started, watched, stopped and said one way. Classes: Failed, Transient, Blocked, Refused, Proc.
+- `migkit/schedule.py` - A hop that runs on a schedule of its own. Classes: NotDue, Slot.
+- `migkit/second_reader.py` - An independent second reading of the data, run out of process. Classes: Narrowing.
+- `migkit/seedtools.py` - What the seed on media (`ship`, `carriers`) asks of each library it wraps, against what each offers (backlog 0f): the compression of a part,
+- `migkit/servicecheck.py` - What another tool's own check said, held table by table against what migkit found (backlog P0-SCOPE.5). Classes: Claims.
+- `migkit/session.py` - One run of migkit: the command an operator started on a hop, and what is kept of it (backlog R23.1, R23.8, R23.10). Classes: Decisions.
+- `migkit/setaside.py` - What a load takes off a target to put back afterwards, kept on disk per process. Classes: SetAside.
+- `migkit/shared.py` - Where the machines of one hop agree: records each written only over the version that was read (backlog W1). Classes: Directory, Target.
+- `migkit/ship.py` - A seed shipped on media, where the link is too narrow to copy the data in time (the owner's scope, 2026-10-01: "data too large for the link" Classes: Unfit, BadPart, Different, Times, Full, Done.
+- `migkit/sizing.py` - How many things a move does at once, worked out rather than asked for. Classes: Plan, RoundTrip, Loss, Held, Strain, Limit.
+- `migkit/sourcechange.py` - A change on the source a way needs: offered with what it buys, never assumed and never hidden (the owner, 2026-09-30). Classes: Ctx, Definition, Defined, Saving, Refused.
+- `migkit/split.py` - One database into many (backlog P0-SCENARIOS): a service extracted, a database split by region or by customer - every row placed by rule, ea Classes: Part, Placed.
+- `migkit/stall.py` - A copy whose link holds and passes nothing is given up on. Classes: Stalled, Guard, Watch.
+- `migkit/standby.py` - Reading a side that is a replica, and what that does to the answer.
+- `migkit/state.py` - Pluggable state backend, terraform-style. Classes: LocalStore, S3Store, Taken, S3RunState, Mirror.
+- `migkit/streamout.py` - Changes delivered as messages into a stream, in the shapes consumers expect (backlog 35): what a message is, whatever carries it - a Kafka t
+- `migkit/subset.py` - Copies for testing (backlog R23, 5): the rows chosen and every row they refer to, masked where the hop says, into a staging or developer dat Classes: Rule, Plan.
+- `migkit/tableengine.py` - A change of storage engine, made in the schema step and held to (backlog P0-SCENARIOS): MyISAM, Aria, MEMORY, ARCHIVE, CSV and MariaDB's own Classes: Traits, Change, Plan.
+- `migkit/tableway.py` - How each table gets to the target: one ladder an engine, one cost model a database, one climb a table. Classes: Way, Pick, Failed.
+- `migkit/tailctl.py` - A running change tail as the rest of migkit sees it. Classes: Running.
+- `migkit/tailtables.py` - A running tail's tables, each in a state of its own (backlog L1, L4, L5, L6; research: leapfrog live tail 2026-09-28, section 1.3). Classes: Spool, TableSet.
+- `migkit/tally.py` - Rows counted and fingerprinted as they pass through a copy. Classes: Tally.
+- `migkit/throttle.py` - Keep verification from becoming the outage it went looking for. Classes: Health, Throttle.
+- `migkit/tls.py` - Whether a connection to a server can be verified, asked of the server.
+- `migkit/tools.py` - What migkit can do on this machine, and how to make it able to do more. Classes: Program, Terms, Bundle.
+- `migkit/tooluse.py` - What migkit asks of each program and library it wraps, against what the build installed offers (backlog 0f). Classes: Terms, Tool.
+- `migkit/toolversion.py` - Whether the client tools on this machine can talk to that server.
+- `migkit/traces.py` - A run as OpenTelemetry spans, beside the Prometheus metrics (backlog R23.8).
+- `migkit/transforms.py` - A column written other than as it was read, and proved as written (backlog P0-SCOPE.7: column transforms the check understands).
+- `migkit/troubleshooting.py` - The troubleshooting guide, read off the code (backlog 42).
+- `migkit/tuning.py` - Numbers set by reasoning, tuned from what runs measure (backlog P0-DEPTH, item 3, built with P0-SMART's knowledge base). Classes: Tunable.
+- `migkit/tunnel.py` - A path to a server that cannot be reached directly, opened by migkit. Classes: Tunnel.
+- `migkit/twoway.py` - Two ways at once through migkit's own tails (backlog R3, P0-DEPTH 2). Classes: Rule, TableRules, Rules, Settled.
+- `migkit/ui.py` - The dashboard and `/metrics` (`migkit report --serve`). Classes: Collector, Handler.
+- `migkit/unchanged.py` - Proof that a table has not moved since it was last proved equal. Classes: Proof.
+- `migkit/upgrade.py` - A major-version upgrade as a goal (backlog R23, 7).
+- `migkit/users.py` - Login/user sync source -> target, keeping the same password.
+- `migkit/util.py` - (no docstring) Classes: CommandFailed, Timer, PrivateFile, Probes.
+- `migkit/variants.py` - Which brand is actually answering, and what that brand cannot do. Classes: Brand.
+- `migkit/vectors.py` - A vector - an embedding - as the numbers it holds, each exactly.
+- `migkit/verdict.py` - The one result shape, whatever engine produced it. Classes: Verdict, Refused, Usage, Decision, Held.
+- `migkit/verifiers.py` - What migkit asks of each verifier it wraps, read off the code, with every feature it does not use given its reason (backlog 0f).
+- `migkit/wording.py` - What the operator reads while migkit works, in migkit's own words. Classes: Tally, DebugLog, Step.
+- `migkit/workload.py` - Whether the target answers the source's own queries as well as the source does (backlog 24, problems file G1; R23, 4).
+- `migkit/zones.py` - The time zone the data is written in, against the one the server declares (backlog 23).
+
+## `migkit/engines/` (44 modules)
+
+- `migkit/engines/__init__.py` - (no docstring)
+- `migkit/engines/ase.py` - SAP ASE (Sybase) as one side of a pair (backlog 34). Classes: AseEngine.
+- `migkit/engines/base.py` - (no docstring) Classes: Result, RepairAction, Engine, Enough, Counted, NotHere.
+- `migkit/engines/cassandra.py` - Cassandra (and ScyllaDB) as one side of a pair (backlog 34). Classes: CassandraEngine.
+- `migkit/engines/clickhouse.py` - ClickHouse as one side of a pair (backlog 33). Classes: ClickHouseEngine.
+- `migkit/engines/cockroachdb.py` - CockroachDB as a side of a pair (backlog ER4), over PostgreSQL's wire. Classes: SinklessFeed, CockroachEngine.
+- `migkit/engines/copybook.py` - Files described by COBOL copybooks as one side of a pair (backlog 34, W5): VSAM and sequential extracts, IMS unloads, the files a mainframe  Classes: Described, CopybookEngine.
+- `migkit/engines/cosmosdb.py` - Azure Cosmos DB for NoSQL as a side of a pair (backlog ER5), through its Python SDK. (Its MongoDB and Cassandra APIs are those engines' side Classes: CosmosLanes, CosmosEngine.
+- `migkit/engines/couchbase.py` - Couchbase as a side of a pair (backlog ER4), through its Python SDK. Classes: CouchbaseEngine.
+- `migkit/engines/db2.py` - Db2 (LUW) as one side of a pair (backlog 34), through `ibm_db`. Classes: Db2Engine.
+- `migkit/engines/db2i.py` - Db2 for i (IBM i) as one side of a pair, and a source whose changes are followed through its journal (backlog 34, W5). Classes: Reread, Image, Db2iEngine.
+- `migkit/engines/db2zos.py` - Db2 for z/OS as one side of a pair (backlog 34, W5), through `ibm_db`. Classes: Db2ZosEngine.
+- `migkit/engines/dbapi.py` - Rows read and written through a DB-API driver, rendered in this process. Classes: DbapiRows, FoldsToCapitals.
+- `migkit/engines/dsql.py` - Aurora DSQL as a side of a pair (backlog ER4), over PostgreSQL's wire. Classes: DsqlEngine.
+- `migkit/engines/duckdb.py` - DuckDB as one side of a pair (backlog R15), through its own library. Classes: DuckDBEngine.
+- `migkit/engines/dynamodb.py` - DynamoDB as one side of a pair (backlog 34). Classes: RawAttr, DynamoDBEngine.
+- `migkit/engines/generic.py` - (no docstring) Classes: GenericEngine.
+- `migkit/engines/hetero.py` - (no docstring) Classes: HeteroEngine.
+- `migkit/engines/kafka.py` - (no docstring) Classes: KafkaEngine.
+- `migkit/engines/kinesis.py` - Amazon Kinesis Data Streams as the destination of a change stream (backlog 33). Classes: KinesisEngine.
+- `migkit/engines/lake.py` - Iceberg and Delta tables as one side of a pair (backlog 33; Leapfrog: engine reach, item 1). Classes: IcebergEngine, DeltaEngine.
+- `migkit/engines/mongodb.py` - (no docstring) Classes: MongoEngine.
+- `migkit/engines/mssql.py` - (no docstring) Classes: MSSQLEngine.
+- `migkit/engines/my_pass.py` - MySQL into MySQL with no row passing through migkit (backlog R20 items 1 and 4). Classes: Different, TableCopy.
+- `migkit/engines/mysql.py` - (no docstring) Classes: MySQLEngine.
+- `migkit/engines/opensearch.py` - OpenSearch (and Elasticsearch) as one side of a pair (backlog 34). Classes: OpenSearchEngine.
+- `migkit/engines/oracle.py` - Oracle as a side of a pair and a hop's engine (backlog 11, F5), through python-oracledb in thin mode: no Instant Client on the machine. Classes: Zoned, Bind, OracleEngine.
+- `migkit/engines/oracle_logminer.py` - migkit's own reader of Oracle's redo, through LogMiner (backlog F5). Classes: NotRead, Miner.
+- `migkit/engines/oracle_pump.py` - Oracle to Oracle, server to server: the target's Data Pump pulls the tables over a database link to the source, as of one SCN, no row throug
+- `migkit/engines/oracle_redo.py` - The redo-file reader: Oracle's redo read from its files by a program of its own, run next to them, as the rung above LogMiner (backlog F5). Classes: Stream, RedoFileReader.
+- `migkit/engines/parquet.py` - Parquet files, on a disk or under an S3 prefix, as one side of a pair (backlog 34). Classes: ParquetEngine.
+- `migkit/engines/pg_pass.py` - PostgreSQL into PostgreSQL with no row passing through migkit (backlog R20 items 1, 4 and 5). Classes: SnapshotLost, Snapshot, TableCopy, Way, Ways.
+- `migkit/engines/pgwire.py` - PostgreSQL's wire, spoken by databases that are not PostgreSQL (backlog ER4): CockroachDB and Aurora DSQL. Classes: PgWireEngine.
+- `migkit/engines/postgres.py` - (no docstring) Classes: SqlFailed, PostgresEngine.
+- `migkit/engines/pubsub.py` - Google Cloud Pub/Sub as the destination of a change stream (backlog 33). Classes: PubSubEngine.
+- `migkit/engines/redis.py` - (no docstring) Classes: RedisEngine.
+- `migkit/engines/saas.py` - SaaS applications as sources, read by programs (backlog ER7): one adapter for every kind of connector, feeding migkit's own writers and its  Classes: Stream, Program, Singer, Airbyte, Dlt, Seen.
+- `migkit/engines/saas_salesforce.py` - Salesforce as a program source (backlog ER7): objects read through its REST API, and followed through its own change events. Classes: Salesforce.
+- `migkit/engines/sapodp.py` - SAP application data through ODP over OData (backlog ER6): the extractors and CDS views an SAP system (ECC, S/4HANA, BW) publishes for extra Classes: Refused, SapOdpEngine.
+- `migkit/engines/sqlite.py` - (no docstring) Classes: SQLiteEngine.
+- `migkit/engines/teradata.py` - Teradata as one side of a pair (backlog ER3), through Teradata's own driver for Python. Its licence is Teradata's (free to use, not open sou Classes: TeradataEngine.
+- `migkit/engines/tidb.py` - TiDB as a side of a pair (backlog ER4), over MySQL's wire. Classes: TiDBEngine.
+- `migkit/engines/warehouse.py` - Warehouses as one side of a pair (backlog 33): Amazon Redshift, Snowflake and Google BigQuery. Classes: RedshiftEngine, SnowflakeEngine, BigQueryEngine.
+- `migkit/engines/warehouse_sql.py` - The canonical text of a row, and the digest over it, in a warehouse's own SQL: BigQuery, Snowflake, Redshift, and DuckDB - a DuckDB file's o Classes: DigestsInSQL.
+
+## `migkit/runners/` (2 modules)
+
+- `migkit/runners/__init__.py` - (no docstring)
+- `migkit/runners/second_reader.py` - Runs inside the second reader's own environment, never migkit's.
+
+## `migkit/storedcode/` (28 modules)
+
+- `migkit/storedcode/__init__.py` - Stored code carried to another engine and proved there (backlog R11).
+- `migkit/storedcode/bench.py` - The sandbox's two servers holding the fixture, with a runner on each watching its tables: what the schema's own proofs run on - constraints  Classes: Bench.
+- `migkit/storedcode/collations.py` - A column's collation held to the source's by the column's own values, asked of both servers (leapfrog research P13, backlog CV.P13). Classes: Collation, Reading, Parting.
+- `migkit/storedcode/concolic.py` - Inputs for a branch the search never took, solved for (leapfrog research P7). Classes: Unsolvable.
+- `migkit/storedcode/constraints.py` - The schema's constraints held to the rows they accept and refuse, by running them (leapfrog research P12, backlog CV.P12). Classes: Outside, NotProbed, Column, Check, Unique, Foreign.
+- `migkit/storedcode/convert.py` - Stored code converted one routine at a time, by whichever candidate proves itself on it (backlog R11). Classes: Conversion.
+- `migkit/storedcode/effort.py` - What converting the stored code will cost a person, from two readings set side by side and never merged (backlog 40, research item 15).
+- `migkit/storedcode/harness.py` - One routine run on one side of the sandbox, and everything it did written down (backlog R11). Classes: HarnessError, Outcome, Watched, Runner, MySQLRunner, PostgresRunner.
+- `migkit/storedcode/history.py` - What the application really calls each routine with (leapfrog research P6): the source's own record of the statements it ran, read-only. Classes: Shape, Record, History.
+- `migkit/storedcode/inputs.py` - What a routine is called with in the proof (backlog R11). Classes: Bank.
+- `migkit/storedcode/keep.py` - The proof kept as tests on the target (backlog R11), so it keeps running after the source is gone.
+- `migkit/storedcode/learn.py` - Rules learned from the fixes that proved (leapfrog research P16). Classes: Learned.
+- `migkit/storedcode/model.py` - A model as the last candidate, in a loop the proof closes (backlog R11).
+- `migkit/storedcode/mutants.py` - The proof's own mutation score: can it say "different"? (leapfrog research P18). Classes: Mutant.
+- `migkit/storedcode/mysql_pg.py` - MySQL stored programs in PostgreSQL's PL/pgSQL, by migkit's own rules. Classes: Node, Context.
+- `migkit/storedcode/pg_mysql.py` - PostgreSQL's PL/pgSQL (and `language sql`) routines as MySQL stored programs, by migkit's own rules - the mirror of `mysql_pg`. Classes: Tok, Node, Decl.
+- `migkit/storedcode/plpgsql.py` - What every converter into PostgreSQL's PL/pgSQL shares: names, the dollar quote, how a routine is wrapped, and the conversion's record. Classes: Converted, Emitter.
+- `migkit/storedcode/programs.py` - Two open converters, driven as programs of their own (backlog R11).
+- `migkit/storedcode/prove.py` - Stored code held to the source's answers, by running it (backlog R11). Classes: Verdict, Proof.
+- `migkit/storedcode/reduce.py` - The smallest part of a routine that still differs (leapfrog research P4: reduce the input and the program).
+- `migkit/storedcode/routines.py` - What one piece of stored code is, whichever engine wrote it. Classes: Param, Routine.
+- `migkit/storedcode/rungs.py` - The candidates for one routine's conversion, as data (backlog R11, P0). Classes: Candidate, Ledger.
+- `migkit/storedcode/sandbox.py` - Where stored code is run: a scratch server of the source's engine and one of the target's, holding the same fixture (backlog R11). Classes: NoSandbox, Sandbox.
+- `migkit/storedcode/sequences.py` - Routines held to the source over sequences of calls, not only one call at a time (leapfrog research P8). Classes: Step, Found.
+- `migkit/storedcode/sizing.py` - Columns sized from the data they hold, every change of domain that makes recorded with its evidence, and proved by what the target now refus
+- `migkit/storedcode/translate.py` - One query or expression in another engine's SQL, or a refusal that says why - never a statement the target runs with another meaning. Classes: Refused.
+- `migkit/storedcode/tsql_pg.py` - SQL Server's T-SQL procedures, functions and triggers in PostgreSQL's PL/pgSQL, by migkit's own rules. Classes: Node.
+- `migkit/storedcode/views.py` - Views held to the source by their rows, on the hop's own servers.
+
+## `migkit/web/` (14 modules)
+
+- `migkit/web/__init__.py` - The web view and the API: several people, each signed in by the organisation's identity provider, each with a role on each hop, and a REST A
+- `migkit/web/api.py` - The REST API, version 1: one table of routes (`ROUTES`) that the server dispatches on and the OpenAPI document is written from - a route can Classes: Route, Answer, Ctx.
+- `migkit/web/app.py` - The web view and the API as one WSGI application (backlog W2). Classes: App.
+- `migkit/web/approve.py` - An approval given in the view, counted where the hop's approvals are counted (`approvals.require`) - beside the signatures approvers make wi
+- `migkit/web/identity.py` - Who is asking: signed in by the organisation's identity provider - OpenID Connect or SAML - or, on an install one operator runs without one, Classes: Refused, Principal, Oidc, Saml, Local.
+- `migkit/web/roles.py` - Who may do what on which hop, in the view and the API (backlog W2).
+- `migkit/web/runner.py` - One run started from the view, in a process of its own: `python -m migkit.web.runner <run.json>` (`runs.start`).
+- `migkit/web/runs.py` - Runs started from the view or the API: the command line's own commands, run whole in a process of their own (backlog W2). Classes: Refused, Option, Action.
+- `migkit/web/scim.py` - SCIM 2.0 (RFC 7643, 7644): the identity provider provisions the people and groups who may sign in, and takes them away (backlog W2). Classes: ScimError, Directory.
+- `migkit/web/server.py` - The web view served: `migkit report --serve` (no new command), on the address `MIGKIT_UI_BIND` and the port `--port` - this machine's loopba
+- `migkit/web/settings.py` - The view's settings, from the environment (`envkeys`), checked once at start: an address people reach it by, how it is served, and who signs Classes: Settings.
+- `migkit/web/store.py` - What the view keeps between requests and across a restart: sessions, API tokens, the sign-ins under way, the local account, the throttle on  Classes: Store.
+- `migkit/web/uses.py` - What the web view uses of each library it imports, and why not the rest (backlog 0f, `tooluse`): each use read off the code that makes it, e
+- `migkit/web/views.py` - What the pages and the API show of a hop, read once for both - the page is the API's answer laid out, never a second reading (backlog W2).

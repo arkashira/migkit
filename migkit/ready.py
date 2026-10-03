@@ -228,7 +228,7 @@ def _resources(hop, eng, dbs):
             continue
         carried = {t: f for t, f in (facts or {}).items()
                    if isinstance(f, dict)
-                   and not hop.excluded(d, *str(t).split("."))}
+                   and hop.takes_table(d, t)}
         data = sum(int(f.get("bytes") or 0) for f in carried.values())
         index = sum(int(f.get("index_bytes") or 0) for f in carried.values())
         try:

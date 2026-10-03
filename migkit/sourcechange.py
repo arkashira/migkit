@@ -550,7 +550,9 @@ def answers(hop):
     for name, got in (_record(hop).get("answers") or {}).items():
         a = answer_word(got.get("answer"))
         if a:
-            out[name] = (a, f"answered at a terminal by {got.get('by') or '?'}"
+            where = "in the web view" if got.get("through") == "web" \
+                else "at a terminal"
+            out[name] = (a, f"answered {where} by {got.get('by') or '?'}"
                             f" on {got.get('at') or '?'}")
     opts = hop.options or {}
     phys = opts.get("physical")
@@ -589,22 +591,27 @@ def put_answers(hop, facts, rungs):
                 facts[decide.answer_key(c.name)] = a
 
 
-def record_answer(hop, changes, answer):
-    """An answer given at a terminal, kept for the hop's later runs and in
-    its changelog."""
+def record_answer(hop, changes, answer, by=None, through="terminal"):
+    """An answer given at a terminal - or in the web view, by the person
+    signed in (`by`) - kept for the hop's later runs and in its
+    changelog; the offer it answers no longer stands."""
     import getpass
-    try:
-        who = getpass.getuser()
-    except Exception:  # noqa: BLE001 - nobody to name
-        who = ""
+    who = by
+    if not who:
+        try:
+            who = getpass.getuser()
+        except Exception:  # noqa: BLE001 - nobody to name
+            who = ""
     rec = _record(hop)
     for c in changes:
         rec.setdefault("answers", {})[c.name] = {
             "answer": answer, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "by": who, "source": _source(hop)}
+            "by": who, "source": _source(hop), "through": through}
+        (rec.get("offered") or {}).pop(c.name, None)
     _save(hop, rec)
     _audit(hop, {"op": "source-change-answer", "answer": answer,
-                 "changes": [c.name for c in changes]})
+                 "changes": [c.name for c in changes], "by": who,
+                 "through": through})
 
 
 # --- the offer, in words -----------------------------------------------------
@@ -684,8 +691,12 @@ def settle(hop, offer, facts, saving, go, ask, log):
     under `--go` (`ask(question)` -> "yes", "no" or "dba"), the answer
     recorded and put in the facts. Returns the answer, or None - and then
     the source is left as it is and the next way runs, said so."""
-    for line in offer_lines(offer, facts, saving):
+    said = offer_lines(offer, facts, saving)
+    for line in said:
         log(line)
+    if not (go and ask is not None):
+        # not answered here: kept as standing, for the web view to answer
+        _offered(hop, offer, said)
     if go and ask is not None:
         got = answer_word(ask(QUESTION))
         if got is None:
@@ -700,7 +711,8 @@ def settle(hop, offer, facts, saving, go, ask, log):
             " answers nothing ahead: the source is left as it is, and"
             f" {saving.instead or 'the next way'} runs")
     else:
-        log("dry-run: --go at a terminal asks it")
+        log("dry-run: --go at a terminal asks it, or an operator answers it"
+            " in the web view")
     return None
 
 
@@ -742,6 +754,55 @@ def written(hop, entry):
     _save(hop, rec)
     _audit(hop, {"op": "source-write", **{k: entry.get(k) for k in (
         "id", "change", "state", "table", "rows")}})
+
+
+def _offered(hop, offer, said):
+    """The offer kept as standing until it is answered: what it is, the
+    way it is for, and the words the plan said it in - what the view
+    shows beside the answer."""
+    try:
+        rec = _record(hop)
+        kept = rec.setdefault("offered", {})
+        for c in offer.changes:
+            if c.name in (rec.get("answers") or {}):
+                continue
+            kept[c.name] = {"said": c.said, "for": offer.rung.said,
+                            "lines": list(said),
+                            "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        _save(hop, rec)
+    except OSError:
+        # the offer is said either way; only the view misses it
+        pass
+
+
+def standing(hop):
+    """{"offered": {change: what the plan said}, "answers": {change:
+    (answer, where)}, "handed": {change: for the DBA}} - the offers not
+    answered, the answers standing (the hop's own over one given at a
+    terminal or in the view) and what is the DBA's to make."""
+    rec = _record(hop)
+    got = answers(hop)
+    offered = {k: v for k, v in (rec.get("offered") or {}).items()
+               if answer_of(hop, k, got)[0] is None}
+    return {"offered": offered, "answers": got,
+            "handed": dict(rec.get("handed") or {})}
+
+
+def answer_from_view(hop, name, answer, by):
+    """An offer standing on the hop answered in the web view by `by`,
+    recorded as a terminal's answer is. ValueError where no such offer
+    stands, the answer is not one, or the hop's file answers it."""
+    word = answer_word(answer)
+    if word is None:
+        raise ValueError(f"{answer!r} is not yes, no or dba")
+    if name not in standing(hop)["offered"]:
+        raise ValueError(f"no change {name!r} is offered on this hop now")
+    held, where = answer_of(hop, name)
+    if held is not None and "the hop's" in where:
+        raise ValueError(f"the hop's file answers {name} ({where}); change"
+                         " it there")
+    record_answer(hop, [_Named(name)], word, by=by, through="web")
+    return word
 
 
 # --- the record -------------------------------------------------------------

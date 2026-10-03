@@ -39,6 +39,7 @@ import threading
 import time
 
 from . import runner, tooluse
+from .config import scoped as _scoped
 from .tooluse import TOPPED, UNUSED, USED
 
 PROGRAM = "redis-shake"
@@ -136,6 +137,12 @@ def _glob_re(glob):
     matched the hop's pattern and not the program's filter (measured),
     and were copied though the check left them out; and a set that starts
     with `^` or `[` holds that character, where it began a negated set."""
+    return "^(?s:" + glob_body(glob) + ")$"
+
+
+def glob_body(glob):
+    """`_glob_re` without its anchors and flag: the pattern as a part of a
+    larger expression (`movers.scope_alternatives`), read the same way."""
     out, i, n = [], 0, len(glob)
     while i < n:
         c = glob[i]
@@ -164,7 +171,7 @@ def _glob_re(glob):
                 i = j + 1
         else:
             out.append(re.escape(c))
-    return "^(?s:" + "".join(out) + ")$"
+    return "".join(out)
 
 
 def key_filters(hop, db):
@@ -179,6 +186,9 @@ def key_filters(hop, db):
     with (it then never matches that way). A pattern that starts with a
     wildcard, or with part of the database's name, could match across the
     dot, and is not guessed at."""
+    if getattr(hop, "include", None):
+        return None, ("the hop takes only some keys, and the fast keyspace"
+                      " copy is told only the keys to leave out")
     out = []
     prefix = f"{db}."
     for pat in hop.exclude or ():
@@ -547,7 +557,7 @@ def move(hop, db, workers, go, log):
         port = movers._free_port()
         text = toml_text(config(hop, db, reader.path, work, port, workers,
                                 bool(refused)))
-        total = None if hop.exclude else eng._dbsize("src", db)
+        total = None if _scoped(hop) else eng._dbsize("src", db)
         if log:
             log(step)
             log(f"db{db}: read by {reader.said} - {reader.reason}")

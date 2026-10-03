@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -75,6 +76,24 @@ CATEGORY_BY_CHECK = {
 STATUSES = ("ok", "skip", "warn", "diff", "error")
 
 
+def clauses(parts, most=10):
+    """At most `most` of a finding's clauses, and how many more there are
+    as one clause more: a list cut short in silence read as every
+    difference there was, to a reader holding each to a hop's carried
+    changes (`verdict.hold`) as well as to a person."""
+    parts = list(parts)
+    more = len(parts) - most
+    return "; ".join(parts[:most]) + (f"; and {more} more" if more > 0
+                                      else "")
+
+
+def rows_counted(table, missing, extra, changed, exact=True):
+    """A finding's `rows_apart` for one table: the rows apart of each
+    kind, counted one by one where `exact`."""
+    return {str(table): {"missing": int(missing), "extra": int(extra),
+                         "changed": int(changed), "exact": bool(exact)}}
+
+
 def categorize(check, scope):
     """Canonical category for a (check, scope) pair. Never raises."""
     last = str(scope).split()[-1] if str(scope).strip() else ""
@@ -92,6 +111,24 @@ class Result:
     report: str = ""
     fix_hint: str = ""
     category: str = ""
+    #: the table a finding about one table is about, named within the
+    #: database as its source names it (`public.orders`) where the scope
+    #: names it otherwise - a pair names a table by its own name alone
+    #: (`HeteroEngine._leaf`) - so a rule written for one schema's table is
+    #: held to it and not to another schema's of the same name
+    table: str = ""
+    #: the rows apart, counted, of each table the finding is about -
+    #: `{table: {"missing", "extra", "changed", "exact"}}`, the table named
+    #: within the database as the source names it (`public.orders`), and
+    #: `exact` where every row was counted one by one. What the verdict
+    #: holds to a hop's carried changes (`verdict.hold`), read here and
+    #: not back out of the words; empty where the finding counted none
+    rows_apart: dict = field(default_factory=dict)
+    #: of a database's one answer, how each table it compared came out -
+    #: `{table: "ok" | "diff" | "error" | "skip"}` - so a reader holding
+    #: another tool's word table by table (`servicecheck`) knows which
+    #: tables the answer covers and how, not only the ones it names
+    tables: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.category:
@@ -110,6 +147,13 @@ class RepairAction:
     #: the table a row repair is for, as the check and its drilldown name
     #: it: the way it goes is climbed for it (`repairways`)
     table: str = ""
+
+
+#: the kind of a repair action that carries nothing out and only says
+#: what the repair leaves alone - a drilldown the last check left for a
+#: table the hop no longer takes (`Engine._drills_in_scope`). Printed with
+#: the plan, never applied
+LEFT_OUT = "left out"
 
 
 #: held while an engine draws its run's salt (`Engine.digest_salt`)
@@ -156,6 +200,61 @@ class Engine:
 
     def databases(self):
         raise NotImplementedError
+
+    def takes(self, db, kind, name, by=None):
+        """Whether the hop takes an object an inventory lists: its table in
+        scope (`by`, the table it belongs to - a trigger's, an index's - or
+        its own name), and its kind carried (`Hop.takes_object` - the
+        hop's `objects`). Every inventory, schema comparer and schema fix
+        asks this one question of an object beside the tables."""
+        if not self.in_scope(db, by if by is not None else name):
+            return False
+        from ..util import split_table
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        schema, leaf = split_table(eng, str(name).split("(", 1)[0])
+        return self.hop.takes_object(kind, db,
+                                     *([schema] if schema else []), leaf)
+
+    def in_scope(self, db, table):
+        """Whether a table, named as this engine's own listings name it
+        (`public.orders`, `orders`, `"v1.orders"`), is one the hop takes -
+        the one question every listing this engine makes for a check, an
+        inventory, a repair, a counter or a watch asks before it reads a
+        table, so none of them reads one the hop leaves out (backlog
+        P0-SCOPE.6)."""
+        return self.hop.takes_table(
+            db, table, self.CANON_ENGINE or getattr(self.hop, "engine", ""))
+
+    def _scoped_rows(self, db, rows, at=0):
+        """The rows of a catalogue listing whose `at`th value is a table
+        the hop takes (`in_scope`). Every deep check, inventory and repair
+        reads its tables through it, so none reads one the hop leaves out:
+        a keyless or drifted table the move never took made the deep check
+        say different, and a repair wrote into one (backlog P0-SCOPE.6b)."""
+        return [r for r in rows if self.in_scope(db, str(r[at]))]
+
+    def _drills_in_scope(self, db, tables, what="tables"):
+        """(the tables a row repair may act on, an action saying the rest
+        or None), of the tables the last check left a drilldown for.
+
+        The files are the last check's, and a check run before the hop
+        left a table out - an `exclude` added, an `include` narrowed -
+        left one for a table that is now the target's own: a repair read
+        from it deleted the rows the target keeps there. A table the hop
+        no longer takes is never acted on, and the plan says so
+        (`LEFT_OUT`)."""
+        tables = list(tables)
+        gone = sorted(t for t in tables if not self.in_scope(db, t))
+        if not gone:
+            return tables, None
+        left = set(gone)
+        return [t for t in tables if t not in left], RepairAction(
+            db, LEFT_OUT, [], [],
+            f"{len(gone)} {what} the last check found different are ones"
+            f" the hop no longer takes: {', '.join(gone[:5])}"
+            + (" ..." if len(gone) > 5 else "")
+            + " - left as the target has them; the check that named them"
+              " ran under another scope")
 
     def check_schema(self, db):
         raise NotImplementedError
@@ -1487,7 +1586,7 @@ class Engine:
         findings, scanned = [], 0
         try:
             for t in self.neutral_tables("src", db):
-                if self.hop.excluded(db, *str(t).split(".")):
+                if not self.in_scope(db, t):
                     continue
                 cols = [(n, "text") for n, typ in
                         self.neutral_columns("src", db, t)
@@ -1783,6 +1882,14 @@ class Engine:
         in words, or None."""
         return None
 
+    def native_scope_unsafe(self):
+        """Why the server's own replication cannot hold to the hop's scope
+        as the hop says it - a pattern its filters have no form for - in
+        words, or None. Asked of a hop that leaves anything out, by the
+        ladder of change ways too (`movers.stream_ways`), which then takes
+        migkit's own tail."""
+        return None
+
     def pooler(self, side):
         """{"name", "mode", "version"} for a connection pooler the side is
         reached through, or None where none is known of. `mode` is how it
@@ -2021,10 +2128,24 @@ class Engine:
 
     def _second_pairs(self, db):
         """[(source table, target table)] the second reading reads: every
-        table both sides have, within one engine."""
-        dst = set(self.neutral_tables("dst", db))
-        return [(t, t) for t in sorted(self.neutral_tables("src", db))
-                if t in dst]
+        table both sides have, within one engine - a table the hop renames
+        paired with the name it has on the target, as the pair engine pairs
+        it (`HeteroEngine.match_tables`, the rule read with its database).
+        Paired by its own name, a renamed table was never read twice: the
+        target has no table of that name."""
+        from .hetero import HeteroEngine
+        src = sorted(self.neutral_tables("src", db))
+        dst = list(self.neutral_tables("dst", db))
+
+        def rename(t):
+            return self.hop.target_table_in(
+                db, *[p for p in str(t).split(".") if p])
+        moved = [t for t in src if str(rename(t)) != str(t)]
+        pairs, _, _, _ = HeteroEngine.match_tables(moved, dst, rename)
+        taken = {d for _, d in pairs}
+        there = set(dst) - taken
+        return sorted(pairs + [(t, t) for t in src
+                               if t not in moved and t in there])
 
     def _second_views(self, db):
         """(name, the source's query, the target's) for each view both
@@ -2390,13 +2511,24 @@ class Engine:
         # name its rows: repaired by its spans or whole (`repairways`)
         for name in self._leaves_kept(db):
             tables.setdefault(name, {})
-        for name, found in sorted(tables.items()):
+        taken, said = self._drills_in_scope(db, tables)
+        if said:
+            actions.append(said)
+        tables = {name: tables[name] for name in taken}
+        for name, named in sorted(tables.items()):
+            # the rows the hop keeps by the changes it does not carry are
+            # left as they are, and said
+            found = self._repairable(db, name, named)
+            kept = self._kept_said(named, found)
+            if kept and not any(found.get(k) for k in
+                                ("missing", "changed", "extra")):
+                continue
             if stream:
                 actions.append(self._resnapshot_action(db, name, found))
                 continue
             send = found.get("missing", []) + found.get("changed", [])
             drop = found.get("extra", [])
-            statements = []
+            statements = [kept] if kept else []
             if not send and not drop:
                 kept = self.repair_leaves(db, name) or {}
                 parts = kept.get("leaves") or []
@@ -2514,6 +2646,71 @@ class Engine:
         return {"db": db, "ts": time.time(),
                 "error": f"{type(self).__name__} has no row count to watch"
                          " - use `migkit check` for this hop"}
+
+    def watched(self, db, src, dst):
+        """What a watch sums of two sides' `{table: rows}`, as this engine's
+        listings name them: (the source's tables the hop takes, the
+        target's tables they land in - under the names the hop gives them
+        there - and the taken tables a row filter narrows, whose source
+        rows are the whole table's). Summed whole, a hop taking a few
+        tables of a billion-row database read `src~1B dst~5M` and a time
+        left that never came, and a busy table it leaves out said the
+        source was still being written. A hop that narrows nothing is
+        summed as it always was."""
+        from ..util import split_table
+        got = self._taken(db, src)
+        if got is None:
+            return src, dst, []
+        taken, narrowed = got
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        there = set()
+        for t in taken:
+            schema, name = split_table(eng, str(t))
+            s2, n2 = split_table(eng, self.hop.target_table_in(
+                db, *([schema] if schema else []), name), schema)
+            there.add(f"{s2}.{n2}" if s2 else n2)
+        return ({t: src[t] for t in taken},
+                {t: n for t, n in dst.items() if t in there}, narrowed)
+
+    def carried(self, db, facts=None):
+        """(the source's `table_facts` of the tables the move carries out
+        of `db`, the names of those a row filter narrows) - the one count
+        of what a move carries that its plan, its time, its pieces of work
+        and the rate it keeps are taken from. Every table the hop leaves
+        out is taken away: summed whole, a hop taking a few tables kept a
+        rate of every table's rows over its own seconds, and every later
+        plan - other hops' too - was read from it. A narrowed table's rows
+        and bytes are the whole table's, so a sum over it is the most the
+        move carries, never what it carries. A hop that narrows nothing
+        has every table, as it always had."""
+        facts = self.table_facts("src", db) if facts is None else facts
+        got = self._taken(db, facts or {})
+        if got is None:
+            return dict(facts or {}), []
+        taken, narrowed = got
+        return {t: facts[t] for t in taken}, narrowed
+
+    def _taken(self, db, names):
+        """([the names of `names` the hop takes], [those a row filter
+        narrows]), each as this engine's listings name it (`in_scope`) - or
+        None where the hop narrows nothing by name or by row, and every
+        name is taken whole as it always was."""
+        from ..config import scoped
+        from ..util import split_table
+        rules = self.hop.mapping or {}
+        if not (scoped(self.hop) or rules.get("tables")
+                or rules.get("where")):
+            return None
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        taken, narrowed = [], []
+        for t in names:
+            if not self.in_scope(db, t):
+                continue
+            taken.append(t)
+            schema, name = split_table(eng, str(t))
+            if self.hop.row_filter(db, *([schema] if schema else []), name):
+                narrowed.append(t)
+        return taken, sorted(narrowed)
 
     # which family of client tools this engine uses, for the version check
     ENGINE_FAMILY = ""
@@ -2743,7 +2940,7 @@ class Engine:
                     + " - a target that folds case keeps one of each pair;"
                       " rename one, or map it to a new name in the hop"})
             items += self._writer_items(db)
-        return items
+        return items + self._include_items()
 
     def _writer_items(self, db):
         """Replication that already writes into this target database.
@@ -2792,6 +2989,406 @@ class Engine:
     #: every time and teach people to ignore the section.
     PREFLIGHT = ()
 
+    #: left-out tables a database's line names before it counts the rest;
+    #: the run's decision record keeps every one
+    SCOPE_NAMED = 10
+    #: the closest real names an entry that matches nothing is offered
+    NEAREST = 3
+    #: a child's rows counted at most, for a foreign key whose parent the
+    #: hop leaves out - a large child costs no more than these rows read
+    ORPHANS_COUNTED = 100_000
+    #: foreign keys across the scope whose child rows are counted, a
+    #: database
+    ORPHAN_COUNTS = 20
+    #: what this engine lists of what a database's objects need of its
+    #: tables (`dependencies`), beside its foreign keys
+    DEPENDENCY_KINDS = ()
+
+    def _include_items(self):
+        """What the hop's scope takes, read before the move and said so it
+        can be checked at a glance: for each database how many of the
+        source's tables the hop takes and leaves, the first it leaves
+        named; for each include and exclude entry what it matched, a
+        pattern said to take the tables made later as well, and one that
+        matches nothing offered the closest real names; then what the
+        tables it takes need of the ones it leaves (`_closure_items`).
+        Every name goes to the run's decision record, and to the console
+        where MIGKIT_EXPLAIN=1. An entry that takes nothing, a database
+        include takes nothing of, is a table the operator believes is
+        moved and checked that nothing looks at - the check, comparing
+        only what is taken, would call the rest the same. Nothing is said
+        for a hop that takes everything.
+
+        The source's every table is listed once, by a twin of the hop
+        that takes everything and has no target (`_unscoped`): what the
+        hop takes is that list read through the one scope answer
+        (`in_scope`), not a second listing."""
+        from ..config import scoped
+        hop = self.hop
+        if not scoped(hop):
+            return []
+        # a pair's source is listed by the source's own engine
+        lister = getattr(self, "src_engine", None) or self
+        try:
+            dbs = self.databases()
+            whole = self._unscoped(lister)
+            every = {db: [str(t) for t in whole.scope_tables("src", db)]
+                     for db in dbs}
+        except Exception as e:
+            why = str(e).splitlines()[-1][:90] if str(e) else \
+                type(e).__name__
+            return [{"level": "warn", "scope": "before the move",
+                     "item": "scope", "detail":
+                         "could not list the source's tables, so what"
+                         f" the hop's scope takes is unknown: {why}"}]
+        try:
+            others = [d for d in whole.databases() if d not in dbs]
+        except Exception:  # noqa: BLE001 - the databases it opens stand
+            others = []
+        taken = {db: [t for t in got if lister.in_scope(db, t)]
+                 for db, got in every.items()}
+        return (self._scope_said(lister, every, taken, others)
+                + self._closure_items(lister, every, taken))
+
+    def _unscoped(self, lister):
+        """`lister`'s engine on a twin of the hop that takes everything
+        and has no target: what lists the source's every table, so the
+        scope can say what it leaves. Its target is no server at all, so
+        nothing it does can reach the hop's."""
+        import dataclasses
+
+        from ..config import Endpoint
+        twin = dataclasses.replace(self.hop, include=[], exclude=[],
+                                   target=Endpoint())
+        return type(lister)(twin)
+
+    def _table_parts(self, lister, table):
+        """A table's name as the parts the hop's patterns are matched
+        against, split the one way (`util.split_table`)."""
+        from ..util import split_table
+        schema, name = split_table(lister.CANON_ENGINE
+                                   or getattr(self.hop, "engine", ""),
+                                   str(table))
+        return [schema, name] if schema else [name]
+
+    def _first(self, names):
+        """The first `SCOPE_NAMED` names, and how many more there are."""
+        names = list(names)
+        more = len(names) - self.SCOPE_NAMED
+        return ", ".join(names[:self.SCOPE_NAMED]) + (
+            f" and {more} more" if more > 0 else "")
+
+    def _nearest(self, entry, lister, pairs, dbs):
+        """' - did you mean ...?' with the closest names the source has
+        for an entry that matches nothing - first the ones it names but
+        for case, then the nearest by spelling (`difflib`) - or ''."""
+        import difflib
+
+        from ..config import name_matches
+        known = set(dbs)
+        for db, t in pairs:
+            parts = [db, *self._table_parts(lister, t)]
+            known.update(".".join(parts[i:]) for i in range(len(parts)))
+            known.update(".".join(parts[:i]) for i in range(1, len(parts)))
+        depth = len(str(entry).split("."))
+        alike = sorted(n for n in known if len(n.split(".")) == depth) \
+            or sorted(known)
+        got = [n for n in alike if name_matches(n, entry, True)]
+        if not got:
+            # spelled near: the last part held to the last parts of the
+            # names under the same database and schema, where there are
+            # any - a long shared head makes every name look near
+            head, _, leaf = str(entry).rpartition(".")
+            pool = [n for n in alike if n.rpartition(".")[0].casefold()
+                    == head.casefold()] or alike
+            by_leaf = {}
+            for n in pool:
+                by_leaf.setdefault(n.rpartition(".")[2], []).append(n)
+            got = [n for near in difflib.get_close_matches(
+                       leaf, sorted(by_leaf), n=self.NEAREST, cutoff=0.6)
+                   for n in by_leaf[near]]
+        got = got[:self.NEAREST]
+        return f" - did you mean {', '.join(got)}?" if got else ""
+
+    def _scope_said(self, lister, every, taken, others=()):
+        """The scope's rows (`_include_items`): each database, each entry,
+        and the decision record holding every name."""
+        import dataclasses
+
+        from .. import decide
+        from ..config import name_matches
+        hop = self.hop
+        before = "before the move"
+        items = []
+        record = {"work": "the hop's scope", "databases": {},
+                  "left out whole": list(others), "entries": {}}
+        for db, got in every.items():
+            took = set(taken[db])
+            left = [t for t in got if t not in took]
+            record["databases"][db] = {"takes": [t for t in got
+                                                 if t in took],
+                                       "leaves": left}
+            if hop.include and not took:
+                items.append({
+                    "level": "warn", "scope": before, "item": "scope",
+                    "detail": f"include takes no table of database {db} -"
+                              " it is opened and nothing in it is moved or"
+                              " checked  [fix] name its tables in include,"
+                              " or leave it out of databases"})
+                continue
+            items.append({
+                "level": "pass", "scope": before, "item": "scope",
+                "detail": f"{db}: takes {len(took)} of the source's"
+                          f" {len(got)} tables"
+                          + (f", leaves {len(left)} out: {self._first(left)}"
+                             if left else ", leaves none out")})
+        if others:
+            items.append({
+                "level": "pass", "scope": before, "item": "scope",
+                "detail": "the source's databases left out whole: "
+                          + self._first(others)})
+        pairs = [(db, t) for db, got in every.items() for t in got]
+        kept = {(db, t) for db, got in taken.items() for t in got}
+        fold = hop.folds_case()
+        for kind in ("include", "exclude"):
+            for entry in [str(e) for e in getattr(hop, kind, None) or []
+                          if str(e).strip()]:
+                probe = dataclasses.replace(
+                    hop, include=[entry] if kind == "include" else [],
+                    exclude=[entry] if kind == "exclude" else [])
+                hit = [(db, t) for db, t in pairs if (
+                    probe.included if kind == "include" else probe.excluded)(
+                        db, *self._table_parts(lister, t))]
+                whole_dbs = [d for d in others
+                             if name_matches(d, entry, fold)]
+                named = [f"{db}.{t}" for db, t in hit] + [
+                    f"{d} (the whole database)" for d in whole_dbs]
+                record["entries"][f"{kind} {entry}"] = named
+                pattern = any(c in entry for c in "*?[")
+                later = (", and tables made later that it names: a pattern"
+                         " is read again every run" if pattern else "")
+                if not named:
+                    near = self._nearest(entry, lister, pairs,
+                                         list(every) + list(others))
+                    items.append({
+                        "level": "warn", "scope": before, "item": "scope",
+                        "detail": (f"include names {entry!r}, which takes no"
+                                   " table on the source - nothing under that"
+                                   " name is moved or checked"
+                                   if kind == "include" else
+                                   f"exclude names {entry!r}, which leaves"
+                                   " out no table on the source - a table"
+                                   " it was meant to keep off the target"
+                                   " would be moved")
+                                  + f"{near}  [fix] correct the name or"
+                                    " drop it"})
+                    continue
+                if kind == "include" and hit and not any(
+                        x in kept for x in hit):
+                    items.append({
+                        "level": "warn", "scope": before, "item": "scope",
+                        "detail": f"include {entry!r} takes {len(hit)}"
+                                  f" tables and exclude takes every one"
+                                  f" back: {self._first(named)} - nothing"
+                                  " under it is moved or checked  [fix]"
+                                  " drop the exclude entry, or this one"})
+                    continue
+                items.append({
+                    "level": "pass", "scope": before, "item": "scope",
+                    "detail": f"{kind} {entry!r} "
+                              + ("takes" if kind == "include"
+                                 else "leaves out")
+                              + f" {len(named)}: {self._first(named)}"
+                              + later})
+
+        def explained(line):
+            items.append({"level": "pass", "scope": before,
+                          "item": "scope, in full", "detail": line})
+        took = sum(len(v) for v in taken.values())
+        decide.record(hop, record, explained, work="the hop's scope",
+                      way=f"takes {took} of {len(pairs)} tables",
+                      reason="the source's every table read through the"
+                             " hop's include and exclude")
+        return items
+
+    #: each way a table the hop takes may need one it leaves out: what it
+    #: is called, and what accepting it leaves on the target
+    CLOSURE = {
+        "foreign key": ("foreign keys", "the target holds rows pointing at"
+                        " parents it does not have, and the key cannot be"
+                        " made or checked there"),
+        "view": ("views", "the views are not made on the target, or read"
+                 " nothing there"),
+        "routine": ("routines", "the routines fail on the target when they"
+                    " run"),
+        "trigger": ("triggers", "the triggers fail on the target when they"
+                    " fire"),
+        "sequence": ("sequences", "the defaults draw from a sequence the"
+                     " target is not given"),
+        "partition": ("partitions", "a partitioned table and its"
+                      " partitions are taken apart"),
+    }
+
+    def _closure_items(self, lister, every, taken):
+        """What the tables the hop takes need of the ones it leaves out,
+        before the move, where this engine can list it: a foreign key from
+        a taken table to a parent it leaves (with the child's rows that
+        hold a key into it, counted up to `ORPHANS_COUNTED` - each points
+        at nothing on the target), and a view, routine or trigger over a
+        table it leaves, a default drawing from a sequence another table
+        owns, a partitioned table taken apart from a partition
+        (`dependencies`). Each kind a `warn` naming them, its `[fix]` both
+        ways out - the tables to take, or `closure: accept` - and a pass
+        saying they were accepted where the hop says so. What this engine
+        cannot list is said as not checked, never as clear."""
+        import dataclasses
+
+        from .. import decide
+        hop = self.hop
+        before = "before the move"
+        accept = str((hop.options or {}).get("closure") or "").lower() \
+            == "accept"
+        fks = type(lister).foreign_keys is not Engine.foreign_keys
+        kinds = tuple(lister.DEPENDENCY_KINDS)
+        unlisted = [self.CLOSURE[k][0] for k in self.CLOSURE
+                    if k != "foreign key" and k not in kinds]
+        if not fks and not kinds:
+            return [{"level": "warn", "scope": before,
+                     "item": "dependencies",
+                     "detail": "what the tables the hop takes need of the"
+                               " ones it leaves out - foreign keys, views,"
+                               " routines, triggers, sequences, partitions"
+                               " - not checked on this engine"}]
+        leaver = dataclasses.replace(hop, include=[])
+        out = []
+        for db, got in every.items():
+            took = set(taken[db])
+
+            def inside(name, db=db):
+                return lister.in_scope(db, name)
+            crossing = {}
+            try:
+                for child, cols, parent, _ in (
+                        lister.foreign_keys("src", db) if fks else []):
+                    if str(child) in took and str(parent) != str(child) \
+                            and not inside(parent):
+                        crossing.setdefault("foreign key", []).append(
+                            (str(parent), str(child), list(cols)))
+                for kind, name, holder, needs in (
+                        lister.dependencies("src", db, got) if kinds
+                        else []):
+                    if kind == "partition":
+                        if inside(holder) != inside(needs):
+                            crossing.setdefault(kind, []).append(
+                                (needs if inside(holder) else holder, name,
+                                 holder))
+                    elif str(needs) != str(holder) and inside(holder) \
+                            and not inside(needs):
+                        crossing.setdefault(kind, []).append(
+                            (str(needs), str(name), str(holder)))
+            except Exception as e:  # noqa: BLE001 - said, never as clear
+                out.append({"level": "warn", "scope": before,
+                            "item": "dependencies",
+                            "detail": f"{db}: what the tables the hop takes"
+                                      " need of the ones it leaves out could"
+                                      " not be listed: "
+                                      + (str(e).strip().splitlines()
+                                         or [type(e).__name__])[-1][:90]})
+                continue
+            said = {kind: [self._crossing_said(lister, db, kind, x, i)
+                           for i, x in enumerate(found)]
+                    for kind, found in crossing.items()}
+
+            def explained(line):
+                out.append({"level": "pass", "scope": before,
+                            "item": "dependencies, in full",
+                            "detail": line})
+            for kind, lines in said.items():
+                needed = sorted({x[0] for x in crossing[kind]})
+                what, then = self.CLOSURE[kind]
+                if accept:
+                    out.append({"level": "pass", "scope": before,
+                                "item": "dependencies",
+                                "detail": f"{db}: {what} across the scope,"
+                                          " accepted (closure: accept): "
+                                          + self._first(lines)})
+                    continue
+                out.append({
+                    "level": "warn", "scope": before, "item": "dependencies",
+                    "detail": f"{db}: {what} across the scope: "
+                              + self._first(lines)
+                              + "  [fix] take the closure: "
+                              + self._closure_fix(lister, leaver, db, needed)
+                              + f"; or accept it: closure: accept in the"
+                                f" hop's options - {then}"})
+            if not crossing:
+                checked = ["foreign keys"] if fks else []
+                checked += [self.CLOSURE[k][0] for k in kinds]
+                out.append({"level": "pass", "scope": before,
+                            "item": "dependencies",
+                            "detail": f"{db}: nothing the hop takes needs a"
+                                      " table it leaves out ("
+                                      + ", ".join(checked) + ")"})
+            decide.record(hop, {"work": f"the closure of {db}",
+                                "crossing": said}, explained,
+                          work=f"the closure of {db}",
+                          way="accepted" if accept and crossing else "",
+                          reason=f"{sum(map(len, said.values()))} across"
+                                 " the scope")
+        if unlisted:
+            out.append({"level": "warn", "scope": before,
+                        "item": "dependencies",
+                        "detail": f"{', '.join(unlisted)} that need a table"
+                                  " the hop leaves out - not checked on"
+                                  " this engine"})
+        return out
+
+    def _crossing_said(self, lister, db, kind, found, i):
+        """One dependency across the scope in words: what needs what - a
+        foreign key with the child's rows that hold a key into the parent
+        left out, counted for the first `ORPHAN_COUNTS`."""
+        needs, name, holder = found
+        if kind == "foreign key":
+            said = f"{name} ({', '.join(holder)}) -> {needs}"
+            if i >= self.ORPHAN_COUNTS:
+                return said
+            try:
+                n = lister.rows_holding("src", db, name, holder,
+                                        self.ORPHANS_COUNTED)
+            except Exception:  # noqa: BLE001 - the key is named, uncounted
+                return said + " (its rows could not be counted)"
+            if n is None:
+                return said
+            most = n >= self.ORPHANS_COUNTED
+            return (said + f" - {'at least ' if most else ''}{n:,} of its"
+                    " rows hold a key into it, each pointing at nothing on"
+                    " the target")
+        return {"view": f"view {name} reads {needs}",
+                "routine": f"{name} names {needs}",
+                "trigger": f"trigger {name} on {holder} names {needs}",
+                "sequence": f"{holder} draws from {name}, which {needs}"
+                            " owns",
+                "partition": (f"{holder} is taken and its partition"
+                              f" {needs} is not" if needs != holder else
+                              f"partition {name} is taken and its table"
+                              f" {holder} is not")}[kind]
+
+    def _closure_fix(self, lister, leaver, db, needed):
+        """The tables a scope must take for its closure, said as the
+        change to make: added to include, or taken out of exclude where
+        exclude is what leaves them."""
+        dropped = [n for n in needed
+                   if leaver.excluded(db, *self._table_parts(lister, n))]
+        added = [n for n in needed if n not in dropped]
+        parts = []
+        if added and self.hop.include:
+            parts.append(f"add {', '.join(f'{db}.{n}' for n in added)}"
+                         " to include")
+        if dropped:
+            parts.append(f"take {', '.join(f'{db}.{n}' for n in dropped)}"
+                         " out of exclude")
+        return " and ".join(parts) or "take " + ", ".join(needed)
+
     def _mapping_items(self):
         """What the hop's mapping would do, read before the move.
 
@@ -2822,7 +3419,9 @@ class Engine:
         ids, why = [], None
         try:
             for db in self.databases():
-                ids += list(self.neutral_tables("src", db))
+                # named from the database down, so a rule that names its
+                # database is matched, and one naming another is not
+                ids += [f"{db}.{t}" for t in self.neutral_tables("src", db)]
         except Exception as e:
             why = str(e).splitlines()[-1][:90]
         if why is not None:
@@ -2931,6 +3530,13 @@ class Engine:
     def neutral_tables(self, side, db):
         """Table identifiers this engine's other neutral methods accept."""
         raise self._no_canon("list tables")
+
+    def scope_tables(self, side, db):
+        """Every table a hop's include and exclude entries may name:
+        `neutral_tables`, and - where a table holds its rows in tables of
+        its own that a move copies one by one (PostgreSQL's partitions) -
+        those too, so an entry naming one is said to take it."""
+        return self.neutral_tables(side, db)
 
     def neutral_columns(self, side, db, table):
         """[(column name, declared type)] in the order the server reports."""
@@ -3574,6 +4180,12 @@ class Engine:
                                   for k in found[:4])
                 parts.append(f"{len(found)} {label} ({shown}"
                              + (" ..." if len(found) > 4 else "") + ")")
+        if parts and not capped:
+            # every row walked: the counts are exact, which is what a hop
+            # that keeps some changes off the target is held to
+            # (`verdict.hold`)
+            parts.append(f"missing={len(missing)} extra={len(extra)}"
+                         f" changed={len(changed)}")
         blind = sum(1 for group in (missing, changed, extra)
                     for k in group if any(part is None for part in k))
         if blind:
@@ -3632,7 +4244,7 @@ class Engine:
         from .. import canon
         if found is None:
             found = self._drill_tables(db).get(name, {})
-        found = self._only_named(found)
+        found = self._repairable(db, src_t, self._only_named(found))
         if not any(found.get(k) for k in ("missing", "changed", "extra")):
             return
         key = list(src_engine.neutral_key("src", db, src_t))
@@ -3754,6 +4366,38 @@ class Engine:
                     for k, v in zip(key, values(key_text))})
                 record.applied(first_delete + i)
 
+    def _kept_by_hop(self, db, table):
+        """The kinds of row (`missing`, `extra`, `changed`) the hop keeps
+        on the target for this table by the changes it does not carry
+        (`verdict.kept_kinds`): a repair never removes a row the source
+        deleted where deletes are not carried, never adds one it inserted
+        where inserts are not, and never overwrites one it updated where
+        updates are not."""
+        from .. import verdict
+        return verdict.kept_kinds(self.hop, db, table)
+
+    def _repairable(self, db, table, found):
+        """`found` ({kind: [keys]}) without the kinds the hop keeps
+        (`_kept_by_hop`); as it is for a hop that carries every change."""
+        kept = self._kept_by_hop(db, table)
+        if not kept or not found:
+            return found
+        return {k: ([] if k in kept else v) for k, v in found.items()}
+
+    @staticmethod
+    def _kept_said(found, kept_found):
+        """What a repair plan says of the rows it leaves because the hop
+        keeps them, or ''."""
+        from .. import verdict
+        left = [(kind, len(found.get(kind) or ()))
+                for _, kind, _, _ in verdict.LEFT_OUT
+                if len(found.get(kind) or ()) and
+                not (kept_found.get(kind) or ())]
+        return "; ".join(
+            f"{verdict._rows(n)} {words} left as they are - {why}"
+            for kind, n in left for _, k, words, why in verdict.LEFT_OUT
+            if k == kind)
+
     def _only_named(self, found):
         """`found` ({kind: [key as canonical text]}) narrowed to the keys a
         repair by spans leaves to be repaired by key (`repairways`); as it
@@ -3834,8 +4478,10 @@ class Engine:
     def repair_found(self, db, table):
         """{missing, changed, extra: [key as canonical text]} the last check
         named for `table` - {} where it named none - or None where this
-        engine's drilldown cannot be read so."""
-        return self._drill_tables(db).get(table, {})
+        engine's drilldown cannot be read so. Never the rows the hop keeps
+        by the changes it does not carry (`_repairable`)."""
+        return self._repairable(db, table,
+                                self._drill_tables(db).get(table, {}))
 
     def _leaves_kept(self, db):
         """The tables the last check kept differing leaves for
@@ -3860,7 +4506,8 @@ class Engine:
         if src is not None:
             pairs, _, _, _ = self.match_tables(
                 src.neutral_tables("src", db),
-                self.dst_engine.neutral_tables("dst", db), self._rename)
+                self.dst_engine.neutral_tables("dst", db),
+                self._renamer(db))
             match = [(s, d) for s, d in pairs if self._leaf(s) == table]
             if len(match) != 1:
                 return None
@@ -4392,6 +5039,23 @@ class Engine:
     def _write_pk_files(self, db, table, missing, extra, changed):
         return None
 
+    def _delta_held(self, result):
+        """A delta verify's answer for one table's differing rows, held to
+        the changes the hop carries (`verdict.hold`): rows it keeps - the
+        ones the source deleted, where deletes are not carried - are a
+        note, not a difference, and do not hold the verified position
+        back. Returns (the answer, whether it holds the position back)."""
+        from .. import verdict
+        verdict.hold(self.hop, [result.__dict__])
+        return result, not getattr(result, "kept_by_hop", "")
+
+    @staticmethod
+    def _delta_said(result):
+        """What a delta cycle's log says of one table's answer."""
+        if getattr(result, "kept_by_hop", ""):
+            return "kept by the hop"
+        return "clean" if result.status == "ok" else "DIFF"
+
     def settle_recheck(self, db, table):
         keys = self._suspect_keys(db, table)
         if not keys or len(keys) > 20000:
@@ -4518,6 +5182,67 @@ class Engine:
     def foreign_keys(self, side, db):
         """[(child, [columns], parent, [parent's columns])]."""
         return []
+
+    def dependencies(self, side, db, tables=()):
+        """[(kind, name, holder, needs)] - what in the database cannot
+        stand without one of its tables, each name as `neutral_tables`
+        gives it, of the kinds this engine lists (`DEPENDENCY_KINDS`):
+        `view` - a view (holder, itself) and a table or view it reads;
+        `routine` - a function or procedure and a table its body names;
+        `trigger` - a trigger, the table it is on and a table its body
+        names; `sequence` - a sequence, the table whose default draws from
+        it and the table that owns it; `partition` - a partition, its
+        partitioned table and itself. `tables` are the source's every
+        table, what a body is read for. [] where this engine lists none."""
+        return []
+
+    def rows_holding(self, side, db, table, columns, most):
+        """How many of `table`'s rows hold a value in every one of
+        `columns`, counted up to `most` and no further - so a large table
+        costs at most `most` rows read - or None where this engine answers
+        no SQL of its own. Read in a transaction that cannot write
+        (`run_rule`)."""
+        if self.SQL_DIALECT not in ("postgres", "mysql"):
+            return None
+        held = " and ".join(f"{self._quote_ident(c)} is not null"
+                            for c in columns) or "1 = 1"
+        got = self.run_rule(
+            side, db, f"select count(*) from (select 1 from"
+                      f" {self._qualified(side, db, table)} where {held}"
+                      f" limit {int(most)}) held")
+        return int(got[0][0]) if got else 0
+
+    #: the words a statement names a table after, and the name: parts
+    #: quoted any way an engine quotes them, joined by dots
+    _NAMES_A_TABLE = re.compile(
+        r"\b(?:from|join|into|update|table|references)\s+"
+        r"((?:[`\"\[]?[\w$]+[`\"\]]?\s*\.\s*)*[`\"\[]?[\w$]+[`\"\]]?)",
+        re.I)
+
+    @classmethod
+    def _tables_named(cls, body, tables, own=""):
+        """The tables of `tables` a routine's or a view's text reads or
+        writes: each name after from, join, into, update, table or
+        references, matched by its own name without case - and by its
+        schema too, where the text gives one and the table has one. A
+        name in a comment or a string is taken all the same: a dependency
+        said that is not one costs a look, one missed a broken target."""
+        by_leaf = {}
+        for t in tables:
+            leaf = str(t).split(".")[-1].strip('`"[]').casefold()
+            by_leaf.setdefault(leaf, []).append(str(t))
+        found = set()
+        for m in cls._NAMES_A_TABLE.finditer(str(body or "")):
+            parts = [p.strip().strip('`"[]').casefold()
+                     for p in m.group(1).split(".")]
+            for t in by_leaf.get(parts[-1], []):
+                mine = [p.strip('`"[]').casefold()
+                        for p in str(t).split(".")]
+                if len(parts) == 1 or len(mine) == 1 or \
+                        mine[-2:] == parts[-2:]:
+                    found.add(t)
+        found.discard(str(own))
+        return sorted(found)
 
     def unique_keys(self, side, db):
         """{table: [[columns of one unique key], ...]}, the primary key
@@ -4688,15 +5413,30 @@ class Engine:
     OWN_PATHS_READ_COLUMN_MAPPING = True
 
     def through_pair(self, db, table):
-        """Whether this table's columns are mapped and this engine's own
-        paths would copy and hash it whole."""
-        return (not self.OWN_PATHS_READ_COLUMN_MAPPING
-                and bool(self.hop.column_rules(db, *str(table).split("."))))
+        """Whether this table's columns are mapped, or its name is, and
+        this engine's own paths would copy and hash it whole under the
+        source's name.
+
+        A table the hop renames (`mapping.tables`) went every same-engine
+        way under its own name - the bulk paths, the table copier, the
+        tables made for a load - and the check then compared it under that
+        name on both sides, so the table it was renamed to was never filled
+        and nothing said so. The pair renames it (`HeteroEngine._rename`)
+        in its copy, comparison, repair and tail alike."""
+        if self.OWN_PATHS_READ_COLUMN_MAPPING:
+            return False
+        from ..movers import _renamed
+        parts = [p for p in str(table).split(".") if p]
+        return bool(self.hop.column_rules(db, *parts)
+                    or _renamed(self.hop, db, parts))
 
     def maps_columns(self):
-        """Whether any table of this hop goes through the pair machinery."""
+        """Whether any table of this hop goes through the pair machinery:
+        it maps columns or renames tables (`through_pair`)."""
+        from ..movers import renames_any
         return (not self.OWN_PATHS_READ_COLUMN_MAPPING
-                and bool((self.hop.mapping or {}).get("columns")))
+                and bool((self.hop.mapping or {}).get("columns")
+                         or renames_any(self.hop)))
 
     def _as_pair(self, within=None):
         """This hop seen as a pair of the same engine, so the machinery
@@ -4767,6 +5507,104 @@ class Engine:
             return self.columns_pair()._compare_pks(
                 db, str(table).rpartition(".")[2], keys)
         return self._compare_pks(db, table, keys)
+
+    #: the files a delta verify keeps its position in, under a database's
+    #: reports - one an engine; PostgreSQL's is a slot on the source
+    DELTA_FILES = ("delta-pos.json", "delta-token.json",
+                   "pair-delta-token.json", "delta-offsets.json",
+                   "delta-seqno.json", "delta-ctver.json",
+                   "delta-parts.json")
+    #: the scope the delta's position was taken under, kept beside it
+    DELTA_SCOPE = "delta-scope.json"
+
+    def _delta_kept(self, db):
+        """What the delta's position for `db` was taken under, {} where
+        nothing says (a position from before this was kept, or none)."""
+        from .. import durable
+        got = durable.read_state(self.hop.report_dir(db) / self.DELTA_SCOPE,
+                                 "position")
+        return got if isinstance(got, dict) else {}
+
+    def delta_covers(self, db):
+        """Whether the delta's position for `db` stands for everything the
+        hop takes now: taken under its scope (`Hop.scope_changed`), and,
+        where it was taken again because the scope changed, a whole check
+        under this scope has found the two the same since. A delta reads
+        only what changed after its position - the changes of a table the
+        hop left out were passed over, and a table it took in later was
+        never compared whole - so the cutover's last check compares every
+        table instead (`cutover._has_delta`)."""
+        kept = self._delta_kept(db)
+        if self.hop.scope_changed(kept):
+            return False
+        return not kept.get("scope_changed_from") or \
+            self._whole_since(float(kept.get("at") or 0))
+
+    def _whole_since(self, at):
+        """Whether the hop's last check, taken after `at` under the hop's
+        scope now, found the two the same (`verdict.json`)."""
+        from .. import durable
+        p = self.hop.report_dir() / "verdict.json"
+        try:
+            got = durable.read_state(p, "cache") or {}
+            taken = p.stat().st_mtime
+        except OSError:
+            return False
+        return (taken >= at and got.get("status") == "same"
+                and not self.hop.scope_changed(got)
+                and bool(got.get("scope_fingerprint")))
+
+    def delta_forget(self, db):
+        """The delta's position for `db` gone - its slot dropped where it
+        keeps one on the source, its files removed - so the next verify
+        takes its baseline afresh."""
+        if callable(getattr(self, "delta_teardown", None)):
+            self.delta_teardown(db)
+        where = self.hop.report_dir(db)
+        for f in self.DELTA_FILES + (self.DELTA_SCOPE,):
+            (where / f).unlink(missing_ok=True)
+
+    def delta_in_scope(self, db, limit=20000, log=None):
+        """`delta_verify`, its position held to the scope it was taken
+        under (backlog P0-SCOPE.6c). Kept beside every position, so a
+        position taken under another scope is never gone on from: the
+        PostgreSQL slot had advanced past the changes of every table the
+        hop left out, and a table taken in later was then verified only
+        from wherever the position stood. Where the scope changed, the
+        position is dropped and taken again here, and every cycle says -
+        and the cutover compares every table - until a whole check under
+        the new scope finds the two the same. A position with nothing kept
+        beside it predates this, and is gone on from as it always was."""
+        from .. import durable
+        kept = self._delta_kept(db)
+        changed = self.hop.scope_changed(kept)
+        if changed:
+            self.delta_forget(db)
+        got = list(self.delta_verify(db, limit, log))
+        fp = self.hop.scope_fingerprint()
+        if kept.get("scope_fingerprint") != fp:
+            now = {"scope_fingerprint": fp, "at": time.time()}
+            if changed:
+                now["scope_changed_from"] = kept["scope_fingerprint"]
+            durable.write_json(self.hop.report_dir(db) / self.DELTA_SCOPE,
+                               now)
+            kept = now
+        if changed:
+            got.append(Result(
+                "delta", db, "warn",
+                "the hop's scope changed since the last verified position,"
+                " which was taken again here: what the hop takes now was"
+                " not compared whole, and the delta sees only what changes"
+                " from here", "",
+                f"migkit check {self.hop.name} --db {db}"))
+        elif kept.get("scope_changed_from") and not self.delta_covers(db):
+            got.append(Result(
+                "delta", db, "warn",
+                "the hop's scope changed after the delta's first position;"
+                " no whole check under the scope it has now has found the"
+                " two the same since, so the delta covers only what"
+                " changed", "", f"migkit check {self.hop.name} --db {db}"))
+        return got
 
     def _mapped_schema(self, db):
         """The schema results for the tables this engine's whole-database
@@ -4891,8 +5729,12 @@ class Engine:
 
     #: the DDLs of this engine's log that stop a tail whose hop's `ddl` is
     #: stop (`tailtables`): those the tail stopped on before there was a
-    #: `ddl` - and a table emptied, which was carried by nothing
-    DDL_STOPS = ("truncate",)
+    #: `ddl` - a table emptied, which was carried by nothing, and a table
+    #: renamed: `RENAME TABLE products TO products_old, products_new TO
+    #: products` left the target's products holding the old rows under the
+    #: new table's changes, and a table renamed into the hop's scope joined
+    #: it with none of its rows
+    DDL_STOPS = ("truncate", "rename")
 
     #: the caches of this engine's own that hold a table's columns, taken
     #: away once a DDL has changed the table under them (`forget_shapes`)

@@ -101,6 +101,8 @@ WORDS = {
                        " cannot do",
     "resume by key": "a stop resumes by key, which {rung} cannot do",
     "keyless": "the table has no key, which {rung} cannot carry",
+    "renamed": "the hop gives it another name on the target, which {rung}"
+               " cannot write it under",
     "apart": "migkit's own writes must be told apart when read back, which"
              " {rung} cannot do",
     "exact": "no batch may be applied twice, which {rung} cannot promise",

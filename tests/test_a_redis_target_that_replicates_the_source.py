@@ -188,7 +188,7 @@ def test_a_hop_the_replica_would_carry_wrongly_is_refused(fresh,
     dst = _r(DST_PORT, DST_PW)
     # excluded keys: the first sync would empty them
     said = _refused(monkeypatch, _hop(exclude=["0.session:*"]))
-    assert said.startswith("the hop excludes keys, and a Redis replica"
+    assert said.startswith("the hop leaves keys out, and a Redis replica"
                            " carries every key of the source"), said
     # a database the hop does not name, on the source: carried
     said = _refused(monkeypatch, _hop(databases=["0"]))
