@@ -19,7 +19,6 @@ A job is the hop's only where it writes what the hop takes: one whose
 every table is one the hop leaves out belongs to whatever writes those
 tables, and is left as it is on both sides (`left_alone`).
 """
-import json
 import re
 
 
@@ -181,17 +180,17 @@ def _path(hop):
 
 
 def recorded(hop):
-    """The switches recorded so far, oldest first."""
-    try:
-        return json.loads(_path(hop).read_text())
-    except (OSError, ValueError):
-        return []
+    """The switches recorded so far, oldest first. A record that cannot be
+    read whole stops, naming it: read as nothing, a rollback would switch
+    nothing back (`durable`)."""
+    from . import durable
+    return durable.read_state(_path(hop), "journal") or []
 
 
 def _save(hop, done):
-    tmp = _path(hop).with_suffix(".tmp")
-    tmp.write_text(json.dumps(done, indent=1))
-    tmp.replace(_path(hop))
+    """Recorded before the switch it records, and on the disk (`durable`)."""
+    from . import durable
+    durable.write_json(_path(hop), done, indent=1)
 
 
 def switch(hop, eng, db, side, names, on, say):

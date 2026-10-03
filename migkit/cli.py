@@ -1,6 +1,5 @@
 import contextlib
 import json
-import os
 import socket
 import threading
 import time
@@ -75,11 +74,22 @@ def _changelog(hop, entry, eng=None):
 class _Checkpoint(dict):
     """How far a copy got. Kept in the hop's run state as well where it has
     one (the s3 backend), so a run another machine takes over resumes from
-    the last chunk saved rather than from the start (backlog 30)."""
+    the last chunk saved rather than from the start (backlog 30).
+
+    Between whole saves, a range begun or landed is a line added to the
+    checkpoint's journal (`journal`, `checkpoint.read_move`): a copy of
+    one table in 20,000 ranges saved the whole file twice a range, O(R^2)
+    bookkeeping and about 14 minutes of saves one after the other (audit
+    ST17); a line is written in the time a whole save of a small file
+    takes, whatever the plan's size. Where the hop keeps its run state
+    where another machine reads it, every save is whole, as before: the
+    store holds the file, not its journal."""
 
     def __init__(self, path, remote=None):
         super().__init__()
         import threading
+
+        from . import checkpoint
         self.path = path
         self.remote = remote
         self._lock = threading.RLock()
@@ -89,13 +99,47 @@ class _Checkpoint(dict):
         # the entries this process's copiers write into: theirs, whatever
         # another machine saved since
         self._mine = set()
+        # the journal the file on the disk names: None until it is written
+        self._jid = None
+        self._keys = {}
         if not path.exists() and remote is not None:
             text = remote.get(path)
             if text:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(text)
-        if path.exists():
-            self.update(json.loads(path.read_text()))
+                from . import durable
+                durable.write_atomic(path, text)
+        got = checkpoint.read_move(path)
+        if got is not None:
+            self.update(got)
+            from . import durable
+            self._jid = (durable.read_state(path, "position") or {}).get(
+                checkpoint.JOURNAL)
+
+    def journals(self):
+        """Whether a range begun or landed is a journal line, not a whole
+        save."""
+        return self.remote is None and self._jid is not None
+
+    def journal(self, st, event):
+        """`event` of the entry `st` added to the journal - called under
+        the lock the entry was changed under, so no whole save written at
+        the same time can leave it out."""
+        import json as _json
+
+        from . import checkpoint, durable, failpoint
+        with self._lock:
+            key = self._keys.get(id(st))
+            if key is None or self.get(key) is not st:
+                key = next((k for k, v in self.items() if v is st), None)
+                if key is None:
+                    # an entry not in the checkpoint: nothing to add to
+                    return self.save()
+                self._keys[id(st)] = key
+            durable.append_line(checkpoint.journal_of(self.path),
+                                _json.dumps({"j": self._jid, "k": key,
+                                             **event},
+                                            separators=(",", ":"),
+                                            default=str))
+            failpoint.hit("checkpoint.journaled")
 
     def setdefault(self, key, default=None):
         self._mine.add(key)
@@ -125,31 +169,40 @@ class _Checkpoint(dict):
         path - measured (CPython 3.12, in-process) on the checkpoint of 200
         tables of 50 ranges each, 1.7 MB: 26.5 ms a save indented, 4.2 ms
         compact, and such a copy saves twice a range."""
-        from . import failpoint
+        import secrets
+
+        from . import checkpoint, durable, failpoint
         with self._lock:
             if upto is not None and self._saved >= upto:
                 return
             if self.remote is not None:
                 self._merge_into_remote()
             gen = self._gen
-            text = self._encoded()
-            tmp = self.path.with_name(
-                f"{self.path.name}.{os.getpid()}.{threading.get_ident()}"
-                ".tmp")
-            tmp.write_text(text)
+            # a journal of its own for the file written now: a line of the
+            # one before, left over by a stop between the two, is not
+            # added to it (`checkpoint.read_move`)
+            jid = secrets.token_hex(6)
+            text = self._encoded(jid)
             failpoint.hit("checkpoint.written")
-            tmp.replace(self.path)
+            durable.write_atomic(self.path, text)
+            self._jid = jid
+            checkpoint.journal_of(self.path).unlink(missing_ok=True)
             self._saved = gen
 
-    def _encoded(self):
-        """The checkpoint as JSON. A copier that adds a field to its own
-        table's entry outside the lock while it is encoded makes the
-        encoder stop (`dictionary changed size`); encoded again, a bounded
-        number of times - the loop that did this ended in an unbound name
-        on its last turn and took the move down with it."""
+    def _encoded(self, jid=None):
+        """The checkpoint as JSON, naming the journal `jid` begun with it.
+        A copier that adds a field to its own table's entry outside the
+        lock while it is encoded makes the encoder stop (`dictionary
+        changed size`); encoded again, a bounded number of times - the
+        loop that did this ended in an unbound name on its last turn and
+        took the move down with it."""
+        from . import checkpoint
         for _ in range(100):
             try:
-                return json.dumps(self, separators=(",", ":"), default=str)
+                body = dict(self)
+                if jid is not None:
+                    body[checkpoint.JOURNAL] = jid
+                return json.dumps(body, separators=(",", ":"), default=str)
             except RuntimeError:
                 time.sleep(0.001)
         raise SystemExit(f"the move's checkpoint {self.path} kept changing"
@@ -157,7 +210,10 @@ class _Checkpoint(dict):
                          " is lost, and the next run goes on from it")
 
     def discard(self):
+        from . import checkpoint
         self.path.unlink(missing_ok=True)
+        checkpoint.journal_of(self.path).unlink(missing_ok=True)
+        self._jid = None
         if self.remote is not None:
             self.remote.delete(self.path)
 
@@ -240,7 +296,7 @@ def _shared(hop, d):
     """This database's run files, fetched from the hop's run state where
     this machine lacks them - or None without one."""
     from . import ha
-    from .state import Mirror, run_state
+    from .state import TailMirror, run_state
     pushed = ha.mirror(hop, d)
     if pushed is not None:
         # a hop with a standby: its files go with the holding's own pushes,
@@ -249,7 +305,8 @@ def _shared(hop, d):
     remote = run_state(hop)
     if remote is None:
         return None
-    return Mirror(remote, [hop.report_dir(d) / n for n in RUN_FILES]).fetch()
+    return TailMirror(remote, [hop.report_dir(d) / n
+                               for n in RUN_FILES]).fetch()
 
 
 @contextlib.contextmanager
@@ -652,6 +709,26 @@ def main(quiet):
     replicate, tail, setup-target, ui, state, monitor, ...) still work."""
     global QUIET
     QUIET = quiet
+    _env_at_start()
+
+
+def _env_at_start():
+    """The environment read once before any command: a `MIGKIT_*` nothing
+    reads is said with the nearest name that is read - a typo was read by
+    nothing and said nothing - and one set to what its kind cannot be
+    stops here as a usage error, named, rather than wherever it is first
+    read, part way through a run (audit 2026-10-01, K13)."""
+    from . import envkeys
+    for line in envkeys.said_unknown():
+        click.echo(f"migkit: {line}", err=True)
+    try:
+        for name, var in envkeys.VARS.items():
+            if var.kind == "flag":
+                envkeys.flag(name)
+            elif var.kind in ("number", "whole"):
+                envkeys.number(name)
+    except envkeys.Bad as e:
+        raise click.UsageError(str(e))
 
 
 def _engine_lines():
@@ -823,6 +900,10 @@ def doctor(install):
         console.print(f"diagnostics: {bundle} ({len(got)} files; passwords,"
                       " tokens, addresses' credentials and every finding's"
                       " values left out)")
+    from . import config as _config
+    # the two places a run depends on, wherever it was started from
+    console.print(f"configuration: {_esc(str(_config.CONF))}\nreports and"
+                  f" run state: {_esc(str(_config.REPORTS))}")
     _hops_table(required=False)
     if install:
         import sys
@@ -995,7 +1076,7 @@ def _doctor_config():
     if not path.exists():
         return {}, {}
     try:
-        data = yaml.safe_load(path.read_text()) or {}
+        data = _config.read_yaml(path.read_text())
     except yaml.YAMLError as e:
         console.print(f"[red]{path} is not YAML migkit can read[/red]: {e}")
         return {}, {}
@@ -1003,7 +1084,7 @@ def _doctor_config():
         hops = load_hops()
     except SystemExit:
         return {}, {}
-    for p in hopkeys.check(data):
+    for p in hopkeys.check(data, path):
         console.print(f"[yellow]{p}[/yellow]")
     return hops, (data.get("hops") or {}) if isinstance(data, dict) else {}
 
@@ -2070,7 +2151,8 @@ def _make_room_for_rows(hop, eng, db, actions):
             " row repair beside it would race it - the row that survives is"
             " whichever lands last. Nothing was applied. Stop it, repair,"
             " and start it again, or let it catch up and check again.")
-    window = int((hop.options or {}).get("repair_window", 300))
+    from .hopkeys import opt
+    window = opt(hop, "repair_window")
     paused = []
     for what in [w for w, _ in writers]:
         console.print(f"  {_esc(what)} is running; asking it to pause for"
@@ -3360,15 +3442,10 @@ def _topology(hop):
         reverse: at_cutover    tearing the stream down starts one back
         topology: two_way      both ways, all the time
     """
-    opts = hop.options or {}
-    rev = str(opts.get("reverse", "") or "").lower()
-    top = str(opts.get("topology", "") or "").lower()
-    if rev not in ("", "at_cutover"):
-        raise SystemExit(f"reverse: {rev} - the one there is, is"
-                         " at_cutover")
-    if top not in ("", "one_way", "two_way"):
-        raise SystemExit(f"topology: {top} - one_way or two_way")
-    return rev == "at_cutover", top == "two_way"
+    from . import hopkeys
+    # the one reading of both words, every spelling of them (K20)
+    return (hopkeys.reverse(hop) == "at_cutover",
+            hopkeys.topology(hop) == "two_way")
 
 
 def _the_other_way(hop, eng):
@@ -3635,9 +3712,8 @@ def _follow(hop, eng, db, do_drop, go):
 
 
 def _tail_token(hop, db):
-    if not db:
-        raise SystemExit("cdc tail needs --db")
-    return hop.report_dir(db) / "tail-token.json"
+    from . import tailctl
+    return tailctl.token_path(hop, db)
 
 
 def _mark_move(hop, eng, d):
@@ -3675,27 +3751,29 @@ def _record_copy(hop, d, before):
     copy was a snapshot at a position of its own - that position; and the
     scope it copied (`Hop.scope_record`), so a stream started after the
     scope took more in copies that first (`_entered`)."""
+    from . import durable
     rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "before": before,
            "scope_fingerprint": hop.scope_fingerprint(),
            "scope": hop.scope_record()}
     dumped = hop.report_dir(d) / "dump-position.json"
-    if dumped.exists():
-        try:
-            rec["exact"] = json.loads(dumped.read_text())
-        except ValueError:
-            pass
-        dumped.unlink()
-    _copy_record_path(hop, d).write_text(json.dumps(rec, default=str))
+    got = durable.read_state(dumped, "position")
+    if got is not None:
+        rec["exact"] = got
+    # the position a later tail starts from, on the disk before the one
+    # it came from goes (`durable`)
+    durable.write_json(_copy_record_path(hop, d), rec)
+    dumped.unlink(missing_ok=True)
     shared = _shared(hop, d)
     if shared:
         shared.push(force=True)
 
 
 def _copy_record(hop, d):
-    try:
-        return json.loads(_copy_record_path(hop, d).read_text())
-    except (OSError, ValueError):
-        return None
+    """The copy's record, None where there is none; one that cannot be read
+    whole stops, naming it - read as none, a tail started from now and
+    skipped what changed during the copy (`durable`)."""
+    from . import durable
+    return durable.read_state(_copy_record_path(hop, d), "position")
 
 
 def _entered(hop, eng, d, rec):
@@ -4703,7 +4781,7 @@ def _stream_leg(hop, eng, db, dbs, engine):
         tailctl.resume(where)
         end = time.monotonic() + 60
         while tailctl.alive(where) and time.monotonic() < end:
-            time.sleep(0.5)
+            time.sleep(tailctl.POLL)
         if tailctl.alive(where):
             raise SystemExit(f"{d}: the change tail did not end")
         say(f"{d}: the change tail ended")

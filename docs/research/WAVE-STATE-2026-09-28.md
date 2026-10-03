@@ -238,9 +238,13 @@ Release waits for the whole backlog, the suite run once and the gate. Merged sin
 
 Running (each on its own `worktree-agent-<id>` branch; I merge, run compileall and the guards, scan the tree):
 - a0fb2973757acdcf0 - conversion breadth (CV.P5, P9-P11, P15, P17, P19-P21, W3) - MERGED `9a091c4`
-- a88f190644bf5cea1 - AUD-D (options, environment and addresses checked at load)
+- a88f190644bf5cea1 - AUD-D (options, environment and addresses checked at load) - MERGED (left: MySQL's `migkit%%` filters to AUD-G2; a PostgreSQL role alone as a managed service's sign needs a real server)
+- a67d0ff82c81c6303 - engine reach: ER4-6, W5 (Vertica, Exasol, HANA, Informix, Netezza, Progress, Databricks), R16b Qdrant, R16c Neo4j, R13-HETERO/GENERIC/kafka/redis/sqlite/parquet, 32.rds
+- W4.a/W4.b wait for the transforms owner (P0-SCOPE 7) to merge
 - a629ecb2da1a93623 - P0-CLOUDS.native, then P0-CLOUDS.more
-- a4acdb02ff0191804 - AUD-B (durable tail state, dirty tracking)
+- a4acdb02ff0191804 - AUD-B (durable tail state, dirty tracking) - MERGED `a0ab528`, SP8 on every source MERGED
+- af3ae769cfcef053c - W6 (types only commercial engines have)
+- a76b06af6ac782986 - W7 (resharding: split, merge, distribution-aware load)
 - a3d309a6543a96c68 - read-only target and writes held on every engine (BAR-3) - MERGED (unproved on servers: Db2 for i `SYSTABAUTH` columns, Teradata `LogonTime`, ClickHouse `ALTER USER ... SETTINGS`, Snowflake `SHOW LOCKS` order - the suite tells)
 - a2602d2c2bffb1f1b - AUD-G2 (the MySQL engine's connections, TLS, zone, keepalives, grants)
 - a36a1e64cac22cbfd - P0-PARITY.matrix and .guard (the depth matrix read off the code, each cell proved by a test on its engine or declared, the red guard; STATE.md shows it)

@@ -270,9 +270,8 @@ def _load(hop, db):
 
 
 def _save(hop, rec, path):
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=1, default=str))
-    tmp.replace(path)
+    from . import durable
+    durable.write_json(path, rec, indent=1)
     shared = _mirror(hop, path)
     if shared:
         shared.push(force=True)

@@ -851,7 +851,8 @@ class SnowflakeEngine(FoldsToCapitals, _Warehouse):
         if opts.get("private_key_file"):
             kw["private_key_file"] = opts["private_key_file"]
             if opts.get("private_key_passphrase"):
-                kw["private_key_file_pwd"] = opts["private_key_passphrase"]
+                kw["private_key_file_pwd"] = ep.option_secret(
+                    "private_key_passphrase")
         else:
             kw["password"] = ep.password
         conn = snowflake.connector.connect(
@@ -1102,7 +1103,8 @@ class SnowflakeEngine(FoldsToCapitals, _Warehouse):
                  "url": opts.get("url") or
                  f"https://{opts['account']}.snowflakecomputing.com"}
         if opts.get("private_key_passphrase"):
-            props["private_key_passphrase"] = opts["private_key_passphrase"]
+            props["private_key_passphrase"] = self._endpoint(
+                side).option_secret("private_key_passphrase")
         if opts.get("role"):
             props["role"] = opts["role"]
         return props
@@ -1376,7 +1378,7 @@ class BigQueryEngine(_Warehouse):
         fields = []
         for col in columns:
             base, nums = warehouse_sql._base(
-                canon.ddl_type("bigquery", col[1], col[2]))
+                canon.ddl_type("bigquery", col[1], col[2], col[0] in key))
             kw = {}
             if base in ("NUMERIC", "BIGNUMERIC") and len(nums) == 2:
                 kw = {"precision": nums[0], "scale": nums[1]}

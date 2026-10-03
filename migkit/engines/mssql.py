@@ -156,38 +156,100 @@ class MSSQLEngine(DbapiRows, Engine):
                        " 'datetimeoffset' then 'datetimeoffset(' +"
                        " cast(c.scale as varchar(2)) + ')' else {d} end")
 
+    def _shape_reads(self):
+        """The six statements `shape_catalog` reads a side's catalogue in,
+        as (statement, its order, how many columns): every column named,
+        and every column an order stands on selected as well - a column's
+        place in its table, in its index, in its foreign key - so
+        `shape_mark` digests exactly what is read, places included."""
+        declared = self._SHAPE_DECLARED.format(d=self.DECLARED.format(c="c"))
+        return (
+            (f"select s.name + '.' + t.name c0, c.name c1, {declared} c2,"
+             " c.is_nullable c3, c.collation_name c4, ic.seed_value c5,"
+             " ic.increment_value c6, dc.definition c7, cc.definition c8,"
+             " cc.is_persisted c9, c.is_sparse c10, c.is_rowguidcol c11,"
+             " case when c.user_type_id <> c.system_type_id then"
+             " type_name(c.user_type_id) end c12, c.column_id c13"
+             " from sys.tables t join sys.schemas s on s.schema_id ="
+             " t.schema_id join sys.columns c on c.object_id = t.object_id"
+             " left join sys.identity_columns ic on ic.object_id ="
+             " c.object_id and ic.column_id = c.column_id"
+             " left join sys.default_constraints dc on"
+             " dc.parent_object_id = c.object_id and dc.parent_column_id"
+             " = c.column_id left join sys.computed_columns cc on"
+             " cc.object_id = c.object_id and cc.column_id = c.column_id"
+             " where t.is_ms_shipped = 0", "1, c.column_id", 14),
+            ("select s.name + '.' + t.name c0, ic.index_id c1, c.name c2,"
+             " ic.is_descending_key c3, ic.is_included_column c4,"
+             " ic.key_ordinal c5 from"
+             " sys.index_columns ic join sys.tables t on t.object_id ="
+             " ic.object_id join sys.schemas s on s.schema_id ="
+             " t.schema_id join sys.columns c on c.object_id ="
+             " ic.object_id and c.column_id = ic.column_id where"
+             " t.is_ms_shipped = 0", "1, 2, ic.is_included_column,"
+             " ic.key_ordinal, c.name", 6),
+            ("select s.name + '.' + t.name c0, i.index_id c1, i.name c2,"
+             " coalesce(kc.is_system_named, 0) c3, lower(i.type_desc) c4,"
+             " i.is_primary_key c5, i.is_unique_constraint c6,"
+             " i.is_unique c7,"
+             " case when i.has_filter = 1 then i.filter_definition end c8"
+             " from sys.indexes i join sys.tables t on t.object_id ="
+             " i.object_id join sys.schemas s on s.schema_id ="
+             " t.schema_id left join sys.key_constraints kc on"
+             " kc.parent_object_id = i.object_id and kc.unique_index_id"
+             " = i.index_id where t.is_ms_shipped = 0 and i.type > 0",
+             "", 9),
+            ("select f.constraint_object_id c0, col_name(f.parent_object_id,"
+             " f.parent_column_id) c1, col_name(f.referenced_object_id,"
+             " f.referenced_column_id) c2, f.constraint_column_id c3"
+             " from sys.foreign_key_columns f", "1, f.constraint_column_id",
+             4),
+            ("select s.name + '.' + t.name c0, fk.object_id c1, fk.name c2,"
+             " fk.is_system_named c3, schema_name(rt.schema_id) + '.' +"
+             " rt.name c4, lower(fk.delete_referential_action_desc) c5,"
+             " lower(fk.update_referential_action_desc) c6"
+             " from sys.foreign_keys fk join sys.tables t on"
+             " t.object_id = fk.parent_object_id join sys.schemas s"
+             " on s.schema_id = t.schema_id join sys.tables rt on"
+             " rt.object_id = fk.referenced_object_id where"
+             " t.is_ms_shipped = 0", "", 7),
+            ("select s.name + '.' + t.name c0, 'check' c1, cc.name c2,"
+             " cc.is_system_named c3, cc.definition c4, col_name("
+             "cc.parent_object_id, cc.parent_column_id) c5"
+             " from sys.check_constraints cc join sys.tables t on"
+             " t.object_id = cc.parent_object_id join sys.schemas s on"
+             " s.schema_id = t.schema_id where t.is_ms_shipped = 0"
+             " union all select s.name + '.' + t.name, 'trigger',"
+             " tr.name, 0, convert(varchar(64), hashbytes('SHA2_256',"
+             " isnull(object_definition(tr.object_id), '')), 2),"
+             " case when tr.is_instead_of_trigger = 1 then 'instead of'"
+             " else 'after' end"
+             " from sys.triggers tr join sys.tables t on t.object_id ="
+             " tr.parent_id join sys.schemas s on s.schema_id ="
+             " t.schema_id where t.is_ms_shipped = 0", "", 6))
+
     def shape_catalog(self, side, db):
         """The side's `catalog.Catalog`, read in six statements on the kept
-        connection whatever the number of tables: each column with its
-        declared type and every number, nullability, collation, default
-        and identity, computed expression or alias type (`extra`); each
-        table's key, its indexes by their columns, order, included columns
-        and filter, its foreign keys with their actions, and its checks and
-        triggers (`others`). A constraint the server named itself is said by
-        what it is, not by that name: the same key made in two databases is
-        named differently in each (`PK__o__3213E83F720CC3A2` and
-        `PK__o__3213E83FA19E373F`, measured on SQL Edge)."""
+        connection whatever the number of tables (`_shape_reads`): each
+        column with its declared type and every number, nullability,
+        collation, default and identity, computed expression or alias type
+        (`extra`); each table's key, its indexes by their columns, order,
+        included columns and filter, its foreign keys with their actions,
+        and its checks and triggers (`others`). A constraint the server
+        named itself is said by what it is, not by that name: the same key
+        made in two databases is named differently in each
+        (`PK__o__3213E83F720CC3A2` and `PK__o__3213E83FA19E373F`, measured
+        on SQL Edge)."""
         from ..catalog import Catalog, Column, ForeignKey, Index
-        declared = self._SHAPE_DECLARED.format(d=self.DECLARED.format(c="c"))
+        reads = self._shape_reads()
+
+        def read(n):
+            sql, order, _ = reads[n]
+            return self._kept_rows(side, db, sql + (f" order by {order}"
+                                                    if order else ""))
         cat = Catalog()
         for (table, name, typ, null, coll, seed, step, default, computed,
-             persisted, sparse, guid, alias) in self._kept_rows(
-                side, db,
-                f"select s.name + '.' + t.name, c.name, {declared},"
-                " c.is_nullable, c.collation_name, ic.seed_value,"
-                " ic.increment_value, dc.definition, cc.definition,"
-                " cc.is_persisted, c.is_sparse, c.is_rowguidcol,"
-                " case when c.user_type_id <> c.system_type_id then"
-                " type_name(c.user_type_id) end"
-                " from sys.tables t join sys.schemas s on s.schema_id ="
-                " t.schema_id join sys.columns c on c.object_id = t.object_id"
-                " left join sys.identity_columns ic on ic.object_id ="
-                " c.object_id and ic.column_id = c.column_id"
-                " left join sys.default_constraints dc on"
-                " dc.parent_object_id = c.object_id and dc.parent_column_id"
-                " = c.column_id left join sys.computed_columns cc on"
-                " cc.object_id = c.object_id and cc.column_id = c.column_id"
-                " where t.is_ms_shipped = 0 order by 1, c.column_id"):
+             persisted, sparse, guid, alias, _place) in read(0):
             extra = " ".join(x for x in (
                 f"identity({seed}, {step})" if seed is not None else "",
                 (f"computed {computed}" + (" persisted" if persisted else ""))
@@ -198,31 +260,12 @@ class MSSQLEngine(DbapiRows, Engine):
                 Column(str(name), str(typ), "", bool(null), default, coll,
                        extra))
         cols = {}
-        for table, index, name, desc, included in self._kept_rows(
-                side, db,
-                "select s.name + '.' + t.name, ic.index_id, c.name,"
-                " ic.is_descending_key, ic.is_included_column from"
-                " sys.index_columns ic join sys.tables t on t.object_id ="
-                " ic.object_id join sys.schemas s on s.schema_id ="
-                " t.schema_id join sys.columns c on c.object_id ="
-                " ic.object_id and c.column_id = ic.column_id where"
-                " t.is_ms_shipped = 0 order by 1, 2, ic.is_included_column,"
-                " ic.key_ordinal, c.name"):
+        for table, index, name, desc, included, _place in read(1):
             got = cols.setdefault((str(table), index), ([], []))
             got[1 if included else 0].append(
                 str(name) + (" desc" if desc and not included else ""))
         for (table, index, name, own, how, primary, constraint, unique,
-             where) in self._kept_rows(
-                side, db,
-                "select s.name + '.' + t.name, i.index_id, i.name,"
-                " coalesce(kc.is_system_named, 0), lower(i.type_desc),"
-                " i.is_primary_key, i.is_unique_constraint, i.is_unique,"
-                " case when i.has_filter = 1 then i.filter_definition end"
-                " from sys.indexes i join sys.tables t on t.object_id ="
-                " i.object_id join sys.schemas s on s.schema_id ="
-                " t.schema_id left join sys.key_constraints kc on"
-                " kc.parent_object_id = i.object_id and kc.unique_index_id"
-                " = i.index_id where t.is_ms_shipped = 0 and i.type > 0"):
+             where) in read(2):
             table = str(table)
             keyed, inc = cols.get((table, index), ([], []))
             if primary:
@@ -238,48 +281,17 @@ class MSSQLEngine(DbapiRows, Engine):
                     f"include ({', '.join(inc)})" if inc else "",
                     f"where {where}" if where else "") if x)))
         refs = {}
-        for fk, name, ref in self._kept_rows(
-                side, db,
-                "select f.constraint_object_id, col_name(f.parent_object_id,"
-                " f.parent_column_id), col_name(f.referenced_object_id,"
-                " f.referenced_column_id) from sys.foreign_key_columns f"
-                " order by 1, f.constraint_column_id"):
+        for fk, name, ref, _place in read(3):
             got = refs.setdefault(fk, ([], []))
             got[0].append(str(name))
             got[1].append(str(ref))
-        for table, fk, name, own, ref, on_delete, on_update in \
-                self._kept_rows(
-                    side, db,
-                    "select s.name + '.' + t.name, fk.object_id, fk.name,"
-                    " fk.is_system_named, schema_name(rt.schema_id) + '.' +"
-                    " rt.name, lower(fk.delete_referential_action_desc),"
-                    " lower(fk.update_referential_action_desc)"
-                    " from sys.foreign_keys fk join sys.tables t on"
-                    " t.object_id = fk.parent_object_id join sys.schemas s"
-                    " on s.schema_id = t.schema_id join sys.tables rt on"
-                    " rt.object_id = fk.referenced_object_id where"
-                    " t.is_ms_shipped = 0"):
+        for table, fk, name, own, ref, on_delete, on_update in read(4):
             mine, theirs = refs.get(fk, ([], []))
             cat.fks.setdefault(str(table), []).append(ForeignKey(
                 "" if own else str(name), tuple(mine), str(ref),
                 tuple(theirs), str(on_delete).replace("_", " "),
                 str(on_update).replace("_", " ")))
-        for table, kind, name, own, a, b in self._kept_rows(
-                side, db,
-                "select s.name + '.' + t.name, 'check', cc.name,"
-                " cc.is_system_named, cc.definition, col_name("
-                "cc.parent_object_id, cc.parent_column_id)"
-                " from sys.check_constraints cc join sys.tables t on"
-                " t.object_id = cc.parent_object_id join sys.schemas s on"
-                " s.schema_id = t.schema_id where t.is_ms_shipped = 0"
-                " union all select s.name + '.' + t.name, 'trigger',"
-                " tr.name, 0, convert(varchar(64), hashbytes('SHA2_256',"
-                " isnull(object_definition(tr.object_id), '')), 2),"
-                " case when tr.is_instead_of_trigger = 1 then 'instead of'"
-                " else 'after' end"
-                " from sys.triggers tr join sys.tables t on t.object_id ="
-                " tr.parent_id join sys.schemas s on s.schema_id ="
-                " t.schema_id where t.is_ms_shipped = 0"):
+        for table, kind, name, own, a, b in read(5):
             if kind == "check":
                 said = (f"check{'' if own else ' ' + str(name)}"
                         + (f" on {b}" if b else "") + f" {a}")
@@ -289,6 +301,34 @@ class MSSQLEngine(DbapiRows, Engine):
         cat.tables = sorted(set(cat.columns) | set(cat.others)
                             | set(cat.indexes) | set(cat.fks))
         return cat
+
+    def shape_mark(self, side, db):
+        """One digest of everything `shape_catalog` reads, computed by the
+        server over the same six statements (`_shape_reads`) in one round
+        trip: each statement's rows counted, and each row - every value as
+        its length and its text, a missing one apart - hashed on its own
+        (SHA-256, its first 56 bits) and the hashes summed, so the digest
+        holds however many rows there are and whatever order the server
+        reads them in; the places a row stands at are among its values.
+        The same catalogue gives the same digest, a change to what drift
+        compares another - what a tail asks every batch before it reads
+        the whole shape again (`hetero._shape_now`, audit SP8). A server
+        that cannot hash a row this long refuses, and the shape is read
+        whole."""
+        def value(n):
+            text = f"convert(nvarchar(max), q.c{n})"
+            return (f"isnull(convert(nvarchar(20), datalength({text}))"
+                    f" + N':' + {text}, N'-')")
+        parts = []
+        for sql, _, width in self._shape_reads():
+            row = " + ".join(value(n) for n in range(width))
+            parts.append(
+                "(select convert(varchar(20), count_big(*)) + ':' +"
+                " isnull(convert(varchar(48), sum(convert(decimal(38, 0),"
+                " convert(bigint, substring(hashbytes('SHA2_256',"
+                f" {row}), 1, 7))))), '0') from ({sql}) q)")
+        got = self._kept_rows(side, db, "select " + ", ".join(parts))
+        return "/".join(str(v) for v in got[0]) if got else None
 
     def column_catalog(self, side, db):
         """`shape_catalog` as the (column, definition) pairs a shape is

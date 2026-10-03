@@ -600,11 +600,103 @@ class MySQLEngine(Engine):
         self.__dict__.get("_catalogs", {}).pop((side, self._d(side, db)),
                                                None)
 
-    def _catalog_rows(self, side, name, sql):
-        """`sql` on the side's catalogue as dicts with lower-case keys: a
-        `select *` reads whatever columns this server's version has."""
-        return [{str(k).lower(): v for k, v in r.items()}
-                for r in self._q_named(side, sql, (name,))]
+    #: the six statements a side's catalogue is read in (`_shapes`) and
+    #: its digest is asked over (`shape_mark`), as (what, its order, how
+    #: many columns, the ways a server's version answers it): every column
+    #: named `c<n>`, and every column an order stands on selected as well -
+    #: a column's place in its table, in its index, in its foreign key - so
+    #: the digest holds exactly what is read, places included. A version
+    #: without a column or a table of the first way is asked the next
+    #: (`_shape_rows`): MySQL 5.7 has no index expression, visibility or
+    #: check, MariaDB keeps a check's table beside it and says an index
+    #: `ignored`, MySQL from 8.0.16 says whether a check is enforced
+    _SHAPE_READS = (
+        ("tables", "c0", 2, (
+            "select table_name c0, table_type c1 from"
+            " information_schema.tables where table_schema = %s",)),
+        ("columns", "c0, c9", 10, tuple(
+            "select table_name c0, column_name c1, column_type c2,"
+            " is_nullable c3, data_type c4, column_default c5, extra c6,"
+            f" collation_name c7, {expr} c8, ordinal_position c9 from"
+            " information_schema.columns where table_schema = %s"
+            for expr in ("generation_expression", "null"))),
+        ("statistics", "c0, c1, c2", 10, tuple(
+            "select table_name c0, index_name c1, seq_in_index c2,"
+            " column_name c3, non_unique c4, sub_part c5, `collation` c6,"
+            f" index_type c7, {how} from information_schema.statistics"
+            " where table_schema = %s"
+            for how in ("expression c8, is_visible c9",
+                        "null c8, case when ignored = 'YES' then 'NO' else"
+                        " 'YES' end c9",
+                        "null c8, 'YES' c9"))),
+        ("fks", "c0, c1, c2", 9, (
+            "select k.table_name c0, k.constraint_name c1,"
+            " k.ordinal_position c2, k.column_name c3,"
+            " k.referenced_table_schema c4, k.referenced_table_name c5,"
+            " k.referenced_column_name c6, r.update_rule c7, r.delete_rule"
+            " c8 from information_schema.key_column_usage k join"
+            " information_schema.referential_constraints r on"
+            " r.constraint_schema = k.constraint_schema and"
+            " r.constraint_name = k.constraint_name and r.table_name ="
+            " k.table_name where k.table_schema = %s and"
+            " k.referenced_table_name is not null",)),
+        ("checks", "c0, c1", 3, (
+            "select t.table_name c0, c.check_clause c1, t.enforced c2 from"
+            " information_schema.table_constraints t join"
+            " information_schema.check_constraints c on"
+            " c.constraint_schema = t.constraint_schema and"
+            " c.constraint_name = t.constraint_name where t.table_schema ="
+            " %s and t.constraint_type = 'CHECK'",
+            "select table_name c0, check_clause c1, 'YES' c2 from"
+            " information_schema.check_constraints where constraint_schema"
+            " = %s",
+            "select t.table_name c0, c.check_clause c1, 'YES' c2 from"
+            " information_schema.table_constraints t join"
+            " information_schema.check_constraints c on"
+            " c.constraint_schema = t.constraint_schema and"
+            " c.constraint_name = t.constraint_name where t.table_schema ="
+            " %s and t.constraint_type = 'CHECK'",
+            # a server that keeps no check: no row, asked the same way
+            "select table_name c0, '' c1, '' c2 from"
+            " information_schema.tables where table_schema = %s and 1 = 0")),
+        ("triggers", "c0, c1", 6, tuple(
+            "select event_object_table c0, trigger_name c1, action_timing"
+            f" c2, event_manipulation c3, {order} c4, action_statement c5"
+            " from information_schema.triggers where trigger_schema = %s"
+            for order in ("action_order", "0"))),
+    )
+
+    #: what a server answers for a column or a catalogue table its version
+    #: does not have: the next way of a read is asked
+    _SHAPE_ABSENT = (1054, 1109, 1146)
+
+    def _shape_reads(self, side):
+        """[(what, statement, its order, how many columns)] of the six
+        reads as this side's server is asked them: each read's way last
+        found answered (`_shape_rows`), the first until one is refused."""
+        ways = self.__dict__.setdefault("_shape_ways", {}).get(side, {})
+        return [(what, alts[ways.get(what, 0)], order, width)
+                for what, order, width, alts in self._SHAPE_READS]
+
+    def _shape_rows(self, side, name, what):
+        """The rows of one read (`_SHAPE_READS`) of database `name`, in
+        its order: where the server has not a column or a table the way
+        asked names, the next way, and that way kept for the side - a
+        read that no way answers raises, never read as empty."""
+        import pymysql
+        ways = self.__dict__.setdefault("_shape_ways", {}).setdefault(
+            side, {})
+        _, order, _, alts = next(r for r in self._SHAPE_READS
+                                 if r[0] == what)
+        while True:
+            n = ways.get(what, 0)
+            try:
+                return self._q(side, f"{alts[n]} order by {order}", (name,))
+            except pymysql.err.MySQLError as e:
+                if n + 1 >= len(alts) or not e.args or \
+                        e.args[0] not in self._SHAPE_ABSENT:
+                    raise
+                ways[what] = n + 1
 
     def _shapes(self, side, db, fresh=False):
         """{"at", "catalog", "kind", "indexes", "generated"} of one side's
@@ -612,10 +704,13 @@ class MySQLEngine(Engine):
         type, null, default (`default_shown`), collation and what else the
         server declares (`extra`: auto_increment, on update, generated as,
         invisible), each table's key, indexes, foreign keys, checks and
-        triggers - read in six statements on one kept connection whatever
-        the number of tables, and kept (`CATALOG_SECONDS`). It was a
-        statement a table for each of its columns, rules, indexes and key,
-        each on a connection of its own (audit 2026-10-01, SC15, SP2)."""
+        triggers - read in six statements (`_SHAPE_READS`) on one kept
+        connection whatever the number of tables, and kept
+        (`CATALOG_SECONDS`). It was a statement a table for each of its
+        columns, rules, indexes and key, each on a connection of its own
+        (audit 2026-10-01, SC15, SP2)."""
+        import hashlib
+
         from .. import canon
         from ..catalog import Catalog, Column, ForeignKey, Index
         lock = self.__dict__.setdefault("_catalogs_lock", threading.Lock())
@@ -633,40 +728,26 @@ class MySQLEngine(Engine):
                 return got
             began = time.monotonic()
             mariadb = self._side_brand(side).name == "mariadb"
-            kind = {str(r["table_name"]): str(r["table_type"])
-                    for r in self._catalog_rows(
-                        side, name, "select table_name, table_type from"
-                        " information_schema.tables where table_schema"
-                        " = %s")}
+            kind = {str(t): str(k) for t, k in
+                    self._shape_rows(side, name, "tables")}
             columns, generated = {}, {}
-            for r in self._catalog_rows(
-                    side, name, "select * from information_schema.columns"
-                    " where table_schema = %s order by table_name,"
-                    " ordinal_position"):
-                t, c = str(r["table_name"]), str(r["column_name"])
-                typ = str(r["column_type"])
-                expr = " ".join(str(r.get("generation_expression")
-                                    or "").split())
+            for (t, c, typ, null, data_type, default, extra, coll, expr,
+                 _) in self._shape_rows(side, name, "columns"):
+                t, c, typ = str(t), str(c), str(typ)
+                expr = " ".join(str(expr or "").split())
                 if expr:
                     generated.setdefault(t, set()).add(c)
                 columns.setdefault(t, []).append(Column(
                     c, typ, canon.type_class("mysql", typ) or "",
-                    str(r["is_nullable"]).upper() == "YES",
-                    default_shown(mariadb, r["data_type"],
-                                  r["column_default"], r["extra"]),
-                    r.get("collation_name") and str(r["collation_name"]),
-                    self._column_extra(r["extra"], expr)))
+                    str(null).upper() == "YES",
+                    default_shown(mariadb, data_type, default, extra),
+                    coll and str(coll), self._column_extra(extra, expr)))
             keys, indexes, plain = {}, {}, {}
-            for r in self._catalog_rows(
-                    side, name, "select * from information_schema.statistics"
-                    " where table_schema = %s order by table_name,"
-                    " index_name, seq_in_index"):
-                t, ix = str(r["table_name"]), str(r["index_name"])
-                col = r.get("column_name")
-                expr = r.get("expression")
-                part = r.get("sub_part")
+            for (t, ix, _, col, non_unique, part, order, how, expr,
+                 visible) in self._shape_rows(side, name, "statistics"):
+                t, ix = str(t), str(ix)
                 one = plain.setdefault((t, ix), [
-                    int(r["non_unique"]) == 0, [], True, [], r])
+                    int(non_unique) == 0, [], True, [], (how, visible)])
                 if col is None or expr is not None or part is not None:
                     one[2] = False
                 if col is not None:
@@ -674,49 +755,53 @@ class MySQLEngine(Engine):
                 said = (f"({' '.join(str(expr).split())})" if expr is not None
                         else str(col) + (f"({part})" if part is not None
                                          else ""))
-                one[3].append(said + (" desc" if str(r.get("collation")
-                                                     or "") == "D" else ""))
-            for (t, ix), (unique, cols, _, said, r) in plain.items():
+                one[3].append(said + (" desc" if str(order or "") == "D"
+                                      else ""))
+            for (t, ix), (unique, cols, _, said, (how, visible)) in \
+                    plain.items():
                 if ix == "PRIMARY":
                     # only the columns the table shows: MariaDB adds a
                     # system-versioned table's hidden `row_end` to its key
                     shown = {c.name for c in columns.get(t, [])}
                     keys[t] = tuple(c for c in cols if c in shown)
                     continue
-                how = [str(r.get("index_type") or "").lower()]
-                how = [h for h in how if h and h != "btree"]
-                if str(r.get("is_visible") or "YES").upper() == "NO" or \
-                        str(r.get("ignored") or "NO").upper() == "YES":
+                how = [h for h in [str(how or "").lower()]
+                       if h and h != "btree"]
+                if str(visible or "YES").upper() == "NO":
                     how.append("invisible")
                 indexes.setdefault(t, []).append(Index(
                     ix, tuple(said), bool(unique), " ".join(how)))
             fks = {}
-            for r in self._catalog_rows(
-                    side, name, "select k.table_name, k.constraint_name,"
-                    " k.column_name, k.referenced_table_schema,"
-                    " k.referenced_table_name, k.referenced_column_name,"
-                    " r.update_rule, r.delete_rule from"
-                    " information_schema.key_column_usage k join"
-                    " information_schema.referential_constraints r on"
-                    " r.constraint_schema = k.constraint_schema and"
-                    " r.constraint_name = k.constraint_name and r.table_name"
-                    " = k.table_name where k.table_schema = %s and"
-                    " k.referenced_table_name is not null order by"
-                    " k.table_name, k.constraint_name, k.ordinal_position"):
-                t = str(r["table_name"])
-                ref = str(r["referenced_table_name"])
-                if str(r["referenced_table_schema"]) != name:
-                    ref = f"{r['referenced_table_schema']}.{ref}"
+            for (t, fk, _, col, ref_db, ref, ref_col, on_update,
+                 on_delete) in self._shape_rows(side, name, "fks"):
+                t, ref = str(t), str(ref)
+                if str(ref_db) != name:
+                    ref = f"{ref_db}.{ref}"
                 mine = fks.setdefault(t, {}).setdefault(
-                    str(r["constraint_name"]),
-                    [[], ref, [], str(r["delete_rule"]).lower(),
-                     str(r["update_rule"]).lower()])
-                mine[0].append(str(r["column_name"]))
-                mine[2].append(str(r["referenced_column_name"]))
+                    str(fk), [[], ref, [], str(on_delete).lower(),
+                              str(on_update).lower()])
+                mine[0].append(str(col))
+                mine[2].append(str(ref_col))
             others = {}
-            for t, said in self._checks_of(side, name) + \
-                    self._triggers_of(side, name):
-                others.setdefault(t, []).append(said)
+            # each check by its clause and whether it is enforced - not by
+            # its name, which the server makes up where none was given
+            for t, clause, enforced in self._shape_rows(side, name,
+                                                        "checks"):
+                clause = " ".join(str(clause).split())
+                others.setdefault(str(t), []).append(
+                    f"check {clause}" + (" not enforced"
+                                         if str(enforced).upper() == "NO"
+                                         else ""))
+            # each trigger by what fires it and a hash of its body - who
+            # defined it is the ownership check's (`_deep_ownership`)
+            for (t, trigger, timing, event, order,
+                 body) in self._shape_rows(side, name, "triggers"):
+                body = " ".join(str(body or "").split())
+                digest = hashlib.md5(body.encode(),
+                                     usedforsecurity=False).hexdigest()[:16]
+                others.setdefault(str(t), []).append(
+                    f"trigger {trigger} {str(timing).lower()}"
+                    f" {str(event).lower()} order {order} {digest}")
             tables = sorted(set(kind) | set(columns))
             got = {"at": began, "kind": kind, "generated": generated,
                    "indexes": {k: (v[0], v[1], v[2])
@@ -748,60 +833,6 @@ class MySQLEngine(Engine):
             if " as (" not in words:
                 words = (words + f" generated as ({expr})").strip()
         return words
-
-    def _checks_of(self, side, name):
-        """[(table, "check (...)")] of a database: each check by its clause
-        and whether it is enforced - not by its name, which the server
-        makes up where none was given. [] where the server keeps none
-        (MySQL before 8.0.16 reads a CHECK and drops it)."""
-        import pymysql
-        try:
-            owner = {str(r["constraint_name"]): (
-                str(r["table_name"]),
-                str(r.get("enforced") or "YES").upper())
-                for r in self._catalog_rows(
-                    side, name, "select * from"
-                    " information_schema.table_constraints where"
-                    " table_schema = %s and constraint_type = 'CHECK'")}
-            got = self._catalog_rows(
-                side, name, "select * from information_schema"
-                ".check_constraints where constraint_schema = %s")
-        except pymysql.err.MySQLError as e:
-            if e.args and e.args[0] in (1109, 1146):
-                return []
-            raise
-        out = []
-        for r in got:
-            table = r.get("table_name") or owner.get(
-                str(r["constraint_name"]), ("", ""))[0]
-            if not table:
-                continue
-            enforced = owner.get(str(r["constraint_name"]), ("", "YES"))[1]
-            clause = " ".join(str(r["check_clause"]).split())
-            out.append((str(table), f"check {clause}"
-                        + (" not enforced" if enforced == "NO" else "")))
-        return out
-
-    def _triggers_of(self, side, name):
-        """[(table, "trigger name before insert order 1 <md5>")]: each
-        trigger by what fires it and a hash of its body - who defined it
-        is the ownership check's (`_deep_ownership`)."""
-        import hashlib
-        out = []
-        for r in self._catalog_rows(
-                side, name, "select trigger_name, event_object_table,"
-                " action_timing, event_manipulation, action_order,"
-                " action_statement from information_schema.triggers where"
-                " trigger_schema = %s"):
-            body = " ".join(str(r["action_statement"] or "").split())
-            digest = hashlib.md5(body.encode(),
-                                 usedforsecurity=False).hexdigest()[:16]
-            out.append((str(r["event_object_table"]),
-                        f"trigger {r['trigger_name']}"
-                        f" {str(r['action_timing']).lower()}"
-                        f" {str(r['event_manipulation']).lower()}"
-                        f" order {r['action_order']} {digest}"))
-        return out
 
     def catalog(self, side, db):
         """This side's tables and views as `catalog.Catalog`, read in one
@@ -838,6 +869,41 @@ class MySQLEngine(Engine):
         if t not in got["catalog"].columns:
             got = self._shapes(side, db, fresh=True)
         return got, (t if t in got["catalog"].columns else None)
+
+    def shape_mark(self, side, db):
+        """One digest of everything `_shapes` reads, computed by the
+        server over the same six statements, each the way this side's
+        server answers it (`_shape_reads`), in one round trip: each
+        statement's rows counted, and each row - every value as its length
+        and its text, a missing one apart - hashed on its own (MD5, its
+        first 60 bits) and the hashes summed, so the digest holds however
+        many rows there are and whatever order the server reads them in;
+        the places a row stands at are among its values. A sum, not one
+        hash over the rows strung together: `group_concat` stops at
+        `group_concat_max_len` with a warning, not an error, and a digest
+        cut short would miss every change past it. It digested a column's
+        table, name, type and place alone, while the shape a tail compares
+        (`shape_catalog`) holds each column's null, default, collation and
+        generation and each table's indexes, foreign keys, checks and
+        triggers: a change to any of those kept the mark, and the tail the
+        shape it read before. What a tail asks before it reads the whole
+        shape again (`hetero._shape_now`, audit SP8) - a MySQL tail only
+        once a minute, its binlog carrying every DDL; a TiDB tail every
+        batch, its feed's DDL left to this. A way this server refuses
+        raises, and the shape is read whole - which finds the way it
+        answers."""
+        reads = self._shape_reads(side)
+        parts = []
+        for _, sql, _, width in reads:
+            row = ", ".join(f"coalesce(concat(char_length(q.c{n}), ':',"
+                            f" q.c{n}), '-')" for n in range(width))
+            parts.append(
+                "(select concat(count(*), ':', coalesce(sum(cast(conv("
+                f"substr(md5(concat_ws(char(31), {row})), 1, 15), 16, 10)"
+                f" as unsigned)), 0)) from ({sql}) q)")
+        got = self._q(side, "select " + ", ".join(parts),
+                      (self._d(side, db),) * len(reads))
+        return "/".join(str(v) for v in got[0]) if got else None
 
     def neutral_columns(self, side, db, table):
         got, t = self._shape_of(side, db, table)
@@ -2298,6 +2364,7 @@ class MySQLEngine(Engine):
         ep = self._ep(side)
         return {"host": ep.host, "port": ep.port, "user": ep.user,
                 "passwd": ep.password, **ep.tls_forms("mysql")["driver"]}
+
     #: seconds a managed server with no retention hours set keeps a binlog
     #: file once it is closed, as its documentation says (RDS: purged
     #: once no replica needs it, within about five minutes)
@@ -3710,10 +3777,8 @@ class MySQLEngine(Engine):
         # the target's own key: `_pk_cols` asks the source
         pks = [r[0] for r in self._q("dst", self.PK_SQL,
                                      (self._d("dst", db), table))]
-        ep = self.hop.target
         stream = BinLogStreamReader(
-            connection_settings={"host": ep.host, "port": ep.port,
-                                 "user": ep.user, "passwd": ep.password},
+            connection_settings=self._binlog_settings("dst"),
             server_id=int(self.hop.options.get("server_id", 4379)) + 1,
             blocking=False, resume_stream=True,
             log_file=mark["log_file"], log_pos=int(mark["log_pos"]),

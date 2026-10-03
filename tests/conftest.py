@@ -215,7 +215,7 @@ def _signs_of_code(code, glb):
 
 #: this file's autouse fixtures, in every test's closure, touch a server
 #: only for a test that asked for one
-_NEUTRAL = {"clean_pg"}
+_NEUTRAL = {"clean_pg", "leases_let_go"}
 
 
 def reached(item):
@@ -461,6 +461,16 @@ do $$ declare r record; begin
   perform lo_unlink(oid) from pg_largeobject_metadata;
 end $$;
 """
+
+
+@pytest.fixture(autouse=True)
+def leases_let_go():
+    """A lease a test took and left - a holder it played dead - is not
+    asked by the next test's write loops (`lease.check_held`)."""
+    yield
+    from migkit import lease
+    with lease._HOLDING_LOCK:
+        lease._HOLDING.clear()
 
 
 @pytest.fixture(autouse=True)

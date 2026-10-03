@@ -74,6 +74,26 @@ def test_the_change_streams_reader_signs_in_with_it(ca):
     assert got["passwd"] == "pw"
 
 
+def test_every_change_stream_reader_signs_in_one_way():
+    """Each binlog reader the engine opens - the tail, the delta proof,
+    the copy point's check, and who wrote a row on the target - takes its
+    sign-in from `_binlog_settings`; who wrote a row read the target's log
+    in clear text, its sign-in written out by hand."""
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "migkit/engines/mysql.py").read_text()
+    readers = [n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.Call)
+               and getattr(n.func, "id", "") == "BinLogStreamReader"]
+    assert len(readers) >= 4, len(readers)
+    for call in readers:
+        given = {k.arg: k.value for k in call.keywords}
+        how = given["connection_settings"]
+        assert isinstance(how, ast.Call) and \
+            how.func.attr == "_binlog_settings", call.lineno
+
+
 def test_the_native_replica_asks_the_source_for_it(ca, monkeypatch):
     eng = _engine({"ssl_ca": ca})
     monkeypatch.setattr(eng, "_binlog_position", lambda side: ("b.1", 4))

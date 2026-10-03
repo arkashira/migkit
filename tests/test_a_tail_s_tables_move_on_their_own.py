@@ -121,13 +121,15 @@ def test_under_park_a_ddl_parks_only_its_table(tmp_path):
     t.park(states, "a", "0/1", "the target does not have w")
     out, left = t.route(states, [_row("a", 1), _row("b", 2), _row("a", 3)],
                         "0/1")
-    # b goes on; a is set aside, counted, on disk before the position
+    # b goes on; a is set aside and counted - written with the batch, in
+    # the transaction set down before the target commits it
     assert out == [_row("b", 2)]
     assert left[tailtables.SPOOLED] == Counter({"a": 2})
+    assert t.spool("a").changes() == []
+    t.prepare(states, 1)
     assert [c["key"]["id"] for c in t.spool("a").changes()] == [1, 3]
-    t.commit(states)
-    assert json.loads((tmp_path / tailtables.STATE).read_text())[
-        "tables"]["a"]["state"] == "parked"
+    assert tailtables.states(tmp_path)["a"]["state"] == "parked"
+    t.committed()
     assert any("a: parked" in s for s in said), said
     # not level yet: nothing given back
     t.check_level(lambda name: False)
@@ -143,7 +145,8 @@ def test_under_park_a_ddl_parks_only_its_table(tmp_path):
     assert counts == Counter({"a": 2})
     out, _ = t.route(states, [_row("a", 5)], "0/2")
     assert out == [_row("a", 5)]
-    t.commit(states)
+    t.prepare(states, 2)
+    t.committed()
     assert t.tables["a"]["state"] == "live"
     assert t.spool("a").changes() == []
 
@@ -202,24 +205,53 @@ def test_a_copy_that_stops_is_tried_again_after_a_wait(tmp_path):
     assert t.tables["a"]["state"] == "copying" and started == ["a"]
 
 
-def test_a_torn_frame_is_the_last_and_is_left_out(tmp_path):
-    s = tailtables.Spool(tmp_path / "x.spool")
-    s.add("0/1", [_row("a", 1)])
-    s.add("0/2", [_row("a", 2)])
-    raw = (tmp_path / "x.spool").read_bytes()
-    (tmp_path / "x.spool").write_bytes(raw[:-3])
-    assert [c["key"]["id"] for c in s.changes()] == [1]
-    # the batch read again after the stop: set aside once more, and a
-    # stop before its position was saved drops it again
-    s.rewrite(s.frames())
-    s.add("0/2", [_row("a", 2)])
-    assert [c["key"]["id"] for c in s.changes()] == [1, 2]
-    s.drop_batch("0/2")
-    assert [c["key"]["id"] for c in s.changes()] == [1]
+def _legacy_frame(at, changes):
+    import pickle
+    import struct
+
+    import zstandard
+    blob = zstandard.ZstdCompressor(level=3).compress(
+        pickle.dumps((at, list(changes))))
+    return struct.pack(">Q", len(blob)) + blob
+
+
+def test_an_earlier_versions_spool_is_taken_in_its_torn_frame_left_out(
+        tmp_path):
+    spools = tmp_path / tailtables.SPOOLS
+    spools.mkdir()
+    raw = (_legacy_frame('"0/1"', [_row("a", 1)])
+           + _legacy_frame('"0/2"', [_row("a", 2)]))
+    # a stop cut the last frame
+    (spools / "a.spool").write_bytes(raw[:-3])
+    (tmp_path / tailtables.STATE).write_text(json.dumps(
+        {"tables": {"a": {"state": "parked", "name": "a"}}}))
+    st = tailtables.Store.of(tmp_path)
+    assert st.import_legacy(tmp_path)
+    assert [c["key"]["id"] for c in tailtables.Spool(st, "a").changes()] \
+        == [1]
+    assert st.tables()["a"]["state"] == "parked"
+    # taken in once: the files are gone
+    assert not (spools / "a.spool").exists()
+    assert not (tmp_path / tailtables.STATE).exists()
+
+
+def test_a_batch_set_down_and_not_saved_is_taken_back_out(tmp_path):
+    t = _tables(tmp_path, "park")
+    t.save()
+    states = t.begin()
+    t.park(states, "a", "0/1", "the target does not have w")
+    t.route(states, [_row("a", 1)], "0/1")
+    t.prepare(states, 1, {"a": {"read": 1}})
+    assert t.store.gen() == 1 and t.spool("a").changes()
+    # the batch's connection lost before its position was saved
+    t.forget()
+    assert t.store.gen() == 0 and t.spool("a").changes() == []
+    assert tailtables.states(tmp_path)["a"]["state"] == "live"
+    assert tailtables.accounts(tmp_path) == {}
 
 
 def test_the_accounts_hold_what_was_set_aside_and_given_back(tmp_path):
-    acc = _Accounts(tmp_path)
+    acc = _Accounts(tailtables.Store.of(tmp_path))
     acc.read([_row("a", 1), _row("a", 2), _row("b", 3)])
     acc.left(tailtables.SPOOLED, Counter({"a": 1}))
     acc.released(Counter({"b": 2}))

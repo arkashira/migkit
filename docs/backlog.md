@@ -3226,6 +3226,32 @@ owner's rule); every verdict touched is proved able to say "different".
 * Running work: `twoway.py` (conflict resolution), `repairlog.py` (repair
   ladder).
 
+*Done (2026-10-01), with ST17's journal (`checkpoint.read_move`) handed
+over from AUD-A.* The tail's own state is one SQLite store set down a
+batch at a time before the target commits it and taken back out where
+the position never passed it (`tailtables.Store`); the target's batch
+mark decides the rest (`twoway.committed_ahead`, `hetero._committed_
+ahead`). A cutover holds a lease of its own while it acts, so the next
+run is refused instead of undoing it in flight (`cutover._held`); every
+lease a process holds is asked between a copy's ranges and a tail's
+batches (`lease.check_held`); every read-modify-write of a kept file goes
+through `durable.change_json` under the file's lock, and no file is
+written through a temporary name another writer shares (ST23).
+Every source whose tail asks its shape digests its catalogue on the
+server first - PostgreSQL, SQL Server, Oracle, MySQL and TiDB, SQLite
+(`shape_mark`, over exactly the rows the whole read reads) - and the
+whole shape is read only where the digest moved; a MySQL tail asks only
+once a minute, its binlog carrying every DDL (SP8). A restore point's copy under
+the reports is sealed file by file to the hop's `at_rest` recipients and
+opened into a directory of the run's own to read (ST15). Spool frames
+are still pickled: read back only into the classes a change log's values
+come as, and a frame that would not read back is refused before the
+batch is kept; `file:` secrets and the approvals' signers list are
+refused where another user may change them (SEC21). `schedule` was
+already lease-based (ST10, AUD-A); the PostgreSQL undo's `\copy` (SEC9)
+and its fence on one kept connection (SP10) were done in `postgres.py`
+by the groups that hold it.
+
 **AUD-C. The dashboard, metrics, the run log and what leaves the machine
 (P0/P1, L).** Files: `migkit/ui.py`, `migkit/notify.py`, `migkit/traces.py`,
 `migkit/digests.py`, `migkit/export.py`, `migkit/diagnostics.py`,
@@ -3292,6 +3318,52 @@ line each).
   did-you-mean (K24).
 * Every `MIGKIT_*` read in these files through `envkeys` (K13); the
   warehouse builder passes `key` to `ddl_type` (SC6, its line).
+
+*Done (2026-10-04).* Every key under an option is declared with its own
+`Key` - type, words (`choices`, `fold` for spellings, built in the
+choice's own), least, default - and an unknown one is an error with the
+nearest; the owning module's reader of an option (`Key.check`: the
+cutover's settings, the follow's end, the limits, the deadline, the
+subset's rules, a stream's format, a page copy's source address, the
+business rules, the origin table, the spool) is asked at load, each
+given the hop without the other options that have readers of their own;
+`approvals.steps` by `approvals.STEPS`, `count` at least 1; a schedule's
+cron and zone read as its slot reads them. `hopkeys.opt` is the one
+reader of a default (`fence_timeout`, `repair_window`, `settle` moved
+onto it), `topology()`/`reverse()` the one reading of those words. A key
+written twice in one mapping is refused (`config.read_yaml`, the C
+parser, merges allowed), at load, in `doctor` and in the tail's reload.
+A side's host, user and password are read where a connection needs
+them, once (`SideEndpoint`), a secret option through
+`Endpoint.option_secret` (registry, redo miner, key passphrase, the
+pooler's password through `config.secret`), a failure naming
+`hops.<hop>.<side>.<key>`; `get_hop` builds the one hop, the file read
+and checked again only when its content or mode changes; Vault over its
+HTTP API with either version of its store; one failure sentence for
+every store. A hops file anyone may change (or replace) is refused, one
+others may read with a secret written out is said. Reports and run
+state beside a project's `conf/` or in `$XDG_STATE_HOME/migkit`, never
+the working directory; `doctor` says both paths; report directories and
+the restore points' mirror (now under the state directory, the old one
+still read) private, files written 0600 from their first byte. Engine
+names: one table of other names, schemes derived from it, ports for 20
+engines, the hop built with the engine's own name and the brand kept
+apart (`Hop.brand`). `noise_prefix` and migkit's own tables (`own`,
+`OWN_PREFIX`, `OWN_LIKE`) in `Hop.excluded` for every engine. Imports
+quote a filter by the source's own quoting, carry a task's include as
+the hop's own where every entry is a shell pattern and say each one
+that is not; an address's reference may hold `/`; a PostgreSQL
+service's own settings (`rds.*`, `cloudsql.*`, `azure.*`, `alloydb.*`)
+say it before its roles; a rule asking one side is refused and answers
+are compared by count; the zone in use read against the server's own
+clock as well as UTC; a cutover's counter margin is its own thread's
+(`SEQUENCE_MARGIN`). Unknown `MIGKIT_*` said at start with the nearest,
+a declared one set wrong a usage error there.
+Left: the MySQL engine's `'migkit%%'` filters are AUD-G2's (DU26's
+engine part); a role alone still names a PostgreSQL service where no
+setting says, since which settings each service shows every user is
+not verified here; the diagnostics bundle still reads a broken file as
+YAML keeps it, to show it.
 
 **AUD-E. External programs: one runner, stop means stop, pinned installs,
 the offline bundle (P0/P1, L).** Files: `migkit/runner.py` (new),

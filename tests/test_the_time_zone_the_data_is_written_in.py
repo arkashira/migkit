@@ -34,6 +34,24 @@ def test_the_servers_own_zone_is_fine_and_the_past_proves_nothing():
     assert got.status == "skip", got.detail
 
 
+def test_a_server_behind_utc_is_read_against_its_own_clock():
+    """A server at UTC-5 with the application writing UTC: no time is in
+    UTC's future, and the check said it found no evidence, though every
+    value is five hours in the server's own future (audit 2026-10-01,
+    K24)."""
+    from migkit import zones
+    # a minute behind the server's UTC clock: the drift of two clocks
+    utc = datetime.datetime(2026, 9, 25, 2, 59)
+    got = zones.infer(_fake(-300, [("orders.created", utc)]), "app")
+    assert got.status == "warn", got.detail
+    assert "at least UTC+0" in got.detail, got.detail
+    assert "server's own (UTC-5)" in got.detail and "5h off" in got.detail
+    # written in the server's own zone, and old: neither proves another
+    local = datetime.datetime(2026, 9, 24, 21, 58)
+    got = zones.infer(_fake(-300, [("orders.created", local)]), "app")
+    assert got.status == "skip", got.detail
+
+
 @needs_docker
 def test_postgres_reads_it_by_the_index(pg_pair):
     from migkit import zones

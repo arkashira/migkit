@@ -43,27 +43,25 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * pip install boto3 for AWS sign-in and secrets
 
-* secret env var '<...>' is not set
+* <...>: <...> | <...>
 
-* secret file '<...>' not found
+* <...> <...> may be changed by every user of this machine; make it writable by its owner alone (chmod o-w)
 
-* AWS secret '<...>' holds no text
+* <...> <...> is in a directory every user of this machine may write, where any of them may put another file in its place; keep it in one only its owner writes
 
-* could not read AWS secret '<...>': <...>
-
-* AWS secret '<...>' has no field '<...>'
+* <...> <...> belongs to another user of this machine (uid <...>), who may change it; it is taken only from this user or root
 
 * pip install google-cloud-secret-manager for gcp-sm: secrets
 
 * pip install azure-identity azure-keyvault-secrets for azure-kv: secrets
 
-* could not read vault secret '<...>' (need vault CLI + VAULT_ADDR/VAULT_TOKEN)
-
-* auth: <...> - password (the default) or aws_iam
+* <...> has <...> problem<...>, and nothing was run: <...>
 
 * no hop configuration yet (<...> does not exist). create one: migkit init or point at an existing file: MIGKIT_CONF=/path/to/hops.yaml
 
-* <...> has <...> problem<...>, and nothing was run: <...>
+* <...> is not YAML migkit can read, and nothing was run: <...>
+
+* auth: <...> - password (the default) or aws_iam
 
 * <...>: the source address names <...> and databases says <...> - say it once
 
@@ -71,7 +69,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> goes to <...> by the target address and to <...> by db_map
 
-* unknown hop <...>, have: <...>
+* unknown hop <...> - did you mean <...>? | <...>, have: <...>
 
 * <...>: mapping.names.<...>.<...> cannot be turned round for the way back - not every name it writes says what it was. Name those tables in mapping.tables, which is turned round exactly
 
@@ -91,6 +89,12 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the hop could not be added to <...> as it is written (<...>); nothing was changed - use --force to write a new file
 
+* <...>: <...> - <...>
+
+* topology: <...> - one_way or two_way
+
+* reverse: <...> - at_cutover
+
 * origin_table: <...> - keep, or drop
 
 * <...>: goal <...> - <...> - so <...> is not run. Change the hop's goal to copy or cutover to move data.
@@ -106,6 +110,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the file holds <...> replication tasks; give it one (a hop is one task)
 
 * the endpoint <...> is a <...> one, which migkit has no engine for
+
+* a row filter on a <...> source: migkit has no engine to write it in
 
 * filter operator <...>: not one migkit reads
 
@@ -207,10 +213,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the bulk copy finished and <...> of <...>'s tables do not hold what the source does: <...> ... | <...>. Nothing has been marked as moved. A source written to while it was copied differs by what changed - move with --mode full+cdc for that; otherwise `migkit sync` puts the rows right
 
-* reverse: <...> - the one there is, is at_cutover
-
-* topology: <...> - one_way or two_way
-
 * topology: two_way - <...>. Nothing was set up.
 
 * the hop maps columns or renames tables (mapping.columns, mapping.tables), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
@@ -218,8 +220,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which reads the hop's scope and mapping for every change.
 
 * <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which stops on a schema change instead of carrying half of it. | `migkit move --mode full` copies what the hop covers, and `migkit sync` brings the target level again before cutover.
-
-* cdc tail needs --db
 
 * <...>: the tail is still running; stop it first, then take its marks away
 
@@ -469,17 +469,29 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * follow_until: <...> is not one of <...> - run until asked to stop, or until caught up with the source
 
-* <...>: <...>. Nothing was applied. Move again with --mode full+cdc.
-
-* <...>: the saved change position belongs to another source (<...>); the source is now <...>. A failover or a rebuilt server gives the same address a log of its own, and resuming in it skips what the old one held. Nothing was applied. Move again with --mode full+cdc, or remove <...> and <...> once the target is known to be level with the new source.
+* cdc tail needs --db
 
 * the saved position in <...> cannot be read, and a follow started from anywhere else either skips changes or cannot say it did not. Remove the file and move again with --mode full+cdc
+
+* <...> was written by a newer migkit (envelope version <...>); this one reads version <...>. Run the newer migkit, or remove the file and move again with --mode full+cdc
+
+* <...>: <...>. Nothing was applied. Move again with --mode full+cdc.
+
+* <...>: the saved change position belongs to another source (<...>); the source is now <...>. A failover or a rebuilt server gives the same address a log of its own, and resuming in it skips what the old one held. Nothing was applied. Move again with --mode full+cdc, or remove <...> once the target is known to be level with the new source.
 
 * <...>: <...> is not one of <...> - stop the tail, park the table the DDL touched, or apply what can be carried
 
 * ddl.skip: <...> is not one of <...> - an ALTER or a rename left out would have every change after it written where the target has no column or table for it
 
 * spool_limit: the bytes a parked table's changes may take on this machine, a whole number
+
+* <...>, so it could not be read back once set aside. Nothing of this batch was kept and its position stays where it was; the table's changes need a reader that hands its values over as plain kinds
+
+* <...> was written by a newer migkit (layout <...>); this one reads layout <...>. Run the newer migkit
+
+* <...> cannot be read (<...>). It holds the change tail's tables' states and what it set aside, and going on without it would be a guess, so migkit stops here; removing it and the tail's position beside it starts the tail over with --mode full+cdc
+
+* <...> stands at batch <...> and the tail's position beside it at <...>: the two were not saved together, and which tables were set aside, and what for, cannot be known. Nothing was applied. Put back the two files as they were saved together, or remove both and move again with --mode full+cdc
 
 * <...>: <...> was replaced on the source - its name names another table now (renamed, or two renames swapped one in under it) - at <...> or after, and nothing after that position was applied. The hop's `ddl` is stop: set `ddl: apply` or `ddl: park` to have it copied again, and run the tail again; it resumes from there
 
@@ -525,6 +537,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## Checking and proving
 
+* <...> was written by a newer migkit (layout <...>); this one reads layout <...>. Run the newer migkit
+
 * <...>: a table copied again whole is not replayed from its record - run the repair again, which copies it from the source as it is now
 
 * <...>: the rows it held before it was copied again were kept in <...>, which is gone - nothing was put back
@@ -542,6 +556,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * this file is encrypted for the hop's recipients, and no key to read it is at <...>: set MIGKIT_IDENTITY to the private SSH key or age identity it was encrypted to
 
 * this file is encrypted to the hop's recipients, and the key in MIGKIT_IDENTITY is not one of them
+
+* a line of an encrypted file cannot be opened (<...>)
+
+* <...> holds values the hop keeps encrypted (at_rest), and a file opened '<...>' cannot be kept so
 
 ## The cutover, and what guards a write
 
@@ -689,7 +707,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * schedule.timezone: <...> is not a time zone
 
-* unknown state backend '<...>', use local or s3
+* state: backend <...> is not one of <...>
 
 * this restore point is encrypted: set MIGKIT_STATE_KEY to the passphrase it was written with
 
@@ -823,8 +841,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * this server is a standalone, and a change stream needs a replica set - the oplog a stream reads does not exist otherwise. A single node is enough: mongod --replSet rs0 mongosh --eval 'rs.initiate()'
 
-* the saved position in <...> cannot be read, and a tail started from anywhere else either skips changes or cannot say it did not. Remove the file and move again
-
 ## SQL Server
 
 * mssql cannot apply a <...> action
@@ -864,8 +880,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: the schema registry refused the table's new schema - its compatibility rule says the consumers of the topic could not read it: <...>
 
 * <...> has fewer partitions on the target than on the source: a key's messages would land in another partition, out of the order its consumers read them
-
-* the saved positions in <...> cannot be read, and a tail started from anywhere else sends messages twice or skips them. Remove the file to copy every topic from its start again
 
 * the target refused offsets for <...>: <...>. Offsets committed before this one stand; nothing was deleted
 
@@ -1333,13 +1347,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> cannot apply changes yet - it has no statement for writing one row by its key
 
-* the saved position in <...> cannot be read, and a tail started from anywhere else either skips changes or cannot say it did not. Remove the file and move again with --mode full+cdc
-
 * <...>: mapping.columns leaves out part of its key, so a change cannot be placed on the target by it. Keep the key's columns.
 
 * <...>: another table of the source has its name, and the target has no table of its whole name, so its changes would land in a table of the other's. Nothing of the batch was applied: make the target's table of that whole name, or rename one of them with mapping.tables, and run the tail again
 
 * <...>: the source's schema changed under the tail - <...> ... | <...>. The target does not have <...> yet, so nothing after <...> was applied. Bring the target's schema level with the source's, then run the tail again; it resumes from there.
+
+* <...>: the target committed batch <...> of this tail, and the tail's own state was not set down for it. Nothing more was applied; start the tail again, which holds the two together before it reads
 
 * <...>.<...>: the tail read <...> changes and took back <...> set aside | <...> and accounts for <...> - <...> to apply, <...> left out. Nothing of the batch was applied, and the position stays at <...>: the batch is read again when the tail starts
 
@@ -1567,6 +1581,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> is not something migkit sends; one of <...>, or none
 
+* the tail keeps <...>, which the machines' store cannot hold; keep the hop's run state in a bucket or a directory every machine sees
+
 * the machines' store kept changing under migkit while it wrote <...>; too many machines write one record at once
 
 * <...>: <...>
@@ -1576,8 +1592,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: standby needs a target that refuses a write from a machine that lost the hop, and <...>'s does not prove it can - <...>. Nothing was written; run one machine, without standby
 
 * <...>: <...> holds its number on the target through another store (<...>; this machine's is <...>) - every machine of a hop must name the same one. Nothing was written
-
-* <...>: the tail keeps <...>, which the machines' store cannot hold; keep the hop's run state in a bucket or a directory every machine sees
 
 * <...> is not a managed service migkit knows; it knows <...> and more (`migkit/data/managed.yaml`)
 
@@ -1604,6 +1618,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * IN over a subquery has no document query
 
 * <...>: the reference does not read it
+
+* rules: a mapping of each rule's name to its question
+
+* rules.<...>: asks <...> nothing - a rule is one question both sides answer, or a question for each (source: ..., target: ...)
 
 * <...>: no database to keep the machines' records in on the target
 
