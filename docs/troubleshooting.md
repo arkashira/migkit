@@ -31,6 +31,12 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * ssl-mode=<...> checks the server's certificate against an authority: say which with ssl-ca=<its certificate file> (a managed service publishes its bundle)
 
+* <...> is not a change a tail carries - insert, update or delete
+
+* <...>: a list of names, or databases each with all, a list of tables, or its schemas
+
+* <...>: <...> - all, a table, a list of tables, or its schemas
+
 * nothing is kept in this machine's keychain as <...>/<...> - `migkit init` keeps it there, or write another reference
 
 * pip install boto3 for AWS sign-in and secrets
@@ -99,7 +105,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * filter operator <...>: not one migkit reads
 
-* the file holds <...> sync jobs (<...>); give it one (a hop is one job)
+* <...>: a list of migration jobs says no objects; save the job's own detail - tccli dts DescribeMigrationDetail --JobId <...>
+
+* the file holds <...> jobs (<...>); give it one (a hop is one job)
 
 * the job's <...> is a <...> one, which migkit has no engine for
 

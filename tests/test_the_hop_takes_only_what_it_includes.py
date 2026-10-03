@@ -218,13 +218,13 @@ def test_before_the_move_an_entry_that_takes_nothing_is_said():
     held = {"appdb": ["public.orders", "public.event_log"],
             "logs": ["public.lines"]}
     h = _hop(include=["appdb.public.orders", "appdb.public.gone"])
-    items = _Listed(h, held)._scope_items()
+    items = _Listed(h, held)._include_items()
     said = " | ".join(i["detail"] for i in items)
     assert {i["level"] for i in items} == {"warn"}, items
     assert "'appdb.public.gone'" in said and "database logs" in said
     ok = _Listed(_hop(include=["appdb.public.orders"]),
-                 {"appdb": held["appdb"]})._scope_items()
+                 {"appdb": held["appdb"]})._include_items()
     assert [i["level"] for i in ok] == ["pass"]
     assert "takes 1 tables" in ok[0]["detail"]
     # and nothing is said for a hop that takes everything
-    assert _Listed(_hop(), held)._scope_items() == []
+    assert _Listed(_hop(), held)._include_items() == []

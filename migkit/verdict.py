@@ -598,6 +598,11 @@ def hop_scope(hop):
            for k in ("include", "exclude")}
     out["row_filters"] = sorted((mapping.get("where") or {}))
     out["column_rules"] = sorted((mapping.get("columns") or {}))
+    out["renamed"] = [f"{k} -> {v}" for k, v in
+                      sorted((mapping.get("tables") or {}).items())]
+    out["changes_carried"] = [
+        f"{k}: {', '.join(v) if isinstance(v, (list, tuple)) else v}"
+        for k, v in sorted((mapping.get("ops") or {}).items())]
     return {k: v for k, v in out.items() if v}
 
 
@@ -640,9 +645,14 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
     # the evidence lists as many tables fewer - said here, not swallowed
     unwritten = digests.unwritten(session.current())
     scope = hop_scope(hop)
+    from . import servicecheck
+    theirs = servicecheck.of(hop, records)
     return {
         **({"coverage": coverage} if coverage else {}),
         **({"scope": scope} if scope else {}),
+        **({"service_check": theirs} if theirs else {}),
+        **({"scope_fingerprint": hop.scope_fingerprint()}
+           if hasattr(hop, "scope_fingerprint") else {}),
         **({"stale": stale} if stale else {}),
         "format_version": FORMAT_VERSION,
         "tool": "migkit",

@@ -236,8 +236,14 @@ class _HopFile:
             return None
         if not isinstance(got, dict):
             return None
-        return {k: [str(p) for p in (got.get(k) or [])]
-                for k in ("exclude", "include")}
+        from .config import scope_patterns
+        try:
+            return {k: scope_patterns(got.get(k))
+                    for k in ("exclude", "include")}
+        except SystemExit:
+            # said wrong mid-run: the scope stays as it was until the
+            # file says it right
+            return None
 
     def refresh(self):
         """Whether the hop's scope changed, its `exclude` and `include`

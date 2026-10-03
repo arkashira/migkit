@@ -157,6 +157,19 @@ class Engine:
     def databases(self):
         raise NotImplementedError
 
+    def in_scope(self, db, table):
+        """Whether a table, named as this engine's own listings name it
+        (`public.orders`, `orders`, `"v1.orders"`), is one the hop takes -
+        the one question every listing this engine makes for a check, an
+        inventory, a repair, a counter or a watch asks before it reads a
+        table, so none of them reads one the hop leaves out (backlog
+        P0-SCOPE.6)."""
+        from ..util import split_table
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        schema, name = split_table(eng, str(table))
+        return not self.hop.excluded(db, *([schema] if schema else []),
+                                     name)
+
     def check_schema(self, db):
         raise NotImplementedError
 
@@ -2743,7 +2756,7 @@ class Engine:
                     + " - a target that folds case keeps one of each pair;"
                       " rename one, or map it to a new name in the hop"})
             items += self._writer_items(db)
-        return items
+        return items + self._include_items()
 
     def _writer_items(self, db):
         """Replication that already writes into this target database.
@@ -2792,7 +2805,7 @@ class Engine:
     #: every time and teach people to ignore the section.
     PREFLIGHT = ()
 
-    def _scope_items(self):
+    def _include_items(self):
         """What the hop's `include` takes, read before the move: an entry
         that takes no table, a database it takes nothing of. Either is a
         table the operator believes is moved and checked that nothing
@@ -2906,7 +2919,7 @@ class Engine:
         that could not run, and it says so rather than passing.
         """
         level_of = {"diff": "fail", "warn": "warn", "error": "warn"}
-        items = self._mapping_items() + self._scope_items()
+        items = self._mapping_items()
         try:
             dbs = self.databases()
         except Exception:
