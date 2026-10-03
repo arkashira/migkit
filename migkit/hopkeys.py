@@ -313,7 +313,11 @@ HOP_OPTIONS = {
                              " on purpose, by a name it answers to",
                              "str|list"),
     "protect_target": Key("the application may not write the target"
-                          " while migkit moves into it", "bool"),
+                          " while migkit moves into it: its rights taken"
+                          " where the engine grants rights, its access"
+                          " policy changed where the hop answers yes"
+                          " (target_access), its writes named before the"
+                          " cutover where nothing holds a writer", "bool"),
     "pt_apply": Key("the online schema change path, on or off", "bool",
                     ("mysql",), knob="way", named_for_a_program=True),
     "region": Key("the region the machine and the target's class are"
@@ -396,6 +400,13 @@ HOP_OPTIONS = {
                   " come too (children), and the most rows it may hold"
                   " (most)", "dict", subs=("start", "children", "most")),
     "tables": Key("the tables of a generic hop", "list", ("generic",)),
+    "target_access": Key("the answer, given ahead, to the change of the"
+                         " target's access policy protect_target offers"
+                         " where the engine's writes are allowed outside"
+                         " the data (a table's own policy, a dataset's"
+                         " access): yes - migkit makes it and gives it back"
+                         " at cutover - or no", "str|bool",
+                         ("dynamodb", "bigquery")),
     "target_engine": Key("the target's engine of a hetero hop", "str",
                          ("hetero",)),
     "target_has_replicas": Key("false: the target has no replicas and no"
@@ -933,17 +944,24 @@ GOALS = {
 #: run says it before `--go`
 MODES = {
     ("move", "full"): "one copy of every table the hop carries: the source"
-                      " read, the target written",
+                      " read, the target written - kept from the"
+                      " application's writes before the first row and"
+                      " again after the last where the hop asks"
+                      " (protect_target): its rights taken, its access"
+                      " policy changed on an answer of yes, or its writes"
+                      " named, the way the target allows",
     ("move", "cdc"): "the stream of changes started, or resumed from where"
                      " it stood: the source's log read, the target written"
                      " change by change",
     ("move", "full+cdc"): "the copy, then the stream from a position taken"
                           " before the copy began, so nothing changed"
                           " during it is lost",
-    ("move", "cdc --drop"): "the cutover: the stream torn down, and what"
-                            " else happens on each side is what cutover:"
-                            " says (below); run again once a cutover of the"
-                            " hop has flipped, its point of no return",
+    ("move", "cdc --drop"): "the cutover: the stream torn down, the target"
+                            " given back to the application where"
+                            " protect_target kept it, and what else happens"
+                            " on each side is what cutover: says (below);"
+                            " run again once a cutover of the hop has"
+                            " flipped, its point of no return",
     ("sync", "reconcile"): "the last check's differences shown; --apply"
                            " writes the target to match the source",
     ("sync", "verify"): "read only: every table compared as of one moment",
@@ -966,8 +984,9 @@ CUTOVER = {
         " chosen from what the source allows - the whole server made"
         " read-only where it may, or the application's accounts kept from"
         " writing and their sessions ended - and reads it back; PostgreSQL,"
-        " MySQL, MongoDB, Redis, SQL Server, Cassandra, Kafka and OpenSearch"
-        " sources alike",
+        " MySQL, TiDB, CockroachDB, MongoDB, Redis, SQL Server, Oracle,"
+        " Db2, SAP ASE, Teradata, ClickHouse, Cassandra, Couchbase, Kafka,"
+        " OpenSearch, Redshift and Snowflake sources alike",
         "the drain: the source's position taken after the freeze, and the"
         " hop's own stream waited for until it passes it - or, where the"
         " stream keeps no position migkit can read, a mark written on the"
@@ -977,6 +996,11 @@ CUTOVER = {
         "the fenced check: the rows changed since the last verified pass"
         " compared inside the outage, and the schema compared with the"
         " preflight's",
+        "the target's hold read back first (protect_target): the"
+        " application's accounts write nothing there, or, where nothing"
+        " holds a writer, the writes that are not migkit's named - one"
+        " named is drift, and stops the cutover - and given back at the"
+        " flip, put on again if the cutover is undone",
         "the counters: the target's sequences and auto-increments raised"
         " past every key the source handed out",
         "the stream back: from the new primary to the old source"
@@ -1272,10 +1296,15 @@ def goal_options(hop, goal):
 
 def apply_goal(hop):
     """The hop's options with its goal's under them - an option the hop
-    says itself is kept."""
+    says itself is kept. Which came from the goal is kept beside them: a
+    target the goal keeps "where the engine allows it" and this server
+    does not is said and moved into, where the hop's own word stops the
+    move (`freeze.protect`)."""
     if not hop.goal:
         return
-    hop.options = {**goal_options(hop, hop.goal), **(hop.options or {})}
+    got = goal_options(hop, hop.goal)
+    vars(hop)["_from_goal"] = sorted(set(got) - set(hop.options or {}))
+    hop.options = {**got, **(hop.options or {})}
 
 
 def refuse_writes(hop, what):

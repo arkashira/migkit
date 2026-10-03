@@ -31,11 +31,21 @@ Turned on by the hop option `protect_target: true`. `app_roles` names the
 roles; without it they are the login roles present on both sides, which
 are the application's own accounts, carried across by `migkit users`.
 
+Every other engine's target is kept by the same primitive the cutover's
+freeze of a source stands on (`Hold`), the way climbed from what the
+target allows among the ways that leave migkit's own account writing, per
+database (`protect`, the section "the target kept from the application"
+below): the application's rights taken where the engine grants rights,
+a change of its access policy offered where the engine's writes are
+allowed outside it, and, where nothing can hold a writer and leave
+migkit's, the writes that are not migkit's named before the cutover.
+
 The source is frozen only by the cutover of a hop that turns `cutover:` on
 (`migkit.cutover`), with the same record-first rule, and more: there the
 freeze is the start of the write outage and has to be complete, not a
 guard. Its rules are at the end of this file.
 """
+import dataclasses
 import json
 import time
 
@@ -75,11 +85,13 @@ def app_roles(hop, eng, db, side="dst"):
     """The roles whose writes the freeze stops.
 
     On the target, the login roles present on both sides: the
-    application's accounts, carried across. On the source, every login
-    role that is not migkit's, the system's or a superuser's - an account
-    the application writes with need not have been carried yet, and it
-    writes all the same. A superuser is not in the list because nothing a
-    freeze can take stops one; `bypass` names them instead."""
+    application's accounts, carried across - or, where the source is
+    another engine, whose accounts are not the target's, every login role
+    of the target's but migkit's and the system's. On the source, every
+    login role that is not migkit's, the system's or a superuser's - an
+    account the application writes with need not have been carried yet,
+    and it writes all the same. A superuser is not in the list because
+    nothing a freeze can take stops one; `bypass` names them instead."""
     named = (hop.options or {}).get("app_roles")
     # migkit's own accounts, its replica's among them: ending that one's
     # session at the source's freeze cut the stream the drain waits on
@@ -87,30 +99,36 @@ def app_roles(hop, eng, db, side="dst"):
             getattr(eng, "REPL_USER", None)}
     if named:
         return [r for r in named if r not in ours]
-    kind, eng = side_engine(hop, eng, side)
-    if kind == "mysql":
+    kind, mine = side_engine(hop, eng, side)
+    src_kind, src = side_engine(hop, eng, "src")
+    both = side == "dst" and src_kind == kind
+    if kind in _MYSQL_KINDS:
         from .users import _mysql_sysuser
         q = "select distinct user from mysql.user order by 1"
         if side == "src":
-            return [r[0] for r in eng._q("src", q)
+            return [r[0] for r in mine._q("src", q)
                     if r[0] not in ours and r[0]
                     and not _mysql_sysuser(r[0])]
-        src = {r[0] for r in eng._q("src", q)}
-        return [r[0] for r in eng._q("dst", q)
-                if r[0] in src and r[0] not in ours
-                and not _mysql_sysuser(r[0])]
+        there = {r[0] for r in src._q("src", q)} if both else None
+        return [r[0] for r in mine._q("dst", q)
+                if (there is None or r[0] in there) and r[0]
+                and r[0] not in ours and not _mysql_sysuser(r[0])]
     from .users import _pg_sysrole
     if side == "src":
-        got = eng._psql("src", db, "select rolname from pg_roles where"
-                                   " rolcanlogin and not rolsuper"
-                                   " order by 1")
+        got = mine._psql("src", db, "select rolname from pg_roles where"
+                                    " rolcanlogin and not rolsuper"
+                                    " order by 1")
         return [r for r in got.split() if r not in ours
                 and not _pg_sysrole(r)]
     q = "select rolname from pg_roles where rolcanlogin order by 1"
-    src = set(eng._psql("src", db, q).split())
-    dst = eng._psql("dst", db, q).split()
-    return [r for r in dst
-            if r in src and r not in ours and not _pg_sysrole(r)]
+    there = set(src._psql("src", db, q).split()) if both else None
+    dst = mine._psql("dst", db, q).split()
+    return [r for r in dst if (there is None or r in there)
+            and r not in ours and not _pg_sysrole(r)]
+
+
+#: the engines whose accounts are MySQL's: TiDB keeps MySQL's grant tables
+_MYSQL_KINDS = ("mysql", "tidb")
 
 
 def _direct_writes(eng, db, role, side="dst"):
@@ -169,20 +187,27 @@ def side_engine(hop, eng, side):
     return ALIASES.get(kind, kind), e
 
 
-def supported(hop):
-    return _engine(hop) in ("postgres", "mysql")
-
-
 def freeze(hop, eng, db, say, side="dst"):
-    """Stop the application's roles writing to this database.
+    """Stop the application's roles writing to this database: on the
+    target, the hop's `protect_target`, the way its engine allows
+    (`protect`); on a source, the per-role part of the cutover's freeze.
 
     Idempotent: a role frozen already is checked again, and anything it
     could newly write to - a table the move just created, a grant made
     since - is frozen too, the record growing rather than being replaced.
     """
+    if side == "dst":
+        return protect(hop, eng, db, say)
     kind, eng = side_engine(hop, eng, side)
-    if kind == "mysql":
+    if kind in _MYSQL_KINDS:
         return _my_freeze(hop, eng, db, say, side)
+    return _pg_freeze(hop, eng, db, say, side)
+
+
+def _pg_freeze(hop, eng, db, say, side="dst"):
+    """The application's roles on one PostgreSQL database: their direct
+    write grants revoked, and a role that can still write after that made
+    read-only by default here, its sessions ended."""
     dbname = eng._d(side, db)
     record = state(hop, db, side) or {"db": dbname, "roles": {}}
     for role in app_roles(hop, eng, db, side):
@@ -228,12 +253,21 @@ def freeze(hop, eng, db, say, side="dst"):
 
 def thaw(hop, eng, db, say, side="dst"):
     """Give back exactly what `freeze` - or a hold of the side's
-    (`Hold.hold`) - took, from its record, and forget it."""
+    (`Hold.hold`) - took, from its record, and forget it. A target held
+    by a change to the whole server's accounts or access lists (`Hold.keep`
+    recorded it for the server) has that given back with the first of its
+    databases."""
     record = state(hop, db, side)
     if not record:
         return None
-    hold_for(hop, eng, side).release(db, record, say)
+    h = hold_for(hop, eng, side)
+    h.release(db, record, say)
     _state_path(hop, db, side).unlink(missing_ok=True)
+    if side == "dst" and record.get("server"):
+        rec = server_state(hop, side)
+        if rec:
+            h.release_server(rec, say)
+            _server_path(hop, side).unlink(missing_ok=True)
     return record
 
 
@@ -459,13 +493,16 @@ def _my_kill(eng, side, sessions, wait=10):
     `KILL` only marks a session, and one still rolling back holds its
     transaction open where a proof looks for it. Where migkit's account
     may not kill another's session, the service's own procedure does
-    (`_my_kill_way`)."""
+    (`_my_kill_way`); TiDB's own word for it (`KILL TIDB`) ends a session
+    on whichever of its servers holds it."""
     ended = 0
     how = _my_kill_way(eng, side) if sessions else None
+    verb = "kill tidb" if getattr(eng, "CANON_ENGINE", "") == "tidb" \
+        else "kill"
     for pid, _ in sessions:
         try:
             eng._q(side, f"call {how}({int(pid)})"
-                   if how and how != "kill" else f"kill {int(pid)}")
+                   if how and how != "kill" else f"{verb} {int(pid)}")
             ended += 1
         except Exception:  # noqa: BLE001 - it ended on its own
             pass
@@ -573,6 +610,10 @@ DATABASE = "the hop's databases alone frozen"
 #: migkit's own account still writes through it: what a drain by a mark
 #: on the source needs (`drainmark`)
 OURS = "migkit's own account writing through it"
+#: what every way of keeping a target gives: the hop's databases alone -
+#: the server's settings are not migkit's to change on a target either -
+#: and migkit's own account writing on, since it moves into it
+KEEP = (DATABASE, OURS)
 
 #: the scope each way is, as the hop's `freeze:` and the records name it
 SCOPE = {"pg_server": "server", "pg_database": "database",
@@ -585,7 +626,16 @@ SCOPE = {"pg_server": "server", "pg_database": "database",
          "mssql_read_only": "database", "mssql_deny": "database",
          "cql_revoke": "database",
          "kafka_cluster": "server", "kafka_topics": "database",
-         "os_cluster": "server", "os_indices": "database"}
+         "os_cluster": "server", "os_indices": "database",
+         # the ways a target is kept by (`Hold.keep_rungs`)
+         "kafka_super": "database", "kafka_principals": "database",
+         "os_named": "database", "pgw_grants": "database",
+         "tidb_server": "server",
+         "ch_grants": "database", "ora_grants": "database",
+         "db2_grants": "database", "ase_grants": "database",
+         "td_grants": "database", "rs_grants": "database",
+         "sf_grants": "database", "cb_roles": "database",
+         "ddb_policy": "database", "bq_access": "database"}
 
 
 def _read(fn):
@@ -651,7 +701,26 @@ class Hold:
     open(db, older)     what it cannot end cleanly: prepared and long
                         transactions, as lines
     cannot(db, way)     what migkit's account lacks for it, as lines
+
+    and, keeping a target from the application (`protect`):
+
+    keep_rungs()        the ways a target is kept by: the hop's databases
+                        alone, migkit's own account writing on (`KEEP`)
+    keep(db, way, say)  kept, each change recorded before it is made
+    kept(db, record)    [(held, what)] read back: nothing of the
+                        application's writes here, or the writes that are
+                        not migkit's, named
+    offer(db)           the change to the target's access policy a way
+                        needs an answer to, as lines; [] where none
     """
+
+    #: how it keeps a target from the application (`protect`): "held" -
+    #: its ways leave migkit's own account writing; "offered" - by a change
+    #: to the target's access policy, made only once the operator answers
+    #: yes; "named" - nothing holds a writer and leaves migkit's, so the
+    #: writes that are not migkit's are named before the cutover; "" -
+    #: neither, and `decide.WAYS["read-only target"]` says why
+    TARGET = ""
 
     def __init__(self, hop, eng, side="src"):
         self.hop, self.side = hop, side
@@ -702,11 +771,25 @@ class Hold:
     def cannot(self, db, way=None):
         return []
 
+    def keep_rungs(self):
+        return tuple(r for r in self.rungs() if r.lacks(KEEP) is None)
+
+    def keep(self, db, way, say):
+        self.hold([db], way, say)
+
+    def kept(self, db, record):
+        return self.held(db, record.get("way"))
+
+    def offer(self, db):
+        return []
+
 
 def hold_for(hop, eng, side="src"):
-    """The hold of one side, as its engine does it (`HOLDS`)."""
+    """The hold of one side, as its engine does it: a source's as the
+    cutover freezes it (`HOLDS`), a target's as `protect_target` keeps it
+    (`KEEPS`)."""
     kind = side_engine(hop, eng, side)[0]
-    return HOLDS.get(kind, Hold)(hop, eng, side)
+    return (HOLDS if side == "src" else KEEPS).get(kind, Hold)(hop, eng, side)
 
 
 def not_held(kind):
@@ -719,9 +802,11 @@ def not_held(kind):
 
 
 def ways(hop, eng, dbs, side="src"):
-    """(facts, rungs) of the ways this side's writes may be held."""
+    """(facts, rungs) of the ways this side's writes may be held: a
+    source's as the cutover freezes it, a target's as it is kept from the
+    application (`Hold.keep_rungs`)."""
     h = hold_for(hop, eng, side)
-    return h.facts(dbs), h.rungs()
+    return h.facts(dbs), (h.rungs() if side == "src" else h.keep_rungs())
 
 
 def choose(hop, eng, dbs, how="auto", need=(), side="src"):
@@ -886,6 +971,242 @@ def bypass(hop, eng, db, way=None):
     return hold_for(hop, eng, "src").exempt(db, way)
 
 
+# --- the target kept from the application (protect_target) -------------------
+# The same primitive per engine (`Hold`), on the target: its ladder the
+# ways that leave migkit's own account writing, per database
+# (`Hold.keep_rungs`), climbed from what the target allows. A way that
+# changes an access policy kept outside the data (DynamoDB's table
+# policies, BigQuery's dataset access) is offered and made only once the
+# operator answers yes - at a terminal under --go, or ahead in the hop
+# (`target_access`). A target nothing can hold while migkit writes into it
+# has the writes that are not migkit's named instead (`Hold.kept`), and the
+# cutover's preflight says them as drift. Where neither is possible,
+# `protect_target` stops the move before anything is copied - or, where
+# the hop's goal turned it on and the hop did not, says why and moves as
+# before: the goal keeps the target "where the engine allows it".
+#
+# Taken before the copy and again after it (`protect` is idempotent), so
+# a table the copy made and a grant a default or future grant gave the
+# application on it are taken in; given back when the stream is torn down
+# at cutover, by `rollback --apply`, and put on again by a cutover undone.
+
+#: the hop option a change of the target's access policy is answered under
+ACCESS = "target_access"
+ACCESS_FILE = "target-access.json"
+QUESTION = "change the target's access for this? yes / no"
+#: the ways that hold nothing and name the writes that are not migkit's:
+#: what they name is drift, and stops a cutover's gate
+NAMED = ("os_named",)
+
+
+def target_kind(hop):
+    """The engine of the hop's target, no server asked: a pair's own
+    `target_engine`."""
+    from .engines import ALIASES
+    kind = _engine(hop)
+    if kind == "hetero":
+        kind = str((hop.options or {}).get("target_engine") or "postgres")
+    return ALIASES.get(kind, kind)
+
+
+def supported(hop):
+    """Whether migkit keeps the hop's target from the application by
+    itself - held, or its writes named - so that a goal may turn
+    `protect_target` on (`hopkeys.goal_options`). A target kept only by a
+    change of its access policy waits on an answer, which no goal gives."""
+    return getattr(KEEPS.get(target_kind(hop)), "TARGET", "") in (
+        "held", "named")
+
+
+def from_goal(hop):
+    """Whether `protect_target` is on because the hop's goal turned it
+    on, not the hop itself (`hopkeys.apply_goal` keeps which)."""
+    return "protect_target" in (vars(hop).get("_from_goal") or ())
+
+
+def not_kept(kind):
+    """Why migkit does not keep a target of this engine, in words: the gap
+    `decide` keeps for it (shape "read-only target")."""
+    from .decide import NOT_APPLICABLE, cell
+    got, why = cell(kind, "read-only target")
+    return why if got == NOT_APPLICABLE else "migkit does not keep it yet"
+
+
+def answered(hop):
+    """The answer to a change of the target's access policy - "yes",
+    "no" - or None: the hop's own (`target_access`) over one given at a
+    terminal, which is kept for the hop's later runs."""
+    from .sourcechange import answer_word
+    raw = (hop.options or {}).get(ACCESS)
+    if raw is not None:
+        return answer_word(raw)
+    try:
+        got = json.loads((hop.report_dir() / ACCESS_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+    return answer_word(got.get("answer")) if isinstance(got, dict) else None
+
+
+def _answered_at_a_terminal(hop, answer):
+    import getpass
+
+    from . import audit
+    try:
+        who = getpass.getuser()
+    except Exception:  # noqa: BLE001 - nobody to name
+        who = ""
+    path = hop.report_dir() / ACCESS_FILE
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"answer": answer, "by": who,
+                               "at": time.strftime("%Y-%m-%d %H:%M:%S")}))
+    tmp.replace(path)
+    audit.append(hop.report_dir() / "changelog.jsonl",
+                 {"op": "target-access-answer", "answer": answer})
+
+
+def keeping(hop, eng, dbs):
+    """The `decide.Choice` of the way the target of `dbs` is kept."""
+    return choose(hop, eng, dbs, "database", need=(OURS,), side="dst")
+
+
+def _not_kept_why(h, got):
+    if h.TARGET:
+        return ("the target is not kept from the application's writes"
+                f" here: {got.reason}")
+    return ("keeping the application from writing to the target is not"
+            f" available for {h.kind} targets: {not_kept(h.kind)}")
+
+
+def protect(hop, eng, db, say, ask=None):
+    """The target of `db` kept from the application's writes while migkit
+    moves into it (`protect_target`): the way climbed from what the target
+    allows (`keeping`), every change recorded before it is made. Called
+    again, it takes in what was made since. `ask(question)` - a terminal
+    under --go - answers a change of the target's access policy offered
+    and not answered yet. Returns the record; None where nothing keeps
+    the target and the hop's goal, not the hop, asked for it."""
+    from .sourcechange import answer_word
+    h = hold_for(hop, eng, "dst")
+    if h.TARGET == "offered" and ask is not None and answered(hop) is None:
+        lines = h.offer(db)
+        if lines:
+            for line in lines:
+                say(line)
+            got = answer_word(ask(QUESTION)) or "no"
+            _answered_at_a_terminal(hop, got)
+            say(f"answered {got}, recorded for this hop's later runs")
+    got = keeping(hop, eng, [db])
+    if got.rung is None:
+        why = _not_kept_why(h, got)
+        before = state(hop, db, "dst")
+        if before is not None:
+            # taken before, and not to be taken again now: what it holds
+            # stays, and the read back says what it does not
+            say(f"{db}: {why} - what was kept before stays kept")
+            return before
+        if from_goal(hop):
+            say(f"{db}: {why} - moved into as before: the hop's goal keeps"
+                " the target where it allows it")
+            return None
+        raise SystemExit(f"{db}: protect_target is set, and {why} - nothing"
+                         " has been copied. Remove the option to move"
+                         " without it.")
+    way = got.rung.name
+    h.keep(db, way, say)
+    record = state(hop, db, "dst")
+    if record is None:
+        # a way that changes the whole server's accounts or access lists
+        # keeps its record for the server (`server_state`); this one says
+        # the database is kept by it, and `thaw` gives it back
+        record = {"db": db, "server": True}
+    record["way"] = way
+    _save(hop, db, record, "dst")
+    return record
+
+
+def not_protected(hop, eng, db):
+    """Why the hop's own `protect_target` would stop a move into `db`
+    before anything is copied - nothing here keeps the target, and the hop
+    itself asked for it - or None: not asked, asked by its goal alone,
+    kept already, or a way that keeps it. Reads only."""
+    if not (hop.options or {}).get("protect_target") or from_goal(hop) \
+            or state(hop, db, "dst") is not None:
+        return None
+    h = hold_for(hop, eng, "dst")
+    if h.TARGET == "offered" and answered(hop) is None:
+        # not answered yet: --go at a terminal asks it (`protect`)
+        return None
+    try:
+        got = keeping(hop, eng, [db])
+    except Exception as e:  # noqa: BLE001 - not readable: said as that
+        return ("whether the target can be kept from the application could"
+                f" not be read ({str(e).strip()[:120]})")
+    if got.rung is not None:
+        return None
+    return _not_kept_why(h, got)
+
+
+def protect_plan(hop, eng, dbs):
+    """What `protect_target` does on the target, as the dry run says it:
+    the way it takes, the change of an access policy it would offer, or
+    why --go stops. Reads only."""
+    out = []
+    h = hold_for(hop, eng, "dst")
+    for d in dbs:
+        got = keeping(hop, eng, [d])
+        if got.rung is not None:
+            out.append(f"{d}: the target kept from the application's"
+                       f" writes: {got.rung.said} ({got.reason})")
+            continue
+        if h.TARGET == "offered" and answered(hop) is None:
+            out += h.offer(d)
+            out.append("dry-run: --go at a terminal asks it")
+        why = _not_kept_why(h, got)
+        out.append(f"{d}: {why} - " + (
+            "moved into as before: the hop's goal keeps the target where"
+            " it allows it" if from_goal(hop) else
+            "with --go the move stops before anything is copied"))
+    return out
+
+
+def kept_rows(hop, eng, d, gate):
+    """[(level, what)] for the cutover's preflight: the target's hold read
+    back from the server (`Hold.kept`) - a line not held is a warning, a
+    write named that is not migkit's is drift, `gate`'s level - or why
+    nothing holds it."""
+    if not (hop.options or {}).get("protect_target"):
+        return [("warn", f"{d}: the target is not held from the"
+                         " application's writes (protect_target); the final"
+                         " check is what catches a row written there")]
+    record = state(hop, d, "dst")
+    if not record:
+        return [("warn", f"{d}: protect_target is set and nothing holds the"
+                         " target: the application may have written there")]
+    try:
+        got = hold_for(hop, eng, "dst").kept(d, record)
+    except Exception as e:  # noqa: BLE001 - said as the reason
+        return [("warn", f"{d}: the target's hold could not be read back"
+                         f" ({str(e).strip()[:160]})")]
+    named = record.get("way") in NAMED
+    return [("ok" if ok else gate if named else "warn",
+             f"{d}: the target: {what}") for ok, what in got]
+
+
+def kept_line(hop, d):
+    """What `doctor` says of a target `protect_target` keeps, from its
+    record - so it is said even when the target cannot be reached - or
+    None."""
+    record = state(hop, d, "dst")
+    if not record:
+        return None
+    if record.get("way") in NAMED:
+        return (f"{d}: the writes that are not migkit's are named before the"
+                f" cutover, counted since {record.get('since') or '?'}")
+    who = sorted(record.get("roles") or ())
+    return (f"{d} is kept from the application's writes"
+            + (f" - {', '.join(who)}" if who else ""))
+
+
 # PostgreSQL
 
 def _keeps_out():
@@ -918,6 +1239,43 @@ class PostgresHold(Hold):
     # holds): a connection limit of none keeps an owner out of every
     # database at once, which is the hop's only where the role connects
     # to nothing else. Each is read from the server, never from its name.
+    TARGET = "held"
+
+    def keep_rungs(self):
+        from .decide import Rung
+        # the target's own way, measured first (the module's head): a
+        # role's grants, and a role that can still write after that made
+        # read-only by default here, its sessions ended - its right to
+        # connect left, so it reads on; none of the source's needs, which
+        # are the freeze's at cutover
+        return (Rung("pg_database", "the application's grants revoked, a"
+                     " role that can still write read-only by default here"
+                     " and its sessions ended", gives=frozenset(KEEP),
+                     because="per database"),)
+
+    def keep(self, db, way, say):
+        _pg_freeze(self.hop, self.eng, db, say, self.side)
+
+    def kept(self, db, record):
+        out = []
+        for role, entry in (record.get("roles") or {}).items():
+            left = _still_writes(self.eng, db, role, self.side)
+            if not left:
+                out.append((True, f"{role} writes to nothing here"))
+            elif entry.get("set") and _setting(
+                    self.eng, db, role, self.side) == "on":
+                # held by a default the role may switch off itself: said
+                # as not held, never as held
+                out.append((False, f"{role} can write to {len(left)} tables"
+                                   " as their owner or through another"
+                                   " role; it is read-only by default here,"
+                                   " which it may switch off itself"))
+            else:
+                out.append((False, f"{role} can write to {len(left)} tables"
+                                   f" ({', '.join(left[:3])})"))
+        return out or [(True, "no login role of the application's is on"
+                              " the target")]
+
     def rungs(self):
         from .decide import Need, Rung
         return (
@@ -1205,7 +1563,7 @@ def _pg_source_freeze(hop, eng, db, say, side="src", limit=False):
     # the server's clock, not this machine's: the proof asks the server
     # which sessions it opened before this
     at = eng._psql(side, db, "select clock_timestamp()::text").strip()
-    record = freeze(hop, eng, db, say, side=side)
+    record = _pg_freeze(hop, eng, db, say, side=side)
     record.setdefault("at", at)
     connect = record.setdefault("connect", {})
     roles = list(record["roles"])
@@ -1594,6 +1952,25 @@ def _my_param_thaw(hop, eng, rec, say, side="src"):
 
 
 class MySQLHold(Hold):
+    TARGET = "held"
+
+    def keep(self, db, way, say):
+        # `_my_freeze` says itself what a per-database revoke cannot reach
+        self.hold([db], way, say)
+
+    def kept(self, db, record):
+        out = []
+        name = self.eng._d(self.side, db)
+        for u in record.get("roles") or {}:
+            left = _my_grants(self.eng, name, u, self.side)
+            wider = _my_wider(self.eng, u, self.side)
+            out.append((not (left or wider), f"{u}: " + (
+                "no write grant on the database" if not left
+                else f"{len(left)} write grants left")
+                + (f", and it {' and '.join(wider)}" if wider else "")))
+        return out or [(True, "no account of the application's is on the"
+                              " target")]
+
     def rungs(self):
         from .decide import Need, Rung
         return (
@@ -1735,6 +2112,103 @@ def _my_may_switch(eng, side="src"):
                                      "SYSTEM_VARIABLES_ADMIN"))
 
 
+# TiDB
+# MySQL's grant tables and its per-database way, with TiDB's own word for
+# ending a session (`_my_kill`). Its switch for the whole cluster is its
+# own, `tidb_super_read_only` (6.2 on), which refuses every account's
+# writes, an administrator's too: MySQL's `super_read_only` is one TiDB
+# keeps to be read and holds nothing by (TiDB's own reference). What is
+# held open is its own table of transactions (`cluster_tidb_trx`, 5.4 on),
+# every server of the cluster's at once, one that has written holding
+# keys in its buffer; TiDB takes no prepared transaction of a client's
+# (no XA).
+
+def _tidb_version(eng, side="src"):
+    """(major, minor) of the TiDB a side runs, from `version()` -
+    `8.0.11-TiDB-v7.5.0`."""
+    got = str(eng._q(side, "select version()")[0][0])
+    tail = got.split("TiDB-v", 1)[-1] if "TiDB-v" in got else ""
+    nums = [int(x) for x in tail.split("-")[0].split(".")[:2] if x.isdigit()]
+    return tuple(nums) if len(nums) == 2 else None
+
+
+class TiDBHold(MySQLHold):
+    def rungs(self):
+        from .decide import Rung
+        return (
+            Rung("tidb_server", "the whole cluster read-only for every"
+                 " account, its administrators too (tidb_super_read_only),"
+                 " the application's sessions ended",
+                 gives=frozenset({SERVER}),
+                 needs=(_alone(), _at_least(
+                     "version", (6, 2), "a read-only switch that holds"
+                     " needs 6.2"), _is(
+                     "read only switch", "migkit's account may switch the"
+                     " cluster read-only", "migkit's account may not change"
+                     " the cluster's settings (SUPER or"
+                     " SYSTEM_VARIABLES_ADMIN)"), _ENDS),
+                 because="every database on the cluster is the hop's"),
+        ) + tuple(r for r in super().rungs() if r.name == "my_database")
+
+    def readers(self, dbs):
+        return {**super().readers(dbs),
+                "version": _read(lambda: _tidb_version(self.eng, self.side))}
+
+    def hold(self, dbs, way, say):
+        if way != "tidb_server":
+            return super().hold(dbs, way, say)
+        rec = server_state(self.hop, self.side) or {}
+        if "before" not in rec:
+            got = self.eng._q(self.side,
+                              "select @@global.tidb_super_read_only")
+            rec.update({"engine": "tidb", "way": way,
+                        "before": int(got[0][0]) if got else 0})
+            _server_save(self.hop, rec, self.side)
+        self.eng._q(self.side, "set global tidb_super_read_only = on")
+        rec["on"] = True
+        _server_save(self.hop, rec, self.side)
+        say(f"{'source' if self.side == 'src' else 'target'}: the whole"
+            " cluster is read-only (tidb_super_read_only)")
+        for d in dbs:
+            _my_end_sessions(self.hop, self.eng, d, say, self.side)
+
+    def release_server(self, rec, say):
+        if rec.get("way") != "tidb_server":
+            return super().release_server(rec, say)
+        if rec.get("on"):
+            self.eng._q(self.side, "set global tidb_super_read_only ="
+                                   f" {int(rec.get('before') or 0)}")
+        say(f"{'source' if self.side == 'src' else 'target'}: writable"
+            " again, as it was before the freeze")
+
+    def held(self, db, way):
+        if way != "tidb_server":
+            return super().held(db, way)
+        got = self.eng._q(self.side, "select @@global.tidb_super_read_only")
+        on = bool(got and int(got[0][0]))
+        left = self.open(db, None)
+        return [(on, f"tidb_super_read_only is {'on' if on else 'off'}"),
+                (not left, "; ".join(left[:3]) if left else
+                 "no transaction holding writes")]
+
+    def writes(self, db):
+        # no running count of writes a table that TiDB keeps: the open
+        # transactions are what is read
+        return None
+
+    def open(self, db, older_than):
+        age = "" if older_than is None else \
+            f" and start_time < now() - interval {float(older_than)} second"
+        got = self.eng._q(
+            self.side, "select user, session_id, timestampdiff(second,"
+                       " start_time, now()) from"
+                       " information_schema.cluster_tidb_trx where"
+                       " mem_buffer_keys > 0 and (user is null or user <>"
+                       " %s)" + age, (self.me,))
+        return [f"write transaction {u} session {i}, open {s}s"
+                for u, i, s in got]
+
+
 def _my_brand(eng, side):
     return eng._brands()[0 if side == "src" else 1].name
 
@@ -1857,6 +2331,9 @@ def _my_proof(hop, eng, db, how, side="src"):
 
 MONGO_SYSTEM = ("admin", "local", "config")
 _MONGO_WRITE_ROLES = ("readWrite", "dbOwner")
+#: the roles that write to every database, which a role taken on one does
+#: not reach
+_MONGO_WIDE = ("readWriteAnyDatabase", "root", "restore", "__system")
 
 
 def _lists(*names):
@@ -1901,15 +2378,41 @@ class MongoHold(Hold):
             Rung("mongo_database", "the application's accounts given read"
                  " for the roles that write here, their sessions ended",
                  gives=frozenset({DATABASE, OURS}),
-                 needs=(_lists("grantRolesToUser", "revokeRolesFromUser"),),
+                 # a server that checks nobody lets anyone who reaches it
+                 # write, whatever an account's roles say: a role taken
+                 # there holds no one, and the read back of the roles
+                 # would say held
+                 needs=(_lists("grantRolesToUser", "revokeRolesFromUser"),
+                        _is("auth", "the server checks who signs in",
+                            "the server checks no accounts (authorization"
+                            " off): anyone who reaches it writes, whatever"
+                            " an account's roles say")),
                  because="per database"))
+
+    TARGET = "held"
 
     def readers(self, dbs):
         c = self.eng._client(self.side)
         return {"version": _read(lambda: tuple(c.admin.command(
                     "buildInfo").get("versionArray", [0, 0])[:2])),
                 "actions": _read(lambda: _mongo_actions(c)),
-                "commands": _read(lambda: _mongo_commands(c))}
+                "commands": _read(lambda: _mongo_commands(c)),
+                "auth": _read(lambda: _mongo_auth(c))}
+
+    def kept(self, db, record):
+        name = self.eng._d(self.side, db)
+        out = []
+        for u, d, roles, bypass in _mongo_users(self.hop, self.eng,
+                                                self.side):
+            here = [r["role"] for r in roles if r.get("db") == name
+                    and r.get("role") in _MONGO_WRITE_ROLES]
+            wide = [r["role"] for r in roles if r.get("role") in _MONGO_WIDE]
+            if here or wide or bypass:
+                out.append((False, f"{u}@{d} still writes here ("
+                            + ", ".join(here + wide or
+                                        ["bypassWriteBlockingMode"]) + ")"))
+        held = len(record.get("roles") or {})
+        return out or [(True, f"{held} accounts hold no write here")]
 
     def others(self, dbs):
         return sorted(set(self.eng._client(self.side).list_database_names())
@@ -1942,8 +2445,7 @@ class MongoHold(Hold):
         out = []
         for u, d, roles, bypass in _mongo_users(self.hop, self.eng,
                                                 self.side):
-            wide = [r["role"] for r in roles if r.get("role") in (
-                "readWriteAnyDatabase", "root", "restore", "__system")]
+            wide = [r["role"] for r in roles if r.get("role") in _MONGO_WIDE]
             if bypass:
                 out.append(f"{u}@{d} may write through a blocked server"
                            " (bypassWriteBlockingMode)")
@@ -1964,6 +2466,25 @@ class MongoHold(Hold):
 
     def open(self, db, older_than):
         return _mongo_open(self.eng, db, older_than, self.side)
+
+
+def _mongo_auth(c):
+    """Whether the server checks who signs in: its own options say so, or
+    it refuses to show them to an account that may not ask, which is that
+    check. A service that does not have the command at all, and took
+    migkit's sign-in, checks it."""
+    from pymongo.errors import OperationFailure
+    try:
+        got = c.admin.command("getCmdLineOpts")
+    except OperationFailure as e:
+        if e.code == 13:
+            return True
+        status = c.admin.command("connectionStatus")
+        return bool((status.get("authInfo") or {}).get("authenticatedUsers"))
+    sec = (got.get("parsed") or {}).get("security") or {}
+    return (sec.get("authorization") == "enabled" or bool(sec.get("keyFile"))
+            or str(sec.get("clusterAuthMode") or "") in (
+                "keyFile", "sendKeyFile", "sendX509", "x509"))
 
 
 def _mongo_actions(c):
@@ -2238,6 +2759,15 @@ def _acl_words(line):
     return out
 
 
+def _one_server():
+    """A Redis side that is one server: a cluster keeps its accounts and
+    its pause node by node, where migkit's hold reaches the one node it
+    signs in to - a hold of one node read back as the whole."""
+    return _is("one server", "one server, not a cluster", "a cluster keeps"
+               " its accounts and its pause node by node, and migkit's"
+               " hold reaches the node it signs in to")
+
+
 class RedisHold(Hold):
     def rungs(self):
         from .decide import Need, Rung
@@ -2245,7 +2775,7 @@ class RedisHold(Hold):
             Rung("redis_pause", "every client's writes held on the server,"
                  " the connections open before it ended",
                  gives=frozenset({SERVER}),
-                 needs=(_alone(), _at_least(
+                 needs=(_alone(), _one_server(), _at_least(
                      "version", (6, 2), "holding writes alone needs 6.2"),
                      Need("no stream back to it",
                           lambda f: not f["stream back"],
@@ -2256,19 +2786,55 @@ class RedisHold(Hold):
             Rung("redis_accounts", "every account's writes refused, the"
                  " connections open before it ended",
                  gives=frozenset({DATABASE}),
-                 needs=(_at_least(
+                 needs=(_one_server(), _at_least(
                      "version", (7, 0), "an account's writes are read back"
                      " as refused from 7.0 (ACL DRYRUN)"), _is(
                      "acl", "accounts on the server", "the server keeps"
                      " no accounts (ACL)")),
                  because="per account"))
 
+    TARGET = "held"
+
+    def keep_rungs(self):
+        # on a target migkit writes on through its own account, which only
+        # an account of its own - not the server's default one, which the
+        # application's connections may sign in as too - can be told apart
+        r = self.rungs()[1]
+        return (dataclasses.replace(
+            r, said="every account's writes but migkit's refused, the"
+                    " connections open before it ended",
+            gives=frozenset(KEEP), needs=r.needs + (_is(
+                "own account", "an account of migkit's own", "migkit signs"
+                " in as the server's default account, which the"
+                " application's connections may use as well: give migkit"
+                " an account of its own (ACL SETUSER) for the others to be"
+                " held"),)),)
+
     def readers(self, dbs):
         return {"version": _read(self.version),
                 "acl": _read(lambda: self.eng._acl(self.side)),
+                "one server": _read(lambda: not self.eng._cluster(
+                    self.side)),
+                "own account": lambda: self.side == "src" or (
+                    self.me or "default") != "default",
                 "stream back": lambda: self.side == "src" and str(
                     (self.hop.options or {}).get("reverse", "") or ""
                 ).lower() == "at_cutover"}
+
+    def kept(self, db, record):
+        c = self.c()
+        writers = [u for u in self.accounts() if str(c.execute_command(
+            "ACL", "DRYRUN", u, "SET", "migkit:probe", "1")) == "OK"]
+        rec = server_state(self.hop, self.side) or {}
+        since = max(0, int(time.time() - float(rec.get("at")
+                                               or time.time())))
+        left = self.clients(c, set(rec.get("rules") or {}),
+                            before=since + 1)
+        return [(not writers, f"still able to write: {', '.join(writers)}"
+                 if writers else f"{len(rec.get('rules') or {})} accounts"
+                                 " refused a write"),
+                (not left, f"{len(left)} connections left from before the"
+                           " hold")]
 
     def c(self):
         return self.eng._client(self.side)
@@ -2292,9 +2858,13 @@ class RedisHold(Hold):
         return out
 
     def accounts(self):
+        """The accounts held: on a source every one but the replication
+        one - nothing migkit does to a source at cutover is a write - and
+        on a target migkit's own left writing too."""
         rules = self.rules()
+        mine = (self.me or "default") if self.side == "dst" else None
         return [u for u in (_named(self.hop) or sorted(rules))
-                if u in rules and u != self.eng.REPL_USER]
+                if u in rules and u not in (self.eng.REPL_USER, mine)]
 
     @staticmethod
     def clients(c, users=None, before=None):
@@ -2716,6 +3286,26 @@ class MSSQLHold(Hold):
                            " a per-database freeze does not reach that")
         return out
 
+    TARGET = "held"
+
+    def kept(self, db, record):
+        out = []
+        # every user of the application's there now, one made since the
+        # hold among them
+        for u in self.users(db):
+            denied = int(self.one(
+                db, "select count(*) from sys.database_permissions"
+                    " where class = 0 and state = 'D' and"
+                    f" grantee_principal_id = user_id({_ms_lit(u)})"
+                    " and permission_name in ('INSERT', 'UPDATE',"
+                    " 'DELETE')") or 0)
+            owner = self.owns(db, u)
+            out.append((denied == 3 and not owner,
+                        f"{u}: {denied} of 3 writes denied"
+                        + (f", and it {owner}" if owner else "")))
+        return out or [(True, "no user of the application's is in the"
+                              " database")]
+
 
 # Cassandra and ScyllaDB
 # The application's roles lose MODIFY on the keyspace and on its tables
@@ -2782,6 +3372,24 @@ class CassandraHold(Hold):
                                  f" grant go, {f['cache']:g}s, past the"
                                  f" {f['budget'] or 0:g}s budget"))),
                  because="per role"),)
+
+    TARGET = "held"
+
+    def keep_rungs(self):
+        # a target is kept before the copy, outside any outage: the cache
+        # is waited out whatever its length, and no budget is held to it
+        r = self.rungs()[0]
+        return (dataclasses.replace(r, needs=r.needs[:2]),)
+
+    def kept(self, db, record):
+        ks = self.ks(db)
+        out = []
+        for r in self.roles():
+            left = sorted({res for res, _ in self.modify(r, ks, False)})
+            out.append((not left, f"{r}: " + (f"may still write {left[0]}"
+                                              if left else "writes nothing"
+                                              " here")))
+        return out or [(True, "no role of the application's signs in")]
 
     def readers(self, dbs):
         return {"authorizer": _read(self.authorizer),
@@ -2928,19 +3536,21 @@ class CassandraHold(Hold):
 # access check: named, not touched. Read back as the cluster lists the
 # denies, and by the topics' ends standing still.
 
-def _kafka_deny(kind, name, filtered=False):
+def _kafka_deny(kind, name, principal="User:*", filtered=False):
+    """A deny of WRITE on one resource by its name, for `principal` -
+    every principal by default; a filter that finds it where `filtered`."""
     from kafka.admin import (ACL, ACLFilter, ACLOperation,
                              ACLPermissionType, ACLResourcePatternType,
                              ResourcePattern, ResourcePatternFilter,
                              ResourceType)
     rtype = getattr(ResourceType, kind)
     if filtered:
-        return ACLFilter(principal="User:*", host="*",
+        return ACLFilter(principal=principal, host="*",
                          operation=ACLOperation.WRITE,
                          permission_type=ACLPermissionType.DENY,
                          resource_pattern=ResourcePatternFilter(
                              rtype, name, ACLResourcePatternType.LITERAL))
-    return ACL(principal="User:*", host="*", operation=ACLOperation.WRITE,
+    return ACL(principal=principal, host="*", operation=ACLOperation.WRITE,
                permission_type=ACLPermissionType.DENY,
                resource_pattern=ResourcePattern(
                    rtype, name, ACLResourcePatternType.LITERAL))
@@ -2965,14 +3575,24 @@ class KafkaHold(Hold):
                  because="per topic"))
 
     def readers(self, dbs):
-        return {"authorizer": _read(self.authorizer)}
+        out = {"authorizer": _read(self.authorizer)}
+        if self.side == "dst":
+            out.update({
+                "super": _read(lambda: self.principal() is not None
+                               and self.principal() in self.super_users()),
+                "principal": lambda: self.principal() is not None,
+                "closed": _read(self.closed),
+                "named allows": _read(lambda: "User:*" not in self.allowed(
+                    self.topics(dbs, every=True)))})
+        return out
 
-    def topics(self, dbs):
+    def topics(self, dbs, every=False):
         """The hop's topics, as this side names them: the source's own
-        names, which the copy keeps."""
+        names, which the copy keeps - on a target those it holds already,
+        or `every` one of them, made or not."""
         mine = sorted({t for d in dbs for _, t in
                        self.eng.list_move_tables(d)})
-        if self.side == "src":
+        if self.side == "src" or every:
             return mine
         c = self.eng._consumer(self.side)
         try:
@@ -3010,8 +3630,9 @@ class KafkaHold(Hold):
             admin.close()
 
     @staticmethod
-    def there(admin, kind, name):
-        got, _ = admin.describe_acls(_kafka_deny(kind, name, filtered=True))
+    def there(admin, kind, name, principal="User:*"):
+        got, _ = admin.describe_acls(_kafka_deny(kind, name, principal,
+                                                 filtered=True))
         return bool(got)
 
     def hold(self, dbs, way, say):
@@ -3074,7 +3695,8 @@ class KafkaHold(Hold):
                                  " the cluster's record"),
                 _held_still(self.hop, self.eng, db, self.side)]
 
-    def exempt(self, db, way):
+    def broker(self):
+        """The first broker's configuration, as the cluster describes it."""
         from kafka.admin import ConfigResource, ConfigResourceType
         admin = self.eng._admin(self.side)
         try:
@@ -3085,11 +3707,153 @@ class KafkaHold(Hold):
                 [ConfigResource(ConfigResourceType.BROKER, node)]))
         finally:
             admin.close()
-        names = [p.strip() for p in str((got.get(node) or {}).get(
-            "super.users") or "").split(";")
-            if p.strip() and p.strip() not in ("None", "null")]
+        return got.get(node) or {}
+
+    def super_users(self):
+        return [p.strip() for p in str(self.broker().get("super.users")
+                                       or "").split(";")
+                if p.strip() and p.strip() not in ("None", "null")]
+
+    def exempt(self, db, way):
+        mine = self.principal() if self.side == "dst" else None
         return [f"{p} is one of the cluster's super users: nothing short of"
-                " stopping it keeps it from writing" for p in names]
+                " stopping it keeps it from writing"
+                for p in self.super_users() if p != mine]
+
+    # the target: kept from the application while migkit writes into it.
+    # A deny for every principal refuses migkit's own as well, but for a
+    # super user, which passes every check; else each principal an allow
+    # lets write the hop's topics is denied by name, on a cluster that
+    # refuses a principal no ACL names and where no allow names every
+    # principal. A deny on a topic's name holds before the copy makes it.
+
+    TARGET = "held"
+
+    def keep_rungs(self):
+        from .decide import Rung
+        checked = _is("authorizer", "access checked on the cluster", "the"
+                      " cluster checks no access (no authorizer)")
+        return (
+            Rung("kafka_super", "every principal's writes to the hop's"
+                 " topics refused - migkit's own passes, as one of the"
+                 " cluster's super users", gives=frozenset(KEEP),
+                 needs=(checked, _is(
+                     "super", "migkit signs in as one of the cluster's super"
+                     " users", "migkit does not sign in as one of the"
+                     " cluster's super users, which alone pass a deny for"
+                     " every principal")),
+                 because="a deny outranks every allow, and a super user"
+                         " passes it"),
+            Rung("kafka_principals", "the writes of each principal an allow"
+                 " lets write the hop's topics refused by name, migkit's own"
+                 " left", gives=frozenset(KEEP),
+                 needs=(checked, _is(
+                     "principal", "migkit signs in as a principal of its own",
+                     "migkit signs in with no SASL account of its own"
+                     " (anonymously, by a certificate or by IAM), so its"
+                     " principal cannot be told from the application's"),
+                     _is("closed", "the cluster refuses a principal no ACL"
+                         " names", "the cluster lets any principal write a"
+                         " topic no ACL names"
+                         " (allow.everyone.if.no.acl.found)"),
+                     _is("named allows", "every allow on the hop's topics"
+                         " names its principal", "an allow for every"
+                         " principal (User:*) reaches the hop's topics: only"
+                         " a deny for every principal outranks it, and that"
+                         " refuses migkit's own")),
+                 because="per principal"))
+
+    def principal(self):
+        """migkit's principal on this side as the cluster names it - its
+        SASL account - or None where it signs in otherwise."""
+        ep = self.hop.source if self.side == "src" else self.hop.target
+        o = ep.options or {}
+        proto = str(o.get("security_protocol") or "").upper()
+        mech = str(o.get("sasl_mechanism") or "PLAIN").upper()
+        if proto.startswith("SASL") and mech != "AWS_MSK_IAM" and ep.user:
+            return f"User:{ep.user}"
+        return None
+
+    def allowed(self, topics):
+        """{principal} an allow lets write any of `topics`: a literal, a
+        prefixed or an every-topic one."""
+        from kafka.admin import (ACLFilter, ACLOperation, ACLPermissionType,
+                                 ACLResourcePatternType,
+                                 ResourcePatternFilter, ResourceType)
+        out = set()
+        admin = self.eng._admin(self.side)
+        try:
+            for t in topics:
+                got, _ = admin.describe_acls(ACLFilter(
+                    principal=None, host=None, operation=ACLOperation.ANY,
+                    permission_type=ACLPermissionType.ALLOW,
+                    resource_pattern=ResourcePatternFilter(
+                        ResourceType.TOPIC, t,
+                        ACLResourcePatternType.MATCH)))
+                out |= {a.principal for a in got if a.operation in (
+                    ACLOperation.WRITE, ACLOperation.ALL)}
+        finally:
+            admin.close()
+        return out
+
+    def closed(self):
+        got = self.broker().get("allow.everyone.if.no.acl.found")
+        return None if got is None else str(got).strip().lower() == "false"
+
+    def keep(self, db, way, say):
+        topics = self.topics([db], every=True)
+        if way == "kafka_super":
+            want = [["TOPIC", t] for t in topics]
+        else:
+            skip = {self.principal(), "User:*", *self.super_users()}
+            want = [["TOPIC", t, p] for t in topics
+                    for p in sorted(self.allowed([t])) if p not in skip]
+        admin = self.eng._admin(self.side)
+        try:
+            rec = server_state(self.hop, self.side) or {
+                "engine": "kafka", "way": way, "made": []}
+            todo = [x for x in want if x not in rec["made"]
+                    and not self.there(admin, *x)]
+            rec["made"] += todo
+            # recorded before it is made: a release deletes exactly these
+            _server_save(self.hop, rec, self.side)
+            if todo:
+                got = admin.create_acls([_kafka_deny(*x) for x in todo])
+                failed = (got or {}).get("failed") or []
+                if failed:
+                    raise RuntimeError("the cluster refused a deny:"
+                                       f" {failed[0]}")
+        finally:
+            admin.close()
+        say(f"{db}: " + (f"every principal refused writes on {len(topics)}"
+                         " topics, migkit's own passing as a super user"
+                         if way == "kafka_super" else
+                         f"{len({x[2] for x in want})} principals refused"
+                         f" writes on {len(topics)} topics by name"))
+        for line in self.exempt(db, way):
+            say(f"{db}: still able to write here: {line}")
+
+    def kept(self, db, record):
+        rec = server_state(self.hop, self.side) or {}
+        made = rec.get("made") or []
+        admin = self.eng._admin(self.side)
+        try:
+            missing = [x for x in made if not self.there(admin, *x)]
+        finally:
+            admin.close()
+        out = [(not missing, "not denied: " + ", ".join(
+            f"{x[2] + ' on ' if len(x) > 2 else ''}{x[1]}"
+            for x in missing[:3]) if missing else
+            f"{len(made)} denies on the cluster's record")]
+        if rec.get("way") == "kafka_principals":
+            topics = self.topics([db], every=True)
+            denied = {x[2] for x in made if len(x) > 2}
+            loose = sorted(self.allowed(topics) - denied - {
+                self.principal(), *self.super_users()})
+            out.append((not loose, f"allowed to write and not denied:"
+                                   f" {', '.join(loose[:3])}" if loose else
+                        "every principal allowed to write is denied"))
+        return out
 
 
 # OpenSearch
@@ -3102,8 +3866,149 @@ class KafkaHold(Hold):
 # the cutover; it is lifted first on the way back, since index settings
 # cannot be changed under it. A block holds every account, an
 # administrator's too.
+#
+# So a target is not held: a block would refuse migkit's own writes, and
+# the cluster grants nothing by account that could be taken from the
+# application alone (a security plugin's roles allow, they never deny).
+# Its writes are named instead: every operation on a shard takes the next
+# sequence number, which no restart takes back, so the operations each of
+# the hop's indices has taken since the target was protected - its
+# primaries' highest numbers - less the ones migkit's own requests were
+# acknowledged for (`counted`, by every process writing it) are writes
+# that are not migkit's. An operation migkit sent and was not told of
+# counts against the application, never the other way round; an index
+# made again since starts its numbers again and is named by its new id.
+
+#: where migkit's own acknowledged operations into a target whose writes
+#: are named are counted, a line a request (`counted`)
+OURS_FILE = "named-writes.jsonl"
+
+
+def counted(hop, counts):
+    """migkit's own operations the target acknowledged ({index: n}),
+    appended where the hop counts them - a line a request, one write, so a
+    tail in another process adds its own beside the copy's. Nothing is
+    written where the target's writes are not named."""
+    counts = {k: int(v) for k, v in (counts or {}).items() if v}
+    if not counts:
+        return
+    path = _ours_path(hop)
+    if not path.exists():
+        return
+    with open(path, "a") as f:
+        f.write(json.dumps(counts) + "\n")
+
+
+def _ours_path(hop):
+    """The count's file, found without making the hop's directory: a hop
+    whose target's writes are not named leaves nothing behind."""
+    from . import config
+    if "report_dir" in vars(hop):
+        return hop.report_dir() / OURS_FILE
+    return config.REPORTS / str(hop.name) / OURS_FILE
+
+
+def _ours(hop):
+    out = {}
+    try:
+        lines = _ours_path(hop).read_text().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            got = json.loads(line)
+        except ValueError:
+            continue
+        for k, v in got.items():
+            out[k] = out.get(k, 0) + int(v)
+    return out
+
 
 class OpenSearchHold(Hold):
+    TARGET = "named"
+
+    def keep_rungs(self):
+        from .decide import Rung
+        return (Rung(
+            "os_named", "the writes that are not migkit's named: each"
+            " index's own count of its operations, less migkit's",
+            gives=frozenset(KEEP), needs=(_is(
+                "numbered", "every shard's operations numbered", "the"
+                " cluster keeps no numbers of its shards' operations"),),
+            because="a write block refuses migkit's own writes as well, and"
+                    " the cluster grants nothing that could be taken from"
+                    " the application alone"),)
+
+    def ops(self, db):
+        """{index: [its id, operations its primaries have taken]} of every
+        index under the hop's prefix on this side."""
+        pre = self.eng._prefix(self.side, db)
+        ids = {i["index"]: i.get("uuid") for i in self.call(
+            "GET", f"/_cat/indices/{pre}*?format=json&h=index,uuid") or []}
+        got = self.call("GET", f"/{pre}*/_stats/docs?level=shards") or {}
+        out = {}
+        for index, body in (got.get("indices") or {}).items():
+            n = 0
+            for copies in (body.get("shards") or {}).values():
+                for c in copies:
+                    if (c.get("routing") or {}).get("primary"):
+                        n += int((c.get("seq_no") or {}).get(
+                            "max_seq_no", -1)) + 1
+            out[index] = [ids.get(index), n]
+        return out
+
+    def numbered(self, db):
+        got = self.call("GET", "/") or {}
+        major = str((got.get("version") or {}).get("number") or "0")
+        # sequence numbers came with 6.0 of the engine OpenSearch forked
+        return (got.get("version") or {}).get("distribution") == \
+            "opensearch" or int(major.split(".")[0]) >= 6
+
+    def keep(self, db, way, say):
+        first = state(self.hop, db, self.side) is None
+        record = state(self.hop, db, self.side) or {
+            "db": db, "way": way, "base": {},
+            "since": time.strftime("%Y-%m-%d %H:%M:%S")}
+        # read before migkit's own are counted: one of them landing in
+        # between counts against the application, never for it
+        for index, (uid, n) in self.ops(db).items():
+            if index not in record["base"]:
+                # one there at the first call counts from what it held; one
+                # made since starts at nothing, whatever the copy wrote
+                record["base"][index] = [uid, n if first else 0]
+        _save(self.hop, db, record, self.side)
+        path = self.hop.report_dir() / OURS_FILE
+        if not path.exists():
+            path.touch()
+        say(f"{db}: nothing on the cluster holds a writer and leaves"
+            " migkit's own, so the writes that are not migkit's are named"
+            f" before the cutover: {len(record['base'])} indices counted"
+            f" from {record['since']}")
+
+    def kept(self, db, record):
+        now = self.ops(db)
+        ours = _ours(self.hop)
+        base = record.get("base") or {}
+        out = []
+        for index in sorted(set(now) | set(base)):
+            uid, n = now.get(index, [None, 0])
+            was_uid, was = base.get(index, [uid, 0])
+            if index in base and index not in now:
+                out.append((False, f"{index}: gone from the target since"
+                                   f" {record.get('since')}"))
+            elif was_uid and uid and was_uid != uid:
+                out.append((False, f"{index}: made again since"
+                                   f" {record.get('since')}: its numbers"
+                                   " started again, and what it took before"
+                                   " is not counted"))
+            elif n - was - ours.get(index, 0) > 0:
+                out.append((False, f"{index}: {n - was - ours.get(index, 0)}"
+                                   " writes that are not migkit's since"
+                                   f" {record.get('since')}"))
+        return out or [(True, "no write that is not migkit's on"
+                              f" {len(now)} indices since"
+                              f" {record.get('since')}")]
+
     def rungs(self):
         from .decide import Rung
         return (
@@ -3170,11 +4075,23 @@ class OpenSearchHold(Hold):
                else ""))
 
     def release(self, db, record, say):
+        if record.get("way") in NAMED:
+            # nothing was taken; the count of migkit's own goes with the
+            # last database named
+            if not any((state(self.hop, d, self.side) or {}).get("way")
+                       in NAMED for d in (self.hop.databases or [])
+                       if d != db):
+                (self.hop.report_dir() / OURS_FILE).unlink(missing_ok=True)
+            say(f"{db}: its writes no longer named")
+            return
         for index, was in (record.get("indices") or {}).items():
             self.call("PUT", f"/{index}/_settings",
                       {"index.blocks.write": was})
         say(f"{record.get('db') or db}: {len(record.get('indices') or {})}"
             " indices open to writes as they were")
+
+    def readers(self, dbs):
+        return {"numbered": _read(lambda: self.numbered(dbs[0]))}
 
     def release_server(self, rec, say):
         if rec.get("on"):
@@ -3210,13 +4127,2292 @@ class OpenSearchHold(Hold):
         return out
 
 
+# --- the holds of the engines that grant rights --------------------------------
+# An engine that grants rights is held the way PostgreSQL's application is:
+# each of the application's accounts loses the rights to write it holds on
+# the hop's database - recorded first, given back exactly - and its open
+# sessions are ended where migkit's account may, so nothing it had begun
+# is written after. What a revoke on one database cannot reach is named
+# and left (`exempt`): on a source, a way in that it leaves - an owner, a
+# grant to everyone that migkit's own writes rest on, a role migkit's
+# account holds - says "a per-database freeze does not reach that", which
+# the cutover's preflight stops on, and an account of the server's own
+# that nothing short of stopping it holds is said. One logic (`_Grants`),
+# an adapter an engine: its accounts, the grants each holds here, the
+# statements that take and give one back, what an account can still
+# write, its sessions, and what other sessions hold open. A source's hold
+# (`SOURCE`) ends every session of the accounts it holds - one with a
+# transaction open would otherwise commit what it wrote before the revoke
+# after the position the drain waits for - and reads back that none is
+# left from before it and that nothing is held open; its rung needs both
+# to be in migkit's account's reach. An engine whose sessions and open
+# work cannot be read so does not freeze a source, and
+# `decide.WAYS["writes held"]` says why.
+
+#: what a way into the database a per-database freeze leaves says, as the
+#: cutover's preflight reads it (`bypass`)
+LEAVES = "a per-database freeze does not reach that"
+
+
+def _autocommits(conn):
+    got = getattr(conn, "autocommit", False)
+    return got is True
+
+
+def _source_needs():
+    """What a source's freeze by rights needs beyond the target's: a way to
+    end the application's sessions, and their open work in sight - read
+    back as none where it cannot be seen, it would pass for none."""
+    from .decide import Need
+    return (
+        Need("a way to end the application's sessions",
+             lambda f: f.get("ends") is True,
+             lambda f: "migkit's account may not end the application's"
+             " sessions here" if f.get("ends") is not None else
+             "whether migkit's account may end the application's sessions"
+             " could not be read"),
+        Need("the application's open work in sight",
+             lambda f: f.get("sees") is True,
+             lambda f: "migkit's account cannot see what other sessions"
+             " hold open here, so an open write would read as none"
+             if f.get("sees") is not None else "whether migkit's account"
+             " sees other sessions' open work could not be read"))
+
+
+def _tried(fn):
+    """True where `fn()` runs, False where the server refuses it."""
+    try:
+        fn()
+        return True
+    except Exception:  # noqa: BLE001 - refused: not in reach
+        return False
+
+
+class _Grants(Hold):
+    TARGET = "held"
+    #: the engine's hold freezes a source at cutover too (`HOLDS`)
+    SOURCE = False
+    #: the way's name and what it is, in words; what it ends on a source
+    WAY, SAID = "", ""
+    ENDS = "every session of theirs ended"
+
+    def rungs(self):
+        from .decide import Rung
+        if not self.SOURCE:
+            return ()
+        return (Rung(self.WAY, f"{self.SAID}; on a source, {self.ENDS}",
+                     gives=frozenset(KEEP),
+                     needs=self.needs() + _source_needs(),
+                     because="per account"),)
+
+    def keep_rungs(self):
+        from .decide import Rung
+        return (Rung(self.WAY, self.SAID, gives=frozenset(KEEP),
+                     needs=self.needs(), because="per account"),)
+
+    def needs(self):
+        return ()
+
+    def readers(self, dbs):
+        if self.side != "src":
+            return {}
+        return {"ends": _read(lambda: self.may_end(dbs[0])),
+                "sees": _read(lambda: self.may_see(dbs[0]))}
+
+    def name(self, db):
+        return self.eng._d(self.side, db)
+
+    def rows(self, db, sql, args=()):
+        return self.eng._rows(self.side, db, sql, tuple(args) or None)
+
+    def run(self, db, *stmts):
+        """Statements that change rights, each as the engine takes it and
+        committed where the driver does not commit them itself."""
+        conn = self.eng._connect(self.side, db)
+        try:
+            cur = conn.cursor()
+            for s in stmts:
+                cur.execute(s)
+            if not _autocommits(conn):
+                conn.commit()
+        finally:
+            conn.close()
+
+    # the adapter
+    def accounts(self, db):
+        """The application's accounts here: every one that holds a right
+        to write here but migkit's own, the system's, and those `wider`
+        names."""
+        return []
+
+    def grants(self, db, who):
+        """The write grants `who` holds here, each as a list the record
+        keeps and `take`/`give` read."""
+        return []
+
+    def take(self, db, who, grant):
+        return []
+
+    def give(self, db, who, grant):
+        return []
+
+    def still(self, db, who):
+        """What `who` can still write here, as words; [] where nothing."""
+        return [self.said(g) for g in self.grants(db, who)]
+
+    def said(self, grant):
+        return " ".join(str(x) for x in grant if x not in (None, ""))
+
+    def end(self, db, who):
+        """`who`'s open sessions ended: how many, 0 where none or where the
+        engine gives migkit no way to."""
+        return 0
+
+    def wider(self, db):
+        """[(line, whether it is a way in a per-database freeze leaves)]:
+        what a revoke on this database does not reach."""
+        return []
+
+    def more(self, db, who, entry, save):
+        """Anything else that keeps `who` from writing here where its
+        grants do not - recorded in `entry` (`save()`) before it is done;
+        what it did, in words, or ""."""
+        return ""
+
+    def less(self, db, who, entry):
+        """What `more` did, undone from `entry`."""
+
+    # a source's freeze
+    def clock(self, db):
+        """The server's time now, as `left` compares a session's start
+        with it; None where the engine proves by its open work alone."""
+        return None
+
+    def left(self, db, who, at):
+        """(held, what) of the sessions of the accounts `who` opened before
+        `at`, or None where the engine proves by its open work alone."""
+        return None
+
+    def stop(self, db):
+        """What other sessions hold open here, ended where the engine ends
+        it apart from a session; what was ended, in words, or ""."""
+        return ""
+
+    def may_end(self, db):
+        return False
+
+    def may_see(self, db):
+        return False
+
+    def holders(self, db):
+        """The accounts held, or that a hold would take."""
+        rec = state(self.hop, db, self.side) or {}
+        return sorted(set(rec.get("roles") or {}) | set(self.accounts(db)))
+
+    def hold(self, dbs, way, say):
+        src = self.side == "src"
+        for d in dbs:
+            record = state(self.hop, d, self.side) or {
+                "db": self.name(d), "way": way, "roles": {}}
+            if src and "at" not in record:
+                # the server's clock, not this machine's: the proof asks
+                # the server which sessions it opened before this
+                record["at"] = self.clock(d)
+            for who in self.accounts(d):
+                entry = record["roles"].setdefault(who, {"revoked": []})
+                todo = [g for g in self.grants(d, who)
+                        if g not in entry["revoked"]]
+                entry["revoked"] += todo
+                # recorded before it is done: a run that stops half way
+                # leaves a record `thaw` can finish from
+                _save(self.hop, d, record, self.side)
+                for g in todo:
+                    self.run(d, *self.take(d, who, g))
+                extra = self.more(d, who, entry,
+                                  lambda: _save(self.hop, d, record,
+                                                self.side))
+                # on a source every session goes, whatever was revoked
+                ended = self.end(d, who) if todo or extra or src else 0
+                how = ([f"{len(todo)} write grants revoked"] if todo
+                       else []) + ([extra] if extra else []) + (
+                    [f"{ended} open sessions ended"] if ended else [])
+                say(f"{record['db']}: {who} - " + ("; ".join(how) if how
+                                                   else "nothing to take"))
+            _save(self.hop, d, record, self.side)
+            stopped = self.stop(d) if src else ""
+            if stopped:
+                say(f"{record['db']}: {stopped}")
+
+    def keep(self, db, way, say):
+        self.hold([db], way, say)
+        for line in self.exempt(db, way):
+            say(f"{db}: still able to write here: {line}")
+
+    def release(self, db, record, say):
+        name = record.get("db") or self.name(db)
+        for who, entry in (record.get("roles") or {}).items():
+            self.less(db, who, entry)
+            for g in entry.get("revoked") or []:
+                self.run(db, *self.give(db, who, g))
+            say(f"{name}: {who} - writes given back"
+                f" ({len(entry.get('revoked') or [])} grants)")
+
+    def kept(self, db, record):
+        out = []
+        # the accounts held, and any that has come to write here since
+        for who in sorted(set(record.get("roles") or {})
+                          | set(self.accounts(db))):
+            left = self.still(db, who)
+            out.append((not left, f"{who}: " + (
+                f"can still write {', '.join(left[:3])}"
+                + (" ..." if len(left) > 3 else "") if left
+                else "writes nothing here")))
+        return out or [(True, "no account of the application's writes"
+                              " here")]
+
+    def held(self, db, way):
+        record = state(self.hop, db, self.side) or {"roles": {}}
+        out = self.kept(db, record)
+        got = self.left(db, sorted(record.get("roles") or {}),
+                        record.get("at"))
+        if got is not None:
+            out.append(got)
+        work = self.open(db, None)
+        out.append((not work, "; ".join(work[:3]) if work else
+                    "nothing held open by another session"))
+        return out
+
+    def exempt(self, db, way):
+        src = self.side == "src"
+        return [line + (f" - {LEAVES}" if src and leaves else "")
+                for line, leaves in self.wider(db)]
+
+    def named_only(self, got):
+        """`got` narrowed to the hop's `app_roles`, where it names them."""
+        named = _named(self.hop)
+        return [a for a in got if a in named] if named else list(got)
+
+
+# PostgreSQL's wire: CockroachDB and Aurora DSQL keep `information_schema`'s
+# table privileges and take PostgreSQL's GRANT and REVOKE. An owner of a
+# table writes it whatever is revoked, and so does a role of the server's
+# own (CockroachDB's admin): named. CockroachDB ends a session by its id
+# and lists every open transaction to its admin, so it freezes a source
+# too; DSQL lets no session end another's or see its transactions, and
+# keeps a target only.
+
+class PgWireHold(_Grants):
+    WAY = "pgw_grants"
+    SAID = ("the application's roles' write grants revoked, their"
+            " sessions ended where the server lets migkit")
+    SOURCE = True
+    SYSTEM = ("pg_catalog", "information_schema", "crdb_internal",
+              "pg_extension", "sys")
+
+    def mine(self, db):
+        return str(self.rows(db, "select current_user")[0][0])
+
+    def privileges(self, db):
+        from .engines.dbapi import MARK
+        marks = ", ".join([MARK] * len(self.SYSTEM))
+        return self.rows(
+            db, "select grantee, table_schema, table_name, privilege_type,"
+                " is_grantable from information_schema.table_privileges"
+                " where table_catalog = current_database() and table_schema"
+                f" not in ({marks}) and privilege_type in ('INSERT',"
+                " 'UPDATE', 'DELETE', 'ALL') order by 1, 2, 3, 4",
+            self.SYSTEM)
+
+    def owners(self, db):
+        from .engines.dbapi import MARK
+        marks = ", ".join([MARK] * len(self.SYSTEM))
+        return {(s, t): o for s, t, o in self.rows(
+            db, "select schemaname, tablename, tableowner from pg_tables"
+                f" where schemaname not in ({marks})", self.SYSTEM)}
+
+    def servers(self, db):
+        """The roles of the server's own that write everything here: its
+        superusers, and CockroachDB's admin and root."""
+        own = {"admin", "root"} if self.kind == "cockroachdb" else set()
+        try:
+            return own | {str(r[0]) for r in self.rows(
+                db, "select rolname from pg_roles where rolsuper")}
+        except Exception:  # noqa: BLE001 - a catalogue without the column
+            return own
+
+    def member(self, db, me, role):
+        from .engines.dbapi import MARK
+        try:
+            got = self.rows(db, f"select pg_has_role({MARK}, {MARK},"
+                                " 'member')", (me, role))
+            return bool(got and got[0][0])
+        except Exception:  # noqa: BLE001 - asked as it can be
+            return False
+
+    def accounts(self, db):
+        me = self.mine(db)
+        owners = self.owners(db)
+        skip = {me, "PUBLIC", "public"} | self.servers(db)
+        got = sorted({g for g, s, t, _, _ in self.privileges(db)
+                      if g not in skip and owners.get((s, t)) != g
+                      and not self.member(db, me, g)})
+        return self.named_only(got)
+
+    def grants(self, db, who):
+        return [[s, t, p, str(gr).upper() == "YES"]
+                for g, s, t, p, gr in self.privileges(db) if g == who]
+
+    def take(self, db, who, grant):
+        s, t, p, _ = grant
+        return [f"revoke {p.lower()} on table {_q(s)}.{_q(t)} from {_q(who)}"]
+
+    def give(self, db, who, grant):
+        s, t, p, opt = grant
+        return [f"grant {p.lower()} on table {_q(s)}.{_q(t)} to {_q(who)}"
+                + (" with grant option" if opt else "")]
+
+    def said(self, grant):
+        return f"{grant[0]}.{grant[1]} ({grant[2].lower()})"
+
+    def end(self, db, who):
+        if self.kind != "cockroachdb":
+            return 0
+        from .engines.dbapi import MARK
+        ids = [r[0] for r in self.rows(
+            db, "select session_id from crdb_internal.cluster_sessions"
+                f" where user_name = {MARK} and session_id <> (select"
+                " session_id from [show session_id])", (who,))]
+        n = 0
+        for i in ids:
+            try:
+                self.run(db, f"cancel session {_lit(i)}")
+                n += 1
+            except Exception:  # noqa: BLE001 - it ended on its own
+                pass
+        return n
+
+    def wider(self, db):
+        me = self.mine(db)
+        owners = self.owners(db)
+        servers = self.servers(db)
+        out = [(f"{o} owns {s}.{t}: an owner writes whatever is revoked",
+                True) for (s, t), o in sorted(owners.items())
+               if o != me and o not in servers][:5]
+        out += [(f"{r} is the server's own: nothing short of stopping it"
+                 " keeps it from writing", False)
+                for r in sorted(servers) if r != me]
+        privs = self.privileges(db)
+        if any(g in ("PUBLIC", "public") for g, *_ in privs):
+            out.append(("PUBLIC may write tables here, and migkit's own role"
+                        " is one of PUBLIC: named, not taken", True))
+        out += [(f"{g} writes here, and migkit's own role is a member of it:"
+                 " it is not taken", True)
+                for g in sorted({g for g, *_ in privs})
+                if g not in servers | {me, "PUBLIC", "public"}
+                and self.member(db, me, g)]
+        return out
+
+    # a source's freeze, CockroachDB's: every session of the accounts held
+    # cancelled, and every open transaction of theirs, and a prepared one,
+    # read back from the cluster's own tables, which show its admin all
+    def admin(self, db):
+        got = self.rows(db, "select pg_has_role(current_user, 'admin',"
+                            " 'member')")
+        return bool(got and got[0][0])
+
+    def may_end(self, db):
+        return self.kind == "cockroachdb" and self.admin(db)
+
+    def may_see(self, db):
+        return self.kind == "cockroachdb" and self.admin(db)
+
+    def clock(self, db):
+        return str(self.rows(db, "select now()::text")[0][0])
+
+    def left(self, db, who, at):
+        from .engines.dbapi import MARK
+        if not who:
+            return (True, "no session of the application's to end")
+        n = int(self.rows(
+            db, "select count(*) from crdb_internal.cluster_sessions where"
+                f" user_name in ({', '.join([MARK] * len(who))}) and"
+                f" session_start < {MARK}::timestamptz",
+            (*who, at))[0][0])
+        return (n == 0, f"{n} sessions of the application's roles left from"
+                        " before the freeze")
+
+    def open(self, db, older_than):
+        from .engines.dbapi import MARK
+        who = self.holders(db)
+        out = []
+        try:
+            out += [f"prepared transaction {g}" for (g,) in self.rows(
+                db, "select gid from pg_prepared_xacts")]
+        except Exception:  # noqa: BLE001 - a version that prepares none
+            pass
+        if not who:
+            return out
+        age = "" if older_than is None else \
+            f" and t.start < now() - interval '{float(older_than)} seconds'"
+        got = self.rows(
+            db, "select s.user_name, t.id, extract(epoch from now() -"
+                " t.start)::int from crdb_internal.cluster_transactions t"
+                " join crdb_internal.cluster_sessions s on s.session_id ="
+                f" t.session_id where s.user_name in"
+                f" ({', '.join([MARK] * len(who))})" + age, tuple(who))
+        return out + [f"transaction {u} {i}, open {s}s" for u, i, s in got]
+
+
+# ClickHouse
+# Each of the application's users and the roles they hold but migkit's own
+# account does not loses the right to insert, update, delete and truncate
+# in the database: one revoke on `db.*`, which takes the database's and its
+# tables' grants and, against a grant on every database, leaves a partial
+# revoke - recorded first, given back exactly, a pre-existing partial
+# revoke left as it was. A user still able to write after that - through a
+# role migkit's own holds - is made read-only (`readonly`, which it cannot
+# lift itself), for every database: said. Its running queries are killed.
+# A user kept in the server's configuration files is not changed by an
+# access statement: named. On a source, what is held open is the writes
+# running and the mutations not yet done - a mutation applies after the
+# statement that asked for it has returned, so one queued before the
+# freeze would change rows after it: read back, never killed (killing one
+# loses the change it was asked for).
+
+_CH_WRITE = ("INSERT", "ALTER UPDATE", "ALTER DELETE", "TRUNCATE")
+#: the access types that cover each write, its own among them
+_CH_COVER = {"INSERT": ("INSERT", "ALL"),
+             "ALTER UPDATE": ("ALTER UPDATE", "ALTER TABLE", "ALTER", "ALL"),
+             "ALTER DELETE": ("ALTER DELETE", "ALTER TABLE", "ALTER", "ALL"),
+             "TRUNCATE": ("TRUNCATE", "ALL")}
+#: where a user is kept that an access statement may change
+_CH_CHANGEABLE = ("local_directory", "replicated", "memory")
+#: the kinds of query that write
+_CH_WRITING = ("Insert", "Alter", "Delete")
+
+
+def _ch_lit(text):
+    return "'" + str(text).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+class ClickHouseHold(_Grants):
+    WAY = "ch_grants"
+    SAID = ("the application's users' and roles' writes in the database"
+            " revoked, a user still writing through a role of migkit's made"
+            " read-only, its queries killed")
+    SOURCE = True
+    ENDS = "their running queries killed"
+
+    def q(self, name):
+        return self.eng._q(name)
+
+    def rows(self, db, sql, args=()):
+        return self.eng._rows(self.side, None, sql, dict(args or {}))
+
+    def run(self, db, *stmts):
+        client = self.eng._client(self.side)
+        try:
+            for s in stmts:
+                client.command(s)
+        finally:
+            client.close()
+
+    def mine(self):
+        return self.me or "default"
+
+    def held_roles(self, who):
+        """Every role `who` holds, through another role too."""
+        edges = self.rows(None, "select user_name, role_name,"
+                                " granted_role_name from system.role_grants")
+        out, todo = set(), {who}
+        while todo:
+            n = todo.pop()
+            for u, r, g in edges:
+                if n in (u, r) and g not in out:
+                    out.add(g)
+                    todo.add(g)
+        return out
+
+    def users(self):
+        return {str(n): str(s) for n, s in self.rows(
+            None, "select name, storage from system.users")}
+
+    def accounts(self, db):
+        users = self.users()
+        me = self.mine()
+        ours = self.held_roles(me)
+        app = [u for u, where in users.items()
+               if u != me and where in _CH_CHANGEABLE]
+        app = self.named_only(app)
+        roles = sorted({r for u in app for r in self.held_roles(u)} - ours)
+        # the roles first: a user that writes through one is held by its
+        # revoke, and made read-only only where a role of migkit's own
+        # leaves it writing
+        return roles + sorted(app)
+
+    def grants(self, db, who):
+        types = sorted({t for c in _CH_COVER.values() for t in c})
+        got = self.rows(
+            None, "select access_type, database, table, column,"
+                  " grant_option, is_partial_revoke from system.grants where"
+                  " (user_name = {w:String} or role_name = {w:String}) and"
+                  " access_type in {t:Array(String)} and (database ="
+                  " {d:String} or database is null)",
+            {"w": who, "t": types, "d": self.name(db)})
+        partial = sorted({str(a) for a, d, t, c, o, p in got
+                          if p and d == self.name(db) and t is None})
+        return [[str(a), d, t, c, bool(o), partial]
+                for a, d, t, c, o, p in got if not p]
+
+    def covered(self, access):
+        return [w for w in _CH_WRITE if access in _CH_COVER[w]]
+
+    def scope(self, db, grant):
+        _, d, t, c, _, _ = grant
+        where = f"{self.q(self.name(db))}." + (self.q(t) if t else "*")
+        return where, f"({self.q(c)})" if c else ""
+
+    def take(self, db, who, grant):
+        where, col = self.scope(db, grant)
+        writes = self.covered(grant[0])
+        return [f"revoke {', '.join(w + col for w in writes)} on {where}"
+                f" from {self.q(who)}"] if writes else []
+
+    def give(self, db, who, grant):
+        access, d, t, c, opt, partial = grant
+        where, col = self.scope(db, grant)
+        if d is None:
+            # a grant on every database: the partial revoke this database
+            # was given is taken off, one there before left as it was
+            writes = [w for w in self.covered(access)
+                      if not any(p in _CH_COVER[w] for p in partial)]
+            return [f"grant {', '.join(writes)} on {where} to"
+                    f" {self.q(who)}" + (" with grant option" if opt
+                                         else "")] if writes else []
+        return [f"grant {access}{col} on {where} to {self.q(who)}"
+                + (" with grant option" if opt else "")]
+
+    def still(self, db, who):
+        if who in self.users() and self.read_only(who):
+            return []
+        name = self.name(db)
+        holders = [who] + sorted(self.held_roles(who))
+        types = sorted({t for c in _CH_COVER.values() for t in c})
+        got = self.rows(
+            None, "select user_name, role_name, access_type, database,"
+                  " table, is_partial_revoke from system.grants where"
+                  " (user_name in {h:Array(String)} or role_name in"
+                  " {h:Array(String)}) and access_type in {t:Array(String)}"
+                  " and (database = {d:String} or database is null)",
+            {"h": holders, "t": types, "d": name})
+        left = []
+        for w in _CH_WRITE:
+            for h in holders:
+                mine = [r for r in got if h in (r[0], r[1])
+                        and r[2] in _CH_COVER[w]]
+                here = [r for r in mine if not r[5] and r[3] == name]
+                off = [r for r in mine if r[5] and r[3] == name
+                       and r[4] is None]
+                every = [r for r in mine if not r[5] and r[3] is None]
+                if here or (every and not off):
+                    left.append(f"{w.lower()} ({h})")
+                    break
+        return left
+
+    def read_only(self, who):
+        got = self.rows(None, "select value from"
+                              " system.settings_profile_elements where"
+                              " user_name = {w:String} and setting_name ="
+                              " 'readonly'", {"w": who})
+        return bool(got) and str(got[0][0]) not in ("0", "", "None")
+
+    def more(self, db, who, entry, save):
+        if who not in self.users() or not self.still(db, who):
+            return ""
+        if "readonly" not in entry:
+            got = self.rows(None, "select value from"
+                                  " system.settings_profile_elements where"
+                                  " user_name = {w:String} and setting_name"
+                                  " = 'readonly'", {"w": who})
+            entry["readonly"] = str(got[0][0]) if got else None
+            save()
+        self.run(db, f"alter user {self.q(who)} "
+                     + ("modify" if entry["readonly"] is not None else "add")
+                     + " settings readonly = 1")
+        return ("still able to write through a role migkit's account holds"
+                " too, so it is read-only - on every database")
+
+    def less(self, db, who, entry):
+        if "readonly" not in entry:
+            return
+        was = entry["readonly"]
+        self.run(db, f"alter user {self.q(who)} "
+                     + (f"modify settings readonly = {int(was)}"
+                        if was is not None else "drop settings readonly"))
+
+    def end(self, db, who):
+        if who not in self.users():
+            return 0
+        got = self.rows(None, "select count() from system.processes where"
+                              " user = {w:String}", {"w": who})
+        self.run(db, f"kill query where user = {_ch_lit(who)} sync")
+        return int(got[0][0]) if got else 0
+
+    def said(self, grant):
+        return f"{grant[0].lower()} on {grant[2] or '*'}"
+
+    def wider(self, db):
+        me = self.mine()
+        out = [(f"{u} is kept in the server's configuration files, which an"
+                " access statement does not change", True)
+               for u, where in sorted(self.users().items())
+               if u != me and where not in _CH_CHANGEABLE
+               and self.still(db, u)]
+        for r in sorted(self.held_roles(me)):
+            if self.still(db, r):
+                out.append((f"the role {r} writes here and migkit's own"
+                            " account holds it: it is not taken", True))
+        return out
+
+    def may_end(self, db):
+        got = self.rows(None, "select count() from system.grants where"
+                              " (user_name = currentUser() or role_name in"
+                              " (select role_name from system.current_roles))"
+                              " and access_type in ('KILL QUERY', 'ALL') and"
+                              " is_partial_revoke = 0")
+        return bool(got) and int(got[0][0]) > 0
+
+    def may_see(self, db):
+        return _tried(lambda: self.rows(None, "select count() from"
+                                              " system.mutations"))
+
+    def left(self, db, who, at):
+        if not who:
+            return (True, "no session of the application's to end")
+        got = self.rows(None, "select count() from system.processes where"
+                              " user in {w:Array(String)} and query_kind in"
+                              " {k:Array(String)}",
+                        {"w": who, "k": list(_CH_WRITING)})
+        n = int(got[0][0]) if got else 0
+        return (n == 0, f"{n} writes of the application's users running")
+
+    def open(self, db, older_than):
+        name = self.name(db)
+        out = [f"mutation {m} on {t}, not done: {str(c)[:60]}"
+               for t, m, c in self.rows(
+                   None, "select table, mutation_id, command from"
+                         " system.mutations where database = {d:String} and"
+                         " not is_done", {"d": name})]
+        age = "" if older_than is None else \
+            f" and elapsed > {float(older_than)}"
+        out += [f"write {q} of {u}, running {e:.0f}s"
+                for u, q, e in self.rows(
+                    None, "select user, query_id, elapsed from"
+                          " system.processes where user <> currentUser() and"
+                          " query_kind in {k:Array(String)}" + age,
+                    {"k": list(_CH_WRITING)})]
+        return out
+
+
+# Oracle
+# A schema's tables are written by their owner, and by every account a
+# grant names: on a table or a view, and on a procedure, function or
+# package of the owner's that runs with its rights (definer's rights) -
+# what a revoke on the tables alone leaves. The grants the owner made are
+# revoked, recorded first, granted back exactly; a grant its grantee
+# passed on to others is left, and named - revoking it would take theirs
+# too. The owner itself, where it is not migkit's own account, is locked
+# and its sessions killed: nothing revoked keeps an owner from its own
+# tables, and a lock reaches only sessions that start after it. A system
+# privilege (INSERT ANY TABLE and the like) reaches every schema: named.
+# On a source, every session of the accounts held is killed, which rolls
+# back what each held open, and the transactions still open
+# (`v$transaction`) and in doubt (`dba_2pc_pending`) are read back.
+
+class OracleHold(_Grants):
+    WAY = "ora_grants"
+    SAID = ("the grants on the schema's tables and on the owner's code"
+            " that runs with its rights revoked from the application's"
+            " accounts, the schema's owner locked, their sessions killed")
+    SOURCE = True
+
+    def owner(self, db):
+        return self.eng._owner(self.side, db)
+
+    def mine(self, db):
+        return str(self.rows(db, "select user from dual")[0][0])
+
+    def ours(self, db):
+        """Roles migkit's own session holds, through others too."""
+        return {str(r[0]) for r in self.rows(db, "select role from"
+                                                 " session_roles")}
+
+    def privileges(self, db):
+        """[(grantee, object, privilege, grantable, grantor)] of the
+        writes into the schema."""
+        from .engines.dbapi import MARK
+        return self.rows(
+            db, "select grantee, table_name, privilege, grantable, grantor"
+                f" from all_tab_privs where table_schema = {MARK} and"
+                " ((privilege in ('INSERT', 'UPDATE', 'DELETE') and type in"
+                " ('TABLE', 'VIEW')) or (privilege = 'EXECUTE' and type in"
+                " ('PROCEDURE', 'FUNCTION', 'PACKAGE') and table_name in"
+                " (select object_name from all_procedures where owner ="
+                f" {MARK} and authid = 'DEFINER'))) order by 1, 2, 3",
+            (self.owner(db), self.owner(db)))
+
+    def maintained(self, db):
+        try:
+            return {str(r[0]) for r in self.rows(
+                db, "select username from all_users where oracle_maintained"
+                    " = 'Y'")}
+        except Exception:  # noqa: BLE001 - before 12c: by name
+            return {"SYS", "SYSTEM"}
+
+    def passed_on(self, db, who):
+        return [r for r in self.privileges(db) if r[4] == who]
+
+    def accounts(self, db):
+        owner, me = self.owner(db), self.mine(db)
+        skip = {me, "PUBLIC"} | self.ours(db) | self.maintained(db)
+        got = sorted({str(g) for g, t, p, gr, by in self.privileges(db)
+                      if g not in skip and by == owner
+                      and not self.passed_on(db, g)})
+        if owner != me and owner not in skip:
+            got = sorted(set(got) | {owner})
+        return self.named_only(got)
+
+    def grants(self, db, who):
+        owner = self.owner(db)
+        return [[t, p, gr == "YES"] for g, t, p, gr, by
+                in self.privileges(db) if g == who and by == owner]
+
+    def take(self, db, who, grant):
+        t, p, _ = grant
+        return [f"revoke {p.lower()} on {_q(self.owner(db))}.{_q(t)} from"
+                f" {_q(who)}"]
+
+    def give(self, db, who, grant):
+        t, p, opt = grant
+        return [f"grant {p.lower()} on {_q(self.owner(db))}.{_q(t)} to"
+                f" {_q(who)}" + (" with grant option" if opt else "")]
+
+    def said(self, grant):
+        return f"{grant[0]} ({grant[1].lower()})"
+
+    def status(self, db, who):
+        """The account's state as the server keeps it (OPEN, LOCKED, ...),
+        or None where migkit's account may not read it."""
+        from .engines.dbapi import MARK
+        try:
+            got = self.rows(db, "select account_status from dba_users where"
+                                f" username = {MARK}", (who,))
+        except Exception:  # noqa: BLE001 - not readable by migkit's account
+            return None
+        return str(got[0][0]) if got else None
+
+    def more(self, db, who, entry, save):
+        if who != self.owner(db):
+            return ""
+        if "status" not in entry:
+            was = self.status(db, who)
+            if was is None:
+                # never locked where what to give back is not known
+                return ("the schema's owner: its account's state could not"
+                        " be read, so it is not locked - as the owner it"
+                        " still writes")
+            entry["status"] = was
+            save()
+        try:
+            self.run(db, f"alter user {_q(who)} account lock")
+        except Exception as e:  # noqa: BLE001 - said, and read back
+            return ("the schema's owner: it could not be locked ("
+                    + (str(e).strip().splitlines() or [""])[0][:120]
+                    + ") - as the owner it still writes")
+        return "the schema's owner, locked: nothing revoked keeps an owner" \
+               " from its own tables"
+
+    def less(self, db, who, entry):
+        if "status" in entry and "LOCKED" not in str(entry["status"] or ""):
+            self.run(db, f"alter user {_q(who)} account unlock")
+
+    def end(self, db, who):
+        from .engines.dbapi import MARK
+        try:
+            got = self.rows(db, "select sid, serial# from v$session where"
+                                f" username = {MARK}", (who,))
+        except Exception:  # noqa: BLE001 - not readable by migkit's account
+            return 0
+        n = 0
+        for sid, serial in got:
+            try:
+                self.run(db, f"alter system kill session '{int(sid)},"
+                             f"{int(serial)}' immediate")
+                n += 1
+            except Exception:  # noqa: BLE001 - it ended on its own
+                pass
+        return n
+
+    def still(self, db, who):
+        if who == self.owner(db):
+            from .engines.dbapi import MARK
+            status = self.status(db, who)
+            if "LOCKED" not in str(status or ""):
+                return ["its own tables, as their owner (not locked)"]
+            try:
+                live = self.rows(db, "select count(*) from v$session where"
+                                     f" username = {MARK}", (who,))
+            except Exception:  # noqa: BLE001 - not readable: not "none"
+                return ["through any session it held open: they could not"
+                        " be read"]
+            n = int(live[0][0]) if live else 0
+            return [f"through {n} sessions open from before"] if n else []
+        return [self.said(g) for g in self.grants(db, who)]
+
+    def wider(self, db):
+        from .engines.dbapi import MARK
+        owner, me = self.owner(db), self.mine(db)
+        out = []
+        if owner == me:
+            out.append((f"{owner} owns the schema's tables and is the account"
+                        " migkit writes with: an application signing in as"
+                        " it is not held", True))
+        privs = self.privileges(db)
+        if any(g == "PUBLIC" for g, *_ in privs):
+            out.append(("PUBLIC may write the schema, and migkit's own account"
+                        " is one of PUBLIC: named, not taken", True))
+        passed = sorted({by for g, t, p, gr, by in privs if by != owner})
+        out += [(f"{who} granted its rights here on to others: revoking them"
+                 " would take theirs too, so they are left", True)
+                for who in passed]
+        ours = self.ours(db)
+        out += [(f"the role {g} writes here and migkit's own session holds"
+                 " it: it is not taken", True)
+                for g in sorted({g for g, *_ in privs} & ours)]
+        try:
+            anys = sorted({str(r[0]) for r in self.rows(
+                db, "select grantee from dba_sys_privs where privilege in"
+                    " ('INSERT ANY TABLE', 'UPDATE ANY TABLE', 'DELETE ANY"
+                    f" TABLE') and grantee <> {MARK}", (me,))})
+        except Exception:  # noqa: BLE001 - not readable by migkit's account
+            anys = []
+        out += [(f"{g} writes every schema's tables (a system privilege)",
+                 False) for g in anys if g not in self.maintained(db)]
+        return out
+
+    def may_end(self, db):
+        got = self.rows(db, "select count(*) from session_privs where"
+                            " privilege = 'ALTER SYSTEM'")
+        return bool(got) and int(got[0][0]) > 0
+
+    def may_see(self, db):
+        return all(_tried(lambda q=q: self.rows(db, q)) for q in (
+            "select count(*) from v$session",
+            "select count(*) from v$transaction",
+            "select count(*) from dba_2pc_pending"))
+
+    def clock(self, db):
+        return str(self.rows(db, "select to_char(sysdate, 'YYYY-MM-DD"
+                                 " HH24:MI:SS') from dual")[0][0])
+
+    def left(self, db, who, at):
+        from .engines.dbapi import MARK
+        if not who:
+            return (True, "no session of the application's to end")
+        n = int(self.rows(
+            db, "select count(*) from v$session where username in"
+                f" ({', '.join([MARK] * len(who))}) and logon_time <"
+                f" to_date({MARK}, 'YYYY-MM-DD HH24:MI:SS')",
+            (*who, at))[0][0])
+        return (n == 0, f"{n} sessions of the application's accounts left"
+                        " from before the freeze")
+
+    def open(self, db, older_than):
+        from .engines.dbapi import MARK
+        out = [f"prepared transaction {t} ({s})" for t, s in self.rows(
+            db, "select local_tran_id, state from dba_2pc_pending")]
+        age = "" if older_than is None else \
+            f" and t.start_date < sysdate - {float(older_than)} / 86400"
+        got = self.rows(
+            db, "select s.username, s.sid, round((sysdate - t.start_date) *"
+                " 86400) from v$transaction t join v$session s on s.taddr ="
+                f" t.addr where s.username <> {MARK}" + age,
+            (self.mine(db),))
+        return out + [f"write transaction {u} session {i}, open {s}s"
+                      for u, i, s in got]
+
+
+# Db2 for Linux, UNIX and Windows; for z/OS and for i below, with their own
+# catalogues. Table privileges revoked from the grantee - a user, a group
+# or a role - and granted back with the option they had; CONTROL, which
+# holds them all, too. On Linux, UNIX and Windows the packages whose
+# static SQL touches the schema's tables and the schema's routines are
+# taken as well: static SQL runs with its package's owner's rights, which
+# a revoke from the user does not reach - EXECUTE on them is. PUBLIC is
+# taken only where migkit's own account writes without it (it owns every
+# table, or holds DATAACCESS); else named. On a source the application's
+# connections are forced off, which rolls back their units of work, and
+# the units of work still open that wrote are read back.
+
+class Db2Hold(_Grants):
+    WAY = "db2_grants"
+    SAID = ("the application's table privileges revoked, CONTROL among"
+            " them, and EXECUTE on the packages and routines that write the"
+            " schema, their connections forced off where migkit's account"
+            " may")
+    SOURCE = True
+    PRIVS = (("CONTROL", "controlauth"), ("INSERT", "insertauth"),
+             ("UPDATE", "updateauth"), ("DELETE", "deleteauth"))
+    KINDS = {"U": "user", "G": "group", "R": "role"}
+    ROUTINES = {"P": "procedure", "F": "function"}
+
+    def schema(self, db):
+        return self.eng._owner(self.side, db)
+
+    def mine(self, db):
+        return str(self.rows(db, "select current user from"
+                                 " sysibm.sysdummy1")[0][0]).strip()
+
+    def ours(self, db):
+        from .engines.dbapi import MARK
+        try:
+            return {str(r[0]).strip() for r in self.rows(
+                db, "select rolename from syscat.roleauth where grantee ="
+                    f" {MARK}", (self.mine(db),))}
+        except Exception:  # noqa: BLE001 - a catalogue without roles
+            return set()
+
+    def privileges(self, db):
+        """[(grantee, its kind, object kind, object, privilege, Y or G,
+        a routine's kind)]."""
+        from .engines.dbapi import MARK
+        schema = self.schema(db)
+        cols = ", ".join(c for _, c in self.PRIVS)
+        out = []
+        for g, kind, t, *flags in self.rows(
+                db, f"select grantee, granteetype, tabname, {cols} from"
+                    f" syscat.tabauth where tabschema = {MARK}", (schema,)):
+            out += [(str(g).strip(), str(kind).strip(), "TABLE",
+                     str(t).strip(), p, str(f).strip(), "")
+                    for (p, _), f in zip(self.PRIVS, flags)
+                    if str(f).strip() in ("Y", "G")]
+        for g, kind, ps, pn, f in self.rows(
+                db, "select a.grantee, a.granteetype, a.pkgschema,"
+                    " a.pkgname, a.executeauth from syscat.packageauth a"
+                    " where a.executeauth in ('Y', 'G') and exists (select 1"
+                    " from syscat.packagedep d where d.pkgschema ="
+                    " a.pkgschema and d.pkgname = a.pkgname and d.btype in"
+                    f" ('T', 'V') and d.bschema = {MARK})", (schema,)):
+            out.append((str(g).strip(), str(kind).strip(), "PACKAGE",
+                        f"{str(ps).strip()}.{str(pn).strip()}", "EXECUTE",
+                        str(f).strip(), ""))
+        for g, kind, rn, f, rt in self.rows(
+                db, "select a.grantee, a.granteetype, a.specificname,"
+                    " a.executeauth, a.routinetype from syscat.routineauth a"
+                    f" where a.schema = {MARK} and a.specificname is not null"
+                    " and a.executeauth in ('Y', 'G') and a.routinetype in"
+                    " ('P', 'F')", (schema,)):
+            out.append((str(g).strip(), str(kind).strip(), "ROUTINE",
+                        str(rn).strip(), "EXECUTE", str(f).strip(),
+                        str(rt).strip()))
+        return out
+
+    def public_taken(self, db):
+        """Whether migkit's own account writes every table here without
+        PUBLIC: it owns them all, or holds DATAACCESS."""
+        from .engines.dbapi import MARK
+        me = self.mine(db)
+        got = self.rows(db, "select count(*) from syscat.tables where"
+                            f" tabschema = {MARK} and type = 'T' and owner"
+                            f" <> {MARK}", (self.schema(db), me))
+        if got and int(got[0][0]) == 0:
+            return True
+        got = self.rows(db, "select count(*) from syscat.dbauth where"
+                            f" grantee = {MARK} and dataaccessauth = 'Y'",
+                        (me,))
+        return bool(got and int(got[0][0]))
+
+    def accounts(self, db):
+        skip = {self.mine(db)} | self.ours(db)
+        if not self.public_taken(db):
+            skip.add("PUBLIC")
+        return self.named_only(sorted({p[0] for p in self.privileges(db)
+                                       if p[0] not in skip}))
+
+    def grants(self, db, who):
+        # one privilege granted by several grantors is one row each, and
+        # one revoke takes them all
+        got = {}
+        for g, kind, ok, name, p, f, rt in self.privileges(db):
+            if g == who:
+                key = (ok, name, kind, p, rt)
+                got[key] = got.get(key, False) or f == "G"
+        return [[ok, name, kind, p, opt, rt]
+                for (ok, name, kind, p, rt), opt in sorted(got.items())]
+
+    def target(self, kind, who):
+        if who == "PUBLIC":
+            return "public"
+        return f"{self.KINDS.get(kind, 'user')} {_q(who)}"
+
+    def on(self, db, grant):
+        ok, name, _, _, _, rt = grant
+        if ok == "TABLE":
+            return f"table {_q(self.schema(db))}.{_q(name)}"
+        sch, _, n = name.partition(".")
+        if ok == "PACKAGE":
+            return f"package {_q(sch)}.{_q(n)}"
+        return (f"specific {self.ROUTINES.get(rt, 'procedure')}"
+                f" {_q(self.schema(db))}.{_q(name)}")
+
+    def take(self, db, who, grant):
+        return [f"revoke {grant[3].lower()} on {self.on(db, grant)} from"
+                f" {self.target(grant[2], who)}"]
+
+    def give(self, db, who, grant):
+        p, opt = grant[3], grant[4]
+        return [f"grant {p.lower()} on {self.on(db, grant)} to"
+                f" {self.target(grant[2], who)}"
+                + (" with grant option" if opt and p != "CONTROL" else "")]
+
+    def said(self, grant):
+        return f"{grant[1]} ({grant[3].lower()})"
+
+    def end(self, db, who):
+        from .engines.dbapi import MARK
+        try:
+            handles = [int(r[0]) for r in self.rows(
+                db, "select application_handle from"
+                    " table(mon_get_connection(null, -2)) where"
+                    f" session_auth_id = {MARK} and application_handle <>"
+                    " mon_get_application_handle()", (who,))]
+            if handles:
+                self.run(db, "call sysproc.admin_cmd('force application ("
+                             + ", ".join(map(str, handles)) + ")')")
+            return len(handles)
+        except Exception:  # noqa: BLE001 - migkit's account may not
+            return 0
+
+    def wider(self, db):
+        from .engines.dbapi import MARK
+        me = self.mine(db)
+        out = []
+        privs = self.privileges(db)
+        if "PUBLIC" not in self.accounts(db) and any(
+                p[0] == "PUBLIC" for p in privs):
+            out.append(("PUBLIC may write the schema, and migkit's own"
+                        " account writes through it: named, not taken",
+                        True))
+        out += [(f"the role {r} writes here and migkit's own account holds"
+                 " it: it is not taken", True)
+                for r in sorted({p[0] for p in privs} & self.ours(db))]
+        try:
+            out += [(f"{str(g).strip()} holds DATAACCESS or DBADM: it writes"
+                     " every table", True) for (g,) in self.rows(
+                        db, "select grantee from syscat.dbauth where"
+                            " (dataaccessauth = 'Y' or dbadmauth = 'Y') and"
+                            f" grantee <> {MARK}", (me,))]
+        except Exception:  # noqa: BLE001 - not readable by migkit's account
+            pass
+        if self.side == "src":
+            out.append(("a transaction an XA manager left in doubt is not"
+                        " read here: the database's manager lists those"
+                        " (LIST INDOUBT TRANSACTIONS)", False))
+        return out
+
+    def may_end(self, db):
+        """FORCE APPLICATION is SYSADM's, SYSCTRL's or SYSMAINT's."""
+        got = self.rows(db, "select count(*) from table(sysproc"
+                            ".auth_list_authorities_for_authid(current"
+                            " user, 'U')) where authority in ('SYSADM',"
+                            " 'SYSCTRL', 'SYSMAINT') and 'Y' in (d_user,"
+                            " d_group, d_public, role_user, role_group,"
+                            " role_public)")
+        return bool(got) and int(got[0][0]) > 0
+
+    def may_see(self, db):
+        return _tried(lambda: self.rows(
+            db, "select count(*) from table(mon_get_unit_of_work(null, -2))"))
+
+    def clock(self, db):
+        return str(self.rows(db, "select varchar(current timestamp) from"
+                                 " sysibm.sysdummy1")[0][0]).strip()
+
+    def left(self, db, who, at):
+        from .engines.dbapi import MARK
+        if not who:
+            return (True, "no connection of the application's to force off")
+        n = int(self.rows(
+            db, "select count(*) from table(mon_get_connection(null, -2))"
+                f" where session_auth_id in ({', '.join([MARK] * len(who))})"
+                f" and connection_start_time < timestamp({MARK})",
+            (*who, at))[0][0])
+        return (n == 0, f"{n} connections of the application's accounts"
+                        " left from before the freeze")
+
+    def open(self, db, older_than):
+        age = "" if older_than is None else (
+            " and uow_start_time < current timestamp -"
+            f" {int(older_than)} seconds")
+        got = self.rows(
+            db, "select session_auth_id, application_handle,"
+                " timestampdiff(2, char(current timestamp - uow_start_time))"
+                " from table(mon_get_unit_of_work(null, -2)) where"
+                " uow_log_space_used > 0 and application_handle <>"
+                " mon_get_application_handle()" + age)
+        return [f"write transaction {str(u).strip()} application {h},"
+                f" open {s}s" for u, h, s in got]
+
+
+class Db2ZosHold(Db2Hold):
+    """Db2 for z/OS: `SYSIBM.SYSTABAUTH`, a grant's revoke by every
+    grantor (`BY ALL`), and no CONTROL. Its threads are ended and their
+    open work read through the subsystem's operator commands, not SQL: it
+    keeps a target, and does not freeze a source."""
+    SOURCE = False
+    PRIVS = (("INSERT", "insertauth"), ("UPDATE", "updateauth"),
+             ("DELETE", "deleteauth"))
+    KINDS = {"": "", "L": "role"}
+
+    def mine(self, db):
+        return str(self.rows(db, "select user from"
+                                 " sysibm.sysdummy1")[0][0]).strip()
+
+    def ours(self, db):
+        return set()
+
+    def privileges(self, db):
+        from .engines.dbapi import MARK
+        cols = ", ".join(c for _, c in self.PRIVS)
+        out = []
+        for g, kind, t, *flags in self.rows(
+                db, f"select grantee, granteetype, ttname, {cols} from"
+                    f" sysibm.systabauth where tcreator = {MARK} and"
+                    " granteetype in (' ', 'L')", (self.schema(db),)):
+            out += [(str(g).strip(), str(kind).strip(), "TABLE",
+                     str(t).strip(), p, str(f).strip(), "")
+                    for (p, _), f in zip(self.PRIVS, flags)
+                    if str(f).strip() in ("Y", "G")]
+        return out
+
+    def public_taken(self, db):
+        return False
+
+    def target(self, kind, who):
+        if who == "PUBLIC":
+            return "public"
+        return f"role {_q(who)}" if kind == "L" else _q(who)
+
+    def take(self, db, who, grant):
+        return [f"revoke {grant[3].lower()} on {self.on(db, grant)} from"
+                f" {self.target(grant[2], who)} by all"]
+
+    def end(self, db, who):
+        return 0
+
+    def wider(self, db):
+        out = []
+        if any(p[0] == "PUBLIC" for p in self.privileges(db)):
+            out.append(("PUBLIC may write tables here, and migkit's own"
+                        " account writes through it: named, not taken",
+                        True))
+        out.append(("an authority over the whole subsystem (SYSADM,"
+                    " DATAACCESS), and static SQL bound by another, write"
+                    " whatever is revoked from the application's account",
+                    False))
+        return out
+
+
+class Db2iHold(Db2Hold):
+    """Db2 for i: `QSYS2.SYSTABAUTH`, its privileges by name, PUBLIC's
+    default authority among them. Its jobs are ended and their pending
+    changes read through its work management, not SQL: it keeps a target,
+    and does not freeze a source."""
+    SOURCE = False
+
+    def mine(self, db):
+        return str(self.rows(db, "select current user from"
+                                 " sysibm.sysdummy1")[0][0]).strip()
+
+    def ours(self, db):
+        return set()
+
+    def privileges(self, db):
+        from .engines.dbapi import MARK
+        return [(str(g).strip(), "", "TABLE", str(t).strip(),
+                 str(p).strip(),
+                 "G" if str(gr).strip().upper() == "YES" else "Y", "")
+                for g, t, p, gr in self.rows(
+                    db, "select grantee, table_name, privilege_type,"
+                        " is_grantable from qsys2.systabauth where"
+                        f" table_schema = {MARK} and privilege_type in"
+                        " ('INSERT', 'UPDATE', 'DELETE')",
+                    (self.schema(db),))]
+
+    def public_taken(self, db):
+        from .engines.dbapi import MARK
+        got = self.rows(db, "select count(*) from qsys2.systables where"
+                            f" table_schema = {MARK} and table_type in ('T',"
+                            f" 'P') and table_owner <> {MARK}",
+                        (self.schema(db), self.mine(db)))
+        return bool(got) and int(got[0][0]) == 0
+
+    def target(self, kind, who):
+        return "public" if who == "PUBLIC" else _q(who)
+
+    def end(self, db, who):
+        return 0
+
+    def wider(self, db):
+        out = []
+        if "PUBLIC" not in self.accounts(db) and any(
+                p[0] == "PUBLIC" for p in self.privileges(db)):
+            out.append(("PUBLIC may write tables here, and migkit's own"
+                        " account writes through it: named, not taken",
+                        True))
+        out.append(("a user with *ALLOBJ, the tables' owner and a program"
+                    " that adopts its owner's authority write whatever is"
+                    " revoked", False))
+        return out
+
+
+# SAP ASE
+# Object permissions in the database (`sysprotects`: insert 195, delete
+# 196, update 197) revoked from the users and groups that hold them, and
+# EXECUTE on the procedures of the database, whose statements run with
+# their owner's rights through an ownership chain; granted back with their
+# grant option. Their sessions in the database are killed where migkit's
+# login holds sa_role. A table's owner and the database's owner write
+# whatever is revoked: named, by name. On a source, the transactions
+# still open in the database (`master..systransactions`) are read back.
+
+class AseHold(_Grants):
+    WAY = "ase_grants"
+    SAID = ("the application's insert, update, delete and execute"
+            " permissions revoked, their sessions in the database killed"
+            " where migkit's login may")
+    SOURCE = True
+    ACTIONS = {195: "insert", 196: "delete", 197: "update", 224: "execute"}
+
+    def run(self, db, *stmts):
+        conn = self.eng._connect(self.side, db)
+        try:
+            # a permission is not changed inside a transaction ASE has to
+            # hold open
+            conn.autocommit = True
+            cur = conn.cursor()
+            for s in stmts:
+                cur.execute(s)
+        finally:
+            conn.close()
+
+    def mine(self, db):
+        return str(self.rows(db, "select user_name()")[0][0])
+
+    def privileges(self, db):
+        return [(str(g), str(owner), str(t), self.ACTIONS[int(a)],
+                 int(kind) == 0) for t, owner, g, a, kind in self.rows(
+            db, "select o.name, user_name(o.uid), user_name(p.uid),"
+                " p.action, p.protecttype from sysprotects p join sysobjects"
+                " o on o.id = p.id where ((o.type = 'U' and p.action in"
+                " (195, 196, 197)) or (o.type = 'P' and p.action = 224))"
+                " and p.protecttype in (0, 1)")
+            if g is not None]
+
+    def accounts(self, db):
+        skip = {self.mine(db), "dbo", "public"}
+        return self.named_only(sorted({g for g, *_ in self.privileges(db)
+                                       if g not in skip}))
+
+    def grants(self, db, who):
+        return [[owner, t, a, opt] for g, owner, t, a, opt
+                in self.privileges(db) if g == who]
+
+    def take(self, db, who, grant):
+        owner, t, a, _ = grant
+        return [f"revoke {a} on {_q(owner)}.{_q(t)} from {_q(who)}"]
+
+    def give(self, db, who, grant):
+        owner, t, a, opt = grant
+        return [f"grant {a} on {_q(owner)}.{_q(t)} to {_q(who)}"
+                + (" with grant option" if opt else "")]
+
+    def said(self, grant):
+        return f"{grant[0]}.{grant[1]} ({grant[2]})"
+
+    def end(self, db, who):
+        from .engines.dbapi import MARK
+        try:
+            spids = [int(r[0]) for r in self.rows(
+                db, "select spid from master..sysprocesses where suid ="
+                    f" (select suid from sysusers where name = {MARK}) and"
+                    " dbid = db_id() and spid <> @@spid", (who,))]
+            for s in spids:
+                self.run(db, f"kill {s}")
+            return len(spids)
+        except Exception:  # noqa: BLE001 - migkit's login may not
+            return 0
+
+    def wider(self, db):
+        me = self.mine(db)
+        owners = sorted({str(r[0]) for r in self.rows(
+            db, "select distinct user_name(uid) from sysobjects where type"
+                " in ('U', 'P')")} - {me, "dbo"})
+        out = [(f"{o} owns tables here: an owner writes whatever is"
+                " revoked", True) for o in owners]
+        if any(g == "public" for g, *_ in self.privileges(db)):
+            out.append(("public may write tables here, and migkit's own"
+                        " login is one of public: named, not taken", True))
+        got = self.rows(db, "select suser_name(suid) from sysusers where"
+                            " name = 'dbo'")
+        dbo = str(got[0][0]) if got and got[0][0] else ""
+        if dbo and dbo != self.me:
+            out.append((f"{dbo} owns the database (dbo): it writes whatever"
+                        " is revoked", False))
+        return out
+
+    def may_end(self, db):
+        got = self.rows(db, "select proc_role('sa_role')")
+        return bool(got) and int(got[0][0] or 0) > 0
+
+    def may_see(self, db):
+        return _tried(lambda: self.rows(
+            db, "select count(*) from master..systransactions"))
+
+    def clock(self, db):
+        return str(self.rows(db, "select convert(char(8), getdate(), 112) +"
+                                 " ' ' + convert(char(8), getdate(),"
+                                 " 108)")[0][0])
+
+    def left(self, db, who, at):
+        from .engines.dbapi import MARK
+        if not who:
+            return (True, "no session of the application's to end")
+        n = int(self.rows(
+            db, "select count(*) from master..sysprocesses where suid in"
+                " (select suid from sysusers where name in"
+                f" ({', '.join([MARK] * len(who))})) and dbid = db_id() and"
+                f" loggedindatetime < convert(datetime, {MARK})",
+            (*who, at))[0][0])
+        return (n == 0, f"{n} sessions of the application's users left from"
+                        " before the freeze")
+
+    def open(self, db, older_than):
+        age = "" if older_than is None else \
+            f" and datediff(ss, starttime, getdate()) > {int(older_than)}"
+        got = self.rows(
+            db, "select spid, datediff(ss, starttime, getdate()) from"
+                " master..systransactions where dbid = db_id() and spid <>"
+                " @@spid" + age)
+        return [f"write transaction session {s}, open {n}s" for s, n in got]
+
+
+# Teradata
+# Rights on the database and its tables (`DBC.AllRightsV`: I, U, D)
+# revoked from the users that hold them, granted back with their grant
+# option. A role's rights reach every user it is granted to, migkit's own
+# perhaps, and the database's owner writes it by implicit right: named. On
+# a source every session of the users held is aborted (`AbortSessions`,
+# logged off), which rolls back what each held open, and none left from
+# before the freeze is read back.
+
+class TeradataHold(_Grants):
+    WAY = "td_grants"
+    SAID = ("the application's insert, update and delete rights on the"
+            " database and its tables revoked")
+    SOURCE = True
+    ENDS = "every session of theirs aborted"
+    RIGHTS = {"I": "insert", "U": "update", "D": "delete"}
+    SYSTEM = ("DBC", "SYSLIB", "SYSUDTLIB", "SYSSPATIAL", "SYSBAR",
+              "TD_SYSFNLIB", "TD_SYSXML", "SYSTEMFE", "SYSADMIN",
+              "CRASHDUMPS", "TDPUSER", "PUBLIC", "ALL")
+
+    def mine(self, db):
+        return str(self.rows(db, "select user")[0][0]).strip()
+
+    def privileges(self, db):
+        from .engines.dbapi import MARK
+        return [(str(u).strip(), str(t).strip(),
+                 self.RIGHTS[str(r).strip()], str(g).strip() == "Y")
+                for u, t, r, g in self.rows(
+                    db, "select UserName, TableName, AccessRight,"
+                        " GrantAuthority from DBC.AllRightsV where"
+                        f" DatabaseName = {MARK} and trim(AccessRight) in"
+                        " ('I', 'U', 'D')", (self.name(db),))]
+
+    def accounts(self, db):
+        skip = {self.mine(db).upper()} | set(self.SYSTEM)
+        return self.named_only(sorted({u for u, *_ in self.privileges(db)
+                                       if u.upper() not in skip}))
+
+    def grants(self, db, who):
+        return [[t, r, opt] for u, t, r, opt in self.privileges(db)
+                if u == who]
+
+    def scope(self, db, t):
+        return _q(self.name(db)) + ("" if t.lower() == "all"
+                                    else f".{_q(t)}")
+
+    def take(self, db, who, grant):
+        t, r, _ = grant
+        return [f"revoke {r} on {self.scope(db, t)} from {_q(who)}"]
+
+    def give(self, db, who, grant):
+        t, r, opt = grant
+        return [f"grant {r} on {self.scope(db, t)} to {_q(who)}"
+                + (" with grant option" if opt else "")]
+
+    def said(self, grant):
+        return f"{grant[0]} ({grant[1]})"
+
+    def end(self, db, who):
+        if self.side != "src":
+            return 0
+        from .engines.dbapi import MARK
+        got = self.rows(db, "select SYSLIB.AbortSessions(-1, "
+                            f"{MARK}, 0, 'Y', 'Y')", (who,))
+        return int(got[0][0] or 0) if got else 0
+
+    def wider(self, db):
+        from .engines.dbapi import MARK
+        me = self.mine(db)
+        out = []
+        try:
+            roles = sorted({str(r[0]).strip() for r in self.rows(
+                db, "select RoleName from DBC.AllRoleRightsV where"
+                    f" DatabaseName = {MARK} and trim(AccessRight) in ('I',"
+                    " 'U', 'D')", (self.name(db),))})
+        except Exception:  # noqa: BLE001 - not readable by migkit's account
+            roles = []
+        out += [(f"the role {r} writes here, for every user it is granted"
+                 " to: named, not taken", True) for r in roles]
+        got = self.rows(db, "select OwnerName from DBC.DatabasesV where"
+                            f" DatabaseName = {MARK}", (self.name(db),))
+        owner = str(got[0][0]).strip() if got else ""
+        if owner and owner.upper() not in {me.upper()} | set(self.SYSTEM):
+            out.append((f"{owner} owns the database and writes it by"
+                        " implicit right", True))
+        return out
+
+    def may_end(self, db):
+        got = self.rows(db, "select count(*) from DBC.FunctionsV where"
+                            " DatabaseName = 'SYSLIB' and FunctionName ="
+                            " 'AbortSessions'")
+        return bool(got) and int(got[0][0]) > 0
+
+    def may_see(self, db):
+        return _tried(lambda: self.rows(
+            db, "select count(*) from DBC.SessionInfoV"))
+
+    def clock(self, db):
+        d, t = self.rows(db, "select cast(current_date as char(10)),"
+                             " extract(hour from current_time) * 10000 +"
+                             " extract(minute from current_time) * 100 +"
+                             " extract(second from current_time)")[0]
+        return f"{str(d).strip()}|{float(t)}"
+
+    def left(self, db, who, at):
+        from .engines.dbapi import MARK
+        if not who:
+            return (True, "no session of the application's to abort")
+        day, _, hhmmss = str(at or "").partition("|")
+        marks = ", ".join([MARK] * len(who))
+        n = int(self.rows(
+            db, "select count(*) from DBC.SessionInfoV where UserName in"
+                f" ({marks}) and (LogonDate < cast({MARK} as date) or"
+                f" (LogonDate = cast({MARK} as date) and LogonTime <"
+                f" {MARK}))", (*who, day, day, float(hhmmss or 0)))[0][0])
+        return (n == 0, f"{n} sessions of the application's users left from"
+                        " before the freeze")
+
+
+# Amazon Redshift
+# Table privileges in the hop's schema revoked from the users, groups and
+# roles that hold them (`svv_relation_privileges`), granted back with
+# their option; a user's sessions ended. A table's owner writes whatever
+# is revoked, and a superuser writes everything: named. On a source, a
+# transaction of another user holding a lock that writes is read back.
+
+class RedshiftHold(_Grants):
+    WAY = "rs_grants"
+    SAID = ("the application's users', groups' and roles' write privileges"
+            " on the schema's tables revoked, their sessions ended")
+    SOURCE = True
+
+    def mine(self, db):
+        return str(self.rows(db, "select current_user")[0][0])
+
+    def ours(self, db):
+        from .engines.dbapi import MARK
+        try:
+            return {str(r[0]) for r in self.rows(
+                db, "select role_name from svv_user_grants where user_name"
+                    f" = {MARK}", (self.mine(db),))}
+        except Exception:  # noqa: BLE001 - a cluster without roles
+            return set()
+
+    def privileges(self, db):
+        from .engines.dbapi import MARK
+        return [(str(n), str(k), str(t), str(p), str(o).lower() in (
+            "t", "true", "1")) for t, p, n, k, o in self.rows(
+            db, "select relation_name, privilege_type, identity_name,"
+                " identity_type, admin_option from svv_relation_privileges"
+                f" where namespace_name = {MARK} and privilege_type in"
+                " ('INSERT', 'UPDATE', 'DELETE')", (self.name(db),))]
+
+    def supers(self, db):
+        return {str(r[0]) for r in self.rows(
+            db, "select usename from pg_user where usesuper")}
+
+    def accounts(self, db):
+        skip = {self.mine(db)} | self.ours(db) | self.supers(db)
+        return self.named_only(sorted({n for n, k, *_ in
+                                       self.privileges(db)
+                                       if n not in skip}))
+
+    def grants(self, db, who):
+        return [[k, t, p, opt] for n, k, t, p, opt in self.privileges(db)
+                if n == who]
+
+    def target(self, kind, who):
+        return {"group": f"group {_q(who)}", "role": f"role {_q(who)}"}.get(
+            kind, _q(who))
+
+    def take(self, db, who, grant):
+        k, t, p, _ = grant
+        return [f"revoke {p.lower()} on {_q(self.name(db))}.{_q(t)} from"
+                f" {self.target(k, who)}"]
+
+    def give(self, db, who, grant):
+        k, t, p, opt = grant
+        return [f"grant {p.lower()} on {_q(self.name(db))}.{_q(t)} to"
+                f" {self.target(k, who)}"
+                + (" with grant option" if opt and k == "user" else "")]
+
+    def said(self, grant):
+        return f"{grant[1]} ({grant[2].lower()})"
+
+    def end(self, db, who):
+        from .engines.dbapi import MARK
+        try:
+            got = self.rows(db, "select count(pg_terminate_backend(process))"
+                                f" from stv_sessions where user_name = {MARK}"
+                                " and process <> pg_backend_pid()", (who,))
+            return int(got[0][0]) if got else 0
+        except Exception:  # noqa: BLE001 - migkit's account may not
+            return 0
+
+    def wider(self, db):
+        from .engines.dbapi import MARK
+        me = self.mine(db)
+        out = [(f"{o} owns tables here: an owner writes whatever is"
+                " revoked", True) for (o,) in self.rows(
+                   db, "select distinct tableowner from pg_tables where"
+                       f" schemaname = {MARK} and tableowner <> {MARK}",
+                   (self.name(db), me))]
+        out += [(f"{s} is a superuser: nothing short of stopping it keeps it"
+                 " from writing", False) for s in sorted(self.supers(db))
+                if s != me]
+        out += [(f"the role {r} writes here and migkit's own account holds"
+                 " it: it is not taken", True)
+                for r in sorted({n for n, k, *_ in self.privileges(db)
+                                 if k == "role"} & self.ours(db))]
+        return out
+
+    def may_end(self, db):
+        # another user's session is ended, and its transactions seen, by
+        # a superuser alone
+        return self.mine(db) in self.supers(db)
+
+    def may_see(self, db):
+        return self.may_end(db)
+
+    def clock(self, db):
+        return str(self.rows(db, "select getdate()::varchar")[0][0])
+
+    def left(self, db, who, at):
+        from .engines.dbapi import MARK
+        if not who:
+            return (True, "no session of the application's to end")
+        n = int(self.rows(
+            db, "select count(*) from stv_sessions where user_name in"
+                f" ({', '.join([MARK] * len(who))}) and starttime <"
+                f" {MARK}::timestamp", (*who, at))[0][0])
+        return (n == 0, f"{n} sessions of the application's users left from"
+                        " before the freeze")
+
+    def open(self, db, older_than):
+        age = "" if older_than is None else \
+            f" and txn_start < getdate() - interval '{int(older_than)} seconds'"
+        got = self.rows(
+            db, "select distinct txn_owner, pid, datediff(s, txn_start,"
+                " getdate()) from svv_transactions where txn_owner <>"
+                " current_user and lock_mode <> 'AccessShareLock'" + age)
+        return [f"write transaction {str(u).strip()} pid {p}, open {s}s"
+                for u, p, s in got]
+
+
+# Snowflake
+# Roles hold privileges. The write privileges on the schema's tables
+# (`information_schema.table_privileges`) and the future grants that give
+# them to every table made in it are revoked from each role migkit's own
+# session does not hold, recorded first, granted back with their option.
+# A statement checks its role's privileges as it runs: there is no session
+# to end. The role that owns a table writes it whatever is revoked: named.
+# On a source, a transaction that writes the schema holds its locks until
+# it ends: the account's locks (`SHOW LOCKS IN ACCOUNT`) are what is held
+# open, and each transaction holding one on the schema is aborted.
+
+class SnowflakeHold(_Grants):
+    WAY = "sf_grants"
+    SAID = ("the write privileges on the schema's tables, and its future"
+            " grants of them, revoked from the application's roles")
+    SOURCE = True
+    ENDS = "every transaction holding the schema's tables aborted"
+    WRITE = ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
+
+    def schema(self, db):
+        return self.eng._owner(self.side, db)
+
+    def database(self):
+        return self.eng._database(self.side)
+
+    def where(self, db):
+        return f"{_q(self.database())}.{_q(self.schema(db))}"
+
+    def ours(self, db):
+        got = self.rows(db, "select current_available_roles()")
+        raw = got[0][0] if got else "[]"
+        return set(json.loads(raw) if isinstance(raw, str) else raw or [])
+
+    def privileges(self, db):
+        from .engines.dbapi import MARK
+        return [(str(g), str(t), str(p), str(gr).upper() == "YES")
+                for g, t, p, gr in self.rows(
+                    db, "select grantee, table_name, privilege_type,"
+                        f" is_grantable from {_q(self.database())}"
+                        ".information_schema.table_privileges where"
+                        f" table_schema = {MARK} and privilege_type in"
+                        " ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',"
+                        " 'OWNERSHIP')", (self.schema(db),))]
+
+    def future(self, db):
+        """[(role, privilege, grant option)] of the schema's future grants
+        on tables that write."""
+        out = []
+        for r in self.rows(db, f"show future grants in schema"
+                               f" {self.where(db)}"):
+            priv, on, to, grantee, opt = (str(r[1]), str(r[2]), str(r[4]),
+                                          str(r[5]), r[6])
+            if on.upper() == "TABLE" and to.upper() == "ROLE" and \
+                    priv.upper() in self.WRITE:
+                out.append((grantee, priv.upper(),
+                            str(opt).lower() in ("true", "1")))
+        return out
+
+    def accounts(self, db):
+        ours = self.ours(db)
+        got = {g for g, t, p, _ in self.privileges(db) if p != "OWNERSHIP"}
+        got |= {g for g, _, _ in self.future(db)}
+        return self.named_only(sorted(got - ours))
+
+    def grants(self, db, who):
+        return [["table", t, p, opt] for g, t, p, opt in self.privileges(db)
+                if g == who and p != "OWNERSHIP"] + [
+            ["future", None, p, opt] for g, p, opt in self.future(db)
+            if g == who]
+
+    def on(self, db, grant):
+        if grant[0] == "future":
+            return f"future tables in schema {self.where(db)}"
+        return f"table {self.where(db)}.{_q(grant[1])}"
+
+    def take(self, db, who, grant):
+        return [f"revoke {grant[2].lower()} on {self.on(db, grant)} from role"
+                f" {_q(who)}"]
+
+    def give(self, db, who, grant):
+        return [f"grant {grant[2].lower()} on {self.on(db, grant)} to role"
+                f" {_q(who)}" + (" with grant option" if grant[3] else "")]
+
+    def said(self, grant):
+        return ("every table made from now" if grant[0] == "future"
+                else grant[1]) + f" ({grant[2].lower()})"
+
+    def wider(self, db):
+        ours = self.ours(db)
+        privs = self.privileges(db)
+        out = [(f"the role {g} owns {t}: an owner writes whatever is"
+                " revoked", True) for g, t, p, _ in privs
+               if p == "OWNERSHIP" and g not in ours][:5]
+        out += [(f"the role {g} writes here, and migkit's own session holds"
+                 " it: it is not taken", True) for g in sorted(
+                    {g for g, t, p, _ in privs if p != "OWNERSHIP"} & ours)]
+        return out
+
+    def locks(self, db):
+        """[(transaction, its start, resource)] of the locks held on the
+        schema's tables, as the account lists them."""
+        pre = f"{self.database()}.{self.schema(db)}.".upper()
+        out = []
+        for r in self.rows(db, "show locks in account"):
+            resource, txn, began = str(r[0]), r[2], r[3]
+            if resource.upper().startswith(pre):
+                out.append((txn, began, resource))
+        return out
+
+    def may_end(self, db):
+        return _tried(lambda: self.rows(db, "show locks in account"))
+
+    def may_see(self, db):
+        return self.may_end(db)
+
+    def stop(self, db):
+        txns = sorted({str(t) for t, _, _ in self.locks(db)})
+        for t in txns:
+            self.rows(db, f"select system$abort_transaction({int(t)})")
+        return (f"{len(txns)} transactions holding the schema's tables"
+                " aborted") if txns else ""
+
+    def open(self, db, older_than):
+        return [f"write transaction {t} on {res}, since {began}"
+                for t, began, res in self.locks(db)]
+
+
+# Couchbase
+# Each local user's roles that write the hop's bucket - by name, never one
+# for every bucket - swapped for the roles that read it, the user's whole
+# list recorded first and put back whole. A role a user takes from a group,
+# a role on every bucket and an administrator's write whatever one user
+# loses: named. An open connection takes the user's roles as they now
+# are. On a source, a transaction still open (`system:transactions`) is
+# what is held open; a single write is done or not done.
+
+_CB_WRITE = ("data_writer", "bucket_full_access", "data_backup",
+             "query_insert", "query_update", "query_delete",
+             "mobile_sync_gateway", "bucket_admin")
+#: what each that reads as well is swapped for
+_CB_READ = {"data_writer": "data_reader", "bucket_full_access": "data_reader",
+            "data_backup": "data_reader", "query_update": "query_select",
+            "query_delete": "query_select"}
+_CB_WIDE = ("admin", "cluster_admin", "ro_admin", "security_admin")
+
+
+def _cb_role(r):
+    """A role as the cluster takes it back: `name[bucket:scope:coll]`."""
+    parts = [r.get(k) for k in ("bucket_name", "scope_name",
+                                "collection_name") if r.get(k)]
+    return r["role"] + (f"[{':'.join(parts)}]" if parts else "")
+
+
+class CouchbaseHold(Hold):
+    WAY = "cb_roles"
+    SAID = ("the application's users' roles that write the bucket swapped"
+            " for the ones that read it")
+    TARGET = "held"
+
+    def rungs(self):
+        from .decide import Rung
+        return (Rung(self.WAY, self.SAID, gives=frozenset(KEEP),
+                     needs=(_is("sees", "the cluster's open transactions in"
+                                " sight", "migkit's user cannot list the"
+                                " cluster's open transactions"
+                                " (system:transactions)"),),
+                     because="per user"),)
+
+    def keep_rungs(self):
+        from .decide import Rung
+        return (Rung(self.WAY, self.SAID, gives=frozenset(KEEP),
+                     because="per user"),)
+
+    def readers(self, dbs):
+        if self.side != "src":
+            return {}
+        return {"sees": _read(lambda: _tried(self.transactions))}
+
+    def bucket(self, db):
+        return self.eng._d(self.side, db)
+
+    def call(self, method, path, form=None):
+        import base64 as b64
+        import ssl
+        import urllib.parse
+        import urllib.request
+        ep = self.eng._ep(self.side)
+        tls = bool(ep.options.get("tls"))
+        port = ep.options.get("mgmt_port") or (18091 if tls else 8091)
+        data = urllib.parse.urlencode(form).encode() if form is not None \
+            else None
+        req = urllib.request.Request(
+            f"{'https' if tls else 'http'}://{ep.host}:{port}{path}",
+            data=data, method=method, headers={
+                "Authorization": "Basic " + b64.b64encode(
+                    f"{ep.user}:{ep.password}".encode()).decode(),
+                **({"Content-Type": "application/x-www-form-urlencoded"}
+                   if data is not None else {})})
+        ctx = None
+        if tls:
+            ctx = ssl.create_default_context(
+                cafile=ep.options.get("tls_ca_file") or None)
+            if ep.options.get("tls_insecure"):
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as got:
+            raw = got.read()
+        return json.loads(raw) if raw.strip() else {}
+
+    def users(self):
+        """{user: its record} of the cluster's own users but migkit's."""
+        me = self.eng._ep(self.side).user
+        got = self.call("GET", "/settings/rbac/users/local")
+        return {u["id"]: u for u in got or [] if u.get("id") != me}
+
+    @staticmethod
+    def direct(r):
+        return any((o or {}).get("type") == "user"
+                   for o in r.get("origins") or [{"type": "user"}])
+
+    def writes(self, r, bucket):
+        return r.get("role") in _CB_WRITE and r.get("bucket_name") == bucket
+
+    def hold(self, dbs, way, say):
+        for d in dbs:
+            b = self.bucket(d)
+            record = state(self.hop, d, self.side) or {
+                "db": b, "way": way, "roles": {}}
+            for uid, u in sorted(self.users().items()):
+                if _named(self.hop) and uid not in _named(self.hop):
+                    continue
+                roles = [r for r in u.get("roles") or [] if self.direct(r)]
+                todo = [r for r in roles if self.writes(r, b)]
+                if not todo or uid in record["roles"]:
+                    continue
+                # the whole user as the cluster takes it back: a PUT of a
+                # user replaces it, its groups among the rest
+                record["roles"][uid] = {"was": [_cb_role(r) for r in roles],
+                                        "name": u.get("name") or "",
+                                        "groups": list(u.get("groups")
+                                                       or [])}
+                # recorded before it is done, as everywhere here
+                _save(self.hop, d, record, self.side)
+                keep = [_cb_role(r) for r in roles if r not in todo]
+                keep += [_cb_role({**r, "role": _CB_READ[r["role"]]})
+                         for r in todo if r["role"] in _CB_READ]
+                self.call("PUT", f"/settings/rbac/users/local/{uid}",
+                          {"name": u.get("name") or "",
+                           "groups": ",".join(u.get("groups") or []),
+                           "roles": ",".join(dict.fromkeys(keep))})
+                say(f"{b}: {uid} - {len(todo)} roles that write swapped for"
+                    " the ones that read")
+            _save(self.hop, d, record, self.side)
+
+    def keep(self, db, way, say):
+        self.hold([db], way, say)
+        for line in self.exempt(db, way):
+            say(f"{db}: still able to write here: {line}")
+
+    def release(self, db, record, say):
+        for uid, entry in (record.get("roles") or {}).items():
+            self.call("PUT", f"/settings/rbac/users/local/{uid}",
+                      {"name": entry.get("name") or "",
+                       "groups": ",".join(entry.get("groups") or []),
+                       "roles": ",".join(entry.get("was") or [])})
+        say(f"{record.get('db') or db}: {len(record.get('roles') or {})}"
+            " users given back their roles as they were")
+
+    def kept(self, db, record):
+        b = self.bucket(db)
+        out = []
+        for uid, u in sorted(self.users().items()):
+            left = [_cb_role(r) for r in u.get("roles") or []
+                    if self.writes(r, b) or r.get("role") in _CB_WIDE
+                    or (r.get("role") in _CB_WRITE
+                        and r.get("bucket_name") == "*")]
+            if left:
+                out.append((False, f"{uid} still writes here"
+                                   f" ({', '.join(left[:3])})"))
+        return out or [(True, f"{len(record.get('roles') or {})} users hold"
+                              " no role that writes the bucket")]
+
+    def transactions(self):
+        """[(id, its state)] of the transactions open on the cluster."""
+        got = self.eng._cluster(self.side).query(
+            "select t.id, t.state from system:transactions as t")
+        return [(r.get("id"), r.get("state")) for r in got.rows()]
+
+    def open(self, db, older_than):
+        return [f"transaction {i} open ({s})"
+                for i, s in self.transactions()]
+
+    def held(self, db, way):
+        record = state(self.hop, db, self.side) or {"roles": {}}
+        out = self.kept(db, record)
+        work = self.open(db, None)
+        out.append((not work, "; ".join(work[:3]) if work else
+                    "no transaction open on the cluster"))
+        return out
+
+    def exempt(self, db, way):
+        b = self.bucket(db)
+        out = []
+        src = self.side == "src"
+        for uid, u in sorted(self.users().items()):
+            for r in u.get("roles") or []:
+                if r.get("role") in _CB_WIDE:
+                    out.append(f"{uid} is an administrator ({r['role']}):"
+                               " nothing short of stopping it keeps it from"
+                               " writing")
+                elif r.get("role") in _CB_WRITE and r.get("bucket_name") \
+                        == "*":
+                    out.append(f"{uid} writes every bucket ({_cb_role(r)}):"
+                               " taking it would take every bucket's"
+                               + (f" - {LEAVES}" if src else ""))
+                elif self.writes(r, b) and not self.direct(r):
+                    out.append(f"{uid} writes here through a group: the"
+                               " group's roles are not taken"
+                               + (f" - {LEAVES}" if src else ""))
+                else:
+                    continue
+                break
+        return out
+
+
+# --- targets kept by a change to their access policy, offered ----------------
+# DynamoDB's and BigQuery's writes are allowed by policies kept outside the
+# data. A change to them is offered, never assumed (as a change on the
+# source is, `sourcechange`): the dry run says it, --go at a terminal asks
+# it, `target_access: yes | no` answers it ahead; made only on yes,
+# recorded first, taken off at cutover with the rest.
+
+def _answered_yes():
+    from .decide import Need
+    return Need("an answer of yes to the change of the target's access",
+                lambda f: f["answer"] == "yes",
+                lambda f: (
+                    "the answer to the change of the target's access is no"
+                    if f["answer"] == "no" else
+                    "it needs a change to the target's access policy -"
+                    " offered, never assumed: answer it (target_access: yes"
+                    " | no), or --go at a terminal asks it"))
+
+
+# DynamoDB
+# A deny in each of the hop's tables' own resource policy: every write
+# action, for every principal but migkit's own and the service's own
+# replication, what the policy held before kept beside it and put back
+# whole. A deny in a resource policy outranks every allow an identity
+# holds. Whoever may change the table's policy can take it off: named.
+
+_DDB_WRITES = ("dynamodb:PutItem", "dynamodb:UpdateItem",
+               "dynamodb:DeleteItem", "dynamodb:BatchWriteItem",
+               "dynamodb:PartiQLInsert", "dynamodb:PartiQLUpdate",
+               "dynamodb:PartiQLDelete")
+_DDB_SID = "MigkitKeepsTheTargetFromTheApplication"
+
+
+class DynamoDBHold(Hold):
+    TARGET = "offered"
+    WAY = "ddb_policy"
+
+    def keep_rungs(self):
+        from .decide import Rung
+        return (Rung(self.WAY, "every principal's writes but migkit's"
+                               " denied in each table's own policy",
+                     gives=frozenset(KEEP),
+                     needs=(_answered_yes(), _is(
+                         "me", "migkit's own principal known", "migkit's"
+                         " own principal could not be told (sts)"), _is(
+                         "policies", "tables that keep a policy of their"
+                         " own", "the service keeps no policy on a table"
+                         " (resource policies)")),
+                     because="a deny in a table's own policy outranks every"
+                             " allow"),)
+
+    def readers(self, dbs):
+        return {"answer": lambda: answered(self.hop),
+                "me": _read(lambda: bool(self.principals())),
+                "policies": _read(lambda: self.policies(dbs))}
+
+    def client(self):
+        return self.eng._client(self.side)
+
+    def sts(self):
+        import boto3
+        ep = self.hop.source if self.side == "src" else self.hop.target
+        kw = {"region_name": ep.options.get("region") or "us-east-1"}
+        if ep.user:
+            kw.update(aws_access_key_id=ep.user,
+                      aws_secret_access_key=ep.password)
+        return boto3.client("sts", **kw)
+
+    def principals(self):
+        """The ARNs migkit's own calls are made as, as a policy's
+        `aws:PrincipalArn` names them: an assumed role by its role, under
+        any path."""
+        arn = str(self.sts().get_caller_identity()["Arn"])
+        head, _, rest = arn.partition(":assumed-role/")
+        if rest:
+            account = head.rsplit(":", 1)[-1]
+            role = rest.split("/")[0]
+            return [f"arn:aws:iam::{account}:role/{role}",
+                    f"arn:aws:iam::{account}:role/*/{role}"]
+        return [arn]
+
+    def tables(self, db):
+        """{name on the target: its ARN} of the hop's tables there now."""
+        c = self.client()
+        out = {}
+        for t in self.eng.neutral_tables(self.side, db):
+            name = self.eng._name(self.side, db, t)
+            out[name] = c.describe_table(TableName=name)["Table"]["TableArn"]
+        return out
+
+    def policy(self, arn):
+        """(the table's policy, its revision) or (None, None)."""
+        try:
+            got = self.client().get_resource_policy(ResourceArn=arn)
+        except Exception as e:  # noqa: BLE001 - classified here
+            if "PolicyNotFound" in type(e).__name__ or "PolicyNotFound" in \
+                    str(e):
+                return None, None
+            raise
+        return got.get("Policy"), got.get("RevisionId")
+
+    def policies(self, dbs):
+        for d in dbs:
+            for arn in self.tables(d).values():
+                self.policy(arn)
+                return True
+        # no table of the hop's there yet: nothing to put a deny on until
+        # the copy makes them, and the hold is taken again after it
+        return True
+
+    def statement(self, arn):
+        return {"Sid": _DDB_SID, "Effect": "Deny", "Principal": "*",
+                "Action": list(_DDB_WRITES), "Resource": arn,
+                "Condition": {
+                    "ArnNotLike": {"aws:PrincipalArn": self.principals()},
+                    "Bool": {"aws:PrincipalIsAWSService": "false"}}}
+
+    def offer(self, db):
+        try:
+            n = len(self.tables(db))
+            who = ", ".join(self.principals())
+        except Exception as e:  # noqa: BLE001 - said as it is
+            n, who = None, f"(it could not be read: {str(e)[:80]})"
+        return [
+            "the target's writes are allowed by its tables' access policies,"
+            " outside the data: keeping the application from them is a"
+            " change to those policies - offered, never assumed:",
+            f"  on each of the hop's tables ({'?' if n is None else n} there"
+            " now, and each the copy makes): a statement in the table's own"
+            " policy denying every principal but migkit's own"
+            f" ({who}) and the service's replication its writes - what the"
+            " policy held before kept and put back whole at cutover",
+            "  yes - migkit adds it and takes it off at cutover or on"
+            " rollback --apply; no - the target is left as it is, and the"
+            " move with protect_target stops before anything is copied",
+            f"  answered ahead in the hop: {ACCESS}: yes | no"]
+
+    def keep(self, db, way, say):
+        record = state(self.hop, db, self.side) or {"db": db, "way": way,
+                                                    "tables": {}}
+        c = self.client()
+        n = 0
+        for name, arn in sorted(self.tables(db).items()):
+            if name not in record["tables"]:
+                before, _ = self.policy(arn)
+                record["tables"][name] = {"arn": arn, "before": before}
+                # recorded before it is done, as everywhere here
+                _save(self.hop, db, record, self.side)
+            before, rev = self.policy(arn)
+            doc = json.loads(before) if before else {
+                "Version": "2012-10-17", "Statement": []}
+            doc["Statement"] = [s for s in doc.get("Statement") or []
+                                if s.get("Sid") != _DDB_SID] + [
+                self.statement(arn)]
+            c.put_resource_policy(ResourceArn=arn, Policy=json.dumps(doc),
+                                  ExpectedRevisionId=rev or "NO_POLICY")
+            n += 1
+        _save(self.hop, db, record, self.side)
+        say(f"{db}: every principal's writes but migkit's denied in {n}"
+            " tables' own policies")
+        for line in self.exempt(db, way):
+            say(f"{db}: still able to write here: {line}")
+
+    def release(self, db, record, say):
+        c = self.client()
+        for name, t in (record.get("tables") or {}).items():
+            if t.get("before"):
+                c.put_resource_policy(ResourceArn=t["arn"],
+                                      Policy=t["before"])
+            else:
+                try:
+                    c.delete_resource_policy(ResourceArn=t["arn"])
+                except Exception as e:  # noqa: BLE001 - gone already
+                    if "PolicyNotFound" not in type(e).__name__ and \
+                            "PolicyNotFound" not in str(e):
+                        raise
+        say(f"{db}: {len(record.get('tables') or {})} tables' policies as"
+            " they were")
+
+    def kept(self, db, record):
+        out = []
+        for name, arn in sorted(self.tables(db).items()):
+            got, _ = self.policy(arn)
+            ours = [s for s in (json.loads(got).get("Statement") or [])
+                    if s.get("Sid") == _DDB_SID] if got else []
+            out.append((bool(ours) and ours[0] == self.statement(arn),
+                        f"{name}: " + ("every principal's writes but"
+                                       " migkit's denied" if ours
+                                       else "no deny in its policy")))
+        return out or [(True, "no table of the hop's on the target yet")]
+
+    def exempt(self, db, way):
+        return ["a principal allowed to change a table's policy can take"
+                " the deny off it"]
+
+
+# BigQuery
+# A dataset's access entries: every entry that writes - WRITER, OWNER and
+# the BigQuery roles that edit or own - for anyone but migkit's own
+# account, removed, a READER put in its place where it had none, and
+# migkit's own account given a WRITER of its own where it wrote only as
+# one of the project's; recorded first, and on release exactly what was
+# taken put back and what was added taken away. A role granted on the
+# project reaches every dataset, whatever a dataset's access says: named.
+
+_BQ_WRITE = ("WRITER", "OWNER", "roles/bigquery.dataEditor",
+             "roles/bigquery.dataOwner", "roles/bigquery.admin")
+
+
+class BigQueryHold(Hold):
+    TARGET = "offered"
+    WAY = "bq_access"
+
+    def keep_rungs(self):
+        from .decide import Rung
+        return (Rung(self.WAY, "every entry that writes the dataset but"
+                               " migkit's own made one that reads",
+                     gives=frozenset(KEEP),
+                     needs=(_answered_yes(), _is(
+                         "me", "migkit's own account known", "migkit signs"
+                         " in without an account a dataset's access can"
+                         " name (a service account)")),
+                     because="per entry"),)
+
+    def readers(self, dbs):
+        return {"answer": lambda: answered(self.hop),
+                "me": _read(lambda: bool(self.mine()))}
+
+    def client(self):
+        return self.eng._client(self.side)
+
+    def mine(self):
+        """The service account migkit signs in as, or None - a machine's
+        own account before it has signed in says only "default"."""
+        creds = getattr(self.client(), "_credentials", None)
+        got = getattr(creds, "service_account_email", None)
+        return got if got and "@" in str(got) else None
+
+    def ref(self, db):
+        return f"{self.eng._database(self.side)}.{self.eng._d(self.side, db)}"
+
+    def ours(self, e):
+        me = self.mine()
+        return e.entity_id in (me, f"serviceAccount:{me}")
+
+    def writer(self, e):
+        return e.role in _BQ_WRITE and e.entity_type in (
+            "userByEmail", "groupByEmail", "domain", "specialGroup",
+            "iamMember") and not self.ours(e)
+
+    def offer(self, db):
+        return [
+            "the target's writes are allowed by its dataset's access, kept"
+            " outside the data: keeping the application from them is a"
+            " change to that access - offered, never assumed:",
+            f"  on {self.ref(db)}: every entry that writes, but migkit's own"
+            " account's, made one that reads; migkit's own account given a"
+            " writer entry of its own where it wrote as one of the"
+            " project's - all of it given back as it was at cutover",
+            "  yes - migkit changes it and gives it back at cutover or on"
+            " rollback --apply; no - the target is left as it is, and the"
+            " move with protect_target stops before anything is copied",
+            f"  answered ahead in the hop: {ACCESS}: yes | no"]
+
+    def keep(self, db, way, say):
+        from google.cloud.bigquery import AccessEntry
+        c = self.client()
+        ds = c.get_dataset(self.ref(db))
+        record = state(self.hop, db, self.side) or {
+            "db": db, "way": way, "taken": [], "added": []}
+        entries = list(ds.access_entries)
+        taken = [e for e in entries if self.writer(e)]
+        added = []
+        have = {(e.role, e.entity_type, str(e.entity_id)) for e in entries}
+        for e in taken:
+            if ("READER", e.entity_type, str(e.entity_id)) not in have:
+                added.append(AccessEntry("READER", e.entity_type,
+                                         e.entity_id))
+        me = self.mine()
+        if not any(self.ours(e) and e.role in _BQ_WRITE for e in entries):
+            added.append(AccessEntry("WRITER", "userByEmail", me))
+        record["taken"] += [e.to_api_repr() for e in taken]
+        record["added"] += [e.to_api_repr() for e in added]
+        # recorded before it is done, as everywhere here
+        _save(self.hop, db, record, self.side)
+        ds.access_entries = [e for e in entries if e not in taken] + added
+        c.update_dataset(ds, ["access_entries"])
+        say(f"{db}: {len(taken)} entries that write the dataset made ones"
+            " that read")
+        for line in self.exempt(db, way):
+            say(f"{db}: still able to write here: {line}")
+
+    def release(self, db, record, say):
+        from google.cloud.bigquery import AccessEntry
+        c = self.client()
+        ds = c.get_dataset(self.ref(db))
+        added = [AccessEntry.from_api_repr(x) for x in
+                 record.get("added") or []]
+        taken = [AccessEntry.from_api_repr(x) for x in
+                 record.get("taken") or []]
+        now = [e for e in ds.access_entries if e not in added]
+        ds.access_entries = now + [e for e in taken if e not in now]
+        c.update_dataset(ds, ["access_entries"])
+        say(f"{db}: the dataset's access as it was ({len(taken)} entries"
+            " given back)")
+
+    def kept(self, db, record):
+        ds = self.client().get_dataset(self.ref(db))
+        left = [f"{e.entity_type} {e.entity_id} ({e.role})"
+                for e in ds.access_entries if self.writer(e)]
+        return [(not left, "still writing: " + ", ".join(left[:3]) if left
+                 else "no entry of the dataset's writes but migkit's")]
+
+    def exempt(self, db, way):
+        return ["an account granted a BigQuery role that writes on the"
+                " project writes every dataset, whatever a dataset's access"
+                " says"]
+
+
 #: the hold each engine has (`Hold`); the engines not here are held by
 #: their operator, and `decide.WAYS["writes held"]` says why
 HOLDS = {"postgres": PostgresHold, "mysql": MySQLHold, "mongodb": MongoHold,
          "redis": RedisHold, "mssql": MSSQLHold, "cassandra": CassandraHold,
-         "kafka": KafkaHold, "opensearch": OpenSearchHold}
+         "kafka": KafkaHold, "opensearch": OpenSearchHold,
+         "tidb": TiDBHold, "cockroachdb": PgWireHold,
+         "clickhouse": ClickHouseHold, "oracle": OracleHold, "db2": Db2Hold,
+         "ase": AseHold, "teradata": TeradataHold, "redshift": RedshiftHold,
+         "snowflake": SnowflakeHold, "couchbase": CouchbaseHold}
 #: the sources the cutover freezes itself; any other is frozen by its
 #: operator (`freeze: operator`) and proved by migkit
 FREEZES = tuple(HOLDS)
+#: the hold each engine keeps a target by (`protect`): every source's, and
+#: those kept for targets alone; an engine not here is not kept, and
+#: `decide.WAYS["read-only target"]` says why
+KEEPS = {**HOLDS, "dsql": PgWireHold, "db2zos": Db2ZosHold,
+         "db2i": Db2iHold, "dynamodb": DynamoDBHold,
+         "bigquery": BigQueryHold}
 #: the ways whose server switch is lifted before the databases' records
 _SERVER_FIRST = ("os_cluster",)

@@ -975,13 +975,11 @@ def _doctor_hop(name, hop, raw_hop):
         except Exception:  # noqa: BLE001 - a probe never fails doctor
             pass
     for d in (hop.databases or []):
-        held = freeze.state(hop, d)
-        if held and held.get("roles"):
-            out.append(f"{_esc(name)} dst: {_esc(d)} is kept from the"
-                       " application's writes -"
-                       f" {_esc(', '.join(sorted(held['roles'])))};"
-                       " tearing the stream down at cutover, or"
-                       " rollback --apply, gives them back")
+        line = freeze.kept_line(hop, d)
+        if line:
+            out.append(f"{_esc(name)} dst: {_esc(line)}; tearing the stream"
+                       " down at cutover, or rollback --apply, gives it"
+                       " back")
     return out, failed
 
 
@@ -4098,22 +4096,38 @@ def _refused_by_a_server(e):
         "pyodbc", "redis", "kafka")
 
 
-def _protect_target(hop, eng, db, release=False):
-    """The hop's `protect_target`: the application's roles cannot write to
-    the target while migkit moves data into it, and can again once the
-    stream is torn down at cutover (or on `rollback --apply`)."""
+def _protect_target(hop, eng, db, release=False, go=True, again=False):
+    """The hop's `protect_target`: the application cannot write to the
+    target while migkit moves data into it - the way its engine allows,
+    climbed per database (`freeze.protect`) - and can again once the
+    stream is torn down at cutover (or on `rollback --apply`). Without
+    `go`, what it would do is said and nothing is changed; `again`, after
+    a copy, takes in what the copy made, where it was taken before."""
     from . import freeze
     if not (hop.options or {}).get("protect_target"):
         return
-    if not freeze.supported(hop):
-        raise SystemExit(
-            f"protect_target is set, and keeping the application from"
-            f" writing to the target is not available for {hop.engine} hops"
-            " yet - nothing has been copied. Remove the option to move"
-            " without it.")
-    for d in ([db] if db else eng.databases()):
-        (freeze.thaw if release else freeze.freeze)(
-            hop, eng, d, lambda m: console.print(f"  {m}"))
+    dbs = [db] if db else eng.databases()
+
+    def say(m):
+        console.print(f"  {_esc(m)}")
+    if not go:
+        for line in freeze.protect_plan(hop, eng, dbs):
+            say(line)
+        return
+    for d in dbs:
+        if release:
+            freeze.thaw(hop, eng, d, say)
+        elif again and freeze.state(hop, d) is None:
+            continue
+        else:
+            freeze.protect(hop, eng, d, say,
+                           ask=_ask_access if sys.stdin.isatty() else None)
+
+
+def _ask_access(question):
+    """The offer of a change to the target's access policy, answered at
+    the terminal."""
+    return click.prompt(f"  {question}", type=click.Choice(["yes", "no"]))
 
 
 def _carried_physically(hop, eng, db, mode, go):
@@ -4319,6 +4333,9 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         # where the hop asks for one, so no write of the application's
         # lands before it
         _protect_target(hop, eng, db, release=do_drop and mode == "cdc")
+    elif not go and not do_drop:
+        # what --go does to the target first, and what it would offer
+        _protect_target(hop, eng, db, go=False)
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
     if mode == "full":
@@ -4349,8 +4366,15 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
             # bulk way where `--go` would take the copier (`decide.attempt`)
             for d in dbs:
                 _bulk_or_copier(hop, eng, d, v, table, chunk, engine, go)
+            if go:
+                # what the copy made - its tables, a grant a default gave
+                # on them - taken in
+                _protect_target(hop, eng, db, again=True)
             return
-        return _move_full(hop, eng, db, table, chunk, go)
+        got = _move_full(hop, eng, db, table, chunk, go)
+        if go:
+            _protect_target(hop, eng, db, again=True)
+        return got
     has_repl = hasattr(eng, "replicate_sql")
     has_tail = hasattr(eng, "tail_apply")
     from . import twoway
@@ -4389,6 +4413,7 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
             _tail_before_copy(hop, tailer, db)
         _move_full(hop, eng, db, table, chunk, go)
         if go:
+            _protect_target(hop, eng, db, again=True)
             return _tail(hop, tailer, db, go)
         # not "then run --mode cdc": a tail started after the copy has
         # skipped what changed during it

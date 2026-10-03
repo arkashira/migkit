@@ -558,15 +558,9 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
                             f" not be read ({e})")
         out += _shape_rows(hop, eng, d, gate)
         out += _set_aside_rows(hop, d, gate)
-        if (hop.options or {}).get("protect_target"):
-            if not freeze.state(hop, d):
-                add("warn", f"{d}: protect_target is set and nothing holds"
-                            " the target: the application may have written"
-                            " there")
-        else:
-            add("warn", f"{d}: the target is not held from the"
-                        " application's writes (protect_target); the final"
-                        " check is what catches a row written there")
+        # the target's hold read back, or the writes that are not migkit's
+        # named - drift, at the gate's level
+        out += freeze.kept_rows(hop, eng, d, gate)
         out += _job_rows(hop, eng, d, conf)
         out += _counter_rows(hop, eng, d, conf, gate)
         out += _slot_rows(hop, eng, d)
