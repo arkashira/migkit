@@ -363,10 +363,15 @@ def _run_command(hop, command, timeout, say):
 
 def _pooler_conn(conf):
     import psycopg2
+
+    from .config import secret
     p = conf["pooler"]
+    # a reference (env:NAME) went to the pooler as its own text (K7)
     conn = psycopg2.connect(host=p.get("host", "127.0.0.1"),
                             port=int(p.get("port", 6432)),
-                            user=p.get("user"), password=p.get("password"),
+                            user=p.get("user"),
+                            password=secret(p.get("password"),
+                                            "cutover.pooler.password"),
                             dbname="pgbouncer", connect_timeout=5)
     conn.autocommit = True
     return conn
@@ -1832,19 +1837,16 @@ def _has_delta(hop, eng, d):
 
 def _counters(hop, eng, d, conf, rec, say):
     """The target's counters past the source's, with the undo written
-    first; `keys: apart` adds its margin (`SEQUENCE_BUFFER`, which both
-    counters' plans read)."""
+    first; `keys: apart` adds its margin (`SEQUENCE_MARGIN`, which both
+    counters' plans read), for this thread's plan only."""
+    from .engines.postgres import SEQUENCE_MARGIN
     gap = margin(conf)
-    before = os.environ.get("SEQUENCE_BUFFER")
+    token = SEQUENCE_MARGIN.set(gap) if gap else None
     try:
-        if gap:
-            os.environ["SEQUENCE_BUFFER"] = str(gap)
         plan = eng.repair_plan(d, "sequences")
     finally:
-        if before is None:
-            os.environ.pop("SEQUENCE_BUFFER", None)
-        else:
-            os.environ["SEQUENCE_BUFFER"] = before
+        if token is not None:
+            SEQUENCE_MARGIN.reset(token)
     for a in plan:
         if "REFUSED" in (a.note or ""):
             raise _Undo(f"{d}: counters - {a.note}")

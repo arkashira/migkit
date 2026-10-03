@@ -299,10 +299,11 @@ class _HopFile:
             return None
 
     def _read(self):
-        import yaml
+        from .config import read_yaml
         try:
             with open(self.path) as f:
-                raw = yaml.safe_load(f.read()) or {}
+                # a key written twice is refused, as at load (K2)
+                raw = read_yaml(f.read())
             got = (raw.get("hops") or {}).get(self.hop.name)
         except Exception:  # noqa: BLE001 - not this hop's file, then
             return None

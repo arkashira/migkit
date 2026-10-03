@@ -277,6 +277,33 @@ def test_the_server_says_it_where_the_address_does_not():
     assert got.service == "aurora-reader" and len(got.evidence) == 2
 
 
+def test_a_services_own_settings_say_it_before_its_roles():
+    """A service's roles come along with every dump of the roles, so a
+    server restored from one read as the service; the settings it defines
+    for itself do not (audit 2026-10-01, K18)."""
+    class Pg:
+        CANON_ENGINE = "postgres"
+
+        def __init__(self, rows):
+            self.rows, self.asked = rows, ""
+
+        def _psql(self, side, db, sql):
+            self.asked = sql
+            return self.rows
+    from migkit.config import Endpoint
+    ep = Endpoint(host="10.0.0.5")
+    eng = Pg("rds_superuser\x1ffalse\x1fcloudsql")
+    got = clouds.of(eng, "src", ep)
+    assert (got.cloud, got.service) == ("gcp", "cloud-sql"), got
+    assert got.evidence == ["the server (its cloudsql.* settings)"], got
+    assert "pg_settings" in eng.asked
+    got = clouds.of(Pg("\x1ffalse\x1fazure"), "src", ep)
+    assert (got.cloud, got.service) == ("azure", "flexible"), got
+    # no setting of a service's: its role still says it
+    got = clouds.of(Pg("rds_superuser\x1ffalse\x1f"), "src", ep)
+    assert got.service == "rds" and "role rds_superuser" in got.evidence[0]
+
+
 def test_a_goal_stands_for_options_and_the_hop_wins(tmp_path):
     hops = _load(tmp_path, """
         hops:

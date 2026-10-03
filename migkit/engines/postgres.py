@@ -1,3 +1,4 @@
+import contextvars
 import json
 import os
 import re
@@ -112,13 +113,24 @@ select 'extension|'||extname from pg_extension
 """
 
 
+#: the head-room one run's own counters take (a cutover's `keys: apart`),
+#: set for the thread that plans them: it went through the process's
+#: environment, which every other thread of the process read too (audit
+#: 2026-10-01, K24)
+SEQUENCE_MARGIN = contextvars.ContextVar("sequence_margin", default=None)
+
+
 def _seq_buffer():
-    """Head-room to add above the highest known id, from SEQUENCE_BUFFER.
+    """Head-room to add above the highest known id: the run's own margin
+    (`SEQUENCE_MARGIN`), else SEQUENCE_BUFFER.
 
     Zero (the default) reseeds to exactly the highest id in use, which is
     correct when the source is quiet. Anything above zero trades a gap in the
     id space for tolerance of rows that arrive a moment later.
     """
+    own = SEQUENCE_MARGIN.get()
+    if own is not None:
+        return max(0, int(own))
     try:
         n = int(os.environ.get("SEQUENCE_BUFFER", "0") or 0)
     except ValueError:

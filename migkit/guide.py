@@ -792,8 +792,9 @@ def _write(path, name, small, force, replace=False):
     else:
         new = HEADER + "hops:\n" + body
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(new)
-    tmp.chmod(0o600)
+    from . import durable
+    # 0600 from its first byte (SEC10)
+    durable.write_atomic(tmp, new)
     # the file as written must load: a guide that wrote a configuration
     # migkit then refuses has handed the operator its own mistake
     from .config import load_hops
