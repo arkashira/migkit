@@ -2656,6 +2656,12 @@ class MySQLEngine(Engine):
                         return cur.fetchall()
                 finally:
                     conn.close()
+                    # what it may have changed is read again, not
+                    # remembered: a table's shape, an account's grants
+                    for key in [k for k in self.__dict__.get(
+                            "_catalogs", {}) if k[0] == side]:
+                        self.__dict__["_catalogs"].pop(key, None)
+                    self.__dict__.get("_privs_of", {}).pop(side, None)
             return with_retry(once, label=f"mysql statement {side}",
                               writes=True)
         return with_retry(lambda: self._asked(side, sql, args, fresh, named),
