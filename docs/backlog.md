@@ -3778,6 +3778,32 @@ Done when a depth matrix generated from the code (as
 the three - a way, or "not applicable" with its reason - and each way
 has its test on that engine.
 
+**All of it (owner 2026-10-04: "complete, all of it deep, all of it
+good").** The matrix is not limited to the shapes and the three depths
+above: it enumerates *every* capability migkit has, and every engine is
+owed every one of them -
+
+1. assess and the pre-flight (every check, the managed service's own
+   limits, the closure of what is taken, the scope explained);
+2. schema and conversion (made on the target, compared, fixed, stored
+   code proved);
+3. move (every way the decision engine knows, resumable, parallel and
+   sized, large values, partitions, filtered, mapped, masked);
+4. change tail and DDL (as above);
+5. verification (every check, consistent snapshot, fence, delta,
+   second reading, the service's own check held against it);
+6. repair with exact undo;
+7. cutover (freeze, drain, counters, flip, rollback, the stream back);
+8. scope (as above), accounts, grants and objects;
+9. security (TLS verified, every sign-in form, secrets, egress);
+10. managed services of every provider (P0-CLOUDS);
+11. HA and fencing (W1), evidence, observability and the forecast.
+
+**Enforced, not hoped for:** a test reads the matrix and fails when any
+cell is "not yet" without either a backlog row naming it or a written
+"not applicable" reason - so an engine left thinner than PostgreSQL and
+MySQL is a red test, never a silent gap.
+
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
 Asked: "is the decision engine smart or still flat - I want it really
