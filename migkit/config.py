@@ -69,6 +69,95 @@ MIGKIT_OWN = ("migkit_origin", "migkit_cutover_mark")
 KEYED_ENGINES = ("redis", "kafka")
 
 
+#: engines whose unquoted names fold to one case - Oracle, Db2 and
+#: Snowflake to upper, SQL Server, ASE and Teradata compare without case -
+#: so `orders` written in a hop names the table the server calls ORDERS
+FOLDS_CASE = ("oracle", "db2", "db2i", "db2zos", "snowflake", "mssql",
+              "ase", "teradata", "sapodp")
+
+
+def name_matches(name, pattern, fold=False):
+    """Whether a dotted name is one a hop's pattern names: a shell pattern
+    read the same on every machine (`fnmatchcase` - `fnmatch` folds case
+    on some systems and not on others, so one hop took a table on one
+    machine and left it on another), without case where the engine's
+    names have none (`FOLDS_CASE`)."""
+    from fnmatch import fnmatchcase
+    name, pattern = str(name), str(pattern)
+    if fnmatchcase(name, pattern):
+        return True
+    return fold and fnmatchcase(name.casefold(), pattern.casefold())
+
+
+#: the changes a tail can carry, in the order they are said
+OPS = ("insert", "update", "delete")
+_OP_WORDS = {"i": "insert", "c": "insert", "insert": "insert",
+             "create": "insert", "u": "update", "update": "update",
+             "d": "delete", "delete": "delete"}
+
+
+def parse_ops(value):
+    """`mapping.ops`' value - a list or a comma-separated string of insert,
+    update and delete (or i, u, d) - as the set it names; SystemExit for
+    a word that is none of them."""
+    words = value if isinstance(value, (list, tuple, set, frozenset)) \
+        else str(value or "").replace(";", ",").split(",")
+    got = set()
+    for w in words:
+        w = str(w).strip().lower()
+        if not w:
+            continue
+        if w not in _OP_WORDS:
+            raise SystemExit(f"{w!r} is not a change a tail carries -"
+                             " insert, update or delete")
+        got.add(_OP_WORDS[w])
+    return frozenset(got)
+
+
+def scope_patterns(value):
+    """A hop's `include` or `exclude` as the dotted patterns every reader
+    matches: a list as written, or the nested form that reads like the
+    databases it names -
+
+        include:
+          billing: all                  # the whole database
+          logistics: [orders, parcels]  # some of its tables
+          shop:
+            public: [orders, "lines_*"] # a schema's tables
+            audit: all                  # a whole schema
+
+    one shape for every reader, so the two forms cannot be read apart."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    if not isinstance(value, dict):
+        raise SystemExit(f"{value!r}: a list of names, or databases each"
+                         " with all, a list of tables, or its schemas")
+    out = []
+
+    def walk(prefix, got):
+        if got in (True, None, "all", "*"):
+            out.append(f"{prefix}.*")
+        elif isinstance(got, str):
+            out.append(f"{prefix}.{got}")
+        elif isinstance(got, (list, tuple)):
+            out.extend(f"{prefix}.{t}" for t in got)
+        elif isinstance(got, dict):
+            for k, v in got.items():
+                walk(f"{prefix}.{k}", v)
+        else:
+            raise SystemExit(f"{prefix}: {got!r} - all, a table, a list of"
+                             " tables, or its schemas")
+    for k, v in value.items():
+        if v is False:
+            continue
+        walk(str(k), v)
+    return out
+
+
 def scoped(hop):
     """Whether the hop leaves anything out by name - an `exclude`, or an
     `include` that takes less than everything. A way that carries a whole
@@ -544,16 +633,100 @@ class Hop:
         only where the hop asks for a stream back (`reverse`,
         `topology`)."""
         import dataclasses
+        mapping = self._mapping_on_target()
         return dataclasses.replace(
             self, name=f"{self.name}-reverse", source=self.target,
             target=self.source,
             databases=[self.target_db(d) for d in (self.databases or [])],
             db_map={v: k for k, v in (self.db_map or {}).items()},
+            include=[self._on_target(p) for p in self.include or []],
+            exclude=[self._on_target(p) for p in self.exclude or []],
+            mapping=mapping,
             # never `physical`: the way back would empty the old source's
             # data directory to fill it with the new primary's pages
             options={k: v for k, v in (self.options or {}).items()
                      if k not in ("reverse", "topology", "protect_target",
                                   "physical")})
+
+    def _mapping_on_target(self):
+        """The mapping as the way back reads it: every rule keyed by the
+        table's name on the target, a rename turned round, a column renamed
+        named as the target has it; a column the way there dropped is not
+        on the target to carry back, and a row filter is asked of the
+        target's rows under their target names."""
+        mapping = dict(self.mapping or {})
+        renames = {str(k): str(v) for k, v in
+                   (mapping.get("tables") or {}).items()}
+
+        def key(k):
+            k = str(k)
+            if k in renames:
+                head = k.split(".")[0] if k.count(".") > \
+                    renames[k].count(".") else ""
+                got = renames[k]
+                return self._on_target(f"{head}.{got}") if head else got
+            return self._on_target(k)
+        out = {}
+        if renames:
+            out["tables"] = {key(k): k.split(".", k.count(".") -
+                                             renames[k].count("."))[-1]
+                             if k.count(".") > renames[k].count(".") else k
+                             for k in renames}
+        cols = {}
+        for k, rule in (mapping.get("columns") or {}).items():
+            rule = dict(rule or {})
+            ren = {str(a): str(b) for a, b in
+                   (rule.get("rename") or {}).items()}
+            back = {}
+            if rule.get("keep"):
+                back["keep"] = [ren.get(str(c), str(c))
+                                for c in rule["keep"]]
+            if ren:
+                back["rename"] = {b: a for a, b in ren.items()}
+            if back:
+                cols[key(k)] = back
+        if cols:
+            out["columns"] = cols
+        for part in ("where", "tolerance", "ops"):
+            if mapping.get(part):
+                out[part] = {key(k): v for k, v in mapping[part].items()}
+        return out
+
+    def _on_target(self, pattern):
+        """A scope pattern as the target names what it names: a leading
+        database the hop maps, written as the target's database - so the
+        way back takes what the way there took."""
+        head, dot, rest = str(pattern).partition(".")
+        if dot and head in (self.db_map or {}):
+            return f"{self.db_map[head]}.{rest}"
+        return str(pattern)
+
+    def scope_fingerprint(self):
+        """One short digest of everything that decides what the hop takes
+        and how each table is read: its databases and their target names,
+        include, exclude and the whole mapping. Kept beside every answer,
+        position and checkpoint that is only good for the scope it was
+        taken under, so one taken under another scope is never reused as
+        if it were this one's (`scope_changed`)."""
+        import hashlib
+        import json
+        got = {"databases": sorted(str(d) for d in self.databases or []),
+               "db_map": {str(k): str(v) for k, v in
+                          sorted((self.db_map or {}).items())},
+               "include": sorted(str(p) for p in self.include or []),
+               "exclude": sorted(str(p) for p in self.exclude or []),
+               "mapping": self.mapping or {}}
+        text = json.dumps(got, sort_keys=True, default=str)
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def scope_changed(self, recorded):
+        """Whether a record made under `recorded` (a fingerprint, or a dict
+        holding one under `scope_fingerprint`) was taken under another
+        scope than the hop's now. A record with none predates them and is
+        taken as it always was."""
+        if isinstance(recorded, dict):
+            recorded = recorded.get("scope_fingerprint")
+        return bool(recorded) and recorded != self.scope_fingerprint()
 
     def report_dir(self, db=""):
         d = REPORTS / self.name / db if db else REPORTS / self.name
@@ -580,7 +753,6 @@ class Hop:
         and 'oms_mkp_uat.public.*' excludes a whole schema. This protects
         target-owned tables (rows written on the target, not the source) from
         being deleted by a reconcile."""
-        from fnmatch import fnmatch
         parts = [str(p) for p in parts if p not in (None, "")]
         if parts and parts[-1] in MIGKIT_OWN:
             # migkit's own bookkeeping on a side, never the application's
@@ -593,9 +765,16 @@ class Hop:
             if bookkeeping(*parts):
                 return True
         cands = {".".join(parts[i:]) for i in range(len(parts))}
-        if any(fnmatch(c, str(pat)) for pat in self.exclude for c in cands):
+        fold = self.folds_case()
+        if any(name_matches(c, pat, fold) for pat in self.exclude
+               for c in cands):
             return True
         return not self.included(*parts)
+
+    def folds_case(self):
+        """Whether the names the hop's patterns are matched against have
+        no case (`FOLDS_CASE`)."""
+        return self._names_engine() in FOLDS_CASE
 
     def included(self, *parts):
         """Whether the hop's `include` takes this object - True where it
@@ -620,16 +799,16 @@ class Hop:
         too many."""
         if not self.include:
             return True
-        from fnmatch import fnmatch
         names = self._names(*parts)
         if not names:
             return True
         pats = [str(p) for p in self.include if str(p).strip()]
         if not pats:
             return True
+        fold = self.folds_case()
         for k in range(1, len(names) + 1):
             for ident in self._ids(*names[:k]):
-                if any(fnmatch(ident, p) for p in pats):
+                if any(name_matches(ident, p, fold) for p in pats):
                     return True
         if len(names) > 1:
             return False
@@ -639,7 +818,7 @@ class Hop:
             return True
         for p in pats:
             head, _, rest = p.partition(".")
-            if fnmatch(db, head) or p.count(".") + 1 < whole:
+            if name_matches(db, head, fold) or p.count(".") + 1 < whole:
                 return True
         return False
 
@@ -681,14 +860,14 @@ class Hop:
         `(database, table)` as the engine lists it: an entry that takes
         nothing is a table the operator believes is moved and checked,
         and nobody looks at it."""
-        from fnmatch import fnmatch
         known = set()
         for db, table in tables:
             names = self._names(db, table)
             for k in range(1, len(names) + 1):
                 known.update(self._ids(*names[:k]))
+        fold = self.folds_case()
         return [str(p) for p in self.include
-                if str(p).strip() and not any(fnmatch(i, str(p))
+                if str(p).strip() and not any(name_matches(i, p, fold)
                                               for i in known)]
 
     @staticmethod
@@ -760,6 +939,28 @@ class Hop:
             if ident in rules:
                 return str(rules[ident])
         return None
+
+    def carries(self, *parts):
+        """The changes the hop carries for this table: insert, update and
+        delete, unless its `mapping.ops` says fewer - a move told to keep
+        what the source deletes (an archive kept on the target), as DTS
+        jobs and GoldenGate's IGNOREDELETES are. Keys are names or
+        patterns (`logistics.*`, `*` for every table); the most particular
+        one that names the table wins. The tail applies only these, and
+        the check holds the table to what they leave: kept deletes let
+        the target hold more rows, never fewer or other ones."""
+        rules = (self.mapping or {}).get("ops") or {}
+        if not rules:
+            return frozenset(OPS)
+        ids = self._ids(*parts)
+        fold = self.folds_case()
+        hits = [k for k in rules
+                if any(name_matches(i, k, fold) for i in ids)]
+        if not hits:
+            return frozenset(OPS)
+        best = max(hits, key=lambda k: (sum(c not in "*?[]" for c in
+                                            str(k)), len(str(k))))
+        return parse_ops(rules[best])
 
     def tolerance(self, *parts):
         """The percentage this table's aggregates may drift by when read a
@@ -1022,8 +1223,8 @@ def build_hop(name, raw):
         source=ends["source"],
         target=ends["target"],
         databases=dbs,
-        exclude=raw.get("exclude") or [],
-        include=[str(p) for p in raw.get("include") or []],
+        exclude=scope_patterns(raw.get("exclude")),
+        include=scope_patterns(raw.get("include")),
         service=raw.get("service", ""),
         big_rows=int(raw.get("big_rows", 5_000_000)),
         slice=int(raw.get("slice", 1_000_000)),

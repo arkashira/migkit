@@ -1867,6 +1867,12 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     verdict_path, env = _verdict.write(
         hop, results, engine=eng.__class__.__name__,
         load=getattr(eng, "_last_throttle", None), coverage=coverage or None)
+    if env.get("service_check"):
+        from . import servicecheck
+        theirs = env["service_check"]
+        console.print(f"  {_esc(servicecheck.said(theirs))}")
+        for name in (theirs.get("missed") or [])[:8]:
+            console.print(f"    [red]the service missed[/red] {_esc(name)}")
     from . import notify
     notify.verdict(hop, env, lambda m: console.print(
         f"[yellow]{_esc(m)}[/yellow]"))

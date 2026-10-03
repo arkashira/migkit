@@ -150,7 +150,8 @@ def _scope_section(hop):
         return ""
     words = {"include": "takes only", "exclude": "leaves out",
              "row_filters": "rows filtered in",
-             "column_rules": "columns chosen in"}
+             "column_rules": "columns chosen in",
+             "renamed": "renamed", "changes_carried": "changes carried"}
     rows = "".join(
         f'<tr><td class="db">{words[k]}</td>'
         f'<td>{html.escape(", ".join(v[:40]))}'
@@ -158,6 +159,28 @@ def _scope_section(hop):
         for k, v in scope.items())
     return (f'<div class="card"><h2>scope (what the verdict covers)</h2>'
             f'<table><tbody>{rows}</tbody></table></div>')
+
+
+def _service_section(hop, results):
+    """Another tool's own check of this move, table by table beside
+    migkit's answers (`servicecheck`): what it missed first."""
+    from . import servicecheck
+    got = servicecheck.of(hop, results)
+    if not got:
+        return ""
+    words = {"missed": "it called the same; migkit found them different",
+             "not found": "it called different; migkit found the same",
+             "skipped": "it passed over", "unchecked": "it never checked",
+             "beyond": "migkit found beyond any table check",
+             "not in the hop": "it checked; the hop does not take",
+             "agreed": "agreed"}
+    rows = "".join(
+        f'<tr><td class="db">{html.escape(words[k])}'
+        f' ({len(got[k])})</td><td>{html.escape("; ".join(got[k][:30]))}'
+        f'{" ..." if len(got[k]) > 30 else ""}</td></tr>'
+        for k in words if got.get(k))
+    return (f'<div class="card"><h2>{html.escape(servicecheck.said(got))}'
+            f'</h2><table><tbody>{rows}</tbody></table></div>')
 
 
 #: a cell's worst answer, and what it is shown as
@@ -248,7 +271,7 @@ def render(hop, results, generated=None, decided=None):
         if hop.target.configured() else "(not configured)"
 
     objects_html = _objects_section(hop, dbs)
-    scope_html = _scope_section(hop)
+    scope_html = _scope_section(hop) + _service_section(hop, results)
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">

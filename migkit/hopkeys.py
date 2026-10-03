@@ -70,10 +70,13 @@ HOP_KEYS = {
                   "str|dict"),
     "databases": Key("the source databases to move, all of them when left"
                      " out", "list"),
-    "exclude": Key("databases, schemas or tables left alone", "list"),
+    "exclude": Key("databases, schemas or tables left alone - dotted"
+                   " names and patterns, or databases each with all, its"
+                   " tables or its schemas", "list|dict"),
     "include": Key("the only databases, schemas or tables taken - moved,"
-                   " checked and repaired - the rest left alone as if"
-                   " excluded; exclude wins where both name one", "list"),
+                   " followed, checked and repaired - the rest left alone"
+                   " as if excluded; exclude wins where both name one."
+                   " Written as exclude is", "list|dict"),
     "service": Key("the playbook `migkit advise` shows", "str"),
     "big_rows": Key("read by nothing", "int", knob="nothing"),
     "slice": Key("the rows one compared range of a large table holds",
@@ -82,10 +85,12 @@ HOP_KEYS = {
                    "int", knob="ceiling"),
     "options": Key("the hop's options", "dict"),
     "db_map": Key("source database name -> target database name", "dict"),
-    "mapping": Key("renames, column rules, row filters, and the"
-                   " percentage a table's aggregates may drift by when"
+    "mapping": Key("renames, column rules, row filters, the changes"
+                   " carried per table (ops: insert, update, delete), and"
+                   " the percentage a table's aggregates may drift by when"
                    " read a second way", "dict",
-                   subs=("tables", "columns", "where", "tolerance")),
+                   subs=("tables", "columns", "where", "tolerance",
+                         "ops")),
 }
 
 #: the keys under a hop's `options`
@@ -149,6 +154,10 @@ HOP_OPTIONS = {
                       subs=("provider", "url", "model")),
     "code_model_rounds": Key("rounds the model gets on one routine", "int",
                              ("hetero",), knob="size"),
+    "compare_with": Key("another tool's own check of this move - a Tencent"
+                        " or Alibaba DTS data check's report, AWS DMS's"
+                        " table statistics - held table by table against"
+                        " migkit's answers in the evidence", "str"),
     "create_streams": Key("create a missing stream", "bool", ("kinesis",)),
     "cutover": Key("the cutover as one timed path that freezes the source"
                    " and undoes itself (`migkit.cutover`)", "dict|bool",
@@ -1549,26 +1558,71 @@ def _two_way_pairs(hops):
     return out
 
 
+def _ops_problems(where, mapping):
+    """`mapping.ops` said wrong: not a mapping, a word that is not a
+    change, or a table that carries nothing at all - which is a table
+    left out, and said as one (`exclude`)."""
+    from .config import parse_ops
+    rules = mapping.get("ops") if isinstance(mapping, dict) else None
+    if rules is None:
+        return []
+    if not isinstance(rules, dict):
+        return [Problem("error", f"{where}.mapping.ops", "is not a mapping")]
+    out = []
+    for table, value in rules.items():
+        try:
+            got = parse_ops(value)
+        except SystemExit as e:
+            out.append(Problem("error", f"{where}.mapping.ops.{table}",
+                               str(e)))
+            continue
+        if not got:
+            out.append(Problem(
+                "error", f"{where}.mapping.ops.{table}",
+                "carries no change at all - leave the table out with"
+                " exclude instead"))
+    return out
+
+
+def _patterns_or_none(value):
+    """`exclude` as patterns, or none where it is said wrong - which its
+    own check says."""
+    from .config import scope_patterns
+    try:
+        return scope_patterns(value)
+    except SystemExit:
+        return []
+
+
 def _include_problems(where, raw, probe):
     """`include` said wrong, or said against the rest of the hop: an
     entry that is not a name, one `exclude` takes back whole, a mapping
     rule for a table it does not take. Each is a table the operator
     believes is moved and checked while nothing looks at it."""
-    from fnmatch import fnmatch
+    from .config import name_matches, scope_patterns
     out = []
+    if isinstance(raw.get("exclude"), dict):
+        try:
+            scope_patterns(raw["exclude"])
+        except SystemExit as e:
+            out.append(Problem("error", f"{where}.exclude", str(e)))
     got = raw.get("include")
-    if got is None:
-        return out
-    if not isinstance(got, list):
+    if got is None or not isinstance(got, (list, dict)):
         # its type is said with every other key's
         return out
+    try:
+        got = scope_patterns(got)
+        excluded = scope_patterns(raw.get("exclude"))
+    except SystemExit as e:
+        return [Problem("error", f"{where}.include", str(e))]
+    fold = probe.folds_case()
     for i, p in enumerate(got):
         if not isinstance(p, str) or not p.strip() or p.strip() != p \
                 or ".." in p or p.startswith(".") or p.endswith("."):
             out.append(Problem("error", f"{where}.include[{i}]",
                                f"{p!r} is not a dotted name"))
             continue
-        if any(fnmatch(p, str(x)) for x in raw.get("exclude") or []):
+        if any(name_matches(p, x, fold) for x in excluded):
             out.append(Problem(
                 "error", f"{where}.include[{i}]",
                 f"{p} is excluded as a whole as well, so it takes nothing"
@@ -1577,11 +1631,13 @@ def _include_problems(where, raw, probe):
     if not probe.include:
         return out
     whole = probe.whole_name()
-    for part in ("where", "tables", "columns", "tolerance"):
+    for part in ("where", "tables", "columns", "tolerance", "ops"):
         rules = (raw.get("mapping") or {}).get(part) or {}
         if not isinstance(rules, dict):
             continue
         for table in rules:
+            if any(c in str(table) for c in "*?["):
+                continue
             names = str(table).split(".")
             # only a rule that names its database says which table it is;
             # a shorter one may be any database's, one include takes
@@ -1599,7 +1655,7 @@ def _contradictions(where, raw, opts, goal, engine):
     out = []
     probe = Hop(name="", engine=engine, source=Endpoint(),
                 target=Endpoint(),
-                exclude=[str(p) for p in (raw.get("exclude") or [])],
+                exclude=_patterns_or_none(raw.get("exclude")),
                 options={k: v for k, v in opts.items()
                          if k == "source_engine"})
     mapping = raw.get("mapping") or {}
@@ -1616,6 +1672,7 @@ def _contradictions(where, raw, opts, goal, engine):
                     f"{table} is also excluded, so this rule touches"
                     " nothing - drop one of the two"))
     out += _include_problems(where, raw, probe)
+    out += _ops_problems(where, mapping)
     if goal in GOALS and not GOALS[goal]["writes"]:
         for k in WRITING:
             if opts.get(k):

@@ -71,6 +71,9 @@ VARS = {
                             "~/.local/share/migkit"),
     "MIGKIT_EXCLUDE": Var("databases or tables left alone for this run, on"
                           " top of the hop's `exclude`", "list"),
+    "MIGKIT_COMPARE_WITH": Var("another tool's own check report to hold"
+                               " this run's answers against, in place of"
+                               " the hop's `compare_with`", "path"),
     # ---- `migkit init` without a terminal -------------------------------
     "MIGKIT_SOURCE": Var("the source's address for `init`, and for a"
                          " step that writes its hop", "text"),
