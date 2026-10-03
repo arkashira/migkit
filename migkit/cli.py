@@ -396,11 +396,14 @@ def _after_copy(hop, eng, d):
     made by the target's own conversion, double-encoded text repaired
     (`charsets.after_copy`), and a table the target has in an old engine
     converted in place (`tableengine.in_place`)."""
-    from . import charsets, tableengine
+    from . import charsets, drift, tableengine
     say = lambda m: console.print(f"  {_esc(m)}")  # noqa: E731
     for line in (charsets.after_copy(hop, eng, d, say)
                  + tableengine.in_place(hop, eng, d, say)):
         say(line)
+    # both sides' schemas as the move left them: what a later check holds
+    # each to, to say what changed since (`drift.since_the_move`)
+    drift.kept_at_move(hop, eng, d)
 
 
 def _tables_to_copy(hop, eng, d, table=""):
@@ -1747,6 +1750,18 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
             if after is not None:
                 shape_file.parent.mkdir(parents=True, exist_ok=True)
                 shape_file.write_text(json.dumps(after))
+        if "schema" in local_map[d]:
+            for side, when, said in drift.since_the_move(hop, eng, d):
+                who = "source" if side == "src" else "target"
+                # said, not judged: whether the two sides still agree is
+                # the schema check's own answer beside it
+                out.append({
+                    "check": "schema", "scope": f"{d} {who} since the move",
+                    "status": "ok",
+                    "detail": f"the {who}'s schema changed since the move"
+                              f" left it ({when}): " + "; ".join(said[:5])
+                              + (f"; and {len(said) - 5} more"
+                                 if len(said) > 5 else "")})
         if whole and not any(r.get("reused_from") for r in out):
             # the whole battery over the whole database: its time is the
             # check phase of the next plan, this hop's or the one it
