@@ -3755,6 +3755,29 @@ they are three cross-cutting gaps, not 26 engine problems:
 Done when every cell is a way or "not applicable" with its reason, and
 the depth tests run on every engine, not only PostgreSQL and MySQL.
 
+Added 2026-10-04 (owner: "if it is not in the backlog, make them equal"):
+the ten shapes above measure what an engine can *move*; three more
+depths were built for PostgreSQL and MySQL (some for MongoDB, SQL Server
+and Oracle) and are owed to every engine:
+
+* **Scope** (P0-SCOPE): `include`, `objects`, `mapping.ops`, the row
+  filter (`rowfilter`), column transforms (`transforms`) and name rules
+  read through `in_scope` / `takes` / `carries` in every path of every
+  engine - its listings, objects inventory, deep checks, repairs,
+  counters, tail and DDL.
+* **Verification**: the whole deep-check catalogue (orphans, constraints
+  not validated, charset/collation, generated columns, boundary, keyless
+  tables, duplicate keys, large values), delta verification and the
+  fence, repair with exact undo, users and grants, the objects inventory.
+* **Change tail and DDL**: per-table states (live/copying/parked/
+  removed) with the exact seam, the per-table DDL policy, renames and
+  swaps, a table added or removed while running, the operation contract.
+
+Done when a depth matrix generated from the code (as
+`capabilities.matrix()` is) shows every engine against every item of
+the three - a way, or "not applicable" with its reason - and each way
+has its test on that engine.
+
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
 Asked: "is the decision engine smart or still flat - I want it really
