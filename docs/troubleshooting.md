@@ -99,7 +99,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: not a file migkit reads a hop from - a replication task's JSON, a connector's configuration, or a LOAD DATABASE command file
 
-* <...>: JSON, but not a replication task (it has no TableMappings), a DTS job (no MigrateOption, Objects, ObjectItems or DbObject) or a connector's configuration (no connector.class)
+* <...>: JSON, but not a replication task (it has no TableMappings), a DTS job (no MigrateOption, Objects, ObjectItems or DbObject), a DRS job (no base_info or object_info), a migration job or stream (no sourceDatabase or sourceConfig), an Azure migration (no taskType or sourceDatabaseName) or a connector's configuration (no connector.class)
 
 * the file holds <...> replication tasks; give it one (a hop is one task)
 
@@ -116,6 +116,24 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the job sends database <...> to both <...> and <...>
 
 * the file holds <...> DTS jobs (<...>); give it one (a hop is one job)
+
+* the file holds <...> DRS jobs (<...>); give it one (a hop is one job)
+
+* <...>: its detail says no objects; save the objects it takes beside it, under db_object - GET /v5/{project_id}/jobs/<...>/db-objects
+
+* the job's <...> names no engine migkit has
+
+* the file holds <...> <...>s (<...>); give it one (a hop is one <...>)
+
+* the job's <...> (<...>) names no engine migkit has
+
+* the stream reads <...>, which migkit has no engine for
+
+* the file holds <...> migrations (<...>); give it one (a hop is one migration)
+
+* <...>: a <...> of the migration service, not a migration - save the migration task, or the database migration
+
+* <...>: a task that does not migrate a database - save the project's migration task (its taskType begins Migrate.)
 
 * the file's connector.class reads no database migkit has an engine for
 
