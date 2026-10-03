@@ -2318,7 +2318,7 @@ and 1,000,000 rows across four pairs:
 | hetero | has no deep battery |
 | sqlglot | decided (2026-09-25): kept, for what a type map cannot do. It translates each column default into the target's SQL: `uuid()` becomes `gen_random_uuid()`, `now()` becomes `CURRENT_TIMESTAMP()`. The target is then asked whether it takes the result, and a default it refuses is named rather than guessed at |
 | to measure before wrapping | boto3 Secrets Manager, `mongodump --query/--oplog`, datacompy `all_mismatch()`, mydumper `--regex/--rows` |
-| resumable-dump flag | tell the operator when a restart loses the dump's progress (DTS `DumperResumeCtrl`) |
+| resumable-dump flag | done (2026-10-04): the bulk plan says what a stop costs the way it took (`movers.after_a_stop`) |
 | timed start and auto-retry window | low value next to cron |
 | two-way and many-to-one topologies with loop detection | moved up to item 36 |
 | waiting on the owner | should dry-run plans hide the command lines they print? |

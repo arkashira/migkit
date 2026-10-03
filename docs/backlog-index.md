@@ -155,7 +155,7 @@ their own names, and `LADDER.table` (a WAVE queue item).
 | 74 | P3.hetero-deep | Deep battery for cross-engine hops | DONE (matrix: hetero deep checks yes) | M | verify | L583, L764, L2318 |
 | 75 | P3.sqlglot | sqlglot kept for defaults a type map cannot translate | DONE (in text, decided 2026-09-25) | S | conversion | L2319 |
 | 76 | P3.measure | Measured before wrapping: boto3 Secrets Manager, mongodump --query/--oplog, mydumper --regex/--rows | DONE (item 38; R14) | S | tools used whole | L2320, L6742-6758 |
-| 77 | P3.resumedump | Tell the operator when a restart loses the dump's progress (DTS DumperResumeCtrl, "resumable dump status") | OPEN (grep: none) | S | move | L2321, L8164 |
+| 77 | P3.resumedump | Tell the operator when a restart loses the dump's progress (DTS DumperResumeCtrl, "resumable dump status") | DONE 2026-10-04 (the bulk plan says what a stop costs the way it took, before it starts - `movers.after_a_stop`: goes on by range, from the tables finished, from the kept dump, or starts over) | S | move | L2321, L8164 |
 | 78 | P3.timed | Timed start and auto-retry window (DTS "start at a time") | DONE 7de74bc (grep: schedule.py retry_window, max_duration, catch-up) | S | operations/scale | L2322, L6201-6203, L6226-6230, L8163 |
 | 79 | P3.dryrun | Should dry-run plans hide the command lines they print | BLOCKED (waiting on the owner) | S | ease of use | L2324 |
 | 80 | 14/R6 | Network path migkit opens itself: SSH or command tunnels, doctor tells "connects but bulk stalls" apart, stall watchdog | DONE (in text 2026-09-27) | M | operations/scale | L2341-2353, L6256-6283 |
