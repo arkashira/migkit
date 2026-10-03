@@ -18,6 +18,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.views", "mysql")]
+
 pytestmark = [pytest.mark.docker]
 
 MY, PG = "migkit-test-code-my", "migkit-test-code-pg"

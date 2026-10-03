@@ -23,6 +23,9 @@ from migkit.engines.base import Engine
 from tests import mysql_pair
 from tests.mysql_pair import my, my_pair  # noqa: F401 - a fixture
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.jobs", ("postgres", "mysql"))]
+
 EVENTS = [("purge_queue", "ENABLED",
            "DELETE FROM `job_queue` WHERE at < now()"),
           ("roll_orders", "ENABLED", "update orders set n = n + 1"),

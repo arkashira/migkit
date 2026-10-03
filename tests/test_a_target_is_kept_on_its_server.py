@@ -17,6 +17,13 @@ from migkit import freeze
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+PROVES = [
+    ("cutover.read-only-target", ("clickhouse", "cockroachdb", "tidb",
+                                  "opensearch", "redis", "mongodb",
+                                  "oracle")),
+    ("cutover.freeze", "cockroachdb"),
+]
+
 pytestmark = needs_docker
 
 

@@ -16,6 +16,12 @@ import pytest
 
 from tests.conftest import verdict
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.identity.sequence-collision", "mssql"),
+    ("verify.structure.keys", "mssql"),
+]
+
 
 def _docker():
     try:

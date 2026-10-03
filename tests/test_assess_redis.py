@@ -12,6 +12,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.versions", "redis"), ("assess.engine-checks", "redis")]
+
 SRC, DST = "migkit-test-ar-src", "migkit-test-ar-dst"
 SRC_PORT, DST_PORT = 16379, 16380
 

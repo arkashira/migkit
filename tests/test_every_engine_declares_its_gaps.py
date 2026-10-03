@@ -15,6 +15,9 @@ from migkit import capabilities as caps
 from migkit.engines import NAMES
 from tests.test_the_report_does_not_name_its_tools import TOOLS
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.rollback", "sqlite")]
+
 BACKLOG = (Path(__file__).parent.parent / "docs" / "backlog.md").read_text()
 
 

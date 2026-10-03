@@ -22,6 +22,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.table-copy", "mongodb")]
+
 SRC, DST = "migkit-test-mcp-src", "migkit-test-mcp-dst"
 SRC_PORT, DST_PORT = 15814, 15815
 

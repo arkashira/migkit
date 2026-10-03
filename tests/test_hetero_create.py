@@ -12,6 +12,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "mysql"), ("move.create-missing", "hetero")]
+
 PG, MY = "migkit-test-cr-pg", "migkit-test-cr-my"
 PG_PORT, MY_PORT = 15467, 13367
 

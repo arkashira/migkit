@@ -31,6 +31,9 @@ from migkit import canon
 from migkit.config import Endpoint, Hop
 from tests.conftest import _wait_tcp, needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "bigquery")]
+
 pytestmark = needs_docker
 
 BQ, HTTP, GRPC = "migkit-test-wh-bq", 16150, 16151

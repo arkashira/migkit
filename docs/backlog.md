@@ -3951,6 +3951,72 @@ cell is "not yet" without either a backlog row naming it or a written
 "not applicable" reason - so an engine left thinner than PostgreSQL and
 MySQL is a red test, never a silent gap.
 
+*Built 2026-10-04, 9fd2442 (P0-PARITY.matrix, P0-PARITY.guard):*
+`capabilities.depth()`, beside the capability table it extends - 86 items
+in 10 areas, each read off the code an engine runs: its own methods, a
+mixin's or another engine's it inherits, the base's helpers they call, and
+the pair's machinery where it hands the work to it (`_as_pair`), never a
+base placeholder or a method that only refuses (a skip, an error, None or
+an empty answer - `_refuses_only`, which now catches the last two as well).
+* *scope* (10): the counts, data and schema checks' listings asked of the
+  one scope answer (`in_scope`, `_scoped_rows`, `takes`, `takes_table`),
+  the deep checks', the copy's (`list_move_tables`), the repairs', the
+  counters'; the objects beside the tables (`takes`, `takes_object`);
+  `mapping.ops` where changes are applied (its own tail asks `carries`, or
+  its changes go through the pair's tail); the row filter, the transforms
+  and the name rules read by the copy and the check alike.
+* *verify* (39): each of the 30 categories of `engines.base.CATEGORIES` an
+  engine's checks can say (the last word of a finding's scope, a finding
+  that can only skip or fail not counted, one made by another module's
+  function the check calls counted); delta, fence, confirm and users (the
+  capability table's own probes and gaps); repair; repair with exact undo
+  (`RepairAction.undo` filled, or the rows kept by `repairlog`); the
+  fields a verdict reads (`Result.rows_apart`, `.tables`, `.table`).
+* *tail* (6): follows (the capability), per-table states (the tail it runs
+  keeps a `TableSet`), a table added at an exact seam, a table back with
+  only its changes since, the per-table DDL policy (its change reader hands
+  `canon.ddl`), renames and swaps (`table_oids`, or a DDL naming where to).
+* *assess* (7), *schema* (6), *move* (7: table copy, bulk, large values and
+  partitioned from the shapes, rows sized, the load window, missing tables
+  made), *cutover* (8: freeze, read-only target, counters and rollback
+  from the two tables; the drain, the servers' own replication paused for
+  a repair, two-way marks, scheduled jobs), *security* (a TLS posture that
+  can come out verified), *managed* (its own services catalogued),
+  *operations* (fencing).
+
+A way counts only once a test proves it on that engine: a test module's
+`PROVES = [(item, engine or engines)]`, read from its source and never
+imported (`capabilities.proofs`); 208 modules carry one. Every gap is
+declared: `DEPTH_GAPS` (not applicable only where the thing does not exist
+on the engine, the reason said once for a family or taken from `GAPS`; not
+yet with its P0-PARITY row, the generic engine's with P0-PARITY.small) and
+`UNPROVED` (a way in the code whose test on that engine is owed; it reads
+as not yet). The guard,
+`tests/test_every_engine_is_as_deep_as_postgres_and_mysql.py`, fails on a
+cell nobody declared, a way with no test nobody declared, a declaration the code or a test has closed, a test claiming a
+way the code does not show, a "not yet" whose row is not in
+`docs/backlog-index.md`, and an item or engine nobody knows. STATE.md
+shows the matrix: per engine the ways proved of the items that apply, area
+by area, and per item the engines in each state.
+
+Measured at 9fd2442: 3,096 cells - yes 435, test owed
+252, not applicable 869, not yet 1,540. By area (yes / owed / n/a / not
+yet): scope 37/92/50/181, verify 124/74/499/707, tail 26/18/59/113,
+assess 32/16/26/178, schema 37/20/74/85, move 83/20/52/97, cutover
+53/5/103/127, security 22/6/1/7, managed 19/0/2/15, operations 2/1/3/30.
+PostgreSQL proves 72 of the 84 that apply to it and MySQL 63 of 78; the
+furthest behind are the SaaS sources (0 of 24), Db2 for z/OS (1 of 69),
+Snowflake (2 of 78), Db2 for i (2 of 81), SAP ASE (4 of 80), the generic
+engine (4 of 86), Redshift (5 of 75), BigQuery (5 of 76), Db2 (6 of 81)
+and TiDB (6 of 76, with 36 ways in its code - MySQL's, inherited - and no
+TiDB test for 30 of them). Found by building it, each now a declared gap
+rather than a counted way: Kafka's version read only says it cannot tell;
+SQL Server's connection never checks a certificate, and Oracle's, Db2's
+and SAP ASE's ask for no TLS; MySQL's index-state check only skips;
+ClickHouse's and Oracle's deep findings and the shared capacity check's
+end in words no category reads (`mutations`, `constraints`, `capacity`),
+so they reach the verdict unclassified.
+
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
 Asked: "is the decision engine smart or still flat - I want it really

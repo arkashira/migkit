@@ -25,6 +25,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import mssql_run, needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.delta", "mssql")]
+
 pytestmark = needs_docker
 
 MS, PORT, PW = "migkit-test-f0v-mssql", 16054, "CHANGE_ME-Str0ng!"

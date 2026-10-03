@@ -23,6 +23,15 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "couchbase"),
+    ("tail.follows", "couchbase"),
+    ("schema.create", "couchbase"),
+    ("move.table-copy", "couchbase"),
+    ("cutover.drain", "couchbase"),
+]
+
 pytestmark = needs_docker
 
 CB, KV, MGMT = "migkit-test-couchbase", 16342, 16343

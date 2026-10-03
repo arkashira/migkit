@@ -19,6 +19,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.fence", "mysql"), ("verify.confirm", "mysql")]
+
 pytestmark = pytest.mark.docker
 
 NET = "migkit-test-fence-net"

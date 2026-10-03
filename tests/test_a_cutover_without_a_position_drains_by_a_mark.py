@@ -28,6 +28,9 @@ from click.testing import CliRunner
 
 from tests import cutover_harness as harness
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.drain", "mysql")]
+
 pytestmark = pytest.mark.docker
 
 NET = "migkit-test-mark-net"

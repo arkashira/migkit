@@ -19,6 +19,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.views", "oracle"), ("schema.routines", "oracle")]
+
 pytestmark = [pytest.mark.docker]
 
 OR, SB_OR = "migkit-test-code-or", "migkit-test-code-sbor"

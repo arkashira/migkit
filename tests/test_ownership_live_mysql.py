@@ -15,6 +15,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.access.object-ownership", "mysql")]
+
 SRC, DST = "migkit-test-own-src", "migkit-test-own-dst"
 SRC_PORT, DST_PORT = 13475, 13476
 

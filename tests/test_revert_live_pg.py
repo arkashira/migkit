@@ -11,6 +11,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.structure.schema-diff", "postgres")]
+
 NAME = "migkit-test-revert"
 PORT = 15489
 

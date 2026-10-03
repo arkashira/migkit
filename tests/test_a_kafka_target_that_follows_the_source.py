@@ -23,6 +23,14 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "kafka"),
+    ("verify.confirm", "kafka"),
+    ("tail.follows", "kafka"),
+    ("cutover.rollback", "kafka"),
+]
+
 pytestmark = needs_docker
 
 SRC, DST = "migkit-test-follow-src", "migkit-test-follow-dst"

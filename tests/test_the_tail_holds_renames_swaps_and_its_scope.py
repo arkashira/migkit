@@ -31,6 +31,9 @@ from migkit import canon, tailtables
 from migkit.config import Endpoint, Hop
 from migkit.engines.hetero import HeteroEngine
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("tail.renames", "mysql")]
+
 EP = Endpoint(host="x", port=1, user="x", password="x")
 
 

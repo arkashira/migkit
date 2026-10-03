@@ -28,6 +28,13 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.users", "teradata"),
+    ("cutover.two-way", "teradata"),
+    ("security.tls", "teradata"),
+]
+
 
 class DriverError(Exception):
     """An error as the driver raises one."""

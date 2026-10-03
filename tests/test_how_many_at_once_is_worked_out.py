@@ -12,6 +12,9 @@ import pytest
 from migkit import sizing
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.capacity", "postgres")]
+
 
 class _Hop:
     workers, workers_set = 4, False

@@ -21,6 +21,9 @@ import psycopg2
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.fence", "postgres")]
+
 pytestmark = needs_docker
 
 SRC = "migkit-test-pg-src"
