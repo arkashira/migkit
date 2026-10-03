@@ -16,9 +16,15 @@ id (`session`) - and under it:
 * each way the engine chose, as an event with its reason (`event`)
 
 in migkit's words and names, whatever ran underneath: a span never names
-a program migkit drives, only what migkit did with it. Spans begun on a
-worker thread, where the command's span is not current, are put under
-it, so a check's databases side by side stay one trace.
+a program migkit drives, only what migkit did with it, and every text on
+it is cleaned at the one gate of what leaves the machine (`egress`), with
+no secret the hop holds. The gate also says whether spans go at all: the
+environment's `MIGKIT_EGRESS` and the hop's `egress` can keep them here,
+and a collector on a host the egress does not name is sent nothing - no
+exporter is built where the environment says no, and none of a hop's
+spans is made where the hop says no. Spans begun on a worker thread,
+where the command's span is not current, are put under it, so a check's
+databases side by side stay one trace.
 """
 import contextlib
 import os
@@ -31,6 +37,10 @@ _PROVIDER = None
 _TRACER = None
 #: the context of the command's span, for spans begun on other threads
 _ROOT = None
+#: the hop of the command in progress, whose secrets its spans are
+#: cleaned of; and whether the egress keeps this command's spans here
+_HOP = None
+_HELD = False
 _LOCK = threading.Lock()
 
 #: the attributes' prefix
@@ -71,11 +81,19 @@ def configure(exporter=None):
         return _TRACER
 
 
+def endpoint():
+    """Where spans go, as the environment names it, or ""."""
+    return (os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or "")
+
+
 def _wanted():
+    """An endpoint named, and the environment's egress letting spans go
+    to it: otherwise no exporter is built, and nothing is ever sent."""
+    from . import egress
     if os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true":
         return False
-    return bool(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-                or os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+    return bool(endpoint()) and egress.permit(None, "traces", endpoint())
 
 
 def tracer():
@@ -85,18 +103,22 @@ def tracer():
 
 
 def enabled():
-    return not isinstance(tracer(), trace.NoOpTracer)
+    return not _HELD and not isinstance(tracer(), trace.NoOpTracer)
 
 
 def _attrs(values):
     """Attributes as OpenTelemetry takes them: under migkit's prefix,
-    plain values only, None left out."""
+    plain values only, None left out, every text as it may leave the
+    machine (`egress.words`)."""
+    from . import egress
     out = {}
     for k, v in values.items():
         if v is None:
             continue
         if not isinstance(v, (str, bool, int, float)):
             v = str(v)
+        if isinstance(v, str):
+            v = egress.words(_HOP, v)
         out[k if "." in k else NS + k] = v
     return out
 
@@ -142,9 +164,12 @@ def answered(s, results):
     span's error."""
     if s is None or not s.is_recording():
         return
+    from .verdict import decide
     worst = max((r.get("status", "ok") for r in results),
                 key=lambda x: _WORST.get(x, 0), default="ok")
     s.set_attribute(NS + "status", worst)
+    # what the answers add up to, by the one rule every output reads
+    s.set_attribute(NS + "verdict", decide(results).status)
     s.set_attribute(NS + "answers", len(results))
     if worst == "error":
         from opentelemetry.trace import Status, StatusCode
@@ -182,11 +207,21 @@ _SAID = ("hop_name", "db", "table", "mode", "kind", "only", "go",
 
 @contextlib.contextmanager
 def command(name, hop, params, run):
-    """The command's span, the root of the run's trace."""
-    global _ROOT
+    """The command's span, the root of the run's trace - none, and none
+    under it, where the hop's egress keeps its spans here."""
+    global _ROOT, _HOP, _HELD
+    from . import egress
     if not enabled():
         yield None
         return
+    if hop is not None and not egress.permit(hop, "traces", endpoint()):
+        _HELD = True
+        try:
+            yield None
+        finally:
+            _HELD = False
+        return
+    _HOP = hop
     attrs = {"command": name, "session": run}
     attrs.update({k.replace("hop_name", "hop").replace("do_apply", "apply"):
                   v for k, v in (params or {}).items()
@@ -220,6 +255,7 @@ def command(name, hop, params, run):
             raise
         finally:
             _ROOT = None
+            _HOP = None
 
 
 def flush():

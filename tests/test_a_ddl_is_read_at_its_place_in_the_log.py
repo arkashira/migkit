@@ -38,6 +38,29 @@ from tests.conftest import needs_docker, psql
     ("BEGIN", "cx", []),
     ("insert into t values (1)", "cx", []),
     ("GRANT select ON t TO u", "cx", []),
+    # a partition's rows gone or swapped with no row event for them: the
+    # table is copied again, never read as a harmless alter
+    ("ALTER TABLE t TRUNCATE PARTITION p0", "cx",
+     [("cx", "t", "reload", None)]),
+    ("alter table db2.t drop partition p0, p1", "cx",
+     [("db2", "t", "reload", None)]),
+    ("ALTER TABLE t EXCHANGE PARTITION p0 WITH TABLE x.t2 WITHOUT"
+     " VALIDATION", "cx",
+     [("cx", "t", "reload", None), ("x", "t2", "reload", None)]),
+    ("alter table t discard partition p0 tablespace", "cx",
+     [("cx", "t", "reload", None)]),
+    ("ALTER TABLE t IMPORT TABLESPACE", "cx", [("cx", "t", "reload", None)]),
+    ("alter table t engine = blackhole", "cx", [("cx", "t", "reload", None)]),
+    # rows moved between a table's own partitions stay the same rows
+    ("ALTER TABLE t REORGANIZE PARTITION p0 INTO (PARTITION a VALUES LESS"
+     " THAN (5), PARTITION b VALUES LESS THAN (10))", "cx",
+     [("cx", "t", "alter", None)]),
+    ("ALTER TABLE t COALESCE PARTITION 2", "cx", [("cx", "t", "alter", None)]),
+    # every clause read: the rename after an added column is a rename
+    ("ALTER TABLE t ADD COLUMN x INT, RENAME TO t2", "cx",
+     [("cx", "t", "alter", None), ("cx", "t", "rename", ("cx", "t2"))]),
+    ("alter table t add column e enum('a,b', 'rename to x'), rename"
+     " column a to b", "cx", [("cx", "t", "alter", None)]),
 ])
 def test_a_statement_says_which_tables_it_touches_and_how(query, schema,
                                                           want):

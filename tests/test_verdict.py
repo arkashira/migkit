@@ -78,8 +78,11 @@ def test_status_derivation(tmp_path):
     assert st([{"status": "ok"}, {"status": "diff"}]) == "different"
     assert st([{"status": "diff"}, {"status": "error"}]) == "error"
     assert st([{"status": "skip"}]) == "incomplete"
-    # a warn on its own is readable, not a mismatch
-    assert st([{"status": "warn"}]) == "same"
+    # a warn is not a mismatch, and not a pass either: rows the role
+    # cannot see, columns no comparison covers - read before the two are
+    # called the same (the check exited 1 on it while this said same)
+    assert st([{"status": "warn"}]) == "incomplete"
+    assert st([{"status": "ok"}, {"status": "warn"}]) == "incomplete"
 
 
 def test_findings_exclude_passes_and_envelope_is_self_describing(tmp_path):

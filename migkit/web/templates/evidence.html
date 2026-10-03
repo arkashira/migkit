@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Evidence of {{ hop.name }} - migkit{% endblock %}
+{% block main %}
+<p><a href="/hops/{{ hop.name|urlencode }}#evidence">&larr; {{ hop.name }}</a></p>
+<section class="card">
+  <h1>Evidence {% if run %}of run {{ run }}{% else %}of the whole history{% endif %}</h1>
+  <p class="muted">What migkit did on this hop and what it measured. Not a
+  certificate: every number can be taken again, the way each was taken is
+  in the files.</p>
+  {% if doc.verdict %}
+  <p>The verdict: <span class="pill {{ doc.verdict.status }}">{{ doc.verdict.status }}</span> as of {{ doc.verdict.generated }}.</p>
+  {% endif %}
+  {% if doc.record %}<p>The record: {{ doc.record.entries }} entries,
+    {% if doc.record.whole %}<span class="pill same">whole</span>{% else %}<span class="pill error">broken: {{ doc.record.broken }}</span>{% endif %}.</p>{% endif %}
+</section>
+{% if doc.tables %}
+<section class="card">
+  <h2>Every table</h2>
+  <table>
+    <thead><tr>{% for k in doc.tables[0].keys() if k not in ("statements", "how") %}<th>{{ k }}</th>{% endfor %}</tr></thead>
+    <tbody>{% for t in doc.tables %}<tr>{% for k, v in t.items() if k not in ("statements", "how") %}<td>{{ v if v is not mapping else v|tojson }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table>
+</section>
+{% endif %}
+{% for part in ("approvals", "repairs", "cutovers", "timings", "removed") %}
+{% if doc[part] %}
+<section class="card">
+  <h2>{{ part|capitalize }}</h2>
+  <pre class="detail">{{ doc[part]|tojson(indent=2) }}</pre>
+</section>
+{% endif %}
+{% endfor %}
+{% endblock %}

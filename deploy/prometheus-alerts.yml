@@ -1,23 +1,54 @@
 # Alert rules for the metrics migkit serves at /metrics
-# (`migkit report --serve`) and prints with `migkit report --metrics`.
-# Load with `rule_files:` in prometheus.yml. The thresholds are starting
-# points; change them to fit the migration.
+# (`migkit report --serve`, scraped with the bearer MIGKIT_METRICS_TOKEN)
+# and prints with `migkit report --metrics`. Load with `rule_files:` in
+# prometheus.yml. The thresholds are starting points; change them to fit
+# the migration. A hop's verdict is a state set - one sample a verdict,
+# 1 for the one its last check ended as - so a hop never checked
+# (status="none") fires none of the verdict rules.
 groups:
   - name: migkit
     rules:
       - alert: MigkitHopDifferent
-        expr: migkit_hop_status == 1
+        expr: migkit_verdict{status="different"} == 1
         labels:
           severity: critical
         annotations:
           summary: "{{ $labels.hop }}: the last check found a difference"
 
       - alert: MigkitHopError
-        expr: migkit_hop_status == 2
+        expr: migkit_verdict{status="error"} == 1
         labels:
           severity: critical
         annotations:
-          summary: "{{ $labels.hop }}: the last check could not finish"
+          summary: "{{ $labels.hop }}: the last check could not verify"
+
+      - alert: MigkitHopIncomplete
+        expr: migkit_verdict{status="incomplete"} == 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ $labels.hop }}: the last check found nothing different and
+            did not compare everything
+
+      - alert: MigkitMetricsStale
+        expr: migkit_collect_age_seconds > 120
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            the metrics are read from a snapshot
+            {{ $value | humanizeDuration }} old
+
+      - alert: MigkitMetricsFailing
+        expr: increase(migkit_collect_errors_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            reading {{ $labels.family }} for the metrics failed in the
+            last 15 minutes
 
       - alert: MigkitCheckStale
         expr: migkit_last_check_age_seconds > 86400
@@ -92,7 +123,8 @@ groups:
         annotations:
           summary: >-
             {{ $labels.hop }} {{ $labels.db }}.{{ $labels.table }}: its
-            rows or digest differ between the two sides at its last check
+            rows or digest differ between the two sides, as the last run
+            that read both took them
 
       - alert: MigkitStreamBehind
         expr: migkit_stream_behind_source_seconds > 300

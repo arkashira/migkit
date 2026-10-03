@@ -9,7 +9,6 @@ usage. None of that is something the operator agreed to by running
 reads it: a switch on the command line, a variable in its environment, a
 line of its configuration file.
 """
-import subprocess
 
 from migkit import util
 from migkit.config import Endpoint, Hop
@@ -27,13 +26,27 @@ def _mysql_engine():
 
 
 def _capture(monkeypatch, stdout=""):
+    """Every program started through the one runner (`runner.start`),
+    as it is started: its command line and its environment."""
+    import io
     seen = []
 
-    def fake(cmd, **kw):
-        seen.append((list(cmd) if not isinstance(cmd, str) else cmd,
-                     kw.get("env") or {}))
-        return subprocess.CompletedProcess(cmd, 0, stdout, "")
-    monkeypatch.setattr(util.subprocess, "run", fake)
+    class P:
+        returncode = 0
+
+        def __init__(self, cmd, **kw):
+            seen.append((list(cmd) if not isinstance(cmd, str) else cmd,
+                         kw.get("env") or {}))
+            self.pid = 0
+            self.stdin = io.StringIO()
+            self.stdout, self.stderr = io.StringIO(stdout), io.StringIO("")
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+    monkeypatch.setattr(util.subprocess, "Popen", P)
     return seen
 
 
@@ -85,18 +98,18 @@ def test_a_program_started_by_the_movers_gets_the_same(monkeypatch):
         returncode = 0
 
         def __init__(self, cmd, **kw):
+            import io
             seen.append((cmd, kw.get("env") or {}))
             self.pid = 0
-
-        def communicate(self):
-            return "", ""
+            self.stdout, self.stderr = io.StringIO(""), io.StringIO("")
 
         def poll(self):
             return 0
 
         def wait(self, timeout=None):
             return 0
-    monkeypatch.setattr(movers.subprocess, "Popen", P)
+    from migkit import runner
+    monkeypatch.setattr(runner.subprocess, "Popen", P)
     movers._sh(["pt-archiver", "--source", "h=x"])
     (argv, env), = seen
     assert argv[:2] == ["pt-archiver", "--no-version-check"], argv

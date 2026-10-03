@@ -85,7 +85,7 @@ def every_reading(tmp_path, monkeypatch):
                         lambda name, port=8083, timeout=2:
                         [("source", True), ("sink", False)])
     monkeypatch.setattr(movers, "stream_readings",
-                        lambda attrs, port, timeout=2: {
+                        lambda attrs, port, timeout=2, server=None: {
                             "MilliSecondsBehindSource": 2500,
                             "TotalNumberOfEventsSeen": 7,
                             "QueueRemainingCapacity": 8000,
@@ -126,15 +126,18 @@ def test_what_the_tools_inside_measure_comes_out_under_migkits_names(
             f'migkit_stream_running{{{LBL},part="source"}} 1',
             f'migkit_stream_running{{{LBL},part="sink"}} 0',
             f"migkit_stream_behind_source_seconds{{{LBL}}} 2.5",
-            f"migkit_stream_events_seen{{{LBL}}} 7"):
+            f"migkit_stream_events_seen{{{LBL}}} 7",
+            f"migkit_stream_events_seen_total{{{LBL}}} 7",
+            f'migkit_verdict{{{LBL},status="none"}} 1'):
         assert line in text, (line, text)
     # where a copy stands in a table is a key - data - and never goes out
     assert "ann@example.com" not in text
     assert not [t for t in TOOLS if t in text.lower()], text
-    # every metric carried out is described once
+    # every metric carried out is described once, a count as a counter
     for name in set(re.findall(r"^(migkit_[a-z_]+)\{", text, re.M)):
-        assert f"# HELP {name} " in text and f"# TYPE {name} gauge" in \
-            text, name
+        kind = "counter" if name.endswith("_total") else "gauge"
+        assert f"# HELP {name} " in text and \
+            f"# TYPE {name} {kind}\n" in text, name
 
 
 def test_the_stream_readers_own_readings_are_read(tmp_path, monkeypatch):
@@ -225,7 +228,10 @@ def test_the_shipped_dashboard_shows_only_metrics_that_exist(tmp_path,
     text = json.dumps(board).lower()
     assert not [t for t in TOOLS if t in text], text
     assert board["templating"]["list"][0]["query"] == \
-        "label_values(migkit_hop_status, hop)"
+        "label_values(migkit_verdict, hop)"
+    # nothing on the board reads a family kept only until 1.0
+    from migkit import ui
+    assert not named & set(ui.DEPRECATED), named & set(ui.DEPRECATED)
 
 
 def _lite(tmp_path, monkeypatch=None):

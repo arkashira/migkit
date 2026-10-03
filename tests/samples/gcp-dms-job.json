@@ -1,0 +1,74 @@
+{
+ "migrationJobs": [
+  {
+   "name": "projects/example-project/locations/us-central1/migrationJobs/orders-pg",
+   "displayName": "orders-pg",
+   "createTime": "2026-01-01T00:00:00Z",
+   "state": "RUNNING",
+   "phase": "CDC",
+   "type": "CONTINUOUS",
+   "source": "projects/example-project/locations/us-central1/connectionProfiles/orders-src",
+   "destination": "projects/example-project/locations/us-central1/connectionProfiles/orders-dst",
+   "sourceDatabase": {
+    "provider": "DATABASE_PROVIDER_UNSPECIFIED",
+    "engine": "POSTGRESQL"
+   },
+   "destinationDatabase": {
+    "provider": "CLOUDSQL",
+    "engine": "POSTGRESQL"
+   },
+   "postgresHomogeneousConfig": {
+    "isNativeLogical": false
+   },
+   "objectsConfig": {
+    "sourceObjectsConfig": {
+     "objectsSelectionType": "SPECIFIED_OBJECTS",
+     "objectConfigs": [
+      {
+       "objectIdentifier": {
+        "database": "orders",
+        "type": "DATABASE"
+       }
+      },
+      {
+       "objectIdentifier": {
+        "database": "billing",
+        "type": "DATABASE"
+       }
+      }
+     ]
+    }
+   }
+  }
+ ],
+ "connectionProfiles": [
+  {
+   "name": "projects/example-project/locations/us-central1/connectionProfiles/orders-src",
+   "displayName": "orders-src",
+   "state": "READY",
+   "provider": "DATABASE_PROVIDER_UNSPECIFIED",
+   "postgresql": {
+    "host": "10.0.0.51",
+    "port": 5432,
+    "username": "dms_reader",
+    "passwordSet": true,
+    "ssl": {
+     "type": "REQUIRED"
+    }
+   }
+  },
+  {
+   "name": "projects/example-project/locations/us-central1/connectionProfiles/orders-dst",
+   "displayName": "orders-dst",
+   "state": "READY",
+   "provider": "CLOUDSQL",
+   "cloudsql": {
+    "cloudSqlId": "orders-replica",
+    "privateIp": "10.0.0.52",
+    "settings": {
+     "databaseVersion": "POSTGRES_15"
+    }
+   }
+  }
+ ]
+}

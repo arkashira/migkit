@@ -1,0 +1,384 @@
+{
+ "about": "what migkit doctor --install fetches, by version and digest (tools/pin_programs.py); a file without a digest is held to the one it had when a machine first fetched it",
+ "files": {
+  "https://archive.apache.org/dist/kafka/3.8.0/kafka_2.13-3.8.0.tgz": {
+   "digest": "sha512:0a33b7be7b6fa53249ba80f9d02cda71ed81927c160aa6ee9be1e3d3c1c4b50466ffc905293143fd88ceac7f5e7d8f5bec28ef972addd3c459cc8b1291e738aa",
+   "program": "connect-mirror-maker.sh",
+   "size": 120735482,
+   "version": "3.8.0"
+  },
+  "https://dev.mysql.com/get/Downloads/MySQL-Shell/mysql-shell-26.7.1-linux-glibc2.28-arm-64bit.tar.gz": {
+   "digest": null,
+   "program": "mysqlsh",
+   "size": null,
+   "version": "26.7.1"
+  },
+  "https://dev.mysql.com/get/Downloads/MySQL-Shell/mysql-shell-26.7.1-linux-glibc2.28-x86-64bit.tar.gz": {
+   "digest": null,
+   "program": "mysqlsh",
+   "size": null,
+   "version": "26.7.1"
+  },
+  "https://dev.mysql.com/get/Downloads/MySQL-Shell/mysql-shell-26.7.1-macos15-arm64.tar.gz": {
+   "digest": null,
+   "program": "mysqlsh",
+   "size": null,
+   "version": "26.7.1"
+  },
+  "https://dev.mysql.com/get/Downloads/MySQL-Shell/mysql-shell-26.7.1-macos15-x86-64bit.tar.gz": {
+   "digest": null,
+   "program": "mysqlsh",
+   "size": null,
+   "version": "26.7.1"
+  },
+  "https://download.oracle.com/otn_software/linux/instantclient/2326000/instantclient-basic-linux.arm64-23.26.0.0.0.zip": {
+   "digest": null,
+   "program": "OpenLogReplicator",
+   "size": null,
+   "version": "2.0.0"
+  },
+  "https://download.oracle.com/otn_software/linux/instantclient/2326000/instantclient-basic-linux.x64-23.26.0.0.0.zip": {
+   "digest": null,
+   "program": "OpenLogReplicator",
+   "size": null,
+   "version": "2.0.0"
+  },
+  "https://download.oracle.com/otn_software/linux/instantclient/2326000/instantclient-sdk-linux.arm64-23.26.0.0.0.zip": {
+   "digest": null,
+   "program": "OpenLogReplicator",
+   "size": null,
+   "version": "2.0.0"
+  },
+  "https://download.oracle.com/otn_software/linux/instantclient/2326000/instantclient-sdk-linux.x64-23.26.0.0.0.zip": {
+   "digest": null,
+   "program": "OpenLogReplicator",
+   "size": null,
+   "version": "2.0.0"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-amazon2023-x86_64-100.16.1.tgz": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian11-x86_64-100.16.1.tgz": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian12-x86_64-100.16.1.tgz": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-macos-arm64-100.16.1.zip": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-macos-x86_64-100.16.1.zip": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2004-x86_64-100.16.1.tgz": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-arm64-100.16.1.tgz": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-100.16.1.tgz": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2404-arm64-100.16.1.tgz": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2404-x86_64-100.16.1.tgz": {
+   "digest": null,
+   "program": "mongodump",
+   "size": null,
+   "version": "100.16.1"
+  },
+  "https://fastdl.mongodb.org/tools/mongosync/mongosync-amazon2023-x86_64-1.21.0.tgz": {
+   "digest": null,
+   "program": "mongosync",
+   "size": null,
+   "version": "1.21.0"
+  },
+  "https://fastdl.mongodb.org/tools/mongosync/mongosync-macos-arm-arm64-1.21.0.zip": {
+   "digest": null,
+   "program": "mongosync",
+   "size": null,
+   "version": "1.21.0"
+  },
+  "https://fastdl.mongodb.org/tools/mongosync/mongosync-macos-x86_64-1.21.0.zip": {
+   "digest": null,
+   "program": "mongosync",
+   "size": null,
+   "version": "1.21.0"
+  },
+  "https://fastdl.mongodb.org/tools/mongosync/mongosync-rhel90-x86_64-1.21.0.tgz": {
+   "digest": null,
+   "program": "mongosync",
+   "size": null,
+   "version": "1.21.0"
+  },
+  "https://fastdl.mongodb.org/tools/mongosync/mongosync-ubuntu2004-x86_64-1.21.0.tgz": {
+   "digest": null,
+   "program": "mongosync",
+   "size": null,
+   "version": "1.21.0"
+  },
+  "https://fastdl.mongodb.org/tools/mongosync/mongosync-ubuntu2204-x86_64-1.21.0.tgz": {
+   "digest": null,
+   "program": "mongosync",
+   "size": null,
+   "version": "1.21.0"
+  },
+  "https://fastdl.mongodb.org/tools/mongosync/mongosync-ubuntu2404-x86_64-1.21.0.tgz": {
+   "digest": null,
+   "program": "mongosync",
+   "size": null,
+   "version": "1.21.0"
+  },
+  "https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz": {
+   "digest": null,
+   "program": "OpenLogReplicator",
+   "size": null,
+   "version": "2.0.0"
+  },
+  "https://github.com/Tencent/rapidjson/commit/3b2441b87f99ab65f37b141a7b548ebadb607b96.diff": {
+   "digest": null,
+   "program": "OpenLogReplicator",
+   "size": null,
+   "version": "2.0.0"
+  },
+  "https://github.com/bersler/OpenLogReplicator/archive/refs/tags/v2.0.0.tar.gz": {
+   "digest": null,
+   "program": "OpenLogReplicator",
+   "size": null,
+   "version": "2.0.0"
+  },
+  "https://github.com/darold/ora2pg/archive/refs/tags/v25.0.tar.gz": {
+   "digest": null,
+   "program": "ora2pg",
+   "size": null,
+   "version": "v25.0"
+  },
+  "https://github.com/datastax/dsbulk/releases/download/1.11.0/dsbulk-1.11.0.tar.gz": {
+   "digest": null,
+   "program": "dsbulk",
+   "size": 42365550,
+   "version": "1.11.0"
+  },
+  "https://github.com/dmtolpeko/sqlines/archive/4d0d87896cead95481fc4656f831a8ac6d7ec291.tar.gz": {
+   "digest": null,
+   "program": "sqlines",
+   "size": null,
+   "version": "4d0d87896cead95481fc4656f831a8ac6d7ec291"
+  },
+  "https://github.com/liquibase/liquibase/releases/download/v4.33.0/liquibase-4.33.0.tar.gz": {
+   "digest": "sha256:689acfcdc97bad0d4c150d1efab9c851e251b398cb3d6326f75e8aafe40ed578",
+   "program": "liquibase",
+   "size": 353930877,
+   "version": "4.33.0"
+  },
+  "https://github.com/liquibase/liquibase/releases/download/v5.0.4/liquibase-5.0.4.tar.gz": {
+   "digest": "sha256:bb08638d70dddd6af8cca6e033148576f8214b5996831b1f8864eb3528f4cfce",
+   "program": "liquibase",
+   "size": 8773410,
+   "version": "5.0.4"
+  },
+  "https://github.com/mydumper/mydumper/releases/download/v1.0.5-1/mydumper-1.0.5-1.el9.x86_64.rpm": {
+   "digest": "sha256:45d40dbedbc713dfee4b450d44429064523438d1ee54307646bc085f6c52d147",
+   "program": "mydumper",
+   "size": 3610581,
+   "version": "1.0.5-1"
+  },
+  "https://github.com/mydumper/mydumper/releases/download/v1.0.5-1/mydumper_1.0.5-1.bookworm_amd64.deb": {
+   "digest": "sha256:5c852891791b518268f35767b4f3cbc13cd4ae7c37d92288d303cd14ab62ab15",
+   "program": "mydumper",
+   "size": 9636992,
+   "version": "1.0.5-1"
+  },
+  "https://github.com/mydumper/mydumper/releases/download/v1.0.5-1/mydumper_1.0.5-1.bookworm_arm64.deb": {
+   "digest": "sha256:7a44c981758f21cf19cf0d4cbdc3d92528eaf11bff093d4ffc640e98d097fde3",
+   "program": "mydumper",
+   "size": 493952,
+   "version": "1.0.5-1"
+  },
+  "https://github.com/mydumper/mydumper/releases/download/v1.0.5-1/mydumper_1.0.5-1.bullseye_amd64.deb": {
+   "digest": "sha256:27498f1a7808acf8004235fe9396a3a30b05fa07fdce0e0d3a8cd9af9db76494",
+   "program": "mydumper",
+   "size": 1105604,
+   "version": "1.0.5-1"
+  },
+  "https://github.com/mydumper/mydumper/releases/download/v1.0.5-1/mydumper_1.0.5-1.focal_amd64.deb": {
+   "digest": "sha256:6b70c08b876d007dfdb0d533cfe7e9b8095b97e9b009675db22f3ca2acdd503a",
+   "program": "mydumper",
+   "size": 2918376,
+   "version": "1.0.5-1"
+  },
+  "https://github.com/mydumper/mydumper/releases/download/v1.0.5-1/mydumper_1.0.5-1.jammy_amd64.deb": {
+   "digest": "sha256:fc87c7c3b205dc853aec9871622550e1f7c0978b5b3b19058dd40452749901ed",
+   "program": "mydumper",
+   "size": 1580156,
+   "version": "1.0.5-1"
+  },
+  "https://github.com/mydumper/mydumper/releases/download/v1.0.5-1/mydumper_1.0.5-1.noble_amd64.deb": {
+   "digest": "sha256:cc49b0b498fac64a121892445d754e7d0e17ee87d75d57c1b7af2735872cab44",
+   "program": "mydumper",
+   "size": 8630492,
+   "version": "1.0.5-1"
+  },
+  "https://github.com/mydumper/mydumper/releases/download/v1.0.5-1/mydumper_1.0.5-1.noble_arm64.deb": {
+   "digest": "sha256:13f4a58224ac65d6bda1fedba39b02e10505c4b75ab7a2babd2435429200371f",
+   "program": "mydumper",
+   "size": 1559924,
+   "version": "1.0.5-1"
+  },
+  "https://github.com/opensearch-project/opensearch-migrations/archive/refs/tags/3.3.8.tar.gz": {
+   "digest": null,
+   "program": "reindex-from-snapshot",
+   "size": null,
+   "version": "3.3.8"
+  },
+  "https://github.com/redis/riotx-dist/releases/download/v1.15.1/riotx-standalone-1.15.1-linux-aarch64.zip": {
+   "digest": "sha256:575f44313501154efba1774b44bec8984ad5c3c985fe28eb349607d223f457c5",
+   "program": "riotx",
+   "size": 409790890,
+   "version": "1.15.1"
+  },
+  "https://github.com/redis/riotx-dist/releases/download/v1.15.1/riotx-standalone-1.15.1-linux-x86_64.zip": {
+   "digest": "sha256:ea68c15658a0309a2d465eacffecaada4294691ae10db30654730edfbb672c1f",
+   "program": "riotx",
+   "size": 410049810,
+   "version": "1.15.1"
+  },
+  "https://github.com/redis/riotx-dist/releases/download/v1.15.1/riotx-standalone-1.15.1-osx-aarch64.zip": {
+   "digest": "sha256:e70c0d2ab3a6f457ca34b419de1ef637dceac80000dc235059f17bfe385a408f",
+   "program": "riotx",
+   "size": 405858154,
+   "version": "1.15.1"
+  },
+  "https://github.com/redis/riotx-dist/releases/download/v1.15.1/riotx-standalone-1.15.1-osx-x86_64.zip": {
+   "digest": "sha256:551eea12a8c80a2996341ab6ec5903d335c3e143df07d4104af36a40133d582b",
+   "program": "riotx",
+   "size": 407154264,
+   "version": "1.15.1"
+  },
+  "https://github.com/tair-opensource/RedisShake/releases/download/v4.6.2/redis-shake-v4.6.2-darwin-amd64.tar.gz": {
+   "digest": "sha256:97aea25a162010d4d87e7e76881e4545ab8fe7dffb60bc591d6972c5c1211741",
+   "program": "redis-shake",
+   "size": 7852404,
+   "version": "4.6.2"
+  },
+  "https://github.com/tair-opensource/RedisShake/releases/download/v4.6.2/redis-shake-v4.6.2-darwin-arm64.tar.gz": {
+   "digest": "sha256:b6083603f0104f12c8e80c8b1aa9a2f94a0542663c35c2a50e93d46f29a191b7",
+   "program": "redis-shake",
+   "size": 7307256,
+   "version": "4.6.2"
+  },
+  "https://github.com/tair-opensource/RedisShake/releases/download/v4.6.2/redis-shake-v4.6.2-linux-amd64.tar.gz": {
+   "digest": "sha256:c255565a60c15f9d1b4d38ef46d30056161266ffa75e11065c7b1901e236bff7",
+   "program": "redis-shake",
+   "size": 7688002,
+   "version": "4.6.2"
+  },
+  "https://github.com/tair-opensource/RedisShake/releases/download/v4.6.2/redis-shake-v4.6.2-linux-arm64.tar.gz": {
+   "digest": "sha256:5fc2b7a393f159f8981c1e8d712b63c0866628b99ad030ed3e46c9869c22ff04",
+   "program": "redis-shake",
+   "size": 6989105,
+   "version": "4.6.2"
+  },
+  "https://public.dhe.ibm.com/software/ibmi/products/odbc/debs/dists/1.1.0/ibmi-acs-1.1.0.list": {
+   "digest": null,
+   "program": "ibmi-odbc",
+   "size": null,
+   "version": ""
+  },
+  "https://public.dhe.ibm.com/software/ibmi/products/odbc/rpms/ibmi-acs.repo": {
+   "digest": null,
+   "program": "ibmi-odbc",
+   "size": null,
+   "version": ""
+  },
+  "https://release.ariga.io/atlas/atlas-community-darwin-amd64-v1.3.0": {
+   "digest": "sha256:650981a024301775ec964e5134e2d5712b7ef1b25fec4b2ec54bad762b4bdf6f",
+   "program": "atlas",
+   "size": 41704648,
+   "version": "1.3.0"
+  },
+  "https://release.ariga.io/atlas/atlas-community-darwin-arm64-v1.3.0": {
+   "digest": "sha256:4e5ffdc10b2b4fd3a06074aba72848150907d5316cacad7b19bae6c6ae3db991",
+   "program": "atlas",
+   "size": 38741634,
+   "version": "1.3.0"
+  },
+  "https://release.ariga.io/atlas/atlas-community-linux-amd64-v1.3.0": {
+   "digest": "sha256:10d7913e3dce43ab99b8d71534a4cbadaf11a16dc293adf3b91d10e83a0ac70b",
+   "program": "atlas",
+   "size": 41625424,
+   "version": "1.3.0"
+  },
+  "https://release.ariga.io/atlas/atlas-community-linux-arm64-v1.3.0": {
+   "digest": "sha256:082188c57a53439596a3ee52173b12e785aa83ec718505674e2052db0fec0c4c",
+   "program": "atlas",
+   "size": 38307928,
+   "version": "1.3.0"
+  },
+  "https://release.ariga.io/atlas/atlas-darwin-amd64-v1.3.0": {
+   "digest": "sha256:4b4d8621332eabc3e6e7554d799a98ceef6376c4d8bbad6ed7832b49655e3480",
+   "program": "atlas",
+   "size": 126058408,
+   "version": "1.3.0"
+  },
+  "https://release.ariga.io/atlas/atlas-darwin-arm64-v1.3.0": {
+   "digest": "sha256:47aaf7c295c7569c7eecfcbc53f02de862846ce1fbef16f1bd8ae98b03c3c68f",
+   "program": "atlas",
+   "size": 118064578,
+   "version": "1.3.0"
+  },
+  "https://release.ariga.io/atlas/atlas-linux-amd64-v1.3.0": {
+   "digest": "sha256:cfc773e5b4e845bc01d680390c174648938a7f88bf30e5a2c83ae85217c21587",
+   "program": "atlas",
+   "size": 125569080,
+   "version": "1.3.0"
+  },
+  "https://release.ariga.io/atlas/atlas-linux-arm64-v1.3.0": {
+   "digest": "sha256:d2cfb1c71e58170bb4ddbe62107a38da4490f516ffa53a13abf57583819b6a40",
+   "program": "atlas",
+   "size": 116631776,
+   "version": "1.3.0"
+  },
+  "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.10/postgresql-42.7.10.jar": {
+   "digest": "sha1:35100a3f0899551e27af8fed4a3414619a4663b3",
+   "program": "liquibase",
+   "size": 1137016,
+   "version": "postgresql-42.7.10.jar"
+  }
+ },
+ "images": {
+  "base": "python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e",
+  "connect-mirror-maker.sh": "apache/kafka:3.8.0@sha256:c89f315cff967322c5d2021434b32271393cb193aa7ec1d43e97341924e57069",
+  "debezium": "quay.io/debezium/connect:3.0@sha256:5547ddf063d6c20c56b56d660eb6bc449b180e6a70b2d69fc981629672b1f213",
+  "pgcopydb": "dimitri/pgcopydb:v0.18@sha256:8d93b05602689a34cb66b0f2dc090c175646a6b2ce2c7d9804001703ae6218f8",
+  "redpanda": "redpandadata/redpanda:v26.2.3@sha256:9e83cfa99278f30d0133271c26bf670cd69c94ffa6ba0b42830dd0c3bd9dcfd9"
+ }
+}

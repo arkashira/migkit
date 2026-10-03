@@ -87,7 +87,7 @@ def test_postgres_moves_checks_and_repairs_through_the_mapping(
                          " ',' order by id) from people") == "1=Ann/30,2=Bo/41"
     assert _dst(pg_pair, "select count(*) from plain") == "2"
     got, said = _run("check", "cm", "--only", "schema,data")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     assert "secret" not in said and "full_name" not in said, said
     # a renamed value that differs is still one
     psql(pg_pair["dst"], "update people set name = 'Anne' where id = 1")
@@ -98,7 +98,7 @@ def test_postgres_moves_checks_and_repairs_through_the_mapping(
     assert got.exit_code == 0, said
     assert _dst(pg_pair, "select name from people where id = 1") == "Ann"
     got, said = _run("check", "cm", "--only", "data")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
 
 
 def test_a_target_made_by_hand_is_compared_through_the_mapping(
@@ -114,7 +114,7 @@ def test_a_target_made_by_hand_is_compared_through_the_mapping(
     got, said = _run("move", "cm", "--go")
     assert got.exit_code == 0, said
     got, said = _run("check", "cm", "--only", "schema,data")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     # and a column the target lacks is still a difference
     psql(pg_pair["dst"], "alter table public.people drop column age")
     got, said = _run("check", "cm", "--only", "schema")
@@ -253,7 +253,7 @@ def test_mysql_moves_checks_and_repairs_through_the_mapping(
               " order by id) from cy.people") == "1=Ann/30,2=Bo/41"
     assert my("select count(*) from cy.plain") == "2"
     got, said = _run("check", "mm", "--only", "schema,data")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     assert "secret" not in said and "full_name" not in said, said
     my("update cy.people set name = 'Anne' where id = 1")
     got, said = _run("check", "mm", "--only", "data")

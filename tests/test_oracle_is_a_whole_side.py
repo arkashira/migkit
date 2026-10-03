@@ -622,11 +622,14 @@ def test_users_roles_and_grants_are_carried_and_taken_back(sandbox,
     made_here = {"user:MIGKIT", "user:APP"}
     assert "user:REPORTER" not in out["password_differs"]
     assert made_here <= set(out["password_differs"]), out
-    users.create(hop, apply=True, say=said.append)
+    # the sandbox's own accounts keep passwords that differ, and create
+    # ends by saying so
+    with pytest.raises(SystemExit, match="still differs"):
+        users.create(hop, apply=True, say=said.append)
     out, s = users.compare(hop, said.append)
     assert not {"user:REPORTER", "role:MIGKIT_R1"} & set(
         out["missing_on_target"] + out["password_differs"]
-        + out["grants_differ"]), (out, said)
+        + out["grants_missing"]), (out, said)
     assert "user:REPORTER" not in out["password_differs"], out
     assert s["user:REPORTER"]["hash"], "the password hash was not read"
     # the same password, carried as its hash: it signs in on the target
@@ -1081,20 +1084,37 @@ def _reader_image():
     runs, in a Linux container of this machine's own architecture."""
     if _docker("image", "inspect", READER_IMAGE).returncode == 0:
         return True
+    import platform
+
     from migkit import tools
     build = tools.REDO_READER_BUILD
     name = f"{READER}-build"
     _docker("rm", "-f", name)
-    made = subprocess.run(
-        ["docker", "run", "--name", name,
-         "-e", "SOURCE=" + build["source"].format(version=build["version"]),
-         "-e", "RAPIDJSON=" + build["rapidjson"],
-         "-e", "RAPIDJSON_FIX=" + build["rapidjson_fix"],
-         "-e", "CLIENT=" + build["client"].replace("{part}", "%s").replace(
-             "{arch}", "%s"),
-         "debian:12", "bash", "-c", tools.REDO_READER_SCRIPT, "build",
-         "/opt/redo-reader", "/tmp/build", build["version"]],
-        capture_output=True, text=True, timeout=3600)
+    # every file it is built from fetched as `doctor --install` fetches it,
+    # held to the lock (a file no vendor publishes a digest of, to the one
+    # it had the first time: kept in a place of the test's own), and handed
+    # to the build, which fetches nothing itself
+    files = pathlib.Path(tempfile.mkdtemp(prefix="migkit-redo-files-"))
+    arch = ("arm64" if platform.machine().lower() in ("arm64", "aarch64")
+            else "x64")
+    before = os.environ.get("MIGKIT_TOOLS")
+    os.environ["MIGKIT_TOOLS"] = str(files / "tools")
+    try:
+        for local, url in tools.redo_reader_files(arch).items():
+            assert tools.fetch(url, str(files / local), print), url
+    finally:
+        if before is None:
+            os.environ.pop("MIGKIT_TOOLS", None)
+        else:
+            os.environ["MIGKIT_TOOLS"] = before
+    subprocess.run(
+        ["docker", "create", "--name", name, "debian:12", "bash", "-c",
+         tools.REDO_READER_SCRIPT, "build", "/opt/redo-reader", "/tmp/build",
+         build["version"]], check=True, capture_output=True)
+    subprocess.run(["docker", "cp", f"{files}/.", f"{name}:/tmp/build"],
+                   check=True, capture_output=True)
+    made = subprocess.run(["docker", "start", "-a", name],
+                          capture_output=True, text=True, timeout=3600)
     BUILD_LOG.write_text(
         made.stdout[-20000:] + made.stderr[-20000:])
     if made.returncode != 0:

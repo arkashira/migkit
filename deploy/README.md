@@ -13,8 +13,37 @@ Add `--go` to execute (dry-run otherwise), `--serve` to loop forever.
 
 ## docker
     cp conf/hops.example.yaml deploy/conf/hops.yaml   # fill endpoints, chmod 600
+    echo "MIGKIT_METRICS_TOKEN=<a long random value>" > deploy/.env
     docker compose -f deploy/docker-compose.yml up -d --build
-    # dashboard: http://<vm>:8899
+    docker compose -f deploy/docker-compose.yml logs migkit-ui   # the address
+
+The dashboard is published on the VM's own 127.0.0.1:8899, never on its
+network: open the address it printed through an SSH tunnel to the VM's
+port 8899, which opens the view once. To share it, put a proxy that signs
+people in before it - it names each person in a header of its own
+(`MIGKIT_UI_USER_HEADER`, e.g. `X-Auth-Request-Email`) and proves it is
+the proxy with a secret it sends in `X-Migkit-Proxy`
+(`MIGKIT_UI_PROXY_SECRET`); without the secret the header is not
+believed, and the view does not start with a header and no secret. Add
+the name the proxy reaches it by to `MIGKIT_UI_HOSTS`. A hop's `access`
+option says who may see it and who may hold its tail.
+
+The image is built the same twice: its base by digest, Debian's packages
+as they stood on one day, every Python package by the digests of its files,
+and every program by `migkit doctor --install`, which holds each file it
+fetches to migkit's lock. `deploy/conf/` and anything holding a password or
+a report never enter it (`.dockerignore`). A program whose terms are not
+open goes in only where the build names it as accepted:
+`--build-arg MIGKIT_ACCEPT_TERMS=atlas,liquibase`.
+
+## a machine with no network
+    # where there is one: every file, wheel and image, with its sums
+    MIGKIT_BUNDLE_BUILD=/media/bundle MIGKIT_BUNDLE_KEY=~/.ssh/id_ed25519 \
+      MIGKIT_BUNDLE_PLATFORM=linux-x86_64-debian-12 migkit doctor --install
+    # where there is none
+    pip install --no-index --find-links /media/bundle/wheels migkit
+    MIGKIT_BUNDLE=/media/bundle MIGKIT_BUNDLE_SIGNERS=allowed_signers \
+      migkit doctor --install
 
 ## systemd
     sudo cp -r . /opt/migkit && /opt/migkit/bootstrap.sh
@@ -32,21 +61,42 @@ up and supervises its own streaming pipeline behind the same command.
 
 ## Alerts and notifications
 
-`/metrics` on the dashboard (`migkit report --serve`) carries each hop's last
-verdict and, for a running change tail, how far behind it is, whether it is
-still going round its loop, and whether it stopped on an error - and what
-works inside migkit, under migkit's names: the copy's rows per table and
-rows a second, each check's seconds, the verify's progress, every table's
-rows on each side and whether they agree, the last cutover's outage and
-phases, the change stream's parts and its reader's own readings.
+`/metrics` on the web view (`migkit report --serve`) carries each hop's last
+verdict (`migkit_verdict`, one sample a verdict: same, different, error,
+incomplete, none) and, for a running change tail, how far behind it is,
+whether it is still going round its loop, and whether it stopped on an
+error - and what works inside migkit, under migkit's names: the copy's rows
+per table and rows a second, each check's seconds, the verify's progress,
+every table's rows on each side and whether they agree as one run took
+them, the last cutover's outage and phases, the hop's own change stream's
+parts and its reader's readings. It is read from a snapshot taken every 15
+seconds, whose age and failed readings it carries too
+(`migkit_collect_age_seconds`, `migkit_collect_errors_total`). Scrape it
+with the bearer token:
+
+    scrape_configs:
+      - job_name: migkit
+        authorization: {credentials_file: /etc/prometheus/migkit-token}
+        static_configs: [{targets: ["migkit-ui:8899"]}]
+
+A person signed in sees the metrics of the hops their `access` gives them.
 `prometheus-alerts.yml` here has rules over those metrics; load it with
 `rule_files:` and change the thresholds to fit. `grafana/migkit.json` is a
 dashboard over the same metrics (import it and pick the Prometheus source).
+The families renamed in 0.x (`migkit_hop_status`, `migkit_check_pass`,
+`migkit_tail_changes_applied`, ...) are still served beside their new
+names until 1.0; their help says what replaces them.
 
 With `OTEL_EXPORTER_OTLP_ENDPOINT` set (the standard OpenTelemetry
 variables), every command is a trace: a span per command, per check of each
 database, per table copied and per cutover phase, with the ways the engine
 chose as events.
+
+Every run of a command on a hop also writes its own log,
+`reports/<hop>/runs/<run>.jsonl`: one JSON line an event, in UTC, in
+migkit's words, with no secret in it; the warnings of the libraries under
+the engines go there instead of the terminal. The diagnostics bundle
+(`MIGKIT_DIAGNOSE=<file>.zip migkit doctor`) carries the last ones.
 
 To be told without Prometheus, give the hop receivers, kept where its
 passwords are kept:
@@ -61,7 +111,28 @@ passwords are kept:
         lag: 300                    # seconds a change tail may be behind
 
 or set `MIGKIT_NOTIFY` (addresses separated by commas) for every hop. What
-is sent names each finding's check and table, never the rows' values.
+is sent names each finding's check and table, never the rows' values; an
+error is named by its kind, its words kept in the run's log unless the
+hop's `notify` says `detail: true`.
+
+## What leaves the machine
+
+Four things, each only where it is configured: notifications, traces, the
+model asked for help (`MIGKIT_AI`), and the evidence's digests put in the
+run state's bucket. Each goes through one gate, which cleans it of every
+secret and asks two settings first, the stricter winning:
+
+    MIGKIT_EGRESS=none                   # nothing leaves, for every hop
+    MIGKIT_EGRESS=notify                 # only notifications
+    MIGKIT_EGRESS_TO=*.corp.example.com,10.0.0.0/8   # and only there
+
+    options:
+      egress:
+        allow: [notify]
+        to: [mattermost.corp.example.com]
+
+In a network with no way out, `MIGKIT_EGRESS=none` makes sure nothing
+tries: no address is read, no name looked up, no connection opened.
 
 ## In the team's pipelines
 

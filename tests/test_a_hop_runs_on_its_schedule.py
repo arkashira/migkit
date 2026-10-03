@@ -40,12 +40,21 @@ def test_a_slot_is_read_in_the_hops_time_zone():
     assert slot == _at("2026-09-27 09:00:00", "Asia/Bangkok")
 
 
-def test_a_run_still_going_or_failing_holds_the_next(monkeypatch):
+def test_a_run_still_going_or_failing_holds_the_next(monkeypatch,
+                                                     tmp_path):
     spec = {"cron": "* * * * *", "pause_after_failures": 2}
     now = time.time()
-    assert schedule.decide(spec, {"running": os.getpid()}, now)[1] == \
-        "the last slot's run is still going"
-    assert schedule.decide(spec, {"running": 999999}, now)[0] is not None
+    # a run still going holds the slot's lease: the next is not due
+    said = []
+    held = schedule.take(_Hop(tmp_path), spec, said.append)
+    assert held is not None
+    assert schedule.take(_Hop(tmp_path), spec, said.append) is None
+    assert said[-1].endswith("the last slot's run is still going"), said
+    held.finished(True)
+    # a process number left in the record says nothing: in a container
+    # every run is process 1, and it held every later slot back forever
+    assert schedule.decide(spec, {"running": os.getpid()}, now)[0] \
+        is not None
     why = schedule.decide(spec, {"failures": 2}, now)[1]
     assert why.startswith("paused after 2 slots in a row failed"), why
     monkeypatch.setenv("MIGKIT_SCHEDULE_RESUME", "1")
@@ -64,9 +73,11 @@ class _Hop:
 
 def test_a_failed_run_is_tried_again_within_its_window(tmp_path):
     marks = tmp_path / "tries"
+    # 3: the command could not do its work (`verdict.EXIT`); 1 is a
+    # difference found, which is work done
     cmd = [sys.executable, "-c",
            f"p = {str(marks)!r}; open(p, 'a').write('x');"
-           " import sys; sys.exit(0 if len(open(p).read()) >= 3 else 1)"]
+           " import sys; sys.exit(0 if len(open(p).read()) >= 3 else 3)"]
     slept = []
     ok = schedule.run(_Hop(tmp_path), {"retry_window": 3600,
                                        "max_duration": 3600}, argv=cmd,

@@ -9,6 +9,7 @@ can be told apart from the hop's whole history (`export`).
 
 Around every command (`step`, which `cli` wraps each command in):
 * the run's trace is opened, and closed at the end (`traces`)
+* the run's log is begun and ended, beside the hop's reports (`runlog`)
 * each way the engine chooses is kept with its reason, and a way given up
   for another as the run goes is said to the hop's receivers in one line
 * a run that stops on an error is said to them, and a run that wrote
@@ -34,7 +35,18 @@ _LOCK = threading.Lock()
 DECISIONS = "decisions.jsonl"
 
 
+#: the shape of a run's id: its start and six hex digits
+_SHAPE = r"^\d{8}T\d{6}-[0-9a-f]{6}$"
+
+
 def _new():
+    """A new run's id - the one the web view drew for a run it started
+    (`MIGKIT_RUN_ID`), so the view finds the run's evidence by it."""
+    import os
+    import re
+    given = os.environ.get("MIGKIT_RUN_ID", "").strip()
+    if given and re.match(_SHAPE, given):
+        return given
     return time.strftime("%Y%m%dT%H%M%S") + "-" + secrets.token_hex(3)
 
 
@@ -142,16 +154,22 @@ def _first_line(text):
 def step(command, params, log=None):
     """One command as one run: see the module's docstring. `params` are
     the command's own (`hop_name`, `go`, `do_apply` read from them)."""
-    from . import decide, notify, traces
+    from . import decide, notify, runlog, traces
     log = log or (lambda m: None)
     run = begin()
     hop = _hop(params.get("hop_name"))
+    kept = None
+    if hop is not None:
+        try:
+            kept = runlog.begin(hop, run, command)
+        except Exception as e:  # noqa: BLE001 - said; the run goes on
+            log(f"the run's log could not be begun ({type(e).__name__})")
     writes = bool(params.get("go") or params.get("do_apply"))
     listening = Decisions(hop, log) if hop is not None else None
     if listening is not None:
         decide.LISTENERS.append(listening.heard)
     began = time.time()
-    failed, ok = None, False
+    failed, ok, ended = None, False, 0
     try:
         with traces.command(command, hop, params, run):
             try:
@@ -162,8 +180,11 @@ def step(command, params, log=None):
                 # are migkit stopping, which is a failure to be told
                 if isinstance(e.code, str) and e.code.strip():
                     failed = _first_line(e.code)
+                else:
+                    ended = e.code
                 raise
             except KeyboardInterrupt:
+                failed = "interrupted"
                 raise
             except Exception as e:
                 failed = f"{type(e).__name__}: {_first_line(e)}"
@@ -174,7 +195,7 @@ def step(command, params, log=None):
                 decide.LISTENERS.remove(listening.heard)
         if hop is not None:
             try:
-                if failed is not None:
+                if failed not in (None, "interrupted"):
                     notify.failed(hop, command, failed, log)
                 elif writes and ok:
                     notify.done(hop, command, time.time() - began, log)
@@ -182,6 +203,9 @@ def step(command, params, log=None):
                 log(f"the hop's receivers could not be told"
                     f" ({type(e).__name__})")
             _export(hop, run, log)
+        runlog.end(kept, "interrupted" if failed == "interrupted" else
+                   "stopped" if failed else "done", time.time() - began,
+                   failed, ended)
         traces.flush()
 
 

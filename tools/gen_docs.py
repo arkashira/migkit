@@ -59,7 +59,6 @@ none of them (the owner's rule), which is why a hop option named for one,
 or whose words name one, is left out of the options page, and why the
 program sources are shown without their schemes.
 """
-import ast
 import html
 import re
 import subprocess
@@ -901,17 +900,12 @@ def _usage(name, cmd):
 
 def metrics():
     """[(family, type, help)] of every metric family `/metrics` serves,
-    read off the dashboard's own help lines."""
+    read off the table the scrape is rendered from (`ui.FAMILIES`) - a
+    family renamed says what replaces it."""
     from migkit import ui
-    tree = ast.parse(Path(ui.__file__).read_text())
-    helps, types = {}, {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            for m in re.finditer(r"# HELP (\S+) ([^\n]+)", node.value):
-                helps.setdefault(m.group(1), m.group(2).strip())
-            for m in re.finditer(r"# TYPE (\S+) (\S+)", node.value):
-                types.setdefault(m.group(1), m.group(2))
-    return [(f, types.get(f, ""), h) for f, h in helps.items()]
+    return [(f, kind, said + (f" (deprecated until 1.0: {instead})"
+                              if instead else ""))
+            for f, (kind, said, instead) in ui.FAMILIES.items()]
 
 
 def page_commands():
@@ -950,6 +944,84 @@ def page_commands():
     return Page("commands", "Commands and metrics", "Commands",
                 f"The {len(commands())} commands, every option they take,"
                 " and the metrics the dashboard serves.", blocks)
+
+
+def page_web():
+    """The web view and the API: the roles (`web.roles`), the routes and
+    their OpenAPI document (`web.api`, written beside the page as
+    `openapi.json`), the runs a person may start (`web.runs`) and the
+    variables that set the view up (`envkeys`)."""
+    from migkit.web import api, roles, runs
+    envkeys = optional("envkeys")
+    # the view's own, and the ones it shares with the dashboard
+    shared = ("MIGKIT_UI_BIND", "MIGKIT_UI_HOSTS", "MIGKIT_METRICS_TOKEN")
+    env = [(n, v) for n, v in sorted((envkeys.VARS if envkeys else {})
+                                     .items())
+           if (n.startswith("MIGKIT_WEB_") or n in shared)
+           and not v.internal]
+    blocks = [
+        P("`migkit report --serve` serves it: every hop's outcomes - what"
+          " happens to each side, the time and outage predicted with their"
+          " spread, the guarantees - its progress, the approvals and the"
+          " changes on the source waiting for an answer, and the evidence,"
+          " for the people each hop names, each signed in by the"
+          " organisation's identity provider. The decision record is shown"
+          " only when asked. The command line is not needed for any of it,"
+          " and the view does nothing the command line does not: a run"
+          " started here is the same command, with the same guards."),
+        H("Signing in", "signing-in"),
+        UL([Said("OpenID Connect: the code flow with PKCE; the ID token"
+                 " checked against the provider's published keys, issuer,"
+                 " audience, expiry and nonce (`MIGKIT_WEB_OIDC_ISSUER`)."),
+            Said("SAML 2.0: the provider's signed answer to a request this"
+                 " view made, read only out of the element the signature"
+                 " covers (`MIGKIT_WEB_SAML_METADATA`)."),
+            Said("SCIM 2.0 at `/scim/v2`: the provider provisions who may"
+                 " sign in and their groups; a person deactivated there is"
+                 " signed out everywhere at once (`MIGKIT_WEB_SCIM_TOKEN`)."),
+            Said("Without a provider, one local operator, the admin of"
+                 " every hop, set once through an address the view prints"
+                 " when it starts."),
+            Said("Multi-factor sign-in is the provider's.")]),
+        H("Roles", "roles"),
+        P("Written in the hops file's `access` - for every hop, a group of"
+          " hops by name pattern, or one hop's `options.access` - by a"
+          " person's name (shell patterns allowed) or `group:NAME`. Each"
+          " role holds the ones before it; nobody has a role the file does"
+          " not give."),
+        Table(["Role", "What it may do"],
+              [[f"`{r}`", Said(roles.WHAT[r])] for r in roles.ROLES],
+              ids=[f"role-{r}" for r in roles.ROLES]),
+        H("What a person may start", "runs"),
+        Table(["Run", "What it does", "Takes"],
+              [[f"`{n}`", Said(a.what),
+                ", ".join(f"`{o.name}`" for o in a.options) or "-"]
+               for n, a in runs.ACTIONS.items()],
+              ids=[f"run-{n}" for n in runs.ACTIONS]),
+        H("The API", "api"),
+        P(f"Every route is served under `{api.BASE}`, answers JSON, and"
+          " needs an API token made on the account page (`Authorization:"
+          " Bearer ...`) or a signed-in page. A hop the caller may not see"
+          " answers 404; a role too low, 403. The whole description:"
+          " [openapi.json](openapi.json)."),
+        Table(["Method", "Path", "Needs", "What it does"],
+              [[f"`{r.method}`", f"`{api.BASE}{r.path}`", r.need,
+                Said(r.summary)] for r in api.ROUTES],
+              ids=[f"api-{r.handler}" for r in api.ROUTES]),
+        H("Setting it up", "setting-up"),
+        P("On this machine alone, nothing needs setting. Anywhere else it"
+          " takes TLS - its own certificate, or a reverse proxy in front"
+          " that does TLS, named so only it is answered. Deployment, the"
+          " proxy's configuration and each provider's settings:"
+          " [docs/web.md](https://github.com/arkashira/migkit/blob/master/"
+          "docs/web.md)."),
+        Table(["Variable", "Kind", "What it does"],
+              [[f"`{n}`", v.kind, Said(v.what)] for n, v in env],
+              ids=[f"web-{n}" for n, _ in env])]
+    return Page("web", "The web view and the API", "Web and API",
+                "Several people, each with a role on each hop, signed in by"
+                " the organisation's identity provider; a REST API over the"
+                " command line's own functions.", blocks)
 
 
 def page_troubleshooting():
@@ -1121,6 +1193,43 @@ RECIPES = (
                       "source": "mysql://app@db1.example.com:3306/shop",
                       "target": "postgres://app@db2.example.com:5432/shop"}},
            needs=(("source", "data"), ("target", "data"))),
+    Recipe("verify-what-a-service-moved",
+           "What a cloud's migration service moved, proved table by table,"
+           " and only that",
+           "A service told to take some databases, schemas and tables -"
+           " leaving its log tables behind, renaming one, filtering another's"
+           " rows, taking some columns - is checked against exactly that:"
+           " `include` names what it took, `exclude` what it was told to"
+           " leave, `mapping` its renames, filters and columns. A table it"
+           " never took is neither compared nor called missing, and the"
+           " verdict says the scope it covers. Given the job's own file"
+           " where it asks for the source, `migkit init` writes this hop"
+           " from it, with every setting of the job that makes a correct"
+           " move look different said beside it - and the changes it does"
+           " not carry (`mapping.ops`) are the contract the check holds"
+           " each table to. Given the service's own check report as"
+           " `compare_with`, the evidence says table by table where its"
+           " \"consistent\" falls short: what it called the same that"
+           " differs, what it skipped, what it never checked.",
+           {"orders-moved": {"goal": "verify",
+                             "source": "mysql://app@db1.example.com:3306/"
+                                       "billing,logistics",
+                             "target": "mysql://app@db2.example.com:3306/"
+                                       "billing,logistics_new",
+                             "include": ["billing.*", "logistics.orders",
+                                         "logistics.parcels"],
+                             "exclude": ["billing.*_log"],
+                             "mapping": {
+                                 "tables": {"logistics.parcels": "parcel"},
+                                 "where": {"logistics.parcels": "id > 10"},
+                                 "columns": {"logistics.orders": {
+                                     "keep": ["id", "status", "total"]}},
+                                 "ops": {"billing.payments":
+                                         ["insert", "update"]}},
+                             "options": {"compare_with":
+                                         "service-check-report.json"}}},
+           needs=(("source", "data"), ("target", "data")),
+           then=("migkit check orders-moved",)),
     Recipe("masked-test-copy",
            "Production to a staging database, as a masked subset",
            "The rows chosen and every row they refer to, masked where the"
@@ -1312,6 +1421,7 @@ PAGES = (("index", "Overview"), ("quickstart", "Quickstart"),
          ("recipes", "Recipes"), ("options", "Hop options"),
          ("environment", "Environment"), ("commands", "Commands"),
          ("troubleshooting", "Troubleshooting"), ("evidence", "Evidence"),
+         ("web", "Web and API"),
          ("releases", "Releases"))
 
 
@@ -1434,7 +1544,7 @@ BUILDERS = {"index": page_index, "quickstart": page_quickstart,
             "recipes": page_recipes, "options": page_options,
             "environment": page_environment, "commands": page_commands,
             "troubleshooting": page_troubleshooting,
-            "evidence": page_evidence}
+            "evidence": page_evidence, "web": page_web}
 
 
 def _site_base():
@@ -1560,6 +1670,13 @@ def _outputs():
     out["docs/goals-and-modes.md"] = goals
     out["docs/troubleshooting.md"] = troubleshooting.render(
         refusals_by_area())
+    # the API's own description, served by the view at
+    # /api/v1/openapi.json, beside the page that lists its routes
+    import json
+
+    from migkit.web import api
+    out[str(SITE / "openapi.json")] = json.dumps(
+        api.document(), indent=1, sort_keys=True) + "\n"
     return out
 
 

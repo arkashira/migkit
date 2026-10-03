@@ -24,11 +24,21 @@ What it is used for:
 What is sent is each finding's check, scope, status and category. The
 finding's detail, where keys and values are, is sent only when
 `MIGKIT_AI_SHARE=detail` says so, and never for a hop that masks values.
+
+Every prompt goes through the one gate of what leaves the machine
+(`egress`): the environment's `MIGKIT_EGRESS` and the hop's `egress` say
+whether a model may be asked at all and at which hosts, and the prompt
+is cleaned of every secret the hop holds and of the programs migkit
+drives. The key goes only over TLS: an address that is not `https` is
+refused - the model is not asked - unless it is this machine's own
+(`http://localhost:11434` for a local model), where no network is
+crossed.
 """
 import json
 import os
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 TIMEOUT = 60
 DEFAULT_MODEL = {"anthropic": "claude-sonnet-5"}
@@ -84,18 +94,48 @@ def _answer(kind, got):
             ).get("content", "")
 
 
-def ask(prompt, endpoint=None):
-    """The provider's answer, or None where none is configured. A provider
-    that cannot be reached is said as the answer: this never stops a
+#: hosts an address may name over plain HTTP: the model runs here
+LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+
+def refused(url):
+    """Why the model at `url` is not asked, or None: the key and the
+    prompt go in the clear over anything but TLS, so only this machine's
+    own address may be plain HTTP."""
+    got = urlsplit(url)
+    host = (got.hostname or "").lower()
+    if got.scheme == "https" or (got.scheme == "http" and (
+            host in LOOPBACK or host.startswith("127."))):
+        return None
+    return (f"the model's address is {got.scheme or 'not'} a TLS address"
+            " (https): the key and what is asked would cross the network"
+            " readable, so the model was not asked")
+
+
+def ask(prompt, endpoint=None, hop=None):
+    """The provider's answer, or None where none is configured or the
+    egress keeps prompts here. A provider that cannot be reached, or an
+    address that is not TLS, is said as the answer: this never stops a
     command whose own result is already in. `endpoint` ({provider, url,
-    model}) is a hop's own choice over the environment's."""
+    model}) is a hop's own choice over the environment's; `hop` the hop
+    the prompt is about, whose secrets it is cleaned of and whose egress
+    is asked."""
+    from . import egress
     kind = str((endpoint or {}).get("provider") or "").lower() or provider()
     if not kind:
         return None
     if kind not in BASE:
         raise SystemExit(f"the model provider {kind} is not one of"
                          f" {', '.join(sorted(BASE))}")
+    if not egress.allows(hop, "assist"):
+        return None
+    prompt = egress.words(hop, prompt)
     url, headers, body = _request(kind, prompt, endpoint)
+    why = refused(url)
+    if why:
+        return f"(the {kind} provider was not asked: {why})"
+    if not egress.permit(hop, "assist", url):
+        return None
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", **headers},
@@ -118,7 +158,7 @@ def shares(what):
     return what in got
 
 
-def propose(src, dst, kind, name, definition):
+def propose(src, dst, kind, name, definition, hop=None):
     """A statement creating `name` in the target's SQL, proposed by the
     provider from the source's definition - or None where none is
     configured, code may not be sent, or the answer holds no statement."""
@@ -129,7 +169,7 @@ def propose(src, dst, kind, name, definition):
         f"Convert this {src} {kind} to {dst}. Keep its name, {name}, its"
         " arguments' names and what it returns for every input, nulls"
         " included. Answer with the one CREATE statement only, with no"
-        f" explanation.\n\n{definition}")
+        f" explanation.\n\n{definition}", hop=hop)
     if not answer or answer.startswith("(the "):
         return None
     fenced = re.search(r"```[a-zA-Z]*\n(.*?)```", answer, re.S)
@@ -155,4 +195,4 @@ def explain(hop, env):
         " finding means and what they would usually do next. Do not invent"
         " facts that are not in the findings. Findings as JSON:\n"
         + json.dumps(findings, indent=1, default=str))
-    return ask(prompt)
+    return ask(prompt, hop=hop)

@@ -6,12 +6,19 @@ Thanks for helping make migkit the most complete database migration verifier.
 
 ```bash
 ./bootstrap.sh && source .venv/bin/activate
-.venv/bin/python -m pytest -q            # full suite (spins up throwaway docker DBs)
 .venv/bin/python -m pytest -q -m "not docker"   # unit + fail-case only, no docker
+.venv/bin/python tools/final_suite.py           # the whole suite, as CI runs it
 ```
 
-The test suite starts throwaway Postgres, MySQL, and MongoDB containers, so a
-working Docker daemon is needed for the full run.
+The test suite starts throwaway database containers, so a working Docker
+daemon is needed for the full run. `tools/final_suite.py` runs the pure tests
+side by side, then the docker tests in lanes on the default colima profile and
+the migkit VM at once, and writes a report to `reports/final-suite/`. A single
+docker test file runs through the lock:
+`python tools/with_docker_lock.py python -m pytest -q tests/test_x.py`
+(`--vm migkit` for Oracle, SQL Server and the x86 images). New tests take
+their servers from `tests/servers.py` (the pattern is at its top) and wait
+with `tests/waits.py:until`.
 
 ## Adding a check
 

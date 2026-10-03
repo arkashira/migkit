@@ -109,6 +109,7 @@ def _twelve(text):
 class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "db2"
+    CHARSETS = True
     SQL_DIALECT = None
     FOLDED_BECAUSE = ("is rendered by migkit's own renderer rather than by"
                       " a Db2 one nobody has run")
@@ -231,6 +232,18 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
         return self._as_pair().check_data(db, table, stream)
 
     def check_deep(self, db):
+        """What a load left pending on the target (`_pending`, each
+        platform's own), and text stored twice as UTF-8 on the source."""
+        return self._pending(db) + [self._mojibake(db)]
+
+    def _held_in_scope(self, db, rows):
+        """The rows of a target listing whose first value is a table the
+        hop takes (`in_scope`): a table it leaves out is the target's own,
+        whatever state a load of someone else's left it in."""
+        return [r for r in rows
+                if self.in_scope(db, self._said(str(r[0]).strip()))]
+
+    def _pending(self, db):
         """Tables a load left in check-pending or unavailable on the
         target: Db2 refuses reads of them, or answers from a table whose
         constraints nobody checked."""
@@ -245,6 +258,7 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
             return [Result("deep", f"{db} target tables", "error",
                            "could not read the target's tables:"
                            f" {str(e).splitlines()[0][:90]}")]
+        held = self._held_in_scope(db, held)
         if held:
             return [Result("deep", f"{db} target tables", "diff",
                            f"{len(held)} tables not in normal state:"

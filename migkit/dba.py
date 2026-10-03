@@ -134,56 +134,18 @@ def missing(found):
 
 # ---- how a cloud spells a setting ----------------------------------------
 
-#: a PostgreSQL setting under the name each service gives it
-PG_NAMES = {("aws", "wal_level", "logical"): ("rds.logical_replication",
-                                              "1"),
-            ("gcp", "wal_level", "logical"): ("cloudsql.logical_decoding",
-                                              "on")}
-
-
 def _setting(engine, where, name, value, restart, target_label):
     """(statements run on the server, lines said about the cloud) that set
-    `name` to `value` on this side."""
-    cloud = getattr(where, "cloud", "") or ""
-    service = getattr(where, "service", "") or ""
-    if cloud == "gcp" and service == "alloydb" and name == "wal_level":
-        name, value = "alloydb.logical_decoding", "on"
-    else:
-        name, value = PG_NAMES.get((cloud, name, value), (name, value)) \
-            if engine == "postgres" else (name, value)
+    `name` to `value` on this side: on a managed side in its provider's
+    own words and under the service's own name for the setting, as the
+    managed-service catalogue writes them (`managed.spell`) - a parameter
+    group, a database flag, a server parameter, a console - and on a
+    server run by its owner, on the server itself."""
+    from . import managed
+    got = managed.spell(engine, where, name, value, restart, target_label)
+    if got is not None:
+        return got
     after = " (the server restarts to take it)" if restart else ""
-    if cloud == "aws":
-        group = ("DB cluster parameter group" if service.startswith("aurora")
-                 else "DB parameter group")
-        api = ("modify-db-cluster-parameter-group"
-               " --db-cluster-parameter-group-name <its cluster parameter"
-               " group>" if service.startswith("aurora") else
-               "modify-db-parameter-group --db-parameter-group-name <its"
-               " parameter group>")
-        return [], [f"in {target_label}'s {group}: {name} = {value}{after}",
-                    f"aws rds {api} --parameters"
-                    f" \"ParameterName={name},ParameterValue={value},"
-                    f"ApplyMethod={'pending-reboot' if restart else 'immediate'}\""]
-    if cloud == "gcp":
-        return [], [f"database flag {name}={value}{after}",
-                    f"gcloud sql instances patch <instance>"
-                    f" --database-flags={name}={value}"
-                    "  (the list replaces every flag the instance has:"
-                    " name the ones it keeps as well)"]
-    if cloud == "azure":
-        kind = "postgres" if engine == "postgres" else "mysql"
-        return [], [f"server parameter {name} = {value}{after}",
-                    f"az {kind} flexible-server parameter set"
-                    " --resource-group <group> --server-name <server>"
-                    f" --name {name} --value {value}"]
-    if cloud == "tencent":
-        return [], [f"TencentDB console, the instance's parameter settings:"
-                    f" {name} = {value}{after}"]
-    if cloud == "alibaba":
-        return [], [f"the instance's parameters in the console, or"
-                    f" `aliyun rds ModifyParameter --DBInstanceId <id>"
-                    f" --Parameters '{{\"{name}\":\"{value}\"}}'"
-                    f"{' --Forcerestart true' if restart else ''}`"]
     if engine == "postgres":
         return ([f"alter system set {name} = '{value}';"]
                 + ([] if restart else ["select pg_reload_conf();"]),
@@ -199,10 +161,30 @@ def _setting(engine, where, name, value, restart, target_label):
 
 # ---- PostgreSQL ----------------------------------------------------------
 
+#: PostgreSQL's reserved words: one of these bare is not a name
+PG_RESERVED = frozenset("""all analyse analyze and any array as asc asymmetric
+authorization binary both case cast check collate collation column
+concurrently constraint create cross current_catalog current_date
+current_role current_schema current_time current_timestamp current_user
+default deferrable desc distinct do else end except false fetch for foreign
+freeze from full grant group having ilike in initially inner intersect into
+is isnull join lateral leading left like limit localtime localtimestamp
+natural not notnull null offset on only or order outer overlaps placing
+primary references returning right select session_user similar some
+symmetric system_user table tablesample then to trailing true union unique
+user using variadic verbose when where window with""".split())
+
+
 def _pgi(name):
-    """An identifier as PostgreSQL reads it back unchanged."""
-    return name if re.fullmatch(r"[a-z_][a-z0-9_]*", str(name)) else \
-        '"' + str(name).replace('"', '""') + '"'
+    """An identifier as PostgreSQL reads it back unchanged: bare where it
+    is a plain lower-case word that is not a reserved one, quoted with any
+    double quote doubled everywhere else - a name read off a catalogue
+    goes into the script the DBA runs as that name and nothing more."""
+    text = str(name)
+    if re.fullmatch(r"[a-z_][a-z0-9_]*", text) and \
+            text not in PG_RESERVED:
+        return text
+    return '"' + text.replace('"', '""') + '"'
 
 
 def _pg_rows(e, key, db, sql):
@@ -285,11 +267,15 @@ def _pg(hop, e, key, side, dbs, where, read, write, follow, native):
         out += _following(_pg_follow(hop, e, key, side, dbs, where, who,
                                      super_, repl == "1", native, label))
     if key == "dst" and write and native and _streams_natively(hop):
+        # the role a managed service gives its admin in place of a
+        # superuser, where the catalogue says it subscribes: a member of
+        # it may (`managed`) - asked of the server, never of the address
+        admin = _admin(where, "postgres")
+        stands_in = admin.get("role") if admin.get("subscribe") else ""
         ok = super_ or (int(version) >= 160000 and _pg_rows(
             e, key, "postgres", "select pg_has_role(current_user,"
             " 'pg_create_subscription', 'member')::int")[0][0] == "1") \
-            or getattr(where, "cloud", "") == "aws" and _member(
-                e, key, "rds_superuser")
+            or bool(stands_in) and _member(e, key, stands_in)
         fix = ([f"grant pg_create_subscription to {who};"]
                if int(version) >= 160000 else
                ["-- before PostgreSQL 16 only a superuser creates a"
@@ -300,6 +286,20 @@ def _pg(hop, e, key, side, dbs, where, read, write, follow, native):
     if key == "dst" and write and hop.engine != "hetero":
         out += _pg_extensions(hop, e, dbs, where, who)
     return out
+
+
+def _admin(where, engine):
+    """What the managed-service catalogue says the side's service gives
+    its admin ({} for a server run by its owner)."""
+    from . import managed
+    got = managed.service_of(where, engine)
+    return dict(got.admin or {}) if got is not None else {}
+
+
+def _granted_role(template):
+    """The role a `grant <role> to {who}` template gives, or ""."""
+    m = re.match(r"\s*grant\s+([\w$]+)\s+to\s", str(template or ""), re.I)
+    return m.group(1) if m else ""
 
 
 def _streams_natively(hop):
@@ -330,8 +330,10 @@ def _pg_follow(hop, e, key, side, dbs, where, who, super_, repl, native,
     out.append(_change(side, "a log that carries rows (wal_level logical)",
                        level == "logical", f"wal_level is {level}",
                        "wal_level", ctx))
-    aws = getattr(where, "cloud", "") == "aws"
-    ok = super_ or repl or (aws and _member(e, key, "rds_replication"))
+    # a managed service gives the right through a role of its own
+    # (`rds_replication`), where the catalogue says so: a member reads
+    given = _granted_role(_admin(where, "postgres").get("replication"))
+    ok = super_ or repl or (bool(given) and _member(e, key, given))
     out.append(_change(side, "read the change log (replication)", ok,
                        "may" if ok else "may not", "replication_role", ctx))
     free = _pg_rows(
@@ -355,13 +357,24 @@ def _pg_follow(hop, e, key, side, dbs, where, who, super_, repl, native,
             has = _pg_rows(e, key, d,
                            f"select count(*) from pg_publication where"
                            f" pubname = {_lit(name)}")[0][0] != "0"
-            ok = has or super_ or (aws and _member(e, key,
-                                                   "rds_superuser"))
+            # the publication lists the hop's tables (`FOR TABLE`), which
+            # their owner may make - a member of the owning role as well
+            others = "0" if has or super_ else _pg_rows(
+                e, key, d, "select count(*) from pg_class c join"
+                           " pg_namespace n on n.oid = c.relnamespace where"
+                           " c.relkind in ('r', 'p') and n.nspname not in"
+                           " ('pg_catalog', 'information_schema') and"
+                           " n.nspname not like 'pg\\_%' and not"
+                           " pg_has_role(current_user, c.relowner,"
+                           " 'USAGE')")[0][0]
+            ok = has or super_ or others == "0"
             out.append(_change(side, f"publish every table's changes in"
                                      f" {d}",
                                ok, "the publication is there" if has else
                                ("may create it" if ok else
-                                "only a superuser publishes every table"),
+                                f"{others} tables it does not own, which"
+                                " only their owner or a superuser"
+                                " publishes"),
                                "publication",
                                sc.Ctx(who=who, where=where, label=label,
                                       db=d, name=name)))
@@ -411,6 +424,7 @@ def _my_privileges(e, key):
     except Exception:  # noqa: BLE001 - before 8.0
         role = "NONE"
     if role and role != "NONE":
+        # current_role() names each role quoted, as the server writes it
         try:
             rows += [r[0] for r in e._q(
                 key, f"show grants for current_user() using {role}")]
@@ -440,6 +454,12 @@ def _myi(name):
     return "`" + str(name).replace("`", "``") + "`"
 
 
+def _my_lit(text):
+    """A MySQL string literal, as the default sql_mode reads one: the
+    backslash escaped, the quote doubled."""
+    return "'" + str(text).replace("\\", "\\\\").replace("'", "''") + "'"
+
+
 #: what a MySQL target needs on the database migkit writes
 MY_WRITE = ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER",
             "DROP", "INDEX", "REFERENCES", "CREATE VIEW", "SHOW VIEW",
@@ -450,7 +470,7 @@ def _my(hop, e, key, side, dbs, where, read, write, follow, native):
     out = []
     user, host = e._q(key, "select substring_index(current_user(), '@', 1),"
                            " substring_index(current_user(), '@', -1)")[0]
-    who = f"'{user}'@'{host}'"
+    who = f"{_my_lit(user)}@{_my_lit(host)}"
     privs = _my_privileges(e, key)
     label = f"the {side}"
     if read:
@@ -511,6 +531,14 @@ def _my(hop, e, key, side, dbs, where, read, write, follow, native):
                        "not kept: removed as soon as it may be")
             except Exception as err:  # noqa: BLE001 - not allowed to ask
                 ok, now = None, _last(err)
+        elif getattr(e, "_own_retention", None) is not None and \
+                e._own_retention(key) is not None:
+            # a server whose retention is its service's own setting, as
+            # the server itself says (a CNAME, a private address)
+            own = e._own_retention(key)
+            ok = own >= 86400
+            now = (f"kept {own // 3600} hours" if own != e.OWN_PURGE else
+                   "not kept: removed as soon as it may be")
         else:
             ok = keep == 0 or keep >= 86400
             now = f"kept {keep}s" if keep else "kept for ever"
@@ -575,11 +603,19 @@ def _mongo(hop, e, key, side, dbs, where, read, write, follow, native):
         out.append(_change(side, "a change stream (a replica set)", rs,
                            f"replica set {hello.get('setName')}" if rs else
                            "a single server", "replica_set", ctx))
-        docdb = getattr(where, "service", "") == "documentdb"
+        # a server that turns change streams on per database answers which
+        # it has on (`$listChangeStreams`); the address naming such a
+        # service is no proof they are off
+        enabled = streams_enabled(client)
+        docdb = enabled is not None
         for db in dbs:
-            ok = can(db, "changeStream")
+            on = enabled is None or ("", "") in enabled \
+                or (db, "") in enabled
+            ok = can(db, "changeStream") and on
             got = _change(side, f"follow {db}'s changes", ok,
-                          "may" if ok else "may not", "change_streams",
+                          ("may" if ok else "may not") if on else
+                          "change streams are off for it on the server",
+                          "change_streams",
                           sc.Ctx(where=where, label=f"the {side}", db=db,
                                  docdb=docdb))
             got.fix.append(grant.format(roles=f'{{role: "read", db:'
@@ -587,6 +623,19 @@ def _mongo(hop, e, key, side, dbs, where, read, write, follow, native):
             out.append(got)
     _following(out[start:])
     return out
+
+
+def streams_enabled(client):
+    """{(database, collection)} a server that keeps its change streams off
+    until they are turned on per database or collection says it has on -
+    ("", "") for all of them - or None where the server answers no such
+    list (a replica set's streams are always on)."""
+    try:
+        got = list(client.admin.aggregate([{"$listChangeStreams": 1}]))
+    except Exception:  # noqa: BLE001 - no such stage: always on
+        return None
+    return {(str(d.get("database") or ""), str(d.get("collection") or ""))
+            for d in got}
 
 
 def _js(text):
@@ -1064,12 +1113,14 @@ def _crdb(hop, e, key, side, dbs, where, read, write, follow, native):
     if not admin:
         for d in dbs:
             for t in e.neutral_tables(key, d):
+                sch, tbl = e._split(t)
                 got = _pgwire_rows(e, key, d, "select privilege_type from"
-                                              f" [show grants on table {t}"
+                                              " [show grants on table"
+                                              f" {_pgi(sch)}.{_pgi(tbl)}"
                                               f" for {_pgi(me)}]")
                 if not {str(p).upper() for (p,) in got} & {"CHANGEFEED",
                                                             "ALL"}:
-                    lack.append(f"{d}.{t}")
+                    lack.append(f"{_pgi(d)}.{_pgi(sch)}.{_pgi(tbl)}")
     found.append(Need(side, "make a changefeed on every table in scope",
                       not lack, f"not on {len(lack)} tables" if lack
                       else "may",
@@ -1123,6 +1174,8 @@ def _couchbase(hop, e, key, side, dbs, where, read, write, follow, native):
     roles = {(r.get("role"), r.get("bucket_name") or "*")
              for r in me.get("roles", [])}
     user = me.get("id") or "<user>"
+    # each name one argument of the command, whatever it holds
+    from shlex import quote as sh
 
     def has(bucket, *names):
         return any((n, b) in roles for n in names + ("admin",)
@@ -1135,26 +1188,28 @@ def _couchbase(hop, e, key, side, dbs, where, read, write, follow, native):
             out.append(Need(side, f"read every document of {name}", ok,
                             "may" if ok else "may not", [],
                             [f"couchbase-cli user-manage --set --rbac-username"
-                             f" {user} --roles data_reader[{name}]"
+                             f" {sh(user)} --roles"
+                             f" {sh(f'data_reader[{name}]')}"
                              " --auth-domain local"]))
         if key == "dst" and write:
             ok = has(name, "bucket_full_access", "bucket_admin") or (
                 has(name, "data_writer") and has(name, "scope_admin",
                                                  "bucket_admin"))
+            writes = f"data_writer[{name}],scope_admin[{name}]"
             out.append(Need(side, f"write documents and make collections"
                             f" in {name}", ok, "may" if ok else "may not",
                             [], [f"couchbase-cli user-manage --set"
-                                 f" --rbac-username {user} --roles"
-                                 f" data_writer[{name}],scope_admin[{name}]"
-                                 " --auth-domain local"]))
+                                 f" --rbac-username {sh(user)} --roles"
+                                 f" {sh(writes)} --auth-domain local"]))
         if key == "src" and follow:
             ok = has(name, "data_monitoring", "bucket_admin", "ro_admin",
                      "cluster_admin")
             out += _following([Need(
                 side, f"read {name}'s sequence numbers, the follow's"
                       " fence", ok, "may" if ok else "may not", [],
-                [f"couchbase-cli user-manage --set --rbac-username {user}"
-                 f" --roles data_monitoring[{name}] --auth-domain local"])])
+                [f"couchbase-cli user-manage --set --rbac-username"
+                 f" {sh(user)} --roles {sh(f'data_monitoring[{name}]')}"
+                 " --auth-domain local"])])
     if follow and key == "src":
         out += _following(_feed(e, key, side, dbs, "the Kafka connector's"
                                 " topic the hop reads",

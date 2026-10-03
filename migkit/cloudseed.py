@@ -59,8 +59,13 @@ of every table are slow, which is the provider's and not the copy's.
 
 The option:
 
+Tencent Cloud and Alibaba Cloud clone an instance into a new one through
+their APIs (`ByApi`, over `cloudapi`), the new instance's id the
+provider's; a MySQL clone goes on from its GTID set, a PostgreSQL one
+from its recovery end, as above.
+
     physical:
-      cloud: aws                      # aws | azure | google
+      cloud: aws                      # aws | azure | google | tencent | alibaba
       source_id: app-db               # the source's instance or cluster
       target_id: app-db-seeded        # the one to make; must not exist
       region: eu-west-1
@@ -73,42 +78,22 @@ The option:
       resource_group: rg-app                               # azure
       project: my-project                                  # google
 """
-import os
 import time
 
 from . import physical
+from .cloudapi import POLL, WAIT  # noqa: F401 - where they are read
+from .cloudapi import until as _until
 from .physical import GIVES, Need, Rung, Unread
 
 AWS_CLONE = "a copy-on-write clone of the source's storage"
 AWS_SNAPSHOT = "a snapshot of the source restored as the target"
 AZURE_RESTORE = "a point-in-time restore of the source as the target"
 GOOGLE_CLONE = "a clone of the source instance"
-
-#: seconds between two looks at something the provider is making, and the
-#: most a make is waited for
-POLL, WAIT = 20, 6 * 3600
-
+TENCENT_CLONE = "a clone of the source instance, made by Tencent Cloud"
+ALIBABA_CLONE = "a clone of the source instance, made by Alibaba Cloud"
 
 def _opts(hop):
     return physical.settings(hop) or {}
-
-
-def _until(ask, what, log, poll=None, most=None):
-    """Ask until `ask()` answers something other than None; the answer."""
-    poll = poll if poll is not None else float(
-        os.environ.get("MIGKIT_CLOUD_POLL", POLL))
-    most = most or float(os.environ.get("MIGKIT_CLOUD_WAIT", WAIT))
-    end, said = time.time() + most, 0.0
-    while True:
-        got = ask()
-        if got is not None:
-            return got
-        if time.time() > end:
-            raise SystemExit(f"{what} was not ready within {most:,.0f}s")
-        if time.time() - said > 300:
-            log(f"waiting for {what}")
-            said = time.time()
-        time.sleep(poll)
 
 
 # --- AWS ---------------------------------------------------------------------
@@ -608,14 +593,73 @@ class Google:
                              f" to {want}")
 
 
-PROVIDERS = {"aws": Aws, "azure": Azure, "google": Google}
+# --- a clone through the provider API layer ------------------------------------
+
+class ByApi:
+    """A provider whose copy is its own clone of an instance into a new
+    one, driven through migkit's provider API layer (`cloudapi`): Tencent
+    Cloud's (TencentDB for MySQL `CreateCloneInstance`, for PostgreSQL
+    `CloneDBInstance`) and Alibaba Cloud's (ApsaraDB RDS `CloneDBInstance`,
+    PolarDB's clone). The clone is a new instance the provider names, so
+    nothing the hop names is overwritten; its credentials are found the
+    way the provider's own CLI finds them."""
+
+    #: (provider, engine) -> the adapter's product, where the hop names none
+    PRODUCTS = {("tencent", "mysql"): "cdb", ("tencent", "postgres"): "postgres",
+                ("alibaba", "mysql"): "rds", ("alibaba", "postgres"): "rds"}
+    #: the options of `physical` that are the seed's, not the adapter's
+    OWN = ("cloud", "source_id", "target_id", "way", "upgrade", "address")
+
+    def __init__(self, hop, opts, engine, api):
+        self.hop, self.opts, self.engine, self.api = hop, opts, engine, api
+
+    def adapter(self, ident=None):
+        from . import cloudapi
+        conf = {k: v for k, v in self.opts.items() if k not in self.OWN}
+        conf.setdefault("product", self.PRODUCTS.get((self.api, self.engine)))
+        conf["id"] = ident or self.opts["source_id"]
+        return cloudapi.adapter(self.api, conf)
+
+    def source(self):
+        got = self.adapter().instance()
+        return {"kind": "instance", "engine": got.engine or self.engine,
+                "version": got.version, "id": got.id,
+                "status": got.status}
+
+    def target_exists(self):
+        # a clone is a new instance with an id of the provider's making:
+        # nothing that is there is written over
+        return False
+
+    def copy(self, way, src, log):
+        """The clone of the source as it stands now (the slots were made
+        before this call, so what it holds is after them)."""
+        got = self.adapter().clone(self.opts["target_id"], None, log)
+        log(f"clone {got.get('id')} of {self.opts['source_id']} is up")
+        return {"host": got["host"], "port": int(got["port"]),
+                "id": got["id"], "kind": got.get("kind") or "instance"}
+
+    def binlog_position(self, target, log):
+        return None
+
+    def upgrade(self, target, version, up, log):
+        raise SystemExit(f"a {self.api} copy is not upgraded through its"
+                         " API by migkit; the logical copy carries an"
+                         " upgrade")
+
+
+PROVIDERS = {"aws": Aws, "azure": Azure, "google": Google,
+             "tencent": ByApi, "alibaba": ByApi}
 
 
 def provider(hop, engine=None):
     opts = _opts(hop)
-    cls = PROVIDERS[str(opts.get("cloud")).lower()]
+    name = str(opts.get("cloud")).lower()
+    cls = PROVIDERS[name]
     if cls is Aws:
         return cls(hop, opts)
+    if cls is ByApi:
+        return cls(hop, opts, engine or physical._engine_of(hop), name)
     return cls(hop, opts, engine or physical._engine_of(hop))
 
 
@@ -657,7 +701,10 @@ class _CloudFacts:
                           "azure.mgmt.postgresqlflexibleservers"
                           if physical._engine_of(self.hop) == "postgres"
                           else "azure.mgmt.mysqlflexibleservers"),
-                "google": ("googleapiclient.discovery",)}.get(name, ())
+                "google": ("googleapiclient.discovery",),
+                "tencent": ("tencentcloud.common.credential",),
+                "alibaba": ("alibabacloud_credentials.client",
+                            "alibabacloud_tea_openapi")}.get(name, ())
         import importlib
         for m in mods:
             importlib.import_module(m)
@@ -706,7 +753,8 @@ _SOURCE_SEEN = Need("a source the credentials can see", ("source",),
                     lambda f: bool(f["source"]))
 
 #: the hop's word for a provider, as `clouds` names it
-CLOUD_OF = {"aws": "aws", "azure": "azure", "google": "gcp"}
+CLOUD_OF = {"aws": "aws", "azure": "azure", "google": "gcp",
+            "tencent": "tencent", "alibaba": "alibaba"}
 
 
 def _theirs(provider_name):
@@ -759,12 +807,12 @@ def _follows(engine, provider_name):
                 ("log_bin",), lambda f: f["log_bin"],
                 "the binlog is off on the source, and the changes after the"
                 " copy are read from it", when=following)]
-    if provider_name == "azure":
+    if provider_name in ("azure", "tencent", "alibaba"):
         out.append(Need("GTIDs on the source", ("gtid_mode",),
                         lambda f: f["gtid_mode"] == "ON",
-                        "a restored Azure server says where it ends only"
-                        " by its GTID set, and GTIDs are off on the source",
-                        when=following))
+                        f"a clone {provider_name} makes says where it ends"
+                        " only by its GTID set, and GTIDs are off on the"
+                        " source", when=following))
     if provider_name == "aws":
         out.append(Need("a restored position the source's log agrees with",
                         ("gtid_mode", "enhanced_binlog"),
@@ -858,6 +906,16 @@ def rungs():
                  footprint=1, engine=engine, cloud="google",
                  because="a clone copies storage, not rows"),
         ]
+        for name, said in (("tencent", TENCENT_CLONE),
+                           ("alibaba", ALIBABA_CLONE)):
+            out.append(Rung(
+                f"cloud-{name}-clone", said, gives=GIVES,
+                needs=(_names(name),
+                       _says(("source_id", "target_id", "region")),
+                       _theirs(name), *base, _NEW_TARGET,
+                       *_follows(engine, name)),
+                footprint=1, engine=engine, cloud=name,
+                because="a clone copies storage, not rows"))
     return tuple(out)
 
 

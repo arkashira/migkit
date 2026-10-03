@@ -7,7 +7,9 @@ name: x86 engines
 # public repository nothing. One engine a job, since a runner's disk holds
 # one of these images at a time, and only the tests marked for it
 # (`-m mssql`, `-m db2`, `-m ase`: a test file named for the engine is
-# marked by `tests/conftest.py`) - never the whole suite, which `ci` runs.
+# marked by `tests/conftest.py`), run as the final run runs them
+# (`tools/final_suite.py`: the pure ones side by side, the rest in the VM
+# lane, which on an x86 runner is the runner's own docker).
 # Each server is a throwaway container with a made-up password: no secret.
 on:
   push:
@@ -16,7 +18,8 @@ on:
             "migkit/engines/ase.py", "migkit/engines/dbapi.py",
             "migkit/engines/hetero.py", "migkit/engines/base.py",
             "migkit/canon.py", "migkit/decide.py", "migkit/planner.py",
-            "tests/conftest.py", "tests/test_sql_server_*.py",
+            "tests/conftest.py", "tests/servers.py", "tests/waits.py",
+            "tools/final_suite.py", "tests/test_sql_server_*.py",
             "tests/test_mssql_*.py", "tests/test_db2_*.py",
             "tests/test_sap_ase_*.py", "pyproject.toml",
             ".github/workflows/x86-engines.yml"]
@@ -25,7 +28,8 @@ on:
             "migkit/engines/ase.py", "migkit/engines/dbapi.py",
             "migkit/engines/hetero.py", "migkit/engines/base.py",
             "migkit/canon.py", "migkit/decide.py", "migkit/planner.py",
-            "tests/conftest.py", "tests/test_sql_server_*.py",
+            "tests/conftest.py", "tests/servers.py", "tests/waits.py",
+            "tools/final_suite.py", "tests/test_sql_server_*.py",
             "tests/test_mssql_*.py", "tests/test_db2_*.py",
             "tests/test_sap_ase_*.py", "pyproject.toml",
             ".github/workflows/x86-engines.yml"]
@@ -36,9 +40,9 @@ on:
 jobs:
   sql-server:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
-      # the full server, where the default is SQL Edge (tests/conftest.py)
+      # the full server, where the default is SQL Edge (tests/servers.py)
       MIGKIT_MSSQL_IMAGE: mcr.microsoft.com/mssql/server:2022-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,12 +58,17 @@ jobs:
           sqlcmd --version
       - name: the server, pulled before a test times its start
         run: docker pull "$MIGKIT_MSSQL_IMAGE"
-      - run: pip install -e . pytest faker
-      - run: pytest -q -m mssql tests/
+      - run: pip install -e ".[dev]"
+      - run: python tools/final_suite.py --strict server -m mssql
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86-mssql-report
+          path: reports/final-suite/
 
   db2:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -69,12 +78,17 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: the server, pulled before a test times its start
         run: docker pull icr.io/db2_community/db2:latest
-      - run: pip install -e . pytest faker
-      - run: pytest -q -m db2 tests/
+      - run: pip install -e ".[dev]"
+      - run: python tools/final_suite.py --strict server -m db2
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86-db2-report
+          path: reports/final-suite/
 
   sap-ase:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -88,5 +102,10 @@ jobs:
       # tests of ASE 16.0 (charset iso_1)
       - name: the server, pulled before a test times its start
         run: docker pull datagrip/sybase:16.0
-      - run: pip install -e . pytest faker
-      - run: pytest -q -m ase tests/
+      - run: pip install -e ".[dev]"
+      - run: python tools/final_suite.py --strict server -m ase
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86-ase-report
+          path: reports/final-suite/

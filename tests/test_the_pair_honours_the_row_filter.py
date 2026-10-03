@@ -75,7 +75,7 @@ def test_the_copy_and_the_check_read_through_the_filter(lite):
     assert _rows(lite / "b.db") == [(1, "apac", "x"), (3, "apac", "z"),
                                     (9, "emea", "theirs")]
     got, said = _run("check", "lite", "--only", "data")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     assert "1 rows on the target lie outside the hop's row filter" in said, \
         said
     # a difference inside the filter is still one
@@ -166,7 +166,7 @@ def test_mysql_to_postgres_copies_checks_and_tails_through_it(
                              " order by id) from public.orders") == \
             "1=apac,3=apac,9=emea", said
         got, said = _run("check", "mp", "--only", "data")
-        assert got.exit_code == 0, said
+        assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
         # the tail: what the filter selects arrives, what it leaves out
         # does not, and a row updated out of it leaves
         from migkit.config import get_hop

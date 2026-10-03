@@ -60,14 +60,26 @@ def test_nothing_recognised_leaves_the_tail_to_speak():
 
 
 def test_a_move_that_fails_says_it(monkeypatch, tmp_path):
-    """Through the one place every program is run from."""
+    """Through the one place every program is run from (`runner`): a
+    target whose disk is full is one no other way gets past either, so
+    the move stops there, in the database's words, rather than trying the
+    next way into the same full disk."""
     import pytest
 
-    from migkit import movers
+    from migkit import movers, runner
     script = tmp_path / "fails.sh"
     script.write_text("#!/bin/sh\ncat <<'X' >&2\n" + DISK_FULL + "X\nexit 12\n")
     script.chmod(0o755)
-    with pytest.raises(RuntimeError) as e:
+    with pytest.raises(runner.Refused) as e:
         movers._sh([str(script)])
     assert str(e.value).startswith("the target ran out of disk space"), \
         e.value
+    assert "no other way would get past it" in str(e.value), e.value
+    # a failure that is not the database's refusal is one another way
+    # may get past: the decision layer switches on it
+    (tmp_path / "gone.sh").write_text(
+        "#!/bin/sh\ncat <<'X' >&2\n" + GONE + "X\nexit 12\n")
+    (tmp_path / "gone.sh").chmod(0o755)
+    with pytest.raises(runner.Transient) as e:
+        movers._sh([str(tmp_path / "gone.sh")])
+    assert "could not be reached" in str(e.value), e.value

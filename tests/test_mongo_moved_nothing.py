@@ -114,3 +114,16 @@ def test_it_looks_in_the_targets_name_for_the_database(seeded):
 def test_a_target_it_cannot_reach_is_not_a_clean_bill(seeded):
     """None, not an empty list: the caller says it could not confirm."""
     assert _engine(dst_port=1).moved_nothing("app") is None
+
+
+def test_a_renamed_collection_is_looked_for_under_its_new_name(seeded):
+    """Looked for under the source's name, a collection the move carried
+    to its new one read as one that received nothing (backlog
+    P0-SCOPE.6d)."""
+    s, t = seeded
+    t.app.orders.drop()
+    t.app.orders_v2.insert_one({"_id": 1})
+    eng = _engine()
+    assert "orders" in eng.moved_nothing("app")
+    eng.hop.mapping = {"tables": {"orders": "orders_v2"}}
+    assert eng.moved_nothing("app") == ["audit", "people"]

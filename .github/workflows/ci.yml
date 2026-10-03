@@ -1,5 +1,11 @@
 name: ci
 
+# The same suite, the same script and the same shards as the final run
+# (`tools/final_suite.py`): the pure tests side by side, the docker tests in
+# lanes. The x86 engines each have a job in `x86-engines.yml`. Programs
+# whose terms need the operator's acceptance are not installed here, so a
+# missing program stays a skip (listed in the report) and only a server
+# that never came up fails (`--strict server`).
 on:
   push:
     branches: [master]
@@ -9,6 +15,7 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         python: ["3.10", "3.12"]
@@ -20,12 +27,21 @@ jobs:
       - name: install
         run: |
           python -m pip install -U pip
-          pip install -e . faker pytest
-      - name: unit tests (no docker)
-        run: pytest tests/ -q -m "not docker"
+          pip install -e ".[dev]"
+      - name: the pure tests
+        run: python tools/final_suite.py --only unit --strict server
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-report-${{ matrix.python }}
+          path: reports/final-suite/
 
   integration:
     runs-on: ubuntu-latest
+    # estimated ~55 min in four lanes (tools/final_suite.py ESTIMATE);
+    # set from the first measured run
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,9 +52,17 @@ jobs:
       - name: install
         run: |
           python -m pip install -U pip
-          pip install -e ".[mysql,mongo]" faker pytest
-      - name: full suite (docker available on ubuntu runners)
-        run: pytest tests/ -q
+          pip install -e ".[dev]"
+      - name: the docker tests in lanes (the x86 engines run in x86-engines)
+        run: >-
+          python tools/final_suite.py --only docker,vm --strict server
+          -m "not mssql and not db2 and not ase"
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-report
+          path: reports/final-suite/
 
   package:
     runs-on: ubuntu-latest
@@ -70,7 +94,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
           python -m pip install -U pip
-          pip install -e . faker pytest
+          pip install -e ".[dev]"
       - name: live debezium e2e
         env:
           MIGKIT_LIVE_E2E: "1"

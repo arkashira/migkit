@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Hops</h1>
+{% if error %}<p class="note error">The hops file could not be read: {{ error }}</p>{% endif %}
+{% if not cards %}
+<section class="card">
+  <p>No hop is yours to see. You are signed in as <b>{{ me.id }}</b>{% if me.groups %}, in {{ me.groups|join(", ") }}{% endif %};
+  an admin gives roles in the hops file's <code>access</code>.</p>
+</section>
+{% endif %}
+<div class="grid">
+{% for c in cards %}
+  <a class="card hop" href="/hops/{{ c.name|urlencode }}">
+    <h2><span class="dot {{ c.verdict or 'none' }}"></span>{{ c.name }}
+      <span class="badge">{{ c.role }}</span></h2>
+    <p class="route">{{ c.route }}</p>
+    <p><span class="pill">{{ c.engine }}</span> <span class="pill">goal {{ c.goal }}</span>
+    {% if c.verdict %}<span class="pill {{ c.verdict }}">{{ c.verdict }}</span>{% else %}<span class="pill">not checked yet</span>{% endif %}</p>
+    <p class="muted">
+      {% if c.running %}{{ c.running|length }} run{{ "s" if c.running|length > 1 }} going on. {% endif %}
+      {% if c.approvals %}{{ c.approvals }} waiting for approval. {% endif %}
+      {% if c.offers %}{{ c.offers }} change{{ "s" if c.offers > 1 }} on the source offered. {% endif %}
+      {% if c.checked %}Last checked {{ c.checked }}.{% endif %}
+    </p>
+  </a>
+{% endfor %}
+</div>
+{% endblock %}

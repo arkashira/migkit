@@ -9,7 +9,7 @@ the neutral contract every engine that moves data already speaks, and
 says what changed.
 """
 
-
+import functools
 import re
 
 #: the working tables of an online schema change: gh-ost's ghost, changelog
@@ -52,29 +52,51 @@ TRANSIENT_TRIGGERS = re.compile(
 
 
 def transient(table, among=None):
-    """True for a table an online schema change is working in.
+    """True for a table an online schema change is working in, or one that
+    is another tool's own state (`leftovers.bookkeeping`, the rule
+    `Hop.excluded` asks too - one rule for gh-ost's changelog, not two).
 
     `among`, the names of the tables on the same side, is what lets a name
     an application could also have chosen count: `_orders_new` is a working
     table beside `orders` and an application's own without it. Without
     `among` those names are read as they always were - gh-ost's and
     pt-online-schema-change's by their name alone - and the rest only where
-    no application would choose it.
+    no application would choose it. A set is used as it is: the caller
+    that asks for every table of a side builds it once (`transient_among`).
     """
     name = str(table)
-    leaf = name.split(".")[-1]
-    if any(p.match(name) or p.match(leaf) for p in OWN_NAMES):
-        return True
     if among is None:
-        return bool(ONLINE_SCHEMA_CHANGE.match(leaf))
+        return _transient_alone(name)
+    if _own(name):
+        return True
+    leaf = name.split(".")[-1]
     schema = name.rpartition(".")[0]
-    others = {str(t) for t in among}
+    others = among if isinstance(among, (set, frozenset)) else \
+        {str(t) for t in among}
     for p in BESIDE_ITS_TABLE:
         got = p.match(leaf)
         if got and (got.group(1) in others
                     or (schema and f"{schema}.{got.group(1)}" in others)):
             return True
     return False
+
+
+@functools.lru_cache(maxsize=4096)
+def _own(name):
+    from .leftovers import bookkeeping
+    leaf = name.split(".")[-1]
+    if any(p.match(name) or p.match(leaf) for p in OWN_NAMES):
+        return True
+    # asked as a table of some database: the database a hop names is the
+    # operator's choice, what lies in it is asked of
+    return bool(bookkeeping("-", *name.split(".")[-2:]))
+
+
+@functools.lru_cache(maxsize=4096)
+def _transient_alone(name):
+    """`transient` without the side's other tables: asked for every row
+    change the tail reads, so each name is worked out once."""
+    return _own(name) or bool(ONLINE_SCHEMA_CHANGE.match(name.split(".")[-1]))
 
 
 def maybe_transient(table):
@@ -87,9 +109,13 @@ def maybe_transient(table):
 
 
 def transient_among(tables):
-    """The tables of one side that an online schema change is working in."""
+    """The tables of one side that an online schema change is working in.
+    The side's names are gathered once: gathered per table, 5,000 tables
+    took 509 ms and a move asks this several times a table (measured,
+    2026-10-01); once, the same answer in a few."""
     tables = [str(t) for t in tables]
-    return {t for t in tables if transient(t, tables)}
+    among = frozenset(tables)
+    return {t for t in tables if transient(t, among)}
 
 
 def transient_trigger(name):
@@ -98,42 +124,175 @@ def transient_trigger(name):
     return bool(TRANSIENT_TRIGGERS.match(str(name).split(".")[-1]))
 
 
+# ---- a table's shape ---------------------------------------------------------
+#
+# A shape is {table: [(column, definition), ...]}: what every reader of
+# one takes apart - a column's name and a text - and what a JSON file
+# beside a run keeps as it is. Underneath it is the side's `catalog.Catalog`
+# (an engine's `shape_catalog`), carried whole: a column's definition is
+# its declared type with every number, followed after `PART` by the rest
+# the server declares of it (nullability, default, collation, identity or
+# computed expression), and the first column's also carries, after
+# `TABLE`, the table's key, indexes, foreign keys and the rest the server
+# says of it (its checks and triggers). `catalog_of` reads a shape back
+# into the catalogue, so the one comparer and the one explanation are the
+# catalogue's (`Catalog.fingerprint`, `Catalog.explain`), whether a shape
+# was read now or saved by an earlier run. An engine that reads only
+# (column, type) - `column_catalog` - is compared by that.
+
+#: before the rest of a column's definition
+PART = "\x1f"
+#: before the table's own parts, on its first column
+TABLE = "\x1e"
+
+
+def pairs(cat):
+    """`catalog.Catalog` -> {table: [(column, definition)]}, everything it
+    holds kept (`catalog_of` reads it back)."""
+    import json
+    out = {}
+    for t in cat.tables:
+        cols = []
+        for c in cat.columns.get(t) or []:
+            text = str(c.declared)
+            rest = [bool(c.nullable), c.default, c.collation, c.extra or ""]
+            if rest != [True, None, None, ""]:
+                text += PART + json.dumps(rest)
+            cols.append((str(c.name), text))
+        whole = {"key": list(cat.keys.get(t) or ()),
+                 "indexes": [[i.name, list(i.columns), bool(i.unique),
+                              i.definition or ""]
+                             for i in cat.indexes.get(t) or []],
+                 "fks": [[f.name, list(f.columns), f.ref_table,
+                          list(f.ref_columns), f.on_delete, f.on_update]
+                         for f in cat.fks.get(t) or []],
+                 "others": sorted(str(o) for o in cat.others.get(t) or [])}
+        if cols and any(whole.values()):
+            name, first = cols[0]
+            cols[0] = (name, first + TABLE + json.dumps(
+                whole, sort_keys=True, separators=(",", ":")))
+        out[t] = cols
+    return out
+
+
+def catalog_of(shape):
+    """A shape (`pairs`, or an engine's plain (column, type) pairs) as the
+    `catalog.Catalog` it was made from."""
+    import json
+
+    from .catalog import Catalog, Column, ForeignKey, Index
+    cat = Catalog()
+    for t, cols in (shape or {}).items():
+        columns = []
+        for name, text in cols or []:
+            text = str(text)
+            own, _, whole = text.partition(TABLE)
+            declared, _, rest = own.partition(PART)
+            nullable, default, collation, extra = (
+                json.loads(rest) if rest else [True, None, None, ""])
+            columns.append(Column(str(name), declared, "", nullable, default,
+                                  collation, extra))
+            if whole:
+                got = json.loads(whole)
+                cat.keys[t] = tuple(got.get("key") or ())
+                cat.indexes[t] = [Index(i[0], tuple(i[1]), bool(i[2]), i[3])
+                                  for i in got.get("indexes") or []]
+                cat.fks[t] = [ForeignKey(f[0], tuple(f[1]), f[2],
+                                         tuple(f[3]), f[4], f[5])
+                              for f in got.get("fks") or []]
+                cat.others[t] = list(got.get("others") or [])
+        cat.columns[t] = columns
+        cat.tables.append(t)
+    return cat
+
+
 def reader(engine):
     """The engine that reads the source's whole column catalogue in one
     query, or None. A cross-engine hop reads it through its source's
     engine; a document store's shape is a scan of every document, which
     nothing that only watches may cost."""
     src = getattr(engine, "src_engine", None) or engine
-    return src if hasattr(src, "column_catalog") else None
+    return src if (hasattr(src, "shape_catalog")
+                   or hasattr(src, "column_catalog")) else None
 
 
 def shape(engine, side, db):
-    """{table: [(column, type), ...]} as the engine sees it now, or None
-    when it cannot be read - never an exception: a move is not stopped by
-    the thing that watches it. An engine that can read its whole column
-    catalogue in one query (`column_catalog`) is asked that way; the rest
-    are read table by table.
+    """{table: [(column, definition), ...]} as the engine sees it now, or
+    None when it cannot be read - never an exception: a move is not
+    stopped by the thing that watches it. An engine that reads its whole
+    catalogue in one pass (`shape_catalog`) is asked that way, else one
+    that reads its columns so (`column_catalog`); the rest are read table
+    by table.
     """
     try:
-        whole = getattr(engine, "column_catalog", None)
-        if whole is not None:
-            got = whole(side, db)
+        if hasattr(engine, "shape_catalog"):
+            got = pairs(engine.shape_catalog(side, db))
+        elif hasattr(engine, "column_catalog"):
+            got = engine.column_catalog(side, db)
         else:
             got = {t: sorted((str(n), str(ty)) for n, ty in
                              engine.neutral_columns(side, db, t))
                    for t in engine.neutral_tables(side, db)}
     except Exception:
         return None
-    # a table the hop leaves alone is not moved, so its DDL is not the
-    # move's business; nor is the scaffolding of an online schema change
+    return in_scope(engine, db, got)
+
+
+def in_scope(engine, db, got):
+    """A shape without the tables the hop leaves alone - not moved, so
+    their DDL is not the move's business - nor the scaffolding of an
+    online schema change."""
     working = transient_among(got)
     return {t: cols for t, cols in got.items()
-            if not engine.hop.excluded(db, *str(t).split("."))
+            if engine.hop.takes_table(db, t)
             and t not in working}
 
 
-def changes(before, after):
-    """What differs between two shapes, one line per table, in words."""
+def said(shape):
+    """A shape as lines a person reads: each column with the rest of its
+    definition, then each table's key, indexes, foreign keys and the
+    rest."""
+    cat = catalog_of(shape)
+    out = []
+    for t in sorted(cat.tables):
+        for c in cat.columns.get(t) or []:
+            rest = [x for x in (
+                "" if c.nullable else "not null",
+                f"default {c.default}" if c.default is not None else "",
+                f"collate {c.collation}" if c.collation else "", c.extra)
+                if x]
+            out.append(f"{t}.{c.name} {', '.join([c.declared] + rest)}\n")
+        if cat.keys.get(t):
+            out.append(f"{t}: key ({', '.join(cat.keys[t])})\n")
+        out += [f"{t}: index {i.name} ({', '.join(i.columns)})"
+                f"{' unique' if i.unique else ''} {i.definition}".rstrip()
+                + "\n" for i in cat.indexes.get(t) or []]
+        out += [f"{t}: foreign key {f.name} ({', '.join(f.columns)}) ->"
+                f" {f.ref_table} ({', '.join(f.ref_columns)})\n"
+                for f in cat.fks.get(t) or []]
+        out += [f"{t}: {o}\n" for o in sorted(cat.others.get(t) or [])]
+    return "".join(out)
+
+
+def table_changes(cols_a, cols_b, engine=None, added="added",
+                  dropped="dropped"):
+    """What differs between one table's two shapes, in words - the
+    catalogue's own explanation (`Catalog.explain`): columns `added` and
+    `dropped`, each column's type (a narrower one named with why), its
+    nullability, default, collation and expression, and the table's key,
+    indexes, foreign keys, checks and triggers. The one comparer of two
+    tables: drift over time, and a schema check across a hop's two sides
+    (`added` and `dropped` then in that check's words)."""
+    a, b = catalog_of({"t": cols_a}), catalog_of({"t": cols_b})
+    if a.fingerprint("t") == b.fingerprint("t"):
+        return []
+    return a.explain(b, "t", engine, added, dropped)
+
+
+def changes(before, after, engine=None):
+    """What differs between two shapes, one line per table, in words.
+    `engine`, where the two are one engine's, names a narrowing with why
+    (`verdict.narrowing`)."""
     if before is None or after is None:
         return []
     out = []
@@ -142,11 +301,7 @@ def changes(before, after):
     for t in sorted(set(after) - set(before)):
         out.append(f"{t}: created")
     for t in sorted(set(before) & set(after)):
-        a, b = dict(before[t]), dict(after[t])
-        parts = [f"column {c} added" for c in sorted(set(b) - set(a))]
-        parts += [f"column {c} dropped" for c in sorted(set(a) - set(b))]
-        parts += [f"column {c} {a[c]} -> {b[c]}"
-                  for c in sorted(set(a) & set(b)) if a[c] != b[c]]
+        parts = table_changes(before[t], after[t], engine)
         if parts:
             out.append(f"{t}: {', '.join(parts)}")
     return out
@@ -154,9 +309,9 @@ def changes(before, after):
 
 def changed_tables(before, after):
     """The tables whose shape differs between two shapes: altered,
-    created or dropped."""
+    created or dropped - anything the server says of a table, by its
+    fingerprint (`Catalog.fingerprint`)."""
     if before is None or after is None:
         return set()
-    return {t for t in set(before) | set(after)
-            if dict(before.get(t) or []) != dict(after.get(t) or [])
-            or (t in before) != (t in after)}
+    a, b = catalog_of(before).shape(), catalog_of(after).shape()
+    return a.changed(b)

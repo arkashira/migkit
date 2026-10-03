@@ -123,16 +123,24 @@ def test_a_verdict_is_sent_when_it_changes_and_not_again(tmp_path,
                           said.append) == 1
     assert notify.verdict(hop, _env("different", [FINDING]),
                           said.append) == 0
-    # a narrowed run is no answer either way
-    assert notify.verdict(hop, _env("incomplete"), said.append) == 0
+    # a narrowed run after a difference is not quiet: it is incomplete,
+    # said with what it did not look at
+    narrowed = {**_env("incomplete"),
+                "why": "the run was narrowed to table main.people"}
+    assert notify.verdict(hop, narrowed, said.append) == 1
     assert notify.verdict(hop, _env("error"), said.append) == 1
     assert notify.verdict(hop, _env("same"), said.append) == 1
     got = [b for _, b in receiver.got]
     assert [(b["status"], b["was"]) for b in got] == [
-        ("different", None), ("error", "different"), ("same", "error")]
-    assert "n is different: diff data main.people" in got[0]["text"], \
+        ("different", None), ("incomplete", "different"),
+        ("error", "incomplete"), ("same", "error")]
+    # in the words every output says a verdict in (`verdict.VERDICTS`)
+    assert "n - different: diff data main.people" in got[0]["text"], \
         got[0]
-    assert "n is error, was different" in got[1]["text"], got[1]
+    assert "n - incomplete (was different): the run was narrowed" in \
+        got[1]["text"], got[1]
+    assert "n - could not verify (was incomplete)" in got[2]["text"], \
+        got[2]
     # the finding's detail, where values live, is not sent
     assert "ann@example.com" not in json.dumps(receiver.got)
     assert said == [], said
@@ -312,7 +320,7 @@ def test_a_tail_that_stops_on_an_error_is_said(pg_pair, tmp_path,
               databases=["postgres"],
               options={"source_engine": "postgres",
                        "target_engine": "postgres",
-                       "notify": [receiver.url]})
+                       "notify": {"to": [receiver.url], "detail": True}})
     eng = HeteroEngine(hop)
     token = hop.report_dir("postgres") / "tail-token.json"
     ended = {}
@@ -353,9 +361,12 @@ def test_a_tail_that_stops_on_an_error_is_said(pg_pair, tmp_path,
                'db="postgres"} 1' in text, text
         assert "migkit_tail_running{" not in text, text
         stops = [b for _, b in receiver.got
-                 if b.get("event") == "tail stopped"]
+                 if b.get("what") == "tail stopped"]
         assert len(stops) == 1 and stops[0]["db"] == "postgres", \
             receiver.got
+        # an event of the ones a hop may name, its words only where the
+        # hop's notify asks for them
+        assert stops[0]["event"] == "failure", stops
         assert "nt" in stops[0]["why"], stops
         # back again
         psql(pg_pair["dst"], "create table public.nt (id int primary key,"
@@ -368,9 +379,10 @@ def test_a_tail_that_stops_on_an_error_is_said(pg_pair, tmp_path,
                     ).stdout.strip() == "1":
                 break
             time.sleep(0.5)
-        assert [b.get("event") for _, b in receiver.got] == [
+        assert [b.get("what") for _, b in receiver.got] == [
             "tail stopped", "tail started"], receiver.got
-        assert "migkit_tail_stopped{" not in ui.prometheus({"nt": hop})
+        assert ('migkit_tail_stopped{hop="nt",engine="hetero",'
+                'db="postgres"} 0') in ui.prometheus({"nt": hop})
     finally:
         import ctypes
         if thread.is_alive():

@@ -131,6 +131,7 @@ def shared(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "REPORTS", tmp_path)
     monkeypatch.setattr(ui, "load_hops", lambda: hops)
     monkeypatch.setenv("MIGKIT_UI_USER_HEADER", "X-Auth-Request-Email")
+    monkeypatch.setenv("MIGKIT_UI_PROXY_SECRET", PROXY)
     monkeypatch.setenv("MIGKIT_UI_HOSTS", "migkit.example.com")
     srv = ThreadingHTTPServer(("127.0.0.1", 0), ui.Handler)
     port = srv.server_address[1]
@@ -141,11 +142,17 @@ def shared(tmp_path, monkeypatch):
     srv.shutdown()
 
 
-def _as(port, user, method, path, body=None, csrf=None):
+#: the secret the proxy proves it is the proxy with
+PROXY = "proxy-" + "p" * 20
+
+
+def _as(port, user, method, path, body=None, csrf=None, proxy=PROXY):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     headers = {"Host": "migkit.example.com"}
     if user:
         headers["X-Auth-Request-Email"] = user
+    if proxy:
+        headers["X-Migkit-Proxy"] = proxy
     if csrf:
         headers["X-Migkit-Csrf"] = csrf
     if body is not None:
@@ -188,6 +195,31 @@ def test_each_person_sees_and_does_what_the_hop_gives_them(shared):
     assert _as(port, "eve@elsewhere.test", "GET", "/report/pay")[0] == 404
 
 
+def test_the_header_is_believed_only_from_the_proxy(shared):
+    """Before, any process that reached the view and sent the proxy's
+    header was signed in as whoever it named - operator of every hop that
+    names no `access`. The header counts only with the proxy's secret."""
+    port, reports = shared
+    for proxy in (None, "", "proxy-" + "q" * 20):
+        assert _as(port, "ann@example.com", "GET", "/api/data",
+                   proxy=proxy)[0] == 403, proxy
+        assert _as(port, "ann@example.com", "POST", "/api/hold",
+                   {"hop": "pay", "db": "app"}, csrf="0" * 64,
+                   proxy=proxy)[0] == 403, proxy
+    assert _as(port, "ann@example.com", "GET", "/api/data")[0] == 200
+
+
+def test_the_view_does_not_start_believing_a_header_alone(monkeypatch):
+    from migkit import ui
+    monkeypatch.setenv("MIGKIT_UI_USER_HEADER", "X-Auth-Request-Email")
+    monkeypatch.delenv("MIGKIT_UI_PROXY_SECRET", raising=False)
+    monkeypatch.setattr(ui, "ThreadingHTTPServer", lambda *a: pytest.fail(
+        "the view started"))
+    with pytest.raises(SystemExit) as e:
+        ui.serve(18998)
+    assert "MIGKIT_UI_PROXY_SECRET" in str(e.value)
+
+
 # ---- the token stays out of the address -------------------------------------
 
 def test_the_printed_address_opens_the_view_once(board):
@@ -222,6 +254,7 @@ def test_serve_prints_no_token_in_a_query(monkeypatch, capsys):
     monkeypatch.setattr(schedule, "loop", lambda *a: None)
     monkeypatch.setattr(ui.Handler, "token", "")
     monkeypatch.setattr(ui.Handler, "once", "")
+    monkeypatch.setattr(ui, "load_hops", lambda: {})
     ui.serve(18999)
     said = capsys.readouterr().out
     assert "http://127.0.0.1:18999/#" in said, said

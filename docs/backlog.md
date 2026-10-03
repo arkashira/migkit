@@ -2818,6 +2818,151 @@ store). What was still nowhere:
     same outcomes the console shows, the approvals and the source-change
     offer answered there.
 
+## P0-SCOPE. The check takes exactly what the move took (owner, 2026-10-03)
+
+"A DTS job can be told to leave the log tables behind, so when we verify
+or compare we must be able to choose where to verify - deep and very
+detailed." A hop said only what it left out (`exclude`); what another
+tool's job *took* was turned into an `exclude` against the source's
+tables once, when `init` connected, so a table made later was in scope
+though the job never took it.
+
+1. **`include`** (done 2026-10-03): the databases, schemas and tables a
+   hop takes - the same names and shell patterns as `exclude`, matched
+   the same right-anchored way, `exclude` winning where both name one.
+   Read inside `Hop.excluded`, the one scope answer every reader asks
+   (the copy, the check, the repair, the tail, the drop list of every
+   bulk mover), so none can verify a table the move left out or leave
+   out one it moved. A database is skipped only where every entry names
+   another one first; where a name may hold a dot of its own (a
+   collection, a topic) every database is opened. Every whole copy (the
+   pages, a backup restore, a replica, the keyspace copy) is refused
+   for a hop that takes only some (`config.scoped`). Validated: an entry
+   that is not a name, one `exclude` takes back whole, a mapping rule
+   naming a table `include` does not take. Before the move: an entry that
+   takes no table, a database it takes nothing of. In the evidence:
+   `verdict.json` and the report say the scope a `same` covers
+   (`verdict.hop_scope`); a `same` within the hop's own scope is a
+   `same` (a run narrowed on the command line stays `incomplete`).
+   Columns and rows go deeper through `mapping.columns` and
+   `mapping.where`, which the compare paths already read.
+2. **A DTS job read as a hop** (done 2026-10-03, `imports`): a Tencent
+   Cloud migration job's detail, a sync job, or a data check's
+   objects; an Alibaba Cloud job's detail or request. Goal `verify`; the
+   job's databases and new names, schemas, tables and new names, row
+   filters, columns and new column names, views; and said beside it,
+   every setting of the job that makes a correct move look different -
+   deletes or updates it does not carry, conflicts it ignores, tables it
+   wrote into that were there, changes-only starts, a target left
+   writable, accounts not moved, its own check off, sampled, counting
+   only or covering less than it moves, an unencrypted leg. AWS DMS
+   tasks' plain includes are now the hop's `include` too.
+3. **Renames read with their database** (done 2026-10-03, found on the
+   way): a rule `appdb.public.orders: orders_v2` - the only way to say
+   which of two databases' `orders` is renamed - was passed over by the
+   pair engine, the PostgreSQL schema check and the parallel copier,
+   which asked without the database; the table was compared against the
+   name it no longer has. `Hop.target_table_in(db, ...)`, one place.
+5. **Every variant of the services, and their own checks** (done
+   2026-10-03): Tencent DTS migration jobs of both APIs (2021, 2018's
+   `DatabaseInfo`), sync jobs, data checks' objects and tasks,
+   subscriptions, and the requests that made any of them; Alibaba DTS
+   `DbList`/`DbObject` and the older `MigrationObject` /
+   `SynchronizationObjects` (`TableExcludes` become `exclude`); the
+   changes a job carries become `mapping.ops`. A service's own check
+   report - Tencent's compare report, AWS DMS's table statistics,
+   Alibaba's data check - given as `compare_with` is held table by table
+   against migkit's answers (`servicecheck`): what it called the same
+   and migkit found different, what it skipped, what it never checked.
+6. **One scope through every part** (owner 2026-10-03: "move, watch,
+   verify, CDC, DDL and everything; deepest, most consistent and
+   idempotent, smartest, easiest; every variant and every engine").
+   Audited 2026-10-03 (three read-only audits and a market survey);
+   shared pieces done: `Engine.in_scope`, `Hop.scope_fingerprint` /
+   `scope_changed`, `Hop.reversed()` reading scope and mapping in the
+   target's names, the nested `include`/`exclude` form, case read the
+   same on every machine and without case where the engine folds it,
+   `mapping.ops` (`Hop.carries`). In progress, by part:
+   a. **counters, orphans, accounts**: sequences and AUTO_INCREMENT only
+      of tables in scope, never lowered (the cutover's counter gate
+      refused on an excluded table's sequence); pg_dump's serial
+      sequences of excluded tables; an orphan whose parent the hop does
+      not take is a warn that says so; a job that moves no accounts is
+      not checked for them; the cutover's jobs and consolidation
+      counters in scope; the second reading pairs renamed tables;
+   b. **deep checks, inventories, repairs**: every listing a deep check,
+      the objects inventory (views, routines, triggers, events,
+      sequences) and every repair builds goes through `in_scope`;
+   c. **reuse, watch, delta, evidence, resume**: the fingerprint beside
+      every answer, position and checkpoint (delta slot, resume records,
+      a seed's manifest), reuse only under the same scope; watch reads
+      the scope every cycle and sums only what is taken; delta reads
+      through the row filter and the renames; the evidence renders the
+      scope it was taken under; sizing counts only what is carried;
+   d. **the bulk paths**: a partition is scoped by its root; renames
+      honoured by every same-engine path (or routed to the copier); a
+      filtered table never emptied whole; a target-only table never
+      emptied; mixed-case names; schema creation leaving out objects
+      that depend on what is not taken; patterns rather than lists where
+      the tool reads them;
+   e. **the change tail and DDL**: the servers' own replication refused
+      or narrowed where a hop filters or renames; partitions by root;
+      renames and swaps into or out of scope under every policy; a
+      scope changed while the tail was stopped; Debezium per database
+      and by pattern; `mapping.ops` applied; a DDL policy per object and
+      kind; online schema change shadow tables; an unchanged large value
+      never written as the decoder's placeholder;
+   f. **contracts and closure**: the check judges a table against the
+      changes its hop carries (deletes kept: the target may hold more,
+      never fewer or other rows), repair never undoes what the contract
+      allows; before the move, the dependency closure of what is taken
+      (foreign keys, views, routines, triggers, owned sequences,
+      partitions) offered or accepted, and every source object explained
+      by the rule that decided it.
+7. **P1, the cores done 2026-10-03, each read in one place:**
+   - one row filter (`rowfilter`): parsed once in the source's SQL,
+     said in another engine's SQL with its column names, as a document
+     store's query with SQL's NULL kept (`NOT` cannot take a NULL row
+     back in), a filter that moves with the clock or reads another table
+     named before anything is read, its text comparisons named for the
+     collation check; `evaluate`, SQL's three-valued logic, the
+     reference every translation is held to on the same rows (17
+     predicates x 25 rows with NULLs and missing fields, and on
+     PostgreSQL, MySQL and a document store in the suite);
+   - column transforms a check can prove (`transforms`): null, constant,
+     a keyed hash (`mask_key`; the same value, the same digest on every
+     run and machine), truncate - one function in Python and in each
+     engine's SQL, held alike by tests;
+   - objects beside the tables (`objects`): views, functions,
+     procedures, triggers, events, sequences, roles - all, none or by
+     name (`Hop.takes_object`); a DTS job's choices by name read into it,
+     a kind it does not carry said as a finding, never left out;
+   - name rules (`mapping.names`): case, prefix, suffix, a prefix or
+     suffix taken off, per level, read where every target name is
+     (`target_table`, `target_db`); DMS's name rules read into them.
+   Still to wire where they are read (after the part merges): the row
+   filter's translations into the pair engine, the document store and
+   the hop's validation (clock and subquery refused there), its time
+   zone (`where: {expr, tz}`) and the collation check; the transforms
+   into `mask_on_write`, the copier and the check's digests (the source
+   side computing the target's value); `takes_object` into the objects
+   inventory, schema creation and repairs; a name rule's collisions
+   (two names one after the rule) refused. Also: a check scope narrower
+   than the move's said as incomplete, never same; partitions carried
+   by root or leaf; every scope change logged with its source position.
+8. **Still open:**
+   a. the Alibaba job's top level for a source with schemas (PostgreSQL,
+      SQL Server) is read as its schemas inside the endpoint's database,
+      from the service's documentation and its errors, not from a real
+      job's detail - confirm against one;
+   b. the change-capture connector and LOAD-file imports still turn a
+      regex or search include into a one-time `exclude`;
+   c. a Huawei DRS / GCP DMS / Azure DMS job read the same way (in
+      progress 2026-10-03, from the providers' documented shapes);
+   d. `include` read by a live tail's filter (Debezium `table.include.list`
+      instead of a resolved exclude list) so a table made later under a
+      taken pattern joins the stream without a restart.
+
 ## P0-CLOUDS. Any cloud to any cloud, every database service in each (owner, 2026-10-01)
 
 "Not just AWS to Tencent - any <-> any from the start: AWS, Tencent,
@@ -2852,14 +2997,14 @@ is migrated." The cases, what migkit has (at fb5c988), what is missing:
 | Version DOWN (rollback plan, an older target) | BUILT (`case`, `lacks`): the case named in the plan; a copy of the pages refused up front with the reason and the logical copy chosen; what the newer source uses that the older target has not, asked of the target where it answers (PostgreSQL types, collations, extensions; MySQL collations used in an expression; SQL Server types and collations) and from a table of each release elsewhere (PostgreSQL identity, partitioning, generated columns, SQL bodies, lz4, NULLS NOT DISTINCT, security_invoker, WITHOUT OVERLAPS; MySQL invisible columns, indexes on expressions, multi-valued indexes, CHECK, expression defaults, SRID, VECTOR, window functions/CTE/JSON_TABLE/LATERAL in code, caching_sha2 users, roles; MongoDB time-series, clustered, encrypted, collations, wildcard, compound hashed; Oracle BOOLEAN/VECTOR/JSON, names over 30 bytes, identity, extended strings against the target's max_string_size); SQL Server's compatibility level and MongoDB's feature compatibility said | Oracle's and SQL Server's version tables are proved on the x86 VM only |
 | **Edition change** (SQL Server Express/Web/Standard/Enterprise/Developer, Oracle SE2/EE, MySQL Community/Enterprise, MongoDB Community/Enterprise, Redis OSS/Enterprise) | BUILT (`editions`, `backupseed`): each side's edition read from its server; what the source's databases use that the target's edition lacks - stripped (the logical copy makes tables from columns and key), lost (refused unless `edition: {accept: [...]}`), refused - with the fix; Express/XE/Free size caps refuse, memory and core caps said; SQL Server's own copy-only backup restored as a physical rung (`physical: {backup: DIR}`) that holds only where the target's edition takes what the database holds and its caps its files, MySQL's clone needing every plugin its source runs on the target; `goal: upgrade` takes an edition up (`upgrade.edition_only`); an edition down said as licence-driven | Redis Enterprise is not told apart from open source (no server-side field known without measuring one); Oracle's options on XE 18c+ taken from its licensing guide, not measured |
 | Fork or distribution (MySQL/MariaDB/Percona, PostgreSQL/Aurora/AlloyDB/Citus/Yugabyte, Redis/Valkey/KeyDB/Dragonfly, Elasticsearch/OpenSearch, MongoDB/DocumentDB/Cosmos Mongo API/FerretDB, Kafka/Redpanda/MSK) | BUILT (`case`, `lacks`, `variants`): one brand a side from the server (Citus by its loaded settings, Cosmos DB by its own request-charge command, Percona Server for MongoDB by `psmdbVersion`, Elasticsearch and OpenSearch by `GET /`, Aurora/AlloyDB by `clouds`' server evidence); a fork change named in the plan; MariaDB's transaction ids and JSON-as-text said; Citus's distributed tables said; Redis forks asked for every command migkit sends and every module type the source holds; views' pipelines and validators run on a Mongo-compatible target against a collection that is not there; Elasticsearch/OpenSearch field types each lacks; Elasticsearch as a side, its own security API for users and roles | DocumentDB still has no server-side signature (none known that is not an absence); MSK cannot be told from Kafka by a client |
-| Platform: on-prem<->cloud, cloud<->cloud, region, account | proved AWS<->Tencent; cloud snapshots across accounts; physical seeds | Tencent Cloud and Alibaba Cloud APIs beside AWS/Azure/GCP in `cloudseed`: snapshots as restore points before cutover (a real run had to script it by hand), clones and restores, credentials resolved the way the provider's own CLI does |
+| Platform: on-prem<->cloud, cloud<->cloud, region, account | proved AWS<->Tencent; cloud snapshots across accounts; physical seeds; **done 2026-10-01, any provider to any:** one managed-service catalogue (`data/managed.yaml`, its sources in its header: every managed database service of AWS, Google Cloud, Azure, Tencent Cloud, Alibaba Cloud, Huawei Cloud, Oracle Cloud, IBM Cloud and the DBaaS vendors - its engine, its signs, its admin, how a setting changes, what following it needs, restore points, limits, defaults) read one way by `managed` for every pair; one provider API layer (`cloudapi`, an adapter per provider SDK, credentials found as each provider's CLI finds them) for instance facts, parameters, restore points taken before the cutover's clock (`cutover: {restore_points: [...]}`) and clones (`cloudseed` for Tencent and Alibaba); the freeze ladder climbing what a managed admin may do (a connection limit where the database is not its own, a service's kill procedure, `read_only` through the parameter group offered as a source change, a MongoDB-compatible service held per database); the target read against the source before the move (collations, time zone, connections); the release gate's scenario (`tests/test_the_release_gate_managed_migration.py`) | engines migkit lacks, listed in the catalogue (`distinct`): Spanner, Bigtable, Firestore, GaussDB, OceanBase, PolarDB-X, AnalyticDB, TDSQL distributed, Keyspaces, Neptune, Timestream, Lindorm, GeminiDB, Synapse, YugabyteDB's own replication, SingleStore |
 | Self-managed<->managed, managed<->managed (EC2->RDS, RDS->Aurora, single->flexible server) | physical and logical rungs, cloud clones | the managed service's own blue/green or upgrade path as a rung where it exists |
 | Hardware / OS / architecture (x86->ARM, Windows->Linux SQL Server) | a logical move | said as its own case; byte-order and collation facts where they differ |
-| Character set / collation change (latin1->utf8mb4, ICU version) | collation merges refused, mojibake repair queued | a planned conversion with every value proved in the new charset, indexes rebuilt |
-| Storage engine change (MyISAM->InnoDB, Aria, MEMORY) | - | converted in the schema step, with the behaviours that change (transactions, FK, full-text) said |
-| Consolidation (many databases or tenants into one) and split (one into many, a service extracted) | `db_map`, mappings, row filters | a tenant key added on the way, collisions of keys across sources found first, a split by rule with every row placed exactly once, proved |
+| Character set / collation change (latin1->utf8mb4, ICU version) | BUILT (`charsets`, the case's rows): every text column's character set and collation read on both sides (MySQL, PostgreSQL, SQL Server, Oracle, Db2 catalogues; Unicode-only engines by their word), or asked by the hop (`charset: {to, collation, repair}`); a value the target's character set has no code for refused by key; UTF-8 stored twice found and repaired on the target (`repair: double-encoded`, the default where a conversion is asked); every unique key over text put to the target's own comparison (`key_merges`, PostgreSQL's nondeterministic collations now too) and two values it takes for one refused; MySQL's index and row limits counted in the new character set's bytes; MySQL converted on the target after the rows are in, column by column keeping each type, the whole table where a value no longer fits (`decide.attempt`); every row proved by key as converted (an order-free digest a side), the proof standing in for a data check of each side's bytes; the schema check holding the rest; PostgreSQL's sort-order libraries compared, a copy of the pages told to reindex. The mojibake check and its repair on every engine with character sets (SQL Server, Oracle, Db2, ASE, Teradata beside MySQL and PostgreSQL, through the neutral contract) | Oracle's and Db2's column collations are not put to the target (their default comparison is exact); ASE's and Teradata's character sets are not read, only their text checked for UTF-8 stored twice |
+| Storage engine change (MyISAM->InnoDB, Aria, MEMORY) | BUILT (`tableengine`): each table's engine on both sides and the target's own engines read; the hop's `table_engine: {to, accept, foreign_keys}`, and a target lacking the source's engine, made in the schema step (the definition rewritten: its ENGINE, the options only the old engine reads, a key for per-group numbering, the hop's foreign keys) or in place after the copy - a way climbed; transactions, foreign keys, full-text (each side's own settings read), locking, MEMORY's lost rows, BLACKHOLE, ARCHIVE's compression said; per-group AUTO_INCREMENT refused unless accepted; MERGE refused with the view to make, remote engines unless accepted, virtual ones refused; rows a foreign key would now refuse counted on the source and refused before the move; after it, every table's engine and every such key proved on the target, a schema check that differs by the plan alone said as the plan | ClickHouse table engines and PostgreSQL access methods are not compared |
+| Consolidation (many databases or tenants into one) and split (one into many, a service extracted) | BUILT (`consolidate`, `split`): goal `consolidate` - a tenant column filled per source (`column`, `value`/`values`), the sources of this hop and the hops it names (`with`) held together; every key two sources hold found before the move and refused, or kept apart by the rule as a climbed way: `tenant` (the column leads the key), `offset` (each source's integer keys and the references to them shifted), `remap` (offsets a stride apart worked out and kept); shifted ranges that meet, or pass their column, refused; counters raised past every source's keys and proved; every source's rows proved by key under its value, rows under no source's value named; batches written by the bulk way or the plainest (`decide.attempt`). Goal `split` - each part's rows by its own row filter and scope, every source row counted against every part's rule on the source before the move (nowhere refused unless `rest: stays`, twice unless `shared`), after it each key in exactly one part's target and the targets together the rows the rules place, references across the split counted and said | a consolidation or a split is carried once (`--mode full`): following each source's changes into the shared target is not a way yet |
 | Resharding / topology (single<->cluster, shard split/merge) | W7 open | W7 |
-| Archive / partial moves (old rows to cheaper storage) | row filters | the source rows removed only after the target is proved and only where the hop allows |
+| Archive / partial moves (old rows to cheaper storage) | BUILT (`archive`): goal `archive` - the rows each table's rule picks (`mapping.where`; a table with none refused) added to the archive, what it holds kept and never overwritten (a row held otherwise refused by key), each batch read back; removed from the source only with `archive: {remove: true}`, the source's own answer by its name (`source_changes: {archived_rows: yes}`, or asked at a terminal and recorded - never a word for every change) and the hop's approvals (`source-setting`): each row read again on both sides and removed only where the archive holds it as the source has it now, children first, never a row other rows still name; each batch's keys and digests kept in a ledger before it goes (resumable), the write recorded in the source's changelog; removed by the batch or a row at a time (`decide.attempt`); `archive: {restore: true}` puts every removed row back; the proof holds every removed row to its digest in the archive | removal is through the source engine's own delete by key: an engine without one keeps its rows and says so |
 | Zero-downtime with a way back, active-active during the move | cutover path, stream back, two-way | cutover gaps (running) |
 | Heterogeneous (commercial -> open source, relational <-> NoSQL/search/stream, OLTP -> warehouse/lake, mainframe, SaaS) | 28 engines, canon, stored-code proof | engine reach (running), P0-PARITY |
 | Test copies, DR drills, backup restores checked, replica drift | subsets, check between any two, rehearsal | - |
@@ -3190,6 +3335,26 @@ the offline bundle (P0/P1, L).** Files: `migkit/runner.py` (new),
   `uuid_text` faster (SP14, SP18 canon part); version parsing in one place
   (DU23).
 * Running work: `canon.py` (P0-PARITY large values).
+* Done 2026-10-01: every account and role name into target DDL through the
+  engine's own quoting and every value bound, on every engine `users`
+  carries, `dba`'s scripts and the PostgreSQL and MySQL grant repairs
+  (`_grant_sql`, `_retarget_grant`); `drift` on `catalog.Catalog` (kept as
+  (column, text) pairs, read back whole, one comparer and one explanation,
+  a narrowing named by `verdict.narrowing`) with SQL Server's
+  `shape_catalog`; SQL Server's check compares every table whole, its
+  permissions by class and column with their grant option, logins by SID
+  and policy, one kept connection, its own `ok`; users' one result shape,
+  roles first and a ledger with undo, `create` ending on a compare, the
+  target's auth plugins asked; `reload` for rows a partition DDL changes;
+  every clause of an ALTER read; `canon.limits`, `citext`, faster
+  `sql_rows`/`digest_step`/`uuid_text`. Left, with why: PostgreSQL and
+  MySQL `shape_catalog` (AUD-G1/G2's files); exact-width integers and
+  routines typed through `ddl_type` - either changes every cross-engine
+  build or cuts a routine's text at 1,024 characters, and the stored-code
+  rules are the conversion-breadth work's; `system_principals_sql` adopted
+  in the PostgreSQL and MySQL grant and assess filters, `freeze`, and
+  `toolversion.server_major` in `physical._series`/`jobs._my_off` (their
+  owners' files).
 
 **AUD-G1. The PostgreSQL engine: one connection, one catalogue read, one
 quoting (P0, L).** Files: `migkit/engines/postgres.py`,
@@ -3217,6 +3382,33 @@ quoting (P0, L).** Files: `migkit/engines/postgres.py`,
   rule (DU26).
 * Running work: `pg_pass.py` (the table-way ladder), the repair paths
   (repair ladder).
+
+  **Built 2026-10-01 (tests written, the full run to come):** one
+  `postgres.connect` (the side's `tls_forms`, connect timeout, keepalives
+  from `envkeys`, migkit's name, `SESSION` pinned: UTC, ISO, every digit,
+  no statement timeout) behind `_open`/`_connect` (the hop's name mapped
+  once) and `pg_pass.connect`, `legs._connect`; the questions on a kept
+  connection per side and thread (`_kept_conn`: the server's text, every
+  result of a script, the session reset after anything that may leave
+  state, a read asked again on a lost connection, a write never), the
+  client program only for meta-commands, and every program through one
+  `_client` with the side's TLS; the catalogue in one statement a side
+  (`catalog`, `shape_catalog` with column extras, checks and triggers,
+  kept 60 s and read again after migkit's own DDL), every reader of a
+  table's shape from it; `user_tables` the one rule, `row_estimate` with
+  None, the key in key order everywhere, markers with the table's live
+  columns in one statement a side; grants of every kind as effective
+  privileges with the grant option; the optional schema readings said
+  "not run: why"; the subscription's connection string from
+  `legs.conninfo` on a session that is not logged; the row repair through
+  the drivers' COPY, its undo sealed and durable; the text repair under the
+  load's window; JSON digested on the server as canon writes it; `doctor`
+  says verified only of a path that checked (`leg_encryption`'s
+  `verified`, the far paths' rows); the page copy's programs on the
+  target's host take the source's TLS as far as they can (`physical`).
+  Left to others: `cli._leg_said` reading `verified` (AUD-A), the leaves'
+  JSON still folded here (`leaves.py`), the drilldown's file names from
+  table names (base and the readers).
 
 **AUD-G2. The MySQL engine: the same (P0, L).** Files:
 `migkit/engines/mysql.py`, `migkit/engines/my_pass.py`.
@@ -3267,6 +3459,33 @@ final run (P0, M).** Files: `tests/conftest.py`, `tests/servers.py` (new),
 * CI and release install `.[dev]` and run the same script; the release tag
   check reads `migkit/__init__.py`; `requires-python = ">=3.10.12"` (T12,
   W21, W24).
+
+*Done 2026-10-01.* As built, where it differs from the plan above: the
+docker tests run in **lanes** - one pytest process each, on the default
+colima profile and on the migkit VM at once, as many as each daemon's free
+memory holds - not in xdist groups, because the modules not yet moved fix
+host ports and container names: files that fix one port or name share a
+lane, files naming the `pg_pair` pair's fixed 55432/`migkit-test-pg-*` run
+on lane 0 (the only lane that keeps them; any other fails such a file
+loudly), heavy files only where a lane may hold them, balanced by
+`reports/final-suite/times.json`. A lane (`MIGKIT_TEST_LANE`) and an xdist
+worker give each process its port block (20000 + 60 x index, under the
+ephemeral ports the colima VM hands out) and name
+suffix. `vm` is marked by what a test reaches (its fixtures and the helpers
+they call name an x86 or Oracle image), not by file name, so the pure and
+PostgreSQL-only tests in `oracle`/`sql_server` files stay where they were.
+`with_docker_lock.py` hands out lanes: a command waits only for the host
+ports and names its test files fix (and lane 0 for the pinned ones); one it
+cannot read takes the whole of docker as before; the VM is stopped by the
+last user. `pg_pair` and `my_pair` are the shared `pg`/`mysql` profiles,
+module-scoped, reset at module end. `MIGKIT_TEST_STRICT` takes `1` or the
+kinds (`server`, as CI, where programs needing accepted terms are absent).
+`final_suite.py` refuses a checkout the installed editable migkit has
+modules beyond (a run would import them from the other tree), stops a lane
+silent past its test's timeout and goes on, and records the run in
+`reports/final-suite/<stamp>/`. Estimate with no measured times: ~53 min a
+lane in four lanes (default profile 1, VM 3) plus the pure phase, from the
+2026-09-27 whole run scaled; AUD-T2 replaces it with the measured run.
 
 ### Wave 2 (after wave 1 merges)
 
@@ -3333,7 +3552,16 @@ nothing `pg_pair` lacks; 43 MySQL files a stock server), hard-coded ports
 and names gone, the 144 fixed waits on `until()` and the tail's own
 caught-up sign, `docker exec` SQL through the driver; then the final run
 measured and its numbers written into `tools/final_suite.py` (T1, T4, T9,
-T10).
+T10). The pattern is at the top of `tests/servers.py` (a module fixture
+from `servers.fixture("<profile>")`, the module's `.name` for what the hop
+names, `server.sql()`, `servers.private()` for a server a test must own,
+`servers.image()` for a built image). Then: the 24 files pinned to lane 0
+read `pg_pair`'s ports instead of 55432/`migkit-test-pg-*`; `cap_pairs`,
+`typepair` (whose session fixture is also called `servers`) and the other
+helpers move onto profiles; every `-p` mapping binds 127.0.0.1 and a lint
+test in `test_the_suite_runs_in_lanes.py` holds every test file to no fixed
+host port (today it holds only the lanes' range and the shared helpers);
+the image scan reads only images a file runs, not ones its strings name.
 
 **AUD-Z. The sweep: every leftover site on the one helper, lint tests that
 keep it so (P1, M).** Files: whatever no group held -
@@ -3526,6 +3754,55 @@ they are three cross-cutting gaps, not 26 engine problems:
 
 Done when every cell is a way or "not applicable" with its reason, and
 the depth tests run on every engine, not only PostgreSQL and MySQL.
+
+Added 2026-10-04 (owner: "if it is not in the backlog, make them equal"):
+the ten shapes above measure what an engine can *move*; three more
+depths were built for PostgreSQL and MySQL (some for MongoDB, SQL Server
+and Oracle) and are owed to every engine:
+
+* **Scope** (P0-SCOPE): `include`, `objects`, `mapping.ops`, the row
+  filter (`rowfilter`), column transforms (`transforms`) and name rules
+  read through `in_scope` / `takes` / `carries` in every path of every
+  engine - its listings, objects inventory, deep checks, repairs,
+  counters, tail and DDL.
+* **Verification**: the whole deep-check catalogue (orphans, constraints
+  not validated, charset/collation, generated columns, boundary, keyless
+  tables, duplicate keys, large values), delta verification and the
+  fence, repair with exact undo, users and grants, the objects inventory.
+* **Change tail and DDL**: per-table states (live/copying/parked/
+  removed) with the exact seam, the per-table DDL policy, renames and
+  swaps, a table added or removed while running, the operation contract.
+
+Done when a depth matrix generated from the code (as
+`capabilities.matrix()` is) shows every engine against every item of
+the three - a way, or "not applicable" with its reason - and each way
+has its test on that engine.
+
+**All of it (owner 2026-10-04: "complete, all of it deep, all of it
+good").** The matrix is not limited to the shapes and the three depths
+above: it enumerates *every* capability migkit has, and every engine is
+owed every one of them -
+
+1. assess and the pre-flight (every check, the managed service's own
+   limits, the closure of what is taken, the scope explained);
+2. schema and conversion (made on the target, compared, fixed, stored
+   code proved);
+3. move (every way the decision engine knows, resumable, parallel and
+   sized, large values, partitions, filtered, mapped, masked);
+4. change tail and DDL (as above);
+5. verification (every check, consistent snapshot, fence, delta,
+   second reading, the service's own check held against it);
+6. repair with exact undo;
+7. cutover (freeze, drain, counters, flip, rollback, the stream back);
+8. scope (as above), accounts, grants and objects;
+9. security (TLS verified, every sign-in form, secrets, egress);
+10. managed services of every provider (P0-CLOUDS);
+11. HA and fencing (W1), evidence, observability and the forecast.
+
+**Enforced, not hoped for:** a test reads the matrix and fails when any
+cell is "not yet" without either a backlog row naming it or a written
+"not applicable" reason - so an engine left thinner than PostgreSQL and
+MySQL is a red test, never a silent gap.
 
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
@@ -4524,6 +4801,26 @@ the gaps nothing above covers yet, now items of their own.
   target, and hundreds of migrations run and watched as one fleet; a
   REST API, a Terraform provider and a Kubernetes operator over it; SSO
   (OIDC/SAML) and SCIM on the view, not only a proxy's header.
+  PARTLY BUILT (the owner's scope of 2026-10-01, "W2 and a GUI";
+  `migkit.web`, served by `migkit report --serve`, `docs/web.md`): sign-in
+  by OpenID Connect (code flow with PKCE, ID token checked against the
+  provider's keys) or SAML (only a signed answer to a request the view
+  made, read out of the element the signature covers), SCIM 2.0
+  provisioning that signs a deactivated person out at once, one local
+  operator without a provider; roles viewer/operator/approver/admin per
+  hop, hop group or file in the hops file's `access`; a versioned REST
+  API whose OpenAPI document is written from the table it dispatches on
+  (`docs/site/openapi.json`); runs started from the view are the command
+  line's own commands in a process of their own, carrying who started
+  them; approvals given in the view counted by `approvals.require`
+  (signed by the view's key, re-checked for the role at count time,
+  never the requester's); source-change offers answered there and
+  recorded by name; pages showing each side's outcome, the plan's phases
+  with p50/p90 and the cutover outage, progress, evidence, the decision
+  record only when asked. Not built: discovery, sizing from performance
+  history, cost, a fleet view, the Terraform provider and the Kubernetes
+  operator; an encrypted SAML assertion, a signed authentication request,
+  single logout.
 * **W3. Code conversion at enterprise breadth.** Beyond R11: PL/SQL
   packages with the emulation libraries they need (orafce and the
   like), T-SQL at depth, and the SQL embedded in application code
