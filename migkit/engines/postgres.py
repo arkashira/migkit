@@ -1271,6 +1271,17 @@ select json_build_object(
         2026-10-01, SC15, SP2)."""
         return self._shapes(side, db)["catalog"]
 
+    def shape_mark(self, side, db):
+        """One digest of everything `shape_catalog` reads, computed by the
+        server over the same statement (`_catalog_sql`): a row of 32
+        characters where the catalogue is a row a relation. The same
+        catalogue gives the same digest, and any change to what drift
+        compares gives another - what a tail asks every batch before it
+        reads the whole shape again (`hetero._shape_now`, audit SP8)."""
+        return self._psql(side, db, (
+            "select md5(coalesce(string_agg(r, chr(10) order by r), ''))"
+            f" from ({self._catalog_sql(side, db)}) q(r)")).strip() or None
+
     def shape_catalog(self, side, db):
         """The catalogue of the tables in scope (`neutral_tables`), read
         now: what drift compares from one reading to the next, a table at a

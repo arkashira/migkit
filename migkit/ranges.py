@@ -298,6 +298,16 @@ def _owner(save):
     return owner if hasattr(owner, "changed") else None
 
 
+def _journaled(owner, st, event):
+    """Whether `event` went into the checkpoint's journal - where it keeps
+    one (`cli._Checkpoint.journals`) - rather than a whole save."""
+    if owner is None or not callable(getattr(owner, "journals", None)) \
+            or not owner.journals():
+        return False
+    owner.journal(st, event)
+    return True
+
+
 def _saved(save, owner, gen):
     if owner is None:
         save()
@@ -344,22 +354,33 @@ def finished(st, after, save):
         if reach is not None:
             st["last"] = reach
         gen = owner.changed() if owner is not None else None
-    _saved(save, owner, gen)
+        # a line of the checkpoint's journal, not the whole file again
+        # (`cli._Checkpoint.journal`, audit ST17)
+        journaled = _journaled(owner, st, {"done": after,
+                                           "last": st.get("last")})
+    if not journaled:
+        _saved(save, owner, gen)
     failpoint.hit("range.saved")
 
 
 def started(st, after, mark, save):
     """A range about to be read: the source's mark taken just before it
     (`Engine.snapshot_mark`; None where it gave none), saved before the
-    read begins - so a range with nothing kept has not been read."""
+    read begins - so a range with nothing kept has not been read. Not
+    begun where this process no longer holds the lease it copies under
+    (`lease.check_held`)."""
+    from . import lease
+    lease.check_held()
     owner = _owner(save)
     with owner._lock if owner is not None else _NOLOCK:
         st.setdefault("ranges_seen", {})[str(after)] = mark
         gen = owner.changed() if owner is not None else None
-    _saved(save, owner, gen)
+        journaled = _journaled(owner, st, {"seen": [after, mark]})
+    if not journaled:
+        _saved(save, owner, gen)
 
 
-def already_read(st, values, covers, ahead=False):
+def already_read(st, values, covers, ahead=False, place=None):
     """Whether a change to the rows keyed `values` is in what the table
     copier read of the table whose checkpoint entry is `st`, or will be -
     so the tail leaves it out instead of applying it.
@@ -381,8 +402,11 @@ def already_read(st, values, covers, ahead=False):
     row the source gained past its ends), a range read under no mark or
     one that cannot say, a range not begun whose copy is not known to be
     running - a copy that stopped may never come back to it, and a table
-    copied again some other way is not what this entry says."""
-    places = place(st, values)
+    copied again some other way is not what this entry says.
+
+    `place`, `placer(st)` made once for an entry the tail asks about
+    change after change."""
+    places = (place or placer(st))(values)
     if not places:
         return False
     for where, mark in places:
@@ -402,12 +426,30 @@ def place(st, values):
     or its key is not a whole number); [] where the entry has no ranges.
     A table whose copy is done has no range left to begin: one not begun
     is `outside` then."""
+    return placer(st)(values)
+
+
+def placer(st):
+    """`place` for the entry `st` as it stands now, its plan indexed once:
+    the set of ranges done was built again for every change the tail
+    asked about - 24 us a change at 2,000 ranges, 83 us at 20,000 (audit
+    SP3). Held to the entry as it was when made: made again once it has
+    moved."""
     import bisect
     rs = st.get("ranges")
-    if not rs or not values:
-        return []
+    if not rs:
+        return lambda values: []
     seen = st.get("ranges_seen") or {}
     done = set(st.get("ranges_done") or ())
+    starts = [r[0] for r in rs]
+    finished = bool(st.get("done"))
+    return lambda values: _placed(rs, starts, seen, done, finished,
+                                  values, bisect)
+
+
+def _placed(rs, starts, seen, done, finished, values, bisect):
+    if not values:
+        return []
     out = []
     for v in values:
         if not isinstance(v, int) or isinstance(v, bool):
@@ -415,7 +457,7 @@ def place(st, values):
             continue
         # asked for every change the tail reads: found by halves, the
         # plan kept in key order
-        i = bisect.bisect_left(rs, v, key=lambda r: r[0]) - 1
+        i = bisect.bisect_left(starts, v) - 1
         if i < 0 or v > rs[i][1]:
             out.append(("outside", None))
             continue
@@ -423,7 +465,7 @@ def place(st, values):
         if at in seen:
             out.append(("read" if rs[i][0] in done else "reading",
                         seen[at]))
-        elif st.get("done") or rs[i][0] in done:
+        elif finished or rs[i][0] in done:
             out.append(("outside", None))
         else:
             out.append(("todo", None))

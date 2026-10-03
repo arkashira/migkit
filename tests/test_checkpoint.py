@@ -124,7 +124,9 @@ def test_writes_are_atomic_and_leave_no_temp_files(tmp_path):
     cp.begin("public.t", EXPR, [(1, 2)])
     cp.record("public.t", 1, 2, 1, 1)
     assert json.loads(open(path).read())["tables"]
-    assert [f.name for f in tmp_path.joinpath("sub").iterdir()] == ["cp.json"]
+    # and the lock every save takes, kept beside it (`durable.locked`)
+    assert sorted(f.name for f in tmp_path.joinpath("sub").iterdir()) == \
+        ["cp.json", "cp.json.lock"]
 
 
 def test_clear_forgets_a_finished_table(tmp_path):

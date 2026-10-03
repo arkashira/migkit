@@ -1108,29 +1108,18 @@ def remember(where, work, name):
     checkpoint, the tail's token), in a file of its own, since every engine
     writes its position in a shape of its own. Written whole or not at
     all."""
-    path = _kept_file(where)
-    with _KEPT_LOCK:
-        got = _read(path)
-        got[str(work)] = name
-        _write(path, got)
+    _change(_kept_file(where),
+            lambda got: got.__setitem__(str(work), name))
 
 
-#: one read-modify-write of a kept-ways file at a time: the tables of one
-#: move copy side by side, and two threads each reading the file, adding
-#: their own table and writing it back would lose one of the two
-_KEPT_LOCK = __import__("threading").RLock()
-
-
-def _write(path, got):
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.{__import__('threading').get_ident()}.tmp"
-    with open(tmp, "w") as f:
-        json.dump(got, f, indent=1)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+def _change(path, apply):
+    """One read-modify-write of a kept-ways file at a time, across runs as
+    well as threads: the tables of one move copy side by side, a tail and
+    a `check` keep theirs beside the same position, and two of them each
+    reading the file, adding their own and writing it back would lose one
+    of the two (audit ST23)."""
+    from . import durable
+    durable.change_json(path, apply, kind="state", indent=1)
 
 
 def remembered(where, work):
@@ -1155,10 +1144,11 @@ def _kept_file(where):
 
 
 def _read(path):
-    try:
-        got = json.loads(open(path).read())
-    except (OSError, ValueError):
-        return {}
+    """The ways kept beside a position, {} where none are kept yet. A file
+    that cannot be read whole stops, naming it: read as none, a restart
+    climbed another rung than the one its work stands on (audit ST9)."""
+    from . import durable
+    got = durable.read_state(path, "state")
     return got if isinstance(got, dict) else {}
 
 
@@ -1328,11 +1318,9 @@ def given_up(where, work):
 
 
 def _keep_given_up(where, work, name, rec):
-    path = _kept_file(where)
-    with _KEPT_LOCK:
-        got = _read(path)
-        got.setdefault(_up_key(work), {})[name] = rec
-        _write(path, got)
+    _change(_kept_file(where),
+            lambda got: got.setdefault(_up_key(work), {}).__setitem__(
+                name, rec))
 
 
 def _cost_words(costs, failed, instead):

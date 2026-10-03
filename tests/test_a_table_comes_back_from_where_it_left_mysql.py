@@ -8,7 +8,6 @@ left. Where the target was written meanwhile, it is copied instead.
 MySQL to MySQL, one server, two databases (`db_map`); the hop's `exclude`
 changed in its file while the tail runs.
 """
-import json
 import socket
 import subprocess
 import threading
@@ -76,11 +75,8 @@ def _pair(where, name):
 
 
 def _state(where, table):
-    try:
-        return json.loads((where / "tail-tables.json").read_text())[
-            "tables"].get(table) or {}
-    except (OSError, ValueError):
-        return {}
+    from migkit import tailtables
+    return tailtables.states(where).get(table) or {}
 
 
 def _wait(cond, what, lines, done, seconds=120):

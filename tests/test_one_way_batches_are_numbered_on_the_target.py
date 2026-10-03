@@ -141,13 +141,13 @@ def test_a_batch_the_target_committed_is_not_applied_again(pg_pair,
         assert psql(pg_pair["dst"], "select count(*) from public.nb"
                     ).stdout.strip() == "50"
         monkeypatch.delenv("MIGKIT_FAILPOINT")
-        before = json.loads((where / "tail-accounts.json").read_text()) \
-            if (where / "tail-accounts.json").exists() else {}
+        from migkit import tailtables
+        before = tailtables.accounts(where)
         lines = []
         _run(pair, path, lines, 8)
         said = " | ".join(lines)
         assert "had committed batch" in said, said
-        after = json.loads((where / "tail-accounts.json").read_text())
+        after = tailtables.accounts(where)
         # the batch was not read again: nothing more of it accounted
         read = (after.get("public.nb") or {}).get("read", 0) \
             - (before.get("public.nb") or {}).get("read", 0)

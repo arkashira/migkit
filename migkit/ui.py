@@ -706,7 +706,8 @@ def _tables_moved_metrics(where, lbl):
     where it stands in a table - that is a key, which is data."""
     out = []
     for d in _db_dirs(where):
-        ck = _json_at(d / "move.json", {}) or {}
+        from . import checkpoint
+        ck = checkpoint.read_move(d / "move.json", "cache") or {}
         tables = {k: v for k, v in ck.items() if isinstance(v, dict)
                   and ("moved" in v or "done" in v)}
         if not tables:

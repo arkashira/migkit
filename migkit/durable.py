@@ -18,6 +18,9 @@ So there is one writer and one reader:
   rename alone 0.50 ms, this 0.39 ms, with `F_FULLFSYNC` (`full=True`,
   macOS's flush through the drive's own cache) 3.9 ms - less than the
   tail already spent a batch.
+* `change_json` - read, change and write back under `locked`, the lock
+  every writer of the file takes, so two runs never lose each other's
+  part.
 * `append_line` - one line to a journal, a torn last line (the one a
   crash cut) taken off first, so the next line never glues onto it.
 * `read_state(path, kind)` - one policy for a torn file per kind of
@@ -27,6 +30,7 @@ So there is one writer and one reader:
 * `private_dir` - a directory only this user can read: what migkit keeps
   holds values and secrets.
 """
+import contextlib
 import errno
 import json
 import os
@@ -133,15 +137,37 @@ def sync_dir(path):
         os.close(fd)
 
 
+def _sealing(path):
+    """The recipients a file that holds values is sealed to, where the hop
+    keeps them encrypted (`evidence.EvidencePath`), else None: the one
+    policy (`at_rest`) for every file written here (audit ST15)."""
+    fn = getattr(path, "_sealing", None)
+    return fn() if callable(fn) else None
+
+
+def _opened(raw):
+    """A file's bytes, opened where they are sealed whole."""
+    from . import evidence
+    if raw.startswith(evidence.AGE):
+        return evidence._open(raw)
+    return raw
+
+
 def write_atomic(path, data, mode=0o600, full=False):
     """Replace `path` with `data` (text or bytes), whole or not at all,
     and on the disk once this returns. `mode` is the file's from its
     first byte; the directory is made private where missing. `full`
     flushes through the drive's own cache where the system has a way
-    (macOS), for the few files a power loss must never roll back."""
+    (macOS), for the few files a power loss must never roll back. A
+    file that holds values under a hop that keeps them encrypted is
+    sealed first (`_sealing`)."""
+    who = _sealing(path)
     path = Path(path)
     if isinstance(data, str):
         data = data.encode()
+    if who:
+        from . import evidence
+        data = evidence._seal(data, who)
     if not path.parent.exists():
         private_dir(path.parent)
     tmp = path.parent / f".{path.name}.{secrets.token_hex(6)}.tmp"
@@ -172,6 +198,39 @@ def write_json(path, value, mode=0o600, full=False, indent=None):
                         mode=mode, full=full)
 
 
+@contextlib.contextmanager
+def locked(path):
+    """Held while a file is read, changed and written back: an exclusive
+    lock on `<path>.lock` that every writer of the file takes. Two runs -
+    or two threads, each opening the lock file on its own - that both read
+    the file, add their part and write it back would otherwise keep only
+    the part written last (audit ST23)."""
+    import fcntl
+    path = Path(path)
+    if not path.parent.exists():
+        private_dir(path.parent)
+    fd = os.open(f"{path}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def change_json(path, apply, kind="cache", empty=dict, indent=None):
+    """Read the JSON `path` holds, let `apply` change it in place and
+    write it back, under `locked`: a writer elsewhere never loses its
+    part. `empty()` stands for a file not there yet, or a cache that
+    cannot be read or holds another shape. Returns the value written."""
+    with locked(path):
+        got = read_state(path, kind)
+        if not isinstance(got, type(empty())):
+            got = empty()
+        apply(got)
+        write_json(path, got, indent=indent)
+    return got
+
+
 def append_line(path, line, mode=0o600, sync=True):
     """Append one line to a journal; returns how many bytes of a torn
     last line were taken off first (0 almost always).
@@ -180,19 +239,32 @@ def append_line(path, line, mode=0o600, sync=True):
     without one is a write a crash cut: nothing read it as a line, and
     the next line appended after it would be glued on and unreadable
     too. Held under an exclusive lock, the one every writer of the file
-    takes."""
+    takes. A file that holds values under a hop that keeps them
+    encrypted has each line sealed on its own (`evidence.seal_line`)."""
+    return append_lines(path, [line], mode, sync)
+
+
+def append_lines(path, lines, mode=0o600, sync=True):
+    """`append_line` for several lines at once: one lock, one write, one
+    sync."""
     import fcntl
+    who = _sealing(path)
     path = Path(path)
     if not path.parent.exists():
         private_dir(path.parent)
-    text = str(line).rstrip("\n")
-    if "\n" in text:
+    texts = [str(line).rstrip("\n") for line in lines]
+    if any("\n" in text for text in texts):
         raise ValueError("one line at a time")
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT | os.O_APPEND, mode)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         dropped = _cut_torn_tail(fd)
-        data = (text + "\n").encode()
+        if who:
+            from . import evidence
+            data = "".join(evidence.seal_line(t, who)
+                           for t in texts).encode()
+        else:
+            data = "".join(t + "\n" for t in texts).encode()
         view = memoryview(data)
         while view:
             view = view[os.write(fd, view):]
@@ -242,7 +314,7 @@ def read_state(path, kind):
     try:
         if not raw.strip():
             raise ValueError("it is empty")
-        return json.loads(raw)
+        return json.loads(_opened(raw))
     except ValueError as e:
         if policy == "absent":
             return None
@@ -258,6 +330,7 @@ def read_lines(path, kind):
     finished, so nothing acted on it - and is left out. A line that does
     not read anywhere else is a break, read by `kind`'s policy: stops
     for a journal, left out for a cache."""
+    from . import evidence
     policy = _kind(kind)
     path = Path(path)
     try:
@@ -265,6 +338,10 @@ def read_lines(path, kind):
     except FileNotFoundError:
         return []
     lines = raw.split(b"\n")
+    sealed = evidence.LINE.encode()
+    if raw.startswith(sealed) or b"\n" + sealed in raw:
+        # sealed a line at a time: each opened, a torn last one left out
+        lines = evidence.opened_lines(raw).encode().split(b"\n")
     # the part after the last newline: "" when the file ends whole
     lines = lines[:-1]
     out = []

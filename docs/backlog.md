@@ -3226,6 +3226,29 @@ owner's rule); every verdict touched is proved able to say "different".
 * Running work: `twoway.py` (conflict resolution), `repairlog.py` (repair
   ladder).
 
+*Done (2026-10-01), with ST17's journal (`checkpoint.read_move`) handed
+over from AUD-A.* The tail's own state is one SQLite store set down a
+batch at a time before the target commits it and taken back out where
+the position never passed it (`tailtables.Store`); the target's batch
+mark decides the rest (`twoway.committed_ahead`, `hetero._committed_
+ahead`). A cutover holds a lease of its own while it acts, so the next
+run is refused instead of undoing it in flight (`cutover._held`); every
+lease a process holds is asked between a copy's ranges and a tail's
+batches (`lease.check_held`); every read-modify-write of a kept file goes
+through `durable.change_json` under the file's lock, and no file is
+written through a temporary name another writer shares (ST23).
+PostgreSQL's catalogue is digested by the server (`shape_mark`) and read
+whole only where the digest moved (SP8). A restore point's copy under
+the reports is sealed file by file to the hop's `at_rest` recipients and
+opened into a directory of the run's own to read (ST15). Spool frames
+are still pickled: read back only into the classes a change log's values
+come as, and a frame that would not read back is refused before the
+batch is kept; `file:` secrets and the approvals' signers list are
+refused where another user may change them (SEC21). `schedule` was
+already lease-based (ST10, AUD-A); the PostgreSQL undo's `\copy` (SEC9)
+and its fence on one kept connection (SP10) were done in `postgres.py`
+by the groups that hold it.
+
 **AUD-C. The dashboard, metrics, the run log and what leaves the machine
 (P0/P1, L).** Files: `migkit/ui.py`, `migkit/notify.py`, `migkit/traces.py`,
 `migkit/digests.py`, `migkit/export.py`, `migkit/diagnostics.py`,
