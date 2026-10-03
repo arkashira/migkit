@@ -288,16 +288,27 @@ def _took(secs):
             f"{secs / 60:,.0f}min" if secs >= 60 else f"{secs:,.0f}s")
 
 
-def estimate(hop, path, rows):
+def estimate(hop, path, rows, narrowed=()):
     """The plan's line about time, in words.
 
     A range from every run kept on the path, and which runs those were -
     one run is one number and is called that. A hop that has run nothing
     yet is given the runs of other hops of the same engines on the same
     path - a rehearsal's, typically - and told whose they are. Nothing
-    measured, nothing estimated."""
+    measured, nothing estimated. `narrowed`: the tables of `rows` a row
+    filter narrows, counted whole - the rows and the time are then the
+    most, and said so."""
     if not rows:
         return "no row count to estimate from"
+    said = _estimate(hop, path, rows)
+    if not narrowed:
+        return said
+    return (f"at most - {len(narrowed)} tables a row filter narrows are"
+            f" counted whole: {said}")
+
+
+def _estimate(hop, path, rows):
+    """`estimate`'s words for `rows`, from the runs kept on `path`."""
     runs, whose = _runs(_rates_path(hop), path), None
     if not runs:
         runs, others = _elsewhere(hop, path)
@@ -335,7 +346,7 @@ def _size(n):
 
 
 def size_line(decisions, facts, engine, price_per_gb=None, free=None,
-              kept=None):
+              kept=None, narrowed=()):
     """The plan's line about size, from the source's catalogue: what the
     move carries and what the target needs for it. None where the
     catalogue gives no sizes.
@@ -348,7 +359,10 @@ def size_line(decisions, facts, engine, price_per_gb=None, free=None,
     `kept` is the target's own answer to how much of the log a load
     writes it holds at once: a callable from the bytes of log written to
     (bytes held, why), or None where the target cannot say. What it holds
-    needs room beside the tables."""
+    needs room beside the tables.
+
+    `narrowed` are the carried tables a row filter narrows
+    (`Engine.carried`): weighed whole, so the size said is the most."""
     carried = {d.table for d in decisions if d.path != LEFT}
     data = index = 0
     known = False
@@ -364,9 +378,14 @@ def size_line(decisions, facts, engine, price_per_gb=None, free=None,
         index += int(fact.get("index_bytes") or 0)
     if not known:
         return None
-    line = (f"about {_size(data + index)} to carry ({_size(data)} of"
-            f" tables, {_size(index)} of indexes built on the target); the"
-            " target needs that much room")
+    # a table a row filter narrows is weighed whole: what it carries of it
+    # is less, and the line says the most
+    line = (f"{'at most' if narrowed else 'about'} {_size(data + index)}"
+            f" to carry ({_size(data)} of tables, {_size(index)} of indexes"
+            " built on the target"
+            + (f"; {len(narrowed)} tables a row filter narrows are weighed"
+               " whole" if narrowed else "")
+            + "); the target needs that much room")
     log = LOG_PER_BYTE.get(engine)
     grows = held = 0
     if log:

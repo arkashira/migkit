@@ -1492,6 +1492,10 @@ def _seal(w, ex, t):
         "room_at_seal": st.get("room_at_seal"),
         "exported_seconds": round(took, 1),
         "sealed_at": _stamp(),
+        # the scope its tables, rows and columns were taken under: a load
+        # under another holds every entry to the scope it has then
+        # (`_in_scope_now`)
+        "scope_fingerprint": w.hop.scope_fingerprint(),
         "tables": [{k: v for k, v in e.items() if k != "because"}
                    for e in st["tables"].values()]}
     body = json.dumps(manifest, sort_keys=True, default=str).encode()
@@ -1657,17 +1661,18 @@ class _Target:
 
 def _target_table(w, src_t, log):
     """The table the rows land in: the target's, matched as the copier
-    matches it, or made as the copier makes it."""
+    matches it, or made as the copier makes it - its renames read with
+    the database (`_renamer`), so a rule naming it is not passed over."""
     pair, db = w.pair, w.db
     leaf = pair._leaf(src_t)
     there = ([] if w.dst.target_missing(db)
              else w.dst.neutral_tables("dst", db))
     pairs, _, _, _ = pair.match_tables(
-        w.src.neutral_tables("src", db), there, pair._rename)
+        w.src.neutral_tables("src", db), there, pair._renamer(db))
     match = [d for s_, d in pairs if pair._leaf(s_) == leaf]
     if match:
         return match[0]
-    want = pair._leaf(pair._rename(src_t))
+    want = pair._leaf(pair._rename(src_t, db))
     if w.dst.CREATES_ON_WRITE:
         return want
     return pair._create_target(db, src_t, want, log)
@@ -2083,6 +2088,46 @@ def _digest_session():
     return out
 
 
+def _in_scope_now(w, manifest, entries):
+    """The manifest's tables as the hop takes them at the load. A seed
+    exported under another scope (`Hop.scope_changed`) is held, entry by
+    entry, to the one the hop has now: a table it has since left out is
+    not loaded, and said - the load empties each table it writes, and it
+    wrote over a table the target owns. What cannot be filtered here
+    refuses the load, naming it: a table whose row filter changed holds
+    the rows the other filter took, and a table the hop takes now that
+    the seed does not hold would be followed with none of its rows. The
+    columns and names are the hop's now in the load itself (`_Target`). A
+    manifest from before scopes were kept is loaded as it always was."""
+    if not w.hop.scope_changed(manifest):
+        return entries
+    keep, gone, refused = [], [], []
+    for e in entries:
+        parts = str(e["table"]).split(".")
+        if w.hop.excluded(w.db, *parts):
+            gone.append(e["table"])
+        elif (e.get("where") or None) != w.hop.row_filter(w.db, *parts):
+            refused.append(f"{e['table']} (its row filter changed)")
+        else:
+            keep.append(e)
+    have = {e["table"] for e in entries}
+    refused += [f"{t} (not in the seed)" for t in _tables(w)
+                if t not in have]
+    if refused:
+        raise SystemExit(
+            f"{w.db}: the seed was exported under another scope than the"
+            f" hop's now, and {len(refused)} of its tables cannot be held"
+            " to this one at the load: " + ", ".join(refused[:6])
+            + (" ..." if len(refused) > 6 else "")
+            + ". Export it again under this scope")
+    if gone:
+        w.log(f"{w.db}: the seed was exported under another scope; the"
+              f" {len(gone)} tables of it the hop now leaves out are not"
+              " loaded: " + ", ".join(gone[:6])
+              + (" ..." if len(gone) > 6 else ""))
+    return keep
+
+
 def load(w, store, seal, go):
     """The load half of one database, from `store`: every part read,
     written and proved, every table held as a whole, and the position the
@@ -2090,7 +2135,7 @@ def load(w, store, seal, go):
     log back to the seed's (`_delta_by_the_leaves`). Returns the `Done`."""
     from . import interlock
     manifest = read_manifest(w, store, seal)
-    entries = manifest["tables"]
+    entries = _in_scope_now(w, manifest, manifest["tables"])
     # the rows the target already holds in these tables, as the hop says
     # to treat them (target_rows): refused, replaced, or kept and left out
     kept = interlock.before_copy(

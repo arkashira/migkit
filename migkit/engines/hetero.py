@@ -2890,6 +2890,10 @@ class HeteroEngine(Engine):
         changes, end = src.neutral_changes("src", db, token, limit)
         touched = {}
         for ch in changes:
+            if not src.in_scope(db, ch["table"]):
+                # a table the hop leaves out: nothing else compares it, and
+                # it is not on the target to be found missing
+                continue
             key = ch["key"]
             touched.setdefault(ch["table"], {})[
                 tuple(sorted(key.items()))] = key
@@ -2918,9 +2922,14 @@ class HeteroEngine(Engine):
                                   " two engines can compare"))
                 continue
             raw = [tuple(k[c] for c in key) for k in keyed.values()]
-            a = src.neutral_rows_by_key("src", db, src_t, sc, key, raw)
+            # both sides through the hop's row filter, as the check reads
+            # them: a changed row the filter leaves behind is on neither
+            src_where, dst_where = self._row_scope(db, src_t)
+            a = src.neutral_rows_by_key("src", db, src_t, sc, key, raw,
+                                        where=src_where)
             b = self.dst_engine.neutral_rows_by_key("dst", db, dst_t, dc,
-                                                    key, raw)
+                                                    key, raw,
+                                                    where=dst_where)
             missing, extra, changed = self._rows_differ(sc, dc, a, b)
             if missing or extra or changed:
                 clean = False

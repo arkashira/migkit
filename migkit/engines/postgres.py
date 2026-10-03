@@ -4618,7 +4618,7 @@ select json_build_object(
             pass    # no key facts = no chunking, never a failure
         return out
 
-    def _scope(self, db, t):
+    def _scope(self, db, t, side=None):
         """What a check reads of table `t`, as a FROM item aliased `t`.
 
         The whole table, or only the rows the hop's row filter selects. The
@@ -4632,11 +4632,19 @@ select json_build_object(
 
         Rows the filter excludes that are sitting on the target anyway are
         a separate question, answered by `_outside_filter`.
+
+        Asked for the target (`side="dst"`), the table under the name the
+        hop gives it there (`Hop.target_table_in`): the delta reads both
+        sides by key, and a renamed table's target was read under the
+        source's name.
         """
         sch, tbl = self._split(t)
-        qt = f'{_ident(sch)}.{_ident(tbl)}'
         pred = (self.hop.row_filter(db, sch, tbl)
                 if hasattr(self.hop, "row_filter") else None)
+        if side == "dst" and hasattr(self.hop, "target_table_in"):
+            sch, tbl = split_table("postgres", self.hop.target_table_in(
+                db, sch, tbl), sch)
+        qt = f'{_ident(sch)}.{_ident(tbl)}'
         return f"(select * from {qt} where {pred}) t" if pred else f"{qt} t"
 
     def _outside_filter(self, db, t):
@@ -4846,7 +4854,11 @@ select json_build_object(
             chunk = cp.chunk_for(t, rate.chunk_rows())
             ranges = _cp.plan_ranges(lo, hi, chunk)
             expr = self._row_hash_expr("src", db, t)
-            todo = cp.begin(t, expr, ranges)
+            # the ranges' sums are of the rows the hop's row filter takes:
+            # partials taken under another filter are not added in
+            pred = self.hop.row_filter(db, sch, tbl)
+            todo = cp.begin(t, expr + (f" where {pred}" if pred else ""),
+                            ranges)
             done_before = cp.resumed(t)
             # the salt the stored partials were taken with, so they add up
             salt = cp.salt(t, self.digest_salt())
@@ -9700,7 +9712,13 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
     def _compare_pks(self, db, table, keys):
         """Row-level compare of the given pk keys (tab-joined when
         composite). Returns (missing, extra, changed) or None when the
-        table has no pk."""
+        table has no pk.
+
+        Each side read as the check reads it (`_scope`): through the hop's
+        row filter, the target under its own name. Read as the raw table,
+        an update of a row the filter leaves behind was a row missing on
+        the target every cycle - the delta never advanced, the cutover's
+        last check stopped on it, and a repair copied it over."""
         cols = self._pk_cols_of(db, table)
         if not cols:
             return None
@@ -9726,7 +9744,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 pk = self._pk_text_expr(cols)
                 h = self._row_hash_expr("src", db, f"{sch}.{tbl}")
                 q = (f"select {pk}||'|'||{h}"
-                     f' from {_ident(sch)}.{_ident(tbl)} t where {where}')
+                     f" from {self._scope(db, f'{sch}.{tbl}', side)}"
+                     f" where {where}")
                 for line in self._psql(side, db, q).splitlines():
                     k, _, h = line.rpartition("|")
                     out[k] = h
@@ -10565,7 +10584,10 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             return pk_cache[t]
 
         touched, nopk, last_lsn = self._parse_decoding(lines, pk_of)
-        n_changes = sum(len(v) for v in touched.values())
+        # what the hop takes: a table it leaves out is passed over below,
+        # its changes stepped past with the rest, and not counted or said
+        taken = [t for t in touched if self._keep_tbl(db, t)]
+        n_changes = sum(len(touched[t]) for t in taken)
         if not touched and not nopk:
             return [Result("delta", db, "ok",
                            "0 changes since last verified point")]
@@ -10604,6 +10626,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     + ("clean" if not (missing or extra or changed)
                        else "DIFF"))
         for t in sorted(nopk):
+            if not self._keep_tbl(db, t):
+                continue
             res.append(Result("delta", f"{db}.{t}", "skip",
                               "no pk, cannot delta-verify"))
         if clean and last_lsn:
@@ -10618,7 +10642,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         res.insert(0, Result("delta", db,
                              "ok" if clean else "diff",
                              f"{n_changes} changed rows across"
-                             f" {len(touched)} tables, {note}"))
+                             f" {len(taken)} tables, {note}"))
         return res
 
     def list_move_tables(self, db):
@@ -12459,25 +12483,28 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
 
     def watch_sample(self, db):
         sample = {"db": db, "ts": time.time()}
-        q = ("select coalesce(sum(n_live_tup),0) from pg_stat_user_tables"
+        # per table on both sides: the sums are of what the hop takes
+        # (`watched`), and the source's name the tables a queue or a
+        # worker is still writing to
+        q = ("select schemaname||'.'||relname||'|'||n_live_tup"
+             " from pg_stat_user_tables"
              " where schemaname not like '\\_\\_%'")
+
+        def live(side):
+            return {l.rsplit("|", 1)[0]: int(l.rsplit("|", 1)[1] or 0)
+                    for l in self._psql(side, db, q).splitlines()
+                    if "|" in l}
         try:
-            sample["src_rows"] = int(self._psql("src", db, q) or 0)
-            sample["dst_rows"] = int(self._psql("dst", db, q) or 0)
-        except RuntimeError as e:
+            src, dst = live("src"), live("dst")
+        except (RuntimeError, ValueError) as e:
             sample["error"] = str(e).splitlines()[-1]
             return sample
-        try:
-            # per-table live counts on the source so a cutover verdict can
-            # name which tables a queue/worker is still writing to
-            rows = self._psql("src", db,
-                              "select schemaname||'.'||relname||'|'||n_live_tup"
-                              " from pg_stat_user_tables"
-                              " where schemaname not like '\\_\\_%'").splitlines()
-            sample["src_tables"] = {l.rsplit("|", 1)[0]: int(l.rsplit("|", 1)[1])
-                                    for l in rows if "|" in l}
-        except (RuntimeError, ValueError):
-            pass
+        src, dst, narrowed = self.watched(db, src, dst)
+        sample["src_rows"] = sum(src.values())
+        sample["dst_rows"] = sum(dst.values())
+        sample["src_tables"] = src
+        if narrowed:
+            sample["narrowed"] = narrowed
         try:
             slots = self._psql("src", db,
                                "select slot_name||' active='||active||' lag='||"

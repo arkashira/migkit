@@ -499,7 +499,7 @@ class Keeper:
         salt = st.get("salt") or pair.digest_salt()
         pairs, _, _, _ = pair.match_tables(
             pair.src_engine.neutral_tables("src", db),
-            pair.dst_engine.neutral_tables("dst", db), pair._rename)
+            pair.dst_engine.neutral_tables("dst", db), pair._renamer(db))
         made = {}
         for src_t, dst_t in pairs:
             try:
@@ -877,7 +877,7 @@ def proved_db(eng, db, stream=None, with_counts=False):
         return None
     pairs, _, _, _ = pair.match_tables(
         pair.src_engine.neutral_tables("src", db),
-        pair.dst_engine.neutral_tables("dst", db), pair._rename)
+        pair.dst_engine.neutral_tables("dst", db), pair._renamer(db))
     names = {pair._leaf(s_) for s_, _ in pairs}
     if not names or not names <= set(got) or any(
             got[n][0] != "ok" for n in names):
