@@ -113,8 +113,13 @@ def translator(pair, ctx, r, fixes=None):
     src = pair.src_engine.SQL_DIALECT
     dst = pair.dst_engine.SQL_DIALECT
     local = ctx["local"]
+    parting = ctx.get("parting")
     if r.kind == "view":
-        tree = local(parse(r.body, src))
+        tree = parse(r.body, src)
+        if parting:
+            from .builtins import refusal
+            refusal(tree, parting, src)
+        tree = local(tree)
         if fixes:
             fixes(tree)
         body = generate(tree, src, dst)
@@ -127,6 +132,9 @@ def translator(pair, ctx, r, fixes=None):
     typed = {p.name: _there(pair, p.type, f"argument {p.name}")
              for p in r.params}
     ret_cls, ret = _there(pair, r.returns, "what it returns")
+    if parting:
+        from .builtins import refusal
+        refusal(parse(one, src), parting, src)
 
     def exact(node, cls, typ):
         # a decimal's declared scale is where its rounding happens;
@@ -195,6 +203,13 @@ def rules(pair, ctx, r):
     if (src, dst) == ("postgres", "mysql"):
         from . import pg_mysql
         return pg_mysql.convert(r, ctx["rules"])
+    if (src, dst) == ("oracle", "postgres"):
+        from . import plsql_pg
+        from .learn import apply
+        made = plsql_pg.convert(r, ctx["rules"])
+        made.statements = [apply(x, ctx.get("learned") or [])
+                           for x in made.statements]
+        return made
     if dst != "postgres" or src not in ("mysql", "tsql"):
         raise Refused(f"migkit's rules do not convert {src} to {dst}")
     from .learn import apply
@@ -305,8 +320,11 @@ class Conversion:
                         " where n.nspname = 'oracle'").split())
             except Exception:  # noqa: BLE001 - none known
                 pass
+        from . import builtins
         self.ctx = {"local": self.local, "dst": self.dst,
                     "emulations": emulations, "emulated": emulated,
+                    "parting": builtins.load(pair.hop, db)
+                    if builtins.turned_on(pair.hop) else {},
                     "dir": code_dir(pair.hop),
                     "rules": mysql_pg.Context(
                         local=self.local, routines=self.routines,
@@ -315,6 +333,12 @@ class Conversion:
         # the target's declared column types, which PostgreSQL's rules
         # into MySQL read for a loop over a query and a column's %TYPE
         self.ctx["rules"].column_types = column_types
+        # what PL/SQL's rules read: the functions the target's emulation
+        # of Oracle holds, and the source's packages (schemas there)
+        self.ctx["rules"].emulated = emulated
+        self.ctx["rules"].packages = {
+            r.settings["package"].lower() for r in self.routines
+            if r.settings.get("package")}
         self.records = []
         #: why the sandbox named for the hop could not be used, if it was
         #: named and could not
@@ -435,6 +459,9 @@ class Conversion:
             proof.begin([])
             self._source_views(proof)
             self.ctx["pg_version"] = _pg_version(proof.b)
+            # the rules read it for what a target of that version runs
+            # (MERGE, OUTPUT's rows before and after)
+            self.ctx["rules"].pg_version = self.ctx["pg_version"]
             import time
             for r in self.views + _order(self.routines):
                 began = time.monotonic()

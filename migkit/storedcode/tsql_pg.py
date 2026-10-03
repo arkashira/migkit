@@ -30,7 +30,31 @@ The rules that keep meaning, not only syntax:
 * a trigger reads the statement's rows as the pseudo-tables `inserted`
   and `deleted`; a PostgreSQL statement trigger reads them as transition
   tables of those names - one trigger per event, since a transition
-  table exists only for the events that have it.
+  table exists only for the events that have it;
+* `OUTPUT` hands back the rows a write wrote: into a table variable, a
+  temporary table or a table, it is the write's `RETURNING` inserted
+  there in one statement (`WITH ... INSERT`); to the caller, it is a
+  result set read from a temporary table the write's rows are put in
+  (a cursor cannot be opened over a write). `deleted.` in an UPDATE's or
+  a MERGE's, and `inserted.` in a MERGE's, are the row before and after,
+  which PostgreSQL returns from version 18 (`old.`, `new.`), and
+  `$action` is `merge_action()` from 17 - refused on an older target,
+  by its version;
+* `MERGE` runs on PostgreSQL from version 15, and `WHEN NOT MATCHED BY
+  SOURCE` from 17 - refused on an older target; a row of the target met
+  by two of the source's fails on both (SQL Server's 8672, PostgreSQL's
+  cardinality violation);
+* the procedure-wide transaction - `BEGIN TRY BEGIN TRAN ... COMMIT END
+  TRY BEGIN CATCH IF @@TRANCOUNT > 0 ROLLBACK ... END CATCH` - is one
+  block with an exception handler: the handler's rollback of the block's
+  writes is the ROLLBACK, the rest of the CATCH runs in the handler, and
+  no COMMIT is written, so a caller's transaction keeps what SQL Server's
+  nested COMMIT leaves to it. Refused where the CATCH writes and then
+  raises (SQL Server keeps those writes, the target's raise takes them
+  back), or the procedure writes before the transaction and the CATCH
+  raises;
+* a table variable keeps its rows through a ROLLBACK; the temporary table
+  it becomes does not - a routine with both is refused.
 """
 import re
 
@@ -40,6 +64,18 @@ from sqlglot.tokens import TokenType
 
 from .plpgsql import QUOTE, Converted, Emitter, ident
 from .translate import Refused, generate, parse
+
+class _Tokens(TSQL.Tokenizer):
+    """T-SQL's tokens with an END read as END wherever it stands: the
+    translator's own tokenizer reads an END after a semicolon as a command
+    and keeps what follows it as one piece of text, so `...; END TRY
+    BEGIN CATCH ...` was one string and its body could not be read."""
+    COMMANDS = TSQL.Tokenizer.COMMANDS - {TokenType.END}
+
+
+def _tokenize(text):
+    return _Tokens(dialect=TSQL()).tokenize(text)
+
 
 _QUOTED = {getattr(TokenType, n) for n in (
     "STRING", "IDENTIFIER", "NUMBER", "NATIONAL_STRING", "HEX_STRING",
@@ -110,7 +146,7 @@ class _Parser:
     def __init__(self, text):
         self.text = text
         try:
-            self.t = TSQL().tokenize(text)
+            self.t = _tokenize(text)
         except Exception as e:  # noqa: BLE001 - said as a refusal
             raise Refused(f"its body could not be read: {str(e)[:80]}")
         self.i = 0
@@ -623,6 +659,8 @@ class _Gen:
         self.uses_rowcount = False
         self.uses_fetch = False
         self.event = None          # a trigger's event, per version
+        #: whether a table variable is declared (it outlives a ROLLBACK)
+        self.tablevars = False
 
     def code(self, what, line):
         if (what, line) not in self.codes:
@@ -895,6 +933,12 @@ class _Gen:
                     self.guarded([f"{pg} := {self.expr(default, node.line)};"])
             elif kind == "table":
                 self.code("tsql.table-variable", node.line)
+                self.tablevars = True
+                if re.search(r"(?i)\brollback\b", self.r.definition or ""):
+                    raise Refused(f"line {node.line} declares a table"
+                                  " variable, which keeps its rows through a"
+                                  " ROLLBACK the routine makes; the target's"
+                                  " temporary table does not")
                 t = self._temp("tv_" + name)
                 self.vars[name.lower()] = (t, "table")
                 cols = parse(f"CREATE TABLE x {typ}", "tsql")
@@ -972,11 +1016,125 @@ class _Gen:
                  "if found then"] + ["  " + c for c in copies] + ["end if;"]
         self.guarded(self.after_dml(lines))
 
+    def _pg_version(self):
+        return getattr(self.ctx, "pg_version", None) if self.ctx is not None \
+            else None
+
+    def _needs(self, version, what, line):
+        """Refused where the target is older than `version` (or its version
+        is not known) for `what`."""
+        have = self._pg_version()
+        if have is None or have < version:
+            raise Refused(f"line {line} {what}, which PostgreSQL runs from"
+                          f" version {version}"
+                          + (f" and the target runs {have}" if have else
+                             "; the target's version is not known here"))
+
     def s_sql(self, node):
         if node.verb == "MERGE":
             self.code("tsql.merge", node.line)
+            self._needs(15, "merges", node.line)
+            if re.search(r"(?i)\bnot\s+matched\s+by\s+source\b",
+                         node.text):
+                self._needs(17, "merges rows the source no longer has (WHEN"
+                                " NOT MATCHED BY SOURCE)", node.line)
+        out = _output_clause(node.text)
+        if out is not None:
+            return self._with_output(node, *out)
         text = self.sql(node.text, node.line)
         self.guarded(self.after_dml([f"{text};"]))
+
+    # ---- OUTPUT ----------------------------------------------------------
+
+    def _output_item(self, verb, item, line, table=None):
+        """One OUTPUT item in the target's SQL: for the write's RETURNING,
+        or - with `table` - for the shape of the table it is put in."""
+        m = re.match(r'(?is)^(.*?)\s+as\s+(\[[^\]]+\]|"[^"]+"|\w+)$',
+                     item.strip())
+        expr, alias = (m.group(1), m.group(2).strip('[]"')) if m else \
+            (item.strip(), None)
+
+        def side(m):
+            which, col = m.group(1).lower(), m.group(2)
+            if table is not None:
+                return f"{table}.{col}"
+            if verb == "INSERT" and which == "inserted" or \
+                    verb == "DELETE" and which == "deleted":
+                return col
+            if verb == "UPDATE" and which == "inserted":
+                return f"new.{col}" if (self._pg_version() or 0) >= 18 \
+                    else col
+            self._needs(18, f"returns the row {'before' if which == 'deleted' else 'after'}"
+                            f" the {verb.lower()} (OUTPUT {which}.)", line)
+            return f"{'old' if which == 'deleted' else 'new'}.{col}"
+        if re.search(r"(?i)\$action\b", expr):
+            if table is not None:
+                expr = re.sub(r"(?i)\$action\b", "cast('' as text)", expr)
+            else:
+                self._needs(17, "returns what a merge did with each row"
+                                " ($action)", line)
+                expr = re.sub(r"(?i)\$action\b", "merge_action()", expr)
+        expr = re.sub(r"(?i)\b(inserted|deleted)\s*\.\s*(\[[^\]]+\]|\*|\w+)",
+                      side, expr)
+        got = self.expr(expr, line) if expr.strip() != "*" else "*"
+        return got + (f" as {ident(alias)}" if alias else "")
+
+    def _output_target(self, into, line):
+        name = into.strip()
+        if name.startswith("@"):
+            pg, typ = self.lookup(name[1:], line)
+            if typ != "table":
+                raise Refused(f"line {line} puts the rows it wrote into"
+                              f" {name}, which is not a table variable")
+            return pg
+        if name.startswith("#"):
+            return self._temp(name[1:].strip("[]"))
+        tree = self.rewrite(parse(f"SELECT 1 FROM {name}", "tsql"), line)
+        return tree.find(exp.Table).sql(dialect="postgres")
+
+    def _written_table(self, text, line):
+        tree = self.rewrite(parse(text, "tsql"), line)
+        t = tree.this if isinstance(tree.this, exp.Table) else \
+            tree.find(exp.Table)
+        if t is None:
+            raise Refused(f"line {line}: the table it writes could not be"
+                          " read")
+        t = t.copy()
+        t.set("alias", None)
+        return t.sql(dialect="postgres")
+
+    def _with_output(self, node, rest, items, into, cols):
+        """A write with OUTPUT: its RETURNING put where OUTPUT puts it."""
+        line = node.line
+        self.code("tsql.output", line)
+        dml = self.sql(rest, line)
+        returning = ", ".join(self._output_item(node.verb, i, line)
+                              for i in items)
+        cte = self.fresh("o")
+        written = f"with {cte} as ({dml} returning {returning})"
+        if into is not None:
+            target = self._output_target(into, line)
+            listed = f" ({', '.join(ident(c) for c in cols)})" if cols \
+                else ""
+            self.guarded(self.after_dml([
+                f"{written} insert into {target}{listed} select * from"
+                f" {cte};"]))
+            return
+        if self.r.kind != "procedure":
+            raise Refused(f"line {line} sends the rows it wrote (OUTPUT),"
+                          " which only a procedure can")
+        table = self._written_table(rest, line)
+        shape = ", ".join(self._output_item(node.verb, i, line, table)
+                          for i in items)
+        name = f"_migkit_rs{len(self.result_sets) + 1}"
+        self.result_sets.append(name)
+        held = f"_migkit_out{len(self.result_sets)}"
+        self.guarded(self.after_dml([
+            f"drop table if exists {held};",
+            f"create temporary table {held} as select {shape} from {table}"
+            " where false;",
+            f"{written} insert into {held} select * from {cte};"]))
+        self.guarded([f"open {name} for select * from {held};"])
 
     def s_temp_create(self, node):
         tree = parse(node.text, "tsql")
@@ -1139,7 +1297,90 @@ class _Gen:
             "end if;"]
         self.guarded(lines)
 
+    def _transaction_try(self, node):
+        """(the CATCH after its ROLLBACK, whether it raises) where `node` is
+        the procedure-wide transaction (`BEGIN TRY BEGIN TRAN ... COMMIT
+        END TRY BEGIN CATCH [IF @@TRANCOUNT > 0] ROLLBACK ... END
+        CATCH`), else None; Refused where its meaning cannot be kept."""
+        body, catch = node.try_, node.catch
+        if len(body) < 2 or body[0].kind != "tx" or \
+                body[0].what != "begin" or body[-1].kind != "tx" or \
+                body[-1].what != "commit" or not catch:
+            return None
+        if any(n.kind == "tx" for st in body[1:-1] for n in st.walk()):
+            return None
+        first = catch[0]
+        then = getattr(first, "then", None) if first.kind == "if" else None
+        if then is not None and then.kind == "block" and \
+                len(then.body) == 1:
+            then = then.body[0]
+        if first.kind == "tx" and first.what == "rollback":
+            pass
+        elif first.kind == "if" and first.otherwise is None and \
+                re.search(r"(?i)@@trancount|xact_state\s*\(", first.cond) \
+                and then is not None and then.kind == "tx" and \
+                then.what == "rollback":
+            pass
+        else:
+            return None
+        rest = catch[1:]
+        if any(n.kind == "tx" for st in rest for n in st.walk()):
+            return None
+        raises = bool(rest) and rest[-1].kind in ("throw", "raiserror") \
+            and (rest[-1].kind == "throw" or
+                 _severity(rest[-1].text) > 10)
+        if raises and any(n.kind in ("sql", "exec") for st in rest
+                          for n in st.walk()):
+            raise Refused(f"line {node.line}: its CATCH writes after the"
+                          " ROLLBACK and then raises; SQL Server keeps those"
+                          " writes, and the target's raise takes them back")
+        top = getattr(self, "tree", [])
+        while len(top) == 1 and top[0].kind == "block":
+            # the body's own BEGIN ... END
+            top = top[0].body
+        if node not in top:
+            return None
+        if raises and any(n.kind in ("sql", "exec") for st in
+                          top[:top.index(node)] for n in st.walk()):
+            raise Refused(f"line {node.line}: the procedure writes before"
+                          " its transaction begins and raises after rolling"
+                          " it back; SQL Server keeps the writes before it,"
+                          " and the target's raise takes them back")
+        if self.tablevars:
+            raise Refused(f"line {node.line} rolls back a transaction that"
+                          " a table variable outlives; the target's"
+                          " temporary table does not")
+        return rest, raises
+
+    def _try_transaction(self, node, rest):
+        e = self.e
+        self.code("tsql.try-transaction", node.line)
+        state, msg = self.fresh("state"), self.fresh("msg")
+        self.decls += [f"{state} text;", f"{msg} text;"]
+        e("begin")
+        e.push()
+        for st in node.try_[1:-1]:
+            self.statement(st)
+        if len(node.try_) == 2:
+            e("null;")
+        e.pop()
+        e("exception when others then")
+        e.push()
+        e(f"get stacked diagnostics {state} = returned_sqlstate,"
+          f" {msg} = message_text;")
+        self.catching.append((None, None, state, msg))
+        for st in rest:
+            self.statement(st)
+        if not rest:
+            e("null;")
+        self.catching.pop()
+        e.pop()
+        e("end;")
+
     def s_try(self, node):
+        pattern = self._transaction_try(node) if not self.frames else None
+        if pattern is not None:
+            return self._try_transaction(node, pattern[0])
         e = self.e
         label = self.fresh("try")
         err, state, msg = self.fresh("err"), self.fresh("state"), \
@@ -1171,6 +1412,10 @@ class _Gen:
         e("end if;")
 
     def s_tx(self, node):
+        if node.what == "rollback" and self.tablevars:
+            raise Refused(f"line {node.line} rolls back, and a table"
+                          " variable keeps its rows through a rollback"
+                          " where the target's temporary table does not")
         if self.r.kind != "procedure":
             raise Refused(f"line {node.line} ends a transaction, which only a"
                           " procedure can")
@@ -1183,6 +1428,91 @@ class _Gen:
         if node.what == "begin":
             return
         self.e("rollback;" if node.what == "rollback" else "commit;")
+
+
+#: the words that end an OUTPUT clause's list where no INTO does
+_AFTER_OUTPUT = {"VALUES", "SELECT", "DEFAULT", "FROM", "WHERE", "OPTION",
+                 "WHEN", "EXEC", "EXECUTE"}
+
+
+def _output_clause(text):
+    """(the statement without its OUTPUT clause, [the items as written],
+    the INTO target or None, [its columns]) of a write, or None where it
+    has no OUTPUT."""
+    try:
+        toks = _tokenize(text)
+    except Exception:  # noqa: BLE001 - read as it is by the translator
+        return None
+    depth, at = 0, None
+    for k, t in enumerate(toks):
+        if t.token_type == TokenType.L_PAREN:
+            depth += 1
+        elif t.token_type == TokenType.R_PAREN:
+            depth -= 1
+        elif depth == 0 and t.token_type not in _QUOTED and \
+                t.text.upper() == "OUTPUT":
+            at = k
+            break
+    if at is None or at + 1 >= len(toks):
+        return None
+    k, depth = at + 1, 0
+    while k < len(toks):
+        t = toks[k]
+        word = t.text.upper() if t.token_type not in _QUOTED else ""
+        if t.token_type == TokenType.L_PAREN:
+            depth += 1
+        elif t.token_type == TokenType.R_PAREN:
+            depth -= 1
+        elif depth == 0 and (word == "INTO" or word in _AFTER_OUTPUT or
+                             t.token_type == TokenType.SEMICOLON):
+            break
+        k += 1
+    if k == at + 1:
+        return None
+    items = _split_args(text[toks[at + 1].start:toks[k - 1].end + 1])
+    into, cols, after = None, [], k
+    if k < len(toks) and toks[k].text.upper() == "INTO":
+        j = k + 1
+        if j >= len(toks):
+            return None
+        begin = toks[j].start
+        if toks[j].token_type in (TokenType.PARAMETER, TokenType.HASH):
+            j += 2
+        else:
+            j += 1
+            while j + 1 < len(toks) and toks[j].token_type == TokenType.DOT:
+                j += 2
+        into = text[begin:toks[j - 1].end + 1]
+        if j < len(toks) and toks[j].token_type == TokenType.L_PAREN:
+            depth, m = 0, j
+            while m < len(toks):
+                if toks[m].token_type == TokenType.L_PAREN:
+                    depth += 1
+                elif toks[m].token_type == TokenType.R_PAREN:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                m += 1
+            cols = [c.strip().strip("[]") for c in
+                    text[toks[j].end + 1:toks[m].start].split(",")
+                    if c.strip()]
+            j = m + 1
+        after = j
+    rest = text[:toks[at].start].rstrip() + (
+        " " + text[toks[after].start:] if after < len(toks) else "")
+    return rest.strip().rstrip(";"), items, into, cols
+
+
+def _severity(text):
+    """A RAISERROR's severity, or 16 where it cannot be read."""
+    inner = str(text or "").strip()
+    if inner.startswith("(") and inner.endswith(")"):
+        inner = inner[1:-1]
+    parts = _split_args(inner)
+    try:
+        return int(parts[1].strip())
+    except (IndexError, ValueError):
+        return 16
 
 
 def _into(select_sql, targets):
