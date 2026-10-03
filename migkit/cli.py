@@ -3435,6 +3435,41 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
                          "db": db, "drop": bool(do_drop and two_way)})
 
 
+def _own_refused(hop, eng, db):
+    """Why the servers' own replication - a subscription, a replica -
+    would carry this hop's changes wrongly, in words, or "": a table it
+    filters, renames, maps the columns of or carries only some changes of
+    (`movers.stream_cannot_carry` - the publication and the replica apply
+    whole rows under the source's names, so a PostgreSQL hop with
+    `where: {orders: "region='TH'"}` was carried whole, and a renamed table
+    landed in a namesake), or a scope its own filters cannot hold
+    (`native_scope_unsafe`). Asked only of a hop that says any of those;
+    the ladder of change ways then takes migkit's own tail
+    (`movers.stream_ways`)."""
+    from . import movers
+    from .config import scoped
+    mapping = hop.mapping or {}
+    said = []
+    dbs = [db] if db else eng.databases()
+    if any(mapping.get(k) for k in ("where", "tables", "columns", "ops")):
+        refused = []
+        for d in dbs:
+            refused += movers.stream_cannot_carry(
+                hop, d, eng.neutral_tables("src", d))
+        if refused:
+            said.append(
+                "the servers' own replication applies whole rows under the"
+                " source's names, and cannot carry what the hop asks for "
+                + "; ".join(f"{t} ({why})" for t, why in refused[:5])
+                + (f" and {len(refused) - 5} more" if len(refused) > 5
+                   else ""))
+    if scoped(hop):
+        why = eng.native_scope_unsafe()
+        if why:
+            said.append(why)
+    return "; ".join(said)
+
+
 def _replicate_released(hop, eng, db, copy_data, do_drop, go):
     """`_replicate`, then - where tearing down starts a stream back - the
     target given back to the application, once that stream runs."""
@@ -3464,6 +3499,12 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
             " replication carries whole rows under the source's names."
             " Nothing was set up. `migkit move --mode cdc` follows this hop"
             " with migkit's own change tail, which applies the mapping.")
+    refused = "" if do_drop else _own_refused(hop, eng, db)
+    if refused:
+        raise SystemExit(
+            f"{refused}. Nothing was set up. `migkit move --mode cdc`"
+            " follows this hop with migkit's own change tail, which reads"
+            " the hop's scope and mapping for every change.")
     why = None if do_drop else eng.native_replica_unsafe()
     if why:
         raise SystemExit(
@@ -4300,9 +4341,12 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         return _cdc(hop, eng, db, do_drop, go, engine)
     # full+cdc
     if has_repl and getattr(eng, "REPLICA_COPIES", False) \
-            and not eng.maps_columns():
+            and not eng.maps_columns() \
+            and (do_drop or not _own_refused(hop, eng, db)):
         # a subscription with copy_data=true, or a Redis replica, copies
-        # first and follows after: the native full+cdc
+        # first and follows after: the native full+cdc - never for a hop
+        # it would copy whole and follow whole where the hop filters or
+        # renames (`_own_refused`), which the copy and the tail below take
         return _replicate(hop, eng, db, True, do_drop, go)
     # MySQL used to print a replica plan here, from a position taken before
     # the copy. The copy is not a snapshot at that position, and a replica
@@ -4489,8 +4533,24 @@ def _cdc(hop, eng, db, do_drop, go, engine):
             return ""
         return "; ".join(r for d in ([db] if db else eng.databases())
                          for r in [eng.publication_add_risk(d)] if r)
+
+    # what the hop asks that the servers' own replication cannot carry,
+    # read once; migkit's own tail of the engine as a pair of itself then
+    # follows the hop (`_tail_pair`), as it does a hop that maps columns
+    said = {}
+
+    def refused():
+        if "why" not in said:
+            said["why"] = "" if do_drop else _own_refused(hop, eng, db)
+        return said["why"]
+
+    def by_pair():
+        if has_tail or not refused():
+            return False
+        pair = _tail_pair(eng)
+        return pair is not None and _tail_ready(pair)
     facts, rungs = _stream_facts(hop, eng, engine, has_repl, has_tail,
-                                  do_drop, risk)
+                                  do_drop, risk, refused, by_pair)
     where = hop.report_dir(db) / "stream.json"
     work = f"following {hop.name}'s source"
     # a way refused as it starts - a target that cannot dial the source -
@@ -4511,7 +4571,7 @@ def _cdc(hop, eng, db, do_drop, go, engine):
         if path in ("subscription", "replica"):
             return _replicate_released(hop, eng, db, False, do_drop, go)
         if path == "tail":
-            return _tail(hop, eng, db, go)
+            return _tail(hop, eng if has_tail else _tail_pair(eng), db, go)
         if has_tail:
             console.print("[yellow]native change tail needs a driver this"
                           " machine does not have - using migkit's"
@@ -4541,18 +4601,21 @@ def _cdc(hop, eng, db, do_drop, go, engine):
 
 
 def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
-                  risk=None):
+                  risk=None, refused=None, by_pair=None):
     """(facts, rungs) of the ways this hop's changes may follow its source
     (`movers.stream_ways`, read as `movers.stream_way` reads them), the leg
     run from here held also where the servers' own replication could not
     start here: what a target that cannot dial the source falls to.
     `risk()` says why the servers' own replication would lose a table's
-    changes (`PostgresEngine.publication_add_risk`)."""
+    changes (`PostgresEngine.publication_add_risk`), `refused()` why it
+    would carry the hop's tables wrongly (`_own_refused`), and `by_pair()`
+    whether migkit's own tail of the engine as a pair then follows it."""
     import dataclasses
 
     from . import decide, movers
     facts = movers.stream_facts(hop, engine, has_repl, has_tail,
-                                has_tail and _tail_ready(eng), drop, risk)
+                                has_tail and _tail_ready(eng), drop, risk,
+                                refused, by_pair)
     rungs = []
     for r in movers.stream_ways():
         if r.name == "follow":
@@ -4561,7 +4624,7 @@ def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
                 lambda f: movers.follow_selected() == "follow"
                 or bool(f.get("own replication failed")),
                 "the target can dial the source, so its own replication"
-                " carries the changes")))
+                " carries the changes")) + tuple(r.needs[2:]))
         rungs.append(r)
     return facts, rungs
 
@@ -4672,7 +4735,8 @@ def _stream_leg(hop, eng, db, dbs, engine):
                           end=tail_end)
     elif conf is not None and _pipeline_runs(hop):
         leg = _pipeline_leg(hop, eng, dbs)
-    elif has_repl and not follow and not eng.maps_columns():
+    elif has_repl and not follow and not eng.maps_columns() \
+            and not _own_refused(hop, eng, db):
         leg = cutover.Leg("native", fence=eng, down=native_down,
                           up=native_up,
                           after_thaw=engine == "mysql" and _by_gtid(eng, dbs))

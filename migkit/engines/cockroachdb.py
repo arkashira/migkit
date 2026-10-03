@@ -160,6 +160,11 @@ class CockroachEngine(PgWireEngine):
     DEFAULT_PORT = 26257
     SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "crdb_internal",
                       "pg_extension")
+    #: the changefeed names its tables when it is opened (`SinklessFeed`):
+    #: a table that joins a running tail gets its changes only once the
+    #: feed is let go and opened again, from where the tail stands
+    #: (`hetero.tail_apply`) - copied and then never followed before
+    FOLLOWS_LISTED_TABLES = True
 
     def _visible(self):
         return " and is_hidden = 'NO'"

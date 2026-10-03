@@ -517,7 +517,7 @@ def from_tencent_dts(data, stem="hop"):
                  " migkit move it instead")
     src = _tdts_end(d, "Src", notes)
     dst = _tdts_end(d, "Dst", notes) if kind != "subscription" else None
-    ops = {}
+    ops, ddl = {}, None
     if kind == "migration":
         opt = d["MigrateOption"]
         picked = opt.get("DatabaseTable") or {"ObjectMode": "all"}
@@ -535,6 +535,7 @@ def from_tencent_dts(data, stem="hop"):
         ops = _tdts_ops(d.get("Options") or {}, picked,
                         flat=(src or {}).get("engine") in ("mysql",
                                                             "mongodb"))
+        ddl = _tdts_ddl(d.get("Options") or {}, notes)
     elif kind == "subscription":
         mode, items = _tdts_subscribed(d)
         notes.append("a subscription carries the changes to a topic, not a"
@@ -578,6 +579,9 @@ def from_tencent_dts(data, stem="hop"):
                if got.get(k)}
     if mapping:
         out.raw["mapping"] = mapping
+    if ddl is not None:
+        # what a tail does with each DDL, as the job carries them
+        out.raw.setdefault("options", {})["ddl"] = ddl
     return out
 
 
@@ -674,6 +678,65 @@ def _dml(words):
     got = sorted({_DTS_OPS[str(w).lower()] for w in words or []
                   if str(w).lower() in _DTS_OPS})
     return None if len(got) == 3 else got
+
+
+def _ddl_option(carried, notes, said):
+    """The hop's `ddl` (`tailtables.policy`) from the DDL kinds a job
+    carries of a table: `apply` where it carries every one, with the kinds
+    it leaves out that a tail can leave out under `skip`
+    (`tailtables.SKIPPABLE`). An ALTER or a rename it leaves out is said:
+    a tail cannot leave those out, since every change after one is
+    written to columns or a table the target would not have."""
+    from .tailtables import SKIPPABLE
+    skip = [k for k in SKIPPABLE if k not in carried]
+    held = [k for k in ("alter", "rename") if k not in carried]
+    if held:
+        notes.append(f"{said} does not carry a table's {' or '.join(held)}:"
+                     " migkit's tail cannot leave "
+                     + ("it" if len(held) == 1 else "them") + " out - under"
+                     " this hop's ddl the target follows where it can, and"
+                     " the table parks where not")
+    return {"default": "apply", "skip": skip} if skip else "apply"
+
+
+def _tdts_ddl(options, notes):
+    """The hop's `ddl` from a Tencent sync job's `OpTypes` and
+    `DdlOptions`: `DDL` carries every one, `PartialDDL` the kinds its
+    table options name (`DdlObject` Table, `DdlValue` Create, Drop,
+    Alter, Rename, Truncate). None where the job says neither."""
+    ops = [str(o) for o in options.get("OpTypes") or []]
+    if "DDL" in ops:
+        return "apply"
+    if "PartialDDL" not in ops:
+        if ops:
+            notes.append("the job carries no DDL: a schema change on the"
+                         " source is not on the target, and reads as a"
+                         " schema difference")
+        return None
+    carried = set()
+    for o in options.get("DdlOptions") or []:
+        if isinstance(o, dict) and str(o.get("DdlObject") or "").lower() \
+                == "table":
+            carried |= {str(v).lower() for v in o.get("DdlValue") or []}
+    return _ddl_option(carried, notes, "the job")
+
+
+def _adts_ddl(entries, notes):
+    """The hop's `ddl` from an Alibaba job's `ddl_op` on its objects (`ct`,
+    `at`, `dt`, `rt`, `tt`; empty for every one, `none` for none). The
+    hop's `skip` is the hop's: where objects say it apart, what any of
+    them leaves out is left out, and that is said. None where no object
+    says it."""
+    if not entries:
+        return None
+    sets = {frozenset(c) for _, c in entries}
+    if len(sets) > 1:
+        notes.append("the job carries other DDL for some objects than for"
+                     " others (" + ", ".join(i for i, _ in entries[:4])
+                     + (" ..." if len(entries) > 4 else "") + "): the"
+                     " hop leaves out what any of them leaves out")
+    carried = set.intersection(*[set(c) for c in sets])
+    return _ddl_option(carried, notes, "the job")
 
 
 def _tdts_ops(options, objects, flat=True):
@@ -1111,6 +1174,10 @@ def from_alibaba_dts(data, stem="hop"):
                if got.get(k)}
     if mapping:
         out.raw["mapping"] = mapping
+    ddl = _adts_ddl(got.get("ddl"), notes)
+    if ddl is not None:
+        # what a tail does with each DDL, as the job carries them
+        out.raw.setdefault("options", {})["ddl"] = ddl
     return out
 
 
@@ -1292,7 +1359,18 @@ def _adts_selection(objects, one_db, notes):
     return got
 
 
+#: Alibaba Cloud DTS's `ddl_op` codes, as `canon.ddl` kinds
+_ADTS_DDL = {"ct": "create", "at": "alter", "dt": "drop", "rt": "rename",
+             "tt": "truncate"}
+
+
 def _adts_ops(ident, spec, notes, got):
+    ddl = spec.get("ddl_op")
+    if ddl is not None:
+        codes = {o.strip().lower() for o in str(ddl).split(",") if o.strip()}
+        got.setdefault("ddl", []).append(
+            (ident, set(_ADTS_DDL.values()) if not codes else
+             {_ADTS_DDL[c] for c in codes if c in _ADTS_DDL}))
     ops = spec.get("dml_op")
     if ops in (None, ""):
         return
