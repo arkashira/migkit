@@ -10,6 +10,18 @@ import pytest
 
 from tests.conftest import verdict
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.identity.sequence-collision", "mysql"),
+    ("verify.identity.sequence-parity", "mysql"),
+    ("verify.structure.keys", "mysql"),
+    ("verify.structure.partitions", "mysql"),
+    ("verify.value.charset", "mysql"),
+    ("verify.value.collation", "mysql"),
+    ("verify.value.generated", "mysql"),
+    ("assess.engine-checks", "mysql"),
+]
+
 
 def _docker():
     try:

@@ -7,6 +7,9 @@ import pytest
 
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.delta", "postgres")]
+
 pytestmark = needs_docker
 
 

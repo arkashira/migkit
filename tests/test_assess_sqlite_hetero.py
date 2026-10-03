@@ -22,6 +22,12 @@ from migkit.engines.base import Engine
 from migkit.engines.hetero import HeteroEngine
 from migkit.engines.sqlite import SQLiteEngine
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("assess.versions", "sqlite"),
+    ("assess.engine-checks", ("sqlite", "hetero")),
+]
+
 
 def _sqlite_engine(src, dst):
     def ep(path):

@@ -34,6 +34,9 @@ from migkit import movers
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.bulk", "mysql")]
+
 SRC, DST = "migkit-test-mybulk-src", "migkit-test-mybulk-dst"
 SRC_PORT, DST_PORT = 13481, 13482
 USER, SECRET = "mover", "not-a-real-secret-42"

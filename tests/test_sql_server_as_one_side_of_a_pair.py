@@ -16,6 +16,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.views", "mssql")]
+
 
 def _hop(src="mssql", dst="postgres", port=1433, dst_port=5432):
     return Hop(name="ms", engine="hetero",

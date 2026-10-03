@@ -357,17 +357,40 @@ class MySQLEngine(Engine):
                          "index_bytes": None if idx is None else int(idx)}
         return out
 
+    #: the columns `column_catalog` reads and `shape_mark` digests: one row
+    #: a column - its table, name, declared type and place
+    _CATALOG_READS = ("select table_name ct, column_name cn, column_type cd,"
+                      " ordinal_position cp from information_schema.columns"
+                      " where table_schema = %s")
+
     def column_catalog(self, side, db):
         """{table: [(column, type), ...]} in one query - what a move reads
         before and after itself to notice a DDL on the source."""
         out = {}
-        for t, c, ty in self._q(side, "select table_name, column_name,"
-                                      " column_type from"
-                                      " information_schema.columns"
-                                      " where table_schema = %s",
-                                (self._d(side, db),)):
+        for t, c, ty, _place in self._q(side, self._CATALOG_READS,
+                                        (self._d(side, db),)):
             out.setdefault(str(t), []).append((str(c), str(ty)))
         return {t: sorted(cols) for t, cols in out.items()}
+
+    def shape_mark(self, side, db):
+        """One digest of what `column_catalog` reads, computed by the
+        server (`_CATALOG_READS`): the columns counted, and each column's
+        row - its values as their lengths and texts - hashed on its own
+        (MD5, its first 60 bits) and the hashes summed. A sum, not one
+        hash over the rows strung together: `group_concat` stops at
+        `group_concat_max_len` with a warning, not an error, and a digest
+        cut short would miss every change past it. What a tail asks
+        before it reads the whole shape again (`hetero._shape_now`, audit
+        SP8) - a MySQL tail only once a minute, its binlog carrying every
+        DDL; a TiDB tail every batch, its feed's DDL left to this."""
+        row = ", ".join(f"char_length(q.{c}), q.{c}"
+                        for c in ("ct", "cn", "cd", "cp"))
+        got = self._q(side, (
+            "select count(*), sum(cast(conv(substr(md5(concat_ws(char(31),"
+            f" {row})), 1, 15), 16, 10) as unsigned)) from"
+            f" ({self._CATALOG_READS}) q"), (self._d(side, db),))
+        return ":".join(str(v if v is not None else 0) for v in got[0]) \
+            if got else None
 
     def neutral_columns(self, side, db, table):
         rows = self._q(side, "select column_name, column_type"

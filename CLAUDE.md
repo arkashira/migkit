@@ -14,7 +14,7 @@ Logic lives once; reach for the owner rather than a second reading: the scope is
 
 ## Tests
 
-Write tests with every change; run them once, at the end (`tools/final_suite.py`). Mid-way, run only `python -m compileall -q migkit tests` and the guards: `tests/test_the_report_does_not_name_its_tools.py`, `tests/test_no_method_is_said_twice.py`, `tests/test_the_code_map_is_current.py`. Never connect to a real database: the docker sandbox only.
+Write tests with every change; run them once, at the end (`tools/final_suite.py`). Mid-way, run only `python -m compileall -q migkit tests` and the guards: `tests/test_the_report_does_not_name_its_tools.py`, `tests/test_no_method_is_said_twice.py`, `tests/test_the_code_map_is_current.py`, `tests/test_every_engine_is_as_deep_as_postgres_and_mysql.py` (the depth matrix: a way you add needs a test naming it in its module's `PROVES`, or an `UNPROVED` entry; a gap you close loses its declaration in `capabilities.DEPTH_GAPS`), and `tests/test_the_scope_reads_alike_everywhere.py::test_a_listed_table_is_asked_of_the_scope_one_way`. Never connect to a real database: the docker sandbox only.
 
 ## The public repo
 

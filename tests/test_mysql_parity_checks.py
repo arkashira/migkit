@@ -10,6 +10,13 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.structure.unvalidated-constraints", "mysql"),
+    ("verify.value.null-empty", "mysql"),
+    ("verify.value.precision", "mysql"),
+]
+
 SRC, DST = "migkit-test-myparity-src", "migkit-test-myparity-dst"
 SRC_PORT, DST_PORT = 13406, 13407
 

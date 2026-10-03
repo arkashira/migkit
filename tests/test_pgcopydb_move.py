@@ -14,6 +14,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.bulk", "postgres")]
+
 SRC, DST = "migkit-test-pgc-src", "migkit-test-pgc-dst"
 SRC_PORT, DST_PORT = 15433, 15434
 

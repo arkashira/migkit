@@ -5118,8 +5118,9 @@ class Engine:
         proof = []
         for rnd in (1, 2):
             lsn = self.src_lsn(db)
-            ok = self.fence_wait(db, lsn, timeout=int(
-                self.hop.options.get("fence_timeout", 300)))
+            from ..hopkeys import opt
+            ok = self.fence_wait(db, lsn,
+                                 timeout=opt(self.hop, "fence_timeout"))
             if ok is None:
                 return None
             proof.append(f"round {rnd}: fence lsn={lsn}"
@@ -5142,7 +5143,9 @@ class Engine:
         deterministically when a fence is available, by sleep-settle as
         the fallback."""
         still, healed, how = [], [], []
-        settle = int(self.hop.options.get("settle", 0))
+        from ..hopkeys import opt
+        # left out, no wait: the re-check reads again at once
+        settle = opt(self.hop, "settle") or 0
         slept = False
         for t in bad:
             keys = self._suspect_keys(db, t)

@@ -13,6 +13,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.table-copy", "postgres")]
+
 pytestmark = needs_docker
 
 ROWS = 60_000

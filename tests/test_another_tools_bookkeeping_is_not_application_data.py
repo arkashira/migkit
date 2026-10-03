@@ -17,6 +17,9 @@ import pytest
 from migkit import leftovers as lo
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.copy", "postgres")]
+
 
 def _hop(engine="postgres", exclude=()):
     return Hop(name="x", engine=engine,

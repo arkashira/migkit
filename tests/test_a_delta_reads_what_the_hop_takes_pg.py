@@ -13,6 +13,9 @@ again.
 """
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.names", "postgres")]
+
 pytestmark = needs_docker
 
 

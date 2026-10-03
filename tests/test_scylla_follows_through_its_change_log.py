@@ -21,6 +21,14 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.delta", "cassandra"),
+    ("verify.fence", "cassandra"),
+    ("tail.follows", "cassandra"),
+    ("cutover.drain", "cassandra"),
+]
+
 pytestmark = needs_docker
 
 SRC, DST = ("migkit-test-eng-sc-src", 16017), ("migkit-test-eng-sc-dst",

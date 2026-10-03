@@ -18,6 +18,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.delta", "opensearch"), ("cutover.rollback", "opensearch")]
+
 pytestmark = needs_docker
 
 OS, PORT = "migkit-test-osos", 15930

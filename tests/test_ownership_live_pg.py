@@ -13,6 +13,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.access.object-ownership", "postgres")]
+
 NAME = "migkit-test-own-pg"
 PORT = 15469
 

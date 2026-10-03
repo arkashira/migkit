@@ -14,6 +14,9 @@ import pytest
 from migkit import verdict
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.ops", "postgres"), ("schema.foreign-keys", "postgres")]
+
 pytestmark = needs_docker
 
 NO_DELETES = {"public.d": "insert, update"}

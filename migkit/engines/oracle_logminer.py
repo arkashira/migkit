@@ -593,7 +593,7 @@ class Miner:
             self.side, dsn=standby or (self.eng._dsn(ep, service)
                                        if service else None),
             user=ep.options.get("mine_user"),
-            password=ep.options.get("mine_password"))
+            password=ep.option_secret("mine_password"))
         self.standby = bool(standby)
         if self.standby:
             standby_gate(self.eng, self.side, self.db, self.conn)

@@ -26,6 +26,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.repair-undo", "kafka")]
+
 pytestmark = needs_docker
 
 SRC, DST = "migkit-test-kclamp-src", "migkit-test-kclamp-dst"

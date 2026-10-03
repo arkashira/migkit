@@ -24,6 +24,13 @@ from tests.test_sql_server_follows_through_change_tracking import (PORT, PW,
                                                                    _sql,
                                                                    server)
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.identity.sequence-parity", "mssql"),
+    ("cutover.counters", "mssql"),
+    ("cutover.rollback", "mssql"),
+]
+
 pytestmark = needs_docker
 
 __all__ = ["server"]

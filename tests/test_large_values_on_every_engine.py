@@ -26,6 +26,15 @@ from tests import large_values_rig as rig
 from tests.cap_pairs import remove
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("move.large-values", ("mongodb", "redis", "kafka", "sqlite", "parquet",
+                           "clickhouse", "opensearch", "duckdb", "iceberg",
+                           "delta", "hetero")),
+    ("move.sized", ("mongodb", "redis", "kafka", "sqlite", "clickhouse",
+                    "duckdb", "hetero")),
+]
+
 pytestmark = needs_docker
 
 MB = rig.MB

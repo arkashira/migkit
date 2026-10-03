@@ -383,8 +383,9 @@ class Ladder:
                 raise
             out.append(f"a writer migkit could not rule out"
                        f" ({decide._first(e)})")
+        from .hopkeys import topology
         if opts.get("two_way") or opts.get("reverse") \
-                or str(opts.get("topology") or "") == "two_way":
+                or topology(opts) == "two_way":
             out.append("the way back to the source")
         rec = cutover.record(t.hop)
         if rec and rec.get("state") in ("running", "undoing", "flipped"):

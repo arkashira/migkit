@@ -40,6 +40,27 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.identity.sequence-collision", "oracle"),
+    ("verify.identity.sequence-parity", "oracle"),
+    ("verify.delta", "oracle"),
+    ("verify.fence", ("oracle", "hetero")),
+    ("verify.confirm", "oracle"),
+    ("verify.users", "oracle"),
+    ("verify.repair", "oracle"),
+    ("tail.follows", "oracle"),
+    ("assess.engine-checks", "oracle"),
+    ("schema.create", "oracle"),
+    ("move.table-copy", "oracle"),
+    ("move.bulk", "oracle"),
+    ("move.large-values", "oracle"),
+    ("move.load-window", "oracle"),
+    ("cutover.counters", "oracle"),
+    ("cutover.rollback", "oracle"),
+    ("cutover.drain", "oracle"),
+]
+
 pytestmark = needs_docker
 
 ORA, ORA_PORT = "migkit-test-ora", 16140

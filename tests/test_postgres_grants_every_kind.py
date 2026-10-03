@@ -13,6 +13,9 @@ import pytest
 from tests import servers
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.repair-undo", "postgres")]
+
 pytestmark = needs_docker
 
 pair = servers.fixture("pg")

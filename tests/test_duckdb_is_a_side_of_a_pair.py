@@ -9,6 +9,9 @@ had been run against DuckDB at all.
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.table-copy", "duckdb")]
+
 pytestmark = needs_docker
 
 TABLE = """
