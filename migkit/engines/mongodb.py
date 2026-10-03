@@ -715,6 +715,28 @@ class MongoEngine(Engine):
                     " set")
         return None
 
+    def stream_match(self, db):
+        """The change stream's own filter for what the hop takes - [] where
+        it takes every collection: the server leaves out the events of a
+        collection the hop does not take, and they never cross the wire,
+        where every event of the database was read and dropped here. Read
+        from the hop's patterns (`movers.scope_alternatives`), so a
+        collection made later under a taken pattern is in it; an event
+        renaming one into what is taken passes by its new name; one about
+        the whole database always passes. Each event is still asked here
+        (`Hop.excluded`): the server's filter only saves the reading."""
+        from ..movers import NOTHING, scope_alternatives
+        out, taken = scope_alternatives(self.hop, db, False)
+        if not out and taken is None:
+            return []
+        rx = ("^" + (f"(?!(?:{'|'.join(out)})$)" if out else "")
+              + (".*$" if taken is None else
+                 f"(?:{'|'.join(taken) or NOTHING})$"))
+        return [{"$match": {"$or": [
+            {"ns.coll": {"$regex": rx}},
+            {"to.coll": {"$regex": rx}},
+            {"ns.coll": {"$exists": False}}]}}]
+
     def change_point(self, side, db):
         """A resume token for now, read without taking any event off the
         stream: the server answers an empty first batch with the position it
@@ -769,7 +791,7 @@ class MongoEngine(Engine):
         if token:
             args["resume_after"] = {"_data": token}
         try:
-            stream = client[target].watch([], **args)
+            stream = client[target].watch(self.stream_match(db), **args)
         except Exception as e:
             if "only supported on replica sets" in str(e):
                 raise SystemExit(
@@ -2498,11 +2520,12 @@ class MongoEngine(Engine):
             kwargs["resume_after"] = resume
         from .. import tailctl
         n, applied = 0, None
+        match = self.stream_match(db)
         running = tailctl.Running(token_path.parent) if go else None
         try:
             if running:
                 running.__enter__()
-            with src.watch(**kwargs) as stream:
+            with src.watch(match, **kwargs) as stream:
                 log("tailing change stream, ctrl-c to stop"
                     + ("" if go else " (count-only, add --go to apply)"))
                 while True:
