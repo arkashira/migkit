@@ -710,14 +710,36 @@ class Hop:
         if it were this one's (`scope_changed`)."""
         import hashlib
         import json
-        got = {"databases": sorted(str(d) for d in self.databases or []),
-               "db_map": {str(k): str(v) for k, v in
-                          sorted((self.db_map or {}).items())},
-               "include": sorted(str(p) for p in self.include or []),
-               "exclude": sorted(str(p) for p in self.exclude or []),
-               "mapping": self.mapping or {}}
-        text = json.dumps(got, sort_keys=True, default=str)
+        text = json.dumps(self.scope_record(), sort_keys=True, default=str)
         return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def scope_record(self):
+        """What `scope_fingerprint` digests, as plain values - kept beside
+        a record whose reader must know what that scope took, not only
+        that it was another (`under`)."""
+        return {"databases": sorted(str(d) for d in self.databases or []),
+                "db_map": {str(k): str(v) for k, v in
+                           sorted((self.db_map or {}).items())},
+                "include": sorted(str(p) for p in self.include or []),
+                "exclude": sorted(str(p) for p in self.exclude or []),
+                "mapping": self.mapping or {}}
+
+    def under(self, record):
+        """This hop under the scope `record` kept (`scope_record`, or a dict
+        holding one under `scope`) - to ask what that scope took. None
+        where it kept none."""
+        import dataclasses
+        if isinstance(record, dict) and isinstance(record.get("scope"),
+                                                   dict):
+            record = record["scope"]
+        if not isinstance(record, dict) or "mapping" not in record:
+            return None
+        return dataclasses.replace(
+            self, databases=list(record.get("databases") or []),
+            db_map=dict(record.get("db_map") or {}),
+            include=list(record.get("include") or []),
+            exclude=list(record.get("exclude") or []),
+            mapping=dict(record.get("mapping") or {}))
 
     def scope_changed(self, recorded):
         """Whether a record made under `recorded` (a fingerprint, or a dict

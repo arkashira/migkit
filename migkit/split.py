@@ -338,7 +338,7 @@ def prove(hop, eng, db):
             dst = pair.dst_engine
             there = [] if dst.target_missing(db) else \
                 dst.neutral_tables("dst", db)
-            got, _, _, _ = pair.match_tables([t], there, pair._rename)
+            got, _, _, _ = pair.match_tables([t], there, pair._renamer(db))
             if not got:
                 missing_part.append(p.name)
                 continue

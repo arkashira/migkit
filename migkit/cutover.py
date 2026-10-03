@@ -1794,9 +1794,21 @@ def _final_check(hop, eng, d, before, left, say):
 def _has_delta(hop, eng, d):
     """Whether a verified pass of `watch --verify --delta` stands to start
     from: only then does the delta check compare what changed, rather
-    than record a starting point and compare nothing."""
+    than record a starting point and compare nothing. A position taken
+    under another scope than the hop's now, or taken again after the
+    scope changed and no whole check since, does not stand: the tables
+    the scope took in were never compared whole (`Engine.delta_covers`),
+    and every table is compared instead."""
     if not hasattr(eng, "delta_verify"):
         return False
+    covers = getattr(eng, "delta_covers", None)
+    if callable(covers):
+        try:
+            if not covers(d):
+                return False
+        except (Exception, SystemExit):  # noqa: BLE001 - not known (a
+            # record cut short too): every table, then
+            return False
     if hasattr(eng, "_delta_slot"):
         try:
             return eng._psql("src", d, "select count(*) from"

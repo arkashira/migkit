@@ -643,7 +643,7 @@ class Sandbox:
             self._exec(self.dst, self.tdb, self._split(
                 pair.dst_engine.table_ddl("dst", db, t)))
         pairs, _, _, _ = pair.match_tables(src_tables, dst_tables,
-                                           pair._rename)
+                                           pair._renamer(db))
         self.tables = dict(pairs)
         sample = self._sample(src_tables, src_fks)
         self._carry(src_tables, sample)

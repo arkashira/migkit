@@ -573,16 +573,23 @@ def _counts(records, key):
     return out
 
 
-def fingerprint(records):
+def fingerprint(records, scope=None):
     """Stable hash of the findings, ignoring wording and ordering.
 
     Only (category, scope, status) goes in: `detail` carries row counts and
     timestamps that move between runs without the verdict changing, so
     including it would make every fingerprint unique and useless.
+
+    `scope` is the hop's scope the answers were taken under
+    (`Hop.scope_fingerprint`), where the hop narrows what it takes: the
+    same findings about other tables, rows or columns are not the same
+    verdict. A hop that takes everything whole passes none, and its
+    fingerprint is what it always was.
     """
     rows = sorted((r.get("category", ""), str(r.get("scope", "")),
                    r.get("status", "")) for r in records)
-    canonical = json.dumps(rows, separators=(",", ":"), ensure_ascii=False)
+    canonical = json.dumps([rows, scope] if scope else rows,
+                           separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -604,6 +611,19 @@ def hop_scope(hop):
         f"{k}: {', '.join(v) if isinstance(v, (list, tuple)) else v}"
         for k, v in sorted((mapping.get("ops") or {}).items())]
     return {k: v for k, v in out.items() if v}
+
+
+#: what each part of `hop_scope` is called where it is said
+SCOPE_WORDS = {"include": "takes only", "exclude": "leaves out",
+               "row_filters": "rows filtered in",
+               "column_rules": "columns chosen in",
+               "renamed": "renamed", "changes_carried": "changes carried"}
+
+
+def scope_said(scope):
+    """[(what, names)] of a `hop_scope`, in the words a report says it."""
+    return [(SCOPE_WORDS.get(k, k), [str(x) for x in v])
+            for k, v in (scope or {}).items() if v]
 
 
 def summarize(hop, records, engine=None, load=None, coverage=None):
@@ -668,7 +688,7 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
                                 or got.status == "error"),
         "totals": totals,
         "by_category": _counts(records, "category"),
-        "fingerprint": fingerprint(records),
+        "fingerprint": fingerprint(records, _narrowing(hop, scope)),
         **({"load": load} if load else {}),
         **({"digests_unwritten": unwritten} if unwritten else {}),
         "findings": [
@@ -693,11 +713,23 @@ def write(hop, records, engine=None, load=None, coverage=None):
     return p, env
 
 
+def _narrowing(hop, scope=None):
+    """The hop's scope fingerprint where it narrows what it takes
+    (`hop_scope`), else None - what `fingerprint` mixes in."""
+    scope = hop_scope(hop) if scope is None else scope
+    if not scope or not hasattr(hop, "scope_fingerprint"):
+        return None
+    return hop.scope_fingerprint()
+
+
 def unchanged_since(hop, records):
-    """True when this run's findings match the last one exactly.
+    """True when this run's findings match the last one exactly, about
+    the same scope.
 
     Lets a repeated check say "nothing moved" without the reader having to
-    diff two reports by eye.
+    diff two reports by eye. The same findings taken under another scope
+    (`Hop.scope_changed`) are not "identical to the previous run": they
+    are about other tables, rows or columns.
     """
     p = hop.report_dir() / "verdict.json"
     if not p.exists():
@@ -706,4 +738,6 @@ def unchanged_since(hop, records):
         prev = json.loads(p.read_text())
     except ValueError:
         return False
-    return prev.get("fingerprint") == fingerprint(records)
+    if hasattr(hop, "scope_changed") and hop.scope_changed(prev):
+        return False
+    return prev.get("fingerprint") == fingerprint(records, _narrowing(hop))
