@@ -3008,7 +3008,7 @@ def _refuse_if_nothing_arrived(hop, eng, d, what, log):
         # the copy was told to skip what the hop excludes, so a table it
         # skipped is not one it failed to fill - counting it made a correct
         # move report itself failed and go unrecorded
-        empty = [t for t in empty if not hop.excluded(d, *t.split("."))]
+        empty = [t for t in empty if hop.takes_table(d, t)]
     if empty:
         raise SystemExit(
             f"{what} reported success and {d} is still empty on the"
@@ -3447,11 +3447,11 @@ def _own_refused(hop, eng, db):
     the ladder of change ways then takes migkit's own tail
     (`movers.stream_ways`)."""
     from . import movers
-    from .config import scoped
-    mapping = hop.mapping or {}
+    from .config import BY_NAME, narrowed_by
     said = []
     dbs = [db] if db else eng.databases()
-    if any(mapping.get(k) for k in ("where", "tables", "columns", "ops")):
+    narrowed = narrowed_by(hop)
+    if [k for k in narrowed if k not in BY_NAME + ("databases_renamed",)]:
         refused = []
         for d in dbs:
             refused += movers.stream_cannot_carry(
@@ -3463,7 +3463,7 @@ def _own_refused(hop, eng, db):
                 + "; ".join(f"{t} ({why})" for t, why in refused[:5])
                 + (f" and {len(refused) - 5} more" if len(refused) > 5
                    else ""))
-    if scoped(hop):
+    if any(k in narrowed for k in BY_NAME):
         why = eng.native_scope_unsafe()
         if why:
             said.append(why)

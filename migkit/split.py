@@ -80,7 +80,7 @@ class Part:
         return self.hop.name
 
     def carries(self, db, table):
-        return not self.hop.excluded(db, *str(table).split("."))
+        return self.hop.takes_table(db, table)
 
     def rule(self, db, table):
         return self.hop.row_filter(db, *str(table).split("."))

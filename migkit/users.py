@@ -95,6 +95,26 @@ def carried(hop):
         return True
 
 
+def role_names(hop):
+    """The patterns of the accounts the hop names (`objects: {roles:
+    [...]}`), or None where it carries every one (or none - `carried`)."""
+    from .config import objects_of
+    try:
+        got = objects_of(hop).get("roles", True)
+    except SystemExit:
+        return None
+    return got if isinstance(got, list) else None
+
+
+def role_taken(hop, key):
+    """Whether an account the comparison keys as `key` - a role, `user@host`,
+    `database.user` - is one the hop names (`Hop.takes_object`): by its
+    whole key, or by the user's name alone where it has a host."""
+    key = "@".join(key) if isinstance(key, tuple) else str(key)
+    names = [key] + ([key.split("@", 1)[0]] if "@" in key else [])
+    return any(hop.takes_object("roles", n) for n in names)
+
+
 def _h(x):
     b = x if isinstance(x, bytes) else str(x or "").encode()
     return hashlib.md5(b, usedforsecurity=False).hexdigest()[:10]
@@ -551,6 +571,14 @@ def compare(hop, say=print, sides=None):
         from .capabilities import require
         require(eng, "users")
         raise SystemExit(f"users: engine {eng} not supported")
+    if role_names(hop) is not None:
+        # the roles the hop names, and only those (`objects: {roles:
+        # [...]}`): every other account is the target's own to keep
+        def keep(keys):
+            return None if keys is None else type(keys)(
+                k for k in keys if role_taken(hop, k))
+        skeys, tkeys = keep(skeys), keep(tkeys)
+        ad, gm, gx, pw = keep(ad), keep(gm), keep(gx), keep(pw)
     missing = sorted(skeys - tkeys)
     extra = sorted(tkeys - skeys)
     out = {"check": "users", "hop": hop.name, "engine": eng,

@@ -15,6 +15,7 @@ from ..util import (CommandFailed, quote_name, run, split_table,
                     tool_env, which)
 from .base import Counted as _Counted
 from .base import Engine, Enough as _Enough, RepairAction, Result, clauses
+from .base import rows_counted
 
 
 def _ident(name):
@@ -1083,7 +1084,7 @@ class PostgresEngine(Engine):
         got = self.user_tables(side, db, "all")
         working = drift.transient_among(got)
         return [t for t in got if t not in working
-                and not self.hop.excluded(db, *self._split(t))]
+                and self.in_scope(db, t)]
 
     def column_catalog(self, side, db):
         """{schema.table: [(column, declared type), ...]} of every relation,
@@ -1590,7 +1591,7 @@ select json_build_object(
         for line in self._psql("dst", db,
                                self.OWNED_SEQUENCES_SQL).splitlines():
             seq, table, col, name = (line.split("\x1f") + ["", "", ""])[:4]
-            if not name or self.hop.excluded(db, *self._split(name)):
+            if not name or not self.in_scope(db, name):
                 continue
             top = self._psql("dst", db,
                 f"select m from (select max({col}) m from {table}) x, {seq} s"
@@ -1663,7 +1664,7 @@ select json_build_object(
         fks = self._foreign_keys(db)
         orphans, outside, unscanned, pending = [], [], [], 0
         for name, child, parent, ckeys, pkeys, valid in fks:
-            if self.hop.excluded(db, *self._split(child)):
+            if not self.in_scope(db, child):
                 continue
             pending += valid != "true"
             try:
@@ -1675,7 +1676,7 @@ select json_build_object(
                 continue
             if not n:
                 continue
-            if self.hop.excluded(db, *self._split(parent)):
+            if not self.in_scope(db, parent):
                 outside.append(f"{child}.{name}: {n} rows point at {parent},"
                                " which this hop does not move")
                 continue
@@ -1730,7 +1731,7 @@ select json_build_object(
                     f" could not be counted: {str(e).splitlines()[-1][:90]}"]
         found, said = [], []
         for name, child, parent, ckeys, pkeys, _ in fks:
-            if self.hop.excluded(db, *self._split(child)):
+            if not self.in_scope(db, child):
                 continue
             where = self._split(parent)
             if self.hop.excluded(db, *where):
@@ -3350,7 +3351,7 @@ select json_build_object(
             if marked:
                 continue
             leaf, table = table, root_of(table)
-            if self.hop.excluded(db, *self._split(table)):
+            if not self.in_scope(db, table):
                 continue
             if table != leaf:
                 parsed = dict(parsed, table=table)
@@ -3390,7 +3391,7 @@ select json_build_object(
             by.setdefault(root_of(t), []).append(t)
         out = []
         for root, got in by.items():
-            if self.hop.excluded(db, *self._split(root)):
+            if not self.in_scope(db, root):
                 continue
             whole = got == [root] or set(got) >= leaves_of(root)
             out.append(canon.ddl(root, "truncate" if whole else "reload",
@@ -4279,16 +4280,15 @@ select json_build_object(
         answer: the views, sequences and functions of tables the hop left
         out were compared, and the schema fix made them on the target."""
         from ..config import scoped
-        owned = self._seq_owned(side, db) if scoped(self.hop) else {}
+        seq_gone = self._seq_gone(side, db) if scoped(self.hop) else None
 
         def out(kind, name):
             name = str(name)
-            by = name
+            if kind.lower() == "sequence" and seq_gone is not None:
+                return seq_gone(name)
             if kind.lower() in ("function", "procedure", "routine"):
-                name = by = name.split("(", 1)[0]
-            elif name in owned:
-                by = ".".join(owned[name][:2])
-            return not self.takes(db, kind, name, by)
+                name = name.split("(", 1)[0]
+            return not self.takes(db, kind, name)
         return out
 
     def _objects_not_taken(self, side, db):
@@ -4438,11 +4438,8 @@ select json_build_object(
 
     def _seq_left_out(self, side, db, names, owned=None):
         """The sequences among `names` (`schema.sequence`, as `side` has
-        them) the hop does not take, so no counter check or repair reads or
-        sets them: one a table owns (a serial's, an identity's -
-        `_seq_owned`) goes with that table; one no table owns goes with the
-        tables whose defaults draw from it, left out only where every one of
-        them is; one nothing owns or draws from is judged by its own name.
+        them) the hop does not take (`_seq_gone`), so no counter check or
+        repair reads or sets them.
 
         Found by the audit of scope (backlog P0-SCOPE.6a): with `exclude:
         [job_queue]`, a table the target writes itself, its
@@ -4450,24 +4447,40 @@ select json_build_object(
         the target had handed out, so the cutover's counter gate refused,
         and set, the target's next insert would have taken a key it holds.
         """
+        gone = self._seq_gone(side, db, owned)
+        return {n for n in names if gone(n)}
+
+    def _seq_gone(self, side, db, owned=None):
+        """A predicate on a sequence of a side (`schema.sequence`), true
+        where the hop does not take it - the one reading the counters,
+        their repair, the inventory and the schema fix share: one a table
+        owns (a serial's, an identity's - `_seq_owned`) goes with that
+        table; one no table owns goes with the tables whose defaults draw
+        from it, left out only where every one of them is; one nothing
+        owns or draws from by its own name - and each only where the hop
+        carries sequences at all (`objects`)."""
         owned = self._seq_owned(side, db) if owned is None else owned
-        used = {}
-        if any(n not in owned for n in names):
-            for l in self._psql(side, db, self.SEQ_USED_Q).splitlines():
-                p = l.split("|")
-                if len(p) == 3:
-                    used.setdefault(p[0], []).append((p[1], p[2]))
-        out = set()
-        for n in names:
-            if n in owned:
-                gone = self.hop.excluded(db, *owned[n][:2])
-            elif used.get(n):
-                gone = all(self.hop.excluded(db, s, t) for s, t in used[n])
+        used = None
+
+        def gone(name):
+            nonlocal used
+            name = str(name)
+            if name in owned:
+                by = [owned[name][:2]]
             else:
-                gone = self.hop.excluded(db, *self._split(n))
-            if gone:
-                out.add(n)
-        return out
+                if used is None:
+                    used = {}
+                    for l in self._psql(side, db,
+                                        self.SEQ_USED_Q).splitlines():
+                        p = l.split("|")
+                        if len(p) == 3:
+                            used.setdefault(p[0], []).append((p[1], p[2]))
+                by = used.get(name) or []
+            if by:
+                return all(not self.takes(db, "sequence", name, f"{s}.{t}")
+                           for s, t in by)
+            return not self.takes(db, "sequence", name)
+        return gone
 
     def _seq_col_max(self, side, db, owned):
         """seqkey -> max(owned column) on `side`, so we know the floor the
@@ -4543,13 +4556,6 @@ select json_build_object(
         if drift.maybe_transient(t) and t in self._working_tables(db):
             return False
         return self.in_scope(db, t)
-
-    def in_scope(self, db, table):
-        """`Engine.in_scope`, a table without its schema read in `public`
-        as `_split` reads it: `regclass` names a table on the search path
-        without one, and `orders` asked as itself missed an `include` of
-        `appdb.public.orders`."""
-        return not self.hop.excluded(db, *self._split(table))
 
     def _scoped(self, db, lines, sep="|"):
         """The lines of a listing - catalogue rows whose first field, up to
@@ -5655,7 +5661,12 @@ select json_build_object(
                       if r else "no primary key for row-level compare")
             return [Result("data", f"{db} {table}", status, detail,
                            str(self._report(db)),
-                           f"migkit sync {self.hop.name} --db {db} --kind rows")]
+                           f"migkit sync {self.hop.name} --db {db} --kind rows",
+                           table=str(table),
+                           rows_apart={str(table): {
+                               "missing": r[0], "extra": r[1],
+                               "changed": r[2], "exact": True}}
+                           if r and any(r) else {})]
         if not consistent:
             # pass D: the leaves the tail keeps, where the hop keeps them
             from .. import kept
@@ -5681,6 +5692,7 @@ select json_build_object(
             held = _re.search(r"source snapshot held ([\d,]+)s", out)
             mode = (f"consistent snapshot, held on the source"
                     f" {held.group(1)}s, " if held else "consistent snapshot, ")
+        outcomes = self._fast_outcomes(out)
         if rc == 0:
             import re as _re
             rows = sum(int(m) for m in _re.findall(r"rows=(\d+)", out))
@@ -5692,17 +5704,18 @@ select json_build_object(
                 Result("data", db, "ok",
                        f"{mode}{n} tables, {rows:,} rows,"
                        f" checksums equal both sides{extra}",
-                       str(ev)), db)]
+                       str(ev), tables=outcomes), db)]
         bad = [l.split(":")[0] for l in out.splitlines() if ": DIFF" in l]
         err = self._failed_tables(out)
         drilled = {t: self._drilldown_native(db, t) for t in bad}
         if bad:
             still, healed, how = self._resolve_inflight(db, bad, stream)
+            outcomes.update({t: "ok" for t in bad if t not in still})
             if not still and not err:
                 return pre + [Result("data", db, "ok",
                                      f"{mode}all diffs proven in-flight"
                                      " replication: " + "; ".join(how),
-                                     str(ev))]
+                                     str(ev), tables=outcomes)]
             bad = still
         detail = ""
         if bad:
@@ -5742,11 +5755,31 @@ select json_build_object(
         stopped = [l for l in out.splitlines() if l.startswith("stopped: ")]
         if stopped:
             detail = (detail + " " + stopped[0]).strip()
+        apart = {t: {k: len(self._drill_keys(db, t, k))
+                     for k in ("missing", "extra", "changed")}
+                 for t in bad if drilled.get(t) is not None}
+        for got in apart.values():
+            got["exact"] = True
         return pre + [Result("data", db, "diff" if bad else "error", detail,
                              str(self._report(db)),
-                             f"migkit sync {self.hop.name} --db {db} --kind rows")
+                             f"migkit sync {self.hop.name} --db {db} --kind rows",
+                             tables=outcomes, rows_apart=apart)
                       ] + [r for r in (self._second_rows(db, t)
                                        for t in bad[:5]) if r]
+
+    @staticmethod
+    def _fast_outcomes(out):
+        """{table: ok | diff | error} of the fast pass's lines: a table
+        unchanged since it was last proved equal is equal."""
+        got = {}
+        for line in str(out).splitlines():
+            table, sep, rest = line.partition(": ")
+            word = rest.split(" ", 1)[0] if sep else ""
+            status = {"OK": "ok", "UNCHANGED": "ok", "DIFF": "diff",
+                      "ERROR": "error"}.get(word)
+            if status and table and " " not in table:
+                got[table] = status
+        return got
 
     def _named_rows(self, db, table):
         """The keys the drilldown named for a table, each as the tuple of
@@ -6926,7 +6959,7 @@ select json_build_object(
         out = []
         for line in rows.splitlines():
             n, _, d = line.partition("\x1f")
-            if n and not self.hop.excluded(db, *self._split(n)):
+            if n and self.in_scope(db, n):
                 out.append((n, d))
         return out
 
@@ -10871,7 +10904,9 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     f"of {len(keys)} touched rows: missing={len(missing)}"
                     f" extra={len(extra)} changed={len(changed)}",
                     str(self._report(db)),
-                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                    f"migkit sync {self.hop.name} --db {db} --kind rows",
+                    table=str(t), rows_apart=rows_counted(
+                        t, len(missing), len(extra), len(changed))))
                 clean = clean and not held_back
                 res.append(got)
             else:
@@ -12376,9 +12411,9 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                  for a, b in self.partition_roots("src", db).items()}
         if all(roots.get(t, t) == t for t in listed):
             return [t for t in listed
-                    if not self.hop.excluded(db, *self._split(t))]
+                    if self.in_scope(db, t)]
         taken = [t for t in listed
-                 if not self.hop.excluded(db, *self._split(roots.get(t, t)))]
+                 if self.in_scope(db, roots.get(t, t))]
         if (self._server_version("src", db) or 0) >= 130000 and \
                 self._publishes_via_root(db) is not False:
             via[db] = True

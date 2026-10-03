@@ -819,7 +819,7 @@ def _tables(w):
     out = []
     for sch, tbl in w.pair.list_move_tables(w.db):
         t = f"{sch}.{tbl}" if sch else tbl
-        if not w.hop.excluded(w.db, *str(t).split(".")):
+        if w.hop.takes_table(w.db, t):
             out.append(t)
     return out
 

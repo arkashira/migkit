@@ -487,6 +487,7 @@ class HeteroEngine(Engine):
             began = None
         for src_t, dst_t in pairs:
             scope = f"{db}.{self._leaf(src_t)}"
+            self.__dict__.setdefault("_named", {})[scope] = str(src_t)
             how = {}
             try:
                 src_cols, dst_cols, notes = self._column_plan(src_t, dst_t, db,
@@ -700,9 +701,15 @@ class HeteroEngine(Engine):
                 one(dst, "dst", dst_t, dst_cols, wheres[1]))
 
     def _neutral_compare(self, db, table=None, stream=None):
-        return [Result("data", scope, status, detail)
+        return [Result("data", scope, status, detail,
+                       table=self._named_as(scope))
                 for scope, status, detail, _, _
                 in self._neutral_rows(db, table, stream)]
+
+    def _named_as(self, scope):
+        """The source's own name of the table a per-table answer's scope
+        names by its leaf (`Result.table`), '' where none was read."""
+        return (self.__dict__.get("_named") or {}).get(scope, "")
 
     def _where_folded(self):
         """A clause naming any side that had to fold its rows on this machine.
@@ -1082,7 +1089,7 @@ class HeteroEngine(Engine):
                       for s, t in self.list_move_tables(db)]
         out, let = {}, {}
         for src_t in tables:
-            if self.hop.excluded(db, *str(src_t).split(".")):
+            if not self.hop.takes_table(db, src_t):
                 continue
             found = self.unfit_values(db, src_t)
             refused = [f for f in found if not self._accepted(src_t, f[0])]
@@ -2356,7 +2363,7 @@ class HeteroEngine(Engine):
         _, src_only, _, _ = self.match_tables(
             self.src_engine.neutral_tables("src", db), there, self._renamer(db))
         for src_t in src_only:
-            if not self.hop.excluded(db, *str(src_t).split(".")):
+            if self.hop.takes_table(db, src_t):
                 self._create_target(db, src_t,
                                     self._leaf(self._rename(src_t, db)), log)
 
@@ -2615,7 +2622,8 @@ class HeteroEngine(Engine):
             # one that counted alike beside ten the hop keeps apart
             # (`verdict.hold`)
             more = [scope for scope, _, _ in bad[10:]]
-            return [Result("counts", scope, status, detail)
+            return [Result("counts", scope, status, detail,
+                           table=self._named_as(scope))
                     for scope, status, detail in bad[:10]] + (
                 [Result("counts", db, "diff",
                         f"{len(more)} more tables count differently or"
@@ -2780,7 +2788,8 @@ class HeteroEngine(Engine):
             return [Result("data", db, got.status, got.detail)]
         rows = self._neutral_rows(db, table, stream)
         rows = self._confirm_in_flight(db, rows, stream)
-        res = [Result("data", scope, status, detail)
+        res = [Result("data", scope, status, detail,
+                      table=self._named_as(scope))
                for scope, status, detail, _, _ in rows]
         res += [r for r in (self._second_rows(db, scope)
                             for scope, status, _, _, _ in rows
@@ -2952,7 +2961,11 @@ class HeteroEngine(Engine):
                     f"of {len(keyed)} changed rows: missing={len(missing)}"
                     f" extra={len(extra)} changed={len(changed)}{compared}",
                     str(self.hop.report_dir(db)),
-                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                    f"migkit sync {self.hop.name} --db {db} --kind rows",
+                    table=str(src_t),
+                    rows_apart={str(src_t): {
+                        "missing": len(missing), "extra": len(extra),
+                        "changed": len(changed), "exact": True}}))
                 clean = clean and not held_back
                 res.append(got)
             else:

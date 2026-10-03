@@ -621,7 +621,7 @@ def plan(hop, eng, db):
     pair = _pair(eng)
     src, dst = pair.src_engine, pair.dst_engine
     tables = [t for t in src.neutral_tables("src", db)
-              if not hop.excluded(db, *str(t).split("."))]
+              if hop.takes_table(db, t)]
     try:
         there = [] if dst.target_missing(db) else dst.neutral_tables("dst",
                                                                       db)

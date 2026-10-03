@@ -68,7 +68,7 @@ def zone_offset(tz):
         from zoneinfo import ZoneInfo
         ZoneInfo(text)
         return text
-    except Exception:
+    except (KeyError, ValueError, OSError):
         raise SystemExit(f"{tz!r} is not a time zone - an offset (+07:00)"
                          " or a zone name (Asia/Bangkok)")
 
@@ -77,9 +77,10 @@ def parse(pred, dialect):
     """The predicate's tree, read in the source's SQL; SystemExit naming
     the filter where it is not one."""
     import sqlglot
+    from sqlglot.errors import ParseError, TokenError
     try:
         return sqlglot.parse_one(str(pred), read=dialect or None)
-    except Exception as e:
+    except (ParseError, TokenError) as e:
         raise SystemExit(f"the row filter {pred!r} is not SQL the source"
                          f" reads: {str(e).splitlines()[0][:120]}")
 
@@ -152,7 +153,7 @@ def to_sql(pred, src_dialect, dst_dialect, renames=None):
     try:
         return tree.sql(dialect=dst_dialect or None,
                         unsupported_level=sqlglot.ErrorLevel.RAISE)
-    except Exception as e:
+    except sqlglot.errors.UnsupportedError as e:
         raise SystemExit(f"the row filter {pred!r} has no translation into"
                          f" the target's SQL: {str(e).splitlines()[0][:120]}")
 

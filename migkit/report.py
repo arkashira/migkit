@@ -191,6 +191,8 @@ def _service_section(hop, results):
         return ""
     words = {"missed": "it called the same; migkit found them different",
              "not found": "it called different; migkit found the same",
+             "unproved": "it gave its word; migkit's answer was neither"
+                         " the same nor different",
              "skipped": "it passed over", "unchecked": "it never checked",
              "beyond": "migkit found beyond any table check",
              "not in the hop": "it checked; the hop does not take",

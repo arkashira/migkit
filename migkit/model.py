@@ -621,7 +621,7 @@ def _carried(hop, eng, db, facts, tables):
         got = [t for t in tables if t in facts] or list(tables)
     else:
         got = [t for t in facts
-               if not hop.excluded(db, *str(t).split("."))]
+               if hop.takes_table(db, t)]
     return got, [t for t in narrowed if t in got]
 
 

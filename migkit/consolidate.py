@@ -204,7 +204,7 @@ def _classes(e, side, db, table):
 def _tables(hop, pair, db):
     src = pair.src_engine
     return [t for t in src.neutral_tables("src", db)
-            if not hop.excluded(db, *str(t).split("."))]
+            if hop.takes_table(db, t)]
 
 
 def _key_texts(s, eng, table):

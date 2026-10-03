@@ -109,7 +109,7 @@ class AseEngine(DbapiRows, Engine):
         return [t for (t,) in self._rows(
             side, db, "select user_name(uid) + '.' + name from sysobjects"
                       " where type = 'U' order by 1")
-            if not self.hop.excluded(db, *t.split(".", 1))]
+            if self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         return [(n, t) for n, t in self._rows(

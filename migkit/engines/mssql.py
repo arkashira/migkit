@@ -1,7 +1,7 @@
 import time
 
 from .. import canon, decide, pieces
-from .base import Engine, RepairAction, Result, clauses
+from .base import Engine, RepairAction, Result, clauses, rows_counted
 from .dbapi import MARK, DbapiRows
 
 #: the server's own databases, and the one a managed server keeps
@@ -549,10 +549,17 @@ class MSSQLEngine(DbapiRows, Engine):
         gate = Throttle(1, probe=lambda: self._health("src", db))
         q = ("select s.name+'.'+t.name from sys.tables t"
              " join sys.schemas s on s.schema_id=t.schema_id order by 1")
-        st = [r[0] for r in self._cmd("src", db, q)]
+        # the tables the hop takes (`in_scope`), on the source; one the
+        # target lacks is a difference, not a table passed over
+        st = [r[0] for r in self._cmd("src", db, q)
+              if self.in_scope(db, r[0])]
         dt = {r[0] for r in self._cmd("dst", db, q)}
         tables = [table] if table else [t for t in st if t in dt]
         bad, left = [], []
+        outcomes = {} if table else {t: "diff" for t in st if t not in dt}
+        apart = {}
+        if not table:
+            bad += [f"{t} missing on target" for t in st if t not in dt]
         rows_a = rows_b = 0
         bad_counts, settled = [], []
         salt = self.digest_salt()
@@ -567,6 +574,7 @@ class MSSQLEngine(DbapiRows, Engine):
                 row, out = self._row_json(db, t)
             except Exception as e:  # noqa: BLE001 - the table is named
                 bad.append(f"{t} error {e}")
+                outcomes[t] = "error"
                 continue
             left += out
             cq = ("select count_big(*), isnull(sum(h), 0) from (select"
@@ -579,7 +587,9 @@ class MSSQLEngine(DbapiRows, Engine):
                     b = self._cmd("dst", db, cq)[0]
             except RuntimeError as e:
                 bad.append(f"{t} error {e}")
+                outcomes[t] = "error"
                 continue
+            outcomes[t] = "ok"
             rows_a += int(a[0] or 0)
             rows_b += int(b[0] or 0)
             if a[0] != b[0]:
@@ -598,6 +608,7 @@ class MSSQLEngine(DbapiRows, Engine):
                         bad.append(f"{t} differs, not localized: the sums"
                                    " still differ and no row differs by"
                                    " key")
+                        outcomes[t] = "diff"
                     else:
                         settled.append(t)
                     continue
@@ -610,8 +621,10 @@ class MSSQLEngine(DbapiRows, Engine):
                     m, e, c = drill
                     bad.append(f"{t} missing={m} extra={e} changed={c}"
                                " (pk files written)")
+                    apart.update(rows_counted(t, m, e, c))
                 else:
                     bad.append(f"{t} src={a} dst={b}")
+                outcomes[t] = "diff"
         res = []
         if with_counts:
             bad_counts += [f"{t} missing on target" for t in st
@@ -637,14 +650,16 @@ class MSSQLEngine(DbapiRows, Engine):
                               "", "pk-level diffs in data-*.missing/extra/"
                               f"changed; migkit sync {self.hop.name} --db"
                               f" {db} --kind rows shows the repair, --apply"
-                              " runs it"))
+                              " runs it", tables=outcomes,
+                              rows_apart=apart))
         else:
             again = (f"; {len(settled)} read while rows changed, every row"
                      " equal by key and the sums equal when read again: "
                      + ", ".join(settled[:8]) if settled else "")
             res.append(Result("data", db, "ok",
                               f"{len(tables)} tables, counts and every"
-                              " row's hash equal both sides" + again + said))
+                              " row's hash equal both sides" + again + said,
+                              tables=outcomes))
         return res
 
     #: CLR types a row hash reads through their own rendering: `FOR JSON`
@@ -1522,7 +1537,7 @@ class MSSQLEngine(DbapiRows, Engine):
                           " v.schema_id join sys.sql_modules m on"
                           " m.object_id = v.object_id where v.is_ms_shipped"
                           " = 0 order by 1"):
-            if self.hop.excluded(db, *name.split(".", 1)):
+            if not self.in_scope(db, name):
                 continue
             try:
                 tree = sqlglot.parse_one(definition, read="tsql")
@@ -1589,7 +1604,7 @@ class MSSQLEngine(DbapiRows, Engine):
                 r.table, r.events = table, tuple(events)
                 r.timing = "INSTEAD OF" if instead else "AFTER"
                 r.level = "statement"
-                if table and self.hop.excluded(db, *table.split(".", 1)):
+                if table and not self.in_scope(db, table):
                     continue
             try:
                 from ..storedcode.tsql_pg import body_of
@@ -2402,7 +2417,7 @@ class MSSQLEngine(DbapiRows, Engine):
         self._all_tracked(side, db)
         plans = []
         for t in sorted(self._tracked(side, db)):
-            if self.hop.excluded(db, *t.split(".", 1)):
+            if not self.in_scope(db, t):
                 continue
             key = self.neutral_key(side, db, t)
             cols = [n for n, _ in self.neutral_columns(side, db, t)]

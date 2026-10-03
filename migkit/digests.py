@@ -145,11 +145,15 @@ def taken(hop, db, table, engine=None, side="src"):
     names = getattr(hop, "_names_engine", None)
     eng = engine or (names() if callable(names) else hop.engine)
     schema, name = split_table(eng, str(table))
-    if side == "dst" and any(str(v).split(".")[-1] == name for v in (
-            (getattr(hop, "mapping", None) or {}).get("tables")
-            or {}).values()):
-        return True
-    return not hop.excluded(db, *([schema] if schema else []), name)
+    parts = [schema] if schema else []
+    if side == "dst" and hasattr(hop, "source_table_in"):
+        # the target's name read back to the source's: a table renamed on
+        # the way is asked as the table it was, in its own database
+        back = hop.source_table_in(db, *parts, name)
+        if back is None:
+            return False
+        return not hop.excluded(db, *back)
+    return not hop.excluded(db, *parts, name)
 
 
 def _within(hop, paired, left=None):

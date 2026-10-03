@@ -1767,9 +1767,12 @@ def _final_check(hop, eng, d, before, left, say):
             # a check that compared nothing (every answer skipped, or no
             # answer at all) is the one mistake here with no undo
             from . import verdict
+            # every field of each answer: the check it is, the rows it
+            # counted - what holds a hop that keeps some changes off the
+            # target to them (`verdict.hold`); without them such a hop's
+            # kept rows read as a difference and it never cut over
             result["decision"] = verdict.decide(
-                [{"status": r.status, "scope": r.scope, "detail": r.detail}
-                 for r in got], hop)
+                [dict(vars(r)) for r in got], hop)
             result["skipped"] = [r.scope for r in got if r.status == "skip"]
         except Exception as e:  # noqa: BLE001 - a check that fails is a stop
             result["error"] = str(e).strip()[:300]

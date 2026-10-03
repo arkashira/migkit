@@ -86,7 +86,7 @@ def tables(hop, eng, db):
     src = _pair(eng).src_engine
     return [(t, hop.row_filter(db, *str(t).split(".")))
             for t in src.neutral_tables("src", db)
-            if not hop.excluded(db, *str(t).split("."))]
+            if hop.takes_table(db, t)]
 
 
 def _source_as_target(hop, eng):

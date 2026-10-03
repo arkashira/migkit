@@ -250,7 +250,7 @@ def outline(hop, eng, db):
     pair = _pair(eng)
     src = pair.src_engine
     tables = [t for t in src.neutral_tables("src", db)
-              if not hop.excluded(db, *str(t).split("."))]
+              if hop.takes_table(db, t)]
     rules, wrong = [], []
     for name, said in sorted(got["start"].items()):
         t = _named(name, tables)
@@ -496,8 +496,7 @@ def move(hop, eng, dbs, mode, table, go, log):
             # to, then written the other way round: no reference on the
             # target is left pointing at a row that is not there yet
             for s in reversed(order):
-                if _as_tuple(s) in kept or hop.excluded(d, *str(s).split(
-                        ".")):
+                if _as_tuple(s) in kept or not hop.takes_table(d, s):
                     continue
                 gone = pair.dst_engine.neutral_empty("dst", d, targets[s])
                 if gone and s not in p.rows:

@@ -203,3 +203,139 @@ def test_an_inventory_asks_one_question_of_every_object():
     assert scoped(h) and not scoped(_hop("mysql"))
     out = MySQLEngine(_hop("mysql", exclude=["shop.orders"]))
     assert not out.takes("shop", "trigger", "t1", "orders")
+
+
+def test_how_a_hop_narrows_is_read_in_one_place():
+    """Seven readers once asked "does the hop take less than everything"
+    each its own way, and a copy of the pages served a hop that kept
+    deletes off the target or left its views out. One reading
+    (`narrowed_by`) names every way; each reader takes the parts it
+    cannot serve from it."""
+    from migkit import verdict
+    from migkit.config import narrowed_by, narrowed_said, scoped
+    whole = _hop()
+    assert narrowed_by(whole) == {} and not scoped(whole)
+    cases = {
+        "include": dict(include=["shop.orders"]),
+        "exclude": dict(exclude=["shop.audit"]),
+        "objects_not_carried": dict(objects={"views": False}),
+        "objects_named": dict(objects={"functions": ["shop.f_*"]}),
+        "row_filters": dict(mapping={"where": {"orders": "id > 1"}}),
+        "column_rules": dict(mapping={"columns": {"orders": {"keep":
+                                                             ["id"]}}}),
+        "values_masked": dict(options={"mask_on_write":
+                                       {"orders.email": "null"}}),
+        "renamed": dict(mapping={"tables": {"orders": "orders_v2"}}),
+        "names_ruled": dict(mapping={"names": {"tables":
+                                               {"prefix": "x_"}}}),
+        "databases_renamed": dict(db_map={"shop": "shop2"}),
+        "changes_carried": dict(mapping={"ops": {"orders": "insert"}}),
+    }
+    for part, kw in cases.items():
+        h = _hop(**kw)
+        got = narrowed_by(h)
+        assert list(got) == [part], (part, got)
+        assert narrowed_said(h)
+        assert verdict.hop_scope(h), part
+        assert scoped(h) == (part in ("include", "exclude",
+                                      "objects_not_carried",
+                                      "objects_named")), part
+    # a database mapped to its own name, or a rule carrying every change,
+    # narrows nothing
+    assert narrowed_by(_hop(db_map={"shop": "shop"})) == {}
+    assert narrowed_by(_hop(mapping={"ops": {"*": "i,u,d"}})) == {}
+    # a backup seed serves database names and the changes the tail
+    # carries; nothing else
+    from migkit import backupseed
+    assert narrowed_said(_hop(db_map={"shop": "shop2"}),
+                         backupseed._SEED_SERVES) == ""
+    assert narrowed_said(_hop(exclude=["shop.audit"]),
+                         backupseed._SEED_SERVES)
+
+
+def test_the_way_back_keeps_the_schema_of_a_table_renamed_alone():
+    """`appdb.public.orders: orders_v2` renames the table in its schema;
+    the way back read it as `app.orders_v2`, which names no table, and
+    wrote the changes back under the new name."""
+    there = _hop(databases=["appdb"], db_map={"appdb": "app"},
+                 include=["appdb.public.orders", "appdb.public.lines"],
+                 mapping={"tables": {"appdb.public.orders": "orders_v2"},
+                          "ops": {"appdb.public.orders": "insert, update"}})
+    back = there.reversed()
+    assert back.mapping["tables"] == {"app.public.orders_v2": "orders"}
+    assert back.target_table_in("app", "public", "orders_v2") == "orders"
+    # what the way there took, the way back takes under the new name
+    assert back.include == ["app.public.orders_v2", "app.public.lines"]
+    assert not back.excluded("app", "public", "orders_v2")
+    assert back.excluded("app", "public", "orders")
+    assert back.carries("app", "public", "orders_v2") == {"insert",
+                                                          "update"}
+
+
+def test_the_way_back_turns_the_name_rules_round():
+    there = _hop(databases=["shop"],
+                 mapping={"names": {"tables": {"prefix": "x_"},
+                                    "databases": {"suffix": "_new"}}})
+    assert there.target_db("shop") == "shop_new"
+    assert there.target_table_in("shop", "public", "orders") == \
+        "public.x_orders"
+    back = there.reversed()
+    assert back.databases == ["shop_new"]
+    assert back.mapping["names"] == {"tables": {"strip_prefix": "x_"},
+                                     "databases": {"strip_suffix": "_new"}}
+    assert back.target_db("shop_new") == "shop"
+    assert back.target_table_in("shop_new", "public", "x_orders") == \
+        "public.orders"
+    # a scope written in the source's names reaches the target's
+    scoped_there = _hop(mapping={"names": {"tables": {"prefix": "x_"}}},
+                        include=["shop.public.ord*"])
+    assert scoped_there.reversed().include == ["shop.public.x_ord*"]
+
+
+def test_a_name_rule_that_cannot_be_turned_round_is_refused():
+    """Lower case, or a stripped prefix, does not say what each name was:
+    the way back would write to a table the old source does not have."""
+    for rule in ({"case": "lower"}, {"strip_prefix": "t_"}):
+        there = _hop(mapping={"names": {"tables": rule}})
+        with pytest.raises(SystemExit, match="cannot be turned round"):
+            there.reversed()
+
+
+def test_a_listed_table_is_asked_of_the_scope_one_way():
+    """A table's listed name is split once, the way names are
+    (`Hop.takes_table`, `Engine.in_scope`): split by hand beside them,
+    `public."v1.orders"` broke at the wrong dot and a bare PostgreSQL name
+    was asked outside its schema."""
+    import ast
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1] / "migkit"
+    bad = []
+    for f in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(f.read_text())):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "excluded"):
+                continue
+            for arg in node.args:
+                inner = arg.value if isinstance(arg, ast.Starred) else None
+                if inner is None:
+                    continue
+                for sub in ast.walk(inner):
+                    if isinstance(sub, ast.Attribute) and sub.attr in (
+                            "split", "_split"):
+                        bad.append(f"{f.relative_to(root)}:{node.lineno}")
+    # a pattern checked against itself, a listing already in parts, and
+    # the generic engine's own names, each said where it is
+    allowed = {"hopkeys.py", "engines/postgres.py", "engines/generic.py"}
+    assert [b for b in bad if b.split(":")[0] not in allowed] == []
+
+
+def test_a_quoted_or_bare_name_is_taken_as_the_engine_names_it():
+    h = _hop(include=["appdb.public.orders", 'appdb.public.v1.orders'])
+    assert h.takes_table("appdb", "orders")              # public, bare
+    assert h.takes_table("appdb", "public.orders")
+    assert h.takes_table("appdb", 'public."v1.orders"')
+    assert not h.takes_table("appdb", "crm.orders")
+    my = _hop("mysql", include=["shop.orders"])
+    assert my.takes_table("shop", "orders")
+    assert not my.takes_table("crm", "orders")

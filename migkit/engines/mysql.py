@@ -12,7 +12,7 @@ from ..config import scoped
 from ..decide import Need, Rung
 from ..tableway import DIRECT, Way
 from ..util import keepalive as _keepalive, run, which, with_retry
-from .base import Engine, RepairAction, Result
+from .base import Engine, RepairAction, Result, rows_counted
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
 
@@ -3098,7 +3098,11 @@ class MySQLEngine(Engine):
                 detail += f"; of the rows only the target has: {whose}"
         return Result("data", scope, "diff", detail, str(d),
                       f"migkit sync {self.hop.name} --db {db} --kind rows"
-                      " --apply"), len(src), len(dst)
+                      " --apply", table=str(t),
+                      rows_apart={str(t): {
+                          "missing": len(missing), "extra": len(extra),
+                          "changed": len(changed), "exact": True}}), \
+            len(src), len(dst)
 
     def _column_fingerprint(self, db, t):
         """One scan per side, one aggregate per column: which columns
@@ -3313,7 +3317,9 @@ class MySQLEngine(Engine):
                     f"of {len(keys)} touched rows: missing={len(missing)}"
                     f" extra={len(extra)} changed={len(changed)}",
                     str(self.hop.report_dir(db)),
-                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                    f"migkit sync {self.hop.name} --db {db} --kind rows",
+                    table=str(t), rows_apart=rows_counted(
+                        t, len(missing), len(extra), len(changed))))
                 clean = clean and not held_back
                 res.append(got)
             else:

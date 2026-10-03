@@ -491,7 +491,7 @@ def _source_sizes(hop, db):
         return {}
     return {name: int(f.get("bytes") or 0) for name, f in facts.items()
             if isinstance(f, dict) and f.get("bytes")
-            and not hop.excluded(db, *str(name).split("."))}
+            and hop.takes_table(db, name)}
 
 
 def _tables_done(pattern, verb, total=None):
@@ -1311,7 +1311,7 @@ def _pg_missing_tables(hop, db):
     # a table whose columns the hop maps is built by the pair's copier,
     # under the names and without the columns the mapping says
     want = [t for t in eng._all_tables("src", db)
-            if not hop.excluded(db, *t.split(".", 1))
+            if hop.takes_table(db, t)
             and not eng.through_pair(db, t)]
     return [t for t in want if t not in have], not have
 
@@ -1433,7 +1433,7 @@ def _pg_references_into(hop, db, routed=()):
         ref, _, by = line.partition(chr(31))
         if not by or ref in routed:
             continue
-        if hop.excluded(db, *ref.replace('"', "").split(".", 1)):
+        if not hop.takes_table(db, ref):
             continue
         out.append(f"{ref} <- {by}")
     return sorted(set(out))
@@ -5980,7 +5980,7 @@ def _stream_facts(hop, dbs, src_is_mysql):
             tables[one] = None
         facts = _within(lambda one=one: eng.table_facts("src", one)) or {}
         for name, f in facts.items():
-            if hop.excluded(one, *str(name).split(".")):
+            if not hop.takes_table(one, name):
                 continue
             if f.get("rows") and f.get("bytes"):
                 rows += int(f["rows"])
@@ -6176,7 +6176,7 @@ def _skipped_operations(hop, tables):
     from .config import OPS
     seen = {hop.carries(one, *[p for p in str(t).split(".") if p])
             for one, listed in tables.items() for t in listed or ()
-            if not hop.excluded(one, *[p for p in str(t).split(".") if p])}
+            if hop.takes_table(one, t)}
     if len(seen) != 1:
         return "none"
     carried = next(iter(seen))

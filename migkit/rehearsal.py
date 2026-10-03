@@ -310,8 +310,7 @@ def record_check(hop, eng, db, seconds):
         return
     rows = size = 0
     for name, f in (facts or {}).items():
-        if isinstance(f, dict) and not hop.excluded(
-                db, *str(name).split(".")):
+        if isinstance(f, dict) and hop.takes_table(db, name):
             rows += int(f.get("rows") or 0)
             size += int(f.get("bytes") or 0)
     if rows and seconds > 0:

@@ -190,11 +190,15 @@ def _parts(scope):
     return [p for p in str(scope).split(".") if p]
 
 
-def _matches(key, parts):
+def _matches(key, parts, fold=False):
     """Whether a table the service named is one migkit answered for:
     database and table alike, the schema too where both name one. A
     service that named no database (its endpoint's) names the schema,
-    which is the database on an engine without schemas."""
+    which is the database on an engine without schemas. `fold`: names
+    compared without case."""
+    if fold:
+        key = tuple(str(x).casefold() for x in key)
+        parts = [str(p).casefold() for p in parts]
     db, schema, table = key
     if not parts or parts[-1] != table:
         return False
@@ -205,51 +209,89 @@ def _matches(key, parts):
     return not (schema and len(parts) == 3 and parts[1] != schema)
 
 
-def reconcile(claims, records):
-    """The claims held against migkit's answers (`Claims` against the
-    records a check returns): what falls in each of `missed`, `agreed`,
-    `not found`, `skipped`, `unchecked` and `beyond`, each a sorted list
-    of names with what was said."""
+#: migkit's answers, least to most telling: a table's worst one is its own
+_WORST = ("ok", "skip", "warn", "error", "diff")
+
+
+def _answers(records):
+    """{dotted table name: (status, detail)} of a check's answers, each
+    table once at its worst: a table's own answer, and each table a
+    database's one answer says how it came out (`Result.tables`)."""
     answers = {}
+
+    def put(name, st, detail):
+        was = answers.get(name)
+        if st in _WORST and (was is None or _WORST.index(st) >
+                             _WORST.index(was[0])):
+            answers[name] = (st, str(detail)[:120])
     for r in records:
         scope = str(r.get("scope", ""))
-        if " " in scope or len(_parts(scope)) < 2:
+        db = scope.split(" ")[0].split(".")[0]
+        for table, st in (r.get("tables") or {}).items():
+            put(f"{db}.{table}", st, f"{r.get('check')}: {st}")
+        table = str(r.get("table") or "")
+        if table and db:
+            put(f"{db}.{table}", r.get("status"), r.get("detail", ""))
             continue
-        st = r.get("status")
-        was = answers.get(scope)
-        worst = ("ok", "skip", "warn", "error", "diff")
-        if st in worst and (was is None or worst.index(st) >
-                            worst.index(was[0])):
-            answers[scope] = (st, str(r.get("detail", ""))[:120])
-    out = {k: [] for k in ("missed", "agreed", "not found", "skipped",
-                           "unchecked", "beyond", "not in the hop")}
+        if " " in scope:
+            # `shop public.orders`: a table named after its database
+            head, _, rest = scope.partition(" ")
+            if "." not in head and rest and " " not in rest.strip():
+                put(f"{head}.{rest.strip()}", r.get("status"),
+                    r.get("detail", ""))
+            continue
+        if len(_parts(scope)) >= 2:
+            put(scope, r.get("status"), r.get("detail", ""))
+    return answers
+
+
+def reconcile(claims, records, fold=False):
+    """The claims held against migkit's answers (`Claims` against the
+    records a check returns): what falls in each of `missed`, `agreed`,
+    `not found`, `unproved`, `skipped`, `unchecked`, `beyond` and `not in
+    the hop`, each a sorted list of names with what was said. `unproved`:
+    the service gave its word and migkit's own answer for the table was
+    neither the same nor different - a warning, a skip, an error - so
+    nothing is agreed. Names are matched as written, and without case
+    where the engine's names have none (`fold`) or where only one answer
+    is the name in another case."""
+    answers = _answers(records)
+    out = {k: [] for k in ("missed", "agreed", "not found", "unproved",
+                           "skipped", "unchecked", "beyond",
+                           "not in the hop")}
     seen = set()
     for key, (said, why) in sorted(claims.tables.items()):
         name = ".".join(x for x in key if x)
-        hit = [s for s in answers if _matches(key, _parts(s))]
+        hit = [s for s in answers if _matches(key, _parts(s), fold)]
+        if not hit and not fold:
+            folded = [s for s in answers if _matches(key, _parts(s), True)]
+            hit = folded if len(folded) == 1 else []
         if not hit:
             out["not in the hop"].append(f"{name} ({said})")
             continue
         seen.update(hit)
         ours = max((answers[s] for s in hit),
-                   key=lambda a: ("ok", "skip", "warn", "error",
-                                  "diff").index(a[0]))
+                   key=lambda a: _WORST.index(a[0]))
         if said == SKIPPED:
             out["skipped"].append(f"{name}: {why}; migkit: {ours[0]}")
+        elif ours[0] not in ("ok", "diff"):
+            out["unproved"].append(
+                f"{name}: the service said {said}; migkit {ours[0]}:"
+                f" {ours[1]}")
         elif said == SAME and ours[0] == "diff":
             out["missed"].append(f"{name}: {ours[1]}")
         elif said == DIFFERENT and ours[0] == "ok":
             out["not found"].append(f"{name}: the service said {why}")
-        elif (said == SAME and ours[0] == "ok") or \
-                (said == DIFFERENT and ours[0] == "diff"):
+        else:
             out["agreed"].append(f"{name}: {said}")
     for s, (st, detail) in sorted(answers.items()):
         if s not in seen:
             out["unchecked"].append(f"{s}: migkit {st}")
     for r in records:
         scope = str(r.get("scope", ""))
-        if r.get("status") == "diff" and (" " in scope
-                                          or len(_parts(scope)) < 2):
+        if r.get("status") == "diff" and not r.get("tables") and \
+                not r.get("table") and (" " in scope
+                                        or len(_parts(scope)) < 2):
             out["beyond"].append(f"{scope} ({r.get('check')}):"
                                  f" {str(r.get('detail', ''))[:100]}")
     return {k: v for k, v in out.items() if v}
@@ -266,9 +308,10 @@ def of(hop, records):
         got = read(path)
     except (OSError, ValueError) as e:
         return {"file": path, "error": f"could not be read: {e}"}
+    fold = bool(getattr(hop, "folds_case", None) and hop.folds_case())
     return {"file": path, "service": got.service,
             "overall": got.overall, "method": got.method,
-            "tables": len(got.tables), **reconcile(got, records)}
+            "tables": len(got.tables), **reconcile(got, records, fold)}
 
 
 def said(section):
@@ -281,7 +324,12 @@ def said(section):
             f" {section.get('overall') or 'nothing overall'}"
             + (f" ({section['method']})" if section.get("method") else ""))
     parts = [f"{len(section[k])} {k}" for k in
-             ("missed", "not found", "skipped", "unchecked", "beyond")
-             if section.get(k)]
-    return head + (": " + ", ".join(parts) if parts else
-                   ", and migkit agrees table by table")
+             ("missed", "not found", "unproved", "skipped", "unchecked",
+              "beyond", "not in the hop") if section.get(k)]
+    agreed = len(section.get("agreed") or ())
+    if parts:
+        return head + ": " + ", ".join(parts) + (
+            f"; {agreed} agreed" if agreed else "")
+    if agreed:
+        return head + f", and migkit agrees on each of its {agreed} tables"
+    return head + ", naming no table to hold to migkit's answers"

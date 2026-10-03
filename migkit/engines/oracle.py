@@ -1610,20 +1610,57 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
     # for an identity column, past the largest value in it as well.
 
     def _sequences(self, side, db):
-        """{name: next value} for the schema's sequences, identity ones by
-        their table and column."""
+        """{name: next value} for the schema's sequences the hop takes,
+        identity ones by their table and column: an identity column's goes
+        with its table, a sequence a column's default draws from with the
+        tables drawing from it (left out only where every one of them is),
+        any other by its own name - and only where the hop carries
+        sequences (`Engine.takes`). Every sequence was read before: the
+        parity check and its repair set the counters of tables the hop
+        left out, which the target writes itself."""
         owner = self._owner(side, db)
-        idents = {s: f"{self._said(t)}.{self._said(c)}"
+        idents = {s: (self._said(t), self._said(c))
                   for t, c, s in self._rows(
                       side, db, "select table_name, column_name,"
                                 " sequence_name from all_tab_identity_cols"
                                 f" where owner = {MARK}", (owner,))}
+        drawn = self._sequence_users(side, db, owner)
         out = {}
         for name, last in self._rows(
                 side, db, "select sequence_name, last_number from"
                           f" all_sequences where sequence_owner = {MARK}",
                 (owner,)):
-            out[idents.get(name, self._said(name))] = int(last)
+            said = self._said(name)
+            if name in idents:
+                t, c = idents[name]
+                if self.takes(db, "sequence", said, t):
+                    out[f"{t}.{c}"] = int(last)
+                continue
+            users = drawn.get(said.upper()) or []
+            taken = (any(self.takes(db, "sequence", said, t) for t in users)
+                     if users else self.takes(db, "sequence", said))
+            if taken:
+                out[said] = int(last)
+        return out
+
+    #: `SEQ.NEXTVAL`, `"OWNER"."SEQ".NEXTVAL` in a column's default: the
+    #: sequence's own name
+    _NEXTVAL = re.compile(r'"?([A-Za-z0-9_$#]+)"?\s*\.\s*"?nextval', re.I)
+
+    def _sequence_users(self, side, db, owner):
+        """{SEQUENCE: [table]} of the tables whose column defaults draw
+        from each sequence; {} where the defaults cannot be read."""
+        out = {}
+        try:
+            rows = self._rows(side, db, "select table_name, data_default"
+                                        " from all_tab_columns where owner ="
+                                        f" {MARK} and data_default is not"
+                                        " null", (owner,))
+        except Exception:  # noqa: BLE001 - each sequence by its own name
+            return out
+        for t, default in rows:
+            for m in self._NEXTVAL.finditer(str(default or "")):
+                out.setdefault(m.group(1).upper(), []).append(self._said(t))
         return out
 
     def sequences_behind(self, db):
@@ -1641,7 +1678,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                            " on q.sequence_owner = i.owner and"
                            " q.sequence_name = i.sequence_name where"
                            f" i.owner = {MARK}", (owner,)):
-            if self.hop.excluded(db, self._said(t)):
+            if not self.in_scope(db, self._said(t)):
                 continue
             top = self._rows("dst", db, f"select max({self._q(c)}) from"
                                         f" {self._q(owner)}.{self._q(t)}")
