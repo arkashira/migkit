@@ -1,8 +1,9 @@
 """A running tail's tables, each in a state of its own (backlog L1, L4,
 L5, L6; research: leapfrog live tail 2026-09-28, section 1.3).
 
-One stream, one saved position, and a state per table beside it
-(`tail-tables.json`, written in the step that writes the position):
+One stream, one saved position, and a state per table beside it, in
+the tail's own store (`Store`), written in one transaction a batch with
+everything else the batch leaves:
 
     live      its changes applied as they are read
     copying   added to the tail: copied under its own marks beside the
@@ -32,13 +33,15 @@ shape the same and the source's log still holding where it left, gets
 only its changes since then, read again from there (`_add_ways`).
 
 A change held for a range or set aside for a parked table is written to
-that table's spool (`Spool`) before the position moves past it, so a stop
-loses none; a batch read again is not spooled twice. A batch works on a
-copy of the states (`begin`), and only the batch that is applied and
-saved makes its states the tail's (`commit`) - a batch read again after a
-lost connection finds the states it was first read under. Everything the
-stream reads is accounted per table every batch - applied, left out and
-why, or set aside - by the tail (`hetero._Accounts`).
+that table's spool (`Spool`) in the batch's transaction, before the target
+commits the batch and the position moves past it, so a stop loses none;
+a batch read again is not spooled twice. A batch works on a copy of the
+states (`begin`), sets them down with the rest of the batch (`prepare`),
+and only once its position is saved are they the tail's (`committed`) -
+a batch read again after a lost connection, or after a stop, finds the
+states it was first read under (`Store.align`). Everything the stream
+reads is accounted per table every batch - applied, left out and why, or
+set aside - by the tail (`hetero._Accounts`).
 
 What a DDL does is the hop's `ddl`:
 
@@ -65,16 +68,18 @@ target table.
 """
 import json
 import os
+import pickle
 import re
 import struct
 import threading
 import time
 from collections import Counter
 
+#: where an earlier version kept the tables' states, and their spools
 STATE = "tail-tables.json"
+SPOOLS = "tail-spool"
 #: the checkpoint the tail's own copies keep, in the table copier's shape
 COPY = "tail-copy.json"
-SPOOLS = "tail-spool"
 POLICIES = ("stop", "park", "apply")
 #: what a parked table's spool may hold, in bytes, before the table is
 #: copied again once its target is level: its changes are then read from
@@ -172,106 +177,617 @@ def _token_text(token):
     return json.dumps(token, sort_keys=True, default=str)
 
 
-class Spool:
-    """The changes set aside for one table, in the order read: frames of
-    `(the position the batch was read from, [changes])`, each zstd over
-    the records as the reader made them (pickled: their values keep their
-    own types, which JSON would not), sealed to the hop's `at_rest`
-    recipients where it names them (`evidence`), and synced to disk before
-    the tail's position moves past them. A frame torn by a stop mid-write
-    is the last, of a batch whose position was never saved: it is read
-    again, and its frames dropped (`drop_batch`)."""
+def _attr(obj, name):
+    """The one attribute a value of a change log is pickled through
+    (`ZoneInfo._unpickle`): `getattr` itself would reach anything from any
+    class allowed."""
+    from zoneinfo import ZoneInfo
+    if obj is ZoneInfo and name == "_unpickle":
+        return ZoneInfo._unpickle
+    raise pickle.UnpicklingError(f"a change set aside asks for {name}, which"
+                                 " is not how a value is made")
 
-    def __init__(self, path, recipients=()):
-        self.path = path
+
+class _Values(pickle.Unpickler):
+    """Changes set aside read back, their values their own types again -
+    and nothing else: only the classes a change log's values come as, by
+    name, are made, so a spool somebody wrote into cannot make this
+    process run anything (audit SEC21). A whole module is never allowed:
+    a module's functions can run a command."""
+
+    #: {module: names} a value may be made of
+    ALLOWED = {
+        "builtins": {"set", "frozenset", "bytearray", "complex", "range",
+                     "slice", "object", "tuple", "list", "dict", "int",
+                     "float", "str", "bytes", "bool"},
+        "copyreg": {"_reconstructor", "__newobj__", "__newobj_ex__"},
+        "collections": {"OrderedDict"},
+        "datetime": {"datetime", "date", "time", "timedelta", "timezone",
+                     "tzinfo"},
+        "decimal": {"Decimal"}, "fractions": {"Fraction"},
+        "uuid": {"UUID", "SafeUUID"},
+        "ipaddress": {"IPv4Address", "IPv6Address", "IPv4Network",
+                      "IPv6Network", "IPv4Interface", "IPv6Interface"},
+        "zoneinfo": {"ZoneInfo"}, "zoneinfo._zoneinfo": {"ZoneInfo"},
+        "array": {"array", "_array_reconstructor"},
+        "migkit.canon": {"Added", "Kept", "_Absent"},
+        # NumPy's scalars from a columnar file, as NumPy pickles them
+        "numpy": {"dtype", "ndarray"},
+        "numpy.core.multiarray": {"_reconstruct", "scalar"},
+        "numpy._core.multiarray": {"_reconstruct", "scalar"},
+    }
+    #: modules whose classes are values a reader hands over - BSON's, the
+    #: PostgreSQL drivers' ranges - each a class, never a function
+    CLASSES = ("bson", "psycopg2._range", "psycopg2.extras",
+               "psycopg.types.range")
+
+    def find_class(self, module, name):
+        if name in self.ALLOWED.get(module, ()):
+            return super().find_class(module, name)
+        if (module, name) == ("builtins", "getattr"):
+            return _attr
+        if module == "bson" or module.startswith("bson.") or \
+                module in self.CLASSES:
+            got = super().find_class(module, name)
+            if isinstance(got, type) and (module.startswith("bson")
+                                          or name.endswith("Range")):
+                return got
+        raise pickle.UnpicklingError(
+            f"a change set aside holds {module}.{name}, which is not a"
+            " kind of value a change log hands over")
+
+
+def _pack(changes, recipients):
+    """A frame's body: its changes pickled - their values keep their own
+    types, which JSON would not - zstd over them, sealed to the hop's
+    `at_rest` recipients where it names them (`evidence`).
+
+    Read back as `_unpack` reads it before it is kept: a value of a kind
+    `_Values` does not make was set aside, the position moved past it,
+    and the frame then refused when it was released - the change lost.
+    Refused here instead, inside the batch's transaction, so nothing of
+    the batch is kept and its position stays."""
+    import io
+
+    import zstandard
+    raw = pickle.dumps(list(changes), protocol=pickle.HIGHEST_PROTOCOL)
+    try:
+        _Values(io.BytesIO(raw)).load()
+    except pickle.UnpicklingError as e:
+        raise SystemExit(
+            f"{e}, so it could not be read back once set aside. Nothing of"
+            " this batch was kept and its position stays where it was;"
+            " the table's changes need a reader that hands its values"
+            " over as plain kinds") from None
+    data = zstandard.ZstdCompressor(level=3).compress(raw)
+    if recipients:
+        from . import evidence
+        data = evidence._seal(data, recipients)
+    return data
+
+
+def _unpack(data):
+    import io
+
+    import zstandard
+
+    from . import evidence
+    data = bytes(data)
+    if data.startswith(evidence.AGE):
+        data = evidence._open(data)
+    return _Values(io.BytesIO(
+        zstandard.ZstdDecompressor().decompress(data))).load()
+
+
+#: the tail's own state, beside its position
+STORE = "tail-state.sqlite"
+#: its layout (`pragma user_version`), and what each layout adds
+STORE_VERSION = 1
+_LAYOUT = {1: (
+    "create table if not exists meta (k text primary key, v text)",
+    "create table if not exists tables (leaf text primary key, v text)",
+    "create table if not exists accounts (tbl text primary key, v text)",
+    "create table if not exists frames (id integer primary key"
+    " autoincrement, leaf text not null, at text, n integer, body blob)",
+    "create index if not exists frames_leaf on frames (leaf, id)",
+    "create table if not exists undo (seq integer primary key"
+    " autoincrement, tbl text, k text, v text, body blob)")}
+
+
+class Store:
+    """The tail's own state beside its position, in one SQLite file
+    (audit 2026-10-01, ST1, ST18, ST19): each table's state, what the tail
+    read of each table and did with it (`hetero._Accounts`), the changes
+    it set aside, one row each batch they were read in (`frames`), and the
+    source's shape it last applied under.
+
+    It was five files - the position, the tables' states, the accounts,
+    a spool a table, the shape - each rewritten in place, none synced but
+    the spools, with no barrier between them: after a power loss a
+    newer position beside older states turned a table parked in the batch
+    after it live again, and what was set aside for it was never applied.
+    Measured in-process per batch at 2,000 tables (Apple SSD): the states
+    and the accounts rewritten whole as they were, 6.02 ms and 350 KB a
+    batch, none of it synced; the batch's transaction here - a table's
+    state, five tables' accounts, the generation - 0.118 ms, synced; the
+    position's envelope written whole and synced 0.454 ms, against 0.129
+    ms rewritten in place.
+
+    **One transaction a batch, before the target commits it** (`batch`):
+    the batch's states, the frames it sets aside and the ones it releases,
+    its accounts and a generation one past the position's, with what each
+    replaced kept (`undo`). The position is written once the target has
+    committed (`tailctl.moved`), and its generation is then the store's.
+    A store one generation ahead of the position holds a batch the
+    position never passed: where the target's mark says it committed that
+    batch the tail goes on after it and the store stands
+    (`hetero._committed_ahead`); anywhere else the batch is taken back out
+    (`align`) and read again. A write between batches - a table added to
+    the scope, a copy that finished - is its own transaction at the
+    generation there is. Only the rows that changed are written: a table
+    whose state is as stored is not rewritten, an account only where the
+    batch read its table, a frame only where it is set aside or released
+    (and a frame half released is rewritten, the rest of the spool not)."""
+
+    _OPEN = {}
+    _OPEN_LOCK = threading.Lock()
+
+    @classmethod
+    def of(cls, where):
+        """The store of the tail whose report directory is `where`, one
+        per process per file."""
+        path = os.path.join(str(where), STORE)
+        with cls._OPEN_LOCK:
+            got = cls._OPEN.get(path)
+            if got is None or not os.path.exists(path) \
+                    or got.ino != os.stat(path).st_ino:
+                got = cls._OPEN[path] = cls(path)
+            return got
+
+    @classmethod
+    def forget(cls, where):
+        """Close this process's store of `where`, for a file put in its
+        place (`ha`, `state.Mirror`) to be opened afresh."""
+        path = os.path.join(str(where), STORE)
+        with cls._OPEN_LOCK:
+            got = cls._OPEN.pop(path, None)
+        if got is not None:
+            got.conn.close()
+
+    def __init__(self, path):
+        import sqlite3
+
+        from . import durable
+        self.path = str(path)
+        durable.private_dir(os.path.dirname(self.path) or ".")
+        if not os.path.exists(self.path):
+            try:
+                os.close(os.open(self.path,
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            except FileExistsError:
+                pass
+        self.ino = os.stat(self.path).st_ino
+        self.lock = threading.RLock()
+        self._undoing = None
+        try:
+            self.conn = sqlite3.connect(self.path, check_same_thread=False,
+                                        isolation_level=None)
+            c = self.conn
+            c.execute("pragma journal_mode=wal")
+            c.execute("pragma synchronous=full")
+            have = c.execute("pragma user_version").fetchone()[0]
+        except sqlite3.DatabaseError as e:
+            raise SystemExit(
+                f"{self.path} cannot be read ({e}). It holds the change"
+                " tail's tables' states and what it set aside, and going on"
+                " without it would be a guess, so migkit stops here;"
+                " removing it and the tail's position beside it starts the"
+                " tail over with --mode full+cdc") from None
+        if have > STORE_VERSION:
+            raise SystemExit(
+                f"{self.path} was written by a newer migkit (layout {have});"
+                f" this one reads layout {STORE_VERSION}. Run the newer"
+                " migkit")
+        for v in range(have + 1, STORE_VERSION + 1):
+            for sql in _LAYOUT[v]:
+                c.execute(sql)
+            c.execute(f"pragma user_version = {v}")
+
+    # --- reading --------------------------------------------------------------
+
+    def get(self, k, default=None):
+        with self.lock:
+            row = self.conn.execute("select v from meta where k = ?",
+                                    (k,)).fetchone()
+        return json.loads(row[0]) if row and row[0] is not None else default
+
+    def tables(self):
+        with self.lock:
+            return {k: json.loads(v) for k, v in
+                    self.conn.execute("select leaf, v from tables")}
+
+    def accounts(self):
+        with self.lock:
+            return {k: json.loads(v) for k, v in
+                    self.conn.execute("select tbl, v from accounts")}
+
+    def frames(self, leaf):
+        """[(id, where the batch was read from, how many, body)], oldest
+        first."""
+        with self.lock:
+            return list(self.conn.execute(
+                "select id, at, n, body from frames where leaf = ? order"
+                " by id", (leaf,)))
+
+    def spooled(self, leaf=None):
+        """Bytes set aside, for `leaf`, or {leaf: bytes} for every one."""
+        with self.lock:
+            if leaf is not None:
+                return int(self.conn.execute(
+                    "select coalesce(sum(length(body)), 0) from frames"
+                    " where leaf = ?", (leaf,)).fetchone()[0])
+            return {k: int(n) for k, n in self.conn.execute(
+                "select leaf, sum(length(body)) from frames group by"
+                " leaf")}
+
+    def gen(self):
+        return int(self.get("gen") or 0)
+
+    # --- writing ---------------------------------------------------------------
+
+    _KEYS = {"meta": "k", "tables": "leaf", "accounts": "tbl"}
+
+    def _remember(self, tbl, k):
+        """What `tbl`'s row `k` held before the batch first touched it."""
+        if self._undoing is None or (tbl, str(k)) in self._undoing:
+            return
+        self._undoing.add((tbl, str(k)))
+        if tbl == "frames":
+            row = self.conn.execute(
+                "select leaf, at, n, body from frames where id = ?",
+                (int(k),)).fetchone()
+            self.conn.execute(
+                "insert into undo (tbl, k, v, body) values (?, ?, ?, ?)",
+                (tbl, str(k), None if row is None else json.dumps(
+                    [row[0], row[1], row[2]]),
+                 None if row is None else row[3]))
+            return
+        row = self.conn.execute(
+            f"select v from {tbl} where {self._KEYS[tbl]} = ?",
+            (k,)).fetchone()
+        self.conn.execute("insert into undo (tbl, k, v) values (?, ?, ?)",
+                          (tbl, str(k), None if row is None else row[0]))
+
+    def put(self, tbl, k, value):
+        self._remember(tbl, k)
+        self.conn.execute(
+            f"insert into {tbl} values (?, ?) on conflict"
+            f" ({self._KEYS[tbl]}) do update set v = excluded.v",
+            (k, json.dumps(value, default=str)))
+
+    def drop(self, tbl, k):
+        self._remember(tbl, k)
+        self.conn.execute(f"delete from {tbl} where {self._KEYS[tbl]} = ?",
+                          (k,))
+
+    def add_frame(self, leaf, at, changes, recipients):
+        got = self.conn.execute(
+            "insert into frames (leaf, at, n, body) values (?, ?, ?, ?)",
+            (leaf, at, len(changes), _pack(changes, recipients))).lastrowid
+        if self._undoing is not None:
+            # a frame the batch made: taken back out by its id
+            self._undoing.add(("frames", str(got)))
+            self.conn.execute("insert into undo (tbl, k, v) values"
+                              " ('frames', ?, null)", (str(got),))
+        return got
+
+    def set_frame(self, fid, changes, recipients):
+        """Frame `fid` holding `changes` now - gone where none are left."""
+        self._remember("frames", fid)
+        if not changes:
+            self.conn.execute("delete from frames where id = ?", (int(fid),))
+            return
+        self.conn.execute("update frames set n = ?, body = ? where id = ?",
+                          (len(changes), _pack(changes, recipients),
+                           int(fid)))
+
+    def move_frames(self, old, new):
+        """What was set aside under one key, under another (`TableSet.
+        _keyed`)."""
+        self.conn.execute("update frames set leaf = ? where leaf = ?",
+                          (new, old))
+
+    def drop_frames(self, leaf):
+        for (fid,) in list(self.conn.execute(
+                "select id from frames where leaf = ?", (leaf,))):
+            self._remember("frames", fid)
+        self.conn.execute("delete from frames where leaf = ?", (leaf,))
+
+    def batch(self, gen=None):
+        """A transaction, `with store.batch(gen) as s:` - where `gen` is a
+        batch's generation, what the batch replaces is kept to be taken
+        back out (`undo`) and the generation written with it; None writes
+        between batches, at the generation there is."""
+        return _Transaction(self, gen)
+
+    def undo(self):
+        """The last batch taken back out: every row it wrote as it was
+        before, its generation with them. True where there was one."""
+        with self.lock:
+            rows = list(self.conn.execute(
+                "select tbl, k, v, body from undo order by seq desc"))
+            if not rows:
+                return False
+            self.conn.execute("begin immediate")
+            try:
+                for tbl, k, v, body in rows:
+                    if tbl == "frames":
+                        self.conn.execute("delete from frames where id = ?",
+                                          (int(k),))
+                        if v is not None:
+                            leaf, at, n = json.loads(v)
+                            self.conn.execute(
+                                "insert into frames (id, leaf, at, n, body)"
+                                " values (?, ?, ?, ?, ?)",
+                                (int(k), leaf, at, n, body))
+                    elif v is None:
+                        self.conn.execute(
+                            f"delete from {tbl} where {self._KEYS[tbl]}"
+                            " = ?", (k,))
+                    else:
+                        self.conn.execute(
+                            f"insert into {tbl} values (?, ?) on conflict"
+                            f" ({self._KEYS[tbl]}) do update set v ="
+                            " excluded.v", (k, v))
+                self.conn.execute("delete from undo")
+                self.conn.execute("commit")
+            except BaseException:
+                self.conn.execute("rollback")
+                raise
+            return True
+
+    def settled(self):
+        """The last batch made the tail's: its position is saved, and it is
+        never taken back out."""
+        with self.lock:
+            self.conn.execute("delete from undo")
+
+    def reset(self, stream, gen=0):
+        """Everything of an earlier stream gone: a position taken afresh
+        begins with nothing set aside and no table's state."""
+        with self.batch() as s:
+            for tbl in ("meta", "tables", "accounts", "frames", "undo"):
+                s.conn.execute(f"delete from {tbl}")
+            s.put("meta", "stream", stream)
+            s.put("meta", "gen", int(gen))
+        # an earlier version's files of an earlier stream go with it
+        import shutil
+        where = os.path.dirname(self.path)
+        for name in self.LEGACY:
+            try:
+                os.unlink(os.path.join(where, name))
+            except FileNotFoundError:
+                pass
+        shutil.rmtree(os.path.join(where, SPOOLS), ignore_errors=True)
+
+    def align(self, env, log, safe_behind=None):
+        """The store held to the tail's position `env` before anything is
+        read (the class's words): in step; a batch the position never
+        passed taken back out; or - a store of another stream - started
+        afresh. A store behind the position (it came from elsewhere,
+        older than the position put beside it) stands only where
+        `safe_behind()` says nothing it would have held can be missing;
+        else it stops, naming both files."""
+        stream = env.get("id") or "v0"
+        have = self.get("stream")
+        gen = int(env.get("gen") or 0)
+        if have is None:
+            with self.batch() as s:
+                s.put("meta", "stream", stream)
+                s.put("meta", "gen", gen)
+            return "new"
+        if have != stream:
+            log("the tail's own state belonged to an earlier position; it"
+                " starts afresh with this one")
+            self.reset(stream, gen)
+            return "afresh"
+        mine = self.gen()
+        if mine == gen:
+            return "in step"
+        if mine == gen + 1 and self.undo():
+            log("the tail had set down its last batch before the target"
+                " committed it or before its position was saved; taken back"
+                " out, the batch is read again")
+            return "undone"
+        if mine < gen and safe_behind is not None and safe_behind():
+            log(f"the tail's own state was {gen - mine} batches behind its"
+                " position, with every table live and nothing set aside;"
+                " it goes on from the position")
+            with self.batch() as s:
+                s.put("meta", "gen", gen)
+            return "behind"
+        raise SystemExit(
+            f"{self.path} stands at batch {mine} and the tail's position"
+            f" beside it at {gen}: the two were not saved together, and"
+            " which tables were set aside, and what for, cannot be known."
+            " Nothing was applied. Put back the two files as they were"
+            " saved together, or remove both and move again with --mode"
+            " full+cdc")
+
+    # --- what an earlier version kept in files of its own ---------------------
+
+    LEGACY = ("tail-tables.json", "tail-accounts.json", "tail-shape.json")
+
+    def import_legacy(self, where, recipients=()):
+        """The tables' states, the accounts, the shape and a spool a table
+        an earlier version kept in files of their own, taken into the
+        store once and the files removed. A file that cannot be read whole
+        stops, naming it (`durable`)."""
+        from pathlib import Path
+
+        from . import durable
+        where = Path(where)
+        found = [n for n in self.LEGACY if (where / n).exists()]
+        spools = sorted((where / SPOOLS).glob("*.spool")) \
+            if (where / SPOOLS).is_dir() else []
+        if not found and not spools:
+            return False
+        tables = durable.read_state(where / self.LEGACY[0], "state") or {}
+        accounts = durable.read_state(where / self.LEGACY[1], "state") or {}
+        shape = durable.read_state(where / self.LEGACY[2], "cache")
+        states = tables.get("tables") or {}
+        with self.batch() as s:
+            for leaf, st in states.items():
+                s.put("tables", leaf, st)
+            if tables.get("scope") is not None:
+                s.put("meta", "scope", tables["scope"])
+            for t, row in accounts.items():
+                s.put("accounts", t, row)
+            if shape is not None:
+                s.put("meta", "shape", shape)
+            for path in spools:
+                leaf = next((k for k in states
+                             if _spool_name(k) == path.name), path.stem)
+                for at, changes in _legacy_frames(path):
+                    s.add_frame(leaf, at, changes, recipients)
+        for n in found:
+            (where / n).unlink(missing_ok=True)
+        for path in spools:
+            path.unlink(missing_ok=True)
+        return True
+
+    # --- as text, for a store of the machines' that keeps no files ------------
+
+    def dump(self):
+        """The store as JSON text - where the machines of a hop keep their
+        records in the target (`shared.Target`), which holds text only.
+        None where it holds changes set aside: those it cannot carry."""
+        with self.lock:
+            if self.conn.execute("select count(*) from frames").fetchone()[0]:
+                return None
+            return json.dumps({"meta": dict(self.conn.execute(
+                                   "select k, v from meta")),
+                               "tables": dict(self.conn.execute(
+                                   "select leaf, v from tables")),
+                               "accounts": dict(self.conn.execute(
+                                   "select tbl, v from accounts"))})
+
+    @classmethod
+    def load(cls, where, text):
+        """A store put in place from its `dump`."""
+        got = json.loads(text)
+        path = os.path.join(str(where), STORE)
+        cls.forget(where)
+        for extra in ("", "-wal", "-shm", "-journal"):
+            try:
+                os.unlink(path + extra)
+            except FileNotFoundError:
+                pass
+        st = cls.of(where)
+        with st.batch():
+            for tbl, rows in (("meta", got.get("meta")),
+                              ("tables", got.get("tables")),
+                              ("accounts", got.get("accounts"))):
+                for k, v in (rows or {}).items():
+                    st.conn.execute(f"insert into {tbl} values (?, ?)",
+                                    (k, v))
+        return st
+
+
+class _Transaction:
+    def __init__(self, store, gen):
+        self.store, self.gen = store, gen
+
+    def __enter__(self):
+        st = self.store
+        st.lock.acquire()
+        try:
+            st.conn.execute("begin immediate")
+            if self.gen is not None:
+                st.conn.execute("delete from undo")
+                st._undoing = set()
+        except BaseException:
+            st.lock.release()
+            raise
+        return st
+
+    def __exit__(self, kind, exc, tb):
+        st = self.store
+        try:
+            if kind is None:
+                if self.gen is not None:
+                    st.put("meta", "gen", int(self.gen))
+                st.conn.execute("commit")
+            else:
+                st.conn.execute("rollback")
+        finally:
+            st._undoing = None
+            st.lock.release()
+        return False
+
+
+def _spool_name(leaf):
+    """The file an earlier version kept a table's set-aside changes in."""
+    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_"
+                   for ch in leaf)
+    return f"{safe}.spool"
+
+
+def _legacy_frames(path):
+    """[(position text, [changes])] of an earlier version's spool file, a
+    torn last frame left out."""
+    import io
+
+    import zstandard
+
+    from . import evidence
+    raw = path.read_bytes()
+    out, at = [], 0
+    while at + 8 <= len(raw):
+        n = struct.unpack(">Q", raw[at:at + 8])[0]
+        if at + 8 + n > len(raw):
+            break
+        data = raw[at + 8:at + 8 + n]
+        try:
+            if data.startswith(evidence.AGE):
+                data = evidence._open(data)
+            got = _Values(io.BytesIO(
+                zstandard.ZstdDecompressor().decompress(data))).load()
+        except pickle.UnpicklingError:
+            raise
+        except Exception:  # noqa: BLE001 - torn, the last one
+            break
+        out.append((got[0], list(got[1])))
+        at += 8 + n
+    return out
+
+
+class Spool:
+    """The changes set aside for one table, in the order read: a frame each
+    batch that set any aside, `(where the batch was read from, [changes])`
+    (`Store`). Written in the batch's transaction, before the target
+    commits the batch and the position moves past them, so a stop loses
+    none; a batch taken back out takes its frames with it."""
+
+    def __init__(self, store, leaf, recipients=()):
+        self.store, self.leaf = store, leaf
         self.recipients = list(recipients or ())
 
-    def _seal(self, data):
-        import zstandard
-        data = zstandard.ZstdCompressor(level=3).compress(data)
-        if self.recipients:
-            from . import evidence
-            data = evidence._seal(data, self.recipients)
-        return data
-
-    @staticmethod
-    def _open(data):
-        import zstandard
-
-        from . import evidence
-        if data.startswith(evidence.AGE):
-            data = evidence._open(data)
-        return zstandard.ZstdDecompressor().decompress(data)
-
     def frames(self):
-        """[(position text, [changes])], a torn last frame left out."""
-        import pickle
-        try:
-            raw = self.path.read_bytes()
-        except OSError:
-            return []
-        out, at = [], 0
-        while at + 8 <= len(raw):
-            n = struct.unpack(">Q", raw[at:at + 8])[0]
-            if at + 8 + n > len(raw):
-                break
-            try:
-                out.append(tuple(pickle.loads(self._open(
-                    raw[at + 8:at + 8 + n]))))
-            except Exception:  # noqa: BLE001 - torn, the last one
-                break
-            at += 8 + n
-        return out
+        """[(frame id, position text, [changes])]."""
+        return [(fid, at, _unpack(body))
+                for fid, at, _, body in self.store.frames(self.leaf)]
 
     def changes(self):
-        return [c for _, got in self.frames() for c in got]
-
-    def add(self, token, changes):
-        """`changes` read in the batch after `token`, appended and
-        synced."""
-        import pickle
-        if not changes:
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        blob = self._seal(pickle.dumps((_token_text(token), list(changes))))
-        with open(self.path, "ab") as f:
-            f.write(struct.pack(">Q", len(blob)) + blob)
-            f.flush()
-            os.fsync(f.fileno())
-
-    def rewrite(self, frames):
-        """The spool as `frames`, put in place whole."""
-        import pickle
-        frames = [(at, got) for at, got in frames if got]
-        if not frames:
-            self.path.unlink(missing_ok=True)
-            return
-        tmp = self.path.with_suffix(".tmp")
-        with open(tmp, "wb") as f:
-            for at, got in frames:
-                blob = self._seal(pickle.dumps((at, got)))
-                f.write(struct.pack(">Q", len(blob)) + blob)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self.path)
-
-    def drop_batch(self, token):
-        """The frames of the batch read after `token`, gone: a batch whose
-        position was not saved is read again, and set aside again."""
-        at = _token_text(token)
-        frames = self.frames()
-        kept = [f for f in frames if f[0] != at]
-        if len(kept) != len(frames):
-            self.rewrite(kept)
+        return [c for _, _, got in self.frames() for c in got]
 
     def size(self):
-        try:
-            return self.path.stat().st_size
-        except OSError:
-            return 0
+        return self.store.spooled(self.leaf)
 
     def remove(self):
-        self.path.unlink(missing_ok=True)
+        """Every frame gone, now - between batches."""
+        with self.store.batch() as s:
+            s.drop_frames(self.leaf)
 
 
 class _HopFile:
@@ -399,42 +915,71 @@ def constant_default(text):
     return text is None or bool(_CONSTANT.match(str(text).strip()))
 
 
+def _state_text(st):
+    return json.dumps(st, sort_keys=True, default=str)
+
+
+def states(where):
+    """{table: its state} a tail keeps in `where`, read only."""
+    return Store.of(where).tables()
+
+
+def accounts(where):
+    """{table: what the tail read of it and did with it} kept in `where`
+    (`hetero._Accounts`), read only."""
+    return Store.of(where).accounts()
+
+
 class TableSet:
     """The tables of one running tail, and what each is waiting for."""
 
-    def __init__(self, pair, db, token_path, log):
+    def __init__(self, pair, db, token_path, log, env=None):
         self.pair, self.db, self.log = pair, db, log
         self.hop = pair.hop
         self.src = pair.src_engine
         self.where = token_path.parent
-        self.path = self.where / STATE
         #: the hop's `ddl` for a table no rule names (`policy`)
         self.policy = policy(self.hop)
         skipped(self.hop)
         self.most = spool_most(self.hop)
         try:
-            doc = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            doc = {}
-        try:
             from . import evidence
             self.recipients = evidence.recipients_of(self.hop)
         except Exception:  # noqa: BLE001 - kept plain
             self.recipients = []
-        self.tables = self._keyed(doc.get("tables") or {})
+        self.store = Store.of(self.where)
+        if self.store.get("stream") is None:
+            self.store.import_legacy(self.where, self.recipients)
+        if env is None:
+            from . import tailctl
+            env = tailctl.position(token_path)
+        if env is not None:
+            self.store.align(env, log, self._nothing_held)
+        stored = self.store.tables()
+        # each table's state as the store holds it, and the state it was
+        # written from: only what changed is written (audit ST19)
+        self._stored = {t: _state_text(st) for t, st in stored.items()}
+        self.tables = self._keyed(stored)
+        self._stored_obj = {}
         self.fresh = not self.tables
         #: the scope the tail last ran under (`save`), held to the hop's at
         #: the first batch: a scope changed while it was stopped is a
         #: scope changed
-        self.was = doc.get("scope") if not self.fresh else None
+        self.was = self.store.get("scope") if not self.fresh else None
+        self._scope_text = _state_text(self.store.get("scope"))
         self.lock = threading.RLock()
         self.file = _HopFile(self.hop)
         self.jobs, self.slots, self.ck = {}, None, None
         self.scope_at = self.level_at = 0.0
         # what a job beside the stream has to tell the next batch
         self.events = []
-        # what the batch in hand will do once it is saved (`commit`)
+        # what the batch in hand will do once it is saved (`committed`)
         self.pending = {}
+        # the states a batch set down (`prepare`) and not yet the tail's
+        self._prepared = None
+        # {leaf: what a copying table's held changes were last decided
+        # under}: decided again only once that moves (`release`)
+        self._released_at = {}
         self._now_mark = None
         self.entries = {}
         # copies that stopped, by table, for the wait before the next try
@@ -464,17 +1009,23 @@ class TableSet:
 
     def _keyed(self, tables):
         """The states a tail saved, each under its `key` - one saved by its
-        last part alone moved to its whole name, its spool with it."""
-        out = {}
+        last part alone moved to its whole name, what it set aside with
+        it, in the store at once."""
+        out, moved = {}, {}
         for k, st in tables.items():
             new = self.key(st.get("name") or k)
             if new != k:
-                old = self.spool(k).path
-                if old.exists():
-                    self.spool(new).path.parent.mkdir(parents=True,
-                                                      exist_ok=True)
-                    os.replace(old, self.spool(new).path)
+                moved[k] = new
             out[new] = st
+        if moved:
+            with self.store.batch() as s:
+                for old, new in moved.items():
+                    s.drop("tables", old)
+                    s.put("tables", new, out[new])
+                    s.move_frames(old, new)
+            for old, new in moved.items():
+                self._stored.pop(old, None)
+                self._stored[new] = _state_text(out[new])
         return out
 
     def _out(self, name):
@@ -484,12 +1035,20 @@ class TableSet:
     def _policy(self, name):
         return policy(self.hop, [self.db, *self._parts(name)])
 
+    def _nothing_held(self):
+        """Whether a store behind its position can be missing nothing:
+        every table live, nothing set aside, and a hop whose `ddl` stops
+        the tail at a DDL - so no batch it missed could have parked a
+        table or set a change aside (`Store.align`)."""
+        return (self.policy == "stop"
+                and all(st.get("state") == "live"
+                        for st in self.store.tables().values())
+                and not self.store.spooled())
+
     # --- files --------------------------------------------------------------
 
     def spool(self, leaf):
-        safe = "".join(ch if ch.isalnum() or ch in "._-" else "_"
-                       for ch in leaf)
-        return Spool(self.where / SPOOLS / f"{safe}.spool", self.recipients)
+        return Spool(self.store, leaf, self.recipients)
 
     def copies(self):
         """The tail's own copy checkpoint (`cli._Checkpoint` over
@@ -513,35 +1072,86 @@ class TableSet:
                 "mapping": self.hop.mapping or {}}
 
     def save(self):
-        """Written whole, before the position it goes with."""
+        """The tables' states that changed between batches, written now, at
+        the position there is - each compared, since one may have been
+        changed where it stands."""
         with self.lock:
-            text = json.dumps({"tables": self.tables,
-                               "scope": self._scope_said()}, indent=1,
-                              sort_keys=True, default=str)
-        self.where.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(text)
-        os.replace(tmp, self.path)
+            states = dict(self.tables)
+        self._write(states, None, every=True)
+
+    def _write(self, states, gen, accounts=None, pending=None, every=False):
+        """One transaction: the states of `states` that differ from the
+        store's, what the batch in hand sets aside and releases, and its
+        `accounts` - a batch's where `gen` is given (`Store.batch`), with
+        `pending`, the batch's number and where it ends, for the target's
+        mark to be held to (`hetero._committed_ahead`). In a batch only a
+        state the batch replaced is written out to be compared (`begin`
+        hands it the tail's own, each replaced, never changed where it
+        stands): 2,000 tables were 2,000 states written out a batch."""
+        # what a batch sets aside and releases goes with the batch only
+        work = {} if every else (self.pending or {})
+        texts = {t: _state_text(st) for t, st in states.items()
+                 if every or st is not self._stored_obj.get(t)}
+        changed = {t: v for t, v in texts.items()
+                   if self._stored.get(t) != v}
+        gone = [t for t in self._stored if t not in states]
+        adds = work.get("add") or {}
+        frames = work.get("frames") or {}
+        drops = work.get("drop") or ()
+        # the scope it runs under, beside its tables (`_since_stopped`)
+        scope = _state_text(self._scope_said())
+        scope = scope if scope != self._scope_text else None
+        if gen is None and not (changed or gone or adds or frames or drops
+                                or accounts or scope):
+            self._stored_obj = dict(states)
+            return
+        with self.store.batch(gen) as s:
+            for t, v in changed.items():
+                s.put("tables", t, json.loads(v))
+            for t in gone:
+                s.drop("tables", t)
+            for leaf in drops:
+                s.drop_frames(leaf)
+            for fid, stay in frames.items():
+                s.set_frame(fid, stay, self.recipients)
+            for leaf, got in adds.items():
+                for at, changes in got:
+                    s.add_frame(leaf, at, changes, self.recipients)
+            for t, row in (accounts or {}).items():
+                s.put("accounts", t, row)
+            if gen is not None:
+                s.put("meta", "pending", pending)
+            if scope is not None:
+                s.put("meta", "scope", json.loads(scope))
+        if scope is not None:
+            self._scope_text = scope
+        self._stored.update(changed)
+        for t in gone:
+            self._stored.pop(t, None)
+        self._stored_obj = dict(states)
 
     def resumed(self, token):
-        """The tail started at `token`: what the batch after it set aside
-        before a stop is dropped - that batch is read again - and a copy
-        or a catch-up that was running is started again, from its
-        checkpoint."""
+        """The tail started at `token`: a copy or a catch-up that was
+        running is started again, from its checkpoint. What a batch set
+        aside that its position never passed is gone already
+        (`Store.align`)."""
         for leaf, st in list(self.tables.items()):
-            if st["state"] in ("parked", "copying"):
-                self.spool(leaf).drop_batch(token)
             if st["state"] == "copying":
                 self._start(leaf, st, fresh=False)
             if st["state"] == "removed" and "digest" not in st \
                     and st.get("why") != "dropped on the source":
                 self._submit(leaf, self._digest_removed)
 
-    def forget(self, token):
-        """A batch that was not saved: what it set aside is dropped, and
-        what it would have done is not done."""
-        for leaf in list(self.tables):
-            self.spool(leaf).drop_batch(token)
+    def forget(self, token=None):
+        """A batch whose position was not saved: what it set down is taken
+        back out (`Store.undo`), and what it would have done is not
+        done."""
+        if self._prepared is not None:
+            self.store.undo()
+            self._stored = {t: _state_text(st) for t, st
+                            in self.store.tables().items()}
+            self._stored_obj = dict(self.tables)
+            self._prepared = None
         self.pending = {}
 
     # --- scope, between batches -------------------------------------------
@@ -827,21 +1437,27 @@ class TableSet:
         that left, a spool dropped for a table that no longer sets one
         aside."""
         with self.lock:
-            todo = [(t, dict(st)) for t, st in self.tables.items()]
+            todo = [(t, dict(st)) for t, st in self.tables.items()
+                    if (st["state"] == "copying" and st.get("start"))
+                    or (st["state"] == "removed" and "said" not in st)
+                    or (self.quiet is not None and t not in self.quieted
+                        and st["state"] in ("live", "copying"))]
         for leaf, st in todo:
             if st["state"] in ("live", "copying") and not self._quiet(leaf,
                                                                      st):
                 continue
             if st["state"] == "copying" and st.get("start"):
                 with self.lock:
-                    self.tables[leaf].pop("start", None)
+                    self.tables[leaf] = {k: v for k, v in
+                                         self.tables[leaf].items()
+                                         if k != "start"}
                 self._stop_job(leaf)
                 self.spool(leaf).remove()
                 self._start(leaf, st, fresh=True)
             elif st["state"] == "removed" and "said" not in st:
                 self._stop_job(leaf)
                 with self.lock:
-                    self.tables[leaf]["said"] = True
+                    self.tables[leaf] = {**self.tables[leaf], "said": True}
                 self.spool(leaf).remove()
                 if st.get("why") != "dropped on the source":
                     self._submit(leaf, self._digest_removed)
@@ -849,6 +1465,7 @@ class TableSet:
                          f" {str(st['at'])[:60]} - {st['why']}; its"
                          " changes are left out and counted, and its target"
                          " is left as it is")
+        return bool(todo)
 
     def _quiet(self, leaf, st):
         """The target's triggers held off for a table the tail takes, once
@@ -1110,16 +1727,28 @@ class TableSet:
         and the changes routed in one batch are held to the same, so a
         range landing in between cannot let a newer change past an older
         one held for it."""
+        import copy
         self._events()
         self._now_mark = None
-        ck = self.copies()
-        with ck._lock:
-            self.entries = json.loads(json.dumps(
-                {k: v for k, v in ck.items() if isinstance(v, dict)},
-                default=str))
-        self.pending = {"spools": {}, "said": []}
+        # the tail's own states, each replaced where the batch changes it
+        # and never changed where it stands (`ddl`, `route`, `release`,
+        # `park`) - a batch read again finds them as they were
         with self.lock:
-            return {t: dict(st) for t, st in self.tables.items()}
+            states = dict(self.tables)
+        # the entries of the tables being copied only: every table the
+        # tail ever copied went through JSON each batch (audit ST19)
+        keys = {self._entry(t) for t, st in states.items()
+                if st.get("state") == "copying"}
+        self.entries = {}
+        if keys:
+            ck = self.copies()
+            with ck._lock:
+                self.entries = copy.deepcopy(
+                    {k: ck[k] for k in keys
+                     if isinstance(ck.get(k), dict)})
+        self.pending = {"add": {}, "frames": {}, "drop": [], "said": [],
+                        "seen": {}, "live": []}
+        return states
 
     def _now(self):
         if self._now_mark is None:
@@ -1167,19 +1796,40 @@ class TableSet:
             return bool(st.get("done"))
         return bool((self.entries.get(self._entry(leaf)) or {}).get("done"))
 
+    def _decided_by(self, leaf, st):
+        """What a copying table's held changes are decided by: its copy's
+        ranges planned, begun and landed, whether it is done - a change
+        held under one of these stays held until one of them moves (a
+        range begins or lands), so its frames are not read again every
+        batch while nothing it waits on has (audit ST18: 200,000 held
+        changes read, unpickled and written back whole, 259 ms + 126 ms a
+        batch)."""
+        entry = self.entries.get(self._entry(leaf)) or {}
+        return (st.get("way"), bool(st.get("done")), bool(entry.get("done")),
+                len(entry.get("ranges") or ()),
+                len(entry.get("ranges_done") or ()),
+                len(entry.get("ranges_seen") or ()),
+                entry.get("mark_before") is not None)
+
     def release(self, states):
         """(the changes set aside earlier that may be applied now, in
         their order, {table: how many}, how many were found in what a copy
         read): a copying table's held changes held to its ranges as they
         stand, a level parked table's all. A table with nothing left held
-        and its copy done is live from this batch on."""
+        and its copy done is live from this batch on. A frame whose
+        changes all stay is not written; one half released is written with
+        the rest; one released whole is deleted - the spool is not
+        rewritten."""
         out, gone = [], 0
         for leaf, st in sorted(states.items()):
             if st["state"] == "copying":
-                frames = self.spool(leaf).frames()
-                keep, went = [], []
-                for at, got in frames:
-                    stay = []
+                by = self._decided_by(leaf, st)
+                if self._released_at.get(leaf) == by:
+                    continue
+                self.pending["seen"][leaf] = by
+                held = 0
+                for fid, _, got in self.spool(leaf).frames():
+                    stay, went = [], []
                     for c in got:
                         v = self._verdict(leaf, st, c)
                         if v == "held":
@@ -1188,19 +1838,19 @@ class TableSet:
                             went.append(c)
                         else:
                             gone += 1
-                    keep.append((at, stay))
-                if sum(len(g) for _, g in keep) != sum(len(g) for _, g
-                                                       in frames):
-                    self.pending["spools"][leaf] = keep
-                out += went
-                if not any(g for _, g in keep) and self._landed(leaf, st):
+                    if len(stay) != len(got):
+                        self.pending["frames"][fid] = stay
+                    held += len(stay)
+                    out += went
+                if not held and self._landed(leaf, st):
                     states[leaf] = {"state": "live", "name": st["name"]}
+                    self.pending["live"].append(leaf)
                     self.pending["said"].append(
                         f"{leaf}: caught up - its changes are applied as"
                         " they are read again")
             elif st["state"] == "parked" and st.get("level"):
                 out += self.spool(leaf).changes()
-                self.pending["spools"][leaf] = []
+                self.pending["drop"].append(leaf)
                 states[leaf] = {"state": "live", "name": st["name"]}
                 self.pending["said"].append(
                     f"{leaf}: its target is level - what was set aside is"
@@ -1251,14 +1901,11 @@ class TableSet:
                 else:
                     put.setdefault(leaf, []).append(c)
                     left[HELD][c["table"]] += 1
+        adds = self.pending.setdefault("add", {})
         for leaf, got in put.items():
-            again = (self.pending.get("spools") or {}).get(leaf)
-            if again is not None:
-                # its spool is rewritten as the batch is saved (`commit`):
-                # what this batch sets aside goes in with it
-                again.append((_token_text(token), got))
-            else:
-                self.spool(leaf).add(token, got)
+            # written with the batch (`prepare`), before the target
+            # commits it
+            adds.setdefault(leaf, []).append((_token_text(token), got))
         return out, left
 
     def _names_among(self, states, change):
@@ -1420,19 +2067,45 @@ class TableSet:
         except Exception:  # noqa: BLE001 - said above already
             pass
 
-    def commit(self, states):
-        """The batch applied, before its position is saved: what it
-        released goes from the spools, its states become the tail's and
-        are written, and what they ask for is started."""
-        for leaf, frames in (self.pending.get("spools") or {}).items():
-            self.spool(leaf).rewrite(frames)
-        for said in self.pending.get("said") or ():
+    def prepare(self, states, gen, accounts=None, pending=None):
+        """The batch set down in one transaction before the target commits
+        it (`Store`): its states, what it sets aside and releases, its
+        `accounts`, and `gen` - one past the position's - with what each
+        replaced, to be taken back out where the position never passes
+        it. `gen` None: a batch that does not move the position, written
+        at the one there is."""
+        self._write(states, gen, accounts, pending)
+        self._prepared = states
+
+    def committed(self, states=None):
+        """The batch's position is saved: its states are the tail's, what
+        they ask for is started, and the store keeps it for good."""
+        if states is None:
+            states = self._prepared
+        self._prepared = None
+        self.store.settled()
+        pending, self.pending = self.pending or {}, {}
+        for said in pending.get("said") or ():
             self.log(said)
-        self.pending = {}
+        self._released_at.update(pending.get("seen") or {})
         with self.lock:
             self.tables = states
-        self._settle()
-        self.save()
+        if pending.get("live"):
+            # a table live again needs its copy's entry no more
+            ck = self.copies()
+            with ck._lock:
+                for leaf in pending["live"]:
+                    ck.pop(self._entry(leaf), None)
+                    self._released_at.pop(leaf, None)
+                ck.save()
+        if self._settle():
+            self.save()
+
+    def commit(self, states):
+        """A batch set down and made the tail's at once: one that does not
+        move the position (`prepare` with no generation)."""
+        self.prepare(states, None)
+        self.committed(states)
 
     # --- parked tables coming level, between batches ---------------------
 
@@ -1499,9 +2172,10 @@ class TableSet:
     def spilled(self):
         """{table: bytes} set aside now, for `/metrics`."""
         with self.lock:
-            names = [t for t, st in self.tables.items()
-                     if st["state"] in ("parked", "copying")]
-        return {t: self.spool(t).size() for t in names}
+            names = {t for t, st in self.tables.items()
+                     if st["state"] in ("parked", "copying")}
+        got = self.store.spooled()
+        return {t: got.get(t, 0) for t in sorted(names)}
 
     def taken(self):
         """The keys of the tables the tail carries or is taking in."""

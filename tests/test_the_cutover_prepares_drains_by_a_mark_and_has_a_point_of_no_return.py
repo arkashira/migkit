@@ -546,3 +546,56 @@ def test_migkits_batch_table_goes_only_where_asked_and_no_tail_needs_it(
         _hop(tmp_path))
     with pytest.raises(SystemExit, match="keep, or drop"):
         hopkeys.origin_dropped(_hop(tmp_path, origin_table="maybe"))
+
+
+def test_a_cutover_under_way_is_never_undone_by_the_next_run(tmp_path):
+    """The record of a run under way was read as a run that had stopped:
+    a second `--go` undid the cutover in flight (audit ST8). A run holds
+    the cutover's lease while it acts; the next is refused and leaves
+    the record alone, and once the run is gone its record is what an
+    interrupted one left."""
+    from migkit import lease
+    hop = _hop(tmp_path, cutover={"budget": 30})
+    cutover._save(hop, {"id": "r1", "began": time.time(), "dbs": ["app"],
+                        "state": "running", "settings":
+                        cutover.settings(hop),
+                        "phases": {"freeze": {"began": time.time()}}})
+    under_way = cutover._held(hop, lambda m: None)
+    said = []
+
+    def approve(*a):
+        raise AssertionError("nothing is asked of a run that is refused")
+    try:
+        with pytest.raises(lease.Held, match="cutover is running"):
+            cutover.run(hop, None, ["app"], True, cutover.Leg("native"),
+                        said.append, approve)
+        assert cutover.record(hop)["state"] == "running"
+        assert cutover.run(hop, None, ["app"], False, cutover.Leg("native"),
+                           said.append, approve) is None
+        assert "is running" in said[-1] and "freeze" in said[-1], said
+        assert any("a cutover is running" in s
+                   for s in cutover.said_by_doctor(hop))
+    finally:
+        under_way.release()
+    assert cutover.running(hop) is None
+    assert any("a cutover stopped at freeze" in s
+               for s in cutover.said_by_doctor(hop))
+
+
+def test_a_cutover_that_ended_is_on_the_disk_before_its_record_goes(
+        tmp_path, monkeypatch):
+    """`_close` appended the run to the runs' log without a sync and
+    removed the record: a power loss could keep the removal and lose the
+    line, and a flipped cutover was forgotten."""
+    from migkit import durable
+    hop = _hop(tmp_path)
+    cutover._save(hop, {"id": "r2", "began": time.time(), "phases": {}})
+    order = []
+    real = durable.append_line
+    monkeypatch.setattr(durable, "append_line", lambda *a, **k: (
+        order.append(("line", cutover._path(hop).exists())),
+        real(*a, **k))[1])
+    cutover._close(hop, cutover.record(hop), "flipped")
+    assert order == [("line", True)]
+    assert cutover.record(hop) is None
+    assert cutover.last_run(hop, after=True)["id"] == "r2"

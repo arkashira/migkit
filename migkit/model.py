@@ -413,11 +413,9 @@ class Model:
     def save(self, where):
         """Kept beside the move's reports as `model.json`: `watch`, the
         metrics and the next run read it."""
-        path = os.path.join(str(where), "model.json")
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.to_dict(), f, indent=1, default=str)
-        os.replace(tmp, path)
+        from . import durable
+        durable.write_json(os.path.join(str(where), "model.json"),
+                           self.to_dict(), indent=1)
 
 
 def _least(stages):

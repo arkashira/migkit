@@ -624,14 +624,11 @@ def refresh(region="us-east-1", session=None, names=None):
     prices = _prices(session, region, list(got) or names)
     for name, price in prices.items():
         got.setdefault(name, {})["price_hour"] = {region: price}
-    path = _refreshed_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({
+    from . import durable
+    durable.write_json(_refreshed_path(), {
         "refreshed": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "refreshed_at": time.time(), "region": region,
-        "types": {"aws": got}}, indent=1))
-    os.replace(tmp, path)
+        "types": {"aws": got}}, indent=1)
     return len(got)
 
 
@@ -800,17 +797,12 @@ def _load_path(hop):
 
 def keep(hop, seen):
     """Add one observation to the hop's, and return them all."""
-    path = _load_path(hop)
-    try:
-        got = json.loads(path.read_text())
-    except (OSError, ValueError):
-        got = []
-    got.append(seen)
-    del got[:-KEEP]
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(got, indent=1))
-    os.replace(tmp, path)
-    return got
+    from . import durable
+
+    def add(got):
+        got.append(seen)
+        del got[:-KEEP]
+    return durable.change_json(_load_path(hop), add, empty=list, indent=1)
 
 
 def kept(hop):

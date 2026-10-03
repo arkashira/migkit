@@ -796,11 +796,8 @@ def _record(hop):
 
 
 def _save(hop, rec):
-    import os
-    path = _path(hop)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=1, default=str))
-    os.replace(tmp, path)
+    from . import durable
+    durable.write_json(_path(hop), rec, indent=1)
 
 
 def _audit(hop, entry):

@@ -65,13 +65,19 @@ class Checkpoint:
     because a corrupt checkpoint is worse than no checkpoint - it would
     silently drop ranges from the total. Read as a cache: one that cannot
     be read is started over, which re-checks what it held and loses
-    nothing.
+    nothing. Two checks of one database save into one file: each save
+    takes the file's lock and writes the tables it worked on over what
+    the file holds now, keeping the other's (audit ST23) - each wrote its
+    whole view over the other's before.
     """
 
     def __init__(self, path):
         self.path = path
         self._lock = threading.Lock()
         self._data = {"format_version": FORMAT_VERSION, "tables": {}}
+        # the tables this run worked on: its saves write those, and keep
+        # what another run saved of the rest
+        self._touched = set()
         if path:
             from .durable import read_state
             loaded = read_state(path, "cache")
@@ -89,6 +95,7 @@ class Checkpoint:
         would make an adaptive size defeat resumability instead of helping it.
         """
         with self._lock:
+            self._touched.add(table)
             entry = self._data["tables"].get(table)
             if entry and entry.get("done") and entry.get("chunk"):
                 return int(entry["chunk"])
@@ -104,6 +111,7 @@ class Checkpoint:
         """
         fp = fingerprint(expr, ranges)
         with self._lock:
+            self._touched.add(table)
             entry = self._data["tables"].get(table)
             if not entry or entry.get("fingerprint") != fp:
                 entry = {"fingerprint": fp, "done": {},
@@ -123,6 +131,7 @@ class Checkpoint:
         kind; else `fresh`, kept with the partials to come. Called after
         `begin`, which has already dropped partials of another plan."""
         with self._lock:
+            self._touched.add(table)
             entry = self._data["tables"].setdefault(
                 table, {"fingerprint": "", "done": {}})
             if not entry.get("done") or not entry.get("salt"):
@@ -133,6 +142,7 @@ class Checkpoint:
 
     def record(self, table, lo, hi, rows, checksum):
         with self._lock:
+            self._touched.add(table)
             entry = self._data["tables"].setdefault(
                 table, {"fingerprint": "", "done": {}})
             entry["done"][_key(lo, hi)] = [int(rows), str(checksum)]
@@ -158,14 +168,109 @@ class Checkpoint:
         """Forget a table's partials - used once it is fully verified, so the
         file does not grow into a record of every table ever checked."""
         with self._lock:
+            self._touched.add(table)
             self._data["tables"].pop(table, None)
             self._flush()
 
     def _flush(self):
         if not self.path:
             return
-        from .durable import write_atomic
-        write_atomic(self.path, json.dumps(self._data, separators=(",", ":")))
+        from .durable import locked, read_state, write_atomic
+        with locked(self.path):
+            disk = read_state(self.path, "cache")
+            merged = {"format_version": FORMAT_VERSION, "tables": {}}
+            if isinstance(disk, dict) and \
+                    disk.get("format_version") == FORMAT_VERSION:
+                merged["tables"].update(disk.get("tables") or {})
+            for table in self._touched:
+                if table in self._data["tables"]:
+                    merged["tables"][table] = self._data["tables"][table]
+                else:
+                    merged["tables"].pop(table, None)
+            write_atomic(self.path, json.dumps(merged,
+                                               separators=(",", ":")))
+
+
+# ---- the copy's checkpoint and its journal ---------------------------------
+
+#: the key a copy's checkpoint names its journal by
+JOURNAL = "__journal__"
+
+
+def journal_of(path):
+    """The journal beside a copy's checkpoint (`move.json`)."""
+    from pathlib import Path
+    path = Path(path)
+    return path.with_name(path.name + ".journal")
+
+
+def read_move(path, kind="position"):
+    """A copy's checkpoint as its file and the journal after it say: its
+    entries, each range begun and landed since the file was written added
+    back from the journal (`replay`); None where there is neither.
+
+    The one reader of a copy's checkpoint - the copier resuming, the
+    tail's `_CopiedRanges`, a tail going on from a copy of topics, the
+    dashboard, the evidence (audit 2026-10-01, ST17). A reader of the file
+    alone misses the ranges the journal holds: the tail would apply what
+    the copy read, or leave out what it did not. The journal's lines count
+    only for the file whose journal they were written under (its
+    `JOURNAL`): a file written whole since starts one of its own, and a
+    line left over from before it is not added to it. `kind` is the file's
+    torn-file policy (`durable.read_state`): a copy's position stops; the
+    dashboard reads it as a cache."""
+    from . import durable
+    snap = durable.read_state(path, kind)
+    lines = durable.read_lines(journal_of(path),
+                               "cache" if kind == "cache" else "journal")
+    if snap is None and not lines:
+        return None
+    if not isinstance(snap, dict):
+        snap = {}
+    jid = snap.pop(JOURNAL, None)
+    replay(snap, [e for e in lines if jid is not None
+                  and isinstance(e, dict) and e.get("j") == jid])
+    return snap
+
+
+def replay(entries, lines):
+    """The journal's `lines` added to a checkpoint's `entries`, in order:
+    a range begun (`seen`: its start and the mark it was begun under) and
+    a range landed (`done`, with how far every range from the start has
+    landed then, `last`) - the only two things the journal holds, both
+    written by `ranges`."""
+    done = {}
+    for e in lines:
+        st = entries.setdefault(e["k"], {})
+        if "seen" in e:
+            after, mark = e["seen"]
+            st.setdefault("ranges_seen", {})[str(after)] = mark
+        if "done" in e:
+            have = st.setdefault("ranges_done", [])
+            got = done.get(e["k"])
+            if got is None:
+                got = done[e["k"]] = set(have)
+            if e["done"] not in got:
+                got.add(e["done"])
+                have.append(e["done"])
+            if e.get("last") is not None:
+                st["last"] = e["last"]
+    return entries
+
+
+def write_move(path, entries):
+    """A copy's checkpoint written whole, with a journal of its own begun
+    (`read_move`): for a writer other than the copier's own checkpoint
+    (a mirror of topics keeping their positions where the copier does)."""
+    import secrets
+
+    from . import durable
+    body = dict(entries)
+    body.pop(JOURNAL, None)
+    body[JOURNAL] = secrets.token_hex(6)
+    durable.write_atomic(path, json.dumps(body, separators=(",", ":"),
+                                          default=str))
+    journal_of(path).unlink(missing_ok=True)
 
 
 # What one chunk should take. Long enough that per-query overhead is noise,

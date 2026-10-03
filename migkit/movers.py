@@ -6529,16 +6529,19 @@ def _follow_runs(hop):
 def _follow_until_asked(hop, db, d, env, proc, log=None):
     """A leg left applying until someone asks it to end - ctrl-c, a
     service manager's stop, or `tail.stop` beside the hop's position
-    (`tailctl`) - and then ended as a catch-up is: its end named at the
-    source's position of that moment, so what was written before the
-    request reaches the target. Marked running while it waits, for
-    `/metrics` and for a repair to see it; returns once the end is
-    named, for the caller to wait for the leg to reach it."""
+    (`tailctl`), or the end of the schedule's slot it runs in (audit
+    K14: it held the slot until `max_duration` cut it off) - and then
+    ended as a catch-up is: its end named at the source's position of
+    that moment, so what was written before the request reaches the
+    target. Marked running while it waits, for `/metrics` and for a
+    repair to see it; returns once the end is named, for the caller to
+    wait for the leg to reach it."""
     import signal
     import time as _t
 
-    from . import tailctl
+    from . import schedule, tailctl
     where = hop.report_dir(db)
+    ends = schedule.slot_end()
     asked = []
 
     def ask(*_):
@@ -6548,21 +6551,25 @@ def _follow_until_asked(hop, db, d, env, proc, log=None):
     except ValueError:
         before = None
     try:
-        with tailctl.Running(where):
+        with tailctl.Running(where, hop):
             if log:
                 log("the change leg applies until it is asked to end:"
-                    f" ctrl-c, or `tail.stop` in {where}")
+                    f" ctrl-c, or `tail.stop` in {where}"
+                    + (", or the schedule's slot ends" if ends else ""))
             try:
                 while proc.poll() is None and not asked \
-                        and not tailctl.stop_asked(where):
+                        and not tailctl.stop_asked(where) \
+                        and (ends is None or _t.time() < ends):
                     _t.sleep(2)
             except KeyboardInterrupt:
                 asked.append(True)
             if proc.poll() is not None:
                 return
             if log:
-                log("asked to end: the leg applies up to the source's"
-                    " position of now, then stops")
+                log(("asked to end" if asked or ends is None
+                     or _t.time() < ends else "the schedule's slot ended")
+                    + ": the leg applies up to the source's position of"
+                    " now, then stops")
             _follow_end(d, env, log)
     finally:
         if before is not None:

@@ -991,7 +991,10 @@ class Hop:
 
     def report_dir(self, db=""):
         d = REPORTS / self.name / db if db else REPORTS / self.name
-        d.mkdir(parents=True, exist_ok=True)
+        # this user's only: what migkit keeps there holds values and the
+        # position of every stream (audit SEC10)
+        from .durable import private_dir
+        private_dir(d)
         # the files under it that hold values encrypted, where the hop
         # names who may read them (`evidence`)
         from . import evidence
@@ -1435,7 +1438,7 @@ def _secret(val):
         p = Path(val[5:]).expanduser()
         if not p.exists():
             raise SystemExit(f"secret file '{p}' not found")
-        return p.read_text().strip()
+        return trusted_file(p, "the secret file").read_text().strip()
     if val.startswith("vault:"):
         return _vault_read(val[6:])
     if val.startswith("aws-sm:"):
@@ -1447,6 +1450,32 @@ def _secret(val):
     if val.startswith("keyring:"):
         return keychain_read(val[8:])
     return val
+
+
+def trusted_file(path, what, owners=None):
+    """`path`, refused where a user other than its owner may change it:
+    writable by every user of the machine, or in a directory every user
+    may replace it in (writable, no sticky bit) - and, with `owners`, a
+    file belonging to a user outside them. A secret, or a list of who
+    may approve, that anyone could rewrite says nothing (audit SEC21)."""
+    import stat
+    p = Path(path)
+    st = p.stat()
+    if st.st_mode & stat.S_IWOTH:
+        raise SystemExit(f"{what} {p} may be changed by every user of this"
+                         " machine; make it writable by its owner alone"
+                         " (chmod o-w)")
+    d = p.resolve().parent.stat()
+    if d.st_mode & stat.S_IWOTH and not d.st_mode & stat.S_ISVTX:
+        raise SystemExit(f"{what} {p} is in a directory every user of this"
+                         " machine may write, where any of them may put"
+                         " another file in its place; keep it in one only"
+                         " its owner writes")
+    if owners is not None and st.st_uid not in owners:
+        raise SystemExit(f"{what} {p} belongs to another user of this"
+                         f" machine (uid {st.st_uid}), who may change it;"
+                         " it is taken only from this user or root")
+    return p
 
 
 def _aws_secret(ref):

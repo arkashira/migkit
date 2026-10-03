@@ -78,6 +78,30 @@ def test_the_leg_ends_at_the_position_of_the_moment_it_is_asked(
     assert not tailctl.alive(tmp_path)
 
 
+def test_a_leg_a_slot_started_ends_at_the_slot_s_end(tmp_path,
+                                                     monkeypatch):
+    """A scheduled leg the hop keeps applying until asked held its slot
+    until the schedule's `max_duration` cut it off, and the slot counted
+    as failed (audit K14)."""
+    hop = _hop({"follow_until": "stopped"})
+    hop.report_dir = lambda db=None: tmp_path
+    monkeypatch.setenv(schedule.SLOT_ENDS, str(time.time() + 1))
+    ended, said = [], []
+    proc = _Proc()
+
+    def end(d, env, log=None):
+        ended.append(time.time())
+        proc.ended = True
+    monkeypatch.setattr(movers, "_follow_end", end)
+    began = time.time()
+    movers._follow_until_asked(hop, "d", tmp_path / "follow", {}, proc,
+                               said.append)
+    assert ended and ended[0] - began < 10
+    assert "slot ends" in said[0], said
+    assert said[-1].startswith("the schedule's slot ended"), said
+    assert not tailctl.alive(tmp_path)
+
+
 DB = "postgres"
 
 

@@ -404,10 +404,8 @@ class SapOdpEngine(Engine):
             return {}
 
     def _keep_initial(self, db, got):
-        path = self.hop.report_dir(db) / INITIAL
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(got, indent=1))
-        tmp.replace(path)
+        from .. import durable
+        durable.write_json(self.hop.report_dir(db) / INITIAL, got, indent=1)
 
     def _rows_of(self, side, db, table, columns, track=False):
         """The entity set's rows, `columns` in order, a page at a time:

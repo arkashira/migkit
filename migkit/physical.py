@@ -1249,10 +1249,8 @@ def seeded(hop):
 
 
 def _save_seed(hop, record):
-    path = _seed_path(hop)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(record, indent=1))
-    os.replace(tmp, path)
+    from . import durable
+    durable.write_json(_seed_path(hop), record, indent=1)
 
 
 def _record_positions(hop, dbs, before, exact):
