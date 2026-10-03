@@ -4509,7 +4509,11 @@ class HeteroEngine(Engine):
 
     #: source engines whose change log carries every DDL, as it happened
     #: (`LOG_CARRIES_DDL`): a MySQL binlog logs each statement, and the
-    #: reader hands each over (`canon.ddl`)
+    #: reader hands each over (`canon.ddl`). The rest ask their catalogue
+    #: every batch, by its digest first (`_shape_now`): PostgreSQL's
+    #: logical decoding carries no DDL but a TRUNCATE, SQL Server's change
+    #: tables none, SQLite keeps no log; Oracle's redo and TiDB's feed
+    #: carry DDL, but their readers hand on only the rows
     _DDL_LOGGED = ("mysql",)
 
     def _tail_batch(self, db, changes, lacking, tables, two_way, token,
