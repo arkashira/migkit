@@ -140,25 +140,43 @@ def _objects_section(hop, dbs):
             f'</thead><tbody>{"".join(rows)}</tbody></table></div>')
 
 
-def _scope_section(hop):
+def _scope_section(hop, taken=None):
     """What the hop takes, under the verdict it qualifies: a `same` is
     about these and nothing else (`verdict.hop_scope`). Nothing for a hop
-    that takes everything whole."""
+    that takes everything whole.
+
+    `taken` is the verdict file of answers taken earlier (`from_summary`):
+    the scope said is the one they were taken under, as it was recorded,
+    and where the hop's is another now, that is said beside it. The
+    report rendered today's scope over yesterday's answers, so a `same`
+    read as covering what the hop takes now. A verdict file that kept no
+    scope predates this, and the hop's is said as it always was."""
     from . import verdict
-    scope = verdict.hop_scope(hop)
-    if not scope:
+    if taken is not None and not taken.get("scope_fingerprint"):
+        taken = None
+    scope = verdict.hop_scope(hop) if taken is None else \
+        (taken.get("scope") or {})
+    changed = taken is not None and hasattr(hop, "scope_changed") \
+        and hop.scope_changed(taken)
+    if not scope and not changed:
         return ""
-    words = {"include": "takes only", "exclude": "leaves out",
-             "row_filters": "rows filtered in",
-             "column_rules": "columns chosen in",
-             "renamed": "renamed", "changes_carried": "changes carried",
-             "objects_not_carried": "objects not carried",
-             "objects_named": "only these objects"}
-    rows = "".join(
-        f'<tr><td class="db">{words[k]}</td>'
-        f'<td>{html.escape(", ".join(v[:40]))}'
-        f'{" ..." if len(v) > 40 else ""}</td></tr>'
-        for k, v in scope.items())
+
+    def rows_of(said):
+        return "".join(
+            f'<tr><td class="db">{html.escape(what)}</td>'
+            f'<td>{html.escape(", ".join(v[:40]))}'
+            f'{" ..." if len(v) > 40 else ""}</td></tr>'
+            for what, v in verdict.scope_said(said))
+    rows = rows_of(scope) or ('<tr><td class="db">took</td><td>everything,'
+                              ' whole</td></tr>')
+    if changed:
+        now = verdict.hop_scope(hop)
+        rows += ('<tr><td class="db">the hop now</td><td>takes another'
+                 ' scope than these answers were taken under: they are'
+                 ' about the scope above, and `migkit check` takes them'
+                 ' under the one below</td></tr>'
+                 + (rows_of(now) or '<tr><td class="db">takes</td>'
+                    '<td>everything, whole</td></tr>'))
     return (f'<div class="card"><h2>scope (what the verdict covers)</h2>'
             f'<table><tbody>{rows}</tbody></table></div>')
 
@@ -189,13 +207,15 @@ def _service_section(hop, results):
 _WORST = ("error", "diff", "warn", "skip", "ok")
 
 
-def render(hop, results, generated=None, decided=None):
+def render(hop, results, generated=None, decided=None, taken=None):
     """The report of a check's answers. It reads them and changes nothing:
     the verdict is `verdict.decide`'s - the one the check's exit code and
     `verdict.json` hold - and a cell shows its worst answer, a skip as a
     skip. It once rewrote a `diff` whose detail said no row differed into
     an `ok`, in the very rows the check then counted its exit code from:
-    the console said different, then "all green", and exited 0."""
+    the console said different, then "all green", and exited 0. `taken`:
+    the verdict file the answers were kept with, where they were taken
+    earlier - their scope is the one it recorded (`_scope_section`)."""
     from . import verdict
     generated = generated or time.strftime("%Y-%m-%d %H:%M:%S")
     results = [dict(r) for r in results]
@@ -273,7 +293,8 @@ def render(hop, results, generated=None, decided=None):
         if hop.target.configured() else "(not configured)"
 
     objects_html = _objects_section(hop, dbs)
-    scope_html = _scope_section(hop) + _service_section(hop, results)
+    scope_html = _scope_section(hop, taken) + _service_section(hop,
+                                                                results)
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -295,15 +316,17 @@ def render(hop, results, generated=None, decided=None):
 </div></body></html>"""
 
 
-def write_report(hop, results, out_path=None, generated=None, decided=None):
+def write_report(hop, results, out_path=None, generated=None, decided=None,
+                 taken=None):
     out = Path(out_path) if out_path else hop.report_dir() / "report.html"
-    out.write_text(render(hop, results, generated, decided))
+    out.write_text(render(hop, results, generated, decided, taken))
     return out
 
 
 def from_summary(hop):
     """The report of the last check, from what it left on disk - its
-    answers, and what it was narrowed to - never changing them."""
+    answers, what it was narrowed to and the scope it was taken under -
+    never changing them."""
     from . import verdict
     p = hop.report_dir() / "summary.json"
     if not p.exists():
@@ -312,9 +335,11 @@ def from_summary(hop):
                               time.localtime(p.stat().st_mtime))
     results = json.loads(p.read_text())
     try:
-        coverage = json.loads((hop.report_dir() / "verdict.json")
-                              .read_text()).get("coverage")
+        taken = json.loads((hop.report_dir() / "verdict.json").read_text())
     except (OSError, ValueError):
-        coverage = None
+        taken = None
+    taken = taken if isinstance(taken, dict) else None
+    coverage = (taken or {}).get("coverage")
     return write_report(hop, results, None, generated,
-                        verdict.decide(results, hop, coverage)), generated
+                        verdict.decide(results, hop, coverage),
+                        taken), generated

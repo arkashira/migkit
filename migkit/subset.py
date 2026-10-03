@@ -447,7 +447,7 @@ def _targets(pair, db):
     """{source table: its name on the target}, by the hop's renames."""
     pairs, _, _, _ = pair.match_tables(
         pair.src_engine.neutral_tables("src", db),
-        pair.dst_engine.neutral_tables("dst", db), pair._rename)
+        pair.dst_engine.neutral_tables("dst", db), pair._renamer(db))
     return dict(pairs)
 
 

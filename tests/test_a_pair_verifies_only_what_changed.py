@@ -120,3 +120,43 @@ def test_a_source_read_through_the_tails_slot_is_not_read_here(pg_pair,
                          password="test"), tmp_path).delta_verify("cx")
     assert [r.status for r in got] == ["error"], got
     assert "the slot is the tail's" in got[0].detail, got[0].detail
+
+
+def test_the_changed_rows_are_read_through_the_hops_scope(mysql, pg_pair,
+                                                          tmp_path):
+    """The keys were asked of both sides whatever the hop's row filter
+    said: a changed source row the filter leaves behind read as missing
+    on the target every cycle, and the position never moved. And a
+    changed table the hop leaves out read as a table the target lacks."""
+    from migkit.engines.hetero import HeteroEngine
+    dst = pg_pair["dst"]
+    psql(dst, "drop database if exists cx")
+    assert psql(dst, "create database cx").returncode == 0
+    _my("drop table if exists t, logs; create table t (id int primary key,"
+        " region varchar(8)); insert into t values (1, 'TH'), (2, 'US');"
+        " create table logs (id int primary key)")
+    psql(dst, "create table t (id bigint primary key, region varchar(8));"
+              " insert into t values (1, 'TH')", db="cx")
+    hop = Hop(name="pd", engine="hetero",
+              options={"source_engine": "mysql", "target_engine": "postgres"},
+              source=Endpoint(host="127.0.0.1", port=MY_PORT, user="root",
+                              password="test"),
+              target=Endpoint(host="127.0.0.1", port=dst, user="postgres",
+                              password="test"),
+              databases=["cx"], exclude=["logs"],
+              mapping={"where": {"t": "region = 'TH'"}})
+    hop.report_dir = lambda db=None: tmp_path
+    eng = HeteroEngine(hop)
+    (tmp_path / "pair-delta-token.json").unlink(missing_ok=True)
+    assert eng.delta_verify("cx")[0].detail.startswith("baseline recorded")
+    _my("update t set region = 'CA' where id = 2; insert into t values"
+        " (3, 'US'); insert into logs values (1)")
+    got = {r.scope: r for r in eng.delta_verify("cx")}
+    assert "cx.logs" not in got, got
+    assert got["cx"].status == "ok", {k: r.detail for k, r in got.items()}
+    assert "advanced" in got["cx"].detail and "NOT" not in got["cx"].detail
+    # a row the filter takes is still asked, and still found
+    _my("update t set region = 'TH' where id = 2")
+    got = {r.scope: r for r in eng.delta_verify("cx")}
+    assert got["cx.t"].status == "diff", got["cx.t"].__dict__
+    assert "missing=1" in got["cx.t"].detail, got["cx.t"].detail

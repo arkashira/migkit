@@ -3244,12 +3244,18 @@ def _shell_dumped_at(folder):
 
 def _shell_resumable(hop, db, tables, folder):
     """The kept record of a dump whose load stopped, when the next move can
-    go on from it: the dump finished, the same tables, and the source not
-    written to since - its binlog where the dump's snapshot left it. None
-    otherwise: a dump older than the source's last write would load
-    yesterday's rows over today's."""
+    go on from it: the dump finished, the same tables under the same scope,
+    and the source not written to since - its binlog where the dump's
+    snapshot left it. None otherwise: a dump older than the source's last
+    write would load yesterday's rows over today's, and one taken under
+    another row filter, columns or names (`Hop.scope_changed`) or other
+    values masked as they are written (`mask_rules`) would load what the
+    rules of then took into tables this hop fills otherwise."""
     rec = _read_json(_shell_resume_record(hop, db))
     if not rec or sorted(rec.get("tables") or []) != sorted(tables):
+        return None
+    if hop.scope_changed(rec) or ("masked" in rec and rec["masked"] != (
+            json.loads(json.dumps(mask_rules(hop, db))))):
         return None
     if not (folder / "@.done.json").exists():
         return None
@@ -3507,7 +3513,9 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                         took[STREAM_COPY] = time.monotonic() - began
                         _write_json(_shell_resume_record(hop, db), {
                             "tables": sorted(shell_tables),
-                            "position": _shell_dumped_at(shell_dir)})
+                            "position": _shell_dumped_at(shell_dir),
+                            "scope_fingerprint": hop.scope_fingerprint(),
+                            "masked": mask_rules(hop, db)})
                     else:
                         shell_tables = []
                 elif log:
@@ -4700,7 +4708,7 @@ def pgcopydb_move(hop, db, workers, go, log):
                             " the source")
             if routed:
                 filters_note += "\n" + _routed_note(routed)
-    resume = stopped_split = False
+    resume = stopped_split = other_scope = False
     # the blocking questions first, so the ones asked beside them have had
     # as long as these took
     blocked = (_pg_references_into(hop, db, routed) if go else
@@ -4736,7 +4744,12 @@ def pgcopydb_move(hop, db, workers, go, log):
             # cut a table in parts does not go on at all (`_Split.keep`)
             kept = _Split.resumed(begun) or split
             stopped_split = kept.way == "split"
-            resume = not stopped_split
+            # nor one begun under another scope: what it finished was
+            # chosen, filtered and named by the scope of then, and going
+            # on skips emptying the tables now taken
+            from .decide import remembered
+            other_scope = hop.scope_changed(remembered(begun, "scope"))
+            resume = not stopped_split and not other_scope
             split = kept if resume else split
         args = ["copy", "table-data", "--dir", str(work), "--source", src,
                 "--target", dst,
@@ -4821,13 +4834,20 @@ def pgcopydb_move(hop, db, workers, go, log):
                 " way through a table it was copying in parts, and a"
                 " copy cut that way cannot be gone on from without"
                 " losing rows; it starts over")
+        elif other_scope and log:
+            log("an earlier streaming copy of this database stopped part"
+                " way under another scope than the hop's now, and what it"
+                " finished was taken under that one; it starts over")
         _pg_truncate_target(hop, db, log)
         if how == "local":
             import shutil
+            from .decide import remember
             shutil.rmtree(work, ignore_errors=True)
             work.mkdir(parents=True)
             begun.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
             split.keep(begun)
+            # the scope it begins under, beside the record that it began
+            remember(begun, "scope", hop.scope_fingerprint())
     with _IndexWindow(hop, db, workers, log):
         if log:
             log(copy)

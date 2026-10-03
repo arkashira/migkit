@@ -401,7 +401,7 @@ def table_plans(hop, eng, db, group_=None):
     there = [] if pair.dst_engine.target_missing(db) else \
         pair.dst_engine.neutral_tables("dst", db)
     pairs, _, _, _ = pair.match_tables(_tables(hop, pair, db), there,
-                                       pair._rename)
+                                       pair._renamer(db))
     names = dict(pairs)
     ways, wrong, chosen = {}, [], {}
     for t in _tables(hop, pair, db):
@@ -422,7 +422,8 @@ def table_plans(hop, eng, db, group_=None):
         except SystemExit as e:
             wrong.append(str(e))
             continue
-        out.append(TablePlan(t, names.get(t) or pair._leaf(pair._rename(t)),
+        out.append(TablePlan(t, names.get(t)
+                             or pair._leaf(pair._rename(t, db)),
                              list(pair.src_engine.neutral_key("src", db, t)
                                   or []), w, shifted, chosen[t]))
     return out, wrong
