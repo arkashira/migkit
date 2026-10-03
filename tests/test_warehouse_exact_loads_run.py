@@ -23,6 +23,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import _wait_tcp, needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.table-copy", "redshift")]
+
 pytestmark = needs_docker
 
 PG, PG_PORT = "migkit-test-wh-pg", 16152

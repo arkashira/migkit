@@ -24,6 +24,13 @@ from migkit.config import Endpoint, Hop
 from migkit.engines import dsql
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "dsql"),
+    ("tail.follows", "dsql"),
+    ("cutover.drain", "dsql"),
+]
+
 PG, PG_PORT = "migkit-test-dsql-wire", 16349
 KS, KS_PORT = "migkit-test-dsql-stream", 16348
 STREAM = "dsql-cdc"

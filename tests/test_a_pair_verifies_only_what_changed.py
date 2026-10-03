@@ -16,6 +16,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.delta", "hetero")]
+
 pytestmark = [pytest.mark.docker]
 
 MY, MY_PORT = "migkit-test-pairdelta-my", 15841

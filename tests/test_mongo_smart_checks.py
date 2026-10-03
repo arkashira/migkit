@@ -10,6 +10,15 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.structure.collection-options", "mongodb"),
+    ("verify.structure.indexes", "mongodb"),
+    ("verify.structure.sharding", "mongodb"),
+    ("verify.value.null-empty", "mongodb"),
+    ("verify.value.type-drift", "mongodb"),
+]
+
 
 def _docker():
     try:

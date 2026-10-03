@@ -18,6 +18,14 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.delta", "clickhouse"),
+    ("verify.users", "clickhouse"),
+    ("move.table-copy", "clickhouse"),
+    ("cutover.rollback", "clickhouse"),
+]
+
 pytestmark = needs_docker
 
 SRC, DST = ("migkit-test-chch-src", 15923), ("migkit-test-chch-dst", 15924)

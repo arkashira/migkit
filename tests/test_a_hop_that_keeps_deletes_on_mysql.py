@@ -12,6 +12,9 @@ from tests import mysql_pair
 from tests.conftest import needs_docker
 from tests.mysql_pair import my, my_pair  # noqa: F401 - a fixture
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.ops", "mysql"), ("schema.foreign-keys", "mysql")]
+
 pytestmark = needs_docker
 
 

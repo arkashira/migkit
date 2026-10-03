@@ -15,6 +15,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "clickhouse"), ("move.table-copy", "clickhouse")]
+
 pytestmark = [pytest.mark.docker]
 
 CH, CH_PORT = "migkit-test-clickhouse", 15826

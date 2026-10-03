@@ -18,6 +18,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.bulk", "dynamodb")]
+
 moto = pytest.importorskip("moto")
 
 REGION = "us-east-1"

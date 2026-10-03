@@ -14,6 +14,21 @@ Pure: each engine's catalogue reads are answered in-process.
 from migkit.config import Endpoint, Hop
 from migkit.engines.base import Result
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("scope.listings", "mssql"),
+    ("scope.deep", ("postgres", "mysql", "mssql", "clickhouse", "oracle",
+                    "db2", "teradata", "cockroachdb")),
+    ("scope.counters", "oracle"),
+    ("scope.objects", "oracle"),
+    ("verify.structure.columns", "mssql"),
+    ("verify.structure.foreign-keys", "mssql"),
+    ("verify.structure.objects", ("oracle", "cockroachdb")),
+    ("verify.structure.triggers", "mssql"),
+    ("verify.rows-apart", "mssql"),
+    ("verify.tables", "mssql"),
+]
+
 
 def _hop(engine, tmp_path, **kw):
     hop = Hop(name="h", engine=engine, source=Endpoint(), target=Endpoint(),

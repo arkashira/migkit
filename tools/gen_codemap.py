@@ -12,7 +12,8 @@ that is read first instead:
   main classes - by package, and the registries every change touches;
 * `docs/agents/STATE.md` (kept in the repo and checked as the map is):
   what migkit can do engine by engine and what is left, from the
-  capability table, the decision engine's coverage and the backlog;
+  capability table, the decision engine's coverage, the depth matrix and
+  the backlog;
 * `.codemap/CALLERS.tsv` and `.codemap/LOCAL.md` (this machine only):
   who calls what, and what this machine last proved - the full suite,
   work not pushed, agents' branches kept;
@@ -55,7 +56,8 @@ HUBS = (
     ("migkit/decide.py", "the decision engine: rungs, `climb`, `attempt`,"
      " `coverage()` - what each engine can do, cell by cell"),
     ("migkit/capabilities.py", "`matrix()`: the capability table the"
-     " docs show"),
+     " docs show; `depth()`: every engine against every depth item, read"
+     " off the code and proved by the tests' `PROVES`"),
     ("migkit/verdict.py", "`decide`: the one verdict rule; VERDICTS and"
      " exit codes; `hop_scope`; the envelope (`summarize`)"),
     ("migkit/cli.py", "every command and its options"),
@@ -172,9 +174,10 @@ def _backlog():
 def state():
     """What migkit can do and what is left, from the code and the
     backlog: the capability table and the decision engine's coverage for
-    every engine, every cell not yet done named, the backlog by status
-    and area. The same on every machine; a session reads it to know the
-    tool's strength and its gaps without asking the code again."""
+    every engine, every cell not yet done named, the depth matrix, the
+    backlog by status and area. The same on every machine; a session
+    reads it to know the tool's strength and its gaps without asking the
+    code again."""
     sys.path.insert(0, str(ROOT))
     from migkit import capabilities, decide
     caps = capabilities.matrix()
@@ -183,7 +186,8 @@ def state():
     shapes = sorted({k for cells in cov.values() for k in cells})
     lines = ["# migkit state", "",
              "Written by `tools/gen_codemap.py` from `capabilities.matrix()`,"
-             " `decide.coverage()` and `docs/backlog-index.md`; the"
+             " `decide.coverage()`, `capabilities.depth()` and"
+             " `docs/backlog-index.md`; the"
              " pre-commit hook keeps it current. What this machine last"
              " proved (the full suite, unpushed work) is in"
              " `.codemap/LOCAL.md`.", ""]
@@ -206,6 +210,7 @@ def state():
         lines.append(f"| {eng} | {len(names) - len(cg)}/{len(names)} |"
                      f" {len(shapes) - len(sg)}/{len(shapes)} |"
                      f" {', '.join(cg + sg) or '-'} |")
+    lines += _depth(capabilities)
     rows = _backlog()
     by = {s: 0 for s in STATUSES}
     areas = {}
@@ -224,6 +229,68 @@ def state():
                                              "PARTLY", "BLOCKED")]
     lines += ["", f"Not done ({len(left)}): " + ", ".join(left), ""]
     return "\n".join(lines) + "\n"
+
+
+def _depth(capabilities):
+    """The depth matrix (`capabilities.depth`, backlog P0-PARITY): per
+    engine, each area's ways a test proves of the items that apply to it;
+    per item, the engines in each state - the largest group said as the
+    rest, so the table stays short."""
+    caps = capabilities
+    got = caps.depth()
+    owed = {(i, n) for i, engines in caps.UNPROVED.items()
+            for n in engines.split()}
+
+    def state(n, i):
+        s = got[n][i]
+        if s == caps.NOT_YET and (i, n) in owed:
+            return "test owed"
+        return {"yes": "yes", caps.NOT_APPLICABLE: "n/a",
+                caps.NOT_YET: "not yet"}.get(s, s)
+    areas = list(caps.AREAS)
+    by_area = {a: [i for i in caps.DEPTH if i.split(".", 1)[0] == a]
+               for a in areas}
+    total = {}
+    for n in got:
+        for i in caps.DEPTH:
+            total[state(n, i)] = total.get(state(n, i), 0) + 1
+    out = ["", "## Depth by engine", "",
+           f"{len(caps.DEPTH)} items in {len(areas)} areas"
+           " (`capabilities.depth()`, backlog P0-PARITY), each read off the"
+           " code an engine runs; a way counts once a test proves it on"
+           " that engine (`PROVES` in the test module). Cells: "
+           + ", ".join(f"{k} {v}" for k, v in sorted(total.items()))
+           + ". A cell below is the ways proved of the items that apply.",
+           "", "| engine | " + " | ".join(areas) + " | all |",
+           "|---|" + "---|" * (len(areas) + 1)]
+    for n in sorted(got):
+        yes = {a: sum(1 for i in by_area[a] if state(n, i) == "yes")
+               for a in areas}
+        apply = {a: sum(1 for i in by_area[a] if state(n, i) != "n/a")
+                 for a in areas}
+        out.append(f"| {n} | " + " | ".join(
+            f"{yes[a]}/{apply[a]}" if apply[a] else "-" for a in areas)
+            + f" | {sum(yes.values())}/{sum(apply.values())} |")
+    out += ["", "Per item: the engines in each state - \"test owed\" is a way"
+            " in the code whose test on that engine is not written"
+            " (`UNPROVED`).", "",
+            "| item | yes | test owed | not yet | n/a |",
+            "|---|---|---|---|---|"]
+    kinds = ("yes", "test owed", "not yet", "n/a")
+    for i in caps.DEPTH:
+        groups = {k: sorted(n for n in got if state(n, i) == k)
+                  for k in kinds}
+        biggest = max(kinds, key=lambda k: len(groups[k]))
+        cells = []
+        for k in kinds:
+            if not groups[k]:
+                cells.append("-")
+            elif k == biggest and len(groups[k]) > 6:
+                cells.append(f"the rest ({len(groups[k])})")
+            else:
+                cells.append(" ".join(groups[k]))
+        out.append(f"| {i} | " + " | ".join(cells) + " |")
+    return out
 
 
 def callers():

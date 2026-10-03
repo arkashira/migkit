@@ -17,6 +17,14 @@ import sqlite3
 import duckdb
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("schema.create", "duckdb"),
+    ("move.table-copy", ("sqlite", "duckdb")),
+    ("move.bulk", ("sqlite", "parquet", "duckdb")),
+    ("cutover.rollback", "parquet"),
+]
+
 
 def _run(*argv):
     from click.testing import CliRunner

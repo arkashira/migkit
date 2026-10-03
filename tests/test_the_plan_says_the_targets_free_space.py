@@ -16,6 +16,9 @@ import time
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.capacity", "mongodb")]
+
 MG, MG_PORT = "migkit-test-room-free", 15796
 
 

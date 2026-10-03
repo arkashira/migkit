@@ -12,6 +12,9 @@ and said.
 """
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "postgres")]
+
 pytestmark = needs_docker
 
 DDL = ("create table public.odd (id int primary key, span interval,"

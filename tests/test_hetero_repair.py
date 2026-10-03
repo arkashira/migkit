@@ -23,6 +23,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.repair", "hetero"), ("verify.repair-undo", "hetero")]
+
 pytestmark = needs_docker
 
 AWKWARD = 'a:b["x"]'

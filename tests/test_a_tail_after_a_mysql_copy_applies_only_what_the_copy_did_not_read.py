@@ -19,6 +19,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("tail.follows", "mysql")]
+
 pytestmark = needs_docker
 
 MY, PORT = "migkit-test-wm-my", 15980

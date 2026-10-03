@@ -12,6 +12,9 @@ from migkit import hopkeys
 from migkit.config import (Endpoint, Hop, build_hop, name_matches,
                            parse_ops, scope_patterns)
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.objects", "mysql")]
+
 
 def _hop(engine="postgres", **kw):
     return Hop(name="h", engine=engine, source=Endpoint(), target=Endpoint(),

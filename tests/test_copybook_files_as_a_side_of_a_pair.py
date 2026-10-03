@@ -19,6 +19,13 @@ from migkit.config import Endpoint, Hop
 from migkit.engines import copybook as E
 from tests import copybook_corpus as C
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("schema.create", "copybook"),
+    ("move.table-copy", "copybook"),
+    ("move.bulk", "copybook"),
+]
+
 
 def _files(root, orders=None):
     src, dst = root / "src" / "bank", root / "dst" / "bank"

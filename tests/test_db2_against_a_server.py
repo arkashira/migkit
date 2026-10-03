@@ -16,6 +16,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "db2"), ("move.table-copy", "db2")]
+
 pytestmark = needs_docker
 
 DB2, PORT, PW = "migkit-test-ms-db2", 16132, "CHANGE_ME-db2"

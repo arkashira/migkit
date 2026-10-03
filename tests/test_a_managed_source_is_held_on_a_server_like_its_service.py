@@ -27,6 +27,9 @@ import pytest
 from migkit import freeze
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.freeze", ("postgres", "mysql"))]
+
 pytestmark = pytest.mark.docker
 
 PG, PG_PORT = "migkit-test-mgd-pg", 16436

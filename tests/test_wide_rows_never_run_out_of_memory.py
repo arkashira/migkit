@@ -18,6 +18,12 @@ import pytest
 from tests import cap_pairs
 from tests.cap_pairs import MY_DST, MY_SRC, PG_DST, PG_SRC, my, pg
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("move.large-values", ("postgres", "mysql")),
+    ("move.sized", ("postgres", "mysql")),
+]
+
 pytestmark = pytest.mark.docker
 
 MB = 2 ** 20

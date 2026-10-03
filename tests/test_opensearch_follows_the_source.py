@@ -22,6 +22,13 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "opensearch"),
+    ("tail.follows", "opensearch"),
+    ("cutover.drain", "opensearch"),
+]
+
 pytestmark = needs_docker
 
 OS, PORT = "migkit-test-eng-os", 16012
