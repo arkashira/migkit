@@ -224,6 +224,23 @@ class SQLiteEngine(NeutralCopier, Engine):
             out.setdefault(str(t), []).append((str(c), str(ty)))
         return {t: sorted(cols) for t, cols in out.items()}
 
+    def shape_mark(self, side, db):
+        """The file's own count of its schema's changes (`pragma
+        schema_version`, raised by every one) with a digest of every
+        definition `sqlite_master` keeps - the statements each table's
+        columns are read from (`column_catalog`) - in one read of one
+        small table, where the whole shape is a read a table: what a tail
+        asks before it reads the whole shape again (`hetero._shape_now`,
+        audit SP8). The definitions as well as the count: a file put in
+        the place of another may count as far."""
+        import hashlib
+        got = hashlib.sha256()
+        for row in self._q(side, "select type, name, tbl_name, sql from"
+                                 " sqlite_master order by type, name"):
+            got.update(repr(tuple(row)).encode())
+        (version,), = self._q(side, "pragma schema_version")
+        return f"{version}:{got.hexdigest()}"
+
     def neutral_columns(self, side, db, table):
         return [(r[1], r[2]) for r in
                 self._q(side, f'pragma table_info("{table}")')]
