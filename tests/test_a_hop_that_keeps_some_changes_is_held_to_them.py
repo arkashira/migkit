@@ -46,13 +46,70 @@ def test_the_kinds_a_hop_keeps_follow_its_carried_changes():
 
 def test_a_pair_naming_a_table_by_its_own_name_is_held_to_a_schema_rule():
     """A pair names a PostgreSQL source's table by its leaf
-    (`HeteroEngine._leaf`); a rule naming its schema still names it."""
+    (`HeteroEngine._leaf`), and says its source name beside it
+    (`Result.table`): a rule naming its schema names that table."""
     h = _hop("hetero", ops={"public.orders": "insert,update"},
              options={"source_engine": "postgres",
                       "target_engine": "mysql"})
-    assert verdict.kept_kinds(h, "shop", "orders") == {"extra"}
     assert verdict.kept_kinds(h, "shop", "public.orders") == {"extra"}
+    assert verdict.kept_kinds(h, "shop", "archive.orders") == frozenset()
     assert verdict.kept_kinds(h, "shop", "lines") == frozenset()
+
+
+def test_a_leaf_alone_is_held_to_every_schema_it_may_be():
+    """`orders` alone may be `public.orders`, which keeps deletes, or
+    `archive.orders`, which carries them: a row is kept only where every
+    reading keeps it - a guess of one schema called another schema's
+    deleted rows kept, and a difference a `same`."""
+    h = _hop("hetero", ops={"public.orders": "insert,update"},
+             options={"source_engine": "postgres",
+                      "target_engine": "mysql"})
+    assert verdict.kept_kinds(h, "shop", "orders") == frozenset()
+    both = _hop("hetero", ops={"public.orders": "insert,update",
+                               "archive.orders": "insert"},
+                options={"source_engine": "postgres",
+                         "target_engine": "mysql"})
+    # a schema neither rule names carries every change, so the leaf
+    # alone keeps nothing
+    assert verdict.kept_kinds(both, "shop", "orders") == frozenset()
+    star = _hop("hetero", ops={"*.orders": "insert,update"},
+                options={"source_engine": "postgres",
+                         "target_engine": "mysql"})
+    assert verdict.kept_kinds(star, "shop", "orders") == {"extra"}
+
+
+def test_another_schemas_table_of_the_same_leaf_is_a_difference():
+    """The pair's answer names `orders`; its source name says which."""
+    h = _hop("hetero", ops={"public.orders": "insert,update"},
+             options={"source_engine": "postgres",
+                      "target_engine": "mysql"})
+    kept = _data("missing=0 extra=5 changed=0", scope="shop.orders")
+    kept["table"] = "public.orders"
+    assert verdict.decide([kept], h).status == "same"
+    other = _data("missing=0 extra=5 changed=0", scope="shop.orders")
+    other["table"] = "archive.orders"
+    assert verdict.decide([other], h).status == "different"
+    unsaid = _data("missing=0 extra=5 changed=0", scope="shop.orders")
+    assert verdict.decide([unsaid], h).status == "different"
+
+
+def test_rows_counted_by_the_check_are_read_from_its_fields():
+    """A check that counted the rows says them as fields
+    (`Result.rows_apart`), read as they are and not back out of words."""
+    h = _hop(ops=NO_DELETES)
+    r = _data("5 rows only on the target")
+    r["rows_apart"] = {"orders": {"missing": 0, "extra": 5, "changed": 0,
+                                  "exact": True}}
+    assert verdict.decide([r], h).status == "same"
+    assert r["kept_by_hop"]
+    r = _data("5 rows only on the target, 1 missing")
+    r["rows_apart"] = {"orders": {"missing": 1, "extra": 5, "changed": 0,
+                                  "exact": True}}
+    assert verdict.decide([r], h).status == "different"
+    r = _data("at least 5 rows only on the target")
+    r["rows_apart"] = {"orders": {"missing": 0, "extra": 5, "changed": 0,
+                                  "exact": False}}
+    assert verdict.decide([r], h).status != "same"
 
 
 def test_rows_the_source_deleted_counted_one_by_one_are_a_note():

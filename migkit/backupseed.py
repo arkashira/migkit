@@ -41,7 +41,7 @@ import re
 import time
 
 from . import physical
-from .config import scoped
+from .config import narrowed_said
 from .physical import Need, _hop_allows, _hop_says, _said_count
 
 #: what an operator reads for this way
@@ -209,11 +209,14 @@ def _why_fits(f):
             f" are: {', '.join(big)}")
 
 
+#: what a hop may narrow and still be seeded from a backup: the
+#: databases' names on the target (a restore names each), and the changes
+#: the tail carries after it (`config.narrowed_by`)
+_SEED_SERVES = ("databases_renamed", "changes_carried")
+
+
 def _covers(f):
-    hop = f.hop
-    mapping = hop.mapping or {}
-    return not (scoped(hop) or mapping.get("where") or mapping.get("columns")
-                or mapping.get("tables"))
+    return not narrowed_said(f.hop, _SEED_SERVES)
 
 
 def _free_names(f):
@@ -239,8 +242,9 @@ def _needs():
              _why_version),
         Need("every table of the database carried, under any name", (),
              _covers,
-             "the hop leaves tables out or maps them, and a backup carries"
-             " every table of the database as it is"),
+             lambda f: (f"the hop {narrowed_said(f.hop, _SEED_SERVES)},"
+                        " and a backup carries every table of the database"
+                        " as it is")),
         Need("no database of that name on the target",
              ("dst_databases",), _free_names,
              lambda f: ("the target already holds "

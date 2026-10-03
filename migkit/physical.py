@@ -254,26 +254,17 @@ class Facts(dict):
 
     def _covers(self):
         """True where a copy of the whole server is what this hop asks
-        for, or the reason it is not."""
-        hop = self.hop
-        if hop.exclude:
-            return (f"the hop excludes {', '.join(map(str, hop.exclude))},"
-                    " and a copy of the pages carries every table")
-        if getattr(hop, "include", None):
-            return (f"the hop takes only {', '.join(map(str, hop.include))},"
-                    " and a copy of the pages carries every table")
-        mapping = hop.mapping or {}
-        if mapping.get("where"):
-            return ("the hop filters rows, and a copy of the pages carries"
-                    " every row")
-        if mapping.get("columns") or mapping.get("tables"):
-            return ("the hop maps tables or columns, and a copy of the pages"
-                    " carries them under the source's names")
-        renamed = {k: v for k, v in (hop.db_map or {}).items() if k != v}
-        if renamed:
-            pairs = ", ".join(f"{a} to {b}" for a, b in renamed.items())
-            return (f"the hop renames {pairs}, and a copy of the pages"
-                    " carries each database under its own name")
+        for, or the reason it is not: anything the hop narrows
+        (`config.narrowed_by`) - names left out, rows filtered, columns
+        chosen or masked, names changed, changes not carried - a copy of
+        the pages carries whole, under the source's names, and the
+        server's own stream applies every change after it."""
+        from .config import narrowed_said
+        said = narrowed_said(self.hop)
+        if said:
+            return (f"the hop {said}, and a copy of the pages carries every"
+                    " table and row whole under the source's names, every"
+                    " change after it applied")
         # a database with tables the hop does not follow would arrive as it
         # was at the copy and never change again - the maintenance database
         # too, which a hop naming none leaves out

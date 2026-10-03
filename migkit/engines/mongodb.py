@@ -2,7 +2,7 @@ import time
 
 from .. import pieces
 from ..decide import Rung
-from .base import Engine, RepairAction, Result, clauses
+from .base import Engine, RepairAction, Result, clauses, rows_counted
 from ..verdict import difference_kind_from_counts
 
 SKIP_DBS = {"admin", "local", "config"}
@@ -1687,7 +1687,10 @@ class MongoEngine(Engine):
                       + (" by their bytes" if exact else "")
                       + (f" kind={kind}" if kind else "")
                       + (f"; {whose}" if whose else ""), str(d),
-                      f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
+                      f"migkit sync {self.hop.name} --db {db} --kind rows --apply",
+                      table=str(name), rows_apart=rows_counted(
+                          name, len(found["missing"]), len(found["extra"]),
+                          len(found["changed"])))
 
     #: stages that write, which a rule may not hold anywhere in it
     WRITING_STAGES = ("$out", "$merge")
@@ -2114,7 +2117,10 @@ class MongoEngine(Engine):
                     f" extra={len(apart['extra'])}"
                     f" changed={len(apart['changed'])}",
                     str(d),
-                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                    f"migkit sync {self.hop.name} --db {db} --kind rows",
+                    table=str(coll), rows_apart=rows_counted(
+                        coll, len(apart["missing"]), len(apart["extra"]),
+                        len(apart["changed"]))))
                 clean = clean and not held_back
                 res.append(answer)
             else:

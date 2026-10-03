@@ -64,6 +64,31 @@ def test_the_operator_says_it_either_way():
                              target=Endpoint()))
 
 
+def test_a_hop_naming_its_roles_is_held_to_those_alone(monkeypatch):
+    """`objects: {roles: [app_*]}` carries the application's accounts and
+    no other; it was read as every account, and the target's own - a
+    monitoring user, a DBA's - read as a gap."""
+    hop = Hop(name="r", engine="postgres", source=Endpoint(),
+              target=Endpoint(), objects={"roles": ["app_*"]})
+    assert users.carried(hop)
+    assert users.role_names(hop) == ["app_*"]
+    src = {"app_rw": {"member_of": ["app_ro"]}, "app_ro": {},
+           "dba_kim": {}, "reporting": {}}
+    dst = {"app_rw": {"member_of": []}, "monitor": {}}
+    monkeypatch.setattr(users, "_pg_roles",
+                        lambda ep: src if ep is hop.source else dst)
+    monkeypatch.setattr(users, "_pg_hashes", lambda ep: None)
+    out, _ = users.compare(hop, say=lambda *_: None)
+    assert out["missing_on_target"] == ["app_ro"]
+    assert out["extra_on_target"] == []
+    assert out["grants_missing"] == ["app_rw"]
+    assert out["source_users"] == 2
+    # MySQL's accounts are a user at a host, named by the user
+    assert users.role_taken(Hop(name="m", engine="mysql", source=Endpoint(),
+                                target=Endpoint(),
+                                objects={"roles": ["app"]}), "app@%")
+
+
 def test_users_verify_is_not_compared_and_never_a_pass(monkeypatch):
     hop = _no_accounts()
     monkeypatch.setattr(users, "get_hop", lambda name: hop)

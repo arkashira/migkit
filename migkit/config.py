@@ -264,17 +264,85 @@ def scope_patterns(value):
     return out
 
 
-def scoped(hop):
-    """Whether the hop leaves anything out by name - an `exclude`, or an
-    `include` that takes less than everything. A way that carries a whole
-    database, a whole server or a whole keyspace serves only a hop that
-    is not; the one `excluded` answers which objects."""
-    if getattr(hop, "exclude", None) or getattr(hop, "include", None):
-        return True
+#: each way a hop takes other than every object whole, under its own
+#: name, with every change - in the order `narrowed_by` says them
+NARROWED_BY = ("include", "exclude", "objects_not_carried", "objects_named",
+             "row_filters", "column_rules", "values_masked", "renamed",
+             "names_ruled", "databases_renamed", "changes_carried")
+#: the parts of it that leave objects out by name
+BY_NAME = ("include", "exclude", "objects_not_carried", "objects_named")
+
+
+def narrowed_by(hop):
+    """{part: [what]} of every way the hop takes other than everything
+    whole (`NARROWED_BY`): objects left out by name, rows filtered, columns
+    chosen or masked, names changed on the target, changes not carried.
+    The one reading of it: a way that copies a whole database or server
+    (pages, a backup) asks which parts it cannot serve, the report says
+    them beside a `same`, and none of them reads the hop's keys apart.
+    Empty for a hop that takes everything whole."""
+    mapping = getattr(hop, "mapping", None) or {}
+    options = getattr(hop, "options", None) or {}
+    out = {k: [str(x) for x in getattr(hop, k, None) or []]
+           for k in ("include", "exclude")}
     try:
-        return any(v is not True for v in objects_of(hop).values())
+        said = objects_of(hop)
     except SystemExit:
-        return False
+        said = {}
+    out["objects_not_carried"] = sorted(k for k, v in said.items()
+                                        if v is False)
+    out["objects_named"] = [f"{k}: {', '.join(v)}" for k, v in
+                            sorted(said.items()) if isinstance(v, list)]
+    out["row_filters"] = sorted(str(k) for k in mapping.get("where") or {})
+    out["column_rules"] = sorted(str(k) for k in
+                                 mapping.get("columns") or {})
+    out["values_masked"] = sorted(str(k) for k in
+                                  options.get("mask_on_write") or {})
+    out["renamed"] = [f"{k} -> {v}" for k, v in
+                      sorted((mapping.get("tables") or {}).items(),
+                             key=lambda kv: str(kv[0]))]
+    out["names_ruled"] = [
+        f"{level}: " + ", ".join(f"{k} {v}" for k, v in sorted(
+            (rule or {}).items()))
+        for level, rule in sorted((mapping.get("names") or {}).items())
+        if rule]
+    out["databases_renamed"] = [
+        f"{k} -> {v}" for k, v in sorted((getattr(hop, "db_map", None)
+                                          or {}).items()) if k != v]
+    every = frozenset(OPS)
+    ops = mapping.get("ops") or {}
+    out["changes_carried"] = []
+    for k, v in sorted(ops.items(), key=lambda kv: str(kv[0])):
+        try:
+            fewer = parse_ops(v) != every
+        except SystemExit:
+            fewer = True
+        if fewer:
+            out["changes_carried"].append(str(k))
+    return {k: out[k] for k in NARROWED_BY if out.get(k)}
+
+
+def narrowed_said(hop, serves=()):
+    """The parts of `narrowed_by` a way does not serve (all but `serves`),
+    in the words a report says them - '' where there are none."""
+    from .verdict import SCOPE_WORDS
+    said = []
+    for k, v in narrowed_by(hop).items():
+        if k in serves:
+            continue
+        more = f" and {len(v) - 3} more" if len(v) > 3 else ""
+        said.append(f"{SCOPE_WORDS.get(k, k)} {', '.join(v[:3])}{more}")
+    return "; ".join(said)
+
+
+def scoped(hop):
+    """Whether the hop leaves anything out by name - an `exclude`, an
+    `include` that takes less than everything, objects not carried
+    (`narrowed_by`). A way that carries a whole database, a whole server or
+    a whole keyspace serves only a hop that is not; the one `excluded`
+    answers which objects."""
+    got = narrowed_by(hop)
+    return any(part in got for part in BY_NAME)
 
 
 @dataclass
@@ -739,21 +807,25 @@ class Hop:
     goal: str = ""
 
     def reversed(self):
-        """The same hop run the other way: the target as the source, the
-        database names mapped back. Its name is its own, so its
+        """The same hop run the other way: the target as the source, every
+        name as the target has it - databases mapped back, tables renamed
+        back, the name rules turned round. Its name is its own, so its
         replication objects and reports are not the forward hop's. Used
         only where the hop asks for a stream back (`reverse`,
-        `topology`)."""
+        `topology`). A name rule that cannot be turned round - one that
+        strips a part some names never had, or folds case - is refused
+        here, before a change is written back under a name the old
+        source does not have."""
         import dataclasses
         mapping = self._mapping_on_target()
         return dataclasses.replace(
             self, name=f"{self.name}-reverse", source=self.target,
             target=self.source,
             databases=[self.target_db(d) for d in (self.databases or [])],
-            db_map={v: k for k, v in (self.db_map or {}).items()},
+            db_map={self.target_db(k): k for k in (self.db_map or {})},
             include=[self._on_target(p) for p in self.include or []],
             exclude=[self._on_target(p) for p in self.exclude or []],
-            objects={k: ([self._on_target(p) for p in v]
+            objects={k: ([self._on_target(p, tables=False) for p in v]
                          if isinstance(v, list) else v)
                      for k, v in objects_of(self).items()},
             mapping=mapping,
@@ -765,28 +837,22 @@ class Hop:
 
     def _mapping_on_target(self):
         """The mapping as the way back reads it: every rule keyed by the
-        table's name on the target, a rename turned round, a column renamed
-        named as the target has it; a column the way there dropped is not
-        on the target to carry back, and a row filter is asked of the
+        table's name on the target (`_on_target`), a rename turned round,
+        a column renamed named as the target has it, the name rules
+        turned round (`_names_back`); a column the way there dropped is
+        not on the target to carry back, and a row filter is asked of the
         target's rows under their target names."""
         mapping = dict(self.mapping or {})
+        out = {}
         renames = {str(k): str(v) for k, v in
                    (mapping.get("tables") or {}).items()}
-
-        def key(k):
-            k = str(k)
-            if k in renames:
-                head = k.split(".")[0] if k.count(".") > \
-                    renames[k].count(".") else ""
-                got = renames[k]
-                return self._on_target(f"{head}.{got}") if head else got
-            return self._on_target(k)
-        out = {}
         if renames:
-            out["tables"] = {key(k): k.split(".", k.count(".") -
-                                             renames[k].count("."))[-1]
-                             if k.count(".") > renames[k].count(".") else k
-                             for k in renames}
+            back = {}
+            for k, v in renames.items():
+                head, tail = k.split("."), v.split(".")
+                back[self._on_target(k)] = ".".join(
+                    head[-len(tail):] if len(head) >= len(tail) else head)
+            out["tables"] = back
         cols = {}
         for k, rule in (mapping.get("columns") or {}).items():
             rule = dict(rule or {})
@@ -799,22 +865,78 @@ class Hop:
             if ren:
                 back["rename"] = {b: a for a, b in ren.items()}
             if back:
-                cols[key(k)] = back
+                cols[self._on_target(k)] = back
         if cols:
             out["columns"] = cols
         for part in ("where", "tolerance", "ops"):
             if mapping.get(part):
-                out[part] = {key(k): v for k, v in mapping[part].items()}
+                out[part] = {self._on_target(k): v
+                             for k, v in mapping[part].items()}
+        names = self._names_back()
+        if names:
+            out["names"] = names
         return out
 
-    def _on_target(self, pattern):
+    #: the parts of a name rule the way back turns round: each one's
+    #: opposite, written to every name the way there wrote
+    _NAMES_TURNED = {"prefix": "strip_prefix", "suffix": "strip_suffix"}
+
+    def _names_back(self):
+        """`mapping.names` turned round for the way back: a prefix or a
+        suffix the way there added, stripped. SystemExit for a rule that
+        cannot be: one that strips (a name that never had the part is
+        not told apart from one that did) or folds case."""
+        out = {}
+        for level, rule in ((self.mapping or {}).get("names") or {}).items():
+            back = {}
+            for k, v in (rule or {}).items():
+                if not v:
+                    continue
+                if k not in self._NAMES_TURNED:
+                    raise SystemExit(
+                        f"{self.name}: mapping.names.{level}.{k} cannot be"
+                        " turned round for the way back - not every name"
+                        " it writes says what it was. Name those tables in"
+                        " mapping.tables, which is turned round exactly")
+                back[self._NAMES_TURNED[k]] = v
+            if back:
+                out[level] = back
+        return out
+
+    def _on_target(self, pattern, tables=True):
         """A scope pattern as the target names what it names: a leading
-        database the hop maps, written as the target's database - so the
-        way back takes what the way there took."""
-        head, dot, rest = str(pattern).partition(".")
-        if dot and head in (self.db_map or {}):
-            return f"{self.db_map[head]}.{rest}"
-        return str(pattern)
+        database (one the pattern names whole: as many parts as a table's
+        whole name, or a database the hop maps) as the target's database,
+        and - `tables` - a table the hop renames by its new name, the
+        name rules written on the schema and the table as on every name
+        (`target_table`). A rename shorter than the name it renames keeps
+        the parts before it. So the way back takes what the way there
+        took, under the names it took them to."""
+        text = str(pattern)
+        parts = text.split(".")
+        whole = self.whole_name()
+        has_db = (len(parts) >= whole if whole else
+                  len(parts) >= 2 and parts[0] in (self.db_map or {}))
+        head = []
+        if has_db:
+            db, parts = parts[0], parts[1:]
+            head = [db if has_wildcard(db) else self.target_db(db)]
+            if not parts:
+                return head[0]
+        if not tables:
+            return ".".join(head + parts)
+        rules = self.table_map()
+        for ident in self._ids(*([text.split(".")[0]] if has_db else [])
+                               + parts):
+            if ident in rules:
+                got = str(rules[ident]).split(".")
+                kept = parts[:max(len(parts) - len(got), 0)]
+                return ".".join(head + kept + got)
+        named = list(parts)
+        named[-1] = self.named("tables", named[-1])
+        if whole == 3 and len(named) >= 2:
+            named[-2] = self.named("schemas", named[-2])
+        return ".".join(head + named)
 
     def scope_fingerprint(self):
         """One short digest of everything that decides what the hop takes
@@ -910,6 +1032,22 @@ class Hop:
                for c in cands):
             return True
         return not self.included(*parts)
+
+    def takes_table(self, db, table, engine=None):
+        """Whether the hop takes a table named as a listing names it
+        (`public.orders`, `orders`, `public."v1.orders"`): split the one way
+        names are (`util.split_table`, by `engine`'s quoting - the
+        source's by default - and a bare name in the engine's default
+        schema, `DEFAULT_SCHEMA`), then asked of `excluded`. The one
+        question every reader holding a table's listed name asks;
+        `Engine.in_scope` asks it with its own engine. Splitting it by
+        hand split `public."v1.orders"` at the wrong dot and asked a
+        bare PostgreSQL name outside its schema."""
+        from .util import DEFAULT_SCHEMA, _canonical, split_table
+        eng = _canonical(engine) if engine else self._names_engine()
+        schema, name = split_table(eng, str(table),
+                                   DEFAULT_SCHEMA.get(eng, ""))
+        return not self.excluded(db, *([schema] if schema else []), name)
 
     def folds_case(self):
         """Whether the names the hop's patterns are matched against have
@@ -1092,6 +1230,23 @@ class Hop:
             if ident in rules:
                 return str(rules[ident])
         return ".".join(str(self.target_table(db, *own)).split(".")[1:])
+
+    def source_table_in(self, db, *parts):
+        """The parts of the source's name, within `db`, of the table the
+        target names `parts` in `db`'s target database: `target_table_in`
+        turned round (`reversed` - a rename, the name rules), a rename
+        shorter than the name keeping the parts before it. None where the
+        hop's name rules cannot be turned round."""
+        own = [str(p) for p in parts if p not in (None, "")]
+        try:
+            back = self.reversed()
+        except SystemExit:
+            return None
+        got = [p for p in back.target_table_in(self.target_db(db), *own)
+               .split(".") if p]
+        if len(got) < len(own):
+            got = own[:len(own) - len(got)] + got
+        return tuple(got)
 
     def column_rules(self, *parts):
         """What the hop's `mapping.columns` says about this table's columns:

@@ -53,6 +53,32 @@ def test_a_table_named_without_its_schema_is_read_in_public(tmp_path):
     assert not eng.in_scope("appdb", "event_log")
 
 
+def test_a_sequence_is_read_one_way_by_the_counters_and_the_inventory(
+        tmp_path):
+    """The counters and the inventory read a sequence's scope one way
+    (`_seq_gone`): by the table owning it, else the tables drawing from
+    it, else its own name - and only where the hop carries sequences. The
+    inventory once read an unowned sequence by its name alone, and the
+    counters read `objects: {sequences: false}` as nothing."""
+    owned = "public.orders_id_seq|public|orders|id"
+    used = "public.shared_seq|public|lines"
+    answers = [(lambda side, sql: "pg_attrdef" in sql, used),
+               (lambda side, sql: "deptype" in sql or "attnum" in sql,
+                owned)]
+    eng = _pg(tmp_path, answers, include=TAKES)
+    eng._seq_owned = lambda side, db: {"public.orders_id_seq": (
+        "public", "orders", "id")}
+    names = ["public.orders_id_seq", "public.shared_seq", "public.loose_seq"]
+    gone = eng._seq_left_out("src", "appdb", names)
+    assert gone == {"public.loose_seq"}
+    out = eng._object_left_out("src", "appdb")
+    assert {n for n in names if out("sequence", n)} == gone
+    none = _pg(tmp_path, answers, include=TAKES,
+               objects={"sequences": False})
+    none._seq_owned = eng._seq_owned
+    assert none._seq_left_out("src", "appdb", names) == set(names)
+
+
 def test_a_listing_keeps_only_the_lines_of_tables_the_hop_takes(tmp_path):
     eng = _pg(tmp_path, [], include=TAKES)
     got = eng._scoped("appdb", "public.orders\npublic.event_log|a\n\n"
@@ -275,6 +301,35 @@ def _ms(tmp_path, answer, **kw):
     return eng
 
 
+def test_sql_server_data_check_compares_the_tables_taken(tmp_path):
+    """The row-hash pass listed every table of both sides and compared
+    them all; it reads the hop's tables, says one the target lacks, and
+    says how each came out (`Result.tables`) and the rows it counted
+    (`Result.rows_apart`) - what a hop keeping some changes off the
+    target, and a service's own check, are held to."""
+    def answer(side, sql):
+        if "sys.tables" in sql:
+            got = [["dbo.orders"], ["dbo.lines"], ["dbo.event_log"]]
+            return got if side == "src" else got[:1] + got[2:]
+        if "count_big" in sql:
+            return [["3", "10"]] if side == "src" else [["4", "11"]]
+        return []
+    eng = _ms(tmp_path, answer,
+              include=["appdb.dbo.orders", "appdb.dbo.lines"])
+    eng._row_json = lambda db, t: ("x", [])
+    eng._health = lambda side, db=None: None
+    asked = []
+    eng._drilldown = lambda db, t: asked.append(t) or (0, 1, 0)
+    eng._resolve_inflight = lambda db, bad, stream=None: (bad, [], [])
+    got = [r for r in eng.check_data("appdb") if r.check == "data"]
+    assert asked == ["dbo.orders"]
+    assert got[0].tables == {"dbo.orders": "diff", "dbo.lines": "diff"}
+    assert got[0].rows_apart == {"dbo.orders": {
+        "missing": 0, "extra": 1, "changed": 0, "exact": True}}
+    assert "dbo.lines missing on target" in got[0].detail
+    assert "event_log" not in got[0].detail
+
+
 def test_sql_server_deep_listings_are_the_hops(tmp_path, monkeypatch):
     def answer(side, sql):
         if "not exists (select 1 from sys.indexes" in sql:
@@ -339,6 +394,40 @@ def test_oracle_invalid_objects_and_loose_constraints_are_the_hops(
     loose = got["appdb target constraints"]
     assert loose.status == "diff" and "CK_A" in loose.detail \
         and "CK_B" not in loose.detail, loose.detail
+
+
+def test_oracle_counters_are_the_ones_the_hop_takes(tmp_path):
+    """The parity check and its repair read every sequence of the schema,
+    and set the counters of tables the hop left out - ones the target
+    writes itself. An identity column's goes with its table, a sequence a
+    default draws from with the tables drawing from it, any other by its
+    own name."""
+    from migkit.engines.oracle import OracleEngine
+    eng = OracleEngine(_hop("oracle", tmp_path, include=["appdb.orders"]))
+
+    def rows(side, db, sql, args=None):
+        if "all_tab_identity_cols" in sql and "join" not in sql:
+            return [("ORDERS", "ID", "ISEQ$$_1"),
+                    ("AUDIT_LOG", "ID", "ISEQ$$_2")]
+        if "data_default" in sql:
+            return [("ORDERS", '"APP"."ORDER_NO_SEQ"."NEXTVAL"'),
+                    ("AUDIT_LOG", "AUDIT_SEQ.nextval")]
+        if "all_sequences" in sql:
+            return [("ISEQ$$_1", 10), ("ISEQ$$_2", 20),
+                    ("ORDER_NO_SEQ", 30), ("AUDIT_SEQ", 40),
+                    ("LOOSE_SEQ", 50)]
+        return []
+    eng._rows = rows
+    eng._owner = lambda side, db: "APP"
+    got = eng._sequences("src", "appdb")
+    assert set(got) == {"orders.id", "order_no_seq"}, got
+    every = OracleEngine(_hop("oracle", tmp_path))
+    every._rows, every._owner = rows, eng._owner
+    assert len(every._sequences("src", "appdb")) == 5
+    none = OracleEngine(_hop("oracle", tmp_path,
+                             objects={"sequences": False}))
+    none._rows, none._owner = rows, eng._owner
+    assert none._sequences("src", "appdb") == {}
 
 
 def test_cockroach_a_broken_object_left_out_is_not_a_finding(tmp_path):

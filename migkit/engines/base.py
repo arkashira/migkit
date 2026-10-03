@@ -87,6 +87,13 @@ def clauses(parts, most=10):
                                       else "")
 
 
+def rows_counted(table, missing, extra, changed, exact=True):
+    """A finding's `rows_apart` for one table: the rows apart of each
+    kind, counted one by one where `exact`."""
+    return {str(table): {"missing": int(missing), "extra": int(extra),
+                         "changed": int(changed), "exact": bool(exact)}}
+
+
 def categorize(check, scope):
     """Canonical category for a (check, scope) pair. Never raises."""
     last = str(scope).split()[-1] if str(scope).strip() else ""
@@ -104,6 +111,24 @@ class Result:
     report: str = ""
     fix_hint: str = ""
     category: str = ""
+    #: the table a finding about one table is about, named within the
+    #: database as its source names it (`public.orders`) where the scope
+    #: names it otherwise - a pair names a table by its own name alone
+    #: (`HeteroEngine._leaf`) - so a rule written for one schema's table is
+    #: held to it and not to another schema's of the same name
+    table: str = ""
+    #: the rows apart, counted, of each table the finding is about -
+    #: `{table: {"missing", "extra", "changed", "exact"}}`, the table named
+    #: within the database as the source names it (`public.orders`), and
+    #: `exact` where every row was counted one by one. What the verdict
+    #: holds to a hop's carried changes (`verdict.hold`), read here and
+    #: not back out of the words; empty where the finding counted none
+    rows_apart: dict = field(default_factory=dict)
+    #: of a database's one answer, how each table it compared came out -
+    #: `{table: "ok" | "diff" | "error" | "skip"}` - so a reader holding
+    #: another tool's word table by table (`servicecheck`) knows which
+    #: tables the answer covers and how, not only the ones it names
+    tables: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.category:
@@ -197,11 +222,8 @@ class Engine:
         inventory, a repair, a counter or a watch asks before it reads a
         table, so none of them reads one the hop leaves out (backlog
         P0-SCOPE.6)."""
-        from ..util import split_table
-        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
-        schema, name = split_table(eng, str(table))
-        return not self.hop.excluded(db, *([schema] if schema else []),
-                                     name)
+        return self.hop.takes_table(
+            db, table, self.CANON_ENGINE or getattr(self.hop, "engine", ""))
 
     def _scoped_rows(self, db, rows, at=0):
         """The rows of a catalogue listing whose `at`th value is a table

@@ -45,3 +45,30 @@ def test_compared_the_same_with_a_skip_named_goes_on():
     said = _run([_r("ok", "a"), _r("skip", "b")])
     assert said and "found the two the same" in said[-1]
     assert "not compared: b" in said[-1]
+
+
+def test_a_hop_that_keeps_deletes_cuts_over_on_the_rows_it_keeps():
+    """The final check is held to the changes the hop carries: rows the
+    source deleted, kept on the target as the hop says, are not a
+    difference. Its answers once reached the verdict without the check
+    they were and the rows they counted, and such a hop never cut over."""
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.base import Result
+    hop = Hop(name="h", engine="mysql", source=Endpoint(),
+              target=Endpoint(),
+              mapping={"ops": {"d.orders": "insert, update"}})
+    kept = Result("data", "d.orders", "diff", "missing=0 extra=4 changed=0",
+                  table="orders",
+                  rows_apart={"orders": {"missing": 0, "extra": 4,
+                                         "changed": 0, "exact": True}})
+    said = []
+    cutover._final_check(hop, _Eng([kept]), "d", None, lambda: 5.0,
+                         said.append)
+    assert said and "found the two the same" in said[-1]
+    lost = Result("data", "d.orders", "diff", "missing=1 extra=4 changed=0",
+                  table="orders",
+                  rows_apart={"orders": {"missing": 1, "extra": 4,
+                                         "changed": 0, "exact": True}})
+    with pytest.raises(cutover._Undo):
+        cutover._final_check(hop, _Eng([lost]), "d", None, lambda: 5.0,
+                             said.append)

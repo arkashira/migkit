@@ -530,3 +530,25 @@ def test_the_delta_reads_the_target_under_its_name_through_the_filter():
     assert pg._scope("appdb", "public.orders") == \
         '(select * from "public"."orders" where region = \'TH\') t'
     assert pg._scope("appdb", "public.lines", "dst") == '"public"."lines" t'
+
+
+def test_a_target_name_is_read_back_to_the_table_it_was(reports):
+    """A target's name is asked as the source's table it was
+    (`Hop.source_table_in`): a rename in another database is not this
+    one's, and a name the hop's rules wrote is its table's - the leaf of
+    any rename once kept another database's table, and a prefixed name
+    was dropped."""
+    h = _hop(include=["appdb.public.orders"],
+             mapping={"tables": {"crm.public.lines": "orders_v2"},
+                      "names": {"tables": {"prefix": "x_"}}})
+    assert h.source_table_in("appdb", "public", "x_orders") == (
+        "public", "orders")
+    assert digests.taken(h, "appdb", "public.x_orders", "postgres", "dst")
+    # `orders_v2` is crm's `lines` renamed, not a table of appdb's
+    assert not digests.taken(h, "appdb", "public.orders_v2", "postgres",
+                             "dst")
+    assert h.source_table_in("crm", "public", "orders_v2") == (
+        "public", "lines")
+    # a rule that cannot be turned round says nothing it cannot know
+    lossy = _hop(mapping={"names": {"tables": {"case": "lower"}}})
+    assert lossy.source_table_in("appdb", "public", "orders") is None

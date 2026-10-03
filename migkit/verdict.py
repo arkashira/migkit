@@ -351,10 +351,11 @@ KINDS = {"missing": ("missing on the target", "inserts are carried"),
 
 def carried(hop, db, table):
     """The changes the hop carries for `db`'s `table`, named as a check
-    names it (`public.orders`, `orders`): `Hop.carries` - and, for a table
-    a pair names by its own name alone (`HeteroEngine._leaf`), a rule that
-    names its schema as well, the pair telling its tables apart by that
-    name already."""
+    names it (`public.orders`, `orders`): `Hop.carries`. A table named by
+    its own name alone on an engine with schemas (`HeteroEngine._leaf`)
+    may be any schema's: where the rules give its schemas other answers,
+    the changes any of them carries - a row is held as kept only where
+    every reading of the name keeps it, never by the guess of one."""
     from .config import OPS
     every = frozenset(OPS)
     rules = (getattr(hop, "mapping", None) or {}).get("ops") or {}
@@ -364,15 +365,14 @@ def carried(hop, db, table):
     parts = [p for p in _parts(hop._names_engine(), str(table)) if p] \
         or [str(table)]
     got = hop.carries(db, *parts)
-    if got != every or len(parts) > 1 or hop.whole_name() != 3:
+    if len(parts) > 1 or hop.whole_name() != 3:
         return got
+    readings = {got}
     for key in rules:
-        head = str(key).split(".")
+        head = [p for p in _parts(hop._names_engine(), str(key)) if p]
         if len(head) >= 2:
-            there = hop.carries(db, head[-2], *parts)
-            if there != every:
-                return there
-    return got
+            readings.add(hop.carries(db, head[-2], *parts))
+    return frozenset().union(*readings)
 
 
 def kept_kinds(hop, db, table):
@@ -481,6 +481,27 @@ def _shapes(r):
     sure = not any(w in detail for w in _PARTIAL)
     if check not in ("data", "delta", "counts") or not db:
         return [], False
+    apart = r.get("rows_apart") or {}
+    if apart:
+        # counted by the check itself, each table under the name its
+        # source gives it: nothing to read back out of the words
+        out = []
+        for table, got in apart.items():
+            counts = {k: int(got.get(k) or 0)
+                      for k in ("missing", "extra", "changed")}
+            out.append((db, str(table), counts,
+                        bool(got.get("exact")) and sure,
+                        counts["extra"] - counts["missing"]))
+        if scope == db:
+            # a database's answer is wholly these rows only where every
+            # table it found different was counted
+            differ = [t for t, st in (r.get("tables") or {}).items()
+                      if st in ("diff", "error")]
+            if not differ and detail.startswith("tables differ: "):
+                differ = [n.strip() for n in detail[len("tables differ: "):]
+                          .split(" (", 1)[0].split(",") if n.strip()]
+            whole = whole and all(str(t) in apart for t in differ)
+        return out, whole
     if scope == db and check == "data" and \
             detail.startswith("tables differ: "):
         # a database's one data answer, its tables named and each one's
@@ -507,7 +528,7 @@ def _shapes(r):
                                          "changed": 0}, False, b - a))
         return out, whole
     if scope.startswith(db + ".") or scope.startswith(db + " "):
-        table = scope[len(db) + 1:].strip()
+        table = str(r.get("table") or "") or scope[len(db) + 1:].strip()
         m = _TRIPLE.search(detail)
         if m:
             counts = {"missing": int(m.group(1)), "extra": int(m.group(2)),
@@ -593,11 +614,18 @@ def hold(hop, records):
             continue
         db, named = db_of(scope), scope[:-len(" rows")]
         named = named[len(db) + 1:] if named.startswith(db + ".") else named
-        for (kdb, table), said in kept.items():
-            if kdb == db and (named == table or
-                              named.endswith("." + table)):
-                _keep(r, f"{said}; read a second way, the same rows")
-                break
+        named = str(r.get("table") or "") or named
+        hits = [said for (kdb, table), said in kept.items()
+                if kdb == db and (named == table
+                                  or named.endswith("." + table))]
+        if not hits:
+            # named by its leaf where the kept table has its schema: only
+            # where one kept table has that leaf
+            hits = [said for (kdb, table), said in kept.items()
+                    if kdb == db and table.endswith("." + named)]
+            hits = hits if len(hits) == 1 else []
+        if hits:
+            _keep(r, f"{hits[0]}; read a second way, the same rows")
     return records
 
 
@@ -884,38 +912,32 @@ def fingerprint(records, scope=None):
 
 
 def hop_scope(hop):
-    """What the hop itself takes, where it takes less than everything: the
-    `include` and `exclude` it was checked within, and the tables whose
-    rows or columns it narrows. Unlike `coverage`, not a narrowed run -
-    the hop's own definition, a `same` within it is a `same` - and said
-    beside the verdict so whoever reads `same` reads what it covers.
-    Empty for a hop that takes everything whole."""
-    mapping = getattr(hop, "mapping", None) or {}
-    out = {k: [str(x) for x in getattr(hop, k, None) or []]
-           for k in ("include", "exclude")}
-    out["row_filters"] = sorted((mapping.get("where") or {}))
-    out["column_rules"] = sorted((mapping.get("columns") or {}))
-    out["renamed"] = [f"{k} -> {v}" for k, v in
-                      sorted((mapping.get("tables") or {}).items())]
-    from .config import objects_of
-    try:
-        said = objects_of(hop)
-    except SystemExit:
-        said = {}
-    out["objects_not_carried"] = sorted(k for k, v in said.items()
-                                        if v is False)
-    out["objects_named"] = [f"{k}: {', '.join(v)}" for k, v in
-                            sorted(said.items()) if isinstance(v, list)]
-    out["changes_carried"] = [contract_said(k, v) for k, v in
-                              sorted((mapping.get("ops") or {}).items())]
-    return {k: v for k, v in out.items() if v}
+    """What the hop itself takes, where it takes less than everything
+    (`config.narrowed_by`): the `include` and `exclude` it was checked
+    within, the objects it leaves, the tables whose rows or columns it
+    narrows, the names it changes and the changes it does not carry.
+    Unlike `coverage`, not a narrowed run - the hop's own definition, a
+    `same` within it is a `same` - and said beside the verdict so whoever
+    reads `same` reads what it covers. Empty for a hop that takes
+    everything whole."""
+    from .config import narrowed_by
+    out = narrowed_by(hop)
+    if out.get("changes_carried"):
+        ops = (getattr(hop, "mapping", None) or {}).get("ops") or {}
+        out["changes_carried"] = [contract_said(k, ops[k]) for k in
+                                  sorted(ops, key=str)
+                                  if str(k) in out["changes_carried"]]
+    return out
 
 
 #: what each part of `hop_scope` is called where it is said
 SCOPE_WORDS = {"include": "takes only", "exclude": "leaves out",
                "row_filters": "rows filtered in",
                "column_rules": "columns chosen in",
-               "renamed": "renamed", "changes_carried": "changes carried",
+               "values_masked": "values masked in",
+               "renamed": "renamed", "names_ruled": "names written",
+               "databases_renamed": "databases renamed",
+               "changes_carried": "changes carried",
                "objects_not_carried": "objects not carried",
                "objects_named": "only these objects"}
 

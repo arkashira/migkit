@@ -132,3 +132,110 @@ def test_a_run_may_name_the_report_in_its_environment(report, monkeypatch):
     class Bare:
         options = {}
     assert servicecheck.of(Bare, ANSWERS)["missed"]
+
+
+def _report(tmp_path, tables):
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"Tables": [
+        {"Db": "shop", "Table": t, "Conclusion": c} for t, c in tables]}))
+    return p
+
+
+def test_an_answer_neither_same_nor_different_agrees_with_nothing(tmp_path):
+    """The service said the same; migkit could not compare the table (an
+    error, a warning, a skip): nothing is agreed, and the line says so -
+    it once said migkit agreed table by table."""
+    p = _report(tmp_path, [("orders", "same"), ("lines", "different"),
+                           ("carts", "same")])
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "shop.orders", "status": "error",
+         "detail": "permission denied"},
+        {"check": "data", "scope": "shop.lines", "status": "warn",
+         "detail": "not proved"},
+        {"check": "data", "scope": "shop.carts", "status": "ok"}])
+    assert [x.split(":")[0] for x in got["unproved"]] == ["shop.lines",
+                                                          "shop.orders"]
+    assert got["agreed"] == ["shop.carts: same"]
+    said = servicecheck.said(got)
+    assert "2 unproved" in said and "agrees" not in said
+
+
+def test_agreement_is_said_only_of_tables_held_to_an_answer(tmp_path):
+    p = _report(tmp_path, [("orders", "same")])
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "crm.orders", "status": "ok"}])
+    assert got["not in the hop"] == ["shop.orders (same)"]
+    assert "agrees" not in servicecheck.said(got)
+    p = _report(tmp_path, [("orders", "same")])
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "shop.orders", "status": "ok"}])
+    assert servicecheck.said(got).endswith(
+        "migkit agrees on each of its 1 tables")
+
+
+def test_a_database_answer_says_each_table_it_compared(tmp_path):
+    """PostgreSQL answers once a database; the answer says how each table
+    came out (`Result.tables`), and each is held to the service's word."""
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"Tables": [
+        {"Db": "shop", "Schema": "public", "Table": "orders",
+         "Conclusion": "same"},
+        {"Db": "shop", "Schema": "public", "Table": "lines",
+         "Conclusion": "same"}]}))
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "shop", "status": "diff",
+         "detail": "tables differ: public.orders (pk-level files written)",
+         "tables": {"public.orders": "diff", "public.lines": "ok"}}])
+    assert [x.split(":")[0] for x in got["missed"]] == ["shop.public.orders"]
+    assert got["agreed"] == ["shop.public.lines: same"]
+    # the database's answer is held table by table, not again as beyond
+    assert "beyond" not in got
+
+
+def test_a_table_named_after_its_database_is_one_answer(tmp_path):
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"Tables": [
+        {"Db": "shop", "Schema": "public", "Table": "orders",
+         "Conclusion": "same"}]}))
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "shop public.orders", "status": "diff",
+         "detail": "missing=1 extra=0 changed=0"}])
+    assert [x.split(":")[0] for x in got["missed"]] == ["shop.public.orders"]
+
+
+def test_a_pair_answer_is_held_by_its_source_name(tmp_path):
+    """A pair names the table by its leaf and its source name beside it."""
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"Tables": [
+        {"Db": "shop", "Schema": "sales", "Table": "orders",
+         "Conclusion": "same"}]}))
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "shop.orders", "status": "diff",
+         "table": "archive.orders"}])
+    assert got["not in the hop"] == ["shop.sales.orders (same)"]
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "shop.orders", "status": "diff",
+         "table": "sales.orders"}])
+    assert [x.split(":")[0] for x in got["missed"]] == ["shop.sales.orders"]
+
+
+def test_a_name_in_another_case_is_matched_where_it_can_only_be_one(
+        tmp_path):
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps({"Tables": [
+        {"Db": "SHOP", "Table": "ORDERS", "Conclusion": "same"}]}))
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "shop.orders", "status": "diff"}])
+    assert [x.split(":")[0] for x in got["missed"]] == ["SHOP.ORDERS"]
+    # two tables that differ only by case: neither is guessed
+    got = servicecheck.of(_Hop(p), [
+        {"check": "data", "scope": "shop.orders", "status": "diff"},
+        {"check": "data", "scope": "shop.Orders", "status": "ok"}])
+    assert got["not in the hop"] == ["SHOP.ORDERS (same)"]
+
+    class Folding(_Hop):
+        def folds_case(self):
+            return True
+    got = servicecheck.of(Folding(p), [
+        {"check": "data", "scope": "shop.orders", "status": "diff"}])
+    assert got["missed"]

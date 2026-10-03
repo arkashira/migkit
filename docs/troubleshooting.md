@@ -73,6 +73,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * unknown hop <...>, have: <...>
 
+* <...>: mapping.names.<...>.<...> cannot be turned round for the way back - not every name it writes says what it was. Name those tables in mapping.tables, which is turned round exactly
+
 * <...> already has a hop <...> going somewhere else (MIGKIT_HOP=<another name> adds this one beside it)
 
 * MIGKIT_GOAL=<...>: one of <...>
