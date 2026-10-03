@@ -1261,6 +1261,23 @@ class TableSet:
                 self.spool(leaf).add(token, got)
         return out, left
 
+    def _names_among(self, states, change):
+        """The tables the tail knows on the source - each state's name and
+        key, and the tables the change names - against which a working
+        table of an online schema change is told from an application's own
+        (`drift.transient`): `_orders_new` is one beside `orders`, and the
+        application's without it. Read by the name alone, the tail took an
+        application's table so named for a working table and skipped its
+        rename."""
+        out = set()
+        for leaf, st in states.items():
+            out.add(str(leaf))
+            if st.get("name"):
+                out.add(str(st["name"]))
+        out.update(str(x) for x in (change.get("table"), change.get("to"))
+                   if x)
+        return frozenset(out)
+
     def ddl(self, states, change, token, two_way=False):
         """What a DDL at its place in the batch does, by the hop's `ddl`:
         None, or ("truncate", leaf) for the target to be emptied there.
@@ -1283,7 +1300,8 @@ class TableSet:
         kind = change["kind"]
         to = change.get("to")
         st = states.get(leaf) or {"state": "live", "name": change["table"]}
-        if kind == "rename" and drift.transient(change["table"]):
+        among = self._names_among(states, change)
+        if kind == "rename" and drift.transient(change["table"], among):
             # the working table swapped in under the table's name: the
             # table's own rename out of the way says what is done
             return None
@@ -1297,7 +1315,7 @@ class TableSet:
         theirs = change["table"] if (leaf in states or not to or not self._out(
             change["table"])) else to
         pol = self._policy(theirs)
-        if kind == "rename" and to and drift.transient(to):
+        if kind == "rename" and to and drift.transient(to, among):
             if pol != "stop":
                 self._add(states, leaf, st.get("name") or leaf, token,
                           f"swapped for its online schema change's copy"

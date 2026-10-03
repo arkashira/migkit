@@ -206,3 +206,19 @@ def test_mysql_a_rewrite_in_progress_is_not_moved_or_reported(
     assert "_archive_old" in objects.detail, objects.detail
     assert "_orders_" not in objects.detail, objects.detail
     assert "pt_osc" not in objects.detail, objects.detail
+
+
+def test_the_tail_tells_a_working_table_by_the_table_beside_it():
+    """The tail read a rename's tables as working tables by their names
+    alone; it reads them beside the tables it knows, as the move does: an
+    application's `_audit_new` with no `audit` beside it is the
+    application's own table."""
+    from migkit import drift
+    from migkit.tailtables import TableSet
+    states = {"orders": {"state": "live", "name": "orders"}}
+    swap = {"kind": "rename", "table": "_orders_gho", "to": "orders"}
+    among = TableSet._names_among(None, states, swap)
+    assert drift.transient("_orders_gho", among)
+    own = {"kind": "rename", "table": "_audit_new", "to": "audit_2024"}
+    among = TableSet._names_among(None, states, own)
+    assert not drift.transient("_audit_new", among)

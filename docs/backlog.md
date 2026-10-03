@@ -2779,8 +2779,8 @@ store). What was still nowhere:
   of the ALTERs that add its deferred indexes are the server's). A name
   an application could choose too (`_archive_old`) counts only beside the
   table it would copy. Left out of the move's table list, the counts, the
-  data, the object inventory and the shape watch. Still open: the change
-  tail reads gh-ost's and pt-osc's names by the name alone.
+  data, the object inventory and the shape watch. The change tail reads them beside
+  the tables it knows too (done 2026-10-04, `TableSet._names_among`).
   Test: `test_an_online_rewrites_working_tables_are_left_alone.py`.
 * **`schema_authority: atlas` needs an alias shape** (4-จ from the old
   queue): how the hop names the authority's own alias for a table the
