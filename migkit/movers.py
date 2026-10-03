@@ -119,6 +119,26 @@ def _ladder():
     )
 
 
+#: what a stop costs each bulk way, as the plan says it before it starts:
+#: a way not named starts over, and every table it had copied is copied
+#: again (DTS says it as "resumable dump status"; nobody here did)
+AFTER_A_STOP = {
+    "builtin": "a stop goes on from the ranges it had finished",
+    "pgcopydb": "a stop goes on from the tables it had finished - a table"
+                " cut in parts, a copy run in a container, or one begun"
+                " under another scope starts over",
+    "mysqlsh": "a stop goes on loading from the dump it kept, where the"
+               " source has not been written since; otherwise it starts"
+               " over",
+}
+
+
+def after_a_stop(via):
+    """What a stop costs the bulk way `via`, in words (`AFTER_A_STOP`)."""
+    return AFTER_A_STOP.get(via, "a stop starts it over: every table it"
+                                 " had copied is copied again")
+
+
 def pick(engine, table="", hop=None, go=False):
     """Fastest installed tool for whole-db moves, builtin for single tables
     (chunk resume matters more than raw speed there)."""

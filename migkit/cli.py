@@ -4402,6 +4402,7 @@ def _bulk_db(hop, eng, d, v, chunk, go, engine):
         _would_stop(lambda: eng.refuse_unfit(d))
         _would_stop(lambda: _programs_ready(hop, d, v))
     console.print(f"[bold]{_esc(d)}[/bold] bulk copy:")
+    console.print(f"  {_esc(movers.after_a_stop(v))}")
     before = drift.shape(eng, "src", d) if go else None
     for line in _table_plan(hop, eng, d, v, go):
         console.print(line)
