@@ -66,6 +66,37 @@ def test_no_rules_no_check(tmp_path):
     assert "rules" not in eng.planned_checks()
 
 
+def test_a_rule_that_asks_one_side_only_is_refused_at_load():
+    """It was dropped without a word, and the rule the operator believed
+    held was never asked (audit 2026-10-01, K19)."""
+    from migkit import hopkeys, rules
+    half = {"revenue": {"source": "select sum(amount) from orders"}}
+    raw = {"source": "sqlite:///tmp/a.db", "target": "sqlite:///tmp/b.db",
+           "options": {"rules": half}}
+    bad = [p for p in hopkeys.check_hop("h", raw) if p.level == "error"]
+    assert [p.where for p in bad] == ["hops.h.options.rules"], bad
+    assert "asks target nothing" in bad[0].text, bad
+    with pytest.raises(SystemExit, match="asks target nothing"):
+        rules.configured(Hop(name="h", engine="sqlite", source=Endpoint(),
+                             target=Endpoint(), options={"rules": half}))
+    whole = {"revenue": {"source": "select 1", "target": "select 1"}}
+    assert not [p for p in hopkeys.check_hop(
+        "h", {**raw, "options": {"rules": whole}}) if p.level == "error"]
+
+
+def test_a_row_one_side_answers_twice_is_a_row_apart(tmp_path):
+    """Compared as a count of each row: a row the source answers twice
+    and the target once was in both lists, and the difference said
+    nothing was apart."""
+    src = [(1, "paid", 1), (2, "paid", 1), (3, "open", 1)]
+    dst = [(1, "paid", 1), (3, "open", 1)]
+    got = _lite(tmp_path, {"statuses": "select status from orders"}, src,
+                dst).check_rules("main")
+    assert got[0].status == "diff", got[0].detail
+    assert got[0].detail.startswith("1 rows only on the source, 0 only on"
+                                    " the target"), got[0].detail
+
+
 def test_values_meet_across_spellings():
     from decimal import Decimal
 

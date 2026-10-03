@@ -37,9 +37,11 @@ def test_a_replication_task_with_its_endpoints():
     m = got.raw["mapping"]
     assert m["tables"] == {"public.order_items": "public.lines"}
     assert m["columns"] == {"public.orders": {"drop": ["notes"]}}
-    # the conditions of a column any of them, the columns all
-    assert m["where"] == {"public.orders": "(region = 'EU' or region ="
-                                           " 'UK') and id >= '1000'"}
+    # the conditions of a column any of them, the columns all - each name
+    # and value quoted as the source's engine quotes them
+    assert m["where"] == {"public.orders": "(\"region\" = 'EU' or"
+                                           " \"region\" = 'UK') and"
+                                           " \"id\" >= '1000'"}
     # what the task took is the hop's own include, not a guess made later
     assert got.raw["include"] == ["public.orders", "public.order_items"]
     assert got.include == []
@@ -51,7 +53,7 @@ def test_a_replication_task_with_its_endpoints():
     hop = _hop(got)
     assert hop.engine == "hetero" and hop.databases == ["orders"]
     assert hop.options["reverse"] == "at_cutover"
-    assert hop.row_filter("public", "orders").startswith("(region")
+    assert hop.row_filter("public", "orders").startswith('("region"')
     assert hop.target.mysql_tls()["ssl"] is not None
 
 
@@ -89,7 +91,11 @@ def test_a_connector_as_json():
     assert "target" not in got.raw
     assert got.raw["goal"] == "keep-in-sync"
     assert got.raw["exclude"] == ["public.audit_2019"]
-    assert ("regex", "public\\.audit_.*") in got.include
+    # each pattern the task took is one a shell pattern says: the hop's
+    # own include, which holds whether or not the guide reaches the source
+    assert got.raw["include"] == ["public.orders", "public.customers",
+                                  "public.audit_*"]
+    assert got.include == []
     assert any("password" in n for n in got.notes)
     # and the password in the file is nowhere in the hop
     assert "CHANGE_ME" not in json.dumps(got.raw)
@@ -162,3 +168,59 @@ def test_nothing_said_of_an_import_names_a_program():
         got = imports.read(SAMPLES / name)
         said = " ".join(got.notes).lower()
         assert not [t for t in TOOLS if t in said], (name, said)
+
+
+# ---- audit 2026-10-01: DU4, K16 -------------------------------------------
+
+def _filter(column, value, engine):
+    return imports._dms_filter([{
+        "filter-type": "source", "column-name": column,
+        "filter-conditions": [{"filter-operator": "eq", "value": value}]}],
+        engine)
+
+
+def test_a_filter_names_its_column_and_value_as_the_source_quotes_them():
+    """`user` bare on PostgreSQL is the session's user, so a filter on
+    the column read zero rows on both sides and said "same" over
+    nothing; `order` was a syntax error; MySQL read `'C:\\new'` with a
+    newline in it."""
+    assert _filter("user", "bob", "postgres") == "\"user\" = 'bob'"
+    assert _filter("order", "x", "mysql") == "`order` = 'x'"
+    # MySQL reads a backslash in a string as an escape: doubled
+    assert _filter("path", "C:\\new", "mysql") == "`path` = 'C:\\\\new'"
+    # PostgreSQL does not: left as it is
+    assert _filter("path", "C:\\new", "postgres") == "\"path\" = 'C:\\new'"
+    assert _filter("it's", "o'k", "postgres") == "\"it's\" = 'o''k'"
+
+
+def test_a_wildcard_database_list_is_carried_not_dropped(tmp_path):
+    f = tmp_path / "c.properties"
+    f.write_text("name=x\n"
+                 "connector.class=io.example.connector.mysql.MySqlConnector\n"
+                 "database.hostname=10.0.0.5\n"
+                 "database.include.list=shop_.*,crm\n")
+    got = imports.read(f)
+    # every database read, the hop's include keeping the tables of those
+    # the patterns match - it was the literal names only, `shop_.*` left
+    # out without a word and its databases never moved
+    assert "databases" not in got.raw
+    assert got.raw["include"] == ["shop_*.*", "crm.*"], got.raw
+    assert any("database.include.list holds patterns" in n
+               for n in got.notes), got.notes
+    hop = build_hop("x", {**got.raw, "target": "mysql://10.0.0.6"})
+    assert not hop.excluded("shop_eu", "orders")
+    assert hop.excluded("billing", "orders")
+    assert not hop.excluded("crm", "people")
+
+
+def test_every_pattern_a_hop_cannot_say_is_said():
+    """A regular expression or a search the hop's include cannot carry
+    stays for the guide to apply, and each is said - where the guide
+    cannot reach the source, the hop would take every table."""
+    load = imports.read(SAMPLES / "sakila.load")
+    assert "include" not in load.raw
+    said = [n for n in load.notes if "include cannot say" in n]
+    assert len(said) == 1 and "film" in said[0], load.notes
+    conn = imports.read(SAMPLES / "connector-mysql.properties")
+    said = [n for n in conn.notes if "exclude cannot say" in n]
+    assert len(said) == 1 and "cache_[0-9]+" in said[0], conn.notes

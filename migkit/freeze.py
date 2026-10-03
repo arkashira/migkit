@@ -378,9 +378,9 @@ def _my_hold(hop, eng, side, sql):
     so the replica stops on it (1141) and the drain with it - and on a
     target whose log flows back to the source (a stream back at cutover,
     or streams both ways), whose hold would become the source's."""
-    top = str((hop.options or {}).get("topology", "") or "").lower()
-    back = str((hop.options or {}).get("reverse", "") or "").lower()
-    local = side == "src" or top == "two_way" or back == "at_cutover"
+    from .hopkeys import reverse, topology
+    local = side == "src" or topology(hop) == "two_way" \
+        or reverse(hop) == "at_cutover"
     if not local:
         return eng._q(side, sql)
     conn = eng._conn(side)

@@ -1,8 +1,12 @@
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+from . import envkeys
+from .engines import PORTS
 
 BASE = Path(__file__).resolve().parent.parent
 
@@ -16,7 +20,7 @@ def _find(env, name, default_dir):
     Order: the explicit variable, the working directory, the user's config
     directory, then the source tree for a checkout run in place.
     """
-    override = os.environ.get(env)
+    override = envkeys.text(env)
     if override:
         return Path(override).expanduser()
     here = Path.cwd() / default_dir / name
@@ -40,28 +44,82 @@ def user_config_path(name="hops.yaml"):
             / "migkit" / name)
 
 
-def _reports_root():
-    """Where reports get written.
+def state_home():
+    """The user's own directory for what a program keeps between runs:
+    `$XDG_STATE_HOME/migkit`, `~/.local/state/migkit` where unset."""
+    return Path(os.environ.get("XDG_STATE_HOME")
+                or Path.home() / ".local" / "state") / "migkit"
 
-    An installed copy must not write inside its own package directory, so an
-    installed run puts them under the working directory. A source checkout
-    keeps them at the repo root, which is where they have always been.
+
+def _reports_root(conf=None):
+    """Where reports and the state of runs are kept: `MIGKIT_REPORTS`, else
+    the repo root for a source checkout, where they have always been.
+
+    An installed copy keeps them beside its configuration where that is a
+    project's own (`<dir>/conf/hops.yaml` -> `<dir>/reports`, where an
+    installed run from that directory always kept them), else in the
+    user's state directory (`state_home`) - never under the working
+    directory. They followed it: run from cron's `$HOME` or systemd's `/`,
+    the same hop met a fresh directory - no lease, so two writers; no tail
+    position, so the tail started from now; no half-done cutover to undo
+    (audit 2026-10-01, ST7).
     """
-    override = os.environ.get("MIGKIT_REPORTS")
+    override = envkeys.text("MIGKIT_REPORTS")
     if override:
         return Path(override).expanduser()
     installed = "site-packages" in BASE.parts or "dist-packages" in BASE.parts
-    return (Path.cwd() if installed else BASE) / "reports"
+    if not installed:
+        return BASE / "reports"
+    conf = Path(conf) if conf else None
+    if conf is not None and conf.parent.name == "conf":
+        return conf.parent.parent / "reports"
+    return state_home() / "reports"
 
 
 CONF = _find("MIGKIT_CONF", "hops.yaml", "conf")
-REPORTS = _reports_root()
+REPORTS = _reports_root(CONF)
+
+
+def private(path):
+    """`path` as a directory only this user may read, made where missing:
+    what migkit keeps there holds values and secrets, and was readable by
+    every user of the machine (audit 2026-10-01, SEC10)."""
+    from . import durable
+    return durable.private_dir(path)
 
 
 #: tables migkit keeps on a side for itself - a two-way tail's origin
 #: marks (`twoway`), a cutover's drain marks (`drainmark`) - never copied,
 #: compared or repaired as the application's
 MIGKIT_OWN = ("migkit_origin", "migkit_cutover_mark")
+#: the beginning of the name of every table migkit makes on a side: the
+#: one rule for "migkit's own", the underscore taken as itself. It was
+#: three - the names above exactly, `migkit\_%` on PostgreSQL and
+#: `migkit%%` on MySQL, which also took an application's `migkitchen`
+#: (audit 2026-10-01, DU26)
+OWN_PREFIX = "migkit_"
+#: the same as a LIKE pattern, `\` its escape (both engines' default),
+#: for a catalogue query to leave them out; quoted by each engine's own
+#: `_quote_literal`
+OWN_LIKE = "migkit\\_%"
+
+
+def own(name, keyed=False):
+    """Whether a table (its own name, without schema or database) is one
+    migkit made on a side for itself. On an engine whose objects are keys
+    or topics an application names as it likes (`KEYED_ENGINES`), only the
+    names migkit uses exactly."""
+    name = str(name)
+    if keyed:
+        return name in MIGKIT_OWN
+    return name in MIGKIT_OWN or name.startswith(OWN_PREFIX)
+
+
+def _is_reference(value):
+    """Whether a side's field is written as a reference to a secret."""
+    from .addresses import REFERENCES
+    return isinstance(value, str) and value.startswith(REFERENCES) and (
+        not value.startswith("${") or value.endswith("}"))
 
 #: engines whose objects are keys or topics an application names as it
 #: likes, not tables and schemas another tool creates for its own state:
@@ -527,7 +585,28 @@ class Endpoint:
     def held_secrets(self):
         """The secrets this side holds now, found without asking anything
         (a keychain, a cloud): what `redact` hides."""
-        return [self.password] if self.password else []
+        return ([self.password] if self.password else []) + self._opened()
+
+    def _opened(self):
+        """The secret options read so far (`option_secret`)."""
+        return [v for v in (self.__dict__.get("_secrets") or {}).values()
+                if v]
+
+    def option_secret(self, key):
+        """The side's option `key`, a secret (`hopkeys` declares it so),
+        read the first time it is asked for and kept: a reference
+        resolved, its failure naming `hops.<hop>.<side>.<key>`. Measured
+        before: a `mine_password`, a key's passphrase or a registry's
+        password written as `env:NAME` - as `doctor` told the operator to
+        write it - went out as the text `env:NAME` (audit 2026-10-01,
+        K7)."""
+        kept = self.__dict__.setdefault("_secrets", {})
+        if key not in kept:
+            raw = (self.options or {}).get(key)
+            where = self.__dict__.get("_where", "")
+            kept[key] = secret(raw, f"{where}.{key}" if where else key,
+                               self.__dict__.get("_memo"))
+        return kept[key]
 
     def _netloc(self):
         host = str(self.host or "")
@@ -665,7 +744,74 @@ class Endpoint:
         return out
 
 
-class IamEndpoint(Endpoint):
+def _side_field(name):
+    """A field of a side read from the configuration whose value may be a
+    reference: kept as written, resolved the first time it is read
+    (`secret`), once. The references are replaced, never changed in
+    place, so a copy of the side reads its own."""
+    def get(self):
+        d = self.__dict__
+        if name in (d.get("_refs") or {}):
+            with _RESOLVING:
+                refs = d.get("_refs") or {}
+                if name in refs:
+                    d["_v_" + name] = secret(
+                        refs[name], f"{d.get('_where') or 'the side'}"
+                                    f".{name}", d.get("_memo"))
+                    d["_refs"] = {k: v for k, v in refs.items()
+                                  if k != name}
+        return d.get("_v_" + name, "")
+
+    def put(self, value):
+        d = self.__dict__
+        refs = {k: v for k, v in (d.get("_refs") or {}).items()
+                if k != name}
+        if _is_reference(value):
+            refs[name] = value
+            d.pop("_v_" + name, None)
+        else:
+            d["_v_" + name] = value
+        d["_refs"] = refs
+    return property(get, put)
+
+
+#: one side's references resolved at a time: two connections opened at
+#: once ask a vault or a cloud once, not twice
+_RESOLVING = threading.RLock()
+
+
+class SideEndpoint(Endpoint):
+    """A side read from the configuration. A host, user or password
+    written as a reference (`env:`, `file:`, `vault:`, `aws-sm:`, ...) is
+    read the first time a connection needs it, once, and a failure names
+    `hops.<hop>.<side>.<key>`: every hop's secrets were read on every load,
+    several loads a command - a vault and a cloud asked each time, and
+    one hop's unset variable stopping a command on another, naming
+    neither (audit 2026-10-01, K12). `doctor`, `report` and a hop that
+    never connects read none."""
+
+    host = _side_field("host")
+    user = _side_field("user")
+    password = _side_field("password")
+
+    def __repr__(self):
+        refs = self.__dict__.get("_refs") or {}
+        shown = {k: refs.get(k) or getattr(self, k) if k != "password"
+                 else ("***" if refs.get(k) or self.__dict__.get(
+                     "_v_password") else "")
+                 for k in ("host", "user", "password")}
+        return (f"{type(self).__name__}(host={shown['host']!r},"
+                f" port={self.port!r}, user={shown['user']!r},"
+                f" password={shown['password']!r}, options={self.options!r})")
+
+    def held_secrets(self):
+        """The password once read, and the secret options read: nothing
+        is asked just for it to be hidden."""
+        got = self.__dict__.get("_v_password")
+        return ([got] if got else []) + self._opened()
+
+
+class IamEndpoint(SideEndpoint):
     """An endpoint that signs in with a token the cloud signs instead of a
     password (backlog 38): `auth: aws_iam` in its options, for RDS and
     Aurora. A token is good for 15 minutes to open connections; it is
@@ -698,7 +844,7 @@ class IamEndpoint(Endpoint):
     def held_secrets(self):
         """The token made last, if one has been: a new one is not signed
         just to be hidden."""
-        return [self._token] if self._token else []
+        return ([self._token] if self._token else []) + self._opened()
 
 
 #: the keychain entries migkit keeps passwords under: service `migkit`,
@@ -735,29 +881,36 @@ def keychain_write(name, secret):
     keyring.set_password(KEYCHAIN, name, secret)
 
 
-class KeychainEndpoint(Endpoint):
+class KeychainEndpoint(SideEndpoint):
     """A side written as an address with no password: its password is the
     one this machine's keychain keeps for the hop and side, read the first
     time a connection needs it - so a hop that never connects never asks
-    the keychain, and one whose server wants no password finds none."""
+    the keychain, and one whose server wants no password finds none. A
+    password given it (a copy of the side made with one) is used as it
+    is."""
 
     keychain = ""
     _got = None
 
     @property
     def password(self):
+        given = self.__dict__.get("_v_password")
+        if given:
+            return given
         if self._got is None:
             self._got = keychain_read(self.keychain, strict=False)
         return self._got
 
     @password.setter
     def password(self, value):
-        pass
+        if value:
+            self.__dict__["_v_password"] = value
 
     def held_secrets(self):
         """The password once read: the keychain is not asked just for it
         to be hidden."""
-        return [self._got] if self._got else []
+        got = self.__dict__.get("_v_password") or self._got
+        return ([got] if got else []) + self._opened()
 
 
 def _aws_client(service, region=None, role=None):
@@ -805,6 +958,11 @@ class Hop:
     #: what the hop is for (`hopkeys.GOALS`), "" where it does not say -
     #: its options are already under the hop's own by the time it is built
     goal: str = ""
+    #: {side: the name its engine was written as} where that is another
+    #: name than the engine's own (`mariadb`, `aurora-postgres`):
+    #: `engine` and the side engines are the engine's own name
+    #: (`hopkeys.brands`)
+    brand: dict = field(default_factory=dict)
 
     def reversed(self):
         """The same hop run the other way: the target as the source, every
@@ -990,11 +1148,12 @@ class Hop:
         return bool(recorded) and recorded != self.scope_fingerprint()
 
     def report_dir(self, db=""):
-        d = REPORTS / self.name / db if db else REPORTS / self.name
-        # this user's only: what migkit keeps there holds values and the
-        # position of every stream (audit SEC10)
-        from .durable import private_dir
-        private_dir(d)
+        # each level only this user's: what is kept under it holds values,
+        # undo journals and positions (SEC10)
+        private(REPORTS)
+        d = private(REPORTS / self.name)
+        if db:
+            d = private(d / db)
         # the files under it that hold values encrypted, where the hop
         # names who may read them (`evidence`)
         from . import evidence
@@ -1009,32 +1168,56 @@ class Hop:
         return got if got is not None else self.named("databases", db)
 
     def excluded(self, *parts):
-        """True if an object matches any `exclude` pattern, so migkit neither
-        verifies nor repairs it. Pass the dotted name parts, e.g. (db, schema,
-        table) for postgres or (db, table) for mysql/mongo. A pattern matches
-        the full dotted id or any right-anchored suffix of it, with shell
+        """True if an object is left out, so migkit neither verifies nor
+        repairs it. Pass the dotted name parts, e.g. (db, schema, table)
+        for postgres or (db, table) for mysql/mongo.
+
+        Left out: migkit's own tables (`own`), another tool's bookkeeping
+        (`leftovers.bookkeeping`) and the tables whose names begin with the
+        hop's `noise_prefix`; what an `exclude` pattern matches - the full
+        dotted id or any right-anchored suffix of it, with shell
         wildcards, so 'job_queue', 'public.job_queue' and
-        'orders_db.public.job_queue' all exclude the same table,
-        and 'orders_db.public.*' excludes a whole schema. This protects
-        target-owned tables (rows written on the target, not the source) from
-        being deleted by a reconcile."""
+        'orders_db.public.job_queue' all exclude the same table, and
+        'orders_db.public.*' a whole schema; and what the hop's `include`
+        does not take (`included`). This protects target-owned tables
+        (rows written on the target, not the source) from being deleted by
+        a reconcile.
+
+        A name handed over as one part (`public.orders`) is read as the
+        parts it names, as `included` reads it, so `orders` excludes it
+        whichever way a caller passes it. One rule for all of it:
+        `noise_prefix` was read by one engine's schema check only, so the
+        copy, the tail and every other engine took the tables it named
+        (audit 2026-10-01, DU16)."""
+        keyed = self.engine in KEYED_ENGINES
         parts = [str(p) for p in parts if p not in (None, "")]
-        if parts and parts[-1] in MIGKIT_OWN:
+        if not parts:
+            return False
+        if own(parts[-1], keyed):
             # migkit's own bookkeeping on a side, never the application's
             return True
-        if self.engine not in KEYED_ENGINES:
+        if not keyed:
             # another tool's bookkeeping - a schema a replicator keeps on
             # the source, a loader's load table: its state, not the
             # application's rows (`leftovers.bookkeeping`)
             from .leftovers import bookkeeping
             if bookkeeping(*parts):
                 return True
-        cands = {".".join(parts[i:]) for i in range(len(parts))}
+            noise = self._noise()
+            if noise and len(parts) > 1 and parts[-1].startswith(noise):
+                return True
+        names = self._names(*parts) or parts
+        cands = {".".join(names[i:]) for i in range(len(names))}
         fold = self.folds_case()
-        if any(name_matches(c, pat, fold) for pat in self.exclude
+        if any(name_matches(c, pat, fold) for pat in self.exclude or ()
                for c in cands):
             return True
         return not self.included(*parts)
+
+    def _noise(self):
+        """The beginnings of names the hop's `noise_prefix` leaves out."""
+        from .hopkeys import noise
+        return noise(self)
 
     def takes_table(self, db, table, engine=None):
         """Whether the hop takes a table named as a listing names it
@@ -1404,19 +1587,59 @@ class Hop:
         return sorted(k for k in keys if k not in known)
 
 
-DEFAULT_PORTS = {
-    "postgres": 5432, "mysql": 3306, "mssql": 1433,
-    "mongodb": 27017, "redis": 6379, "kafka": 9092,
-    "tidb": 4000, "cockroachdb": 26257, "dsql": 5432, "cosmosdb": 443,
-}
+#: the port a side listens on where it names none: the one table, kept
+#: in `engines` beside every engine's other names (`engines.PORTS`)
+DEFAULT_PORTS = PORTS
+
+
+# ---- secrets --------------------------------------------------------------
+
+#: where each kind of reference is kept, as its failures say it
+_STORES = (("env:", "the environment"), ("${", "the environment"),
+           ("file:", "a file"), ("vault:", "Vault"),
+           ("aws-sm:", "AWS Secrets Manager"),
+           ("gcp-sm:", "Google Secret Manager"),
+           ("azure-kv:", "Azure Key Vault"), ("keyring:", "the keychain"))
+
+
+def _unread(ref, why):
+    """The one way a secret that could not be read is said, whatever store
+    keeps it: the reference, where it is kept and why (K22)."""
+    store = next((s for p, s in _STORES if str(ref).startswith(p)),
+                 "its store")
+    return SystemExit(f"the secret {ref} could not be read from {store}:"
+                      f" {why}")
+
+
+def secret(value, where="", memo=None):
+    """`value` with a reference read from where it is kept (`_secret`);
+    anything else as it is. A failure names `where` - the key it was
+    written under, `hops.<hop>.<side>.password`. `memo` keeps what a vault
+    or a cloud answered for the configuration it was read from, so one
+    file's reference is asked once a process; the environment and files
+    are read each time."""
+    if not _is_reference(value):
+        return value
+    if memo is not None and value in memo:
+        return memo[value]
+    try:
+        got = _secret(value)
+    except SystemExit as e:
+        raise SystemExit(f"{where}: {e}" if where else str(e)) from None
+    if memo is not None and not value.startswith(("env:", "${", "file:")):
+        memo[value] = got
+    return got
 
 
 def _secret(val):
     """Resolve a secret reference so credentials need not sit in plaintext:
       env:NAME / ${NAME}   -> environment variable
       file:/path           -> file contents (trimmed; Docker/K8s secrets)
-      vault:secret/db#key  -> Vault KV via VAULT_ADDR/VAULT_TOKEN (or the
-                              vault CLI), read at load time
+      vault:secret/db#key  -> Vault's KV store, version 1 or 2, over its
+                              HTTP API (VAULT_ADDR, VAULT_TOKEN or
+                              ~/.vault-token, VAULT_NAMESPACE,
+                              VAULT_CACERT), or the vault CLI where
+                              VAULT_ADDR is unset
       aws-sm:<id>[#key]    -> AWS Secrets Manager; `key` picks a field of a
                               JSON secret (RDS's own secrets are JSON)
       gcp-sm:projects/<p>/secrets/<s>[/versions/<v>]
@@ -1432,13 +1655,14 @@ def _secret(val):
         name = val[4:] if val.startswith("env:") else val[2:-1]
         v = os.environ.get(name)
         if v is None:
-            raise SystemExit(f"secret env var '{name}' is not set")
+            raise _unread(val, f"the variable {name} is not set")
         return v
     if val.startswith("file:"):
         p = Path(val[5:]).expanduser()
-        if not p.exists():
-            raise SystemExit(f"secret file '{p}' not found")
-        return trusted_file(p, "the secret file").read_text().strip()
+        try:
+            return trusted_file(p, "the secret file").read_text().strip()
+        except OSError as e:
+            raise _unread(val, f"{p}: {e.strerror or e}") from None
     if val.startswith("vault:"):
         return _vault_read(val[6:])
     if val.startswith("aws-sm:"):
@@ -1489,17 +1713,17 @@ def _aws_secret(ref):
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001 - said, with the secret's name
-        raise SystemExit(f"could not read AWS secret '{sid}':"
-                         f" {type(e).__name__}")
+        raise _unread(f"aws-sm:{ref}", type(e).__name__) from None
     text = got.get("SecretString")
     if text is None:
-        raise SystemExit(f"AWS secret '{sid}' holds no text")
+        raise _unread(f"aws-sm:{ref}", f"AWS secret '{sid}' holds no text")
     if not key:
         return text
     try:
         return str(_json.loads(text)[key])
     except (ValueError, KeyError, TypeError):
-        raise SystemExit(f"AWS secret '{sid}' has no field '{key}'")
+        raise _unread(f"aws-sm:{ref}",
+                      f"AWS secret '{sid}' has no field '{key}'") from None
 
 
 def _gcp_secret(ref):
@@ -1509,8 +1733,11 @@ def _gcp_secret(ref):
         raise SystemExit("pip install google-cloud-secret-manager for"
                          " gcp-sm: secrets")
     name = ref if "/versions/" in ref else ref + "/versions/latest"
-    got = secretmanager.SecretManagerServiceClient().access_secret_version(
-        name=name)
+    try:
+        got = secretmanager.SecretManagerServiceClient() \
+            .access_secret_version(name=name)
+    except Exception as e:  # noqa: BLE001 - said, with the secret's name
+        raise _unread(f"gcp-sm:{ref}", f"{type(e).__name__}: {e}") from None
     return got.payload.data.decode()
 
 
@@ -1522,66 +1749,197 @@ def _azure_secret(ref):
         raise SystemExit("pip install azure-identity azure-keyvault-secrets"
                          " for azure-kv: secrets")
     vault, _, name = ref.partition("/secrets/")
-    return SecretClient(vault_url=vault, credential=DefaultAzureCredential()
-                        ).get_secret(name.split("/")[0]).value
+    try:
+        return SecretClient(vault_url=vault,
+                            credential=DefaultAzureCredential()).get_secret(
+                                name.split("/")[0]).value
+    except Exception as e:  # noqa: BLE001 - said, with the secret's name
+        raise _unread(f"azure-kv:{ref}",
+                      f"{type(e).__name__}: {e}") from None
 
 
 def _vault_read(ref):
+    """One field of a secret Vault's KV store keeps at `path#key` (`value`
+    where no key is said). Over Vault's own HTTP API where `VAULT_ADDR`
+    says where it is - version 1 and 2 of the store alike, the version
+    read off the mount as the vault CLI reads it - else through the CLI.
+    It was the CLI only, though the docstring promised `VAULT_ADDR`, read
+    a version 2 store's layout only (version 1 ended in `KeyError`), and
+    kept what the CLI said to itself (audit 2026-10-01, K22)."""
+    import shutil
     path, _, key = ref.partition("#")
     key = key or "value"
+    path = path.strip("/")
+    addr = os.environ.get("VAULT_ADDR", "").rstrip("/")
+    if addr:
+        data = _vault_http(addr, path, f"vault:{ref}")
+    elif shutil.which("vault"):
+        data = _vault_cli(path, f"vault:{ref}")
+    else:
+        raise _unread(f"vault:{ref}", "VAULT_ADDR is not set, and there is"
+                      " no vault program to ask")
+    if not isinstance(data, dict) or key not in data:
+        raise _unread(f"vault:{ref}", f"{path} holds no field '{key}'")
+    return str(data[key])
+
+
+def _vault_get(addr, api, ref):
+    """The JSON Vault answers for `GET /v1/<api>`, None for 404."""
     import json as _json
-    import shutil
+    import ssl
+    import urllib.error
+    import urllib.request
+    token = os.environ.get("VAULT_TOKEN", "")
+    if not token:
+        kept = Path.home() / ".vault-token"
+        token = kept.read_text().strip() if kept.is_file() else ""
+    headers = {"X-Vault-Token": token} if token else {}
+    if os.environ.get("VAULT_NAMESPACE"):
+        headers["X-Vault-Namespace"] = os.environ["VAULT_NAMESPACE"]
+    ctx = None
+    if addr.startswith("https"):
+        ctx = ssl.create_default_context(
+            cafile=os.environ.get("VAULT_CACERT") or None)
+    req = urllib.request.Request(f"{addr}/v1/{api}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
+            return _json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        try:
+            said = "; ".join(_json.loads(e.read().decode() or "{}")
+                             .get("errors") or []) or e.reason
+        except ValueError:
+            said = e.reason
+        raise _unread(ref, f"Vault answered {e.code}: {said}") from None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        why = getattr(e, "reason", None) or e
+        raise _unread(ref, f"{addr} could not be reached: {why}") from None
+
+
+def _vault_http(addr, path, ref):
+    """The fields kept at `path`, from a KV store of either version."""
+    mount, version = "", ""
+    try:
+        got = _vault_get(addr, f"sys/internal/ui/mounts/{path}", ref)
+    except SystemExit:
+        got = None
+    if got and isinstance(got.get("data"), dict):
+        mount = str(got["data"].get("path") or "")
+        version = str((got["data"].get("options") or {}).get("version")
+                      or "1")
+    if not mount:
+        mount = path.split("/", 1)[0] + "/"
+    rest = path[len(mount):] if path.startswith(mount) else path
+    if version in ("2", ""):
+        got = _vault_get(addr, f"{mount}data/{rest}", ref)
+        data = ((got or {}).get("data") or {}).get("data")
+        if isinstance(data, dict) or version == "2":
+            return data
+    got = _vault_get(addr, path, ref)
+    return (got or {}).get("data")
+
+
+def _vault_cli(path, ref):
+    import json as _json
     import subprocess
-    if shutil.which("vault"):
-        p = subprocess.run(["vault", "kv", "get", "-format=json", path],
-                           capture_output=True, text=True)
-        if p.returncode == 0:
-            data = _json.loads(p.stdout)["data"]["data"]
-            if key in data:
-                return data[key]
-    raise SystemExit(f"could not read vault secret '{ref}'"
-                     " (need vault CLI + VAULT_ADDR/VAULT_TOKEN)")
+    p = subprocess.run(["vault", "kv", "get", "-format=json", path],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        said = (p.stderr or p.stdout or "").strip().splitlines()
+        raise _unread(ref, said[-1] if said else f"exit {p.returncode}")
+    try:
+        data = _json.loads(p.stdout)["data"]
+    except (ValueError, KeyError, TypeError):
+        raise _unread(ref, "the vault program's answer was not read")
+    # version 2 keeps the fields under data.data, beside its metadata
+    if isinstance(data, dict) and isinstance(data.get("data"), dict) and \
+            "metadata" in data:
+        return data["data"]
+    return data
 
 
-def _endpoint(engine, raw, keychain=""):
-    """A side from its long-form mapping. `keychain` names the entry a
-    side written as an address signs in with where it carries no password
-    of its own."""
-    raw = raw or {}
-    extra = {k: v for k, v in raw.items()
-             if k not in ("host", "port", "user", "password")}
-    nested = extra.pop("options", None)
-    if isinstance(nested, dict):
-        extra.update(nested)
-    auth = str(extra.get("auth", "") or "").lower()
-    if auth not in ("", "password", "aws_iam"):
-        raise SystemExit(f"auth: {auth} - password (the default) or"
-                         " aws_iam")
-    lazy = bool(keychain) and auth != "aws_iam" and not raw.get("password")
-    ep = (IamEndpoint if auth == "aws_iam" else
-          KeychainEndpoint if lazy else Endpoint)(
-        host=_secret(raw.get("host", "")),
-        port=int(raw.get("port") or DEFAULT_PORTS.get(engine, 0)),
-        user=_secret(raw.get("user", "")),
-        password=("" if auth == "aws_iam" or lazy
-                  else str(_secret(raw.get("password", "")))),
-        options=extra,
-    )
-    if lazy:
-        ep.keychain = keychain
-    return ep
+# ---- the configuration file ------------------------------------------------
+
+try:
+    _LOADER = yaml.CSafeLoader
+except AttributeError:  # a build of the YAML library without its C part
+    _LOADER = yaml.SafeLoader
 
 
-def load_hops(path=None):
+class _OnceEach(_LOADER):
+    """YAML's safe loader, refusing a key written twice in one mapping.
+    YAML keeps the last and reads the first as nothing - measured: a hop
+    with two `options:` blocks loaded as the second, `protect_target` and
+    `approvals` gone, and no error (audit 2026-10-01, K2). A key a merge
+    (`<<: *anchor`) brings is the anchor's to be overridden, as YAML
+    means. The C parser where it is built: 40 hops read in 0.5 ms against
+    4.3 ms (measured in the audit)."""
+
+    def construct_mapping(self, node, deep=False):
+        if isinstance(node, yaml.MappingNode):
+            seen = {}
+            for key_node, _ in node.value:
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    continue
+                key = self.construct_object(key_node, deep=True)
+                try:
+                    first = seen.get(key)
+                except TypeError:
+                    continue
+                line = key_node.start_mark.line + 1
+                if first is not None:
+                    raise yaml.constructor.ConstructorError(
+                        None, None,
+                        f"{key!r} is written twice in one mapping (line"
+                        f" {first} and line {line}): YAML keeps the last"
+                        " and reads the first as nothing - say it once",
+                        key_node.start_mark)
+                seen[key] = line
+        return super().construct_mapping(node, deep)
+
+
+def read_yaml(text):
+    """A configuration's text as data, a key written twice refused: the
+    one reader of a hops file (`load_hops`, `doctor`)."""
+    return yaml.load(text, Loader=_OnceEach) or {}
+
+
+#: {path: (what the file was, its data, the secrets read for it)}: the
+#: file read and checked once while it stays as it is (`_checked`)
+_FILES = {}
+_FILES_LOCK = threading.Lock()
+
+
+def _checked(path=None):
+    """(data, the memo of its secrets) of the hops file, every problem of
+    it refused before anything runs - read and checked again only when
+    the file changes. A command loaded it two to seven times, the
+    dashboard on every poll (K12)."""
+    import hashlib
     path = Path(path or CONF)
-    if not path.exists():
+    try:
+        text = path.read_bytes()
+        mode = path.stat().st_mode
+    except FileNotFoundError:
         raise SystemExit(
             f"no hop configuration yet ({path} does not exist).\n"
             "  create one:  migkit init\n"
             "  or point at an existing file:  MIGKIT_CONF=/path/to/hops.yaml")
-    data = yaml.safe_load(path.read_text()) or {}
+    stamp = (hashlib.blake2b(text, digest_size=16).digest(), mode)
+    key = str(path)
+    with _FILES_LOCK:
+        got = _FILES.get(key)
+    if got is not None and got[0] == stamp:
+        return got[1], got[2]
+    try:
+        data = read_yaml(text)
+    except yaml.YAMLError as e:
+        raise SystemExit(f"{path} is not YAML migkit can read, and nothing"
+                         f" was run:\n  {e}")
     from . import hopkeys
-    errors = [p for p in hopkeys.check(data) if p.level == "error"]
+    errors = [p for p in hopkeys.check(data, path) if p.level == "error"]
     if errors:
         # before anything runs, and all of them at once: a run stopped on
         # the first only to meet the second is two runs for one fix
@@ -1589,7 +1947,17 @@ def load_hops(path=None):
             f"{path} has {len(errors)} problem"
             f"{'s' if len(errors) > 1 else ''}, and nothing was run:\n"
             + "\n".join(f"  {p}" for p in errors))
-    return {name: build_hop(name, raw)
+    with _FILES_LOCK:
+        _FILES[key] = (stamp, data, {})
+    return data, _FILES[key][2]
+
+
+def load_hops(path=None):
+    """Every hop of the hops file, built. Nothing is resolved: a side's
+    secrets are read the first time it connects (`SideEndpoint`)."""
+    import copy
+    data, memo = _checked(path)
+    return {name: build_hop(name, copy.deepcopy(raw), memo)
             for name, raw in (data.get("hops") or {}).items()}
 
 
@@ -1598,27 +1966,71 @@ _NO_KEYCHAIN = ("sqlite", "duckdb", "parquet", "bigquery", "pubsub",
                 "generic", "saas")
 
 
-def build_hop(name, raw):
+def _endpoint(engine, raw, keychain="", where="", memo=None):
+    """A side from its long-form mapping. `keychain` names the entry a
+    side written as an address signs in with where it carries no password
+    of its own; `where` is the side's place in the file
+    (`hops.<hop>.<side>`), named where a secret of it cannot be read."""
+    from . import hopkeys
+    raw = raw or {}
+    extra = {k: v for k, v in raw.items()
+             if k not in ("host", "port", "user", "password")}
+    nested = extra.pop("options", None)
+    if isinstance(nested, dict):
+        extra.update(nested)
+    extra = hopkeys.normalised(hopkeys.ENDPOINT_OPTIONS, extra)
+    auth = str(extra.get("auth", "") or "").lower()
+    if auth not in ("", "password", "aws_iam"):
+        raise SystemExit(f"auth: {auth} - password (the default) or"
+                         " aws_iam")
+    lazy = bool(keychain) and auth != "aws_iam" and not raw.get("password")
+    password = raw.get("password", "")
+    if password is not None and not isinstance(password, str):
+        password = str(password)
+    ep = (IamEndpoint if auth == "aws_iam" else
+          KeychainEndpoint if lazy else SideEndpoint)(
+        host=raw.get("host", ""),
+        port=int(raw.get("port") or PORTS.get(engine, 0)),
+        user=raw.get("user", ""),
+        password="" if auth == "aws_iam" or lazy else (password or ""),
+        options=extra,
+    )
+    ep.__dict__.update(_where=where, _memo=memo)
+    if lazy:
+        ep.keychain = keychain
+    return ep
+
+
+def build_hop(name, raw, memo=None):
     """One hop from its mapping - the long form, two addresses
     (`migkit.addresses`), or a side of each. An address is read into the
-    mapping the long form would hold, and built the same way from there."""
+    mapping the long form would hold, and built the same way from there.
+
+    Every engine on it is the engine's own name, whatever other name it
+    was written as (the name kept apart, `Hop.brand`); every side has its
+    engine's port where it names none, a cross-engine hop's long-form
+    sides too, which got port 0; and every word an option folds is in its
+    own spelling (`hopkeys.normalised`) - so no reader meets another
+    spelling than the next (audit 2026-10-01, DU6, K15, K20)."""
     from . import addresses, hopkeys
     raw = dict(raw or {})
     src_e, dst_e, engine = hopkeys.sides(raw)
-    options = dict(raw.get("options") or {})
+    options = hopkeys.normalised(hopkeys.HOP_OPTIONS,
+                                 raw.get("options") or {})
+    if engine == "hetero":
+        options.update(source_engine=src_e, target_engine=dst_e)
     dbs = list(raw.get("databases") or [])
     db_map = dict(raw.get("db_map") or {})
     ends = {}
-    for side in ("source", "target"):
+    for side, e in (("source", src_e), ("target", dst_e)):
         got = raw.get(side)
+        where = f"hops.{name}.{side}"
         if not addresses.is_address(got):
-            ends[side] = _endpoint(engine, got)
+            ends[side] = _endpoint(e, got, where=where, memo=memo)
             continue
         e, ep_raw, names = addresses.parse(got, side)
         ends[side] = _endpoint(e, ep_raw, "" if e in _NO_KEYCHAIN
-                               else keychain_name(name, side))
-        if engine == "hetero":
-            options.setdefault(f"{side}_engine", e)
+                               else keychain_name(name, side), where, memo)
         if side == "source" and names:
             if dbs and [str(d) for d in dbs] != names:
                 raise SystemExit(
@@ -1641,6 +2053,7 @@ def build_hop(name, raw):
                             f"{name}: {s} goes to {t} by the target"
                             f" address and to {db_map[s]} by db_map")
                     db_map[s] = t
+    keys = hopkeys.HOP_KEYS
     hop = Hop(
         name=name,
         engine=engine,
@@ -1651,27 +2064,38 @@ def build_hop(name, raw):
         include=scope_patterns(raw.get("include")),
         objects=dict(raw.get("objects") or {}),
         service=raw.get("service", ""),
-        big_rows=int(raw.get("big_rows", 5_000_000)),
-        slice=int(raw.get("slice", 1_000_000)),
-        workers=int(raw.get("workers", 4)),
+        big_rows=hopkeys.opt(raw, "big_rows", keys),
+        slice=hopkeys.opt(raw, "slice", keys),
+        workers=hopkeys.opt(raw, "workers", keys),
         options=options,
         db_map=db_map,
         mapping=raw.get("mapping") or {},
         workers_set="workers" in raw,
         goal=str(raw.get("goal") or ""),
+        brand=hopkeys.brands(raw),
     )
     hopkeys.apply_goal(hop)
     return hop
 
 
 def get_hop(name):
-    hops = load_hops()
-    if name not in hops:
-        raise SystemExit(f"unknown hop {name}, have: {', '.join(hops) or 'none'}")
-    hop = hops[name]
+    """The hop `name`, and only it, built: another hop's secrets are not
+    read, and a name that is not one is said with the nearest that is."""
+    import copy
+    import difflib
+    data, memo = _checked()
+    hops = data.get("hops") or {}
+    key = next((k for k in hops if str(k) == str(name)), None)
+    if key is None:
+        names = [str(k) for k in hops]
+        near = difflib.get_close_matches(str(name), names, n=1, cutoff=0.6)
+        raise SystemExit(f"unknown hop {name}"
+                         + (f" - did you mean {near[0]}?" if near else "")
+                         + f", have: {', '.join(names) or 'none'}")
+    hop = build_hop(key, copy.deepcopy(hops[key]), memo)
     # MIGKIT_EXCLUDE lets a caller skip databases/tables without editing hops.yaml,
     # so the run's config file stays the single place the operator changes.
-    env = os.environ.get("MIGKIT_EXCLUDE", "")
-    if env:
-        hop.exclude = list(hop.exclude) + [p.strip() for p in env.split(",") if p.strip()]
+    extra = envkeys.items("MIGKIT_EXCLUDE")
+    if extra:
+        hop.exclude = list(hop.exclude) + extra
     return hop

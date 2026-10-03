@@ -875,8 +875,10 @@ def _generation_wait(pair, db, a):
     """What a generation waits on: past the source's position of now where
     a tail follows it (`fence_wait`), else the hop's `settle` seconds."""
     from . import tailctl
-    opts = pair.hop.options or {}
-    pause = float(opts.get("settle") or GENERATION_SECONDS)
+    from .hopkeys import opt
+    # left out, the generations' own pause
+    said = opt(pair.hop, "settle")
+    pause = GENERATION_SECONDS if not said else said
 
     def wait(n):
         if tailctl.alive(pair.hop.report_dir(db)):
@@ -885,7 +887,7 @@ def _generation_wait(pair, db, a):
             except Exception:  # noqa: BLE001 - waited by the clock instead
                 pos = None
             if pos is not None and pair.fence_wait(
-                    db, pos, int(opts.get("fence_timeout", 300))):
+                    db, pos, opt(pair.hop, "fence_timeout")):
                 return
         time.sleep(pause)
     return wait

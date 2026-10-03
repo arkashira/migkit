@@ -94,6 +94,7 @@ import threading
 import time
 
 from . import failpoint
+from .hopkeys import opt
 
 #: in the order they run; each is a failpoint `cutover.<phase>`
 PHASES = ("prepare", "jobs_off", "pause", "freeze", "drain", "verify",
@@ -181,8 +182,8 @@ def _engine(hop):
 
 
 def _reverse(hop):
-    return str((hop.options or {}).get("reverse", "") or "").lower() \
-        == "at_cutover"
+    from .hopkeys import reverse
+    return reverse(hop) == "at_cutover"
 
 
 # --- the stream, as the cutover sees it -----------------------------------
@@ -397,10 +398,15 @@ def _run_command(hop, command, timeout, say):
 
 def _pooler_conn(conf):
     import psycopg2
+
+    from .config import secret
     p = conf["pooler"]
+    # a reference (env:NAME) went to the pooler as its own text (K7)
     conn = psycopg2.connect(host=p.get("host", "127.0.0.1"),
                             port=int(p.get("port", 6432)),
-                            user=p.get("user"), password=p.get("password"),
+                            user=p.get("user"),
+                            password=secret(p.get("password"),
+                                            "cutover.pooler.password"),
                             dbname="pgbouncer", connect_timeout=5)
     conn.autocommit = True
     return conn
@@ -480,8 +486,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out.append((level, what))
 
     budget = conf["budget"] if conf else None
-    top = str((hop.options or {}).get("topology", "") or "").lower()
-    if top == "two_way" or (hop.options or {}).get("two_way"):
+    from .hopkeys import topology
+    if topology(hop) == "two_way" or (hop.options or {}).get("two_way"):
         add("fail", "the hop streams both ways (two_way), and a"
                     " cutover freezes one side: there is no one side to"
                     " move from")
@@ -1155,8 +1161,7 @@ def _manual(hop, eng, dbs, leg, say, approvers, failed, unproven):
                                  " this again")
             pos = leg.fence.src_lsn(d)
             got = leg.fence.fence_wait(d, pos, timeout=float(
-                (hop.options or {}).get("fence_timeout", 300))) \
-                if pos is not None else None
+                opt(hop, "fence_timeout"))) if pos is not None else None
             if got is False and unproven is not None:
                 unproven.append(f"{d}: the stream short of {pos}")
             elif got is False:
@@ -1500,7 +1505,7 @@ def _mark_ready(hop, eng, dbs, leg, rec, say):
     a stream that does not carry a table made now is found here, with
     nothing frozen yet."""
     from . import drainmark
-    wait = float((hop.options or {}).get("fence_timeout", 300))
+    wait = float(opt(hop, "fence_timeout"))
     for i, d in enumerate(dbs):
         rec.setdefault("mark", {})[d] = {"made": True}
         _save(hop, rec)
@@ -1878,19 +1883,16 @@ def _has_delta(hop, eng, d):
 
 def _counters(hop, eng, d, conf, rec, say):
     """The target's counters past the source's, with the undo written
-    first; `keys: apart` adds its margin (`SEQUENCE_BUFFER`, which both
-    counters' plans read)."""
+    first; `keys: apart` adds its margin (`SEQUENCE_MARGIN`, which both
+    counters' plans read), for this thread's plan only."""
+    from .engines.postgres import SEQUENCE_MARGIN
     gap = margin(conf)
-    before = os.environ.get("SEQUENCE_BUFFER")
+    token = SEQUENCE_MARGIN.set(gap) if gap else None
     try:
-        if gap:
-            os.environ["SEQUENCE_BUFFER"] = str(gap)
         plan = eng.repair_plan(d, "sequences")
     finally:
-        if before is None:
-            os.environ.pop("SEQUENCE_BUFFER", None)
-        else:
-            os.environ["SEQUENCE_BUFFER"] = before
+        if token is not None:
+            SEQUENCE_MARGIN.reset(token)
     for a in plan:
         if "REFUSED" in (a.note or ""):
             raise _Undo(f"{d}: counters - {a.note}")
@@ -2112,7 +2114,7 @@ def back_apply(hop, eng, db, back, apply, say):
         return stmts
     pos = rev.src_lsn(tdb) if hasattr(rev, "src_lsn") else None
     got = rev.fence_wait(tdb, pos, timeout=float(
-        (hop.options or {}).get("fence_timeout", 300))) \
+        opt(hop, "fence_timeout"))) \
         if pos is not None and hasattr(rev, "fence_wait") else None
     say("  the stream back " + (
         f"has carried everything the target has ({pos})" if got else
