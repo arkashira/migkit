@@ -235,8 +235,11 @@ def test_the_online_sync_is_not_given_a_rename():
 
 def test_the_restore_writes_a_renamed_collection_under_its_new_name(
         tmp_path, monkeypatch):
-    """Its own pair of names first: the restore takes the first pair a name
-    matches, and the database's pair would take it under its old name."""
+    """Its own pair of names last: the restore takes the last pair a name
+    matches (measured with the Database Tools 100.16 against MongoDB 7.0:
+    `appdb.orders -> first.orders_v2` before `appdb.* -> second.*`
+    restored `second.orders`), and the database's pair after it took it
+    under its old name."""
     _collections(monkeypatch)
     hop = _hop("mongodb", mapping={"tables": {"orders": "orders_v2"}},
                db_map={"appdb": "appdb2"})
@@ -244,8 +247,36 @@ def test_the_restore_writes_a_renamed_collection_under_its_new_name(
     steps = movers.mongodump_move(hop, "appdb", 2, False, None)
     argv = next(s.argv for s in steps if getattr(s, "argv", None))
     renames = [a for a in argv if a.startswith(("--nsFrom", "--nsTo"))]
-    assert renames == ["--nsFrom=appdb.orders", "--nsTo=appdb2.orders_v2",
-                       "--nsFrom=appdb.*", "--nsTo=appdb2.*"], renames
+    assert renames == ["--nsFrom=appdb.*", "--nsTo=appdb2.*",
+                       "--nsFrom=appdb.orders", "--nsTo=appdb2.orders_v2"], \
+        renames
+
+
+@needs_docker
+def test_the_restore_takes_the_last_pair_a_name_matches(tmp_path):
+    """The measurement the order above rests on, on the sandbox's own
+    server and this machine's programs."""
+    import shutil
+    import subprocess
+    from tests import servers
+    if not (shutil.which("mongodump") and shutil.which("mongorestore")):
+        pytest.skip("the dump and restore programs are not installed here")
+    with servers.space("mongo", __name__) as mongo:
+        coll = mongo.src.client()["measure"]["orders"]
+        coll.insert_one({"_id": 1})
+        uri = (f"mongodb://{mongo.src.host}:{mongo.src.port}/"
+               "?directConnection=true")
+        archive = tmp_path / "a.archive"
+        subprocess.run(["mongodump", f"--uri={uri}", "--db=measure",
+                        f"--archive={archive}", "--quiet"], check=True)
+        subprocess.run(["mongorestore", f"--uri={uri}", f"--archive={archive}",
+                        "--quiet", "--nsInclude=measure.*",
+                        "--nsFrom=measure.*", "--nsTo=second.*",
+                        "--nsFrom=measure.orders", "--nsTo=first.orders_v2"],
+                       check=True)
+        client = mongo.src.client()
+        assert client["first"].list_collection_names() == ["orders_v2"]
+        assert "orders" not in client["second"].list_collection_names()
 
 
 def _collections(monkeypatch):
@@ -356,9 +387,18 @@ def test_a_pattern_after_the_database_takes_what_it_took_before(pattern):
 def test_the_dumps_pattern_takes_what_the_hop_takes(scope):
     hop = _hop("mysql", **scope)
     rx = movers._mydumper_regex(hop, "appdb")
+    # the dump reads its pattern without case unless told otherwise
+    # (measured on 1.0.5); Python's reads it with case already, and has
+    # no bare `(?-i)`
+    assert rx.startswith("(?-i)"), rx
+    rx = rx[len("(?-i)"):]
     for name in NAMES:
         assert bool(re.search(rx, f"appdb.{name}")) == \
             (not hop.excluded("appdb", name)), (scope, name, rx)
+    # a table named otherwise in case is another table, taken as the hop
+    # takes it
+    assert bool(re.search(rx, "appdb.AUDIT_x")) == \
+        (not hop.excluded("appdb", "AUDIT_x"))
 
 
 def test_a_hop_taking_everything_gives_the_dump_no_pattern():

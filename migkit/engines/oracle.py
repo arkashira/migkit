@@ -1315,10 +1315,11 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
     # ---- code -----------------------------------------------------------
 
     def neutral_views(self, side, db):
+        # each as the hop's `objects` carries views (`takes`)
         return [(self._said(n), text) for n, text in self._rows(
             side, db, f"select view_name, text from all_views where owner ="
                       f" {MARK} order by 1", (self._owner(side, db),))
-            if not self.hop.excluded(db, self._said(n))]
+            if self.takes(db, "view", self._said(n))]
 
     def neutral_functions(self, side, db):
         """Functions whose body is `BEGIN RETURN <expression>; END`; every
@@ -1334,6 +1335,8 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
             src.setdefault((name, kind), []).append(text or "")
         out = []
         for (name, kind), lines in sorted(src.items()):
+            if not self.takes(db, kind, self._said(name)):
+                continue
             params, returns = [], None
             for arg, declared, pos in self._rows(
                     side, db, "select argument_name, data_type, position"
@@ -1426,8 +1429,11 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                             else "AFTER")
                 r.level = "row" if "EACH ROW" in how else "statement"
                 r.events = tuple(e.strip() for e in event.split(" OR "))
-                if self.hop.excluded(db, table):
-                    continue
+            # each by its kind as the hop's `objects` carries it, a
+            # trigger by its table too (`takes`)
+            if not self.takes(db, k, f"{r.table}.{r.name}" if r.table
+                              else r.name, r.table):
+                continue
             out.append(r)
         return out
 
@@ -1511,7 +1517,8 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         owner = self._owner("dst", db)
         try:
             # each with the name that decides whether the hop takes it: a
-            # trigger's and an index's table, any other object its own
+            # trigger's and an index's table, any other object its own -
+            # and its kind, as the hop's `objects` carries it (`takes`)
             invalid = self._rows(
                 "dst", db, "select o.object_type || ' ' || o.object_name,"
                            " coalesce((select t.table_name from all_triggers"
@@ -1520,7 +1527,8 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                            " (select i.table_name from all_indexes i where"
                            " o.object_type = 'INDEX' and i.owner = o.owner"
                            " and i.index_name = o.object_name),"
-                           " o.object_name) from all_objects o where"
+                           " o.object_name), o.object_type, o.object_name"
+                           " from all_objects o where"
                            f" o.owner = {MARK} and o.status = 'INVALID'"
                            " order by 1", (owner,))
             loose = self._rows("dst", db, "select constraint_name || ' on '"
@@ -1532,8 +1540,9 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                                           " 'DISABLED' or validated ="
                                           " 'NOT VALIDATED') order by 1",
                                (owner,))
-            invalid = [r for r in invalid
-                       if self.in_scope(db, self._said(str(r[1])))]
+            invalid = [r for r in invalid if self.takes(
+                db, str(r[2]), self._said(str(r[3])),
+                self._said(str(r[1])))]
             loose = [r for r in loose
                      if self.in_scope(db, self._said(str(r[1])))]
         except Exception as e:  # noqa: BLE001 - said, as the error

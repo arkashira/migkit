@@ -2165,23 +2165,65 @@ class MySQLEngine(Engine):
         left = [f"--ignore-table={pdb}.{t}"
                 for t in sorted(self._left_out_of_schema(db, side)
                                 | self._objects_not_taken(side, db))]
+        # a kind the hop's `objects` does not carry at all is not dumped;
+        # one it carries by name has the rest taken out of the text
+        # (`_without_objects_not_taken`)
+        from ..config import objects_of
+        said = objects_of(self.hop)
+        kinds = [("--routines", "--skip-routines", ("functions",
+                                                    "procedures")),
+                 ("--triggers", "--skip-triggers", ("triggers",)),
+                 ("--events", "--skip-events", ("events",))]
+        flags = [off if all(said.get(k, True) is False for k in ks) else on
+                 for on, off, ks in kinds]
         # the password in the environment: on the command line every
         # process listing on the machine could read it
         p = run(["mysqldump", "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
-                 "--no-data", "--routines", "--triggers",
-                 "--events", "--skip-comments", "--skip-dump-date",
+                 "--no-data", *flags, "--skip-comments", "--skip-dump-date",
                  "--column-statistics=0",
                  f"--ignore-table={pdb}.migkit_changelog", *left, pdb],
                 check=False, env={"MYSQL_PWD": ep.password})
         if p.returncode != 0:
             raise RuntimeError(p.stderr.strip())
-        text = self._canon_ddl(p.stdout)
+        text = self._without_objects_not_taken(db, self._canon_ddl(p.stdout))
         lines = [l for l in text.splitlines()
                  if not l.startswith("--")
                  and "GTID_PURGED" not in l
                  and "SQL_LOG_BIN" not in l
                  and l.strip()]
         return "\n".join(lines) + "\n"
+
+    #: a routine's, a trigger's or an event's statement in a schema dump:
+    #: its kind and its name, and for a trigger the table it is on
+    _CODE_DDL = re.compile(r"\b(FUNCTION|PROCEDURE|TRIGGER|EVENT)\s+`([^`]+)`"
+                           r"(?:.*?\bON\s+`([^`]+)`)?", re.I | re.S)
+
+    def _without_objects_not_taken(self, db, text):
+        """A schema dump's text without the routines, triggers and events
+        the hop's `objects` leaves out by name (`takes`): each is a block
+        of its own between the dump's `DELIMITER ;;` and `DELIMITER ;`.
+        A block whose object cannot be read is kept, and so compared."""
+        from ..config import objects_of
+        if not any(isinstance(v, list) for v in objects_of(self.hop)
+                   .values()):
+            return text
+        out, block = [], None
+        for line in str(text).splitlines():
+            if block is None and line.strip() == "DELIMITER ;;":
+                block = [line]
+                continue
+            if block is not None:
+                block.append(line)
+                if line.strip() == "DELIMITER ;":
+                    m = self._CODE_DDL.search("\n".join(block))
+                    if m is None or self.takes(
+                            db, m.group(1), f"{m.group(3)}.{m.group(2)}"
+                            if m.group(3) else m.group(2), m.group(3)):
+                        out += block
+                    block = None
+                continue
+            out.append(line)
+        return "\n".join(out + (block or []))
 
     def _left_out_of_schema(self, db, side):
         """The tables on this side the whole-database schema comparers
@@ -5150,10 +5192,16 @@ class MySQLEngine(Engine):
         neither compares nor replays a grant on a table that is the
         target's own."""
         def taken(grant):
-            got = re.search(r"\sON\s+(?:(?:TABLE|FUNCTION|PROCEDURE)\s+)?"
+            got = re.search(r"\sON\s+(?:(TABLE|FUNCTION|PROCEDURE)\s+)?"
                             r"<db>\s*\.\s*(\S+)", grant, re.I)
-            return not got or got.group(1) == "*" \
-                or self.in_scope(db, got.group(1))
+            if not got or got.group(2) == "*":
+                return True
+            # a grant on a routine goes with it, as the hop's `objects`
+            # carries functions and procedures (`takes`)
+            what = str(got.group(2)).strip("`")
+            if got.group(1) and got.group(1).upper() != "TABLE":
+                return self.takes(db, got.group(1), what)
+            return self.in_scope(db, what)
         out = {}
         for who, privs in grants.items():
             kept = {g for g in privs if taken(g)}
@@ -5317,14 +5365,15 @@ class MySQLEngine(Engine):
 
     def _events(self, side, db):
         """{event: (time_zone, sql_mode, CREATE EVENT)} as the server shows
-        each one, of the events the hop takes (`in_scope`): the repair
-        made every source event on the target, one the hop leaves out too."""
+        each one, of the events the hop takes - by its name and as its
+        `objects` carries events (`takes`): the repair made every source
+        event on the target, one the hop leaves out too."""
         name = self._d(side, db)
         out = {}
         for (ev,) in self._q(side, "select event_name from"
                                    " information_schema.events where"
                                    " event_schema = %s", (name,)):
-            if not self.in_scope(db, str(ev)):
+            if not self.takes(db, "event", str(ev)):
                 continue
             row = self._q(side, f"show create event {self._my_ident(name)}"
                                 f".{self._my_ident(ev)}")[0]

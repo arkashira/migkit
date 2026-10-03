@@ -244,3 +244,280 @@ def test_mongodb_an_excluded_collection_and_its_indexes_are_not_compared(
     got = eng.check_schema("appdb")
     assert [r.status for r in got] == ["ok", "ok"], [r.detail for r in got]
     assert "audit" not in (tmp_path / "objects.json").read_text()
+
+
+# ---- every engine's kinds, read one way (backlog P0-SCOPE 7, item 3) -------
+
+def test_a_catalogues_own_words_name_the_hops_kinds():
+    from migkit.config import object_kind, object_kinds
+    assert object_kinds("SQL_STORED_PROCEDURE") == ("procedures",)
+    assert object_kinds("SQL_INLINE_TABLE_VALUED_FUNCTION") == ("functions",)
+    assert object_kinds("SEQUENCE_OBJECT") == ("sequences",)
+    assert object_kinds("MATERIALIZED VIEW") == ("views",)
+    assert object_kinds("dictionary") == ("dictionaries",)
+    assert object_kinds("routine") == ("functions", "procedures")
+    assert object_kinds("PACKAGE BODY") == ("functions", "procedures")
+    assert object_kinds("table") == () and object_kinds("SYNONYM") == ()
+    assert object_kind("routine") is None and object_kind("VIEW") == "views"
+
+
+def test_a_word_for_two_kinds_is_taken_where_either_is(tmp_path):
+    hop = _hop("postgres", tmp_path, objects={"functions": False})
+    assert hop.takes_object("routine", "appdb", "public", "f")
+    assert not hop.takes_object("function", "appdb", "public", "f")
+    hop = _hop("postgres", tmp_path, objects={"routines": False})
+    assert not hop.takes_object("routine", "appdb", "public", "f")
+    assert not hop.takes_object("SQL_SCALAR_FUNCTION", "appdb", "dbo", "f")
+
+
+def test_sql_server_lists_only_the_objects_the_hop_carries(tmp_path):
+    from migkit.engines.mssql import MSSQLEngine
+    eng = MSSQLEngine(_hop("mssql", tmp_path, objects={
+        "procedures": False, "views": ["dbo.v_keep"]}))
+    rows = [("dbo.v_keep", "VIEW", "h1", "dbo", "v_keep"),
+            ("dbo.v_other", "VIEW", "h2", "dbo", "v_other"),
+            ("dbo.p", "SQL_STORED_PROCEDURE", "h3", "dbo", "p"),
+            ("dbo.f", "SQL_SCALAR_FUNCTION", "h4", "dbo", "f"),
+            ("dbo.s", "SEQUENCE_OBJECT", "h5", "dbo", "s")]
+    eng._cmd = lambda side, db, sql: rows
+    got = eng._objects("src", "appdb")
+    assert set(got) == {("dbo.v_keep", "VIEW"),
+                        ("dbo.f", "SQL_SCALAR_FUNCTION"),
+                        ("dbo.s", "SEQUENCE_OBJECT")}, got
+
+
+def test_oracle_lists_only_the_objects_the_hop_carries(tmp_path):
+    from migkit.engines.oracle import OracleEngine
+    eng = OracleEngine(_hop("oracle", tmp_path, objects={
+        "views": False, "triggers": False}))
+    eng._owner = lambda side, db: "APP"
+
+    def rows(side, db, sql, args=()):
+        if "all_views" in sql:
+            return [("V1", "select 1 from dual")]
+        if "all_source" in sql and "TRIGGER" in sql:
+            return [("F1", "FUNCTION", "function f1 return number is"
+                     " begin return 1; end;"),
+                    ("T1", "TRIGGER", "trigger t1 before insert on orders"
+                     " begin null; end;")]
+        if "all_triggers" in sql:
+            return [("T1", "ORDERS", "BEFORE EACH ROW", "INSERT")]
+        return []
+    eng._rows = rows
+    assert eng.neutral_views("src", "appdb") == []
+    got = [r.kind for r in eng.code_routines("src", "appdb")]
+    assert got == ["function"], got
+
+
+def test_oracles_own_pull_is_not_taken_where_it_would_bring_triggers():
+    """Its table mode brings each table's triggers: a hop whose `objects`
+    leaves some out goes by the table copier, which makes none."""
+    from migkit.decide import Facts, climb
+    from migkit.engines import oracle_pump
+    got = climb("appdb", oracle_pump.ways(),
+                Facts({"triggers": False}, **{"why not": lambda: None}))
+    assert got.path == "copier", got
+    got = climb("appdb", oracle_pump.ways(),
+                Facts({"triggers": True}, **{"why not": lambda: None}))
+    assert got.path == "pump", got
+
+
+def _lite(tmp_path, **kw):
+    import sqlite3
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.sqlite import SQLiteEngine
+    for name in ("a.db", "b.db"):
+        con = sqlite3.connect(tmp_path / name)
+        con.executescript(
+            "create table t (id integer primary key, v text);"
+            " create table log (id integer primary key, at text);"
+            " create view v_t as select id from t;")
+        if name == "a.db":
+            con.executescript(
+                "create trigger trg after insert on t begin insert into log"
+                " (at) values ('x'); end;"
+                " create view v_more as select v from t;")
+        con.close()
+    hop = Hop(name="lite", engine="sqlite",
+              source=Endpoint(host=str(tmp_path / "a.db")),
+              target=Endpoint(host=str(tmp_path / "b.db")),
+              databases=["main"], **kw)
+    hop.report_dir = lambda db=None: tmp_path
+    return SQLiteEngine(hop)
+
+
+def test_sqlite_compares_only_the_objects_the_hop_carries(tmp_path):
+    got = _lite(tmp_path).check_schema("main")
+    assert got[0].status == "diff", got
+    got = _lite(tmp_path, objects={"triggers": False,
+                                   "views": ["v_t"]}).check_schema("main")
+    assert got[0].status == "ok", [(r.status, r.detail) for r in got]
+
+
+def test_sqlite_makes_no_trigger_the_hop_leaves_out(tmp_path):
+    import sqlite3
+    eng = _lite(tmp_path, objects={"triggers": False})
+    (tmp_path / "b.db").unlink()
+    sqlite3.connect(tmp_path / "b.db").close()
+    eng.native_bulk("main", ["t", "log"], True, lambda m: None)
+    con = sqlite3.connect(tmp_path / "b.db")
+    kinds = {r[0] for r in con.execute("select type from sqlite_master")}
+    con.close()
+    assert "trigger" not in kinds and "table" in kinds, kinds
+
+
+def test_duckdb_reads_and_makes_only_the_sequences_the_hop_carries(tmp_path):
+    import duckdb
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.duckdb import DuckDBEngine
+    con = duckdb.connect(str(tmp_path / "a.duckdb"))
+    con.execute("create sequence free_seq start 5; create sequence id_seq;"
+                " create table t (id integer default nextval('id_seq'),"
+                " v text); insert into t (v) values ('x');"
+                " create view v_t as select v from t;")
+    con.close()
+    duckdb.connect(str(tmp_path / "b.duckdb")).close()
+    hop = Hop(name="duck", engine="duckdb",
+              source=Endpoint(host=str(tmp_path / "a.duckdb")),
+              target=Endpoint(host=str(tmp_path / "b.duckdb")),
+              databases=["main"], objects={"sequences": False,
+                                           "views": False})
+    hop.report_dir = lambda db=None: tmp_path
+    eng = DuckDBEngine(hop)
+    assert eng._sequences("src", "main") == {}
+    assert eng._objects("src", "main")["view"] == {}
+    said = []
+    eng.native_bulk("main", ["t"], True, said.append)
+    con = duckdb.connect(str(tmp_path / "b.duckdb"), read_only=True)
+    got = {r[0] for r in con.execute(
+        "select sequence_name from duckdb_sequences()").fetchall()}
+    con.close()
+    # the one a carried table draws on is made all the same, and said
+    assert got == {"id_seq"}, got
+    assert any("id_seq" in m for m in said), said
+
+
+def test_postgres_the_schema_fix_makes_no_trigger_the_hop_leaves_out(
+        tmp_path):
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(_hop("postgres", tmp_path,
+                              objects={"triggers": False}))
+    ddl = ('CREATE TABLE "public"."t" ("id" integer);\n'
+           'CREATE TRIGGER "trg" AFTER INSERT ON "public"."orders" FOR EACH'
+           ' ROW EXECUTE FUNCTION "public"."g"();\n'
+           'CREATE INDEX "i" ON "public"."t" ("id");')
+    got, left = eng._without_triggers_not_taken("appdb", ddl)
+    assert "TRIGGER" not in got and "CREATE INDEX" in got, got
+    assert left == ["public.orders.trg"]
+    every = PostgresEngine(_hop("postgres", tmp_path))
+    assert every._without_triggers_not_taken("appdb", ddl) == (ddl, [])
+    # one it would have to cut out of a longer statement is refused
+    import pytest
+    with pytest.raises(SystemExit, match="not one line"):
+        eng._without_triggers_not_taken(
+            "appdb", 'CREATE TRIGGER "trg" AFTER INSERT ON "public"."o"\n'
+                     "FOR EACH ROW EXECUTE FUNCTION g();")
+
+
+def test_postgres_the_inventory_leaves_a_trigger_by_its_kind(tmp_path):
+    held = {"src": ["table|public.orders", "trigger|public.orders.trg"],
+            "dst": ["table|public.orders"]}
+    got = _pg(tmp_path, held, objects={"triggers": False}).check_objects(
+        "appdb")
+    assert got.status == "ok", got.detail
+    got = _pg(tmp_path, held).check_objects("appdb")
+    assert got.status == "diff", got.detail
+
+
+#: a dump's list as PostgreSQL 16's restore writes it (measured)
+LISTING = """221; 1255 16413 FUNCTION public f(integer, text) postgres
+3439; 0 0 COMMENT public FUNCTION f(a integer, b text) postgres
+222; 1255 16414 FUNCTION public g() postgres
+3288; 2620 16415 TRIGGER public orders trg postgres
+3442; 0 0 COMMENT public TRIGGER trg ON orders postgres
+3287; 2606 16400 FK CONSTRAINT public orders fk_cust postgres
+3443; 0 0 COMMENT public CONSTRAINT fk_cust ON orders postgres
+3434; 2618 16483 RULE public people rl postgres
+3448; 0 0 COMMENT public RULE rl ON people postgres
+"""
+
+
+def test_a_comment_goes_with_the_object_left_out_of_the_schema():
+    """Measured on 16: the comment on a function left out was restored
+    and refused (`function public.f(integer, text) does not exist`)."""
+    from migkit import movers
+    text, dropped = movers._toc_without(
+        LISTING, {"1255 16413": {}, "2620 16415": {}, "2606 16400": {}},
+        ["public FUNCTION f(a integer, b text)"])
+    out = [line for line in text.splitlines() if line.startswith(";")]
+    assert [line.split(";")[1] for line in out] == [
+        "221", "3439", "3288", "3442", "3287", "3443"], out
+    assert dropped == ["1255 16413", "2620 16415", "2606 16400"]
+    # what is kept keeps its comment
+    assert "3448; 0 0 COMMENT public RULE rl ON people postgres" in text
+
+
+def test_mysql_compares_only_the_code_the_hop_carries(tmp_path):
+    from migkit.engines.mysql import MySQLEngine
+    eng = MySQLEngine(_hop("mysql", tmp_path, objects={
+        "procedures": ["keep_p"], "triggers": False}))
+    text = "\n".join([
+        "CREATE TABLE `t` (`id` int);",
+        "DELIMITER ;;", "CREATE PROCEDURE `keep_p`() BEGIN END ;;",
+        "DELIMITER ;",
+        "DELIMITER ;;", "CREATE PROCEDURE `drop_p`() BEGIN END ;;",
+        "DELIMITER ;",
+        "DELIMITER ;;", "/*!50003 CREATE TRIGGER `trg` BEFORE INSERT ON `t`"
+        " FOR EACH ROW SET NEW.id = 1 */;;", "DELIMITER ;"])
+    got = eng._without_objects_not_taken("appdb", text)
+    assert "keep_p" in got and "drop_p" not in got and "trg" not in got, got
+    assert "CREATE TABLE" in got
+    every = MySQLEngine(_hop("mysql", tmp_path))
+    assert every._without_objects_not_taken("appdb", text) == text
+
+
+def test_mysql_a_grant_on_a_routine_goes_with_the_routine(tmp_path):
+    from migkit.engines.mysql import MySQLEngine
+    eng = MySQLEngine(_hop("mysql", tmp_path,
+                           objects={"procedures": False}))
+    got = eng._grants_taken("appdb", {"app@%": {
+        "GRANT EXECUTE ON PROCEDURE <db>.`p` TO `app`@`%`",
+        "GRANT EXECUTE ON FUNCTION <db>.`f` TO `app`@`%`",
+        "GRANT SELECT ON <db>.* TO `app`@`%`"}})
+    assert got == {"app@%": {
+        "GRANT EXECUTE ON FUNCTION <db>.`f` TO `app`@`%`",
+        "GRANT SELECT ON <db>.* TO `app`@`%`"}}, got
+
+
+def test_the_stored_code_proof_reads_only_what_the_hop_carries(tmp_path):
+    from migkit.storedcode import prove
+    from migkit.storedcode.routines import Routine
+
+    class Src:
+        def __init__(self, hop):
+            self.hop = hop
+
+        def takes(self, db, kind, name, by=None):
+            from migkit.engines.base import Engine
+            return Engine.takes(self, db, kind, name, by)
+
+        def in_scope(self, db, table):
+            return True
+
+        CANON_ENGINE = "postgres"
+
+        def code_routines(self, side, db):
+            return [Routine(kind="function", name="public.f"),
+                    Routine(kind="procedure", name="public.p"),
+                    Routine(kind="trigger", name="trg", table="public.t")]
+
+        def neutral_functions(self, side, db):
+            return [("public.f", [], "int", "1"), ("public.g", [], "int",
+                                                   "2")]
+    src = Src(_hop("postgres", tmp_path, objects={
+        "functions": ["public.f"], "triggers": False}))
+    got = [(r.kind, r.name) for r in prove.routines_of(src, "src", "appdb")]
+    assert got == [("function", "public.f"), ("procedure", "public.p")], got
+    # the target's are what it holds
+    assert len(prove.routines_of(src, "dst", "appdb")) == 3
+    assert prove.expressions(src, "src", "appdb") == {"public.f": "1"}

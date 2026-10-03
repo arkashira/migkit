@@ -177,23 +177,54 @@ OBJECT_KINDS = {"views": ("views", "view", "matviews"),
                 "triggers": ("triggers", "trigger"),
                 "events": ("events", "event"),
                 "sequences": ("sequences", "sequence"),
+                "dictionaries": ("dictionaries", "dictionary"),
                 "roles": ("roles", "role", "users", "accounts", "grants")}
 #: words that name more than one kind at once
 OBJECT_GROUPS = {"routines": ("functions", "procedures"),
                  "routine": ("functions", "procedures")}
+#: the words each engine's own catalogue names a kind of object with, as
+#: an inventory reads them: SQL Server's `type_desc`, Oracle's
+#: `object_type`, Cassandra's schema tables, ClickHouse's engines
+CATALOGUE_KINDS = {
+    "materialized view": ("views",), "matview": ("views",),
+    "mview": ("views",), "materializedview": ("views",),
+    "sql stored procedure": ("procedures",),
+    "clr stored procedure": ("procedures",),
+    "extended stored procedure": ("procedures",),
+    "sql scalar function": ("functions",),
+    "sql table valued function": ("functions",),
+    "sql inline table valued function": ("functions",),
+    "clr scalar function": ("functions",),
+    "clr table valued function": ("functions",),
+    "aggregate function": ("functions",), "aggregate": ("functions",),
+    "sql trigger": ("triggers",), "clr trigger": ("triggers",),
+    "sequence object": ("sequences",),
+    "package": ("functions", "procedures"),
+    "package body": ("functions", "procedures")}
+
+
+def object_kinds(word):
+    """The kinds of `objects` a word names - `view`, `materialized view`,
+    `function`, `trigger` as the inventories say them, `routine` or an
+    Oracle package for functions and procedures at once, a catalogue's own
+    words (`CATALOGUE_KINDS`) - or () for a word that is none (a table, an
+    index: they follow the table)."""
+    w = str(word or "").strip().lower().replace("_", " ")
+    if w in CATALOGUE_KINDS:
+        return CATALOGUE_KINDS[w]
+    if w in OBJECT_GROUPS:
+        return OBJECT_GROUPS[w]
+    for kind, words in OBJECT_KINDS.items():
+        if w in words:
+            return (kind,)
+    return ()
 
 
 def object_kind(word):
-    """The kind of `objects` a word names - `view`, `materialized view`,
-    `function`, `trigger` as the inventories say them - or None for a
-    word that is not one (a table, an index: they follow the table)."""
-    w = str(word or "").strip().lower().replace("_", " ")
-    if w in ("materialized view", "matview", "mview"):
-        return "views"
-    for kind, words in OBJECT_KINDS.items():
-        if w in words:
-            return kind
-    return None
+    """The one kind of `objects` a word names (`object_kinds`), or None
+    for a word that names none or more than one."""
+    got = object_kinds(word)
+    return got[0] if len(got) == 1 else None
 
 
 def objects_of(hop):
@@ -1392,14 +1423,19 @@ class Hop:
         evidence carries and before the move, so nobody takes its absence
         on the target for a pass. A table's own objects follow the table
         too (`excluded`)."""
-        got = objects_of(self).get(object_kind(kind), True)
-        if got is True:
-            return True
-        if got is False:
-            return False
+        said = objects_of(self)
         ids = self._ids(*self._names(*parts))
         fold = self.folds_case()
-        return any(name_matches(i, p, fold) for p in got for i in ids)
+
+        def one(k):
+            got = said.get(k, True)
+            if got is True or got is False:
+                return got
+            return any(name_matches(i, p, fold) for p in got for i in ids)
+        # a word for more than one kind (a routine, a package) is taken
+        # where any of them is: left out, a carried one would go unread
+        kinds = object_kinds(kind)
+        return any(one(k) for k in kinds) if kinds else True
 
     def carries(self, *parts):
         """The changes the hop carries for this table: insert, update and

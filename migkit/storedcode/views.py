@@ -9,8 +9,10 @@ from .prove import Verdict
 
 
 def prove_views(pair, db):
+    from .prove import taken
     views = {pair._leaf(n): n for n, _ in
-             pair.src_engine.neutral_views("src", db)}
+             pair.src_engine.neutral_views("src", db)
+             if taken(pair.src_engine, "src", db, "view", n)}
     if not views:
         return []
     there = {pair._leaf(v) for v, _ in pair.dst_engine.neutral_views("dst",

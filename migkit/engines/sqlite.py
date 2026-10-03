@@ -645,10 +645,13 @@ class SQLiteEngine(NeutralCopier, Engine):
                                  " coalesce(sql, '') from sqlite_master"
                                  " where name not like 'sqlite_%'"
                                  " order by type, name")
-            # an excluded table's indexes and triggers go with it; a table
-            # whose columns the hop maps is compared through the mapping
+            # an excluded table's indexes and triggers go with it, a view or
+            # a trigger the hop's `objects` does not carry is left out
+            # (`takes`); a table whose columns the hop maps is compared
+            # through the mapping
             return "\n".join(f"{t} {n}\n{s};" for t, n, owner, s in rows
-                             if not self.hop.excluded("main", owner)
+                             if self.takes(db, t, n if t == "view"
+                                           else f"{owner}.{n}", owner)
                              and owner not in mapped)
 
         mapped = {t for t in self._tables("src")
@@ -1100,10 +1103,15 @@ class SQLiteEngine(NeutralCopier, Engine):
                                     " type = 'table' and name = ?",
                                     (t,)).fetchone()
                 if not there:
-                    for (sql,) in dst.execute(
-                            "select sql from source.sqlite_master where"
-                            " tbl_name = ? and sql is not null order by"
+                    for kind, name, sql in dst.execute(
+                            "select type, name, sql from source.sqlite_master"
+                            " where tbl_name = ? and sql is not null order by"
                             " type = 'table' desc, type", (t,)).fetchall():
+                        # a trigger the hop's `objects` does not carry is
+                        # not made with its table (`takes`)
+                        if kind == "trigger" and not self.takes(
+                                db, "trigger", f"{t}.{name}", t):
+                            continue
                         dst.execute(sql)
             for t in tables:
                 q = '"' + str(t).replace('"', '""') + '"'
@@ -1125,11 +1133,14 @@ class SQLiteEngine(NeutralCopier, Engine):
                     dst.execute(f"insert into main.{q} ({cols}) select"
                                 f" {cols} from source.{q}")
                     if not there:
-                        for (sql,) in dst.execute(
-                                "select sql from source.sqlite_master where"
-                                " tbl_name = ? and type in ('index',"
-                                " 'trigger') and sql is not null order by"
-                                " type", (t,)).fetchall():
+                        for kind, name, sql in dst.execute(
+                                "select type, name, sql from"
+                                " source.sqlite_master where tbl_name = ? and"
+                                " type in ('index', 'trigger') and sql is not"
+                                " null order by type", (t,)).fetchall():
+                            if kind == "trigger" and not self.takes(
+                                    db, "trigger", f"{t}.{name}", t):
+                                continue
                             dst.execute(sql)
                     dst.execute("commit")
                 except BaseException:

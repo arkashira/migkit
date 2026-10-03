@@ -79,10 +79,10 @@ HOP_KEYS = {
                    " names and patterns, or databases each with all, its"
                    " tables or its schemas", "list|dict"),
     "objects": Key("the kinds of object beside the tables carried: views,"
-                   " routines, triggers, events, sequences, roles - each"
-                   " all (the default), none, or a list of names; one not"
-                   " carried is out of scope as an excluded table is",
-                   "dict"),
+                   " routines, triggers, events, sequences, dictionaries,"
+                   " roles - each all (the default), none, or a list of"
+                   " names; one not carried is out of scope as an excluded"
+                   " table is", "dict"),
     "include": Key("the only databases, schemas or tables taken - moved,"
                    " followed, checked and repaired - the rest left alone"
                    " as if excluded; exclude wins where both name one."

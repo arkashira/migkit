@@ -4300,6 +4300,10 @@ select json_build_object(
                 return seq_gone(name)
             if kind.lower() in ("function", "procedure", "routine"):
                 name = name.split("(", 1)[0]
+            if kind.lower() == "trigger":
+                # `schema.table.trigger`: by its table, and by its kind
+                return not self.takes(db, kind, name,
+                                      name.rsplit(".", 1)[0])
             return not self.takes(db, kind, name)
         return out
 
@@ -4353,7 +4357,7 @@ select json_build_object(
                 if left(name) or (t == "trigger"
                                   and drift.transient_trigger(name)):
                     continue
-                if t in self.OWN_NAMED and out(t, name):
+                if t in self.OWN_NAMED + ("trigger",) and out(t, name):
                     continue
                 if name in working or name.rsplit(".", 1)[0] in working \
                         or (t != "table" and drift.transient(name, tables)):
@@ -4474,6 +4478,19 @@ select json_build_object(
         """
         gone = self._seq_gone(side, db, owned)
         return {n for n in names if gone(n)}
+
+    def sequences_needed(self, side, db):
+        """{schema.sequence} a table the hop takes owns or draws its column
+        defaults from: such a table is not made without it, so the schema
+        a move makes keeps it even where the hop's `objects` leaves
+        sequences out - said, as the closure of what is taken."""
+        out = {n for n, (s, t, _) in self._seq_owned(side, db).items()
+               if self.in_scope(db, f"{s}.{t}")}
+        for line in self._psql(side, db, self.SEQ_USED_Q).splitlines():
+            p = line.split("|")
+            if len(p) == 3 and self.in_scope(db, f"{p[1]}.{p[2]}"):
+                out.add(p[0])
+        return out
 
     def _seq_gone(self, side, db, owned=None):
         """A predicate on a sequence of a side (`schema.sequence`), true
@@ -8225,8 +8242,12 @@ select json_build_object(
                               "no single-int-pk tables to boundary-check"))
         return res
 
+    #: each relation under the kind the hop's `objects` reads it by - a
+    #: view, a materialized view and a sequence by their own kinds
     OWNER_SQL = """
-        select 'table '||n.nspname||'.'||c.relname||'|'
+        select case c.relkind when 'v' then 'view ' when 'm' then 'matview '
+                              when 'S' then 'sequence ' else 'table ' end
+               ||n.nspname||'.'||c.relname||'|'
                ||pg_get_userbyid(c.relowner)
           from pg_class c join pg_namespace n on n.oid = c.relnamespace
          where c.relkind in ('r','p','v','m','S')
@@ -9082,13 +9103,50 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         if not hasattr(self, "migration_pair"):
             return None
         fwd, undo = self.migration_pair(db)
-        if not fwd:
+        fwd, left = self._without_triggers_not_taken(db, fwd or "")
+        undo, _ = self._without_triggers_not_taken(db, undo or "")
+        if not fwd.strip():
             return None
         return RepairAction(db, "schema", fwd.splitlines(),
-                            (undo or "").splitlines(),
+                            undo.splitlines(),
                             "DDL that aligns the target's objects with the"
                             " source (review before --apply; runs in one"
-                            " transaction, reverse DDL saved to undo)")
+                            " transaction, reverse DDL saved to undo)"
+                            + (f"; triggers the hop's objects leave out are"
+                               f" not made: {', '.join(left[:5])}"
+                               if left else ""))
+
+    #: a trigger made or dropped in a line of its own, as the schema differ
+    #: writes it: its name, and the table it is on
+    _TRIGGER_DDL = re.compile(
+        r'^\s*(?:CREATE(?:\s+OR\s+REPLACE)?(?:\s+CONSTRAINT)?|DROP)\s+TRIGGER'
+        r'\s+(?:IF\s+EXISTS\s+)?"?([^"\s]+)"?\s.*?\bON\s+"?([^".\s]+)"?\."?'
+        r'([^"\s;(]+)"?', re.I)
+
+    def _without_triggers_not_taken(self, db, text):
+        """(the DDL without the statements that make or drop a trigger the
+        hop's `objects` leaves out, [those triggers]) - the fix never makes
+        on the target one the move left behind. A statement naming such a
+        trigger that is not one line of its own is refused rather than
+        cut by guess."""
+        out, left = [], []
+        for line in str(text).splitlines():
+            m = self._TRIGGER_DDL.match(line)
+            if m:
+                name, sch, tbl = m.groups()
+                table = f"{sch}.{tbl}"
+                if not self.takes(db, "trigger", f"{table}.{name}", table):
+                    if not line.rstrip().endswith(";"):
+                        raise SystemExit(
+                            f"{db}: the schema fix would make or drop"
+                            f" trigger {name} on {table}, which the hop's"
+                            " objects leave out, in a statement that is not"
+                            " one line - nothing is applied; make the"
+                            " target's schema by hand or carry the trigger")
+                    left.append(f"{table}.{name}")
+                    continue
+            out.append(line)
+        return "\n".join(out), left
 
     def apply(self, db, action):
         if action.by == "pair":

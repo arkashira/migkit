@@ -1046,6 +1046,10 @@ class MongoEngine(Engine):
                 idx[i["name"]] = repr(sorted(spec.items(), key=str))
             opts = d.command("listCollections",
                              filter={"name": name})["cursor"]["firstBatch"][0]
+            if opts.get("type") == "view" and not self.takes(db, "view",
+                                                             name):
+                # a view the hop's `objects` does not carry
+                continue
             o = {k: v for k, v in opts.get("options", {}).items()
                  if k not in ("storageEngine", "autoIndexId")
                  and not (k == "capped" and not v)}

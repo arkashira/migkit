@@ -1641,8 +1641,22 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
     left = (_pg_depending(hop, db, gone, routines, triggers)
             if gone or routines or triggers else [])
     views = [x["view"] for x in left if x["view"]]
+    # a sequence the hop's `objects` leaves out is not made, where no table
+    # it takes owns it or draws on it; one a taken table needs is made with
+    # it - the table is not made without it - and said
+    seqs = list(objects.get("sequence", ()))
+    if seqs and whole:
+        needed = eng.sequences_needed("src", db)
+        kept = [n for n in seqs if n in needed]
+        seqs = [n for n in seqs if n not in needed]
+        if kept and log:
+            log(f"{db}: {len(kept)} sequences the hop's objects leave out are"
+                " made all the same - a table it takes draws on each: "
+                + ", ".join(kept[:6]) + (" ..." if len(kept) > 6 else ""))
+    else:
+        seqs = []
     if whole:
-        pick = [a for n in skip + paired + views
+        pick = [a for n in skip + paired + views + seqs
                 for a in ("-T", _pg_pattern(n))]
     else:
         pick = [a for n in tables for a in ("-t", _pg_pattern(n))]
@@ -1669,7 +1683,8 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
         dropped = []
         if entries:
             text, dropped = _toc_without(
-                _sh(["pg_restore", "-l", str(out)], env_s).stdout, entries)
+                _sh(["pg_restore", "-l", str(out)], env_s).stdout, entries,
+                _pg_routine_comments(hop, db, entries))
             if dropped:
                 listed.write_text(text)
                 load[-1:-1] = ["-L", str(listed)]
@@ -1782,20 +1797,98 @@ def _pg_depending(hop, db, gone, routines=(), triggers=()):
 _TOC_ENTRY = re.compile(r"^\s*\d+;\s+(?P<cls>\d+)\s+(?P<oid>\d+)\s")
 
 
-def _toc_without(listing, entries):
+def _toc_without(listing, entries, comments=()):
     """(the dump's list with `entries` - "class number" - commented out,
     the ones it held). The restore reads only the lines left: `;` begins
     a comment there, which is how its own documentation leaves an entry
-    out."""
-    out, dropped = [], []
-    for line in listing.splitlines():
+    out. The comment made on an entry left out goes with it - one on an
+    object of a table named off its entry (`_toc_comment_of`), one on a
+    routine by `comments` (`_pg_routine_comments`, its signature as the
+    catalogue writes it): an entry of its own in the list, it was
+    restored and refused - measured on 16, `ERROR: function
+    public.f(integer, text) does not exist` for `COMMENT ON FUNCTION
+    public.f(a integer, b text)`."""
+    out, dropped, comments = [], [], set(comments)
+    lines = listing.splitlines()
+    for line in lines:
         m = _TOC_ENTRY.match(line)
         key = f"{m.group('cls')} {m.group('oid')}" if m else None
         if key in entries:
+            got = _toc_comment_of(line)
+            if got:
+                comments.add(got)
+    for line in lines:
+        m = _TOC_ENTRY.match(line)
+        key = f"{m.group('cls')} {m.group('oid')}" if m else None
+        said = line.split(";", 1)[1].strip() if ";" in line else ""
+        if key in entries:
             dropped.append(key)
+            line = ";" + line
+        elif said.startswith("0 0 COMMENT ") and any(
+                said[len("0 0 COMMENT "):].startswith(c + " ")
+                for c in comments):
             line = ";" + line
         out.append(line)
     return "\n".join(out) + "\n", dropped
+
+
+#: the words a comment on an object of a table is listed under, by the
+#: kind its own entry is listed as (`<schema> <table> <name>`): measured on
+#: 16, `TRIGGER public orders trg` is commented as `TRIGGER trg ON orders`,
+#: `FK CONSTRAINT public orders fk` as `CONSTRAINT fk ON orders`, and a
+#: policy's and a rule's alike. A routine's comment names its arguments,
+#: where its entry names their types only, and is read off the catalogue
+#: (`_pg_routine_comments`). A comment whose words are not these is left
+#: in the list, and the restore says so if it is refused
+_TOC_COMMENTED = {"TRIGGER": "TRIGGER {name} ON {table}", "CONSTRAINT":
+                  "CONSTRAINT {name} ON {table}", "FK CONSTRAINT":
+                  "CONSTRAINT {name} ON {table}", "POLICY":
+                  "POLICY {name} ON {table}", "RULE": "RULE {name} ON {table}"}
+
+
+def _toc_comment_of(line):
+    """`<schema> <the words its comment is listed under>` of a dump's list
+    entry, or None for one whose comment cannot be named
+    (`_TOC_COMMENTED`)."""
+    m = _TOC_ENTRY.match(line)
+    if not m:
+        return None
+    rest = line[m.end():].split()
+    for desc in sorted(_TOC_COMMENTED, key=len, reverse=True):
+        words = desc.split()
+        if rest[:len(words)] != words:
+            continue
+        rest = rest[len(words):]
+        if len(rest) < 4:
+            return None
+        # the schema first, the table, and the owner last
+        return f"{rest[0]} " + _TOC_COMMENTED[desc].format(
+            name=" ".join(rest[2:-1]), table=rest[1])
+    return None
+
+
+#: the words a routine's comment is listed under, as the catalogue writes
+#: its signature: measured on 16, `COMMENT public FUNCTION f(a integer, b
+#: text)`, `PROCEDURE pr(IN x integer, IN y text)`, `AGGREGATE agg(integer)`
+PG_ROUTINE_COMMENTS_SQL = """
+select n.nspname || ' ' || case p.prokind when 'p' then 'PROCEDURE'
+                                          when 'a' then 'AGGREGATE'
+                                          else 'FUNCTION' end
+       || ' ' || p.proname || '(' || pg_get_function_arguments(p.oid) || ')'
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where p.oid = any (string_to_array({oids}, ',')::oid[])"""
+
+
+def _pg_routine_comments(hop, db, entries):
+    """The words the comments on the routines among `entries` ("class
+    number") are listed under in a dump's list."""
+    oids = [k.split()[1] for k in entries if k.split()[0] == "1255"]
+    if not oids:
+        return []
+    from .engines.postgres import PostgresEngine
+    got = PostgresEngine(hop)._psql("src", db, PG_ROUTINE_COMMENTS_SQL.format(
+        oids=_pg_literal(",".join(oids))))
+    return [line.strip() for line in got.splitlines() if line.strip()]
 
 
 def _schema_left_out(hop, db, section, views, entries, log=None):
@@ -2435,6 +2528,13 @@ def pgcopydb_filters(hop, db, tables, also=(), roots=None):
     so an excluded table was copied and then never looked at. Filtering it
     here means it is not carried at all. A partition is named on its own
     beside its table (`roots`): the filter file reads names, not trees.
+
+    A name is read as the catalogue stores it, case and all, split at its
+    first dot - measured on this machine's program against PostgreSQL 16:
+    `public.MyTable` and `public.Mixed.Dot` left `"MyTable"` and
+    `"Mixed.Dot"` out, where `public.mytable` left nothing out and
+    `public."MyTable"` listed no table at all. So each is written as the
+    source lists it (`user_tables`), unquoted.
     """
     out = excluded_tables(hop, db, tables, roots=roots)
     # tables left to the table copier (`routed_to_copier`) are left out of
@@ -2631,11 +2731,18 @@ def _mydumper_regex(hop, db):
     """The hop's scope as the parallel dump's one `--regex` over
     `db.table`, or None where it leaves nothing out: no name `exclude`
     takes, and - where `include` narrows the database - only a name it
-    takes."""
+    takes.
+
+    Measured on 1.0.5 against MySQL 8.4: the pattern is matched against
+    `db.table` (`appdb\\.skip_me` left the table out, `skip_me` did not),
+    and without case - `appdb\\.mixedcase` took `MixedCase`, so a pattern
+    for `orders` left `Orders` out of the dump too, a table the hop takes.
+    `(?-i)` holds it to the case the hop's own names are matched in
+    (`Hop.excluded`): measured, `appdb\\.mixedcase` then took nothing."""
     out, taken = scope_alternatives(hop, db, True)
     if not out and taken is None:
         return None
-    return ("(?s)^" + (f"(?!(?:{'|'.join(out)})$)" if out else "")
+    return ("(?-i)(?s)^" + (f"(?!(?:{'|'.join(out)})$)" if out else "")
             + ("" if taken is None else
                f"(?:{'|'.join(taken) or NOTHING})$"))
 
@@ -4533,9 +4640,13 @@ def mongodump_move(hop, db, workers, go, log):
     `db_map` said.
 
     A collection the hop renames (`mapping.tables`) is restored under its
-    new name, its own pair of names ahead of the database's - the restore
-    takes the first pair a name matches: it was restored under the
-    source's name, and the one the hop names stayed empty.
+    new name, its own pair of names after the database's: the restore
+    takes the last pair a name matches - measured with the Database Tools
+    100.16 against MongoDB 7.0, `appdb.orders -> first.orders_v2` given
+    before `appdb.* -> second.*` restored `second.orders`, and given after
+    it `first.orders_v2`. Ahead of it, as this was written from the
+    documentation, a renamed collection of a hop that maps its database
+    landed under the source's name and the one the hop names stayed empty.
     """
     from .wording import Step, phase
     s, t = hop.source, hop.target
@@ -4571,11 +4682,12 @@ def mongodump_move(hop, db, workers, go, log):
     restore = ["mongorestore", f"--uri={_mongo_uri(t)}", "--archive",
                "--drop", "--bypassDocumentValidation", f"--nsInclude={db}.*",
                *[f"--nsExclude={db}.{n}" for n in skip],
+               # the database's pair first: the last a name matches wins
+               *([f"--nsFrom={db}.*", f"--nsTo={tdb}.*"] if tdb != db
+                 else []),
                *[a for n, there in renamed.items()
                  for a in (f"--nsFrom={_ns(db, n)}",
                            f"--nsTo={_ns(tdb, there)}")],
-               *([f"--nsFrom={db}.*", f"--nsTo={tdb}.*"] if tdb != db
-                 else []),
                f"--numParallelCollections={workers}"]
     copy = Step(phase("stream-copy", workers=workers, left_out=len(skip)),
                 dump + ["|"] + restore)
@@ -4886,6 +4998,20 @@ def mongosync_move(hop, db, workers, go, log):
                 # committed, it has nothing more to do and does not stop;
                 # stopped part way, it is stopped with what it started
                 proc.stop(grace=30)
+    # how it reads a pattern of collections (`collectionsRegex`) and from
+    # which build (`MONGOSYNC_PATTERNS`) is its documentation's, not
+    # measured here: what it carried is held to the hop's own answer
+    # instead of trusted - a collection the hop leaves out that arrived on
+    # the target is said, never passed over by a check that skips it
+    carried = sorted(c for c in set(target.list_collection_names()) - there
+                     if not c.startswith("__mdb") and not eng.in_scope(db, c))
+    if carried:
+        raise SystemExit(
+            f"{db}: the online sync carried collections the hop leaves out:"
+            f" {', '.join(carried[:8])}" + (" ..." if len(carried) > 8
+                                            else "")
+            + ". They are on the target now; nothing has been marked as"
+              " moved - drop them there, or move this hop by the dump")
     return steps
 
 

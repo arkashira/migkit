@@ -359,6 +359,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the tables masked on the way are not what the hop's transforms make them: <...>
 
+* <...>: the online sync carried collections the hop leaves out: <...> ... | <...>. They are on the target now; nothing has been marked as moved - drop them there, or move this hop by the dump
+
 * MIGKIT_CDC=<...> is not one of native, follow. native = the database's own replication, which needs the target to dial the source; follow = a leg driven from where migkit runs, which connects out to both sides instead
 
 * this CDC path needs a component that is not installed on this machine: it runs for the length of the catch-up and keeps its state in <...>. migkit doctor --install puts it in place, or use MIGKIT_CDC=native, which needs no component here but does need the target to reach the source
@@ -768,6 +770,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * two_way: a tail applies into <...> under a replication origin of migkit's (<...>), and <...> applies into it too. Leaving out what migkit applied there would leave out what the other applies, and those changes would never reach the other side. Tear the two-way tail into this side down (move --mode cdc --drop), or the other; its next start chooses another way to mark what it applies
 
 * no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance(<...>, pg_current_wal_lsn()); -- skips everything pending, including this
+
+* <...>: the schema fix would make or drop trigger <...> on <...>, which the hop's objects leave out, in a statement that is not one line - nothing is applied; make the target's schema by hand or carry the trigger
 
 * <...>: the key column <...> has no text both sides render, so the repair could not be recorded row by row. Nothing was repaired on this table.
 
