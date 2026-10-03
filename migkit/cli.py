@@ -1335,45 +1335,12 @@ def _convert_schema(hop_name, db, do_apply):
 
 def _create_converted(eng, d, todo):
     """([name made], [why each failed], whether it was one transaction):
-    the converted statements run on the target. A PostgreSQL target takes
-    them in one transaction on one connection, each under a savepoint so
-    every failure is named, and keeps none of them where one fails - it
-    took each on a connection of its own and kept half a schema. A target
-    whose DDL commits as it runs (MySQL) takes them one by one."""
-    target = eng.dst_engine
-
-    def said(e):
-        return (str(e).strip().splitlines() or [""])[0]
-    if getattr(target, "CANON_ENGINE", "") != "postgres" or \
-            not hasattr(target, "_conn"):
-        made, failed = [], []
-        for name, stmt in todo:
-            try:
-                target.neutral_create_code("dst", d, stmt)
-                made.append(name)
-            except Exception as e:  # noqa: BLE001 - listed by the caller
-                failed.append(f"{name}: {said(e)}")
-        return made, failed, False
-    made, failed = [], []
-    conn = target._conn("dst", target._d("dst", d))
-    try:
-        with conn.cursor() as cur:
-            for i, (name, stmt) in enumerate(todo):
-                cur.execute(f"savepoint migkit_convert_{i}")
-                try:
-                    cur.execute(stmt)
-                    made.append(name)
-                except Exception as e:  # noqa: BLE001 - listed, then undone
-                    cur.execute(f"rollback to savepoint migkit_convert_{i}")
-                    failed.append(f"{name}: {said(e)}")
-        if failed:
-            conn.rollback()
-            made = []
-        else:
-            conn.commit()
-    finally:
-        conn.close()
-    return made, failed, True
+    the converted statements run on the target the way it takes them
+    (`neutral_create_codes`) - a PostgreSQL target in one transaction,
+    each under a savepoint so every failure is named, keeping none where
+    one fails; a MySQL one on one connection, its DDL committing as it
+    runs; any other one by one."""
+    return eng.dst_engine.neutral_create_codes("dst", d, todo)
 
 
 def _record_built(hop, eng, d, made):

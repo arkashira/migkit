@@ -22,6 +22,7 @@ replica, and a point-in-time restore of the target, read that log.
 import threading
 
 from ..stall import Guard
+from ..util import quote_name
 
 #: values a load cannot be handed as text and read back the same
 UNFIT = {"geometry", "point", "linestring", "polygon", "multipoint",
@@ -71,7 +72,7 @@ def line_expr(columns):
     """The SQL rendering one row, `[(name, kind)]`, as the load's line."""
     parts = []
     for name, k in columns:
-        q = "`" + name.replace("`", "``") + "`"
+        q = quote_name("mysql", name)
         if k == "hex":
             e = f"hex({q})"
         elif k == "number":
@@ -138,32 +139,37 @@ class TableCopy:
 
     def _source(self, where, order):
         """The source's client reading the range under one consistent
-        snapshot: its digest line first, then the load's lines."""
+        snapshot, in the session zone every connection of migkit's reads in
+        (`SESSION_ZONE`): its digest line first, then the load's lines.
+        Signed in with the hop's TLS (`_client_argv`), started and stopped
+        by the one runner, its whole process group with it (`runner`)."""
         import subprocess
 
-        from ..util import tool_env
-        eng, s = self.eng, self.eng.hop.source
-        qt = (f"`{self.db.replace('`', '``')}`."
-              f"`{self.table.replace('`', '``')}`")
+        from .. import runner
+        from .mysql import SESSION_ZONE, _ql
+        eng = self.eng
+        qt = (quote_name("mysql", self.db) + "."
+              + quote_name("mysql", self.table))
         w = f" where {where}" if where else ""
         digest = eng._range_digest_sql("src", self.db, self.table, where,
                                        self.digest_cols)
-        script = ("set session time_zone = '+00:00';"
+        script = (f"set session time_zone = {_ql(SESSION_ZONE)};"
                   " set session transaction isolation level repeatable"
                   " read; start transaction with consistent snapshot,"
                   f" read only; {digest};"
                   f" select {line_expr(self.columns)} from {qt}{w}"
-                  + (f" order by `{order}`" if order else "") + ";"
+                  + (f" order by {quote_name('mysql', order)}" if order
+                     else "") + ";"
                   " commit;")
-        args = ["mysql", "-h", s.host, "-P", str(s.port), "-u", s.user,
+        args = [*eng._client_argv("mysql", "src"),
                 "--batch", "--raw", "--skip-column-names", "--quick",
                 # a row of large values as one line: the most there is
                 "--max-allowed-packet=1073741824",
-                "--default-character-set=utf8mb4", *eng._client_tls("src"),
-                "-e", script, self.db]
-        return subprocess.Popen(args, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                env=tool_env({"MYSQL_PWD": s.password or ""}))
+                "--default-character-set=utf8mb4", "-e", script, self.db]
+        env = eng._client_env("src")
+        return runner.start(args, env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=False,
+                            secrets=tuple(env.values()))
 
     def copy(self, where, clear, order, what, whole=False):
         """The rows `where` selects, in place of what `clear` removes, in
@@ -175,10 +181,10 @@ class TableCopy:
         eng = self.eng
         proc = self._source(where, order)
         conn = self._target()
-        guard = Guard(what, (proc,))
+        guard = Guard(what, proc.stop)
         failed = None
         try:
-            line = proc.stdout.readline()
+            line = proc.popen.stdout.readline()
             guard.moved()
             head = line.decode(errors="replace").rstrip("\n").split("\t")
             if len(head) != 2 or not head[0].isdigit():
@@ -187,7 +193,6 @@ class TableCopy:
             n, theirs = int(head[0]), head[1]
             with conn.cursor() as cur:
                 cur.execute("set foreign_key_checks = 0")
-                cur.execute("set session time_zone = '+00:00'")
                 cur.execute("set session transaction isolation level read"
                             " committed")
                 cur.execute("set unique_checks = "
@@ -196,7 +201,7 @@ class TableCopy:
                 cur.execute(clear)
                 got = _load_feed(cur, eng._d("dst", self.db), self.table,
                                  self.names, self.kinds,
-                                 _Guarded(proc.stdout, guard))
+                                 _Guarded(proc.popen.stdout, guard))
                 warned = int(cur.warning_count or 0)
                 said = self._ended(proc)
                 if said:
@@ -224,8 +229,8 @@ class TableCopy:
                 pass
         finally:
             if proc.poll() is None:
-                proc.kill()
-                proc.wait()
+                proc.stop()
+            proc.done()
             guard.stop()
         raise RuntimeError(f"{what}: {self._said_by(proc) or failed}"[:600]) \
             from failed
@@ -233,7 +238,7 @@ class TableCopy:
     @staticmethod
     def _said_by(proc):
         try:
-            return (proc.stderr.read() or b"").decode(
+            return (proc.popen.stderr.read() or b"").decode(
                 errors="replace").strip()[-300:]
         except Exception:  # noqa: BLE001 - nothing more to say
             return ""

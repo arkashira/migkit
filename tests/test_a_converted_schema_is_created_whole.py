@@ -45,25 +45,28 @@ class _Conn:
         self.ended.append("close")
 
 
-class _Target:
-    CANON_ENGINE = "postgres"
+def _hop(engine):
+    from migkit.config import Endpoint, Hop
+    return Hop(name="h", engine=engine, source=Endpoint(), target=Endpoint())
 
-    def __init__(self):
-        self.conns = []
 
-    def _d(self, side, db):
-        return db
+def _pg():
+    """A PostgreSQL target whose connections are `_Conn`s."""
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(_hop("postgres"))
+    eng.conns = []
 
-    def _conn(self, side, db):
-        self.conns.append((side, db))
-        c = _Conn()
-        self.last = c
-        return c
+    def connect(side, db, purpose="read", **extra):
+        eng.conns.append((side, db))
+        eng.last = _Conn()
+        return eng.last
+    eng._connect = connect
+    return eng
 
 
 class _Pair:
-    def __init__(self):
-        self.dst_engine = _Target()
+    def __init__(self, target=None):
+        self.dst_engine = target or _pg()
 
 
 def test_one_transaction_whole_or_not_at_all():
@@ -91,21 +94,59 @@ def test_all_made_is_committed_once():
     assert pair.dst_engine.last.ended == ["commit", "close"]
 
 
-def test_a_target_whose_ddl_commits_as_it_runs_takes_them_one_by_one():
+def test_a_mysql_target_takes_them_on_one_connection():
+    """Its DDL commits as it runs, so not one transaction - but one
+    connection, signed in once, where each was a connection of its own
+    (audit 2026-10-01, SC21); a statement that fails is named and the rest
+    are made."""
+    import pymysql
+
+    from migkit.engines.mysql import MySQLEngine
+    eng = MySQLEngine(_hop("mysql"))
+    opened = []
+
+    class Cur(_Cursor):
+        def execute(self, sql):
+            self.conn.ran.append(sql)
+            if "bad" in sql:
+                raise pymysql.err.ProgrammingError(
+                    1146, "Table 'app.bad' doesn't exist")
+
+    class Conn(_Conn):
+        def cursor(self):
+            return Cur(self)
+
+    def conn(side, retry=True):
+        opened.append(side)
+        opened.append(Conn())
+        return opened[-1]
+    eng._conn = conn
+    got, failed, whole = cli._create_converted(
+        _Pair(eng), "app", [("a", "create table a (id int)"),
+                            ("v", "create view v as select * from bad"),
+                            ("b", "create table b (id int)")])
+    assert got == ["a", "b"] and not whole, (got, failed)
+    assert len(failed) == 1 and failed[0].startswith("v: "), failed
+    assert opened[0] == "dst" and len(opened) == 2, opened
+    assert opened[1].ran[0] == "use `app`", opened[1].ran
+    assert opened[1].ended == ["commit", "close"]
+
+
+def test_any_other_target_takes_them_one_by_one():
+    from migkit.engines.base import Engine
     made = []
 
-    class My:
-        CANON_ENGINE = "mysql"
-
+    class Other(Engine):
         def neutral_create_code(self, side, db, stmt):
             if "bad" in stmt:
                 raise RuntimeError("Table 'bad' doesn't exist")
             made.append(stmt)
-    pair = type("P", (), {"dst_engine": My()})()
     got, failed, whole = cli._create_converted(
-        pair, "app", [("a", "create table a (id int)"),
-                      ("v", "create view v as select * from bad")])
+        _Pair(Other(_hop("sqlite"))), "app",
+        [("a", "create table a (id int)"),
+         ("v", "create view v as select * from bad")])
     assert got == ["a"] and len(failed) == 1 and not whole
+    assert made == ["create table a (id int)"]
 
 
 def test_the_tables_it_made_get_their_indexes_from_the_move(tmp_path):

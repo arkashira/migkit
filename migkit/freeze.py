@@ -2077,7 +2077,10 @@ class MySQLHold(Hold):
             out.append(f"XA RECOVER could not be read ({e})")
         age = "" if older_than is None else \
             f" and t.trx_started < now() - interval {float(older_than)} second"
-        got = eng._q(side,
+        # in the server's own zone: it keeps a transaction's start in its
+        # process's, and migkit's sessions are in UTC
+        got = eng._q_server_zone(
+                     side,
                      "select p.user, t.trx_mysql_thread_id,"
                      " timestampdiff(second, t.trx_started, now())"
                      " from information_schema.innodb_trx t join"
@@ -2199,7 +2202,7 @@ class TiDBHold(MySQLHold):
     def open(self, db, older_than):
         age = "" if older_than is None else \
             f" and start_time < now() - interval {float(older_than)} second"
-        got = self.eng._q(
+        got = self.eng._q_server_zone(
             self.side, "select user, session_id, timestampdiff(second,"
                        " start_time, now()) from"
                        " information_schema.cluster_tidb_trx where"

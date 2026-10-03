@@ -145,18 +145,27 @@ MY_HELD = {
 }
 
 
-def _my(tmp_path, only_on_target, **kw):
-    """The target holds everything; the source lacks `only_on_target`."""
+def _my(tmp_path, only_on_target, bodies=None, **kw):
+    """The target holds everything; the source lacks `only_on_target`.
+    Each view's, routine's, trigger's and event's definition is `body`,
+    or what `bodies` gives it on a side ({(side, name): text})."""
     from migkit.engines.mysql import MySQLEngine
     eng = MySQLEngine(_hop("mysql", tmp_path, **kw))
     queries = {q: k for k, q in MySQLEngine.OBJECT_QUERIES.items()}
+    defined = {q: k for k, q in MySQLEngine.OBJECT_DEFINITIONS.items()}
+
+    def held(side, kind):
+        return [r for r in MY_HELD[kind] if side == "dst"
+                or not any(o in (r[0], r[1]) for o in only_on_target)]
 
     def q(side, sql, args=None, fresh=False):
+        if sql in defined:
+            return [(r[0], (bodies or {}).get((side, r[0]), "body"))
+                    for r in held(side, defined[sql])]
         kind = queries.get(sql)
         if kind is None:
             return []
-        return [r for r in MY_HELD[kind] if side == "dst"
-                or not any(o in (r[0], r[1]) for o in only_on_target)]
+        return held(side, kind)
     eng._q = q
     eng._all_tables = lambda side, db: [
         t for t, _ in MY_HELD["table"]
@@ -195,6 +204,44 @@ def test_mysql_a_trigger_goes_with_its_table(tmp_path):
     got = eng.check_objects("appdb")
     assert got.status == "diff" and "trg_orders" in got.detail, got.detail
     assert "audit" not in got.detail, got.detail
+
+
+def test_mysql_a_body_that_changed_is_different(tmp_path):
+    """Present on both sides by name, defined differently: a routine's, a
+    trigger's and a view's body were compared by name only, and the
+    schema-aware comparison that demoted the text never read one (audit
+    2026-10-01, SC16)."""
+    same = _my(tmp_path, ()).check_objects("appdb")
+    assert same.status == "ok" and "defined alike" in same.detail, \
+        same.detail
+    for name in ("p_orders", "trg_orders", "v_orders", "ev_purge_audit"):
+        got = _my(tmp_path, (), bodies={("dst", name): "other body"}) \
+            .check_objects("appdb")
+        assert got.status == "diff", (name, got.detail)
+        assert "defined differently" in got.detail and name in got.detail, \
+            (name, got.detail)
+
+
+def test_mysql_a_body_the_account_cannot_read_is_said_not_same(tmp_path):
+    """A routine's definition comes back NULL to an account that may not
+    read it: never read as the same as the other side's."""
+    got = _my(tmp_path, (), bodies={("src", "f_audit"): None}) \
+        .check_objects("appdb")
+    assert got.status == "warn", got.detail
+    assert "function f_audit" in got.detail, got.detail
+
+
+def test_mysql_the_databases_own_name_in_a_view_is_not_a_difference(
+        tmp_path):
+    """A view keeps its tables qualified by the database; a hop mapping
+    the database to another name on the target compares it alike."""
+    eng = _my(tmp_path, (), db_map={"appdb": "appdb2"}, bodies={
+        ("src", "v_orders"): "select `appdb`.`orders`.`id` from"
+                             " `appdb`.`orders`",
+        ("dst", "v_orders"): "select `appdb2`.`orders`.`id` from"
+                             " `appdb2`.`orders`"})
+    got = eng.check_objects("appdb")
+    assert got.status == "ok", got.detail
 
 
 def test_mysql_the_schema_fix_leaves_out_the_objects_the_hop_does(tmp_path):

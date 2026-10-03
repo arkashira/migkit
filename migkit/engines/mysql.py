@@ -1135,7 +1135,7 @@ class MySQLEngine(Engine):
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         from .. import canon
-        defs = [f"{_qi(col[0])}"
+        defs = [_qi(col[0]) +
                 f" {canon.ddl_type('mysql', col[1], col[2], col[0] in key)}"
                 + self._column_tail(col[3] if len(col) > 3 else None,
                                     "mysql")
@@ -1236,14 +1236,14 @@ class MySQLEngine(Engine):
         full = [{**k, **v} for k, v in rows]
         names = [n for n in sorted(full[0])
                  if n not in self._unwritable_columns(side, db, table)]
-        cols = ", ".join(f"`{n}`" for n in names)
-        sets = ", ".join(f"`{n}` = values(`{n}`)"
+        cols = ", ".join(_qi(n) for n in names)
+        sets = ", ".join(f"{_qi(n)} = values({_qi(n)})"
                          for n in names if n not in key)
         # a row already there with nothing but its key to write is left
         # as it is, as `on conflict do nothing` does
         tail = (f" on duplicate key update {sets}" if sets else
                 " on duplicate key update " + ", ".join(
-                    f"`{k}` = `{k}`" for k in sorted(key)))
+                    f"{_qi(k)} = {_qi(k)}" for k in sorted(key)))
         mark = "(" + ", ".join(["%s"] * len(names)) + ")"
         ddb = self._d(side, db)
         with self._writer(side, db) as conn:
@@ -1271,7 +1271,7 @@ class MySQLEngine(Engine):
                         for at in range(0, len(values), self.APPLY_ROWS):
                             part = values[at:at + self.APPLY_ROWS]
                             cur.execute(
-                                f"insert into `{ddb}`.`{table}`"
+                                f"insert into {_qi(ddb)}.{_qi(table)}"
                                 f" ({cols}) values "
                                 + ", ".join([mark] * len(part)) + tail,
                                 [v for r in part for v in r])
@@ -1426,9 +1426,9 @@ class MySQLEngine(Engine):
         new row's values and never made row 2. Updating first and inserting
         after puts a value that moved from one row to a new one where it
         belongs; a value two rows really both claim is refused, loudly."""
-        qt = f"`{db}`.`{table}`"
+        qt = f"{_qi(db)}.{_qi(table)}"
         at = [names.index(k) for k in key]
-        kcols = ", ".join(f"`{k}`" for k in key)
+        kcols = ", ".join(_qi(k) for k in key)
         one = "(" + ", ".join(["%s"] * len(key)) + ")"
         there = set()
         for i in range(0, len(rows), self.APPLY_ROWS):
@@ -1443,13 +1443,13 @@ class MySQLEngine(Engine):
         if old and rest:
             cur.executemany(
                 f"update {qt} set "
-                + ", ".join(f"`{names[i]}` = %s" for i in rest)
-                + " where " + " and ".join(f"`{k}` = %s" for k in key),
+                + ", ".join(f"{_qi(names[i])} = %s" for i in rest)
+                + " where " + " and ".join(f"{_qi(k)} = %s" for k in key),
                 [tuple(r[i] for i in rest) + tuple(r[j] for j in at)
                  for r in old])
         if new:
             cur.executemany(
-                f"insert into {qt} ({', '.join(f'`{n}`' for n in names)})"
+                f"insert into {qt} ({', '.join(_qi(n) for n in names)})"
                 " values (" + ", ".join(["%s"] * len(names)) + ")", new)
 
     def _apply_delete(self, side, db, table, key):
@@ -1459,14 +1459,14 @@ class MySQLEngine(Engine):
         from .. import canon
         table = self.local_table(table)
         names = sorted(keys[0])
-        cols = ", ".join(f"`{n}`" for n in names)
+        cols = ", ".join(_qi(n) for n in names)
         mark = "(" + ", ".join(["%s"] * len(names)) + ")"
         with self._writer(side, db) as conn:
             with conn.cursor() as cur:
                 for at in range(0, len(keys), self.APPLY_ROWS):
                     part = keys[at:at + self.APPLY_ROWS]
                     cur.execute(
-                        f"delete from `{self._d(side, db)}`.`{table}`"
+                        f"delete from {_qi(self._d(side, db))}.{_qi(table)}"
                         f" where ({cols}) in ("
                         + ", ".join([mark] * len(part)) + ")",
                         [canon.sql_value(k[n]) for k in part
@@ -1684,7 +1684,7 @@ class MySQLEngine(Engine):
         import threading
 
         from .. import twoway
-        name = f"{self._my_ident(self._d(side, db))}.`{twoway.TABLE}`"
+        name = f"{self._my_ident(self._d(side, db))}.{_qi(twoway.TABLE)}"
         lock = self.__dict__.setdefault("_origin_lock", threading.Lock())
         made = self.__dict__.setdefault("_origin_made", set())
         with lock:
@@ -1716,7 +1716,7 @@ class MySQLEngine(Engine):
     def own_name(self, side, db):
         """`migkit_origin`'s name in the database of `db` on `side`."""
         from .. import twoway
-        return f"{self._my_ident(self._d(side, db))}.`{twoway.TABLE}`"
+        return f"{self._my_ident(self._d(side, db))}.{_qi(twoway.TABLE)}"
 
     def own_table(self, side, db):
         """(a connection of its own, `migkit_origin`'s name in the database
@@ -1755,16 +1755,17 @@ class MySQLEngine(Engine):
             return f"{uid}:{TAG}:{self._gtid_n}"
 
     def mark_facts(self, side, db):
-        """What decides the rungs this side allows (`marks.choose_rung`)."""
-        import re
-
+        """What decides the rungs this side allows (`marks.choose_rung`):
+        the brand as `variants` names it and the version as
+        `toolversion.server_version` reads it - each read one way for
+        every check (audit 2026-10-01, DU23)."""
         import pymysql
 
         from .. import twoway
-        got = self._q(side, "select version(), @@version_comment")
-        banner = " ".join(str(x) for x in (got[0] if got else ()))
-        mariadb = "mariadb" in banner.lower()
-        version = tuple(int(x) for x in re.findall(r"\d+", banner)[:3])
+        from ..toolversion import server_version
+        got = self._q(side, "select version()")
+        mariadb = self._side_brand(side).name == "mariadb"
+        version = server_version(got[0][0] if got else "")[:3]
 
         def var(name):
             try:
@@ -1910,7 +1911,7 @@ class MySQLEngine(Engine):
         if rung in ("table", "skip_flag", "comment"):
             steps.append(f"drop table if exists"
                          f" {self._my_ident(self._d(side, db))}"
-                         f".`{twoway.TABLE}`")
+                         f".{_qi(twoway.TABLE)}")
         for sql in steps if go else ():
             self._q(side, sql)
         return steps
@@ -1928,7 +1929,7 @@ class MySQLEngine(Engine):
                 if not cur.fetchone()[0]:
                     return None
                 cur.execute(f"select seen from {self._my_ident(self._d(side, db))}"
-                            f".`{twoway.TABLE}` where origin = %s",
+                            f".{_qi(twoway.TABLE)} where origin = %s",
                             (self._origin_row(),))
                 got = cur.fetchone()
         finally:
@@ -2624,6 +2625,23 @@ class MySQLEngine(Engine):
         """
         return self._answer(side, sql, args, False, True)
 
+    def _q_server_zone(self, side, sql, args=None):
+        """The rows `sql` answers in the server's own zone, on a connection
+        of its own: what compares the server's clock (`now()`) with a time
+        the server keeps in its own process's zone - an open transaction's
+        start (`innodb_trx.trx_started`, written by the process's local
+        time whatever the session's zone) - which every other connection,
+        in UTC (`SESSION_ZONE`), would read hours apart on a server whose
+        zone is not UTC: a transaction open an hour would read as not yet
+        begun."""
+        conn = self._connect(side, "zone")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, args)
+                return cur.fetchall()
+        finally:
+            conn.close()
+
     def _answer(self, side, sql, args, fresh, named):
         if self._READS.match(sql) is None:
             def once():
@@ -3249,8 +3267,8 @@ class MySQLEngine(Engine):
             col = acol.get(t)
             if not col or nextv is None:
                 continue
-            mx = self._q("dst", f"select coalesce(max(`{col}`),0)"
-                                f" from `{ddb}`.`{t}`", fresh=True)[0][0]
+            mx = self._q("dst", f"select coalesce(max({_qi(col)}),0)"
+                                f" from {_qi(ddb)}.{_qi(t)}", fresh=True)[0][0]
             if int(mx) > 0 and int(nextv) <= int(mx):
                 collide.append(f"{t}: auto_increment={nextv}"
                                f" <= max({col})={mx}")
@@ -3425,7 +3443,7 @@ class MySQLEngine(Engine):
         name = (self.hop.target_table_in(db, t)
                 if renamed and side == "dst"
                 and hasattr(self.hop, "target_table_in") else t)
-        qt = f"`{self._d(side, db)}`.`{name}`"
+        qt = f"{_qi(self._d(side, db))}.{_qi(name)}"
         pred = (self.hop.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         return f"(select * from {qt} where {pred}) t" if pred else f"{qt} t"
@@ -3439,7 +3457,7 @@ class MySQLEngine(Engine):
         if not pred:
             return None
         return int(self._q("dst", f"select count(*) from"
-                                  f" `{self._d('dst', db)}`.`{t}`"
+                                  f" {_qi(self._d('dst', db))}.{_qi(t)}"
                                   f" where ({pred}) is not true")[0][0])
 
     #: one row's hash, salted, its first 64 bits summed: a sum of unsigned
@@ -3450,7 +3468,7 @@ class MySQLEngine(Engine):
     #: alike
     @staticmethod
     def _summed(expr, salt):
-        return (f"coalesce(sum(cast(conv(substring(md5(concat('{salt}', "
+        return (f"coalesce(sum(cast(conv(substring(md5(concat({_ql(salt)}, "
                 + expr + ")), 1, 16), 16, 10) as unsigned)), 0)")
 
     def _checksum(self, side, db, t, expr, where="", key_expr=None,
@@ -3488,18 +3506,28 @@ class MySQLEngine(Engine):
         return got
 
     def _reladiff_url(self, side, db):
-        from urllib.parse import quote
-        ep = self.hop.source if side == "src" else self.hop.target
-        return (f"mysql://{ep.user}:{quote(ep.password, safe='')}"
-                f"@{ep.host}:{ep.port}/{self._d(side, db)}")
+        """One side as the second data reading's address (`Endpoint.url`,
+        user and password escaped whole), the TLS in the query its driver
+        reads (`tls_forms`' `rows_query`); None where that driver cannot
+        hold the side's TLS - encryption asked with no authority named -
+        and the reading is not run rather than run in clear text. It went
+        without TLS and with the user unescaped (audit 2026-10-01, SEC2,
+        DU8)."""
+        ep = self._ep(side)
+        query = ep.tls_forms("mysql")["rows_query"]
+        if query is None:
+            return None
+        return ep.url("mysql", self._d(side, db), tls=False) + (
+            f"?{query}" if query else "")
 
     def _reladiff_table(self, db, t, pks):
         from ..util import PrivateFile, diff_run_config
+        a, b = self._reladiff_url("src", db), self._reladiff_url("dst", db)
+        if a is None or b is None:
+            return None, "", 0, 0
         # both addresses in a private file: they carry the passwords, and
         # were the program's arguments
-        conf = PrivateFile(diff_run_config(
-            self._reladiff_url("src", db), t, self._reladiff_url("dst", db),
-            t), ".toml")
+        conf = PrivateFile(diff_run_config(a, t, b, t), ".toml")
         from ..verifiers import reladiff_rung
         fact = (self.table_facts("src", db) or {}).get(t) or {}
         rung = reladiff_rung(fact.get("rows"), fact.get("bytes"),
@@ -3558,7 +3586,7 @@ class MySQLEngine(Engine):
             n = self._q("src", f"select count(*) from"
                                f" {self._scope('src', db, t)}")[0][0]
             if n > self.hop.slice:
-                mm = self._q("src", f"select min(`{pks[0]}`), max(`{pks[0]}`)"
+                mm = self._q("src", f"select min({_qi(pks[0])}), max({_qi(pks[0])})"
                                     f" from {self._scope('src', db, t)}")[0]
                 if mm[0] is not None and str(mm[0]).lstrip("-").isdigit():
                     col = pks[0]
@@ -3570,7 +3598,7 @@ class MySQLEngine(Engine):
         key_expr = self._key_expr(db, t)
 
         def clause(lo, hi):
-            w = _cp.where(f"`{col}`", lo, hi) if col else ""
+            w = _cp.where(_qi(col), lo, hi) if col else ""
             return f"where {w}" if w else ""
 
         ranges = [clause(lo, hi) for lo, hi in pk_ranges]
@@ -3844,9 +3872,9 @@ class MySQLEngine(Engine):
         expr = ", ".join(self._summed(rowtext.mysql_row([c]), salt)
                          for c in cols)
         try:
-            a = self._q("src", f"select {expr} from `{db}`.`{t}`")[0]
+            a = self._q("src", f"select {expr} from {_qi(db)}.{_qi(t)}")[0]
             b = self._q("dst",
-                        f"select {expr} from `{self._d('dst', db)}`.`{t}`")[0]
+                        f"select {expr} from {_qi(self._d('dst', db))}.{_qi(t)}")[0]
         except Exception as e:
             return self._fingerprint_failed(e)
         diff = [c for c, x, y in zip(cols, a, b) if x != y]
@@ -3876,11 +3904,11 @@ class MySQLEngine(Engine):
             for i in range(0, len(klist), 500):
                 chunk = klist[i:i + 500]
                 if len(pks) == 1:
-                    where = (f"cast(`{pks[0]}` as char) in ("
+                    where = (f"cast({_qi(pks[0])} as char) in ("
                              + ", ".join(["%s"] * len(chunk)) + ")")
                     args = [rowtext.parse(k)[0] for k in chunk]
                 else:
-                    tup = ("(" + ", ".join(f"cast(`{c}` as char)"
+                    tup = ("(" + ", ".join(f"cast({_qi(c)} as char)"
                                            for c in pks) + ")")
                     one = "(" + ", ".join(["%s"] * len(pks)) + ")"
                     where = tup + " in (" + ", ".join([one] * len(chunk)) + ")"
@@ -4215,9 +4243,9 @@ class MySQLEngine(Engine):
             if left <= 0:
                 out.append((t, "unknown", None))
                 continue
-            size = "+".join(f"coalesce(length(`{c.replace('`', '``')}`), 0)"
+            size = "+".join(f"coalesce(length({_qi(c)}), 0)"
                             for c in cols[t])
-            table = f"`{db.replace('`', '``')}`.`{t.replace('`', '``')}`"
+            table = f"{_qi(db)}.{_qi(t)}"
             sql = (f"set statement max_statement_time = {left:.3f} for"
                    f" select max({size}) from {table}" if mariadb else
                    f"select /*+ MAX_EXECUTION_TIME({max(int(left * 1000), 1)})"
@@ -4934,6 +4962,34 @@ class MySQLEngine(Engine):
             conn.commit()
         finally:
             conn.close()
+            self._forget_catalog(side, db)
+
+    def neutral_create_codes(self, side, db, todo):
+        """The converted statements on one connection: each was a
+        connection of its own, signed in again for every one (audit
+        2026-10-01, SC21). Not one transaction - MySQL commits each
+        statement that makes something as it runs - so each that fails is
+        named and the rest are made."""
+        import pymysql
+        if side != "dst":
+            raise RuntimeError("migkit does not write to the source")
+        made, failed = [], []
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"use {_qi(self._d(side, db))}")
+                for name, stmt in todo:
+                    try:
+                        cur.execute(stmt)
+                        made.append(name)
+                    except pymysql.err.MySQLError as e:
+                        failed.append(f"{name}: " + (str(e).strip()
+                                                     .splitlines() or [""])[0])
+            conn.commit()
+        finally:
+            conn.close()
+            self._forget_catalog(side, db)
+        return made, failed, False
 
     def neutral_views(self, side, db):
         return [(n, d) for n, d in self._q(
@@ -5173,8 +5229,8 @@ class MySQLEngine(Engine):
         for t, c in cols:
             if self.hop.excluded(db, t):
                 continue
-            latest = self._q(side, f"select max(`{c}`) from"
-                                   f" {self._my_ident(name)}.`{t}`")[0][0]
+            latest = self._q(side, f"select max({_qi(c)}) from"
+                                   f" {self._my_ident(name)}.{_qi(t)}")[0][0]
             heads.append((f"{t}.{c}", latest))
         return int(offset), now, heads
 
@@ -5590,12 +5646,12 @@ class MySQLEngine(Engine):
         for (con, t, rt), (cols, rcols) in sorted(fks.items()):
             if self.hop.excluded(db, str(t)):
                 continue
-            nn = " and ".join(f"c.`{c}` is not null" for c in cols)
-            join = " and ".join(f"p.`{r}` = c.`{c}`"
+            nn = " and ".join(f"c.{_qi(c)} is not null" for c in cols)
+            join = " and ".join(f"p.{_qi(r)} = c.{_qi(c)}"
                                 for c, r in zip(cols, rcols))
-            n = self._q("dst", f"select count(*) from `{ddb}`.`{t}` c"
+            n = self._q("dst", f"select count(*) from {_qi(ddb)}.{_qi(t)} c"
                                f" where {nn} and not exists"
-                               f" (select 1 from `{ddb}`.`{rt}` p"
+                               f" (select 1 from {_qi(ddb)}.{_qi(rt)} p"
                                f" where {join})")[0][0]
             if not n:
                 continue
@@ -6333,12 +6389,16 @@ class MySQLEngine(Engine):
 
     def _grants_for_db(self, side, dbn):
         """({account: {grant as said}}, why it could not be read) for
-        database `dbn` on one side (`_grants_on`)."""
+        database `dbn` on one side (`_grants_on`): the accounts the hop
+        names, where it names some (`objects: {roles: [...]}`,
+        `users.role_taken`)."""
+        from ..users import role_names, role_taken
         got = self._privileges(side)
         if got["error"]:
             return {}, got["error"]
-        return ({me: set(g) for me, g in self._grants_on(side, dbn).items()},
-                "")
+        named = role_names(self.hop) is not None
+        return ({me: set(g) for me, g in self._grants_on(side, dbn).items()
+                 if not named or role_taken(self.hop, me)}, "")
 
 
     def _events(self, side, db):
@@ -6453,9 +6513,9 @@ class MySQLEngine(Engine):
                    if v == "NO" and src.get(k) == "YES"]
         if not turn_on:
             return None
-        stmts = [f"ALTER TABLE `{tbl}` ALTER CHECK `{name}` ENFORCED;"
+        stmts = [f"ALTER TABLE {_qi(tbl)} ALTER CHECK {_qi(name)} ENFORCED;"
                  for tbl, name in turn_on]
-        undo = [f"ALTER TABLE `{tbl}` ALTER CHECK `{name}` NOT ENFORCED;"
+        undo = [f"ALTER TABLE {_qi(tbl)} ALTER CHECK {_qi(name)} NOT ENFORCED;"
                 for tbl, name in turn_on]
         return RepairAction(db, "constraints", stmts, undo,
                             f"{len(turn_on)} check constraints the target"
@@ -6517,16 +6577,19 @@ class MySQLEngine(Engine):
                 fwd, back = self._grant_sql(who, who in roles, level, gdb,
                                             obj, privs, have)
                 stmts += fwd
-                undo += back
+                undo.append(back)
             if defaults:
                 fwd, back = self._default_roles_sql(
                     who, who in roles, src_on[who], dst_on.get(who, {}))
                 stmts += fwd
-                undo += back
+                undo.append(back)
                 n += 1
         if not stmts:
             return None
-        return RepairAction(db, "grants", stmts, undo,
+        # undone last first: a default role is set back before its role
+        # is taken away
+        return RepairAction(db, "grants", stmts,
+                            [s for back in reversed(undo) for s in back],
                             f"{n} grants the mover did not carry")
 
     def _account_sql(self, who, role=False):
@@ -6646,10 +6709,10 @@ class MySQLEngine(Engine):
                 if dv > sv:
                     refuse.append(f"{tbl}: target {dv} > source {sv}")
                     continue
-                stmts.append(f"alter table `{ddb}`.`{tbl}` auto_increment ="
+                stmts.append(f"alter table {_qi(ddb)}.{_qi(tbl)} auto_increment ="
                              f" {sv + buf};  -- dst now {dv}"
                              + (f" +buffer {buf}" if buf else ""))
-                undo.append(f"alter table `{ddb}`.`{tbl}` auto_increment = {dv};")
+                undo.append(f"alter table {_qi(ddb)}.{_qi(tbl)} auto_increment = {dv};")
             same = sum(1 for tbl, v in src.items() if dst.get(tbl) == v)
             note = f"{len(stmts)} counters raised, {same} already equal"
             if refuse:
@@ -7003,13 +7066,13 @@ class MySQLEngine(Engine):
                     f"{t}: newer_wins names {col}, and it is not on both"
                     " sides, so which row is newer cannot be told. Nothing"
                     " was repaired on this table.")
-            key_cond = " and ".join(f"cast(`{c}` as char) = %s" for c in pks)
+            key_cond = " and ".join(f"cast({_qi(c)} as char) = %s" for c in pks)
 
             def at(side, keys):
                 name = db if side == "src" else ddb
                 out = {}
                 for k in keys:
-                    got = self._q(side, f"select `{col}` from `{name}`.`{t}`"
+                    got = self._q(side, f"select {_qi(col)} from {_qi(name)}.{_qi(t)}"
                                         f" where {key_cond}", k)
                     if got:
                         out[self._key_id(k)] = got[0][0]
@@ -7020,8 +7083,8 @@ class MySQLEngine(Engine):
                 log_kept.write_text("".join(f"{k}\n" for k in kept))
         to_delete = extra + changed
         to_copy = missing + changed
-        cond = " and ".join(f"cast(`{c}` as char) = %s" for c in pks)
-        collist = ", ".join(f"`{c}`" for c in cols)
+        cond = " and ".join(f"cast({_qi(c)} as char) = %s" for c in pks)
+        collist = ", ".join(_qi(c) for c in cols)
         ph = ", ".join(["%s"] * len(cols))
 
         undo = Path(undo_dir) if undo_dir else d / "undo"
@@ -7038,12 +7101,17 @@ class MySQLEngine(Engine):
             with dconn.cursor() as cur:
                 cur.execute("set foreign_key_checks = 0")
                 for pk in touched:
-                    cur.execute(f"select {collist} from `{ddb}`.`{t}`"
+                    cur.execute(f"select {collist} from {_qi(ddb)}.{_qi(t)}"
                                 f" where {cond}", pk)
                     got = cur.fetchall()
                     entries.append({"pk": pk, "cols": cols,
                                     "old": [list(r) for r in got] or None})
-                (undo / f"rows-{t}.jsonl").write_text(
+                # the undo on the disk, whole, before a row is changed
+                # (`durable`): a crash after the repair began left an undo
+                # that held part of what it changed, or none
+                from .. import durable
+                durable.write_atomic(
+                    undo / f"rows-{t}.jsonl",
                     "".join(json.dumps(e, default=str) + "\n"
                             for e in entries))
                 # pt-table-sync when available (bounded to the verified pks);
@@ -7054,16 +7122,16 @@ class MySQLEngine(Engine):
                         cur.execute(stmt)
                 else:
                     for pk in to_delete:
-                        cur.execute(f"delete from `{ddb}`.`{t}`"
+                        cur.execute(f"delete from {_qi(ddb)}.{_qi(t)}"
                                     f" where {cond}", pk)
                     with sconn.cursor() as scur:
                         for pk in to_copy:
-                            scur.execute(f"select {collist} from `{db}`.`{t}`"
+                            scur.execute(f"select {collist} from {_qi(db)}.{_qi(t)}"
                                          f" where {cond}", pk)
                             rows = scur.fetchall()
                             if rows:
                                 cur.executemany(
-                                    f"insert into `{ddb}`.`{t}` ({collist})"
+                                    f"insert into {_qi(ddb)}.{_qi(t)} ({collist})"
                                     f" values ({ph})", rows)
             dconn.commit()
             record.applied(record.n)
@@ -7158,13 +7226,12 @@ class MySQLEngine(Engine):
             return None
         if any(c in str(k[0]) for k in touched for c in self.PT_UNSAFE):
             return None
-        vals = ", ".join("'" + str(k[0]).replace("'", "''") + "'"
-                         for k in touched)
+        vals = ", ".join(_ql(k[0]) for k in touched)
         s, tg = self.hop.source, self.hop.target
         from ..movers import client_defaults
         with client_defaults(s, tg) as (fs, ft):
             p = run(["pt-table-sync", "--print",
-                     "--where", f"`{pks[0]}` in ({vals})",
+                     "--where", f"{_qi(pks[0])} in ({vals})",
                      f"h={s.host},P={s.port},u={s.user},F={fs},"
                      f"D={db},t={t}",
                      f"h={tg.host},P={tg.port},u={tg.user},F={ft},"
@@ -7178,7 +7245,10 @@ class MySQLEngine(Engine):
 
     def restore_rows(self, db, undo_dir):
         """Replay a complete row undo: for each touched pk, delete whatever is
-        there now, then re-insert the saved pre-repair row (or leave absent)."""
+        there now, then re-insert the saved pre-repair row (or leave absent).
+        An undo that cannot be read whole stops, naming the file
+        (`durable.read_lines`): read in part, it undid part."""
+        from .. import durable
         undo_dir = Path(undo_dir)
         files = sorted(undo_dir.glob("rows-*.jsonl"))
         if not files:
@@ -7192,18 +7262,17 @@ class MySQLEngine(Engine):
                 for f in files:
                     t = f.name[len("rows-"):-len(".jsonl")]
                     pks = self._pk_cols(db, t)
-                    for line in f.read_text().splitlines():
-                        e = json.loads(line)
+                    for e in durable.read_lines(f, "journal"):
                         cols = e["cols"]
                         cond = " and ".join(
-                            f"cast(`{c}` as char) = %s" for c in pks)
-                        cur.execute(f"delete from `{ddb}`.`{t}` where {cond}",
+                            f"cast({_qi(c)} as char) = %s" for c in pks)
+                        cur.execute(f"delete from {_qi(ddb)}.{_qi(t)} where {cond}",
                                     e["pk"])
                         if e["old"]:
-                            collist = ", ".join(f"`{c}`" for c in cols)
+                            collist = ", ".join(_qi(c) for c in cols)
                             ph = ", ".join(["%s"] * len(cols))
                             cur.executemany(
-                                f"insert into `{ddb}`.`{t}` ({collist})"
+                                f"insert into {_qi(ddb)}.{_qi(t)} ({collist})"
                                 f" values ({ph})", e["old"])
                         n += 1
             dconn.commit()
@@ -7213,7 +7282,12 @@ class MySQLEngine(Engine):
 
     def _assess_accounts(self):
         """The application's accounts on the target, as `assess` says them:
-        each there, and with the source's password."""
+        each there, and with the source's password. The servers' and the
+        providers' own accounts left out by the one list `users`, the
+        grant checks and this read (`users.system_principals_sql`): a list
+        of its own here called a provider's administrators missing on the
+        target that `users` never creates (audit 2026-10-01, DU13)."""
+        from ..users import system_principals_sql
         items = []
 
         def add(level, scope, item, detail=""):
@@ -7222,8 +7296,8 @@ class MySQLEngine(Engine):
         try:
             uq = ("select concat(user,'@',host),"
                   " authentication_string from mysql.user"
-                  " where user not in ('mysql.sys','mysql.session',"
-                  "'mysql.infoschema','root') and user not like 'rds%'")
+                  f" where not {system_principals_sql('mysql', 'user')}"
+                  f" and user <> {_ql(self.REPL_USER)}")
             su = dict(self._q("src", uq))
             du = dict(self._q("dst", uq))
             miss = sorted(set(su) - set(du))
@@ -7251,7 +7325,7 @@ class MySQLEngine(Engine):
                           "item": item, "detail": str(detail)})
 
         def var(side, name):
-            r = self._q(side, f"show variables like '{name}'")
+            r = self._q(side, f"show variables like {_ql(name)}")
             return r[0][1] if r else "?"
 
         items += self._brand_rows()
@@ -7318,11 +7392,12 @@ class MySQLEngine(Engine):
                 " on GTID positions")
 
         # a long-running open transaction pins InnoDB purge and stalls CDC
-        # (the target lags for as long as it stays open); flag by age
-        lrt = self._q("src",
-                      "select count(*), coalesce(max(timestampdiff(second,"
-                      " trx_started, now())),0)"
-                      " from information_schema.innodb_trx")
+        # (the target lags for as long as it stays open); flag by age, in
+        # the zone the server keeps the start in (`_q_server_zone`)
+        lrt = self._q_server_zone(
+            "src", "select count(*), coalesce(max(timestampdiff(second,"
+                   " trx_started, now())),0)"
+                   " from information_schema.innodb_trx")
         n, age = (lrt[0][0], int(lrt[0][1])) if lrt else (0, 0)
         add("pass" if age < 900 else "warn" if age < 3600 else "fail",
             "instance", "long-running transactions blocking CDC/purge",
@@ -7518,7 +7593,7 @@ class MySQLEngine(Engine):
         for name in ("rpl_semi_sync_source_enabled",
                      "rpl_semi_sync_master_enabled"):
             try:
-                got = self._q("dst", f"show variables like '{name}'")
+                got = self._q("dst", f"show variables like {_ql(name)}")
             except Exception:  # noqa: BLE001
                 got = ()
             if got and str(got[0][1]).upper() == "ON":
@@ -7829,7 +7904,7 @@ class MySQLEngine(Engine):
         what a managed service sets by default: three quarters."""
         status = {k: v for k, v in self._q(
             side, "show global status where variable_name in ("
-            + ", ".join(f"'{k}'" for k in self.LOAD_STATUS) + ")")}
+            + ", ".join(_ql(k) for k in self.LOAD_STATUS) + ")")}
         most, pool = self._q(side, "select @@max_connections,"
                                    " @@innodb_buffer_pool_size")[0]
 
@@ -8066,7 +8141,7 @@ class MySQLEngine(Engine):
 
     def io_wait(self, side, db):
         got = dict(self._q(side, "show global status where variable_name in"
-                                 " (" + ", ".join(f"'{n}'" for n in
+                                 " (" + ", ".join(_ql(n) for n in
                                                   self.IO_PENDING) + ")"))
         return {"io_pending": sum(int(v or 0) for v in got.values())}
 
@@ -8074,23 +8149,18 @@ class MySQLEngine(Engine):
         """Rows inserted, updated and deleted in `db`'s tables as the
         performance schema counts them since the server started; the
         server's own counters, for every database, where it does not."""
-        d = self._d(side, db)
         up = float(dict(self._q(side, "show global status like"
                                       " 'Uptime'")).get("Uptime", 0) or 0)
-        try:
-            got = self._q(side, "select coalesce(sum(count_insert +"
-                                " count_update + count_delete), 0) from"
-                                " performance_schema"
-                                ".table_io_waits_summary_by_table where"
-                                " object_schema = %s", (d,))
-            return int(got[0][0]), up
-        except Exception:  # noqa: BLE001 - no performance schema here
-            got = dict(self._q(side, "show global status where"
-                                     " variable_name in"
-                                     " ('Innodb_rows_inserted',"
-                                     " 'Innodb_rows_updated',"
-                                     " 'Innodb_rows_deleted')"))
-            return sum(int(v or 0) for v in got.values()), up
+        written = self._rows_written(side, db)
+        if written is not None:
+            return sum(written.values()), up
+        # no performance schema here
+        got = dict(self._q(side, "show global status where"
+                                 " variable_name in"
+                                 " ('Innodb_rows_inserted',"
+                                 " 'Innodb_rows_updated',"
+                                 " 'Innodb_rows_deleted')"))
+        return sum(int(v or 0) for v in got.values()), up
 
     #: rows of a table read to size its wide rows, and the bytes of values
     #: such a read may take from the source at most
@@ -8187,7 +8257,7 @@ class MySQLEngine(Engine):
         chunk, rf = job.chunk, job.rf
         ddb = self._d("dst", db)
         cols = self._cols(db, t)
-        collist = ", ".join(f"`{c}`" for c in cols)
+        collist = ", ".join(_qi(c) for c in cols)
         ph = ", ".join(["%s"] * len(cols))
         pks = self._pk_cols(db, t)
         intpk = None
@@ -8222,11 +8292,11 @@ class MySQLEngine(Engine):
                 return timed()
             if not intpk:
                 log(f"{key}: no single int pk, single-shot copy")
-                clear = (f"delete from `{ddb}`.`{t}` where ({rf})" if rf
-                         else f"truncate `{ddb}`.`{t}`")
+                clear = (f"delete from {_qi(ddb)}.{_qi(t)} where ({rf})" if rf
+                         else f"truncate {_qi(ddb)}.{_qi(t)}")
                 if ctx is None or self._passed(
                         ctx, f"({rf})" if rf else "",
-                        f"delete from `{ddb}`.`{t}`"
+                        f"delete from {_qi(ddb)}.{_qi(t)}"
                         + (f" where ({rf})" if rf else ""), None, key,
                         not rf, log) is None:
                     self._range_checked(
@@ -8236,10 +8306,10 @@ class MySQLEngine(Engine):
                 st["done"] = True
                 ck.save()
                 return timed()
-            mm = self._q("src", f"select coalesce(min(`{intpk}`), 0),"
-                         f" coalesce(max(`{intpk}`), 0),"
-                         f" min(`{intpk}`) is not null"
-                         f" from `{db}`.`{t}`"
+            mm = self._q("src", f"select coalesce(min({_qi(intpk)}), 0),"
+                         f" coalesce(max({_qi(intpk)}), 0),"
+                         f" min({_qi(intpk)}) is not null"
+                         f" from {_qi(db)}.{_qi(t)}"
                          + (f" where ({rf})" if rf else ""))[0]
             lo, hi, has = int(mm[0]), int(mm[1]), bool(mm[2])
             from .. import ranges
@@ -8253,7 +8323,7 @@ class MySQLEngine(Engine):
                     return []
                 return [r[0] for r in self.run_rule(
                     "src", db, ranges.bounds_sql(
-                        self._quote_ident, f"`{db}`.`{t}`", intpk, every,
+                        self._quote_ident, f"{_qi(db)}.{_qi(t)}", intpk, every,
                         rf))]
             todo = (ranges.plan(st, lo, hi, edges, ck.save, table=t)
                     if has else [])
@@ -8269,12 +8339,12 @@ class MySQLEngine(Engine):
             def sweep():
                 # each chunk replaces its own key range, so a target row
                 # outside the source's whole range was in none of them
-                outside = (f"not (`{intpk}` between {lo} and {hi})" if has
+                outside = (f"not ({_qi(intpk)} between {lo} and {hi})" if has
                            else "true")
                 if rf:
                     outside = f"({outside}) and ({rf})"
                 with dconn.cursor() as dcur:
-                    gone = dcur.execute(f"delete from `{ddb}`.`{t}`"
+                    gone = dcur.execute(f"delete from {_qi(ddb)}.{_qi(t)}"
                                         f" where {outside}")
                 dconn.commit()
                 if gone:
@@ -8288,7 +8358,7 @@ class MySQLEngine(Engine):
                     opened.append(local.conns)
                 ranges.started(st, after, self.snapshot_mark("src", db),
                                ck.save)
-                rng_sql = (f"`{intpk}` > {int(after)} and `{intpk}` <="
+                rng_sql = (f"{_qi(intpk)} > {int(after)} and {_qi(intpk)} <="
                            f" {int(upto)}")
                 where = f"({rng_sql}) and ({rf})" if rf else rng_sql
                 if ctx is not None:
@@ -8297,7 +8367,7 @@ class MySQLEngine(Engine):
                         # said before the load empties it with the rest
                         sweep()
                     n = self._passed(
-                        ctx, where, f"delete from `{ddb}`.`{t}`" + (
+                        ctx, where, f"delete from {_qi(ddb)}.{_qi(t)}" + (
                             "" if whole else f" where {where}"), intpk,
                         f"{key} {intpk} {after + 1:,} to {upto:,}", whole,
                         log)
@@ -8309,9 +8379,9 @@ class MySQLEngine(Engine):
                         return n
                 sent = self._range_checked(
                     local.conns[0], local.conns[1], db, t, collist, ph,
-                    f" where `{intpk}` > %s and `{intpk}` <= %s" + rfp,
+                    f" where {_qi(intpk)} > %s and {_qi(intpk)} <= %s" + rfp,
                     (after, upto),
-                    f"delete from `{ddb}`.`{t}` where {rng_sql}"
+                    f"delete from {_qi(ddb)}.{_qi(t)} where {rng_sql}"
                     + (f" and ({rf})" if rf else ""),
                     f"({rng_sql}) and ({rf})" if rf else rng_sql,
                     f"{key} {intpk} {after + 1:,} to {upto:,}", log)
@@ -8383,7 +8453,7 @@ class MySQLEngine(Engine):
 
         def clear(where_there=None):
             with dconn.cursor() as cur:
-                gone = cur.execute(f"delete from `{ddb}`.`{t}`"
+                gone = cur.execute(f"delete from {_qi(ddb)}.{_qi(t)}"
                                    + (f" where {scoped(where_there)}"
                                       if where_there else
                                       f" where ({rf})" if rf else ""))
@@ -8663,7 +8733,7 @@ class MySQLEngine(Engine):
         sc, dc, _ = columns or self._comparable_columns(db, self, t, self, t)
         row = canon.row_expr("mysql", sc if side == "src" else dc)
         return (f"select count(*), {canon.digest_expr('mysql', row)}"
-                f" from `{self._d(side, db)}`.`{t}`"
+                f" from {_qi(self._d(side, db))}.{_qi(t)}"
                 + (f" where {where}" if where else ""))
 
     def _client_tls(self, side):
@@ -8882,18 +8952,18 @@ class MySQLEngine(Engine):
         """One range of the table copier, on connections of its own: its
         span on the target replaced by the source's and read back."""
         cols = self._cols(db, t)
-        collist = ", ".join(f"`{c}`" for c in cols)
+        collist = ", ".join(_qi(c) for c in cols)
         ph = ", ".join(["%s"] * len(cols))
         ddb = self._d("dst", db)
         rfp = f" and ({rf.replace('%', '%%')})" if rf else ""
-        rng_sql = f"`{intpk}` > {int(after)} and `{intpk}` <= {int(upto)}"
+        rng_sql = f"{_qi(intpk)} > {int(after)} and {_qi(intpk)} <= {int(upto)}"
         sconn, dconn = self._conn("src"), self._conn("dst")
         try:
             return self._range_checked(
                 sconn, dconn, db, t, collist, ph,
-                f" where `{intpk}` > %s and `{intpk}` <= %s" + rfp,
+                f" where {_qi(intpk)} > %s and {_qi(intpk)} <= %s" + rfp,
                 (after, upto),
-                f"delete from `{ddb}`.`{t}` where {rng_sql}"
+                f"delete from {_qi(ddb)}.{_qi(t)} where {rng_sql}"
                 + (f" and ({rf})" if rf else ""),
                 f"({rng_sql}) and ({rf})" if rf else rng_sql,
                 f"{key} {intpk} {after + 1:,} to {upto:,}", log).n
@@ -8929,7 +8999,7 @@ class MySQLEngine(Engine):
         # copy's log (`_put_rows`)
         self.lend_log(log)
         ddb = self._d("dst", db)
-        insert = f"insert into `{ddb}`.`{t}` ({collist}) values ({ph})"
+        insert = f"insert into {_qi(ddb)}.{_qi(t)} ({collist}) values ({ph})"
         names = [n.replace("``", "`")
                  for n in re.findall(r"`((?:[^`]|``)*)`", collist)]
         loads = [True]
@@ -8967,7 +9037,7 @@ class MySQLEngine(Engine):
                 dcur.execute("set session transaction isolation level read"
                              " committed")
                 dcur.execute(clear)
-                scur.execute(f"select {collist} from `{db}`.`{t}`" + where,
+                scur.execute(f"select {collist} from {_qi(db)}.{_qi(t)}" + where,
                              args or None)
                 reader = threading.Thread(target=read, args=(scur,),
                                           daemon=True)
@@ -9023,7 +9093,7 @@ class MySQLEngine(Engine):
         def there():
             got = Tally()
             with dconn.cursor(pymysql.cursors.SSCursor) as cur:
-                cur.execute(f"select {collist} from `{ddb}`.`{t}`" + where,
+                cur.execute(f"select {collist} from {_qi(ddb)}.{_qi(t)}" + where,
                             args or None)
                 while True:
                     rows = cur.fetchmany(5000)
@@ -9213,16 +9283,16 @@ class MySQLEngine(Engine):
                 + [f"replicate-ignore-table = {r}" for r in ignore])
         if brand == "mariadb":
             stmts = [f"set global replicate_rewrite_db ="
-                     f" '{','.join(f'{a}->{b}' for a, b in rewrite)}';"
+                     f" {_ql(','.join(f'{a}->{b}' for a, b in rewrite))};"
                      ] if rewrite else []
             if exact:
                 stmts.append(f"set global replicate_do_table ="
-                             f" '{','.join(exact)}';")
+                             f" {_ql(','.join(exact))};")
             stmts += [f"set global replicate_wild_do_table ="
-                      f" '{','.join(do)}';"]
+                      f" {_ql(','.join(do))};"]
             if ignore:
                 stmts.append(f"set global replicate_ignore_table ="
-                             f" '{','.join(ignore)}';")
+                             f" {_ql(','.join(ignore))};")
             return stmts, conf
         parts = []
         if rewrite:
@@ -9232,7 +9302,7 @@ class MySQLEngine(Engine):
         if exact:
             parts.append("REPLICATE_DO_TABLE = (" + ", ".join(exact) + ")")
         parts.append("REPLICATE_WILD_DO_TABLE = ("
-                     + ", ".join(f"'{r}'" for r in do) + ")")
+                     + ", ".join(_ql(r) for r in do) + ")")
         if ignore:
             parts.append("REPLICATE_IGNORE_TABLE = (" + ", ".join(ignore)
                          + ")")
@@ -9357,7 +9427,7 @@ class MySQLEngine(Engine):
         server; the address is the hint only where it cannot be asked -
         or None where it takes `CHANGE REPLICATION SOURCE TO` itself."""
         ep = self.hop.target if side == "dst" else self.hop.source
-        listed = ", ".join(f"'{p}'" for p in self.REPLICA_PROCEDURES)
+        listed = ", ".join(_ql(p) for p in self.REPLICA_PROCEDURES)
         try:
             got = {str(r[0]) for r in self._q(
                 side, "select routine_name from information_schema.routines"
@@ -9405,14 +9475,19 @@ class MySQLEngine(Engine):
                 " source changed since, and one started earlier stops on"
                 " rows the copy already carried - move with --mode"
                 " full+cdc instead")
+        repl, pw = _ql(self.REPL_USER), _ql(secret)
         src_cmds = [
-            f"create user if not exists '{self.REPL_USER}'@'%'"
-            f" identified by '{secret}';",
+            f"create user if not exists {repl}@'%' identified by {pw};",
             # a user an earlier run left keeps its old password otherwise,
             # and the replica below would be given this one
-            f"alter user '{self.REPL_USER}'@'%' identified by '{secret}';",
-            f"grant replication slave on *.* to '{self.REPL_USER}'@'%';",
+            f"alter user {repl}@'%' identified by {pw};",
+            f"grant replication slave on *.* to {repl}@'%';",
         ]
+        # the hop's TLS to the source, as the replica asks it of the source
+        # (`tls_forms`): it connected in clear text, and fetched the
+        # source's public key unauthenticated (audit 2026-10-01, SEC2)
+        tls = s.tls_forms("mysql")
+        encrypted = tls["mode"] != "PREFERRED"
         filters, conf = self._replica_filter_sql(brand)
         parallel, applier = self._parallel_apply_sql(brand)
         keep = ("; these scope the replica to the hop and last only until"
@@ -9434,10 +9509,11 @@ class MySQLEngine(Engine):
             if applier:
                 keep += (f"; and {applier}, or it applies with one")
             dst_cmds = [
-                f"call {procedure} ('{s.host}', {s.port},"
-                f" '{self.REPL_USER}', '{secret}',"
-                + (f" '{pos[0]}', {pos[1]}," if pos else " '', 4,")
-                + " 0);",
+                f"call {procedure} ({_ql(s.host)}, {int(s.port)},"
+                f" {repl}, {pw},"
+                + (f" {_ql(pos[0])}, {int(pos[1])}," if pos else " '', 4,")
+                # the procedure's last argument: the source's encryption
+                + f" {1 if encrypted else 0});",
                 "call mysql.rds_start_replication;",
             ]
         elif brand == "mariadb":
@@ -9453,14 +9529,16 @@ class MySQLEngine(Engine):
             # master's binlog". `slave_pos` holds only what was replicated,
             # and is the same position on a target that keeps no log.
             auto = ("MASTER_USE_GTID = slave_pos" if gtid_on else
-                    (f"MASTER_LOG_FILE = '{pos[0]}',"
-                     f" MASTER_LOG_POS = {pos[1]}"
+                    (f"MASTER_LOG_FILE = {_ql(pos[0])},"
+                     f" MASTER_LOG_POS = {int(pos[1])}"
                      + (", MASTER_USE_GTID = no" if exact else "")
                      if pos else ""))
             dst_cmds = [
-                f"change master to MASTER_HOST = '{s.host}',"
-                f" MASTER_PORT = {s.port}, MASTER_USER = '{self.REPL_USER}',"
-                f" MASTER_PASSWORD = '{secret}', {auto};",
+                f"change master to MASTER_HOST = {_ql(s.host)},"
+                f" MASTER_PORT = {int(s.port)}, MASTER_USER = {repl},"
+                f" MASTER_PASSWORD = {pw},"
+                + (f" {tls['master']}," if tls["master"] else "")
+                + f" {auto};",
                 *filters,
                 *parallel,
                 "start slave;",
@@ -9468,14 +9546,16 @@ class MySQLEngine(Engine):
         else:
             auto = "SOURCE_AUTO_POSITION = 1" if gtid_on else \
                 ((f"SOURCE_AUTO_POSITION = 0, " if exact else "")
-                 + f"SOURCE_LOG_FILE = '{pos[0]}',"
-                 f" SOURCE_LOG_POS = {pos[1]}" if pos else "")
+                 + f"SOURCE_LOG_FILE = {_ql(pos[0])},"
+                 f" SOURCE_LOG_POS = {int(pos[1])}" if pos else "")
             dst_cmds = [
-                f"change replication source to SOURCE_HOST = '{s.host}',"
-                f" SOURCE_PORT = {s.port}, SOURCE_USER = '{self.REPL_USER}',"
-                f" SOURCE_PASSWORD = '{secret}',"
-                # MySQL 8 only: MariaDB has no such option
-                f" GET_SOURCE_PUBLIC_KEY = 1, {auto};",
+                f"change replication source to SOURCE_HOST = {_ql(s.host)},"
+                f" SOURCE_PORT = {int(s.port)}, SOURCE_USER = {repl},"
+                f" SOURCE_PASSWORD = {pw},"
+                # MySQL 8 only, both: MariaDB has no such option. Encrypted
+                # where the hop's source is; its public key fetched only
+                # where it is not
+                f" {tls['source']}, {auto};",
                 *filters,
                 *parallel,
                 "start replica;",
@@ -9501,7 +9581,7 @@ class MySQLEngine(Engine):
                      "fire_dst": [f"start {word} sql_thread;"],
                      "unarm_src": []}
         return {**armed, "src": src_cmds, "dst": dst_cmds,
-                "drop_src": [f"drop user if exists '{self.REPL_USER}'@'%';"],
+                "drop_src": [f"drop user if exists {repl}@'%';"],
                 "drop_dst": stop,
                 "status": ("show slave status" if brand == "mariadb"
                            else "show replica status"),
@@ -9705,9 +9785,9 @@ class MySQLEngine(Engine):
                                 " where schema_name = %s", (db,))
         except Exception:
             cs = []
-        create = (f"create database `{tdb}` character set {cs[0][0]}"
+        create = (f"create database {_qi(tdb)} character set {cs[0][0]}"
                   f" collate {cs[0][1]};   -- the source's own" if cs else
-                  f"create database `{tdb}` ...;   -- the source's character"
+                  f"create database {_qi(tdb)} ...;   -- the source's character"
                   " set could not be read: use the one `show create database"
                   f" {db}` gives there")
         return [
@@ -9747,7 +9827,7 @@ class MySQLEngine(Engine):
         t = table.split(".", 1)[-1]
         cols = self._cols(db, t)
         rows = self._q(side,
-                       f"select * from `{self._d(side, db)}`.`{t}`"
+                       f"select * from {_qi(self._d(side, db))}.{_qi(t)}"
                        + (f" where {where}" if where else "")
                        + f" limit {limit}")
         return pd.DataFrame(rows, columns=cols)
@@ -9805,7 +9885,7 @@ class MySQLEngine(Engine):
         pks = self._pk_cols(db, t)
         # hex, so no key's bytes are read as an escape or a quote
         where = (f"{rowtext.mysql_row(pks)} in ("
-                 + ", ".join(f"convert(X'{k.encode().hex()}' using utf8mb4)"
+                 + ", ".join(f"convert(unhex({_ql(k.encode().hex())}) using utf8mb4)"
                              for k in keys) + ")") if keys and pks else ""
         return said + self._explained(db, t, pks, keys, where)
 
@@ -9833,21 +9913,46 @@ class MySQLEngine(Engine):
 
     def watch_sample(self, db):
         """The server's own row estimates, per table on both sides, summed
-        over what the hop takes (`watched`). Not said per table: InnoDB's
-        estimate of a table moves between two readings nobody wrote
-        between, which would read as a table still being written."""
+        over what the hop takes (`watched`), read as they are now - cached
+        up to a day otherwise (`information_schema_stats_expiry`, audit
+        2026-10-01, V14). Not said per table: InnoDB's estimate of a table
+        moves between two readings nobody wrote between, which would read
+        as a table still being written. What says a table is still being
+        written is the server's count of the rows written to it
+        (`src_tables`, `performance_schema`), which only a write moves -
+        without it a source with its writers still running read as quiet
+        to `watch`."""
         import time
         q = ("select table_name, coalesce(table_rows, 0)"
              " from information_schema.tables where table_schema=%s")
 
         def rows(side, name):
-            return {str(t): int(n or 0) for t, n in self._q(side, q, (name,))}
+            return {str(t): int(n or 0)
+                    for t, n in self._q(side, q, (name,), fresh=True)}
         src, dst, narrowed = self.watched(db, rows("src", db),
                                           rows("dst", self._d("dst", db)))
-        return {"db": db, "ts": time.time(),
-                "src_rows": sum(src.values()),
-                "dst_rows": sum(dst.values()),
-                **({"narrowed": narrowed} if narrowed else {})}
+        out = {"db": db, "ts": time.time(),
+               "src_rows": sum(src.values()),
+               "dst_rows": sum(dst.values()),
+               **({"narrowed": narrowed} if narrowed else {})}
+        written = self._rows_written("src", db)
+        if written is not None:
+            out["src_tables"] = {t: n for t, n in written.items()
+                                 if t in src}
+        return out
+
+    def _rows_written(self, side, db):
+        """{table: rows inserted, updated and deleted since the server
+        started} as `performance_schema` counts them, or None where it
+        does not (switched off, or not readable by this account)."""
+        try:
+            got = self._q(side, "select object_name, count_write from"
+                                " performance_schema"
+                                ".table_io_waits_summary_by_table where"
+                                " object_schema = %s", (self._d(side, db),))
+        except Exception:  # noqa: BLE001 - not counted here
+            return None
+        return {str(t): int(n or 0) for t, n in got}
 
 
 def _copy_my_range(item):
@@ -10127,24 +10232,22 @@ def _load_feed(cur, db, table, names, kinds, data):
     the server says it took; its warnings are the load's own answer's
     (`cur.warning_count`)."""
     import uuid
-
-    def q(n):
-        return "`" + str(n).replace("`", "``") + "`"
     cols, sets = [], []
     for i, (n, k) in enumerate(zip(names, kinds)):
         if k == "hex":
             cols.append(f"@v{i}")
-            sets.append(f"{q(n)} = unhex(@v{i})")
+            sets.append(f"{_qi(n)} = unhex(@v{i})")
         elif k == "number":
             cols.append(f"@v{i}")
-            sets.append(f"{q(n)} = cast(@v{i} as unsigned)")
+            sets.append(f"{_qi(n)} = cast(@v{i} as unsigned)")
         else:
-            cols.append(q(n))
+            cols.append(_qi(n))
     name = f"rows-{uuid.uuid4().hex}"
     cur.connection.feed = (name.encode(), data)
     try:
         got = cur.execute(
-            f"load data local infile '{name}' into table {q(db)}.{q(table)}"
+            f"load data local infile {_ql(name)} into table"
+            f" {_qi(db)}.{_qi(table)}"
             " character set utf8mb4 fields terminated by '\\t' escaped by"
             " '\\\\' lines terminated by '\\n'"
             f" ({', '.join(cols)})"

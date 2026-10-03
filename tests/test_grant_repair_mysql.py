@@ -193,7 +193,10 @@ def test_a_privilege_set_holds_statements_not_characters(pair, tmp_path):
     assert "app@%" in src, src
     privs = src["app@%"]
     assert all(len(p) > 5 for p in privs), privs
-    assert any("SELECT" in p and "INSERT" in p for p in privs), privs
+    # one grant a privilege, read from the grant tables, the database's
+    # own name said as <db>
+    assert {"GRANT SELECT ON <db>.*", "GRANT INSERT ON <db>.*"} <= privs, \
+        privs
 
 
 def test_a_user_with_nothing_on_the_target_is_not_called_missing(pair,

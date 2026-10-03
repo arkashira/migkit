@@ -613,7 +613,17 @@ class Endpoint:
         `far`, and the server's public key fetched only where it is
         not), `clone` (a clone's `REQUIRE SSL`), `connector` (the change
         pipeline's mode: it verifies through a Java key store, which an
-        authority's file is not, so it is carried as `required`).
+        authority's file is not, so it is carried as `required`),
+        `schema_query` (the schema comparison's address, read by a Go
+        driver: the authority, certificate and key files it reads and
+        checks the server and its name by, `tls=skip-verify` for
+        encryption with nothing checked, `tls=preferred` where nothing is
+        asked - TLS where the server offers it, as the client takes it;
+        MySQL's `ssl-mode` there is a session variable it would set and
+        fail on), `rows_query` (the second data reading's, read by a
+        Python driver's keywords: a switch that is off left out, since
+        `False` as text reads as on; None for encryption without an
+        authority, which that driver cannot be told to require).
         MongoDB, Redis, Cassandra, SQL Server: `driver`, and MongoDB's
         `query`. `mode` in each is the decision in the engine's words."""
         from urllib.parse import urlencode
@@ -645,7 +655,16 @@ class Endpoint:
                         else ["--ssl"])
                 dump += (["--cert", cert] if cert else []) + (
                     ["--key", key] if key else [])
+            files = {k: v for k, v in uri.items() if k != "ssl-mode"}
+            schema = (urlencode(files) if ca else
+                      urlencode({"tls": "skip-verify", **files}) if mode
+                      else "tls=preferred")
+            rows = ({k: ("1" if v is True else str(v))
+                     for k, v in got.items() if v is not False}
+                    if ca else None if mode else {})
             return {"mode": mode or "PREFERRED", "driver": got,
+                    "schema_query": schema,
+                    "rows_query": None if rows is None else urlencode(rows),
                     "client": [f"--{k}={v}" for k, v in uri.items()],
                     "dump": dump, "uri": uri, "query": urlencode(uri),
                     "source": ("SOURCE_SSL = 1" if mode

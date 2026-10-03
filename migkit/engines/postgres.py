@@ -7021,6 +7021,36 @@ select json_build_object(
         finally:
             conn.close()
 
+    def neutral_create_codes(self, side, db, todo):
+        """The converted statements in one transaction on one connection,
+        each under a savepoint so every failure is named, and none of them
+        kept where one fails: each on a connection of its own kept half a
+        schema."""
+        if side != "dst":
+            raise RuntimeError("migkit does not write to the source")
+        made, failed = [], []
+        conn = self._connect(side, db)
+        try:
+            with conn.cursor() as cur:
+                for i, (name, stmt) in enumerate(todo):
+                    cur.execute(f"savepoint migkit_convert_{i}")
+                    try:
+                        cur.execute(stmt)
+                        made.append(name)
+                    except Exception as e:  # noqa: BLE001 - listed, undone
+                        cur.execute(
+                            f"rollback to savepoint migkit_convert_{i}")
+                        failed.append(f"{name}: " + (
+                            str(e).strip().splitlines() or [""])[0])
+            if failed:
+                conn.rollback()
+                made = []
+            else:
+                conn.commit()
+        finally:
+            conn.close()
+        return made, failed, True
+
     def neutral_views(self, side, db):
         rows = self._psql(side, db, "select schemaname||'.'||viewname"
                                     "||chr(31)||replace(definition,"

@@ -2490,6 +2490,12 @@ class client_defaults:
             with os.fdopen(fd, "w") as f:
                 f.write("[client]\npassword=" + str(ep.password or "")
                         + "\n")
+                # the side's TLS as the client library reads it from the
+                # same file (`Endpoint.tls_forms`' `uri`, its option names):
+                # a DSN has no word for it, and the row sync read both
+                # sides in clear text (audit 2026-10-01, SEC2)
+                for k, v in ep.tls_forms("mysql")["uri"].items():
+                    f.write(f"{k}={v}\n")
             paths.append(path)
         return paths
 

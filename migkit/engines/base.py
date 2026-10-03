@@ -5279,6 +5279,22 @@ class Engine:
         raise NotImplementedError(
             f"{type(self).__name__} cannot create converted objects")
 
+    def neutral_create_codes(self, side, db, todo):
+        """([names made], [why each failed], whether they were one
+        transaction) of converted `create` statements `[(name,
+        statement)]` run on the target: here one by one
+        (`neutral_create_code`). An engine that takes them on one
+        connection, or in one transaction, says so in its own."""
+        made, failed = [], []
+        for name, stmt in todo:
+            try:
+                self.neutral_create_code(side, db, stmt)
+                made.append(name)
+            except Exception as e:  # noqa: BLE001 - listed by the caller
+                failed.append(f"{name}: "
+                              + (str(e).strip().splitlines() or [""])[0])
+        return made, failed, False
+
     def neutral_empty(self, side, db, table, where=None):
         """Remove every row of `table` on the target, keeping the table.
         Returns how many went.
