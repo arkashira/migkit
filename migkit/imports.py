@@ -126,6 +126,14 @@ DMS_GOALS = {"full-load": "copy", "full-load-and-cdc": "cutover",
              "cdc": "keep-in-sync"}
 
 
+#: DMS's name rules for every name at a level, as the hop's `names`
+_DMS_NAMING = {"convert-lowercase": ("case", "lower"),
+               "convert-uppercase": ("case", "upper"),
+               "add-prefix": ("prefix", None), "add-suffix": ("suffix", None),
+               "remove-prefix": ("strip_prefix", None),
+               "remove-suffix": ("strip_suffix", None)}
+
+
 def _is_dms(data):
     if isinstance(data, dict):
         return bool(data.get("ReplicationTasks") or data.get(
@@ -156,7 +164,7 @@ def from_dms(data, stem="hop"):
     if goal and goal != "copy":
         out.raw["goal"] = goal
     schemas = set()
-    exclude, where, tables, columns = [], {}, {}, {}
+    exclude, where, tables, columns, naming = [], {}, {}, {}, {}
     for r in sorted(rules, key=lambda r: int(r.get("rule-id") or 0)):
         kind, action = r.get("rule-type"), r.get("rule-action")
         loc = r.get("object-locator") or {}
@@ -199,6 +207,15 @@ def from_dms(data, stem="hop"):
             elif target == "schema" and action == "rename" and \
                     src_engine == "mysql" and sch and "%" not in sch:
                 out.raw.setdefault("db_map", {})[sch] = value
+            elif target in ("schema", "table") and action in _DMS_NAMING \
+                    and (sch == "%" and (target == "schema"
+                                         or tab in (None, "%"))):
+                # one rule for every name at a level: the hop's name rule;
+                # MySQL's schema is its database
+                level = ("databases" if src_engine == "mysql" else
+                         "schemas") if target == "schema" else "tables"
+                key, arg = _DMS_NAMING[action]
+                naming.setdefault(level, {})[key] = arg or value
             else:
                 notes.append(f"rule {r.get('rule-name')}"
                              f" ({target} {action}) has no match in"
@@ -260,7 +277,7 @@ def from_dms(data, stem="hop"):
         out.raw["include"] = [p for _, p in out.include]
         out.include = []
     mapping = {k: v for k, v in (("tables", tables), ("columns", columns),
-                                 ("where", where)) if v}
+                                 ("where", where), ("names", naming)) if v}
     if mapping:
         out.raw["mapping"] = mapping
     return out
