@@ -307,6 +307,17 @@ DEFINITIONS = {d.name: d for d in (
         "the right to read the binary log (replication)",
         make=lambda c: [f"grant replication slave, replication client on"
                         f" *.* to {c.who};"]),
+    # the commits under way when a copy's position is taken are waited out
+    # (`MySQLEngine._commits_under_way`): an account that sees only its own
+    # session cannot, and the copy is refused
+    Definition(
+        "process_grant", "mysql",
+        "the right to see the other sessions (PROCESS)",
+        make=lambda c: [f"grant process on *.* to {c.who};"],
+        without="a copy followed by the change tail is refused: which"
+                " commits are under way when it starts cannot be read, and"
+                " one in the binary log but not yet visible would be in"
+                " neither"),
     # -- MongoDB ------------------------------------------------------------
     Definition(
         "replica_set", "mongodb", "a change stream (a replica set)",

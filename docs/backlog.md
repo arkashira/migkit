@@ -2318,7 +2318,7 @@ and 1,000,000 rows across four pairs:
 | hetero | has no deep battery |
 | sqlglot | decided (2026-09-25): kept, for what a type map cannot do. It translates each column default into the target's SQL: `uuid()` becomes `gen_random_uuid()`, `now()` becomes `CURRENT_TIMESTAMP()`. The target is then asked whether it takes the result, and a default it refuses is named rather than guessed at |
 | to measure before wrapping | boto3 Secrets Manager, `mongodump --query/--oplog`, datacompy `all_mismatch()`, mydumper `--regex/--rows` |
-| resumable-dump flag | tell the operator when a restart loses the dump's progress (DTS `DumperResumeCtrl`) |
+| resumable-dump flag | done (2026-10-04): the bulk plan says what a stop costs the way it took (`movers.after_a_stop`) |
 | timed start and auto-retry window | low value next to cron |
 | two-way and many-to-one topologies with loop detection | moved up to item 36 |
 | waiting on the owner | should dry-run plans hide the command lines they print? |
@@ -2676,8 +2676,18 @@ documentation, and says what migkit took from each:
 
 HVR, Qlik, Striim and Bytebase are learned from and not wrapped. They
 are commercial or bring a platform of their own. Trino is a candidate
-second reader, to measure first. sqlpipe and schemachange are not read
-yet.
+second reader, to measure first. *Read (2026-10-04):* sqlpipe (CSV
+through each target's bulk client, no comparison) has nothing to wrap;
+schemachange's history table, with Flyway's, Liquibase's, Alembic's,
+Django's, Rails' and Entity Framework's, is the application's record of
+its schema version, which migkit should read (26.versions):
+
+* **26.versions** - the schema version each side stands on, from the
+  application's migration history table, said by `check` and the
+  cutover's gate; a migration run on one side and not the other found;
+  where migkit changes the target's schema itself (the schema fix, a DDL
+  the tail applies), said that the application's tool does not know of
+  it.
 
 **27. SQL Server depth.** Closed as untestable on this arm64 machine. Either
 find an x86 runner, or list it plainly in section H of
@@ -2750,8 +2760,8 @@ store). What was still nowhere:
   way (`waiting for handler commit`), or takes `Binlog_snapshot_*` where
   the server gives it; replaying from the start of the binlog file was
   tried and dropped - measured, it brought back rows from before a `DROP
-  DATABASE`. Still open: the wait needs `PROCESS` (without it nothing is
-  waited for, as before); MongoDB's resume token and MariaDB's/Percona's
+  DATABASE`. The wait needs `PROCESS`: without it the copy is refused,
+  saying the grant (done 2026-10-04, `sees_every_session`). Still open: MongoDB's resume token and MariaDB's/Percona's
   snapshot position are not measured here.
 * **Uniform time shift and type narrowing on MySQL.** #22 of the smart
   check work: the PostgreSQL deep checks for a constant per-row epoch
@@ -2779,12 +2789,14 @@ store). What was still nowhere:
   of the ALTERs that add its deferred indexes are the server's). A name
   an application could choose too (`_archive_old`) counts only beside the
   table it would copy. Left out of the move's table list, the counts, the
-  data, the object inventory and the shape watch. Still open: the change
-  tail reads gh-ost's and pt-osc's names by the name alone.
+  data, the object inventory and the shape watch. The change tail reads them beside
+  the tables it knows too (done 2026-10-04, `TableSet._names_among`).
   Test: `test_an_online_rewrites_working_tables_are_left_alone.py`.
 * **`schema_authority: atlas` needs an alias shape** (4-จ from the old
-  queue): how the hop names the authority's own alias for a table the
-  hop renames; open, small.
+  queue): *done (2026-10-04)* - the words name what decides,
+  `schema-aware` (the default) or `every-reading`, never the program
+  behind it; an older hop's `atlas` is read as the default, any other
+  word refused at load.
 * **reladiff as a rung, not a default:** it has no jsonb rendering and
   breaks on Python 3.14; the decision engine keeps it for the pairs it
   proves on and says why it was not used elsewhere (0f).
@@ -2962,6 +2974,38 @@ though the job never took it.
    d. `include` read by a live tail's filter (Debezium `table.include.list`
       instead of a resolved exclude list) so a table made later under a
       taken pattern joins the stream without a restart.
+   e. left by 6d (merged `dfd78df`): the document store's check does not
+      read renames, so a renamed collection reads as different after the
+      move; the table copier (own and pair) deletes its key ranges before
+      loading whatever `mapping.ops` says - only the bulk truncate honours
+      it; schema creation does not leave out the sequences `objects`
+      leaves out (a kept table would not create without its sequence);
+      a comment on a left-out function, trigger or constraint is still
+      restored and refused by the target; the schema comparers and deep
+      checks read partitions by their own names, not their root's; three
+      program behaviours read from documentation, not measured (the
+      dump's pattern against `db.table`, the online sync's regex fields
+      and its 1.6 cut-off, the restore's first matching rename); the
+      streaming copy's filter file is names one by one, its reading of
+      mixed case unchecked.
+   f. the two-axis review of the scope work (2026-10-04) closed in
+      `8650feb`: `mapping.ops` held to every reading of a leaf name and to
+      the pair's own name for it (`Result.table`); the counts a check
+      counted carried as fields (`Result.rows_apart`, `Result.tables`)
+      on PostgreSQL, MySQL, SQL Server, the pair and the document store,
+      the words read only where an engine says none; a service's word
+      held to every answer, a warn or an error `unproved`, never agreed,
+      a database's one answer held table by table, names matched without
+      case only where one table can be meant; the cutover's final check
+      given whole answers; one reading of what a hop narrows
+      (`config.narrowed_by`) for the copy of pages, the backup seed, the
+      servers' own replication and the evidence; `Hop.reversed` keeping
+      schemas, turning name rules round and refusing ones that cannot be;
+      a listed name asked one way (`Hop.takes_table`, an AST guard); the
+      target's names read back (`Hop.source_table_in`); one PostgreSQL
+      sequence reading (`_seq_gone`); named roles (`users.role_taken`);
+      Oracle's counters scoped; SQL Server's data check scoped. Still to
+      carry the fields on every other engine (P0-PARITY.verify).
 
 ## P0-CLOUDS. Any cloud to any cloud, every database service in each (owner, 2026-10-01)
 
