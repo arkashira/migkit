@@ -188,9 +188,9 @@ def test_db_map_resolves_target_name():
     hop = Hop(name="m", engine="postgres",
               source=Endpoint(host="s", user="u", password="p"),
               target=Endpoint(host="t", user="u", password="p"),
-              db_map={"cart_uat": "cart"})
-    assert hop.target_db("cart_uat") == "cart"     # mapped
-    assert hop.target_db("order_uat") == "order_uat"  # identity when unmapped
+              db_map={"shop_staging": "shop"})
+    assert hop.target_db("shop_staging") == "shop"     # mapped
+    assert hop.target_db("reports") == "reports"  # identity when unmapped
 
 
 def test_engine_side_resolution_maps_only_dst():
@@ -203,13 +203,13 @@ def test_engine_side_resolution_maps_only_dst():
         return Hop(name="m", engine=engine,
                    source=Endpoint(host="s", user="u", password="p"),
                    target=Endpoint(host="t", user="u", password="p"),
-                   db_map={"cart_uat": "cart"})
+                   db_map={"shop_staging": "shop"})
     for cls, eng_name in ((PostgresEngine, "postgres"),
                           (MySQLEngine, "mysql"),
                           (MongoEngine, "mongodb")):
         eng = cls(hop(eng_name))
-        assert eng._d("src", "cart_uat") == "cart_uat"   # source never maps
-        assert eng._d("dst", "cart_uat") == "cart"       # target maps
+        assert eng._d("src", "shop_staging") == "shop_staging"   # source never maps
+        assert eng._d("dst", "shop_staging") == "shop"       # target maps
         assert eng._d("dst", "other") == "other"         # unmapped identity
     # pg must never remap the maintenance db
     assert PostgresEngine(hop("postgres"))._d("dst", "postgres") == "postgres"
