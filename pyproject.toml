@@ -76,6 +76,9 @@ dependencies = [
     # property search, and a branch the search never took solved for
     "hypothesis",
     "z3-solver",
+    # the SQL written in an application's code, found by a parser of the
+    # code's own language (`storedcode.appscan`)
+    "ast-grep-py>=0.45",
     # DuckDB files as a side of a pair, and the diff of keys too many to
     # hold
     "duckdb>=1.1",

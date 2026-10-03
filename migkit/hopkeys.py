@@ -119,6 +119,11 @@ HOP_OPTIONS = {
                     "bool"),
     "app_roles": Key("the application's roles protect_target holds",
                      "list"),
+    "application_sql": Key("where the application's code is on this"
+                           " machine: the SQL written in it is found,"
+                           " carried into the target's SQL and proved on"
+                           " the sandbox, and never changed", "str|list",
+                           ("hetero",)),
     "approvals": Key("the steps that wait for an approval", "dict",
                      subs=("steps", "signers", "count", "expires")),
     "at_rest": Key("who may read the files holding values", "dict",
@@ -169,6 +174,15 @@ HOP_OPTIONS = {
                  " machine and the target's class are named in it", "str"),
     "code_dir": Key("where the operator's own versions of routines are"
                     " kept, one <name>.sql each", "str", ("hetero",)),
+    "builtin_suites": Key("where the engines' own test suites are on this"
+                          " machine: each case calling a function the"
+                          " source's code calls is run on both sandboxes,"
+                          " and the ones answered apart become the"
+                          " translator's rules", "str|list", ("hetero",)),
+    "code_reference_days": Key("days after the cutover the source's"
+                               " answers stay the reference the target's"
+                               " routines are held to (true: 30)",
+                               "int|bool", ("hetero",)),
     "code_model": Key("the model a routine no converter proves is asked"
                       " of", "dict", ("hetero",),
                       subs=("provider", "url", "model")),
@@ -416,6 +430,11 @@ HOP_OPTIONS = {
                            " narrowing recorded and proved", "bool",
                            ("hetero",)),
     "verify_batches": Key("compare a bulk copy with the source", "bool"),
+    "workload_replay": Key("the source's record of what the application"
+                           " ran, every statement on it translated, run on"
+                           " both sandboxes and compared by its answers and"
+                           " the rows it writes, and timed on both sides,"
+                           " weighted by how often each ran", "bool"),
 }
 
 #: the keys of a side written in the long form
@@ -614,6 +633,10 @@ ENDPOINT_OPTIONS = {
                         ("dynamodb", "kinesis", "parquet", "delta")),
     "table_prefix": Key("the table names' template", "str",
                         ("dynamodb",)),
+    "index_advice": Key("indexes the translated workload needs, made on"
+                        " the target hypothetically and advised only where"
+                        " its own planner's estimate falls by half",
+                        "bool"),
     "index_prefix": Key("the index names' template", "str",
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"

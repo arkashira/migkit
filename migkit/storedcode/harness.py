@@ -125,9 +125,17 @@ def error_key(error):
         return None
     state, message = error
     state = str(state or "")
-    if state[:2] in RAISED:
+    if state[:2] in RAISED and state not in SYSTEM_RAISED:
         return (state, str(message or ""))
+    if state in SYSTEM_RAISED:
+        return (state,)
     return (state[:2] or "?",)
+
+
+#: PL/pgSQL's own conditions in the class a routine raises with: no row,
+#: too many rows, an assertion - each engine says them in its own words,
+#: so they are compared by their code alone
+SYSTEM_RAISED = ("P0002", "P0003", "P0004")
 
 
 #: a class that says only "an error": two sides erroring with it errored
@@ -542,8 +550,10 @@ class Runner:
     def call(self, routine, args, tables, commits=False):
         raise NotImplementedError
 
-    def run(self, statement, params, tables):
-        """A DML statement (a trigger's firing) and what it changed."""
+    def run(self, statement, params, tables, rows=False):
+        """A DML statement (a trigger's firing) and what it changed; with
+        `rows`, the rows it answered too (an application's statement,
+        `statements`), as one result set."""
         raise NotImplementedError
 
     def counters(self, tables):
@@ -782,7 +792,7 @@ class MySQLRunner(Runner):
         except Exception:  # noqa: BLE001 - a connection opened again
             pass           # after a lost call has its own clock
 
-    def run(self, statement, params, tables):
+    def run(self, statement, params, tables, rows=False):
         out = Outcome()
         self._from_fixture(tables)
         before = self.counters(tables)
@@ -791,6 +801,8 @@ class MySQLRunner(Runner):
         try:
             with self.conn.cursor() as cur:
                 cur.execute(statement, tuple(params))
+                if rows and cur.description is not None:
+                    out.sets = [[list(r) for r in cur.fetchall()]]
         except Exception as e:  # noqa: BLE001 - the routine's own answer
             if not _is_server_error(e):
                 raise HarnessError(str(e)) from e
@@ -895,12 +907,15 @@ class PostgresRunner(Runner):
                     (routine.name,))
                 for (stmt,) in cur.fetchall():
                     cur.execute(stmt)
+            schema, _, leaf = routine.name.rpartition(".") \
+                if getattr(routine, "settings", {}).get("package") \
+                else ("", "", routine.name)
             cur.execute(
                 "select format('drop routine if exists %%s cascade',"
                 " p.oid::regprocedure) from pg_proc p join pg_namespace n"
                 " on n.oid = p.pronamespace where p.proname = %s and"
-                " n.nspname not in ('pg_catalog', 'information_schema')",
-                (routine.name,))
+                " n.nspname not in ('pg_catalog', 'information_schema')"
+                " and (%s = '' or n.nspname = %s)", (leaf, schema, schema))
             for (stmt,) in cur.fetchall():
                 cur.execute(stmt)
         self.conn.commit()
@@ -941,6 +956,13 @@ class PostgresRunner(Runner):
         cur.execute(f"fetch all from {self.q(name)}")
         return [list(r) for r in cur.fetchall()]
 
+    def routine_name(self, routine):
+        """A routine's name to call it by: a package's member in its
+        package's schema (`packages`)."""
+        if routine.settings.get("package") and "." in routine.name:
+            return ".".join(self.q(p) for p in routine.name.split(".", 1))
+        return self.q(routine.name)
+
     def call(self, routine, args, tables, commits=False):
         import psycopg2
         out = Outcome()
@@ -951,7 +973,7 @@ class PostgresRunner(Runner):
             # of the proof's (a counter read is kept whatever ends it)
             self.conn.rollback()
             self.conn.autocommit = True
-        name = self.q(routine.name)
+        name = self.routine_name(routine)
         cur = self.conn.cursor()
         try:
             if not commits:
@@ -1011,7 +1033,7 @@ class PostgresRunner(Runner):
             self._done()
         return out
 
-    def run(self, statement, params, tables):
+    def run(self, statement, params, tables, rows=False):
         import psycopg2
         out = Outcome()
         self._from_fixture(tables)
@@ -1022,6 +1044,8 @@ class PostgresRunner(Runner):
             out.now = cur.fetchone()[0]
             cur.execute("savepoint migkit_call")
             cur.execute(statement, tuple(params))
+            if rows and cur.description is not None:
+                out.sets = [[list(r) for r in cur.fetchall()]]
         except psycopg2.Error as e:
             if e.pgcode is None:
                 raise HarnessError(str(e)) from e
@@ -1061,10 +1085,14 @@ class PostgresRunner(Runner):
                             " t.tgname = %s and not t.tgisinternal",
                             (routine.name,))
             else:
+                schema, _, leaf = routine.name.rpartition(".") \
+                    if routine.settings.get("package") \
+                    else ("", "", routine.name)
                 cur.execute("select p.oid from pg_proc p join pg_namespace"
                             " n on n.oid = p.pronamespace where p.proname"
                             " = %s and n.nspname not in ('pg_catalog',"
-                            " 'information_schema')", (routine.name,))
+                            " 'information_schema') and (%s = '' or"
+                            " n.nspname = %s)", (leaf, schema, schema))
             got = [r[0] for r in cur.fetchall()]
         self.conn.commit()
         return got
@@ -1163,7 +1191,9 @@ class PostgresRunner(Runner):
 MSSQL_STATES = {2627: "23505", 2601: "23505", 547: "23503", 515: "23502",
                 8134: "22012", 245: "22P02", 8114: "22P02", 8152: "22001",
                 2628: "22001", 220: "22003", 8115: "22003", 232: "22003",
-                1205: "40P01", 3930: "25P02"}
+                1205: "40P01", 3930: "25P02",
+                # a MERGE meeting one target row with two source rows
+                8672: "21000"}
 
 
 class MSSQLRunner(Runner):
@@ -1326,13 +1356,15 @@ class MSSQLRunner(Runner):
         self.conn.autocommit(False)
         return out
 
-    def run(self, statement, params, tables):
+    def run(self, statement, params, tables, rows=False):
         out = Outcome()
         self._from_fixture(tables)
         before = self.counters(tables)
         try:
             with self.conn.cursor() as cur:
                 cur.execute(statement, tuple(params))
+                if rows and cur.description is not None:
+                    out.sets = [[list(r) for r in cur.fetchall()]]
         except Exception as e:  # noqa: BLE001 - the routine's own answer
             if type(e).__module__.split(".")[0] != "pymssql":
                 raise HarnessError(str(e)) from e
@@ -1373,7 +1405,10 @@ ORACLE_STATES = {1: "23505", 1400: "23502", 1407: "23502", 2291: "23503",
                  2292: "23503", 1476: "22012", 1722: "22P02",
                  12899: "22001", 1438: "22003", 1403: "P0002",
                  1422: "P0003", 1830: "22007", 1843: "22008", 60: "40P01",
-                 2290: "23514"}
+                 2290: "23514",
+                 # an exception the routine declared and raised, unhandled:
+                 # the class every rules' version raises one with
+                 6510: "UE000"}
 
 
 class OracleRunner(Runner):
@@ -1561,13 +1596,20 @@ class OracleRunner(Runner):
             self._run = None
             name = routine.name.upper() if routine.name == \
                 routine.name.lower() else routine.name
+            lines = (0, 10 ** 9)
+            if routine.settings.get("package"):
+                # a member's blocks are its package body's, on its lines
+                pkg = routine.settings["package"]
+                name = pkg.upper() if pkg == pkg.lower() else pkg
+                lines = routine.settings.get("lines") or lines
             cur.execute(
                 f"select b.line, b.col, b.covered from {self.eng._q(owner)}"
                 f".dbmspcc_blocks b join {self.eng._q(owner)}.dbmspcc_units"
                 " u on u.run_id = b.run_id and u.object_id = b.object_id"
                 " where b.run_id = :1 and u.owner = :2 and u.name = :3 and"
-                " b.not_feasible = 0 order by b.line, b.col",
-                (run, self._owner(), name))
+                " b.not_feasible = 0 and b.line between :4 and :5 order by"
+                " b.line, b.col", (run, self._owner(), name, lines[0],
+                                   lines[1]))
             rows = cur.fetchall()
         except Exception as e:  # noqa: BLE001 - said, as not measured
             self.coverage_off = ("its block coverage could not be read:"
@@ -1592,7 +1634,8 @@ class OracleRunner(Runner):
             cur.execute(s.rstrip().rstrip("/").rstrip())
             m = re.search(r'(?is)^\s*create\s+(or\s+replace\s+)?'
                           r'(editionable\s+)?(function|procedure|trigger|'
-                          r'view|package)\s+("[^"]+"|[\w$#.]+)', s)
+                          r'view|package(?:\s+body)?)\s+("[^"]+"|[\w$#.]+)',
+                          s)
             if not m:
                 continue
             made = m.group(4).split(".")[-1]
@@ -1609,7 +1652,13 @@ class OracleRunner(Runner):
         kind = {"event": "procedure"}.get(routine.kind, routine.kind)
         cur = self.conn.cursor()
         try:
-            cur.execute(f"drop {kind} {self.q(routine.name)}")
+            if getattr(routine, "settings", {}).get("package"):
+                # a member goes with its package: the package is made
+                # whole again
+                cur.execute(f"drop package"
+                            f" {self.q(routine.settings['package'])}")
+            else:
+                cur.execute(f"drop {kind} {self.q(routine.name)}")
         except Exception:  # noqa: BLE001 - nothing of that name
             pass
         self.conn.commit()
@@ -1618,8 +1667,17 @@ class OracleRunner(Runner):
         import oracledb
         out = Outcome()
         self._from_fixture(tables)
-        name = self.q(routine.name)
+        member = routine.settings.get("package") and "." in routine.name
+        name = ".".join(self.q(p) for p in routine.name.split(".", 1)) \
+            if member else self.q(routine.name)
         cur = self.conn.cursor()
+        if member and not self.held:
+            # a package's state as a new session has it: each call starts
+            # from it, as each call on the target starts from its own
+            try:
+                cur.execute("begin dbms_session.reset_package; end;")
+            except Exception:  # noqa: BLE001 - called with it as it is
+                pass
         try:
             if routine.kind == "function":
                 marks = ", ".join(f":{k + 1}" for k in range(len(args)))
@@ -1641,8 +1699,11 @@ class OracleRunner(Runner):
                         var.setvalue(0, args[k])
                     values.append(var)
                     outs.append((p, var))
-                cur.callproc(routine.name.upper() if routine.name ==
-                             routine.name.lower() else routine.name, values)
+                cur.callproc(".".join(
+                    p.upper() if p == p.lower() else p
+                    for p in routine.name.split(".", 1)) if member else
+                    routine.name.upper() if routine.name ==
+                    routine.name.lower() else routine.name, values)
                 sets = [[list(r) for r in rs.fetchall()]
                         for rs in cur.getimplicitresults()]
                 kept = []
@@ -1667,7 +1728,7 @@ class OracleRunner(Runner):
             self._done()
         return out
 
-    def run(self, statement, params, tables):
+    def run(self, statement, params, tables, rows=False):
         import oracledb
         out = Outcome()
         self._from_fixture(tables)
@@ -1676,6 +1737,8 @@ class OracleRunner(Runner):
         sql = re.sub(r"%s", lambda m: f":{next(marks)}", statement)
         try:
             cur.execute(sql, list(params))
+            if rows and cur.description is not None:
+                out.sets = [[list(r) for r in cur.fetchall()]]
         except oracledb.DatabaseError as e:
             out.error = self._error(e)
         out.changes = self.changes(tables)
