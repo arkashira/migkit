@@ -68,7 +68,8 @@ def _all(*pairs, kinds=KINDS):
 def candidates(pair, routine, ctx):
     """[Candidate] for one routine of this pair, in their listed order."""
     from . import model, programs
-    from .convert import by_hand, emulate, translator, rules
+    from .convert import EMULATORS, as_written, by_hand, emulate, \
+        translator, rules
     src = pair.src_engine.SQL_DIALECT
     dst = pair.dst_engine.SQL_DIALECT
     pg_version = ctx.get("pg_version")
@@ -100,6 +101,18 @@ def candidates(pair, routine, ctx):
                         "an emulation carries only a view or a function of"
                         " one expression")),
                   footprint=1, make=lambda r: emulate(pair, ctx, r)),
+        Candidate("emulator", "the target's own emulation of the source's"
+                  " engine",
+                  _all("oracle->mysql", "oracle->postgres", "tsql->postgres",
+                       "mysql->postgres", kinds=("function", "procedure")),
+                  (Need("a target that runs the source's own code",
+                        lambda f: any(EMULATORS.get(m, (None,))[0] ==
+                                      f["src"] for m in
+                                      f.get("emulating") or ()),
+                        "the target runs no emulation of the source's"
+                        " engine (MariaDB's Oracle mode, IvorySQL,"
+                        " openGauss, Babelfish, openHalo)"),),
+                  footprint=1, make=lambda r: as_written(pair, ctx, r)),
         Candidate("plsql-converter", "the PL/SQL converter",
                   _all("oracle->postgres", "mysql->postgres",
                        "tsql->postgres",

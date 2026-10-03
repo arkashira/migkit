@@ -4850,24 +4850,31 @@ class MySQLEngine(Engine):
                           "could not read the partitions:"
                           f" {str(e).splitlines()[-1][:120]}")
 
+    def partition_scheme(self, side, db, schema=None):
+        """{table: {"m": method, "e": expression, "p": {partition: its
+        description}}} of every partitioned table in scope - the
+        partitions in their order, a partition's subpartitions read as it.
+        `schema` is the database as the side names it, `db` where it is
+        left out."""
+        out = {}
+        for t, meth, expr, name, desc in self._q(side,
+                "select table_name, partition_method,"
+                " coalesce(partition_expression, ''), partition_name,"
+                " coalesce(partition_description, '')"
+                " from information_schema.partitions where table_schema=%s"
+                " and partition_name is not null"
+                " order by table_name, partition_ordinal_position",
+                (schema or db,)):
+            if self.hop.excluded(db, t):
+                continue
+            e = out.setdefault(t, {"m": meth, "e": expr, "p": {}})
+            # a partition's subpartitions answer a row each
+            e["p"].setdefault(name, desc)
+        return out
+
     def _partitions_compared(self, db, ddb):
-        def scheme_of(side, dbn):
-            out = {}
-            for t, meth, expr, name, desc in self._q(side,
-                    "select table_name, partition_method,"
-                    " coalesce(partition_expression, ''), partition_name,"
-                    " coalesce(partition_description, '')"
-                    " from information_schema.partitions where table_schema=%s"
-                    " and partition_name is not null"
-                    " order by table_name, partition_ordinal_position",
-                    (dbn,)):
-                if self.hop.excluded(db, t):
-                    continue
-                e = out.setdefault(t, {"m": meth, "e": expr, "p": {}})
-                # a partition's subpartitions answer a row each
-                e["p"].setdefault(name, desc)
-            return out
-        sp, dp = scheme_of("src", db), scheme_of("dst", ddb)
+        sp, dp = self.partition_scheme("src", db, db), \
+            self.partition_scheme("dst", db, ddb)
         plain = {side: set(self._all_tables(side, db))
                  for side in ("src", "dst")}
         scheme, tables = [], {}

@@ -807,8 +807,9 @@ class _Gen:
                       r"cast(\1 as numeric)", text)
         return text
 
-    def rewrite(self, tree, line):
-        """The rules on a tree read as Oracle's SQL."""
+    def rewrite(self, tree, line, statement=False):
+        """The rules on a tree read as Oracle's SQL; in a `statement` a bare
+        name is a column first, as Oracle resolves it there."""
         if self.ctx is not None and getattr(self.ctx, "local", None):
             tree = self.ctx.local(tree)
         emulated = set(getattr(self.ctx, "emulated", None) or ())
@@ -828,6 +829,19 @@ class _Gen:
                     node.name.lower() in self.package.vars and \
                     node.name.lower() not in self.vars:
                 node.replace(exp.maybe_parse(self.package.getter(node.name)))
+            elif isinstance(node, exp.Column) and not node.table and \
+                    not statement and node.name.lower() not in self.vars \
+                    and self._function(node.name) is not None:
+                # PL/SQL calls a function of no arguments without
+                # parentheses; PL/pgSQL reads that as a column
+                node.replace(exp.maybe_parse(
+                    self._function(node.name) + "()"))
+            elif isinstance(node, exp.Anonymous) and \
+                    self._function(node.name) is not None and \
+                    not isinstance(node.parent, exp.Dot):
+                node.replace(exp.maybe_parse(
+                    self._function(node.name) + "(" + ", ".join(
+                        a.sql("postgres") for a in node.expressions) + ")"))
             elif isinstance(node, exp.Column) and node.table and \
                     self.package is not None and \
                     str(node.table).lower() == self.package.name and \
@@ -868,6 +882,20 @@ class _Gen:
                         expression=exp.Anonymous(this=name, expressions=[
                             a.copy() for a in args])))
         return tree
+
+    def _function(self, name):
+        """The target's name of a function of the package's or the
+        source's own, called by `name` alone; None for any other."""
+        low = str(name).lower()
+        if self.package is not None and \
+                self.package.members.get(low) == "function":
+            return f"{self.package.schema}.{ident(low)}"
+        routines = getattr(self.ctx, "routines", None) or {}
+        got = routines.get(low)
+        if got is not None and got.kind == "function" and \
+                not got.settings.get("package"):
+            return ident(got.name)
+        return None
 
     def _substr(self, node):
         """Oracle's SUBSTR: a start of 0 is 1, a negative start counts from
@@ -917,7 +945,7 @@ class _Gen:
         text = self._pre(text, line)
         text = re.sub(r"(?i)\bsysdate\b", "migkit_sysdate", text)
         tree = parse(text, "oracle")
-        tree = self.rewrite(tree, line)
+        tree = self.rewrite(tree, line, statement=True)
         out = generate(tree, "oracle", "postgres", normalize=False)
         return re.sub(r"(?i)\bmigkit_sysdate\b", "localtimestamp(0)", out)
 

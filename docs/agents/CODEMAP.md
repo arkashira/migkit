@@ -223,7 +223,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/runners/__init__.py` - (no docstring)
 - `migkit/runners/second_reader.py` - Runs inside the second reader's own environment, never migkit's.
 
-## `migkit/storedcode/` (38 modules)
+## `migkit/storedcode/` (39 modules)
 
 - `migkit/storedcode/__init__.py` - Stored code carried to another engine and proved there (backlog R11).
 - `migkit/storedcode/appscan.py` - The SQL written in the application's own code, found, carried into the target's SQL and proved (leapfrog research P11, backlog CV.P11, W3's 
@@ -245,6 +245,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/storedcode/mutants.py` - The proof's own mutation score: can it say "different"? (leapfrog research P18). Classes: Mutant.
 - `migkit/storedcode/mysql_pg.py` - MySQL stored programs in PostgreSQL's PL/pgSQL, by migkit's own rules. Classes: Node, Context.
 - `migkit/storedcode/packages.py` - Oracle's packages as the routines the proof calls one by one (backlog W3).
+- `migkit/storedcode/partitions.py` - A source table's partitioning carried to a PostgreSQL target as advice, and the routing of its rows proved on the sandbox (leapfrog research
 - `migkit/storedcode/pg_mysql.py` - PostgreSQL's PL/pgSQL (and `language sql`) routines as MySQL stored programs, by migkit's own rules - the mirror of `mysql_pg`. Classes: Tok, Node, Decl.
 - `migkit/storedcode/plpgsql.py` - What every converter into PostgreSQL's PL/pgSQL shares: names, the dollar quote, how a routine is wrapped, and the conversion's record. Classes: Converted, Emitter.
 - `migkit/storedcode/plsql_pg.py` - Oracle's PL/SQL in PostgreSQL's PL/pgSQL, by migkit's own rules - standalone functions, procedures and triggers, and packages (backlog W3). Classes: Tok, Node, Package.
