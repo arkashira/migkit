@@ -164,6 +164,20 @@ class Engine:
     def databases(self):
         raise NotImplementedError
 
+    def takes(self, db, kind, name, by=None):
+        """Whether the hop takes an object an inventory lists: its table in
+        scope (`by`, the table it belongs to - a trigger's, an index's - or
+        its own name), and its kind carried (`Hop.takes_object` - the
+        hop's `objects`). Every inventory, schema comparer and schema fix
+        asks this one question of an object beside the tables."""
+        if not self.in_scope(db, by if by is not None else name):
+            return False
+        from ..util import split_table
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        schema, leaf = split_table(eng, str(name).split("(", 1)[0])
+        return self.hop.takes_object(kind, db,
+                                     *([schema] if schema else []), leaf)
+
     def in_scope(self, db, table):
         """Whether a table, named as this engine's own listings name it
         (`public.orders`, `orders`, `"v1.orders"`), is one the hop takes -

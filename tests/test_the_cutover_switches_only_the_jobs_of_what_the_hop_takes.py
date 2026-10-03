@@ -24,15 +24,15 @@ from tests import mysql_pair
 from tests.mysql_pair import my, my_pair  # noqa: F401 - a fixture
 
 EVENTS = [("purge_queue", "ENABLED",
-           "DELETE FROM `pick_dispatch_queue` WHERE at < now()"),
+           "DELETE FROM `job_queue` WHERE at < now()"),
           ("roll_orders", "ENABLED", "update orders set n = n + 1"),
           ("both", "ENABLED",
-           "insert into orders select * from pick_dispatch_queue"),
+           "insert into orders select * from job_queue"),
           ("by_routine", "ENABLED",
-           "begin delete from pick_dispatch_queue; call tidy(); end"),
+           "begin delete from job_queue; call tidy(); end"),
           ("by_text", "ENABLED", "begin prepare s from @q; execute s; end"),
           ("named_nothing", "ENABLED", "do sleep(1)"),
-          ("off_already", "DISABLED", "delete from pick_dispatch_queue")]
+          ("off_already", "DISABLED", "delete from job_queue")]
 
 
 class _MySQL(Engine):
@@ -47,7 +47,7 @@ class _MySQL(Engine):
         return db
 
     def _all_tables(self, side, db):
-        return ["orders", "pick_dispatch_queue"]
+        return ["orders", "job_queue"]
 
     def _q(self, side, sql, args=None, **kw):
         self.asked.append(sql)
@@ -69,7 +69,7 @@ def _hop(tmp_path=None, **scope):
 
 
 def test_a_job_that_writes_only_what_the_hop_leaves_out_is_left_alone():
-    hop = _hop(exclude=["pick_dispatch_queue"])
+    hop = _hop(exclude=["job_queue"])
     eng = _MySQL(hop)
     assert jobs.inventory(hop, eng, "shop", "src") == [
         ("roll_orders", True), ("both", True), ("by_routine", True),
@@ -88,7 +88,7 @@ def test_a_hop_that_leaves_nothing_out_takes_every_job_as_before():
 
 
 def test_the_switch_and_the_preflight_leave_it_alone(tmp_path):
-    hop = _hop(tmp_path, exclude=["pick_dispatch_queue"])
+    hop = _hop(tmp_path, exclude=["job_queue"])
     eng = _MySQL(hop)
     running = [n for n, on in jobs.inventory(hop, eng, "shop", "src") if on]
     said = []
@@ -146,10 +146,10 @@ def test_a_pg_cron_job_is_read_the_same_way():
 @pytest.fixture
 def events(my_pair):
     my("src", "drop database if exists jb; create database jb; use jb;"
-              " create table pick_dispatch_queue (id int primary key);"
+              " create table job_queue (id int primary key);"
               " create table orders (id int primary key, v int);"
               " create event purge_queue on schedule every 1 day do"
-              " delete from pick_dispatch_queue where id < 0;"
+              " delete from job_queue where id < 0;"
               " create event roll_orders on schedule every 1 day do"
               " update orders set v = v where id < 0;")
     yield
@@ -159,7 +159,7 @@ def events(my_pair):
 def test_mysql_events_of_a_table_the_hop_leaves_out_stay_on(events,
                                                             tmp_path):
     eng = mysql_pair.engine("jb")
-    eng.hop.exclude = ["pick_dispatch_queue"]
+    eng.hop.exclude = ["job_queue"]
     eng.hop.report_dir = lambda db=None, _p=tmp_path: _p
     hop = eng.hop
     assert jobs.inventory(hop, eng, "jb", "src") == [("roll_orders", True)]

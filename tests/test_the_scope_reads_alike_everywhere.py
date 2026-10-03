@@ -185,3 +185,21 @@ def test_a_name_rule_said_wrong_is_refused():
                   if p.level == "error") == [
         "hops.h.mapping.names.rows", "hops.h.mapping.names.tables.case",
         "hops.h.mapping.names.tables.prefix"]
+
+
+def test_an_inventory_asks_one_question_of_every_object():
+    """A view, a routine, a trigger: its table in scope, and its kind
+    carried - one answer for the inventory, the schema comparers and the
+    schema fix (`Engine.takes`)."""
+    from migkit.config import scoped
+    from migkit.engines.mysql import MySQLEngine
+    h = _hop("mysql", objects={"views": ["shop.v1"], "triggers": False})
+    eng = MySQLEngine(h)
+    assert eng.takes("shop", "view", "v1")
+    assert not eng.takes("shop", "view", "v2")
+    assert not eng.takes("shop", "trigger", "t1", "orders")
+    assert eng.takes("shop", "index", "orders.i", "orders")
+    # a hop that narrows its objects is one that leaves something out
+    assert scoped(h) and not scoped(_hop("mysql"))
+    out = MySQLEngine(_hop("mysql", exclude=["shop.orders"]))
+    assert not out.takes("shop", "trigger", "t1", "orders")

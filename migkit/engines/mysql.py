@@ -2237,7 +2237,7 @@ class MySQLEngine(Engine):
             name, by = str(name), str(by)
             # what the hop leaves out is the target's own: an `exclude`d
             # table on the target alone was "table extra" every check
-            if not self.in_scope(db, by):
+            if not self.takes(db, typ, name, by):
                 return False
             if typ == "trigger":
                 return not drift.transient_trigger(name)
@@ -2315,7 +2315,7 @@ class MySQLEngine(Engine):
         for typ in ("view", "function", "procedure", "event"):
             got |= {str(n) for n, by in self._q(
                         side, self.OBJECT_QUERIES[typ], (self._d(side, db),))
-                    if not self.in_scope(db, str(by))}
+                    if not self.takes(db, typ, str(n), str(by))}
         return got
 
     def _atlas(self, db):
