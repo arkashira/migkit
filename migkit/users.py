@@ -72,6 +72,20 @@ def system_principals_sql(engine, column):
     return "(" + " or ".join(parts) + ")"
 
 
+#: what a check of accounts says on a hop whose move does not carry them
+NOT_CARRIED = ("the hop does not carry users, roles or grants (accounts:"
+               " false) - not compared")
+
+
+def carried(hop):
+    """Whether the hop's move carries users, roles and grants: not where it
+    says `accounts: false`, as a DTS job told not to move them does
+    (`imports`). The checks of them are then skipped and said as not
+    compared (`NOT_CARRIED`) - never as the same - and no repair grants
+    what the move was not asked to carry."""
+    return (getattr(hop, "options", None) or {}).get("accounts") is not False
+
+
 def _h(x):
     b = x if isinstance(x, bytes) else str(x or "").encode()
     return hashlib.md5(b, usedforsecurity=False).hexdigest()[:10]
@@ -3274,6 +3288,12 @@ def run(hop_name, mode, apply=False, pw_file="", say=print):
         raise SystemExit(mongo_setpw(hop, passwords, apply, say))
     elif mode == "rollback":
         rollback(hop, apply, say)
+    elif not carried(hop):
+        say(f"hop={hop.name}: {NOT_CARRIED}")
+        if mode == "verify":
+            from .verdict import VERDICTS
+            say("VERIFY: not compared")
+            raise SystemExit(VERDICTS["incomplete"].exit)
     else:
         out, _ = compare(hop, say)
         if mode == "verify":

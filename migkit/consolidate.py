@@ -869,14 +869,17 @@ def _counters(dst, db):
 
 
 def _mysql_counters(dst, db):
+    """One Result: the target's AUTO_INCREMENT counters of the tables the
+    hop takes past their rows - a table it leaves out keeps the counter
+    its own writer gives it (`Engine.in_scope`)."""
     from .engines.base import Result
     ddb = dst._d("dst", db)
-    rows = dst._q("dst", "select c.table_name, c.column_name,"
-                         " t.auto_increment from information_schema.columns"
-                         " c join information_schema.tables t on"
-                         " t.table_schema = c.table_schema and t.table_name"
-                         " = c.table_name where c.table_schema = %s and"
-                         " c.extra like %s", (ddb, "%auto_increment%"))
+    rows = [r for r in dst._q(
+        "dst", "select c.table_name, c.column_name, t.auto_increment from"
+               " information_schema.columns c join information_schema.tables"
+               " t on t.table_schema = c.table_schema and t.table_name ="
+               " c.table_name where c.table_schema = %s and c.extra like %s",
+        (ddb, "%auto_increment%")) if dst.in_scope(db, r[0])]
     behind = []
     for t, c, nxt in rows:
         top = dst._q("dst", f"select max({dst._quote_ident(c)}) from"

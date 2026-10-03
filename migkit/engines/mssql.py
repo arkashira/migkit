@@ -407,8 +407,12 @@ class MSSQLEngine(DbapiRows, Engine):
              " join sys.schemas s on s.schema_id=t.schema_id"
              " join sys.columns c on c.object_id=ic.object_id"
              " and c.column_id=ic.column_id order by 1")
-        src = {r[0]: r[2] for r in self._cmd("src", db, q)}
-        drows = self._cmd("dst", db, q)
+        # the identities of the tables the hop takes: one it leaves out
+        # keeps the seed its own writer gives it
+        src = {r[0]: r[2] for r in self._cmd("src", db, q)
+               if self.in_scope(db, r[0])}
+        drows = [r for r in self._cmd("dst", db, q)
+                 if self.in_scope(db, r[0])]
         dcol = {r[0]: r[1] for r in drows}
         dcur = {r[0]: r[2] for r in drows}
         collide = []
@@ -1006,34 +1010,43 @@ class MSSQLEngine(DbapiRows, Engine):
     def repair_plan(self, db, kind):
         actions = []
         if kind in ("sequences", "all"):
-            src = dict(self._cmd("src", db,
-                               "select s.name+'.'+t.name,"
-                               " cast(ident_current(s.name+'.'+t.name) as bigint)"
-                               " from sys.tables t join sys.schemas s"
-                               " on s.schema_id=t.schema_id where"
-                               " objectproperty(t.object_id,'TableHasIdentity')=1"))
-            dst = dict(self._cmd("dst", db,
-                               "select s.name+'.'+t.name,"
-                               " cast(ident_current(s.name+'.'+t.name) as bigint)"
-                               " from sys.tables t join sys.schemas s"
-                               " on s.schema_id=t.schema_id where"
-                               " objectproperty(t.object_id,'TableHasIdentity')=1"))
+            q = ("select s.name+'.'+t.name,"
+                 " cast(ident_current(s.name+'.'+t.name) as bigint)"
+                 " from sys.tables t join sys.schemas s"
+                 " on s.schema_id=t.schema_id where"
+                 " objectproperty(t.object_id,'TableHasIdentity')=1")
+            # the identities of the tables the hop takes only: one it
+            # leaves out keeps the seed its own writer gives it
+            src, dst = ({t: v for t, v in self._cmd(side, db, q)
+                         if self.in_scope(db, t)} for side in ("src", "dst"))
+
             def lit(t):
                 # the table's quoted name, as a literal: a quote in a name
                 # stays in the name
                 return self._qualified("dst", db, t).replace("'", "''")
-            stmts = [f"dbcc checkident ('{lit(t)}', reseed, {int(v)});"
-                     f"  -- dst now {dst.get(t, 'MISSING')}"
-                     for t, v in sorted(src.items())
-                     if dst.get(t) != v and v != "NULL"]
+
+            def ahead(t):
+                # never lowered: a seed past the source's has handed out
+                # the keys up to it, and reseeded back, the next insert
+                # takes one of them again
+                return dst.get(t) not in (None, "NULL") \
+                    and src[t] != "NULL" and int(dst[t]) > int(src[t])
+            change = [t for t, v in sorted(src.items())
+                      if dst.get(t) != v and v != "NULL" and not ahead(t)]
+            stmts = [f"dbcc checkident ('{lit(t)}', reseed, {int(src[t])});"
+                     f"  -- dst now {dst.get(t, 'MISSING')}" for t in change]
             undo = [f"dbcc checkident ('{lit(t)}', reseed, {int(dst[t])});"
-                    for t in sorted(src) if t in dst and dst.get(t) != src[t]
-                    and dst[t] != "NULL"]
+                    for t in change if t in dst and dst[t] != "NULL"]
             same = sum(1 for t, v in src.items() if dst.get(t) == v)
-            if stmts:
+            past = [f"{t}: target {dst[t]} > source {src[t]}"
+                    for t in sorted(src) if ahead(t)]
+            if stmts or past:
                 actions.append(RepairAction(
                     db, "sequences", stmts, undo,
-                    f"{len(stmts)} identities differ, {same} already equal"))
+                    f"{len(stmts)} identities differ, {same} already equal"
+                    + (f"; left alone {len(past)} (the target's seed is past"
+                       " it already, never lowered): " + "; ".join(past[:4])
+                       if past else "")))
         if kind in ("rows", "all"):
             actions += self._rows_found_plan(db)
             # after the rows, never before: a row copied again takes the
@@ -1102,8 +1115,10 @@ class MSSQLEngine(DbapiRows, Engine):
                                         found=self._found(db, t))
         if action.kind != "sequences":
             raise SystemExit(f"mssql cannot apply a {action.kind!r} action")
-        self._cmd("dst", db,
-                " ".join(s.split("  --")[0] for s in action.statements))
+        # seeds left alone and nothing to reseed send nothing
+        if action.statements:
+            self._cmd("dst", db,
+                      " ".join(s.split("  --")[0] for s in action.statements))
 
     def snapshot_state(self, db, state_dir, kind="all"):
         """What the target held before a repair: each identity column's
