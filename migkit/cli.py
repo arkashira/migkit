@@ -2468,13 +2468,16 @@ def _table_plan(hop, eng, d, via, go=False):
     costs the operator this view and nothing else: the copy asks the same
     questions again, and stops on its own if they cannot be answered.
     """
-    from . import planner
+    from . import movers, planner
     from .engines import ALIASES
     engine = ALIASES.get(hop.engine, hop.engine)
     try:
         lister = getattr(eng, "_all_tables", None)
         tables = lister("src", d) if lister else eng.neutral_tables("src", d)
         facts = eng.table_facts("src", d)
+        # a partition planned as its table is (`movers._pg_roots`)
+        roots = (movers._pg_roots(hop, d, eng=eng)
+                 if hasattr(eng, "partition_roots") else None)
     except NotImplementedError:
         # a keyspace or a cluster's topics: no table to plan
         return []
@@ -2487,7 +2490,7 @@ def _table_plan(hop, eng, d, via, go=False):
                 f"{without_programs(why, DRIVEN)})"]
     decisions = planner.plan(hop, d, via, tables,
                              "public" if engine == "postgres" else None,
-                             facts)
+                             facts, roots=roots)
     # the time each table the copier carries takes; its way and why go to
     # the decision record (`decide.record`)
     from . import tableway
@@ -3493,10 +3496,12 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
     if eng.maps_columns() and not do_drop:
         # a subscription or a replica applies whole rows by the source's
         # column names: the first change to a mapped table stops it on a
-        # column the target does not have, or lands in the wrong one
+        # column the target does not have, or lands in the wrong one - and
+        # a renamed table's in the table it was renamed from
         raise SystemExit(
-            "the hop maps columns (mapping.columns), and the server's own"
-            " replication carries whole rows under the source's names."
+            "the hop maps columns or renames tables (mapping.columns,"
+            " mapping.tables), and the server's own replication carries"
+            " whole rows under the source's names."
             " Nothing was set up. `migkit move --mode cdc` follows this hop"
             " with migkit's own change tail, which applies the mapping.")
     refused = "" if do_drop else _own_refused(hop, eng, db)

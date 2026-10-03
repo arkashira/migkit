@@ -211,7 +211,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * topology: two_way - <...>. Nothing was set up.
 
-* the hop maps columns (mapping.columns), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
+* the hop maps columns or renames tables (mapping.columns, mapping.tables), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
 
 * <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which reads the hop's scope and mapping for every change.
 
@@ -335,7 +335,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the hop masks <...> on the way, and only the parallel dump of a MySQL hop can: this path would copy the values as they are. Nothing has been copied. Install it with migkit doctor --install, or drop the masking rule
 
-* <...> would be emptied anyway: the table references one of the tables this move replaces, and emptying a table empties everything pointing at it. the hop excludes it, which says its rows are written here and not carried, so they cannot be put back afterwards. either it is not target-owned after all - take it out of the hop's exclude list and let the move carry it - or the reference has to go before the move can run.
+* <...> would be emptied anyway: the table references one of the tables this move replaces, and emptying a table empties everything pointing at it. the hop excludes it, which says its rows are written here and not carried, so they cannot be put back afterwards. either it is not target-owned after all - take it out of the hop's exclude list and let the move carry it - or the reference has to go before the move can run. | <...> the hop carries only the rows its filter selects into it, and the rows outside the filter are the target's own, so they cannot be put back afterwards. Either the filter goes, or the reference has to go before the move can run. | <...> the source has no such table, so the move does not carry it and its rows are the target's own, which cannot be put back afterwards. Either the reference goes before the move can run, or the hop leaves out the table it points at. | <...>
+
+* <...> ... | <...>: the hop carries only some of their changes (mapping.ops), so the rows the target holds of them are kept as they are - a row the source deleted, or changed, stays as it was there - and emptying them for the load would take those rows. Nothing has been emptied. Move them while the target holds none of their rows, or follow only their changes (`migkit move --mode cdc`)
 
 * <...>: <...> ... | <...> have triggers on the target - foreign keys among them - and <...> can neither turn them off for the load nor load as a replica. Loading anyway would either be refused row by row or let the triggers rewrite what arrives. Nothing has been written. Grant it with `GRANT SET ON PARAMETER session_replication_role TO <...>` (PostgreSQL 15 and later), or move as the managed service's admin user.
 

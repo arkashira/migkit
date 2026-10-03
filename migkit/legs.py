@@ -728,7 +728,9 @@ def pull_move(hop, db, workers, go, log):
         known = eng.table_facts("src", db)
     except Exception:  # noqa: BLE001 - ranges then from the keys alone
         known = {}
-    decisions = planner.plan(hop, db, "pgpull", tables, "public", known)
+    # a partition goes where its table goes (`movers._pg_roots`)
+    decisions = planner.plan(hop, db, "pgpull", tables, "public", known,
+                             roots=movers._pg_roots(hop, db, eng=eng))
     carried = _leaves(eng, db, [d.table for d in decisions
                                 if d.path == planner.BULK])
     routed = [d.table for d in decisions if d.path == planner.COPIER]
@@ -906,12 +908,14 @@ def _carried(hop, db):
     """(engine, the tables the temporary subscription copies, the ones the
     table copier carries): one reading of the plan, for the copy and for
     the statements its change on the source is said with."""
-    from . import planner
+    from . import movers, planner
     from .engines.postgres import PostgresEngine
     eng = PostgresEngine(hop)
     tables = eng._all_tables("src", db)
+    # a partition goes where its table goes (`movers._pg_roots`)
     decisions = planner.plan(hop, db, "pgsubscribe", tables, "public",
-                             eng.table_facts("src", db))
+                             eng.table_facts("src", db),
+                             roots=movers._pg_roots(hop, db, eng=eng))
     carried = _leaves(eng, db, [d.table for d in decisions
                                 if d.path == planner.BULK])
     return eng, carried, [d.table for d in decisions

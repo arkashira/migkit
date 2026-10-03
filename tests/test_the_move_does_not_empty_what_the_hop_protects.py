@@ -134,6 +134,9 @@ def test_a_cascade_reaching_the_excluded_table_is_refused(pg_pair):
 def test_the_cascade_is_followed_through_more_than_one_hop(pg_pair):
     """`a -> b -> c`: emptying `c` reaches `a`, which no single join finds."""
     _seed(pg_pair)
+    # `mid` on both sides, so the move carries and empties it
+    assert psql(pg_pair["src"], "create table mid (id int primary key,"
+                " oid int references orders(id))").returncode == 0
     for sql in ("create table mid (id int primary key,"
                 " oid int references orders(id))",
                 "alter table audit_log add column mid int references mid(id)"):
@@ -147,8 +150,11 @@ def test_a_reference_between_two_carried_tables_is_not_a_refusal(pg_pair):
     """Both ends are being replaced, so the cascade changes nothing. A check
     that fired here would block every ordinary schema."""
     _seed(pg_pair)
-    assert psql(pg_pair["dst"], "create table lines (id int primary key,"
-                " oid int references orders(id))").returncode == 0
+    # on both sides: a table only the target has is not carried, and not
+    # emptied (`test_the_bulk_paths_take_the_hops_scope.py`)
+    for port in (pg_pair["src"], pg_pair["dst"]):
+        assert psql(port, "create table lines (id int primary key,"
+                    " oid int references orders(id))").returncode == 0
     stmt = movers._pg_truncate_target(_hop(pg_pair, ["audit_log"]),
                                       "postgres")
     assert "public.lines" in stmt and "public.audit_log" not in stmt, stmt

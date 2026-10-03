@@ -5384,15 +5384,30 @@ class Engine:
     OWN_PATHS_READ_COLUMN_MAPPING = True
 
     def through_pair(self, db, table):
-        """Whether this table's columns are mapped and this engine's own
-        paths would copy and hash it whole."""
-        return (not self.OWN_PATHS_READ_COLUMN_MAPPING
-                and bool(self.hop.column_rules(db, *str(table).split("."))))
+        """Whether this table's columns are mapped, or its name is, and
+        this engine's own paths would copy and hash it whole under the
+        source's name.
+
+        A table the hop renames (`mapping.tables`) went every same-engine
+        way under its own name - the bulk paths, the table copier, the
+        tables made for a load - and the check then compared it under that
+        name on both sides, so the table it was renamed to was never filled
+        and nothing said so. The pair renames it (`HeteroEngine._rename`)
+        in its copy, comparison, repair and tail alike."""
+        if self.OWN_PATHS_READ_COLUMN_MAPPING:
+            return False
+        from ..movers import _renamed
+        parts = [p for p in str(table).split(".") if p]
+        return bool(self.hop.column_rules(db, *parts)
+                    or _renamed(self.hop, db, parts))
 
     def maps_columns(self):
-        """Whether any table of this hop goes through the pair machinery."""
+        """Whether any table of this hop goes through the pair machinery:
+        it maps columns or renames tables (`through_pair`)."""
+        from ..movers import renames_any
         return (not self.OWN_PATHS_READ_COLUMN_MAPPING
-                and bool((self.hop.mapping or {}).get("columns")))
+                and bool((self.hop.mapping or {}).get("columns")
+                         or renames_any(self.hop)))
 
     def _as_pair(self, within=None):
         """This hop seen as a pair of the same engine, so the machinery
