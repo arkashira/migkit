@@ -95,7 +95,7 @@ HOP_KEYS = {
                    " the percentage a table's aggregates may drift by when"
                    " read a second way", "dict",
                    subs=("tables", "columns", "where", "tolerance",
-                         "ops")),
+                         "ops", "names")),
 }
 
 #: the keys under a hop's `options`
@@ -1599,6 +1599,38 @@ def _patterns_or_none(value):
         return []
 
 
+def _names_problems(where, mapping):
+    """`mapping.names` said wrong: a level that is not one, a rule that
+    is not one, a case that is neither lower nor upper."""
+    got = mapping.get("names") if isinstance(mapping, dict) else None
+    if got is None:
+        return []
+    if not isinstance(got, dict):
+        return [Problem("error", f"{where}.mapping.names", "is not a mapping")]
+    out = []
+    for level, rule in got.items():
+        at = f"{where}.mapping.names.{level}"
+        if level not in ("databases", "schemas", "tables"):
+            out.append(Problem("error", at, "databases, schemas or tables"))
+            continue
+        if not isinstance(rule, dict):
+            out.append(Problem("error", at, "is not a mapping"))
+            continue
+        for k, v in rule.items():
+            if k not in ("case", "prefix", "suffix", "strip_prefix",
+                         "strip_suffix"):
+                out.append(Problem("error", f"{at}.{k}", "case, prefix,"
+                                   " suffix, strip_prefix or strip_suffix"))
+            elif k == "case" and str(v).lower() not in ("lower", "upper"):
+                out.append(Problem("error", f"{at}.case", f"{v!r} - lower or"
+                                   " upper"))
+            elif k != "case" and (not isinstance(v, str) or not v
+                                  or any(c in v for c in ".\"'`")):
+                out.append(Problem("error", f"{at}.{k}", f"{v!r} - text a"
+                                   " name may hold"))
+    return out
+
+
 def _objects_problems(where, raw):
     """`objects` said wrong: a kind that is not one, a value that is
     neither all, none nor names."""
@@ -1696,6 +1728,7 @@ def _contradictions(where, raw, opts, goal, engine):
     out += _include_problems(where, raw, probe)
     out += _ops_problems(where, mapping)
     out += _objects_problems(where, raw)
+    out += _names_problems(where, mapping)
     if goal in GOALS and not GOALS[goal]["writes"]:
         for k in WRITING:
             if opts.get(k):

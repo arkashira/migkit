@@ -154,3 +154,34 @@ def test_the_way_back_names_the_objects_in_the_targets_database():
     back = there.reversed()
     assert back.takes_object("views", "shop2", "v1")
     assert not back.takes_object("views", "shop2", "v2")
+
+
+def test_a_name_rule_writes_every_name_of_a_level_one_way():
+    h = _hop(mapping={"names": {"tables": {"case": "lower", "prefix": "x_"},
+                                "schemas": {"case": "lower"}},
+                      "tables": {"appdb.public.Keep": "public.kept"}})
+    assert h.target_table_in("appdb", "Sales", "Orders") == "sales.x_orders"
+    # a rename the hop names itself is taken as written
+    assert h.target_table_in("appdb", "public", "Keep") == "public.kept"
+    m = _hop("mysql", db_map={"crm": "crm2"},
+             mapping={"names": {"tables": {"strip_prefix": "tbl_",
+                                           "case": "upper"},
+                                "databases": {"suffix": "_new"}}})
+    assert m.target_table_in("shop", "tbl_orders") == "ORDERS"
+    assert m.target_db("shop") == "shop_new" and m.target_db("crm") == "crm2"
+    # a document store's database is never taken for a schema
+    g = _hop("mongodb", mapping={"names": {"tables": {"case": "lower"}}})
+    assert g.target_table_in("Db", "Coll") == "coll"
+    assert _hop().target_table_in("a", "public", "T") == "public.T"
+
+
+def test_a_name_rule_said_wrong_is_refused():
+    raw = {"engine": "postgres", "source": {"host": "10.0.0.1", "user": "a"},
+           "target": {"host": "10.0.0.2", "user": "a"},
+           "mapping": {"names": {"tables": {"case": "title",
+                                            "prefix": "a.b"},
+                                 "rows": {}}}}
+    assert sorted(p.where for p in hopkeys.check({"hops": {"h": raw}})
+                  if p.level == "error") == [
+        "hops.h.mapping.names.rows", "hops.h.mapping.names.tables.case",
+        "hops.h.mapping.names.tables.prefix"]

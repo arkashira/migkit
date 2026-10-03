@@ -785,7 +785,8 @@ class Hop:
         differently-named db (e.g. shop_staging -> shop), so every dst-side
         connection resolves through this map (identity when unmapped).
         Local report paths stay keyed by the source name."""
-        return self.db_map.get(db, db)
+        got = (self.db_map or {}).get(db)
+        return got if got is not None else self.named("databases", db)
 
     def excluded(self, *parts):
         """True if an object matches any `exclude` pattern, so migkit neither
@@ -940,7 +941,46 @@ class Hop:
         for ident in self._ids(*parts):
             if ident in rules:
                 return str(rules[ident])
-        return ".".join(str(p) for p in parts if p not in (None, ""))
+        parts = [str(p) for p in parts if p not in (None, "")]
+        if self.name_policy("tables") or self.name_policy("schemas"):
+            # the database a name opens with is the target's own
+            # (`target_db`); the schema and the table take the hop's rule
+            whole = self.whole_name() or 2
+            lead = 1 if len(parts) >= whole else 0
+            if parts:
+                parts[-1] = self.named("tables", parts[-1])
+            if len(parts) - lead >= 2:
+                parts[-2] = self.named("schemas", parts[-2])
+        return ".".join(parts)
+
+    def name_policy(self, level):
+        """The hop's rule for every name at one level (`databases`,
+        `schemas`, `tables`) on the target, from `mapping.names`: `case`
+        (lower or upper), `prefix`, `suffix`, `strip_prefix`,
+        `strip_suffix` - as DMS's and the DTS services' name rules
+        transform every name of a level at once. A rename the hop names
+        itself (`mapping.tables`, `db_map`) is taken as written."""
+        rules = ((self.mapping or {}).get("names") or {}).get(level)
+        return dict(rules) if isinstance(rules, dict) else {}
+
+    def named(self, level, name):
+        """A name at `level` as the hop's rule writes it on the target."""
+        rule = self.name_policy(level)
+        if not rule:
+            return name
+        name = str(name)
+        for key, cut in (("strip_prefix", lambda n, x: n[len(x):]
+                          if n.startswith(x) else n),
+                         ("strip_suffix", lambda n, x: n[:-len(x)]
+                          if x and n.endswith(x) else n)):
+            if rule.get(key):
+                name = cut(name, str(rule[key]))
+        case = str(rule.get("case") or "").lower()
+        if case == "lower":
+            name = name.lower()
+        elif case == "upper":
+            name = name.upper()
+        return f"{rule.get('prefix') or ''}{name}{rule.get('suffix') or ''}"
 
     def target_table_in(self, db, *parts):
         """`target_table` for a table of database `db`, named without it.
@@ -948,11 +988,15 @@ class Hop:
         A rule may name the database - the only way to tell two
         databases' `orders` apart - so the database is part of what is
         matched; the answer is the rule's target, or the table's name as
-        the caller gave it where no rule applies.
+        the caller gave it (under the hop's name rule, `named`) where no
+        rule applies.
         """
-        got = str(self.target_table(db, *parts))
         own = [str(p) for p in parts if p not in (None, "")]
-        return ".".join(own) if got == ".".join([str(db), *own]) else got
+        rules = self.table_map()
+        for ident in self._ids(db, *own):
+            if ident in rules:
+                return str(rules[ident])
+        return ".".join(str(self.target_table(db, *own)).split(".")[1:])
 
     def column_rules(self, *parts):
         """What the hop's `mapping.columns` says about this table's columns:
