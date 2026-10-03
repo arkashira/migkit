@@ -1725,6 +1725,34 @@ def _where_problems(where, mapping, engine):
     return out
 
 
+def _collision_problems(where, raw, engine, opts):
+    """Two rules of `mapping.tables` that land on one name on the target
+    (`Hop.ambiguous_mapping`, without case where the target's names have
+    none), read off the rules before anything is listed: whichever is
+    written second overwrites the first. The source's own tables, name
+    rules and all, are asked before anything runs (`Hop.name_collisions`)."""
+    from .config import Endpoint, Hop
+    mapping = raw.get("mapping")
+    if not isinstance(mapping, dict) or not isinstance(
+            mapping.get("tables"), dict):
+        return []
+    probe = Hop(name="", engine=engine or "", source=Endpoint(),
+                target=Endpoint(), mapping={"tables": mapping["tables"]},
+                db_map=raw.get("db_map") if isinstance(raw.get("db_map"),
+                                                       dict) else {},
+                options={k: v for k, v in opts.items()
+                         if k in ("source_engine", "target_engine")})
+    try:
+        clash = probe.ambiguous_mapping()
+    except Exception:  # noqa: BLE001 - said by the rules' own checks
+        return []
+    return [Problem("error", f"{where}.mapping.tables",
+                    f"{', '.join(srcs)} all land on {dst} on the target -"
+                    " whichever is written second overwrites the first;"
+                    " give them separate names")
+            for dst, srcs in sorted(clash.items())]
+
+
 def _mask_problems(where, opts):
     """`mask_on_write` said wrong, before anything is written: a key that
     names no table, a rule that is not a transform (`transforms.parse`),
@@ -1921,6 +1949,8 @@ def _contradictions(where, raw, opts, goal, engine):
     out += _ops_problems(where, mapping)
     out += _objects_problems(where, raw)
     out += _names_problems(where, mapping)
+    if raw.get("goal") != "consolidate":
+        out += _collision_problems(where, raw, engine, opts)
     out += _mask_problems(where, opts)
     out += _where_problems(where, mapping, opts.get("source_engine")
                            if engine == "hetero" else engine)

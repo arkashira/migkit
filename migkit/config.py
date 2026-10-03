@@ -1021,6 +1021,70 @@ class Hop:
             objects=dict(record.get("objects") or {}),
             mapping=dict(record.get("mapping") or {}), options=options)
 
+    #: the file a database's scope changes are kept in, among its reports
+    SCOPE_LOG = "scope-log.jsonl"
+
+    def log_scope(self, db, position, by):
+        """The hop's scope now (`scope_record`) appended to `db`'s scope
+        log with the source position it takes effect at - the position a
+        copy was taken after, the change a tail applies first under it -
+        and what took it (`by`: a move, a tail), where it is not the scope
+        the log last holds. Every reader of a record kept under a scope
+        (`under`, `scope_changed`) can then ask which scope a position was
+        taken under (`scope_at`), and the evidence says when it changed.
+        Returns whether a line was written; never raises - a log that
+        cannot be written costs the evidence this line, not the move."""
+        import json
+        import time
+        fp = self.scope_fingerprint()
+        try:
+            last = self.scope_log(db)[-1:]
+            if last and last[0].get("scope_fingerprint") == fp:
+                return False
+            from . import durable
+            durable.append_line(
+                self.report_dir(db) / self.SCOPE_LOG,
+                json.dumps({"at": time.time(), "by": str(by),
+                            "position": position, "scope_fingerprint": fp,
+                            "scope": self.scope_record()}, default=str,
+                           sort_keys=True))
+            return True
+        except Exception:  # noqa: BLE001 - the evidence's line, not the move
+            return False
+
+    def scope_log(self, db):
+        """[{at, by, position, scope_fingerprint, scope}] of `db`'s scope
+        changes, oldest first (`log_scope`); [] where none is kept."""
+        import json
+        try:
+            text = (self.report_dir(db) / self.SCOPE_LOG).read_text()
+        except OSError:
+            return []
+        out = []
+        for line in text.splitlines():
+            try:
+                got = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(got, dict):
+                out.append(got)
+        return out
+
+    def scope_at(self, db, position=None, reached=None, by=None):
+        """This hop under the scope `db`'s log says was in effect at
+        `position` - the last change logged at or before it, by `reached`
+        (`Engine.position_reached(have, want)`) - or under the last one
+        logged (by `by` where given: the scope the last move took); None
+        where the log holds none."""
+        log = [e for e in self.scope_log(db) if by is None or e.get("by")
+               == by]
+        if position is not None and reached is not None:
+            # a position the engine cannot order is taken as reached: the
+            # later scope is the one said
+            log = [e for e in log if e.get("position") is None
+                   or reached(position, e.get("position")) is not False]
+        return self.under(log[-1]) if log else None
+
     def scope_changed(self, recorded):
         """Whether a record made under `recorded` (a fingerprint, or a dict
         holding one under `scope_fingerprint`) was taken under another
@@ -1491,11 +1555,72 @@ class Hop:
         overwrite the first, and the verification would then compare one
         source against a target holding the other. `hetero.match_tables`
         already refuses an ambiguous *pair* for the same reason.
+
+        Read off the rules alone, before a source is listed: two rules
+        naming one target name - without case where the target's names have
+        none (`target_folds_case`) - in one target database, or where
+        either names no database. `name_collisions` answers it of the
+        source's own tables, name rules and all.
         """
+        whole = self.whole_name()
+        fold = self.target_folds_case()
         seen = {}
-        for src, dst in sorted(self.table_map().items()):
-            seen.setdefault(str(dst), []).append(src)
-        return {dst: srcs for dst, srcs in seen.items() if len(srcs) > 1}
+        for src, dst in sorted(self.table_map().items(), key=str):
+            parts = str(src).split(".")
+            db = parts[0] if whole and len(parts) >= whole else None
+            name = str(dst).casefold() if fold else str(dst)
+            seen.setdefault(name, []).append(
+                (self.target_db(db) if db else None, str(src)))
+        out = {}
+        for got in seen.values():
+            hit = [s for i, (w, s) in enumerate(got) if any(
+                j != i and (w is None or v is None or w == v)
+                for j, (v, _) in enumerate(got))]
+            if hit:
+                out[str(self.table_map()[hit[0]])] = hit
+        return out
+
+    def target_folds_case(self):
+        """Whether the target's names have no case (`FOLDS_CASE`): two
+        names that differ only by it are one table there."""
+        from .util import _canonical
+        eng = self.engine
+        if eng == "hetero":
+            eng = (self.options or {}).get("target_engine") or ""
+        return _canonical(eng) in FOLDS_CASE
+
+    def name_collisions(self, tables):
+        """{the target's name: [the source's tables]} of `tables` - each
+        `(db, table)` as the source lists it - that the hop takes and that
+        land on one name on the target after its renames, its name rules
+        and its database names (`target_db`, `target_table_in`), compared
+        without case where the target's names have none. Refused before
+        anything runs (`Engine._mapping_items`, every write, the check):
+        whichever copy ran second wrote over the first, and the check
+        compared one source against a target holding the other. A hop
+        whose goal is to bring many into one (`consolidate`) means it."""
+        if self.goal == "consolidate":
+            return {}
+        from .util import DEFAULT_SCHEMA, _canonical
+        fold = self.target_folds_case()
+        eng = self.engine if self.engine != "hetero" else (
+            (self.options or {}).get("target_engine") or "")
+        # a name the rule gives without its schema is in the target's
+        # default one, as the copier makes and finds it there
+        schema = DEFAULT_SCHEMA.get(_canonical(eng), "") \
+            if self.whole_name() == 3 else ""
+        seen = {}
+        for db, t in tables:
+            if not self.takes_table(db, t):
+                continue
+            name = self.target_table_in(db, *self._names(t))
+            if schema and "." not in name:
+                name = f"{schema}.{name}"
+            there = f"{self.target_db(db)}.{name}"
+            seen.setdefault(there.casefold() if fold else there, []).append(
+                (there, f"{db}.{t}"))
+        return {got[0][0]: [s for _, s in got] for got in seen.values()
+                if len(got) > 1}
 
     def unused_mapping(self, source_ids):
         """Mapping keys that matched nothing on the source.
@@ -1762,5 +1887,8 @@ def get_hop(name):
     # so the run's config file stays the single place the operator changes.
     env = os.environ.get("MIGKIT_EXCLUDE", "")
     if env:
-        hop.exclude = list(hop.exclude) + [p.strip() for p in env.split(",") if p.strip()]
+        # kept apart too: a check narrowed so is said as narrowed, never
+        # `same` of the hop (`cli._check`)
+        hop.run_exclude = [p.strip() for p in env.split(",") if p.strip()]
+        hop.exclude = list(hop.exclude) + hop.run_exclude
     return hop

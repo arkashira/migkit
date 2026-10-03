@@ -706,6 +706,7 @@ def gather(hop, session=None):
         "method": _method(tables),
         "code": _code(root) if not session else [],
         "positions": _positions(root),
+        "scope_changes": _scope_changes(hop, root),
         "decisions": _decisions(hop, session),
         "approvals": _approvals(root, entries),
         "repairs": _repairs(root, entries),
@@ -776,6 +777,30 @@ def _md_table(head, rows):
     return "\n".join(out) + "\n"
 
 
+def _scope_changes(hop, root):
+    """{db: [{at, by, position, scope}]} of each database's scope log
+    (`Hop.log_scope`): every scope the hop's moves, tails and deltas took
+    effect under, with the source position each took effect at."""
+    from .config import Hop
+    out = {}
+    try:
+        dbs = sorted(p.name for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return out
+    for db in dbs:
+        if not (root / db / Hop.SCOPE_LOG).exists():
+            continue
+        got = hop.scope_log(db) if hasattr(hop, "scope_log") else []
+        if got:
+            out[db] = [{"at": time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                            time.localtime(e.get("at", 0))),
+                        "by": e.get("by"), "position": _plain(e.get(
+                            "position")),
+                        "scope_fingerprint": e.get("scope_fingerprint")}
+                       for e in got]
+    return out
+
+
 def _scope_rows(doc):
     """(what, names) of the scope the verdict was taken under, as it
     recorded it; where the hop takes another now, that beside it, said;
@@ -800,6 +825,13 @@ def _scope_rows(doc):
         rows += [(f"now {what}", ", ".join(names)) for what, names in
                  _v.scope_said(route.get("scope"))] or \
             [("now takes", "everything, whole")]
+    for db, changes in sorted((doc.get("scope_changes") or {}).items()):
+        if len(changes) > 1:
+            rows.append((f"{db}: scope changed", "; ".join(
+                f"{c.get('at')} by the {c.get('by')} at "
+                + ("a position not read" if c.get("position") is None
+                   else str(c.get("position")))
+                for c in changes[1:])))
     renamed = route.get("databases_renamed") or {}
     if any(k != v for k, v in renamed.items()):
         rows.append(("databases on the target", ", ".join(

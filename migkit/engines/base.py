@@ -3475,10 +3475,28 @@ class Engine:
         feature is one people learn to scroll past.
         """
         hop = self.hop
-        if not getattr(hop, "mapping", None):
+        merged = getattr(hop, "db_map", None) or {}
+        if not getattr(hop, "mapping", None) and len(
+                {hop.target_db(d) for d in merged}) == len(merged):
+            # no mapping, and no two databases into one
             return []
         items = []
-        for dst, srcs in sorted(hop.ambiguous_mapping().items()):
+        ids, why, listed = [], None, []
+        try:
+            for db in self.databases():
+                # named from the database down, so a rule that names its
+                # database is matched, and one naming another is not
+                got = self.neutral_tables("src", db)
+                ids += [f"{db}.{t}" for t in got]
+                listed += [(db, t) for t in got]
+        except Exception as e:
+            why = str(e).splitlines()[-1][:90]
+        # two tables onto one name on the target: of the source's own
+        # tables, renames, name rules and database names all read
+        # (`name_collisions`); of the rules alone where it cannot be listed
+        clash = (hop.ambiguous_mapping() if why is not None
+                 else hop.name_collisions(listed))
+        for dst, srcs in sorted(clash.items()):
             items.append({
                 "level": "fail", "scope": "before the move",
                 "item": "mapping", "detail":
@@ -3487,14 +3505,8 @@ class Engine:
                     " overwrites the first, and the check would then"
                     " compare one source against a target holding the"
                     " other  [fix] give them separate names on the target"})
-        ids, why = [], None
-        try:
-            for db in self.databases():
-                # named from the database down, so a rule that names its
-                # database is matched, and one naming another is not
-                ids += [f"{db}.{t}" for t in self.neutral_tables("src", db)]
-        except Exception as e:
-            why = str(e).splitlines()[-1][:90]
+        if not getattr(hop, "mapping", None):
+            return items
         if why is not None:
             items.append({
                 "level": "warn", "scope": "before the move",
@@ -5777,11 +5789,23 @@ class Engine:
         got = list(self.delta_verify(db, limit, log))
         fp = self.hop.scope_fingerprint()
         if kept.get("scope_fingerprint") != fp:
-            now = {"scope_fingerprint": fp, "at": time.time()}
+            # the source's position the scope took effect at, beside its
+            # fingerprint and in the database's scope log (`log_scope`)
+            try:
+                import json
+                at = self.log_position("src", db)
+                # a position as plain data: a document store's is a BSON
+                # timestamp
+                at = json.loads(json.dumps(at, default=str))
+            except Exception:  # noqa: BLE001 - kept without one
+                at = None
+            now = {"scope_fingerprint": fp, "at": time.time(),
+                   **({"position": at} if at is not None else {})}
             if changed:
                 now["scope_changed_from"] = kept["scope_fingerprint"]
             durable.write_json(self.hop.report_dir(db) / self.DELTA_SCOPE,
                                now)
+            self.hop.log_scope(db, at, "delta")
             kept = now
         if changed:
             got.append(Result(

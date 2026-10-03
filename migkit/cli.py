@@ -339,6 +339,14 @@ def _guard_write(hop, eng, what, dbs, go, mode="", drop=False, step=None,
             hopkeys.refuse_writes(hop, what)
     except Refused as e:
         stop(str(e.code))
+    if preflight is None and not drop and dbs != [""]:
+        # two tables onto one name on the target: whichever is written
+        # second overwrites the first (`Hop.name_collisions`); a move asks
+        # it with the rest of its gate (`ready`)
+        clash = _collided(hop, eng, dbs or ([db] if db else
+                                            eng.databases()))
+        if clash:
+            stop(f"{hop.name}: {clash}. Nothing has been written")
     stream = mode in ("cdc", "full+cdc") and not drop
     if (hop.options or {}).get("mask_on_write") and (stream or carries_rows):
         try:
@@ -1800,6 +1808,66 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
     return results, timings
 
 
+def _collided(hop, eng, dbs):
+    """The tables of `dbs` the hop lands on one name on the target
+    (`Hop.name_collisions`), in words, or "" - what every check and write
+    is refused on before it runs. A source that cannot be listed is
+    asked of the hop's rules alone (`Hop.ambiguous_mapping`)."""
+    try:
+        listed = [(d, t) for d in dbs for t in eng.neutral_tables("src", d)]
+        clash = hop.name_collisions(listed)
+    except Exception:  # noqa: BLE001 - the rules alone, then
+        clash = hop.ambiguous_mapping()
+    if not clash:
+        return ""
+    return ("the hop lands more than one table on one name on the target - "
+            + "; ".join(f"{', '.join(srcs)} onto {dst}" for dst, srcs in
+                        sorted(clash.items())[:4])
+            + (f" and {len(clash) - 4} more" if len(clash) > 4 else "")
+            + ": whichever is copied second overwrites the first, and the"
+              " check compares one source against a target holding the"
+              " other. Give them separate names on the target (mapping."
+              "tables, mapping.names)")
+
+
+def _narrower_than_moved(hop, dbs):
+    """[what] the last move of each database carried that a check under
+    the hop's scope now leaves out: tables it takes no more, rows its
+    filters take otherwise, columns chosen or masked otherwise, objects
+    no longer carried - read from the scope that move took (`Hop.scope_at`,
+    the database's scope log). Such a check is not a whole check of what
+    was moved, and is said as narrowed (`verdict.decide`), never `same`.
+    Empty where no move logged its scope, or it is the scope now."""
+    out = []
+    now = hop.scope_fingerprint()
+    for d in dbs:
+        moved = hop.scope_at(d, by="move")
+        if moved is None or moved.scope_fingerprint() == now:
+            continue
+        try:
+            tables = get_engine(moved).neutral_tables("src", d)
+        except Exception:  # noqa: BLE001 - said as unknown
+            out.append(f"{d}: the scope it was moved under (its tables"
+                       " could not be listed to compare)")
+            continue
+        for t in tables:
+            # split the one way names are (`Hop._names`)
+            parts = hop._names(t)
+            if not hop.takes_table(d, t):
+                out.append(f"{d}.{t} (left out since the move)")
+            elif hop.row_filter(d, *parts) and hop.row_filter(
+                    d, *parts) != moved.row_filter(d, *parts):
+                out.append(f"{d}.{t} (rows filtered otherwise than moved)")
+            elif hop.column_rules(d, *parts) != moved.column_rules(d,
+                                                                   *parts):
+                out.append(f"{d}.{t} (columns chosen otherwise than moved)")
+            elif hop.masks(d, *parts) != moved.masks(d, *parts):
+                out.append(f"{d}.{t} (values masked otherwise than moved)")
+        if (hop.objects or {}) != (moved.objects or {}):
+            out.append(f"{d}: objects carried otherwise than moved")
+    return out
+
+
 def _check(hop, db, table, only, do_deep, consistent, workers, resume,
            exclude, hints=True):
     """`check`: the checks run, their answers kept (`summary.json`,
@@ -1813,6 +1881,12 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     eng = get_engine(hop)
     checks, allowed = _checks_for(eng, only, do_deep)
     dbs = [db] if db else eng.databases()
+    # before anything is read: two tables onto one name on the target
+    # leave nothing to compare the one with (`Hop.name_collisions`)
+    clash = _collided(hop, eng, dbs)
+    if clash:
+        from .verdict import Refused
+        raise Refused(f"{hop_name}: {clash}. Nothing has been compared")
     if workers:
         # asked for on the command line: a ceiling, as a hop's own is
         hop.workers, hop.workers_set = int(workers), True
@@ -1908,6 +1982,17 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     if exclude:
         coverage["exclude"] = [p.strip() for p in exclude.split(",")
                                if p.strip()]
+    # what the environment left out of this run (`MIGKIT_EXCLUDE`), which
+    # the hop's definition does not
+    if getattr(hop, "run_exclude", None):
+        coverage["exclude"] = coverage.get("exclude", []) + [
+            p for p in hop.run_exclude if p not in coverage.get("exclude",
+                                                                [])]
+    # a check under a scope narrower than the one the move took is not a
+    # whole check of what was moved (`_narrower_than_moved`)
+    narrower = _narrower_than_moved(hop, dbs)
+    if narrower:
+        coverage["narrower than the move"] = narrower
     decided = _verdict.decide(results, hop, coverage or None)
     verdict_path, env = _verdict.write(
         hop, results, engine=eng.__class__.__name__,
@@ -3716,6 +3801,9 @@ def _record_copy(hop, d, before):
             pass
         dumped.unlink()
     _copy_record_path(hop, d).write_text(json.dumps(rec, default=str))
+    # the scope the copy took, from the position taken before it, in the
+    # database's scope log (`Hop.log_scope`)
+    hop.log_scope(d, before, "move")
     shared = _shared(hop, d)
     if shared:
         shared.push(force=True)
@@ -5181,7 +5269,7 @@ def _monitor(hop_name, db, interval, only, cycles):
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    checks, _ = _checks_for(eng, only)
+    checks, allowed = _checks_for(eng, only)
     dbs = [db] if db else eng.databases()
     n, got = 0, None
     while True:
@@ -5190,7 +5278,7 @@ def _monitor(hop_name, db, interval, only, cycles):
             # each cycle checks what the hop takes now (`_hop_again`)
             hop, eng, dbs, moved = _hop_again(hop_name, hop, eng, db, dbs)
             if moved:
-                checks, _ = _checks_for(eng, only)
+                checks, allowed = _checks_for(eng, only)
         stamp = time.strftime("%H:%M:%S")
         all_results, _ = run_checks(hop, eng, dbs, checks,
                                     workers=hop.workers, whole=False)
@@ -5212,7 +5300,10 @@ def _monitor(hop_name, db, interval, only, cycles):
                     statuses.append(f"[green]{c}:ok[/green]")
             console.print(f"{stamp} cycle {n} {_esc(d)}: "
                           + "  ".join(statuses))
-        got = _verdict.decide(all_results, hop)
+        # counts alone, as the watch asks by default, are not a check of
+        # the rows: a narrowed run is said as narrowed, never `same`
+        got = _verdict.decide(all_results, hop, {"checks": sorted(checks)}
+                              if set(checks) < set(allowed) else None)
         try:
             (hop.report_dir() / WATCH_SUMMARY).write_text(
                 json.dumps(all_results, indent=1, default=str))

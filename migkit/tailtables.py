@@ -71,6 +71,16 @@ import threading
 import time
 from collections import Counter
 
+
+def _plain(token):
+    """A position as plain data, as the scope log keeps it beside the scope
+    it took effect at."""
+    try:
+        return json.loads(json.dumps(token, default=str))
+    except (TypeError, ValueError):
+        return str(token)
+
+
 STATE = "tail-tables.json"
 #: the checkpoint the tail's own copies keep, in the table copier's shape
 COPY = "tail-copy.json"
@@ -615,6 +625,9 @@ class TableSet:
             self.log(f"the source's tables could not be listed"
                      f" ({type(e).__name__}); the tail's scope is as it was")
             return False
+        # the scope the changes from `token` on are carried under, in the
+        # database's scope log where it is a new one (`Hop.log_scope`)
+        self.hop.log_scope(self.db, _plain(token), "tail")
         with self.lock:
             if self.fresh:
                 for leaf, name in scope.items():

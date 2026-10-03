@@ -179,6 +179,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * --only <...>: not a check of this hop's engine; its checks are <...>
 
+* <...>: <...>. Nothing has been compared
+
 * on_conflict: <...> - source-wins or keep-target
 
 * run migkit check first, then sync uses its diffs
