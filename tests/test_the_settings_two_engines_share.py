@@ -15,6 +15,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.rollback", "hetero")]
+
 pytestmark = [pytest.mark.docker]
 
 MY, PG = "migkit-test-set-my", "migkit-test-set-pg"

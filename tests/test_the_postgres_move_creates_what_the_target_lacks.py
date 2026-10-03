@@ -26,6 +26,9 @@ from click.testing import CliRunner
 from migkit import movers
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.create-missing", "postgres")]
+
 pytestmark = [needs_docker, pytest.mark.skipif(
     not (movers.which("pg_dump") and movers.which("pg_restore")),
     reason="the PostgreSQL dump programs are not installed")]

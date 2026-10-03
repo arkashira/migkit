@@ -18,6 +18,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("schema.create", "parquet"), ("move.table-copy", "parquet")]
+
 pytestmark = [pytest.mark.docker]
 
 S3, S3_PORT = "migkit-test-parquet-s3", 15825

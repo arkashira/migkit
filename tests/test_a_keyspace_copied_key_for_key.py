@@ -14,6 +14,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.table-copy", "redis"), ("cutover.rollback", "redis")]
+
 SRC, DST = "migkit-test-rcp-src", "migkit-test-rcp-dst"
 SRC_PORT, DST_PORT = 15816, 15817
 

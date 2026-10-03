@@ -16,6 +16,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.drain", "mongodb")]
+
 pytestmark = [pytest.mark.docker]
 
 MG, PG = "migkit-test-xmongo-mg", "migkit-test-xmongo-pg"

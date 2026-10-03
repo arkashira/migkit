@@ -13,6 +13,9 @@ import pytest
 from tests import mysql_pair
 from tests.mysql_pair import my, my_pair  # noqa: F401 - a fixture
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.names", "mysql"), ("verify.delta", "mysql")]
+
 
 @pytest.fixture
 def reports(tmp_path, monkeypatch):

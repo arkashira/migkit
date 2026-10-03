@@ -21,6 +21,9 @@ from migkit import movers
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("scope.names", "mysql")]
+
 pytestmark = needs_docker
 
 SRC, DST = "migkit-test-myscope-src", "migkit-test-myscope-dst"

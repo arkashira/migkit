@@ -8,6 +8,9 @@ import textwrap
 
 from tests.conftest import needs_docker, psql, migkit_cmd
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.value.precision", "postgres")]
+
 pytestmark = needs_docker
 
 

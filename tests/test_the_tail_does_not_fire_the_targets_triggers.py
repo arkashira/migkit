@@ -25,6 +25,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.load-window", "hetero")]
+
 PG, MY = "migkit-test-trigtail-pg", "migkit-test-trigtail-my"
 PG_PORT, MY_PORT = 15750, 15751
 

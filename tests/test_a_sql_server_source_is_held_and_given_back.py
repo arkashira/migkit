@@ -18,6 +18,9 @@ from migkit import freeze
 from migkit.config import Endpoint, Hop
 from tests.conftest import mssql_run, needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("cutover.freeze", "mssql")]
+
 pytestmark = needs_docker
 
 MS, PORT, PW = "migkit-test-hold-mssql", 16351, "CHANGE_ME-Str0ng!"

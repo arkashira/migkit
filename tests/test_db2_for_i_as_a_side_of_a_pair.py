@@ -20,6 +20,9 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.users", "db2i"), ("assess.engine-checks", "db2zos")]
+
 
 def _hop(engine="db2i", **src_options):
     hop = Hop(name="i", engine=engine,

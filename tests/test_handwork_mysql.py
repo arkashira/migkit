@@ -14,6 +14,9 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("assess.handwork", "mysql")]
+
 SRC, DST = "migkit-test-handwork-src", "migkit-test-handwork-dst"
 SRC_PORT, DST_PORT = 13495, 13496
 

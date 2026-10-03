@@ -12,6 +12,13 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.structure.objects", "duckdb"),
+    ("cutover.counters", "duckdb"),
+    ("cutover.rollback", "duckdb"),
+]
+
 
 def _engine(tmp_path, src, dst):
     from migkit.engines.duckdb import DuckDBEngine

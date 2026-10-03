@@ -21,6 +21,12 @@ import json
 
 from migkit.config import Endpoint, Hop
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("scope.objects", ("postgres", "mysql")),
+    ("verify.structure.objects", ("postgres", "mysql", "mongodb")),
+]
+
 
 def _hop(engine, tmp_path, **kw):
     hop = Hop(name="h", engine=engine, source=Endpoint(), target=Endpoint(),

@@ -22,6 +22,9 @@ from tests import large_values_rig as rig
 from tests.cap_pairs import remove
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("move.large-values", "ase"), ("move.sized", "ase")]
+
 pytestmark = needs_docker
 
 ASE, PORT, PW = "migkit-test-lv-ase", 16378, "myPassword"

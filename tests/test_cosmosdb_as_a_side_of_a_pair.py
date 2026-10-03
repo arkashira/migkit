@@ -21,6 +21,15 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.fence", "cosmosdb"),
+    ("tail.follows", "cosmosdb"),
+    ("schema.create", "cosmosdb"),
+    ("move.table-copy", "cosmosdb"),
+    ("cutover.drain", "cosmosdb"),
+]
+
 pytestmark = needs_docker
 
 EMU, PORT = "migkit-test-cosmos", 16345

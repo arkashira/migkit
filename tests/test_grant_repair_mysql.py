@@ -11,6 +11,13 @@ import time
 
 import pytest
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [
+    ("verify.access.table-grants", "mysql"),
+    ("verify.repair", "mysql"),
+    ("verify.repair-undo", "mysql"),
+]
+
 SRC, DST = "migkit-test-grantfix-src", "migkit-test-grantfix-dst"
 SRC_PORT, DST_PORT = 13471, 13472
 

@@ -30,6 +30,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from migkit.engines.base import RepairAction
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.repair", "sqlite"), ("verify.repair-undo", "sqlite")]
+
 
 def _build(tmp_path, ddl, rows, changes=()):
     src, dst = tmp_path / "a.db", tmp_path / "b.db"

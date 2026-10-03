@@ -33,6 +33,9 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker, psql
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.structure.indexes", "postgres")]
+
 pytestmark = needs_docker
 
 
