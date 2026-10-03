@@ -30,9 +30,6 @@ dependencies = [
     "psycopg2-binary>=2.9",
     "pymysql>=1.1",
     "pymssql>=2.3",
-    # SQL Server's own bulk load (TDS bulk insert from a compiled core),
-    # which the target side of a SQL Server hop writes through
-    "mssql-python>=1.15",
     "clickhouse-connect>=0.8",
     # thin mode; direct path loads from 3.4
     "oracledb>=3.4",
@@ -168,6 +165,12 @@ Repository = "https://github.com/arkashira/migkit"
 Changelog = "https://github.com/arkashira/migkit/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
+# SQL Server's own bulk load (TDS bulk insert from a compiled core), which
+# the target side of a SQL Server hop writes through where it is here. It
+# brings Microsoft's ODBC driver, which is not open source: `migkit doctor
+# --install` puts it in place once its terms are accepted, and without it
+# a SQL Server target is written by statements
+mssql-bulk = ["mssql-python>=1.15"]
 # These were once the way to opt into an engine. They are all in the base
 # install now; the names stay so existing install commands keep working.
 mysql = []
