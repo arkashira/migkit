@@ -237,7 +237,8 @@ Open from the two-axis review of `f3cb404...HEAD` (fix before the full suite):
 Release waits for the whole backlog, the suite run once and the gate. Merged since the pause: the review's findings (`8650feb`), 6d (`dfd78df`).
 
 Running (each on its own `worktree-agent-<id>` branch; I merge, run compileall and the guards, scan the tree):
-- a0fb2973757acdcf0 - conversion breadth (CV.P5, P9-P11, P15, P17, P19-P21, W3)
+- a0fb2973757acdcf0 - conversion breadth (CV.P5, P9-P11, P15, P17, P19-P21, W3) - MERGED `9a091c4`
+- a88f190644bf5cea1 - AUD-D (options, environment and addresses checked at load)
 - a629ecb2da1a93623 - P0-CLOUDS.native, then P0-CLOUDS.more
 - a4acdb02ff0191804 - AUD-B (durable tail state, dirty tracking)
 - a3d309a6543a96c68 - read-only target and writes held on every engine (BAR-3)
