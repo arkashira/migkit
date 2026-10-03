@@ -1889,9 +1889,16 @@ class MSSQLEngine(DbapiRows, Engine):
     @staticmethod
     def _bulk_unusable():
         """Why the bulk load's driver cannot be used on this machine, or
-        None. It is a dependency, and still a compiled one: a wheel built
+        None. It brings Microsoft's ODBC driver, which is not open source,
+        so it is installed only once its terms are accepted (`tools.TERMS`,
+        `migkit doctor --install`); and it is a compiled one: a wheel built
         for a newer C library than the machine's installs and then fails
         to load."""
+        from ..tools import MSSQL_BULK, driver_present
+        if not driver_present(MSSQL_BULK):
+            return ("the bulk load's driver is not installed here - `migkit"
+                    " doctor --install` puts it in place once its terms are"
+                    " accepted")
         try:
             import mssql_py_core  # noqa: F401
             import mssql_python  # noqa: F401

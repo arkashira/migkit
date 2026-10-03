@@ -445,3 +445,25 @@ def test_doctor_asks_with_the_licence_and_where_to_read_it(monkeypatch):
     assert "Competitive" in text or "overlaps" in text
     # never yes by default
     assert asked == [("  accept the terms of riotx?", False)]
+
+
+def test_the_sql_server_bulk_driver_waits_for_its_terms():
+    """SQL Server's bulk-load driver brings Microsoft's ODBC driver, which
+    is not open source: not a base dependency, installed only once its
+    terms are accepted, and a target written by statements without it."""
+    deps = " ".join(_requirements())
+    assert "mssql-python" not in deps
+    extras = tomllib.loads((ROOT / "pyproject.toml").read_text())[
+        "project"]["optional-dependencies"]
+    assert any("mssql-python" in d for d in extras["mssql-bulk"])
+    assert tools.MSSQL_BULK in tools.TERMS
+    assert tools.PROGRAM_LICENCES[tools.MSSQL_BULK] not in \
+        tools.OPEN_LICENCES
+    assert "statements" in tools.TERMS[tools.MSSQL_BULK].otherwise
+
+
+def test_without_its_driver_the_bulk_load_says_how_to_get_it(monkeypatch):
+    from migkit.engines.mssql import MSSQLEngine
+    monkeypatch.setattr(tools, "driver_present", lambda name: False)
+    why = MSSQLEngine._bulk_unusable()
+    assert why and "terms are accepted" in why
