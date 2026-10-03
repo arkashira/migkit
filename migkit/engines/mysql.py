@@ -2124,8 +2124,11 @@ class MySQLEngine(Engine):
             raise SystemExit("the MySQL client is not installed on this"
                              " machine: migkit doctor --install")
         pdb = physical or self._d(side, db)
+        # a view the hop leaves out goes with the tables: the dump's table
+        # switch takes views too
         left = [f"--ignore-table={pdb}.{t}"
-                for t in sorted(self._left_out_of_schema(db, side))]
+                for t in sorted(self._left_out_of_schema(db, side)
+                                | self._objects_not_taken(side, db))]
         # the password in the environment: on the command line every
         # process listing on the machine could read it
         p = run(["mysqldump", "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
@@ -2150,7 +2153,7 @@ class MySQLEngine(Engine):
         those whose columns the hop maps, which the pair machinery compares
         through the mapping (`_mapped_schema`)."""
         out = {t for t in self._all_tables(side, db)
-               if self.hop.excluded(db, t)}
+               if not self.in_scope(db, t)}
         for t in self.mapped_tables(db):
             leaf = t.rpartition(".")[2]
             out.add(self.hop.target_table(db, leaf).rpartition(".")[2]
@@ -2194,24 +2197,32 @@ class MySQLEngine(Engine):
         # these tables out, so its reading is no authority over them
         return self._atlas_authoritative(res) + self._mapped_schema(db)
 
+    #: each kind of object with the name that decides whether the hop
+    #: takes it: a table, view, routine or event its own (an object named
+    #: in `include` or `exclude`), a trigger or an index its table's
+    OBJECT_QUERIES = {
+        "table": "select table_name, table_name from information_schema.tables"
+                 " where table_schema=%s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')",
+        "view": "select table_name, table_name from information_schema.tables"
+                " where table_schema=%s and table_type='VIEW'",
+        "function": "select routine_name, routine_name"
+                    " from information_schema.routines"
+                    " where routine_schema=%s and routine_type='FUNCTION'",
+        "procedure": "select routine_name, routine_name"
+                     " from information_schema.routines"
+                     " where routine_schema=%s and routine_type='PROCEDURE'",
+        "trigger": "select trigger_name, event_object_table"
+                   " from information_schema.triggers"
+                   " where trigger_schema=%s",
+        "event": "select event_name, event_name from information_schema.events"
+                 " where event_schema=%s",
+        "index": "select concat(table_name, '.', index_name), table_name"
+                 " from information_schema.statistics"
+                 " where table_schema=%s group by table_name, index_name",
+    }
+
     def check_objects(self, db):
-        queries = {
-            "table": "select table_name from information_schema.tables"
-                     " where table_schema=%s and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')",
-            "view": "select table_name from information_schema.tables"
-                    " where table_schema=%s and table_type='VIEW'",
-            "function": "select routine_name from information_schema.routines"
-                        " where routine_schema=%s and routine_type='FUNCTION'",
-            "procedure": "select routine_name from information_schema.routines"
-                         " where routine_schema=%s and routine_type='PROCEDURE'",
-            "trigger": "select trigger_name from information_schema.triggers"
-                       " where trigger_schema=%s",
-            "event": "select event_name from information_schema.events"
-                     " where event_schema=%s",
-            "index": "select concat(table_name, '.', index_name)"
-                     " from information_schema.statistics"
-                     " where table_schema=%s group by table_name, index_name",
-        }
+        queries = self.OBJECT_QUERIES
         inv = {}
         # a mapped table's indexes are over the columns the mapping names
         left = {side: self._left_out_of_schema(db, side)
@@ -2222,20 +2233,23 @@ class MySQLEngine(Engine):
         working = {side: drift.transient_among(self._all_tables(side, db))
                    for side in ("src", "dst")}
 
-        def kept(side, typ, name):
-            name = str(name)
+        def kept(side, typ, name, by):
+            name, by = str(name), str(by)
+            # what the hop leaves out is the target's own: an `exclude`d
+            # table on the target alone was "table extra" every check
+            if not self.in_scope(db, by):
+                return False
             if typ == "trigger":
                 return not drift.transient_trigger(name)
             if typ == "table":
                 return name not in working[side]
-            table = name.split(".", 1)[0]
-            return not (typ == "index" and (table in left[side]
-                                            or table in working[side]))
+            return not (typ == "index" and (by in left[side]
+                                            or by in working[side]))
         for typ, sql in queries.items():
             a = {r[0] for r in self._q("src", sql, (db,))
-                 if kept("src", typ, r[0])}
+                 if kept("src", typ, r[0], r[1])}
             b = {r[0] for r in self._q("dst", sql, (self._d("dst", db),))
-                 if kept("dst", typ, r[0])}
+                 if kept("dst", typ, r[0], r[1])}
             inv[typ] = {"src": len(a), "dst": len(b),
                         "missing": sorted(a - b)[:50],
                         "extra": sorted(b - a)[:50]}
@@ -2280,11 +2294,29 @@ class MySQLEngine(Engine):
                 f"@{t.host}:{t.port}/{self._d('dst', db)}")
 
     def _schema_excludes(self, db):
-        """What the schema comparison leaves out: migkit's own table, and
-        the tables the pair compares through the mapping."""
+        """What the schema comparison leaves out: migkit's own table, the
+        tables the pair compares through the mapping, and the tables,
+        views, routines and events the hop leaves out - the fix made them
+        on the target."""
         return ["migkit_changelog"] + [
             name for side in ("src", "dst")
-            for name in sorted(self._left_out_of_schema(db, side))]
+            for name in sorted(self._left_out_of_schema(db, side)
+                               | self._objects_not_taken(side, db))]
+
+    def _objects_not_taken(self, side, db):
+        """The views, routines and events on a side the hop leaves out, by
+        name (`OBJECT_QUERIES`, `in_scope`): what the schema comparers and
+        the schema fix leave out beside the tables. Nothing for a hop that
+        takes everything, which is read as it always was."""
+        from ..config import scoped
+        if not scoped(self.hop):
+            return set()
+        got = set()
+        for typ in ("view", "function", "procedure", "event"):
+            got |= {str(n) for n, by in self._q(
+                        side, self.OBJECT_QUERIES[typ], (self._d(side, db),))
+                    if not self.in_scope(db, str(by))}
+        return got
 
     def _atlas(self, db):
         from ..movers import schema_diff
@@ -2355,8 +2387,7 @@ class MySQLEngine(Engine):
         from .. import drift
         got = self._all_tables(side, db)
         working = drift.transient_among(got)
-        return [t for t in got
-                if t not in working and not self.hop.excluded(db, t)]
+        return [t for t in got if t not in working and self.in_scope(db, t)]
 
     #: a primary key's columns, only the ones the table shows: MariaDB adds
     #: a system-versioned table's hidden `row_end` to its key, and a check
@@ -3280,13 +3311,13 @@ class MySQLEngine(Engine):
         """
         ddb = self._d("dst", db)
         try:
-            cols = [(r[0], r[1]) for r in self._q(
+            cols = [(r[0], r[1]) for r in self._scoped_rows(db, self._q(
                 "src", "select table_name, column_name"
                        " from information_schema.columns"
                        " where table_schema = %s and data_type in ("
                        + ", ".join(["%s"] * len(self.LOB_TYPES)) + ")"
                        " order by table_name, column_name",
-                       (db, *self.LOB_TYPES))]
+                       (db, *self.LOB_TYPES)))]
             limit = int(self._q("dst", "select @@max_allowed_packet")[0][0])
         except Exception as e:
             return Result("deep", f"{db} lobs", "error",
@@ -3674,7 +3705,8 @@ class MySQLEngine(Engine):
         try:
             cols = {}
             place = ",".join(["%s"] * len(self.TEXT_TYPES))
-            for t, c in self._q("src",
+            for t, c in self._scoped_rows(db, self._q(
+                                "src",
                                 "select c.table_name, c.column_name"
                                 " from information_schema.columns c"
                                 " join information_schema.tables t"
@@ -3685,7 +3717,7 @@ class MySQLEngine(Engine):
                                 " and c.table_name not like 'migkit%%'"
                                 f" and c.data_type in ({place})"
                                 " order by 1, 2",
-                                (db,) + self.TEXT_TYPES):
+                                (db,) + self.TEXT_TYPES)):
                 cols.setdefault(t, []).append(c)
             for table, columns in sorted(cols.items()):
                 quoted = ["`" + c.replace("`", "``") + "`" for c in columns]
@@ -3736,7 +3768,7 @@ class MySQLEngine(Engine):
                                    f" and c.data_type in ({place})"
                                    " order by 1, 2",
                             (ddb,) + self.TEXT_TYPES):
-            if not self.hop.excluded(db, str(t)):
+            if self.in_scope(db, str(t)):
                 cols.setdefault(str(t), []).append(str(c))
         stmts, undo, touched, refused = [], [], set(), []
         repaired = clean = skipped = left = 0
@@ -4272,7 +4304,7 @@ class MySQLEngine(Engine):
         # no pk/unique = CDC drops its updates/deletes and it can't be verified
         # or repaired by key (the same trap postgres has, without the InnoDB
         # guardrails). Check the source tables that are about to be migrated.
-        nopk = [r[0] for r in self._q("src",
+        nopk = [r[0] for r in self._scoped_rows(db, self._q("src",
                 "select t.table_name from information_schema.tables t"
                 " where t.table_schema=%s and t.table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
                 " and t.table_name not like 'migkit%%'"
@@ -4280,7 +4312,7 @@ class MySQLEngine(Engine):
                 " information_schema.table_constraints tc"
                 " where tc.table_schema=t.table_schema"
                 " and tc.table_name=t.table_name"
-                " and tc.constraint_type in ('PRIMARY KEY','UNIQUE'))", (db,))]
+                " and tc.constraint_type in ('PRIMARY KEY','UNIQUE'))", (db,)))]
         if nopk:
             # a keyless table's change is applied on a replica by reading
             # the table for the row: MySQL's hash scan keys on the whole
@@ -4314,14 +4346,18 @@ class MySQLEngine(Engine):
 
         res.append(self._fk_orphans(db))
 
-        colq = ("select concat(table_name, '.', column_name), column_type,"
+        # each row after the table it is on, which decides its scope
+        colq = ("select table_name, concat(table_name, '.', column_name),"
+                " column_type,"
                 " is_nullable, coalesce(column_default, ''),"
                 " coalesce(character_set_name, ''),"
                 " coalesce(collation_name, ''), extra"
                 " from information_schema.columns where table_schema=%s"
-                " and table_name not like 'migkit%%' order by 1")
-        sc = {r[0]: r[1:] for r in self._q("src", colq, (db,))}
-        dc = {r[0]: r[1:] for r in self._q("dst", colq, (ddb,))}
+                " and table_name not like 'migkit%%' order by 2")
+        sc = {r[1]: r[2:] for r in
+              self._scoped_rows(db, self._q("src", colq, (db,)))}
+        dc = {r[1]: r[2:] for r in
+              self._scoped_rows(db, self._q("dst", colq, (ddb,)))}
         drift = [f"{k}: src={sc[k]} dst={dc[k]}" for k in sorted(sc)
                  if k in dc and sc[k] != dc[k]]
         if drift:
@@ -4344,11 +4380,13 @@ class MySQLEngine(Engine):
         # The reasoning is the one every engine's deep check asks
         # (`verdict.narrowing`), over the declared types read here.
         from .. import verdict
-        nq = ("select concat(table_name,'.',column_name), column_type"
-              " from information_schema.columns"
+        nq = ("select table_name, concat(table_name,'.',column_name),"
+              " column_type from information_schema.columns"
               " where table_schema=%s and table_name not like 'migkit%%'")
-        scn = dict(self._q("src", nq, (db,)))
-        dcn = dict(self._q("dst", nq, (ddb,)))
+        scn = {r[1]: r[2] for r in
+               self._scoped_rows(db, self._q("src", nq, (db,)))}
+        dcn = {r[1]: r[2] for r in
+               self._scoped_rows(db, self._q("dst", nq, (ddb,)))}
         narrow = []
         for k in sorted(scn):
             if k not in dcn:
@@ -4363,11 +4401,11 @@ class MySQLEngine(Engine):
         # conversion bug (mover applied a non-UTC session), not row corruption.
         # Both sides read with time_zone pinned to +00:00, so a faithful copy
         # compares as delta 0 and a systematic shift shows the same delta.
-        tcols = self._q("src",
-                        "select table_name, column_name"
-                        " from information_schema.columns where table_schema=%s"
-                        " and data_type in ('datetime','timestamp')"
-                        " and table_name not like 'migkit%%'", (db,))
+        tcols = self._scoped_rows(db, self._q(
+            "src", "select table_name, column_name"
+                   " from information_schema.columns where table_schema=%s"
+                   " and data_type in ('datetime','timestamp')"
+                   " and table_name not like 'migkit%%'", (db,)))
         shifts = []
         for t, col in tcols[:10]:
             pk = self._pk_cols(db, t)
@@ -4395,8 +4433,10 @@ class MySQLEngine(Engine):
                " from information_schema.columns where table_schema=%s"
                " and character_set_name is not null"
                " and table_name not like 'migkit%%'")
-        scs = {(r[0], r[1]): r[2] for r in self._q("src", csq, (db,))}
-        dcs = {(r[0], r[1]): r[2] for r in self._q("dst", csq, (ddb,))}
+        scs = {(r[0], r[1]): r[2] for r in self._scoped_rows(
+            db, self._q("src", csq, (db,)))}
+        dcs = {(r[0], r[1]): r[2] for r in self._scoped_rows(
+            db, self._q("dst", csq, (ddb,)))}
         WIDTH = {"utf8mb4": 4, "utf8mb3": 3, "utf8": 3, "latin1": 1,
                  "latin2": 1, "ascii": 1}
         csbad = []
@@ -4407,12 +4447,12 @@ class MySQLEngine(Engine):
                 if WIDTH.get(d2, 9) < WIDTH.get(s2, 0):
                     note += " (DOWNGRADE, drops/truncates multibyte chars)"
                 csbad.append(note)
-        tcols = self._q("src",
-                        "select distinct table_name, column_name"
-                        " from information_schema.columns where table_schema=%s"
-                        " and data_type in ('char','varchar','text','tinytext',"
-                        "'mediumtext','longtext') and table_name not like"
-                        " 'migkit%%'", (db,))
+        tcols = self._scoped_rows(db, self._q(
+            "src", "select distinct table_name, column_name"
+                   " from information_schema.columns where table_schema=%s"
+                   " and data_type in ('char','varchar','text','tinytext',"
+                   "'mediumtext','longtext') and table_name not like"
+                   " 'migkit%%'", (db,)))
         for t, col in tcols[:30]:
             q = ("select coalesce(sum(char_length(convert(`{c}` using utf8mb4))"
                  " - char_length(replace(convert(`{c}` using utf8mb4),"
@@ -4447,8 +4487,10 @@ class MySQLEngine(Engine):
                 " from information_schema.columns where table_schema=%s"
                 " and generation_expression <> '' and generation_expression"
                 " is not null and table_name not like 'migkit%%'")
-        sg = {(r[0], r[1]): (r[2], r[3]) for r in self._q("src", genq, (db,))}
-        dg = {(r[0], r[1]): (r[2], r[3]) for r in self._q("dst", genq, (ddb,))}
+        sg = {(r[0], r[1]): (r[2], r[3]) for r in self._scoped_rows(
+            db, self._q("src", genq, (db,)))}
+        dg = {(r[0], r[1]): (r[2], r[3]) for r in self._scoped_rows(
+            db, self._q("dst", genq, (ddb,)))}
 
         def _n(e):
             return re.sub(r"\s+", "", e).lower()
@@ -4500,8 +4542,10 @@ class MySQLEngine(Engine):
                "  in ('PRIMARY KEY','UNIQUE')"
                "  and c.data_type in ('char','varchar','text')"
                "  and c.collation_name is not null")
-        su = {(r[0], r[1]): r[2] for r in self._q("src", uqq, (db,))}
-        dcu = {(r[0], r[1]): r[2] for r in self._q("dst", uqq, (ddb,))}
+        su = {(r[0], r[1]): r[2] for r in self._scoped_rows(
+            db, self._q("src", uqq, (db,)))}
+        dcu = {(r[0], r[1]): r[2] for r in self._scoped_rows(
+            db, self._q("dst", uqq, (ddb,)))}
         cbad = []
         for k, scoll in sorted(su.items()):
             dcoll = dcu.get(k)
@@ -4541,7 +4585,7 @@ class MySQLEngine(Engine):
                " and k2.table_name = k.table_name"
                " and k2.constraint_name='PRIMARY')"
                " order by 1")
-        spk = self._q("src", pkq, (db,))
+        spk = self._scoped_rows(db, self._q("src", pkq, (db,)))
         dpk = {r[0] for r in self._q("dst", pkq, (ddb,))}
         both = [(t, c) for t, c in spk if t in dpk]
 
@@ -4770,10 +4814,13 @@ class MySQLEngine(Engine):
                 got["digest"] = None if dig is None else str(dig)
         return out
 
-    OWNED = (("views", "table_schema", "table_name"),
-             ("routines", "routine_schema", "routine_name"),
-             ("triggers", "trigger_schema", "trigger_name"),
-             ("events", "event_schema", "event_name"))
+    #: each kind with its schema and name, and the name that decides
+    #: whether the hop takes it - a trigger its table's
+    OWNED = (("views", "table_schema", "table_name", "table_name"),
+             ("routines", "routine_schema", "routine_name", "routine_name"),
+             ("triggers", "trigger_schema", "trigger_name",
+              "event_object_table"),
+             ("events", "event_schema", "event_name", "event_name"))
 
     def _deep_ownership(self, db, ddb):
         """DEFINER and SQL SECURITY drift, which the schema diff cannot see.
@@ -4789,16 +4836,16 @@ class MySQLEngine(Engine):
         """
         from .. import ownership as _own
         rows = []
-        for table, sch_col, name_col in self.OWNED:
+        for table, sch_col, name_col, by_col in self.OWNED:
             has_sec = table in ("views", "routines")
             sec = ", security_type" if has_sec else ""
-            q = (f"select {name_col}, definer{sec} from information_schema."
-                 f"{table} where {sch_col} = %s")
+            q = (f"select {by_col}, {name_col}, definer{sec} from"
+                 f" information_schema.{table} where {sch_col} = %s")
             try:
-                a = {r[0]: "/".join(str(x) for x in r[1:])
-                     for r in self._q("src", q, (db,))}
-                b = {r[0]: "/".join(str(x) for x in r[1:])
-                     for r in self._q("dst", q, (ddb,))}
+                a = {r[1]: "/".join(str(x) for x in r[2:])
+                     for r in self._scoped_rows(db, self._q("src", q, (db,)))}
+                b = {r[1]: "/".join(str(x) for x in r[2:])
+                     for r in self._scoped_rows(db, self._q("dst", q, (ddb,)))}
             except Exception as e:
                 return [Result("deep", f"{db} ownership", "warn",
                                f"cannot read {table}: {str(e)[:90]} -"
@@ -4840,7 +4887,8 @@ class MySQLEngine(Engine):
              " where table_schema=%s and data_type in ("
              + ",".join(["%s"] * len(self.TEXTY)) + ")"
              " and table_name not like 'migkit%%' order by 1,2")
-        return self._q("src", q, (db,) + self.TEXTY)[:limit]
+        return self._scoped_rows(
+            db, self._q("src", q, (db,) + self.TEXTY))[:limit]
 
     def _deep_nullempty(self, db, ddb):
         """NULL and '' are different values that a mover happily swaps.
@@ -4882,7 +4930,8 @@ class MySQLEngine(Engine):
         q = ("select table_name, column_name from information_schema.columns"
              " where table_schema=%s and data_type in (%s, %s)"
              " and table_name not like 'migkit%%' order by 1,2")
-        cols = self._q("src", q, (db,) + self.FLOATY)[:30]
+        cols = self._scoped_rows(
+            db, self._q("src", q, (db,) + self.FLOATY))[:30]
         bad = []
         for tbl, col in cols:
             agg = (f"select count(`{col}`), coalesce(sum(`{col}`),0),"
@@ -4927,8 +4976,10 @@ class MySQLEngine(Engine):
              " where tc.constraint_schema=%s and tc.constraint_type='CHECK'"
              " and tc.table_name not like 'migkit%%'")
         try:
-            src = {(r[0], r[1]): (r[2], r[3]) for r in self._q("src", q, (db,))}
-            dst = {(r[0], r[1]): (r[2], r[3]) for r in self._q("dst", q, (ddb,))}
+            src = {(r[0], r[1]): (r[2], r[3]) for r in self._scoped_rows(
+                db, self._q("src", q, (db,)))}
+            dst = {(r[0], r[1]): (r[2], r[3]) for r in self._scoped_rows(
+                db, self._q("dst", q, (ddb,)))}
         except Exception as e:
             # MySQL 5.7 parses CHECK and discards it; there is no catalog to
             # read, and saying so is more use than a silent pass
@@ -4960,6 +5011,25 @@ class MySQLEngine(Engine):
         return [Result("deep", f"{db} checks", "ok",
                        f"{len(src)} CHECK constraints match{note}")]
 
+    def _grants_taken(self, db, grants):
+        """`_grants_for_db`'s {user: grants} without the grants on what the
+        hop leaves out, and the users left holding none: a grant on the
+        whole database stays, one on a table or its columns goes with the
+        table (`in_scope`). The check and the repair read through it, so
+        neither compares nor replays a grant on a table that is the
+        target's own."""
+        def taken(grant):
+            got = re.search(r"\sON\s+(?:(?:TABLE|FUNCTION|PROCEDURE)\s+)?"
+                            r"<db>\s*\.\s*(\S+)", grant, re.I)
+            return not got or got.group(1) == "*" \
+                or self.in_scope(db, got.group(1))
+        out = {}
+        for who, privs in grants.items():
+            kept = {g for g in privs if taken(g)}
+            if kept:
+                out[who] = kept
+        return out
+
     # privileges live in the grant tables, not in the schema, so neither a
     # dump/restore nor a CDC stream carries them: the data arrives and the
     # permissions do not. The symptom is an app that connects fine and then
@@ -4968,6 +5038,7 @@ class MySQLEngine(Engine):
         ddb = self._d("dst", db)
         src, serr = self._grants_for_db("src", db)
         dst, derr = self._grants_for_db("dst", ddb)
+        src, dst = self._grants_taken(db, src), self._grants_taken(db, dst)
         # an account that cannot read the grant tables must say so - reporting
         # a match nobody was able to look at is worse than reporting nothing.
         # warn, not skip: skip counts as ok everywhere downstream, so an
@@ -5112,12 +5183,15 @@ class MySQLEngine(Engine):
 
     def _events(self, side, db):
         """{event: (time_zone, sql_mode, CREATE EVENT)} as the server shows
-        each one."""
+        each one, of the events the hop takes (`in_scope`): the repair
+        made every source event on the target, one the hop leaves out too."""
         name = self._d(side, db)
         out = {}
         for (ev,) in self._q(side, "select event_name from"
                                    " information_schema.events where"
                                    " event_schema = %s", (name,)):
+            if not self.in_scope(db, str(ev)):
+                continue
             row = self._q(side, f"show create event {self._my_ident(name)}"
                                 f".{self._my_ident(ev)}")[0]
             # Event, sql_mode, time_zone, Create Event, ...
@@ -5207,10 +5281,11 @@ class MySQLEngine(Engine):
              " where tc.constraint_schema=%s and tc.constraint_type='CHECK'"
              " and tc.table_name not like 'migkit%%'")
         try:
+            # a table the hop leaves out is the target's own, its checks too
             src = {(r[0], r[1]): str(r[2]).upper()
-                   for r in self._q("src", q, (db,))}
+                   for r in self._scoped_rows(db, self._q("src", q, (db,)))}
             dst = {(r[0], r[1]): str(r[2]).upper()
-                   for r in self._q("dst", q, (ddb,))}
+                   for r in self._scoped_rows(db, self._q("dst", q, (ddb,)))}
         except Exception:
             # MySQL 5.7 parses CHECK and discards it - no catalog to read
             return None
@@ -5244,6 +5319,7 @@ class MySQLEngine(Engine):
         dst, derr = self._grants_for_db("dst", ddb)
         if serr or derr:
             return None
+        src, dst = self._grants_taken(db, src), self._grants_taken(db, dst)
         raw = getattr(self, "_grant_raw", {}).get("src", {})
         # an account that exists on the target holding nothing on this
         # database is exactly the case worth repairing, and `dst` only lists
@@ -5355,6 +5431,12 @@ class MySQLEngine(Engine):
                                for f in d.glob("data-*.extra")}
                             | {f.name.split(".")[0][len("data-"):]
                                for f in d.glob("data-*.changed")})
+            # a drilldown of a table the hop has since left out is said,
+            # never acted on: a check run before `exclude: [audit_log]`
+            # left one, and the resync deleted the target's own rows
+            tables, said = self._drills_in_scope(db, tables)
+            if said:
+                actions.append(said)
             for t in tables:
                 counts = []
                 for k in ("missing", "extra", "changed"):

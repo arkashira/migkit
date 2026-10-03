@@ -137,6 +137,19 @@ class HeteroEngine(Engine):
     def databases(self):
         return self.src_engine.databases()
 
+    def in_scope(self, db, table):
+        """A table as the pair names it - the source's name, or the leaf
+        its drilldown is filed under (`_leaf`) - taken where the source's
+        own listing, which reads the hop's scope, holds it: `orders` read
+        as itself missed an `include` of `appdb.public.orders`. A hop that
+        leaves nothing out reads every table, as it always did."""
+        from ..config import scoped
+        if not scoped(self.hop):
+            return super().in_scope(db, table)
+        name = str(table)
+        return any(name in (t, self._leaf(t))
+                   for t in self.src_engine.neutral_tables("src", db))
+
     # ---- comparing, for any pair ---------------------------------------
 
     @staticmethod

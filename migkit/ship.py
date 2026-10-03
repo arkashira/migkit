@@ -2185,6 +2185,7 @@ def _delta_by_the_leaves(w):
     drilldown, leaf by leaf, and copied by the repair - then checked
     again. Behind the hop's approvals for a repair."""
     from . import approvals
+    from .engines.base import LEFT_OUT
     eng, db = w.eng, w.db
     approvals.require(w.hop, "repair", db, w.log)
     differ = [r for r in eng.check_data(db) if r.status == "diff"]
@@ -2195,6 +2196,9 @@ def _delta_by_the_leaves(w):
     w.log(f"{db}: {len(differ)} tables changed since the seed; copying"
           " what differs, leaf by leaf")
     for action in eng.repair_plan(db, "rows"):
+        if action.kind == LEFT_OUT:
+            w.log(f"{db}: {action.note}")
+            continue
         eng.apply(db, action)
     again = [r for r in eng.check_data(db) if r.status == "diff"]
     if again:

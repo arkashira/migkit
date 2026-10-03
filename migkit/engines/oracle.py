@@ -452,7 +452,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                       " and temporary = 'N' and table_name not like"
                       f" '{OWN_PREFIX}%' escape '\\' order by 1",
             (self._owner(side, db),)))
-            if not self.hop.excluded(db, t)]
+            if self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         return [(self._said(n), t) for n, t in self._rows(
@@ -1510,19 +1510,32 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         out = []
         owner = self._owner("dst", db)
         try:
-            invalid = self._rows("dst", db, "select object_type || ' ' ||"
-                                            " object_name from all_objects"
-                                            f" where owner = {MARK} and"
-                                            " status = 'INVALID' order by 1",
-                                 (owner,))
+            # each with the name that decides whether the hop takes it: a
+            # trigger's and an index's table, any other object its own
+            invalid = self._rows(
+                "dst", db, "select o.object_type || ' ' || o.object_name,"
+                           " coalesce((select t.table_name from all_triggers"
+                           " t where o.object_type = 'TRIGGER' and t.owner ="
+                           " o.owner and t.trigger_name = o.object_name),"
+                           " (select i.table_name from all_indexes i where"
+                           " o.object_type = 'INDEX' and i.owner = o.owner"
+                           " and i.index_name = o.object_name),"
+                           " o.object_name) from all_objects o where"
+                           f" o.owner = {MARK} and o.status = 'INVALID'"
+                           " order by 1", (owner,))
             loose = self._rows("dst", db, "select constraint_name || ' on '"
                                           " || table_name || ' (' || status"
-                                          " || ', ' || validated || ')' from"
+                                          " || ', ' || validated || ')',"
+                                          " table_name from"
                                           " all_constraints where owner ="
                                           f" {MARK} and (status ="
                                           " 'DISABLED' or validated ="
                                           " 'NOT VALIDATED') order by 1",
                                (owner,))
+            invalid = [r for r in invalid
+                       if self.in_scope(db, self._said(str(r[1])))]
+            loose = [r for r in loose
+                     if self.in_scope(db, self._said(str(r[1])))]
         except Exception as e:  # noqa: BLE001 - said, as the error
             return [Result("deep", f"{db} target objects", "error",
                            "could not read the target's objects:"

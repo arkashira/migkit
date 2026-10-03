@@ -552,6 +552,8 @@ class ClickHouseEngine(NeutralCopier, Engine):
                                   f"could not read the {who}'s mutations:"
                                   f" {str(e).splitlines()[0][:90]}"))
                 continue
+            # a table the hop leaves out is not the move's to settle
+            stuck = self._scoped_rows(db, stuck)
             if stuck:
                 failing = [r for r in stuck if r[2]]
                 out.append(Result(
