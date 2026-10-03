@@ -112,6 +112,13 @@ class RepairAction:
     table: str = ""
 
 
+#: the kind of a repair action that carries nothing out and only says
+#: what the repair leaves alone - a drilldown the last check left for a
+#: table the hop no longer takes (`Engine._drills_in_scope`). Printed with
+#: the plan, never applied
+LEFT_OUT = "left out"
+
+
 #: held while an engine draws its run's salt (`Engine.digest_salt`)
 _SALT_DRAWN = threading.Lock()
 
@@ -169,6 +176,37 @@ class Engine:
         schema, name = split_table(eng, str(table))
         return not self.hop.excluded(db, *([schema] if schema else []),
                                      name)
+
+    def _scoped_rows(self, db, rows, at=0):
+        """The rows of a catalogue listing whose `at`th value is a table
+        the hop takes (`in_scope`). Every deep check, inventory and repair
+        reads its tables through it, so none reads one the hop leaves out:
+        a keyless or drifted table the move never took made the deep check
+        say different, and a repair wrote into one (backlog P0-SCOPE.6b)."""
+        return [r for r in rows if self.in_scope(db, str(r[at]))]
+
+    def _drills_in_scope(self, db, tables, what="tables"):
+        """(the tables a row repair may act on, an action saying the rest
+        or None), of the tables the last check left a drilldown for.
+
+        The files are the last check's, and a check run before the hop
+        left a table out - an `exclude` added, an `include` narrowed -
+        left one for a table that is now the target's own: a repair read
+        from it deleted the rows the target keeps there. A table the hop
+        no longer takes is never acted on, and the plan says so
+        (`LEFT_OUT`)."""
+        tables = list(tables)
+        gone = sorted(t for t in tables if not self.in_scope(db, t))
+        if not gone:
+            return tables, None
+        left = set(gone)
+        return [t for t in tables if t not in left], RepairAction(
+            db, LEFT_OUT, [], [],
+            f"{len(gone)} {what} the last check found different are ones"
+            f" the hop no longer takes: {', '.join(gone[:5])}"
+            + (" ..." if len(gone) > 5 else "")
+            + " - left as the target has them; the check that named them"
+              " ran under another scope")
 
     def check_schema(self, db):
         raise NotImplementedError
@@ -1500,7 +1538,7 @@ class Engine:
         findings, scanned = [], 0
         try:
             for t in self.neutral_tables("src", db):
-                if self.hop.excluded(db, *str(t).split(".")):
+                if not self.in_scope(db, t):
                     continue
                 cols = [(n, "text") for n, typ in
                         self.neutral_columns("src", db, t)
@@ -2417,6 +2455,10 @@ class Engine:
         # name its rows: repaired by its spans or whole (`repairways`)
         for name in self._leaves_kept(db):
             tables.setdefault(name, {})
+        taken, said = self._drills_in_scope(db, tables)
+        if said:
+            actions.append(said)
+        tables = {name: tables[name] for name in taken}
         for name, found in sorted(tables.items()):
             if stream:
                 actions.append(self._resnapshot_action(db, name, found))

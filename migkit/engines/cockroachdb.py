@@ -430,15 +430,18 @@ class CockroachEngine(PgWireEngine):
         source the rangefeeds a follow needs."""
         out = []
         try:
-            bad = self._rows("dst", db, "select obj_name, error from"
-                                        " crdb_internal.invalid_objects")
+            bad = self._rows("dst", db, "select obj_name, error, schema_name"
+                                        " from crdb_internal.invalid_objects")
+            # an object the hop leaves out is the target's own
+            bad = [r for r in bad
+                   if self.in_scope(db, f"{r[2] or 'public'}.{r[0]}")]
         except Exception as e:  # noqa: BLE001 - said, as the error
             out.append(self._deep_error(db, "target", e))
         else:
             out.append(Result(
                 "deep", f"{db} target objects", "diff" if bad else "ok",
                 (f"{len(bad)} objects the cluster says are broken: "
-                 + ", ".join(str(n) for n, _ in bad[:4])) if bad
+                 + ", ".join(str(r[0]) for r in bad[:4])) if bad
                 else "every schema object whole", "",
                 "repair those objects before the target is used" if bad
                 else ""))
