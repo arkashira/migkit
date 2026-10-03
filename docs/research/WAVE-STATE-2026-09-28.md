@@ -247,7 +247,9 @@ Running (each on its own `worktree-agent-<id>` branch; I merge, run compileall a
 - a76b06af6ac782986 - W7 (resharding: split, merge, distribution-aware load)
 - a3d309a6543a96c68 - read-only target and writes held on every engine (BAR-3) - MERGED (unproved on servers: Db2 for i `SYSTABAUTH` columns, Teradata `LogonTime`, ClickHouse `ALTER USER ... SETTINGS`, Snowflake `SHOW LOCKS` order - the suite tells)
 - a2602d2c2bffb1f1b - AUD-G2 (the MySQL engine's connections, TLS, zone, keepalives, grants)
-- a36a1e64cac22cbfd - P0-PARITY.matrix and .guard (the depth matrix read off the code, each cell proved by a test on its engine or declared, the red guard; STATE.md shows it)
+- a36a1e64cac22cbfd - P0-PARITY.matrix and .guard - MERGED `269e6ab` (3,096 cells: 435 proved, 252 untested owed, 869 not applicable, 1,540 not yet)
+- aaac6750508afe865 - parity C1: Snowflake, Redshift, BigQuery, Db2, Db2 for i, Db2 for z/OS, ASE, Teradata - every not-yet and untested cell
+- next parity families once their engines are free of other agents: C2 TiDB, CockroachDB, DSQL, generic (after engine reach); C3 MongoDB, Couchbase, Cosmos DB, DynamoDB, Cassandra, Redis; C4 Kafka, Kinesis, Pub/Sub, Iceberg, Delta, Parquet, DuckDB, SQLite, ClickHouse, OpenSearch, copybook, SaaS, SAP; C5 PostgreSQL, MySQL, SQL Server, Oracle, the pair (after scope 7, W6, AUD-G2)
 - a83dabd5f6b0ea12e - P0-SCOPE 7 and 8 wired (transforms as the one masking language on every engine, the row filter's translations and zone, objects beyond PostgreSQL/MySQL, name collisions, narrower check incomplete, partitions on the check side, scope-change log, 6d's leftovers)
 
 Next waves, in order, as agents free up:
