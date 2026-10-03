@@ -179,7 +179,7 @@ their own names, and `LADDER.table` (a WAVE queue item).
 | 98 | MSSQL-x86 | SQL Server at full depth on a real server: T-SQL paths run, CDC proper, Agent jobs, row-level security (item 27) | BLOCKED (full SQL Server is x86-only; the x86 CI workflow is merged in fed3f89 and runs once pushed) | L | engines | L753-759, L2552-2553, L2682-2689, L5382-5383, L5656-5658, L6528-6533 |
 | 99 | AUD.part | Every partition held to its own count and digest (PostgreSQL, MySQL); A5 | DONE 659b54f | M | verify | L2704-2721 |
 | 100 | AUD.slot | Slot made with its snapshot; MySQL position taken after commits in flight; property-tested | DONE 659b54f | M | change follow | L2722-2752 |
-| 101 | AUD.slot.process | MySQL `copy_point` waits nothing without PROCESS | OPEN | S | change follow | L2753-2754 |
+| 101 | AUD.slot.process | MySQL `copy_point` waits nothing without PROCESS | DONE 2026-10-04 (`MySQLEngine.sees_every_session`: an account that sees only its own session is refused before the copy, saying `grant process`; the DBA's script asks for it - `sourcechange` `process_grant`) | S | change follow | L2753-2754 |
 | 102 | AUD.slot.more | MongoDB resume token and MariaDB/Percona snapshot position measured the same way | OPEN | S | change follow | L2754-2755 |
 | 103 | AUD.shift | Uniform time shift and type narrowing reasoned in one place, both engines | DONE 659b54f | S | types | L2756-2770 |
 | 104 | AUD.osc | Online-rewrite working tables left out everywhere | DONE 659b54f | S | move | L2771-2781 |

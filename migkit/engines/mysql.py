@@ -1995,8 +1995,20 @@ class MySQLEngine(Engine):
         out of sight. A thread seen committing again later is committing a
         later transaction, whose events are after the position; waiting
         for it costs only the wait. Without `PROCESS` the server shows only
-        this session's threads, and nothing is waited for.
+        this session's threads: nothing was waited for, and a copy read
+        then could miss a commit the tail starts after - so that is
+        refused, saying what to grant (`sees_every_session`).
         """
+        if not self.sees_every_session(side):
+            raise SystemExit(
+                "the source's account cannot see the other sessions"
+                " (PROCESS), so which commits are under way when the copy"
+                " starts cannot be read, and a commit written to the binary"
+                " log before the copy's position but not yet visible would"
+                " be in neither the copy nor the tail. Grant it - `grant"
+                " process on *.* to <the account>;` - or use a server that"
+                " says its snapshot's binary log position (MariaDB,"
+                " Percona). Nothing was copied")
         q = ("select id from information_schema.processlist"
              " where id <> connection_id()"
              " and lower(coalesce(state, '')) like '%commit%'")
@@ -2014,6 +2026,23 @@ class MySQLEngine(Engine):
                     " are through.")
             if first:
                 time.sleep(0.05)
+
+    def sees_every_session(self, side):
+        """Whether this account sees every client session in the process
+        list - `PROCESS`, or a server where it is the only one: the
+        sessions it lists against the server's own count of connections
+        (`Threads_connected`, which needs no privilege). Asked a few times,
+        as a session may connect between the two reads."""
+        for _ in range(3):
+            seen = int(self._q(side, "select count(*) from"
+                                     " information_schema.processlist")[0][0])
+            rows = self._q(side, "show global status like"
+                                 " 'Threads\\_connected'")
+            connected = int(rows[0][1]) if rows else 0
+            if seen >= connected:
+                return True
+            time.sleep(0.05)
+        return False
 
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
