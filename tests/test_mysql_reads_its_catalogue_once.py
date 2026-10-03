@@ -15,6 +15,9 @@ from migkit.engines.mysql import MySQLEngine, default_shown
 from tests import servers
 from tests.conftest import needs_docker
 
+#: what this module proves, item by engine (`capabilities.proofs`)
+PROVES = [("verify.structure.columns", "mysql")]
+
 pair = servers.fixture("mysql")
 
 SHAPES = """
@@ -122,6 +125,76 @@ def test_two_servers_spelling_one_schema_two_ways_compare_alike():
                                                  " zerofill")]})
     assert eng._comparable_shape(widened).columns["t"][0] != \
         b.columns["t"][0]
+
+
+def test_the_deep_column_check_compares_the_catalogue_in_one_spelling(
+        tmp_path, monkeypatch):
+    """A 5.7 or MariaDB source and an 8.0 target of one schema read
+    alike column by column; a column the target narrows, holds NOT NULL
+    or collates otherwise is named, with its narrowing - from the one
+    catalogue, never a second reading of the columns in their raw text."""
+    from migkit.catalog import Catalog, Column
+    from migkit.config import Endpoint, Hop
+    hop = Hop(name="c", engine="mysql", source=Endpoint(), target=Endpoint(),
+              databases=["app"])
+    hop.report_dir = lambda d=None: tmp_path
+    eng = MySQLEngine(hop)
+
+    def table(width, null, coll, display=""):
+        return [Column("id", f"int{display}", "", False, None, None,
+                       "auto_increment"),
+                Column("v", f"varchar({width})", "", null, "'x'", coll, ""),
+                Column("n", "decimal(12,2)", "", True, None, None, "")]
+    shapes = {"src": Catalog(columns={
+        "t": table(40, True, "utf8_general_ci", "(11)"),
+        "only_src": [Column("id", "int")]}),
+        "dst": Catalog(columns={"t": table(40, True, "utf8mb3_general_ci")})}
+    monkeypatch.setattr(MySQLEngine, "shape_catalog",
+                        lambda self, side, db: shapes[side])
+    monkeypatch.setattr(MySQLEngine, "_q", lambda *a, **k: pytest.fail(
+        "the columns read again"))
+    cols, narrow = eng._deep_column_definitions("app")
+    assert cols.scope == "app columns" and narrow.scope == "app narrowing"
+    assert cols.status == "ok", cols.detail
+    assert "3 columns of 1 tables" in cols.detail, cols.detail
+    assert narrow.status == "ok", narrow.detail
+    shapes["dst"] = Catalog(columns={"t": table(20, False, "utf8mb4_bin")})
+    cols, narrow = eng._deep_column_definitions("app")
+    assert cols.status == "diff", cols.detail
+    said = (tmp_path / "deep-columns.diff").read_text()
+    for part in ("t: column v now NOT NULL",
+                 "t: column v collation utf8mb3_general_ci -> utf8mb4_bin"):
+        assert part in said, said
+    assert narrow.status == "diff" and "t.v" in narrow.detail, narrow.detail
+    # the same again: the file of what differed goes with it
+    shapes["dst"] = shapes["src"]
+    assert eng._deep_column_definitions("app")[0].status == "ok"
+    assert not (tmp_path / "deep-columns.diff").exists()
+
+
+def test_the_texts_difference_stands_where_an_object_differs():
+    """The schema-aware reading inspects tables, not a trigger's, a
+    view's or a routine's body: the text's difference is made cosmetic
+    only where the whole tables and the objects' definitions are the same
+    too (audit 2026-10-01, SC16)."""
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.base import Result
+    eng = MySQLEngine(Hop(name="a", engine="mysql", source=Endpoint(),
+                          target=Endpoint()))
+
+    def said(tables, objects):
+        return eng._atlas_authoritative([
+            Result("schema", "db", "diff", "3 changed lines"),
+            Result("schema", "db tables", tables, ""),
+            Result("schema", "db objects", objects, ""),
+            Result("schema", "db (fix DDL)", "ok", "schemas match")])
+    assert said("ok", "diff")[0].status == "diff"
+    assert said("diff", "ok")[0].status == "diff"
+    got = said("ok", "ok")
+    assert got[0].status == "ok" and "cosmetic" in got[0].detail
+    # the readings that compare objects are never made cosmetic
+    assert [r.status for r in said("diff", "diff")[1:3]] == ["diff",
+                                                             "diff"]
 
 
 # ---- on a server -----------------------------------------------------------

@@ -47,7 +47,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1489, test owed 265, yes 455. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1489, test owed 264, yes 456. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -73,7 +73,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | mongodb | 1/9 | 11/23 | 1/6 | 4/7 | 0/3 | 4/5 | 3/5 | 1/1 | 1/1 | 0/1 | 26/61 |
 | mssql | 4/10 | 12/35 | 1/6 | 0/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 29/81 |
-| mysql | 8/10 | 22/31 | 5/6 | 5/7 | 6/6 | 7/7 | 7/8 | 1/1 | 1/1 | 1/1 | 63/78 |
+| mysql | 8/10 | 23/31 | 5/6 | 5/7 | 6/6 | 7/7 | 7/8 | 1/1 | 1/1 | 1/1 | 64/78 |
 | opensearch | 0/9 | 3/26 | 1/6 | 2/7 | 1/4 | 3/6 | 4/6 | 1/1 | 1/1 | 0/1 | 16/67 |
 | oracle | 3/10 | 8/36 | 1/6 | 1/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 25/82 |
 | parquet | 0/7 | 0/15 | - | 0/4 | 1/2 | 3/6 | 1/1 | 0/1 | 0/1 | 0/1 | 5/38 |
@@ -109,7 +109,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.identity.sequence-parity | mssql mysql oracle postgres | - | ase bigquery cockroachdb db2 db2i db2zos dsql duckdb generic hetero redshift snowflake sqlite tidb | the rest (18) |
 | verify.movement.target-ahead | - | mongodb mssql mysql postgres | the rest (28) | kinesis pubsub saas sapodp |
 | verify.structure.collection-options | mongodb | - | the rest (28) | copybook kinesis parquet pubsub redis saas sapodp |
-| verify.structure.columns | mssql postgres | mysql | the rest (23) | cosmosdb couchbase dynamodb kafka kinesis mongodb pubsub redis saas sapodp |
+| verify.structure.columns | mssql mysql postgres | - | the rest (23) | cosmosdb couchbase dynamodb kafka kinesis mongodb pubsub redis saas sapodp |
 | verify.structure.deferrable | postgres | - | generic hetero oracle sqlite | the rest (31) |
 | verify.structure.extensions | postgres | - | generic hetero | the rest (33) |
 | verify.structure.foreign-keys | mssql mysql postgres | - | ase bigquery cockroachdb db2 db2i db2zos duckdb generic hetero oracle redshift snowflake sqlite teradata tidb | the rest (18) |

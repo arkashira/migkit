@@ -2880,6 +2880,12 @@ class MySQLEngine(Engine):
             others={t: [o.replace("`", "") if o.startswith("check ") else o
                         for o in got] for t, got in cat.others.items()})
 
+    #: the readings that compare the schema by its objects: every table
+    #: whole (`_check_tables`), and every view, routine, trigger and event
+    #: by its definition (`check_objects`) - the text's difference is
+    #: cosmetic only where both found nothing (`_atlas_authoritative`)
+    STRUCTURAL_SCOPES = (" tables", " objects")
+
     def _check_tables(self, db):
         """Every table compared whole on both sides by the one comparer
         (`catalog.Catalog.explain`), read in one pass a side
@@ -5367,56 +5373,7 @@ class MySQLEngine(Engine):
 
         res.append(self._fk_orphans(db))
 
-        # each row after the table it is on, which decides its scope
-        colq = ("select table_name, concat(table_name, '.', column_name),"
-                " column_type,"
-                " is_nullable, coalesce(column_default, ''),"
-                " coalesce(character_set_name, ''),"
-                " coalesce(collation_name, ''), extra"
-                " from information_schema.columns where table_schema=%s"
-                f" and table_name not in {OWN_SQL} order by 2")
-        sc = {r[1]: r[2:] for r in
-              self._scoped_rows(db, self._q("src", colq, (db,)))}
-        dc = {r[1]: r[2:] for r in
-              self._scoped_rows(db, self._q("dst", colq, (ddb,)))}
-        drift = [f"{k}: src={sc[k]} dst={dc[k]}" for k in sorted(sc)
-                 if k in dc and sc[k] != dc[k]]
-        if drift:
-            out = self.hop.report_dir(db) / "deep-columns.diff"
-            out.write_text("\n".join(drift) + "\n")
-            res.append(Result("deep", f"{db} columns", "diff",
-                              f"{len(drift)} columns drift (type/null/"
-                              f"default/charset): "
-                              + "; ".join(d.split(":")[0] for d in drift[:4]),
-                              str(out), "align target DDL, charset drift"
-                                        " corrupts comparisons and apps"))
-        else:
-            res.append(Result("deep", f"{db} columns", "ok",
-                              f"{len(sc)} columns compared, type/null/"
-                              "default/charset/collation identical"))
-
-        # narrowing = silent truncation/overflow: a target column shorter than
-        # the source (fewer chars, less decimal scale/precision, smaller int,
-        # or unsigned turned signed) quietly cuts or wraps values.
-        # The reasoning is the one every engine's deep check asks
-        # (`verdict.narrowing`), over the declared types read here.
-        from .. import verdict
-        nq = ("select table_name, concat(table_name,'.',column_name),"
-              " column_type from information_schema.columns"
-              f" where table_schema=%s and table_name not in {OWN_SQL}")
-        scn = {r[1]: r[2] for r in
-               self._scoped_rows(db, self._q("src", nq, (db,)))}
-        dcn = {r[1]: r[2] for r in
-               self._scoped_rows(db, self._q("dst", nq, (ddb,)))}
-        narrow = []
-        for k in sorted(scn):
-            if k not in dcn:
-                continue
-            why = verdict.narrowing("mysql", str(scn[k]).replace(
-                " zerofill", ""), str(dcn[k]).replace(" zerofill", ""))
-            if why:
-                narrow.append(f"{k}: {why}")
-        res.append(verdict.narrowing_result(db, narrow))
+        res += self._deep_column_definitions(db)
         res.append(self._deep_timeshift(db))
         res.append(self._deep_charset(db, ddb))
 
@@ -5970,6 +5927,60 @@ class MySQLEngine(Engine):
 
     TEXTY = ("char", "varchar", "text", "tinytext", "mediumtext", "longtext")
     FLOATY = ("float", "double")
+
+    def _deep_column_definitions(self, db):
+        """[`<db> columns`, `<db> narrowing`]. Columns: each column of the
+        tables the hop takes, on both sides, by its whole definition - type, null, default,
+        collation, auto-increment, on-update clock, generated expression,
+        its place - in one spelling for both servers (`_comparable_shape`)
+        and said by the one comparer (`catalog.Catalog.explain`), from the
+        catalogue read once a side. It read `information_schema.columns`
+        again and compared its raw text: a default MariaDB quotes (`'x'`,
+        `NULL`, `current_timestamp()`) and MySQL does not, or an integer's
+        display width from 5.7 to 8.0, read as drift on every such column
+        of a hop between them (audit 2026-10-01, SC14). Narrowing: a
+        target column shorter than the source's - fewer characters, less
+        scale or precision, a smaller integer, unsigned turned signed -
+        cuts or wraps values quietly; the reasoning every engine's deep
+        check asks (`verdict.narrowing`), over the same reading."""
+        from .. import durable, verdict
+        from ..catalog import Catalog
+        src = self._comparable_shape(self.shape_catalog("src", db))
+        dst = self._comparable_shape(self.shape_catalog("dst", db))
+        both = sorted(set(src.columns) & set(dst.columns))
+        drift = [f"{t}: {said}" for t in both
+                 for said in Catalog(columns={t: src.columns[t]}).explain(
+                     Catalog(columns={t: dst.columns[t]}), t,
+                     self.CANON_ENGINE, added="only on the target",
+                     dropped="missing on the target")]
+        narrow = []
+        for t in both:
+            theirs = {c.name: c for c in dst.columns[t]}
+            for c in src.columns[t]:
+                if c.name not in theirs:
+                    continue
+                why = verdict.narrowing(
+                    "mysql", c.declared.replace(" zerofill", ""),
+                    theirs[c.name].declared.replace(" zerofill", ""))
+                if why:
+                    narrow.append(f"{t}.{c.name}: {why}")
+        compared = sum(len(src.columns[t]) for t in both)
+        out = self.hop.report_dir(db) / "deep-columns.diff"
+        if drift:
+            durable.write_atomic(out, "\n".join(drift) + "\n")
+            tables = len({d.split(":")[0] for d in drift})
+            said = Result("deep", f"{db} columns", "diff",
+                          f"{len(drift)} column differences in {tables}"
+                          " tables: " + "; ".join(drift[:4]), str(out),
+                          "align target DDL, charset drift corrupts"
+                          " comparisons and apps")
+        else:
+            out.unlink(missing_ok=True)
+            said = Result("deep", f"{db} columns", "ok",
+                          f"{compared} columns of {len(both)} tables"
+                          " compared, type/null/default/collation/"
+                          "generation identical")
+        return [said, verdict.narrowing_result(db, narrow)]
 
     def _deep_scan(self, db, data_types, what, aggregates):
         """{(table, column): (source's aggregates, target's)} for every
@@ -9616,7 +9627,7 @@ class MySQLEngine(Engine):
             ]
         else:
             auto = "SOURCE_AUTO_POSITION = 1" if gtid_on else \
-                ((f"SOURCE_AUTO_POSITION = 0, " if exact else "")
+                (("SOURCE_AUTO_POSITION = 0, " if exact else "")
                  + f"SOURCE_LOG_FILE = {_ql(pos[0])},"
                  f" SOURCE_LOG_POS = {int(pos[1])}" if pos else "")
             dst_cmds = [

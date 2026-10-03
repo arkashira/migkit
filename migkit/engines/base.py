@@ -2366,6 +2366,12 @@ class Engine:
     #: (`LEGACY_AUTHORITY`) is read as it
     AUTHORITIES = ("schema-aware", "every-reading")
     LEGACY_AUTHORITY = "atlas"
+    #: the scopes of an engine's readings that compare its schema by its
+    #: objects - triggers, views and routines among them, which the
+    #: schema-aware reading does not inspect: where an engine has them, the
+    #: text's difference is cosmetic only where each of them found nothing
+    #: either (audit 2026-10-01, SC16)
+    STRUCTURAL_SCOPES = ()
 
     def _atlas_authoritative(self, res):
         """When the schema-aware reading says clean, demote the noisier
@@ -2373,12 +2379,23 @@ class Engine:
         to informational, so the database's verdict follows the reading that
         understands what a schema *is* rather than how it is spelled. The
         object inventory still stands, and so does the structural diff: that
-        one compares objects rather than text and is never demoted. Opt out
-        with `options.schema_authority: every-reading`."""
+        one compares objects rather than text and is never demoted. The
+        schema-aware reading says clean only of what it inspects - tables,
+        their columns, keys and indexes - where the text also holds
+        triggers, views and routines: an engine whose structural readings
+        compare those (`STRUCTURAL_SCOPES`) demotes nothing unless they are
+        clean too - a routine's or a trigger's body that differed read ok
+        behind it. Opt out with `options.schema_authority:
+        every-reading`."""
         said = str(self.hop.options.get("schema_authority")
                    or "schema-aware").strip().lower()
         if said not in ("schema-aware", self.LEGACY_AUTHORITY):
             return res
+        if self.STRUCTURAL_SCOPES:
+            structural = [r for r in res
+                          if r.scope.endswith(self.STRUCTURAL_SCOPES)]
+            if not structural or any(r.status != "ok" for r in structural):
+                return res
         if not any(r.scope.endswith(self.AUTHORITY_SCOPE) and r.status == "ok"
                    for r in res):
             return res

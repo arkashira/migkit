@@ -4143,17 +4143,9 @@ select json_build_object(
             return "the program it runs is not installed here"
         return ""
 
-    def _atlas_authoritative(self, res):
-        """The schema-aware reading says clean only of what it inspects -
-        tables, their columns, keys and indexes - where the dump's text
-        also holds triggers, views and routines: it may demote the text's
-        difference to cosmetic only where the structural reading, which
-        inspects those, found nothing either. A routine's or a trigger's
-        body that differed read ok behind it (audit 2026-10-01, SC16)."""
-        structural = [r for r in res if r.scope.endswith("(structural)")]
-        if not structural or any(r.status != "ok" for r in structural):
-            return res
-        return super()._atlas_authoritative(res)
+    #: the structural reading, which inspects triggers, views and routines
+    #: the schema-aware one does not (`Engine._atlas_authoritative`)
+    STRUCTURAL_SCOPES = ("(structural)",)
 
     def check_atlas(self, db):
         from ..movers import schema_diff
