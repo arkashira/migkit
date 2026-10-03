@@ -19,7 +19,13 @@ task it describes and writes the hop that does the same:
   Alibaba Cloud DTS job's detail or request (its objects): the hop
   checks exactly what the job takes, down to its tables' row filters and
   columns, and says each of the job's settings that makes a correct move
-  look different (`from_tencent_dts`).
+  look different (`from_tencent_dts`);
+* the same of the other clouds' services: a Huawei Cloud DRS job's
+  detail with the objects it takes beside it (`from_huawei_drs`), a
+  Google Cloud migration job with its connection profiles beside it
+  (`from_google_dms`) or a Datastream stream (`from_datastream`), and an
+  Azure migration - a classic project task or a database migration of
+  the newer service (`from_azure_dms`).
 
 What migkit decides for itself - types, batch sizes, workers, how a
 table is loaded - is left behind and said so; so is anything the other
@@ -71,6 +77,14 @@ def read(path):
             return from_tencent_dts(data, stem)
         if _is_alibaba_dts(data):
             return from_alibaba_dts(data, stem)
+        if _is_huawei_drs(data):
+            return from_huawei_drs(data, stem)
+        if _is_google_dms(data):
+            return from_google_dms(data, stem)
+        if _is_datastream(data):
+            return from_datastream(data, stem)
+        if _is_azure_dms(data):
+            return from_azure_dms(data, stem)
         if _is_dms(data):
             return from_dms(data, stem)
         if _is_connector(data):
@@ -78,8 +92,12 @@ def read(path):
         raise SystemExit(f"{p}: JSON, but not a replication task (it"
                          " has no TableMappings), a DTS job (no"
                          " MigrateOption, Objects, ObjectItems or"
-                         " DbObject) or a"
-                         " connector's configuration (no connector.class)")
+                         " DbObject), a DRS job (no base_info or"
+                         " object_info), a migration job or stream (no"
+                         " sourceDatabase or sourceConfig), an Azure"
+                         " migration (no taskType or sourceDatabaseName)"
+                         " or a connector's configuration (no"
+                         " connector.class)")
     if re.search(r"(?is)^\s*load\s+\w+", _strip_comments(text)):
         return from_load_file(text, stem)
     props = _properties(text)
@@ -1301,6 +1319,1476 @@ def _adts_mode_notes(mode, notes):
     if mode.get("DataSynchronization") is False:
         notes.append("the job moves the data once and no change after it:"
                      " a row changed on the source since reads as different")
+
+
+# ---- what another cloud's job takes, as one hop -------------------------
+
+#: said beside every hop that checks what a service moved
+_VERIFY = ("the job moves the data and this hop checks what it took"
+           " (goal: verify) - make the goal copy or cutover to have"
+           " migkit move it instead")
+_ONCE = ("the job moves the data once and no change after it: a row"
+         " changed on the source since reads as different")
+_CHANGES_ONLY = ("the job carries changes only, from when it began: a row"
+                 " from before is on the target only if it was there"
+                 " already")
+#: a change a job does not carry, and how the target looks for it
+_NOT_CARRIED = (("delete", "a row deleted on the source stays on the target"
+                           " and reads as extra"),
+                ("update", "a row updated on the source keeps its old"
+                           " values on the target and reads as different"),
+                ("insert", "a row added on the source never arrives and"
+                           " reads as missing"))
+
+
+def _scope():
+    """What a job takes, empty, for an importer to fill: its databases
+    and their new names, `include` and `exclude`, table renames, row
+    filters, columns, and the objects beside the tables it names."""
+    return {"dbs": [], "db_map": {}, "include": [], "exclude": [],
+            "tables": {}, "where": {}, "columns": {}, "objects": {}}
+
+
+def _took_db(got, db, new=None):
+    """A database the job takes, and the name it lands under."""
+    db = str(db)
+    if db not in got["dbs"]:
+        got["dbs"].append(db)
+    if new and str(new) != db:
+        if got["db_map"].get(db, str(new)) != str(new):
+            raise SystemExit(f"the job sends database {db} to both"
+                             f" {got['db_map'][db]} and {new}")
+        got["db_map"][db] = str(new)
+
+
+def _leaf(text):
+    """The last part of a resource's path - its own name."""
+    return str(text or "").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _host_port(text):
+    """`host:port` as its two parts; a bracketed address kept whole."""
+    text = str(text or "").strip()
+    m = re.match(r"^\[([^\]]+)\](?::(\d+))?$", text) or re.match(
+        r"^([^:]+):(\d+)$", text)
+    if m:
+        return m.group(1), int(m.group(2)) if m.group(2) else None
+    return text, None
+
+
+def _dotted(name):
+    """A dotted name's parts, each as its engine quotes it or bare:
+    `[dbo].[orders]`, `"Sales"."Order"`, `` `shop`.`orders` `` and
+    `public.orders` alike - a dot inside quotes is the name's own."""
+    closing = {"[": "]", '"': '"', "`": "`"}
+    out, cur, quote, i, s = [], "", None, 0, str(name)
+    while i < len(s):
+        c = s[i]
+        if quote:
+            if c == quote and s[i + 1:i + 2] == quote:
+                cur += c
+                i += 1
+            elif c == quote:
+                quote = None
+            else:
+                cur += c
+        elif c in closing:
+            quote = closing[c]
+        elif c == ".":
+            out.append(cur)
+            cur = ""
+        else:
+            cur += c
+        i += 1
+    out.append(cur)
+    return [p for p in out if p]
+
+
+def _unreached(word, what, how, notes):
+    notes.append(f"the {word} is {what or 'an instance'}, which the job"
+                 " reaches through the cloud's own network"
+                 f" ({how or 'not said'}) - the guide asks for an"
+                 " address migkit can reach")
+
+
+def _say_ops(kept, notes, who="the job"):
+    for op, said in _NOT_CARRIED:
+        if op not in kept:
+            notes.append(f"{who} does not carry {op}s: {said}")
+
+
+def _verify_sides(out, src, dst, got):
+    """The rest of the hop that checks what a service's job took, the
+    same for every service: each side as an address where the job names
+    a server (one it reaches only through the cloud's own network is left
+    for the guide to ask), the two engines, the databases and their new
+    names, and what it takes - its scope, renames, row filters, columns,
+    the changes it carries and the objects beside the tables it names
+    one by one (a kind every database takes whole is all of it: nothing
+    to say)."""
+    dbs, db_map = got["dbs"], got["db_map"]
+    src_e, dst_e = src and src["engine"], dst and dst["engine"]
+    for side, end, names in (("source", src, dbs),
+                             ("target", dst, [db_map.get(x, x)
+                                              for x in dbs])):
+        if end is None:
+            continue
+        if end.get("uri"):
+            head, query = end["uri"]
+            out.raw[side] = (head + ("/" + ",".join(names) if names else "")
+                             + (f"?{query}" if query else ""))
+        elif end["long"].get("host") or end["long"].get("hosts"):
+            long = dict(end["long"])
+            if long.get("host") and not long.get("port"):
+                # a service that names no port reaches the engine's own
+                from .config import DEFAULT_PORTS
+                if DEFAULT_PORTS.get(end["engine"]):
+                    long["port"] = DEFAULT_PORTS[end["engine"]]
+            out.raw[side] = _side(end["engine"], long, names)
+    if src_e and dst_e and src_e != dst_e:
+        out.raw["engine"] = "hetero"
+        out.raw["options"] = {"source_engine": src_e,
+                              "target_engine": dst_e}
+    elif (src_e or dst_e) and any(isinstance(out.raw.get(x), dict)
+                                  for x in ("source", "target")):
+        out.raw["engine"] = src_e or dst_e
+    if dbs and not isinstance(out.raw.get("source"), str):
+        out.raw["databases"] = dbs
+    if db_map and not isinstance(out.raw.get("target"), str):
+        out.raw["db_map"] = db_map
+    for key in ("include", "exclude"):
+        if got.get(key):
+            out.raw[key] = list(dict.fromkeys(got[key]))
+    objects = {k: list(dict.fromkeys(v))
+               for k, v in (got.get("objects") or {}).items()
+               if v and not all(p.endswith(".*") for p in v)}
+    if objects:
+        out.raw["objects"] = objects
+    mapping = {k: got[k] for k in ("tables", "columns", "where", "ops",
+                                   "names") if got.get(k)}
+    if mapping:
+        out.raw["mapping"] = mapping
+    return out
+
+
+# ---- Huawei Cloud DRS ----------------------------------------------------
+
+#: DRS's db_type (and each side of its engine_type, `mysql-to-mysql`) and
+#: the engine migkit reads it as; TaurusDB is MySQL's, DDS MongoDB's,
+#: GeminiDB Redis Redis's
+HDRS_ENGINES = {"mysql": "mysql", "taurus": "mysql",
+                "postgresql": "postgres", "mongodb": "mongodb",
+                "dds": "mongodb", "oracle": "oracle", "sqlserver": "mssql",
+                "redis": "redis", "rediscluster": "redis",
+                "gaussredis": "redis", "kafka": "kafka"}
+#: the objects beside its tables a DRS job names among them, by `type`
+_HDRS_OBJECTS = {"view": "views", "procedure": "procedures"}
+
+
+def _hdrs_jobs(data):
+    """The jobs a DRS answer holds - ShowJobDetail's `job`, the v5 batch
+    APIs' `jobs`, the v3 batch detail's `results` - or None."""
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("job"), dict):
+        return [data["job"]]
+    for key in ("jobs", "results"):
+        many = data.get(key)
+        if isinstance(many, list) and many and all(isinstance(j, dict)
+                                                   for j in many):
+            return many
+    return None
+
+
+def _hdrs_job_like(job):
+    if isinstance(job.get("base_info"), dict):
+        return True
+    ep = job.get("source_endpoint")
+    if isinstance(ep, list):
+        ep = ep[0] if ep else None
+    return isinstance(ep, dict) and "db_type" in ep and any(
+        k in job for k in ("task_type", "db_use_type", "object_infos",
+                           "db_object"))
+
+
+def _hdrs_objects_like(data):
+    """The objects of a job alone - the answer of its db-objects query."""
+    return isinstance(data, dict) and isinstance(
+        data.get("object_info"), dict) and (
+            "object_scope" in data or "target_root_db" in data)
+
+
+def _is_huawei_drs(data):
+    if _hdrs_objects_like(data):
+        return True
+    jobs = _hdrs_jobs(data)
+    return bool(jobs) and all(_hdrs_job_like(j) for j in jobs)
+
+
+def _hdrs_job_name(job):
+    return ((job.get("base_info") or {}).get("name") or job.get("name")
+            or job.get("id") or "")
+
+
+def from_huawei_drs(data, stem="hop"):
+    """A hop that checks what a Huawei Cloud DRS job takes, read from what
+    the service says of it: a job's detail (v5 ShowJobDetail, `{"job":
+    ...}`) with the objects it takes beside it under `db_object` - the
+    answer of GET /v5/{project_id}/jobs/{job_id}/db-objects, or the
+    `db_object` the job was made with - the v5 batch APIs' `jobs`, the v3
+    batch detail's `results` with their `object_infos` and the answer's
+    row filters (`data_transformation`), or the objects alone.
+
+    The same hop `from_tencent_dts` makes of a Tencent job: goal
+    `verify`, its databases and their new names, its schemas and tables
+    and theirs, each table's row filter and columns, the changes it
+    carries (`dml_types`), and every setting of the job that makes a
+    correct move look different - conflicts ignored, a dropped database
+    or a structure change not carried, a target left writable, accounts
+    not moved."""
+    if _hdrs_objects_like(data):
+        job, objects = {}, data
+    else:
+        jobs = _hdrs_jobs(data)
+        if len(jobs) != 1:
+            names = ", ".join(str(_hdrs_job_name(j)) for j in jobs[:6])
+            raise SystemExit(f"the file holds {len(jobs)} DRS jobs ({names});"
+                             " give it one (a hop is one job)")
+        job = jobs[0]
+        objects = job.get("db_object") if isinstance(
+            job.get("db_object"), dict) else data.get("db_object")
+    notes = []
+    out = Imported(_name(_hdrs_job_name(job) or stem), {}, notes)
+    out.raw["goal"] = "verify"
+    notes.append(_VERIFY)
+    pair = str((job.get("base_info") or {}).get("engine_type")
+               or "").lower().split("-to-")
+    pair = pair if len(pair) == 2 else [None, None]
+    src = _hdrs_end(job, "source", pair[0], notes)
+    dst = _hdrs_end(job, "target", pair[1], notes)
+    if isinstance(objects, dict) and objects:
+        got = _hdrs_selection(objects, notes)
+    elif isinstance(job.get("object_infos"), list):
+        objects, gone = _hdrs_v3_objects(job["object_infos"])
+        got = _hdrs_selection(objects, notes)
+        got["exclude"] += gone
+        _hdrs_v3_filters(data.get("data_transformation"), got, notes)
+    else:
+        ident = job.get("id") or "{job_id}"
+        raise SystemExit(f"{job.get('id') or 'the job'}: its detail says no"
+                         " objects; save the objects it takes beside it,"
+                         " under db_object - GET /v5/{project_id}/jobs/"
+                         f"{ident}/db-objects")
+    policy = job.get("policy_config") or {}
+    kept = _ops_letters(policy.get("dml_types"))
+    if kept is not None:
+        got["ops"] = {"*": kept}
+        _say_ops(kept, notes)
+    _hdrs_notes(job, notes)
+    return _verify_sides(out, src, dst, got)
+
+
+def _ops_letters(value):
+    """The changes a DRS `dml_types` names - `i,u,d`, the letters run
+    together, or the words - in migkit's words, or None where it names
+    all three or none (nothing to say)."""
+    letters = {"i": "insert", "u": "update", "d": "delete"}
+    got = set()
+    for w in re.findall(r"[a-z]+", str(value or "").lower()):
+        if w in _DTS_OPS:
+            got.add(w)
+        elif set(w) <= set(letters):
+            got |= {letters[c] for c in w}
+    return None if len(got) in (0, 3) else sorted(got)
+
+
+def _hdrs_end(job, side, kind, notes):
+    """One side of a DRS job: its engine and the long form of its address,
+    or None where the file does not say. v5 names a side as a list of
+    endpoints, each with its `endpoint` within; v3 as the endpoint
+    itself. The password is never read; an instance the job reaches by
+    the cloud's own network is said where there is no address."""
+    eps = job.get(f"{side}_endpoint")
+    if isinstance(eps, list):
+        eps = [e for e in eps if isinstance(e, dict)]
+        if len(eps) > 1:
+            notes.append(f"the {side} is {len(eps)} endpoints; the address"
+                         " is the first one's - give the one migkit should"
+                         " read")
+        ep = eps[0] if eps else None
+    else:
+        ep = eps if isinstance(eps, dict) else None
+    kind = (ep or {}).get("db_type") or kind
+    engine = HDRS_ENGINES.get(str(kind or "").lower())
+    if kind and engine is None:
+        raise SystemExit(f"the job's {side} is a {kind} one, which migkit"
+                         " has no engine for")
+    if ep is None:
+        notes.append(f"the file names no {side} - the guide asks for its"
+                     " address")
+        return {"engine": engine, "long": {}, "db": ""} if engine else None
+    node = ep["endpoint"] if isinstance(ep.get("endpoint"), dict) else ep
+    if engine is None:
+        raise SystemExit(f"the job's {side} names no engine migkit has")
+    long = {}
+    hosts = [h.strip() for h in str(node.get("ip") or "").split(",")
+             if h.strip()]
+    if len(hosts) > 1 and engine in ("mongodb", "kafka"):
+        long["hosts"] = hosts
+    elif hosts:
+        host, port = _host_port(hosts[0])
+        long["host"] = host
+        port = port or node.get("db_port")
+        if port:
+            long["port"] = int(port)
+        if len(hosts) > 1:
+            notes.append(f"the {side} is {len(hosts)} servers; the address"
+                         " is the first one's - give the one migkit should"
+                         " read")
+    if node.get("db_user"):
+        long["user"] = str(node["db_user"])
+    ssl = ep["ssl"] if isinstance(ep.get("ssl"), dict) else node
+    if _flag(ssl.get("ssl_link")):
+        if engine == "postgres":
+            long["sslmode"] = "require"
+        elif engine == "mysql":
+            long["ssl"] = True
+        elif engine == "mongodb":
+            long["uri_options"] = "tls=true"
+    if not hosts:
+        what = (node.get("instance_id") or node.get("inst_id")
+                or node.get("instance_name") or node.get("inst_name"))
+        _unreached(side, what, ep.get("endpoint_type") or (
+            job.get("base_info") or {}).get("net_type"), notes)
+    if side == "target" and (ep.get("config") or {}).get(
+            "is_target_readonly") is False:
+        notes.append("the target stays writable while the job runs"
+                     " (is_target_readonly false): a row written there"
+                     " directly reads as a difference")
+    return {"engine": engine, "long": long,
+            "db": str(node.get("db_name") or "")}
+
+
+def _hdrs_selection(objects, notes):
+    """What a DRS job takes - `object_scope` all, database or table, and
+    `object_info`: `{db: {name, all, schemas: {schema: {name, all,
+    tables}}, tables: {table: {name, type, all, filtered,
+    filter_conditions, columns}}}}`, each `name` the one it lands under -
+    as the hop says it, each table named from its database down."""
+    got = _scope()
+    scope = str(objects.get("object_scope") or "").lower()
+    info = objects.get("object_info")
+    root = (objects.get("target_root_db") or {}).get("db_name")
+    if root:
+        notes.append(f"the job writes what it takes into the target"
+                     f" database {root}, each source database a schema in"
+                     " it: migkit compares a database with a database -"
+                     " give the target the hop compares, and its db_map")
+    if scope == "all" or not isinstance(info, dict) or not info:
+        notes.append("the job takes the whole instance; so does the hop")
+        return got
+    whole = True
+    for db, spec in info.items():
+        spec = spec if isinstance(spec, dict) else {}
+        _took_db(got, db, spec.get("name"))
+        schemas = spec.get("schemas") if isinstance(spec.get("schemas"),
+                                                    dict) else {}
+        tables = spec.get("tables") if isinstance(spec.get("tables"),
+                                                  dict) else {}
+        whole_db = scope == "database" or _flag(spec.get("all")) or not (
+            schemas or tables)
+        if whole_db:
+            got["include"].append(f"{db}.*")
+        whole = whole and whole_db
+        for sch, s in schemas.items():
+            s = s if isinstance(s, dict) else {}
+            base, new_sch = f"{db}.{sch}", s.get("name")
+            listed = s.get("tables") if isinstance(s.get("tables"),
+                                                   dict) else {}
+            whole_sch = whole_db or _flag(s.get("all")) or not listed
+            if whole_sch and not whole_db:
+                got["include"].append(f"{base}.*")
+            if whole_sch and new_sch and new_sch != sch:
+                notes.append(f"schema {base} lands as {new_sch}: migkit"
+                             " renames a table by its name - not carried")
+            named = {}
+            for name, t in listed.items():
+                _hdrs_table(got, base, sch, new_sch, name, t, named, notes,
+                            take=not whole_sch)
+            _hdrs_named(got, base, {} if whole_sch else named)
+        named = {}
+        for name, t in tables.items():
+            _hdrs_table(got, db, "", None, name, t, named, notes,
+                        take=not whole_db)
+        if whole_db or tables:
+            _hdrs_named(got, db, {} if whole_db else named)
+    if whole:
+        # whole databases: the databases say it
+        got["include"] = []
+    return got
+
+
+def _hdrs_named(got, base, named):
+    """The views and procedures a job names one by one at `base`, as the
+    hop's `objects` names them; a kind it names none of there is all of
+    it (as `_tdts_objects`: a kind not carried is a finding, never left
+    out of the check)."""
+    for kind in _HDRS_OBJECTS.values():
+        picked = named.get(kind)
+        got["objects"].setdefault(kind, []).extend(
+            [f"{base}.{n}" for n in picked] if picked else [f"{base}.*"])
+
+
+def _hdrs_table(got, base, sch, new_sch, name, t, named, notes, take=True):
+    """One object of a job's tables: a view or procedure named, or a table
+    taken (`take`; in a database or schema taken whole, only what it says
+    of the table) - its new name, row filter and columns."""
+    t = t if isinstance(t, dict) else {}
+    kind = _HDRS_OBJECTS.get(str(t.get("type") or "table").lower())
+    if kind:
+        named.setdefault(kind, []).append(name)
+        return
+    ident = f"{base}.{name}"
+    if take:
+        got["include"].append(ident)
+    new = t.get("name") or name
+    if new != name or (new_sch and new_sch != sch):
+        got["tables"][ident] = ".".join(x for x in (new_sch or sch, new)
+                                        if x)
+    for key, word in (("db_alias_name", "database"),
+                      ("schema_alias_name", "schema")):
+        if t.get(key):
+            notes.append(f"{ident} lands in the {word} {t[key]}: migkit"
+                         " writes a table where its own database lands -"
+                         " not carried")
+    conds = t.get("filter_conditions") or []
+    conds = [str(c) for c in ([conds] if isinstance(conds, str) else conds)
+             if str(c).strip()]
+    if conds and str(t.get("filtered", True)).lower() != "false":
+        if len(conds) == 1:
+            got["where"][ident] = conds[0]
+        else:
+            notes.append(f"the row filter of {ident} is {len(conds)}"
+                         " conditions, and the service does not say how it"
+                         " joins them - not carried; give mapping.where")
+    if t.get("config_conditions"):
+        notes.append(f"the row filter of {ident} reads another table (an"
+                     " advanced setting of the job's) - not carried; give"
+                     " mapping.where")
+    drop, rename = [], {}
+    cols = t.get("columns") if isinstance(t.get("columns"), dict) else {}
+    for col, c in cols.items():
+        c = c if isinstance(c, dict) else {}
+        if _flag(c.get("additional")):
+            notes.append(f"{ident}: the job adds a column of its own"
+                         f" ({c.get('name') or col}) - it reads as extra on"
+                         " the target")
+        elif str(c.get("filtered")).lower() == "false":
+            # the service's own words: false, the column is not carried
+            drop.append(col)
+        elif c.get("name") and c["name"] != col:
+            rename[col] = c["name"]
+    rule = {k: v for k, v in (("drop", drop), ("rename", rename)) if v}
+    if rule:
+        got["columns"][ident] = rule
+
+
+def _hdrs_v3_objects(items):
+    """The v3 API's `object_infos` - `[{id, parent_id, type, name,
+    alias_name, select}]`, a table naming its database (or its schema)
+    as its parent, `select` true, partial or false - in the shape the v5
+    API says objects, and the tables a database taken whole leaves out."""
+    items = [o for o in items if isinstance(o, dict)]
+    by_id = {str(o.get("id") or o.get("name")): o for o in items}
+
+    def picked(o):
+        return str(o.get("select", "")).lower()
+
+    def kind(o):
+        return str(o.get("type") or "").lower()
+    info, gone = {}, []
+    for o in items:
+        if kind(o) == "database" and picked(o) != "false":
+            db = str(o.get("name") or o.get("id"))
+            info[db] = {"name": o.get("alias_name") or db,
+                        "select": picked(o), "schemas": {}, "tables": {}}
+    for o in items:
+        parent = by_id.get(str(o.get("parent_id"))) or {}
+        if kind(o) == "schema" and picked(o) != "false":
+            db = str(parent.get("name") or o.get("parent_id"))
+            if db in info:
+                info[db]["schemas"][str(o.get("name"))] = {
+                    "name": o.get("alias_name") or o.get("name"),
+                    "tables": {}}
+    for o in items:
+        if kind(o) not in ("table", "view") or not o.get("name"):
+            continue
+        parent = by_id.get(str(o.get("parent_id"))) or {}
+        sch = ""
+        if kind(parent) == "schema":
+            sch = str(parent.get("name"))
+            parent = by_id.get(str(parent.get("parent_id"))) or {}
+        db = str(parent.get("name") or o.get("parent_id"))
+        if db not in info or (sch and sch not in info[db]["schemas"]):
+            # a database or schema the job does not take
+            continue
+        name = str(o["name"])
+        if picked(o) == "false":
+            gone.append(".".join(x for x in (db, sch, name) if x))
+            continue
+        spot = info[db]["schemas"][sch]["tables"] if sch else info[db][
+            "tables"]
+        spot[name] = {"type": kind(o), "name": o.get("alias_name") or name}
+    for spec in info.values():
+        said = spec.pop("select")
+        spec["all"] = said == "true" or (said != "partial" and not (
+            spec["schemas"] or spec["tables"]))
+    return {"object_scope": "table", "object_info": info}, gone
+
+
+def _hdrs_v3_filters(transformed, got, notes):
+    """The v3 batch detail's row filters (`data_transformation`, beside
+    the jobs it answers for): a condition on the table's own columns, or
+    one that reads another table - said, not carried. A filter of a
+    database the job does not take is another job's."""
+    for f in (transformed or {}).get("filter_conditions") or []:
+        if not isinstance(f, dict):
+            continue
+        info = f.get("transformation_info") or {}
+        kind = str(info.get("transformation_type") or "")
+        for o in f.get("data_transformation_object_infos") or []:
+            if not isinstance(o, dict) or not o.get("table_name"):
+                continue
+            if got["dbs"] and str(o.get("db_name")) not in got["dbs"]:
+                continue
+            ident = ".".join(str(x) for x in (
+                o.get("db_name"), o.get("schema_name"), o.get("table_name"))
+                if x)
+            if kind == "contentConditionalFilter" and info.get("value"):
+                got["where"][ident] = str(info["value"])
+            elif kind == "configConditionalFilter":
+                notes.append(f"the row filter of {ident} reads another table"
+                             " (an advanced setting of the job's) - not"
+                             " carried; give mapping.where")
+
+
+def _hdrs_notes(job, notes):
+    """What a DRS job's settings make a correct move look like."""
+    base = job.get("base_info") or {}
+    policy = job.get("policy_config") or {}
+    task = str(base.get("task_type") or job.get("task_type") or "").upper()
+    if task == "FULL_TRANS":
+        notes.append(_ONCE)
+    elif task == "INCR_TRANS":
+        notes.append(_CHANGES_ONLY)
+    conflict = str(policy.get("conflict_policy")
+                   or job.get("conflict_policy") or "").lower()
+    if conflict == "ignore":
+        notes.append("the job keeps a row the target already had under the"
+                     " same key (conflict_policy ignore): it reads as"
+                     " different")
+    if str(policy.get("filter_ddl_policy") or job.get("filter_ddl_policy")
+           or "").startswith("drop_database"):
+        notes.append("the job does not carry a database dropped on the"
+                     " source (filter_ddl_policy drop_database): it stays"
+                     " on the target")
+    if policy.get("ddl_trans") is False:
+        notes.append("the job does not carry structure changes (ddl_trans"
+                     " false): a table altered on the source since it began"
+                     " reads as different in structure")
+    if policy.get("index_trans") is False:
+        notes.append("the job does not carry ordinary indexes (index_trans"
+                     " false): the check of the schema shows them missing")
+    if base.get("multi_write") is True:
+        notes.append("the job is dual-active (multi_write): both sides take"
+                     " writes, so a row written on either reads as a"
+                     " difference until the job carries it across")
+    users = job.get("user_migration")
+    moved = users.get("is_migrate_user") if isinstance(users, dict) \
+        else job.get("migrate_user")
+    if moved is False:
+        notes.append("the job does not move accounts: the target's users"
+                     " and grants are not the source's")
+    if job.get("is_target_readonly") is False:
+        notes.append("the target stays writable while the job runs"
+                     " (is_target_readonly false): a row written there"
+                     " directly reads as a difference")
+
+
+# ---- Google Cloud Database Migration Service and Datastream -------------
+
+#: the engines Database Migration Service names (`DatabaseEngine`) and
+#: the engine migkit reads each as
+GDMS_ENGINES = {"MYSQL": "mysql", "POSTGRESQL": "postgres",
+                "SQLSERVER": "mssql", "ORACLE": "oracle"}
+#: a connection profile's engine, by the key its settings sit under
+_GDMS_PROFILES = {"mysql": "mysql", "postgresql": "postgres",
+                  "sqlserver": "mssql", "oracle": "oracle"}
+#: a Cloud SQL instance's engine, by its databaseVersion's first word
+_CLOUDSQL = {"MYSQL": "mysql", "POSTGRES": "postgres",
+             "SQLSERVER": "mssql"}
+#: a stream's source settings: the engine, the list its objects sit in
+#: and the key of its name, its tables' (collections') list and the key
+#: of theirs, their columns' list, and the backfill's list of what it
+#: left out
+_DS_SOURCES = {
+    "mysqlSourceConfig": ("mysql", "mysqlDatabases", "database",
+                          "mysqlTables", "table", "mysqlColumns",
+                          "mysqlExcludedObjects"),
+    "postgresqlSourceConfig": ("postgres", "postgresqlSchemas", "schema",
+                               "postgresqlTables", "table",
+                               "postgresqlColumns",
+                               "postgresqlExcludedObjects"),
+    "oracleSourceConfig": ("oracle", "oracleSchemas", "schema",
+                           "oracleTables", "table", "oracleColumns",
+                           "oracleExcludedObjects"),
+    "sqlServerSourceConfig": ("mssql", "schemas", "schema", "tables",
+                              "table", "columns",
+                              "sqlServerExcludedObjects"),
+    "mongodbSourceConfig": ("mongodb", "databases", "database",
+                            "collections", "collection", None,
+                            "mongodbExcludedObjects")}
+
+
+def _gcp_kind(d):
+    """Which of Google Cloud's things a resource is - a migration job, a
+    stream, either service's connection profile, a profile of neither
+    kind migkit reads - by its fields, its name
+    (`projects/p/locations/l/migrationJobs/j`) where they say less, or
+    None."""
+    if not isinstance(d, dict):
+        return None
+    m = re.match(r"^projects/[^/]+/locations/[^/]+/(\w+)/[^/]+$",
+                 str(d.get("name") or ""))
+    path = m.group(1) if m else ""
+    if path == "migrationJobs" or (
+            str(d.get("type")) in ("ONE_TIME", "CONTINUOUS")
+            and (isinstance(d.get("sourceDatabase"), dict)
+                 or ("source" in d and "destination" in d))):
+        return "job"
+    if path == "streams" or (isinstance(d.get("sourceConfig"), dict)
+                             and isinstance(d.get("destinationConfig"),
+                                            dict)):
+        return "stream"
+    if any(isinstance(d.get(k), dict) for k in list(_GDMS_PROFILES)
+           + ["cloudsql", "alloydb"]):
+        return "dms-profile"
+    if any(k.endswith("Profile") and isinstance(v, dict)
+           for k, v in d.items()):
+        return "stream-profile"
+    return "profile" if path == "connectionProfiles" else None
+
+
+def _gcp_items(data):
+    """The resources a file holds: one, a JSON list of them, or the lists
+    the APIs answer with (`migrationJobs`, `streams`,
+    `connectionProfiles`) side by side."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    items = [data] if _gcp_kind(data) else []
+    for key in ("migrationJobs", "streams", "connectionProfiles"):
+        if isinstance(data.get(key), list):
+            items += data[key]
+    return items
+
+
+def _gcp_holds(data, main, beside):
+    kinds = [_gcp_kind(i) for i in _gcp_items(data)]
+    return main in kinds and all(k in (main,) + beside for k in kinds)
+
+
+def _is_google_dms(data):
+    return _gcp_holds(data, "job", ("dms-profile", "profile"))
+
+
+def _is_datastream(data):
+    return _gcp_holds(data, "stream", ("stream-profile", "profile"))
+
+
+def _gcp_one(data, kind, word):
+    got = [i for i in _gcp_items(data) if _gcp_kind(i) == kind]
+    if len(got) != 1:
+        names = ", ".join(_leaf(i.get("name")) or str(i.get("displayName"))
+                          for i in got[:6])
+        raise SystemExit(f"the file holds {len(got)} {word}s ({names}); give"
+                         f" it one (a hop is one {word})")
+    return got[0]
+
+
+def _gcp_profile(ref, data, kinds):
+    """The connection profile a job names, from those beside it: by its
+    whole resource name, or by its own."""
+    if not ref:
+        return None
+    mine = [p for p in _gcp_items(data) if _gcp_kind(p) in kinds]
+    return next((p for p in mine if str(p.get("name")) == str(ref)),
+                None) or next((p for p in mine
+                               if _leaf(p.get("name")) == _leaf(ref)), None)
+
+
+def from_google_dms(data, stem="hop"):
+    """A hop that checks what a Google Cloud Database Migration Service
+    job takes, read from the job as the service says it (`gcloud
+    database-migration migration-jobs describe --format=json`, or a list
+    of them) and, beside it, the connection profiles it names - as
+    `{"migrationJobs": [...], "connectionProfiles": [...]}` or a JSON
+    list of the resources: its two sides from their profiles (one whose
+    profile the file does not hold is left for the guide to ask), its
+    databases, schemas and tables from `objectsConfig` (a SQL Server
+    job's databases from its backups), goal `verify`, and what the job's
+    type and the service's documented limits make a correct move look
+    like."""
+    job = _gcp_one(data, "job", "migration job")
+    notes = []
+    out = Imported(_name(job.get("displayName") or _leaf(job.get("name"))
+                         or stem), {}, notes)
+    out.raw["goal"] = "verify"
+    notes.append(_VERIFY)
+    src_kind = (job.get("sourceDatabase") or {}).get("engine")
+    dst_kind = (job.get("destinationDatabase") or {}).get("engine")
+    src = _gdms_end(job.get("source"), data, src_kind, "source", notes)
+    if not dst_kind and not job.get("conversionWorkspace"):
+        # one engine on both sides unless a conversion workspace says
+        # otherwise
+        dst_kind = src_kind
+    dst = _gdms_end(job.get("destination"), data, dst_kind, "target", notes)
+    got = _gdms_selection(job, src, notes)
+    _gdms_notes(job, src and src["engine"], notes)
+    return _verify_sides(out, src, dst, got)
+
+
+def _gdms_end(ref, data, kind, word, notes):
+    """One side of a migration job from the connection profile it names:
+    its engine and the long form of its address (the password never
+    read), or a note where the file does not hold the profile."""
+    engine = GDMS_ENGINES.get(str(kind or "").upper())
+    prof = _gcp_profile(ref, data, ("dms-profile", "profile"))
+    own = next((k for k in _GDMS_PROFILES
+                if isinstance((prof or {}).get(k), dict)), None)
+    if prof is not None:
+        cloud = ((prof.get("cloudsql") or {}).get("settings") or {}).get(
+            "databaseVersion")
+        engine = engine or (_GDMS_PROFILES[own] if own else None) or (
+            "postgres" if isinstance(prof.get("alloydb"), dict) else
+            _CLOUDSQL.get(str(cloud or "").split("_")[0]))
+    if prof is None:
+        notes.append(f"the file holds no connection profile {_leaf(ref)} -"
+                     f" the guide asks for the {word}'s address" if ref
+                     else f"the file names no {word} - the guide asks for"
+                     " its address")
+        return {"engine": engine, "long": {}, "db": ""} if engine else None
+    if engine is None:
+        raise SystemExit(f"the job's {word} ({_leaf(ref)}) names no engine"
+                         " migkit has")
+    long, db = {}, ""
+    if own:
+        body = prof[own]
+        if body.get("host"):
+            long["host"] = str(body["host"])
+        if body.get("port"):
+            long["port"] = int(body["port"])
+        if body.get("username"):
+            long["user"] = str(body["username"])
+        if own == "oracle" and body.get("databaseService"):
+            long["service"] = str(body["databaseService"])
+        db = str(body.get("database") or "")
+        _gcp_tls(engine, str((body.get("ssl") or {}).get("type") or ""),
+                 word, long, notes)
+        where = body.get("cloudSqlId") or body.get("alloydbClusterId")
+    else:
+        sql = prof.get("cloudsql") if isinstance(prof.get("cloudsql"),
+                                                 dict) else {}
+        ip = sql.get("privateIp") or sql.get("publicIp")
+        if ip:
+            long["host"] = str(ip)
+        if sql.get("privateIp") and sql.get("publicIp"):
+            notes.append(f"the {word} is read at its private address; its"
+                         f" public one is {sql['publicIp']}")
+        where = sql.get("cloudSqlId") or (prof.get("alloydb") or {}).get(
+            "clusterId")
+    if not long.get("host"):
+        _unreached(word, where or _leaf(prof.get("name")),
+                   "its connection profile names no address", notes)
+    return {"engine": engine, "long": long, "db": db}
+
+
+def _gcp_tls(engine, kind, word, long, notes):
+    """A profile's TLS (`REQUIRED`: encrypted, nothing checked;
+    `SERVER_ONLY`, `SERVER_CLIENT`: the server's certificate checked
+    against one the profile holds) as the address says it."""
+    kind = kind.upper()
+    if kind in ("", "NONE", "SSL_TYPE_UNSPECIFIED"):
+        return
+    if engine == "postgres":
+        long["sslmode"] = "require"
+    elif engine == "mysql":
+        long["ssl"] = True
+    elif engine == "mssql":
+        long["encrypt"] = "require"
+    if kind != "REQUIRED":
+        notes.append(f"the job checks the {word}'s certificate against one"
+                     " its connection profile holds: give its file in the"
+                     " address (sslrootcert, ssl-ca) to have migkit check"
+                     " it too")
+
+
+def _gdms_selection(job, src, notes):
+    """What a migration job takes: the databases, schemas and tables its
+    `objectsConfig` names (`SPECIFIED_OBJECTS`), a SQL Server job's
+    databases from its backups, or the whole instance."""
+    got = _scope()
+    cfg = (job.get("objectsConfig") or {}).get("sourceObjectsConfig") or {}
+    picked = [c.get("objectIdentifier") or {} for c in
+              cfg.get("objectConfigs") or [] if isinstance(c, dict)]
+    backups = [b["database"] for b in (
+        job.get("sqlserverHomogeneousMigrationJobConfig") or {}).get(
+            "databaseBackups") or [] if isinstance(b, dict)
+        and b.get("database")]
+    one_db = src and src["engine"] != "mysql" and src.get("db") or ""
+    if cfg.get("objectsSelectionType") == "SPECIFIED_OBJECTS" and picked:
+        whole = True
+        for o in picked:
+            kind = str(o.get("type") or "")
+            db = o.get("database") or (one_db if kind != "DATABASE"
+                                       else "")
+            sch, tab = o.get("schema"), o.get("table")
+            if kind == "DATABASE" and db:
+                _took_db(got, db)
+                got["include"].append(f"{db}.*")
+            elif kind in ("SCHEMA", "TABLE") and (sch or tab):
+                if db:
+                    _took_db(got, db)
+                got["include"].append(".".join(
+                    str(x) for x in (db, sch, tab if kind == "TABLE"
+                                     else "*") if x))
+                whole = False
+            else:
+                notes.append(f"an object the job names ({kind or 'of no'}"
+                             " type) with no name of its level - not"
+                             " carried")
+        if whole:
+            got["include"] = []
+    elif backups:
+        for db in backups:
+            _took_db(got, db)
+    elif job.get("conversionWorkspace") or job.get("filter"):
+        said = f", picked by the filter {job['filter']}" if job.get(
+            "filter") else ""
+        notes.append(f"the job takes what its conversion workspace"
+                     f" holds{said}: the file does not say which tables -"
+                     " give the hop's include")
+    else:
+        notes.append("the job takes the whole instance; so does the hop")
+    return got
+
+
+def _gdms_notes(job, engine, notes):
+    """What a migration job's type and the service's documented limits
+    make a correct move look like."""
+    if job.get("type") == "ONE_TIME":
+        notes.append(_ONCE)
+    if job.get("purpose") == "FAILBACK":
+        notes.append("a failback job (purpose FAILBACK): its source is the"
+                     " target an earlier migration made")
+    if job.get("conversionWorkspace"):
+        return
+    if engine == "postgres":
+        notes.append("the service does not move users and roles: the"
+                     " target's are not the source's")
+        notes.append("the service moves a materialized view's definition,"
+                     " not its rows: it reads as empty on the target until"
+                     " refreshed")
+        notes.append("the service does not carry unlogged or temporary"
+                     " tables: they read as missing or empty on the target")
+        notes.append("a sequence's state on the target may differ from the"
+                     " source's: its next value reads as different")
+        if job.get("type") == "CONTINUOUS":
+            notes.append("a table with no primary key carries inserts only"
+                         " while the job runs: a row updated or deleted on"
+                         " the source since reads as different")
+    elif engine == "mysql":
+        notes.append("the service does not move the mysql system database:"
+                     " the target's users and grants are not the source's")
+
+
+def from_datastream(data, stem="hop"):
+    """A hop that checks what a Google Cloud Datastream stream takes, read
+    from the stream as the service says it (`gcloud datastream streams
+    describe --format=json`) and, beside it, its source's connection
+    profile: the databases (schemas, where the source has them), tables
+    and columns its `includeObjects` take and its `excludeObjects` leave
+    out (a table's columns left out, the table kept), goal `verify`, and
+    what its backfill and its destination make a correct move look like.
+    It writes into BigQuery or Cloud Storage, which a hop does not name
+    by a database's address: the guide asks for the target."""
+    stream = _gcp_one(data, "stream", "stream")
+    notes = []
+    out = Imported(_name(stream.get("displayName")
+                         or _leaf(stream.get("name")) or stem), {}, notes)
+    out.raw["goal"] = "verify"
+    notes.append(_VERIFY.replace("the job", "the stream"))
+    cfg = stream.get("sourceConfig") or {}
+    key = next((k for k in _DS_SOURCES if isinstance(cfg.get(k), dict)),
+               None)
+    if key is None:
+        other = next((k[:-len("SourceConfig")] for k in cfg
+                      if k.endswith("SourceConfig")), "a source")
+        raise SystemExit(f"the stream reads {other}, which migkit has no"
+                         " engine for")
+    shape = _DS_SOURCES[key]
+    src = _ds_end(cfg.get("sourceConnectionProfile"), data, shape[0], notes)
+    got = _ds_selection(cfg[key], shape, src["db"], notes)
+    _ds_notes(stream, shape, src["db"], notes)
+    return _verify_sides(out, src, None, got)
+
+
+def _ds_end(ref, data, engine, notes):
+    """A stream's source from its connection profile: the long form of
+    its address (the password never read)."""
+    prof = _gcp_profile(ref, data, ("stream-profile", "profile"))
+    if prof is None:
+        notes.append(f"the file holds no connection profile {_leaf(ref)} -"
+                     " the guide asks for the source's address" if ref
+                     else "the file names no source - the guide asks for"
+                     " its address")
+        return {"engine": engine, "long": {}, "db": ""}
+    body = next((v for k, v in prof.items() if k.endswith("Profile")
+                 and isinstance(v, dict)), {})
+    long = {}
+    if engine == "mongodb":
+        hosts = [f"{a['hostname']}:{a['port']}" if a.get("port")
+                 else str(a["hostname"])
+                 for a in body.get("hostAddresses") or []
+                 if isinstance(a, dict) and a.get("hostname")]
+        if len(hosts) > 1:
+            long["hosts"] = hosts
+        elif hosts:
+            long["host"], port = _host_port(hosts[0])
+            if port:
+                long["port"] = port
+        if body.get("replicaSet"):
+            long["uri_options"] = f"replicaSet={body['replicaSet']}"
+        if "srvConnectionFormat" in body:
+            notes.append("the source is named by a DNS seed list"
+                         " (mongodb+srv): give its address as one")
+    else:
+        if body.get("hostname"):
+            long["host"] = str(body["hostname"])
+        if body.get("port"):
+            long["port"] = int(body["port"])
+        if engine == "oracle" and body.get("databaseService"):
+            long["service"] = str(body["databaseService"])
+    if body.get("username"):
+        long["user"] = str(body["username"])
+    if isinstance(body.get("sslConfig"), dict) and body["sslConfig"]:
+        _gcp_tls(engine, "SERVER_ONLY", "source", long, notes)
+    if not (long.get("host") or long.get("hosts")):
+        _unreached("source", _leaf(prof.get("name")),
+                   "its connection profile names no address", notes)
+    elif isinstance(prof.get("forwardSshConnectivity"), dict):
+        notes.append("the stream reaches the source through an SSH tunnel"
+                     " (forwardSshConnectivity): migkit needs the same"
+                     " way in")
+    return {"engine": engine, "long": long,
+            "db": str(body.get("database") or "")}
+
+
+def _ds_walk(objects, shape, one_db):
+    """[(base, [(table, [column])])] of a stream's include or exclude
+    objects, each named from its database down - a source with schemas'
+    schemas inside the profile's one database; a name left empty is every
+    one (`*`)."""
+    engine, tops, top_key, tables_key, table_key, cols_key, _ = shape
+    flat = engine in ("mysql", "mongodb", "oracle")
+    out = []
+    for t in (objects or {}).get(tops) or []:
+        if not isinstance(t, dict):
+            continue
+        top = str(t.get(top_key) or "") or "*"
+        base = top if flat or not one_db else f"{one_db}.{top}"
+        tables = []
+        for x in t.get(tables_key) or []:
+            if isinstance(x, dict) and x.get(table_key):
+                cols = [str(c["column"]) for c in (
+                    x.get(cols_key) or [] if cols_key else [])
+                    if isinstance(c, dict) and c.get("column")]
+                tables.append((str(x[table_key]), cols))
+        out.append((base, tables))
+    return out
+
+
+def _ds_selection(cfg, shape, one_db, notes):
+    """What a stream takes, as the hop says it: its databases (or the
+    profile's one database), `include` where it takes less than whole
+    databases, the columns it keeps, and `exclude` - a table its
+    `excludeObjects` names with columns keeps the table and drops those
+    columns."""
+    flat = shape[0] in ("mysql", "mongodb", "oracle")
+    got = _scope()
+    if one_db and not flat:
+        _took_db(got, one_db)
+    taken = _ds_walk(cfg.get("includeObjects"), shape, one_db)
+    if not taken:
+        notes.append("the stream takes everything its source has; so does"
+                     " the hop")
+    whole = True
+    for base, tables in taken:
+        if flat and base != "*":
+            _took_db(got, base)
+        if not tables:
+            got["include"].append(f"{base}.*")
+            whole = whole and flat and base != "*"
+            continue
+        whole = False
+        for name, cols in tables:
+            ident = f"{base}.{name}"
+            got["include"].append(ident)
+            if cols:
+                got["columns"][ident] = {"keep": cols}
+    if whole:
+        got["include"] = []
+    for base, tables in _ds_walk(cfg.get("excludeObjects"), shape, one_db):
+        if not tables:
+            got["exclude"].append(f"{base}.*")
+        for name, cols in tables:
+            ident = f"{base}.{name}"
+            if not cols:
+                got["exclude"].append(ident)
+                continue
+            rule = got["columns"].setdefault(ident, {})
+            if "keep" in rule:
+                rule["keep"] = [c for c in rule["keep"] if c not in cols]
+            else:
+                rule.setdefault("drop", []).extend(cols)
+    return got
+
+
+def _ds_notes(stream, shape, one_db, notes):
+    """What a stream's backfill and destination make a correct move look
+    like."""
+    if "backfillNone" in stream:
+        notes.append(_CHANGES_ONLY.replace("the job", "the stream"))
+    left = (stream.get("backfillAll") or {}).get(shape[6])
+    names = [f"{b}.{t}" for b, ts in _ds_walk(left, shape, one_db)
+             for t, _ in ts] + [f"{b}.*" for b, ts in _ds_walk(
+                 left, shape, one_db) if not ts]
+    if names:
+        notes.append("the stream did not copy the rows that were there"
+                     f" before it began of {', '.join(names[:8])}"
+                     f"{' ...' if len(names) > 8 else ''}: they are on the"
+                     " target only if they were there already")
+    out = stream.get("destinationConfig") or {}
+    lake = out.get("bigqueryDestinationConfig")
+    if isinstance(lake, dict):
+        notes.append("the stream writes into BigQuery: give as the target"
+                     " the dataset the check compares, each source table a"
+                     " table there")
+        if "appendOnly" in lake:
+            notes.append("the stream appends each change as a row of its"
+                         " own (appendOnly): the tables there are a history"
+                         " of the source's rows, not the rows themselves")
+    elif isinstance(out.get("gcsDestinationConfig"), dict):
+        notes.append("the stream writes files into Cloud Storage, which the"
+                     " check does not read as a database: give as the"
+                     " target the database the files are loaded into")
+    else:
+        notes.append("the file names no target - the guide asks for its"
+                     " address")
+
+
+# ---- Azure Database Migration Service ------------------------------------
+
+#: a classic project task's taskType (as the API spells it, read without
+#: case): the engines of its two sides, and whether it follows the source
+#: until the cutover (None: its input says)
+AZDMS_TASKS = {
+    "migrate.sqlserver.sqldb": ("mssql", "mssql", False),
+    "migrate.sqlserver.azuresqldb.sync": ("mssql", "mssql", True),
+    "migrate.sqlserver.azuresqldbmi": ("mssql", "mssql", False),
+    "migrate.sqlserver.azuresqldbmi.sync.lrs": ("mssql", "mssql", True),
+    "migrate.mysql.azuredbformysql": ("mysql", "mysql", False),
+    "migrate.mysql.azuredbformysql.sync": ("mysql", "mysql", True),
+    "migrate.postgresql.azuredbforpostgresql.syncv2": ("postgres",
+                                                       "postgres", True),
+    "migrate.oracle.azuredbforpostgresql.sync": ("oracle", "postgres",
+                                                 True),
+    "migrate.mongodb": ("mongodb", "mongodb", None)}
+#: a database migration's kind and the engine both its sides run
+AZDMS_KINDS = {"SqlDb": "mssql", "SqlMi": "mssql", "SqlVm": "mssql",
+               "MongoToCosmosDbMongo": "mongodb"}
+
+
+def _az_listed(data):
+    """The resources a list answers with (`value`, or a JSON list), or
+    None."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("value"), list):
+        return data["value"]
+    return None
+
+
+def _az_like(res):
+    if not isinstance(res, dict):
+        return False
+    if str(res.get("type") or "").lower().startswith(
+            "microsoft.datamigration/"):
+        return True
+    props = res["properties"] if isinstance(res.get("properties"),
+                                            dict) else res
+    if str(props.get("taskType") or "").lower().startswith("migrate.") \
+            and isinstance(props.get("input"), dict):
+        return True
+    return props.get("kind") in AZDMS_KINDS and any(
+        k in props for k in ("sourceDatabaseName", "sourceSqlConnection",
+                             "collectionList", "sourceMongoConnection"))
+
+
+def _is_azure_dms(data):
+    many = _az_listed(data)
+    if many is not None:
+        return bool(many) and all(_az_like(r) for r in many)
+    return _az_like(data)
+
+
+def from_azure_dms(data, stem="hop"):
+    """A hop that checks what an Azure Database Migration Service
+    migration takes, read from the resource as the API answers it: a
+    classic project task (`az dms project task show`; its
+    `properties.input`: the two connections, `selectedDatabases` with
+    their target names and the tables each takes - SQL Server, MySQL,
+    PostgreSQL and Oracle sources - or a MongoDB task's databases and
+    collections), or a database migration of the newer service (SQL
+    Database, Managed Instance, SQL Server on a VM: `sourceDatabaseName`,
+    the resource's own name the target database, `tableList`; MongoDB to
+    Cosmos DB: `collectionList`). The same hop `from_tencent_dts` makes:
+    goal `verify`, what it takes and the names it lands under, and what
+    the migration's settings make a correct move look like."""
+    many = _az_listed(data)
+    if many is not None:
+        if len(many) != 1:
+            names = ", ".join(str(r.get("name")) for r in many[:6]
+                              if isinstance(r, dict))
+            raise SystemExit(f"the file holds {len(many)} migrations"
+                             f" ({names}); give it one (a hop is one"
+                             " migration)")
+        data = many[0]
+    props = data["properties"] if isinstance(data.get("properties"),
+                                             dict) else data
+    notes = []
+    out = Imported(_name(data.get("name") or stem), {}, notes)
+    if props.get("taskType"):
+        src, dst, got = _az_task(props, notes)
+    elif props.get("kind") in AZDMS_KINDS:
+        src, dst, got = _az_migration(data, props, notes)
+    else:
+        raise SystemExit(f"{data.get('name') or 'the file'}: a"
+                         f" {data.get('type') or 'resource'} of the"
+                         " migration service, not a migration - save the"
+                         " migration task, or the database migration")
+    out.raw["goal"] = "verify"
+    notes.insert(0, _VERIFY.replace("the job", "the migration"))
+    return _verify_sides(out, src, dst, got)
+
+
+def _az_task(props, notes):
+    """(source, target, scope) of a classic project task."""
+    kind = str(props["taskType"])
+    spec = AZDMS_TASKS.get(kind.lower())
+    if spec is None:
+        raise SystemExit(f"{kind}: a task that does not migrate a database -"
+                         " save the project's migration task (its taskType"
+                         " begins Migrate.)")
+    src_e, dst_e, online = spec
+    task = props.get("input") or {}
+    if src_e == "mongodb":
+        src = _az_mongo(task.get("source"), "source", notes)
+        dst = _az_mongo(task.get("target"), "target", notes)
+        got = _az_collections(task.get("databases"), notes)
+        online = str(task.get("replication") or "OneTime") == "Continuous"
+    else:
+        src = _az_end(task.get("sourceConnectionInfo"), src_e, "source",
+                      notes)
+        dst = _az_end(task.get("targetConnectionInfo"), dst_e, "target",
+                      notes)
+        got = _az_selected(task.get("selectedDatabases") or [], src_e,
+                           kind.lower(), notes)
+    if not online:
+        notes.append(_ONCE.replace("the job", "the task"))
+    if kind.lower().startswith("migrate.sqlserver.azuresqldbmi"):
+        logins = [str(x) for x in task.get("selectedLogins") or []]
+        notes.append(f"the task moves the logins {', '.join(logins[:8])}"
+                     " and no other: the target's other logins are not the"
+                     " source's" if logins else "the task moves no logins:"
+                     " the target's logins are not the source's")
+    if src_e == "postgres":
+        notes.append("the task does not carry a sequence's state: its next"
+                     " value on the target reads as different until it is"
+                     " set again")
+    return src, dst, got
+
+
+def _az_end(info, engine, word, notes):
+    """One side of an Azure migration from its connection info (the
+    password never read): a SQL Server's `dataSource` -
+    `tcp:host\\instance,port` - a server's name and port, an Oracle
+    source's EZConnect `host:port/service`, or a managed instance named
+    only by its resource id."""
+    if not isinstance(info, dict):
+        notes.append(f"the file names no {word} - the guide asks for its"
+                     " address")
+        return {"engine": engine, "long": {}, "db": ""}
+    long = {}
+    if info.get("type") == "MiSqlConnectionInfo" or (
+            info.get("managedInstanceResourceId")
+            and not info.get("dataSource")):
+        _unreached(word, _leaf(info.get("managedInstanceResourceId")),
+                   "a managed instance named by its resource id", notes)
+    elif engine == "oracle":
+        m = re.match(r"^(?://)?([^:/\s]+)(?::(\d+))?/([^\s:/]+)",
+                     str(info.get("dataSource") or ""))
+        if m:
+            long["host"] = m.group(1)
+            if m.group(2):
+                long["port"] = int(m.group(2))
+            long["service"] = m.group(3)
+        else:
+            notes.append(f"the {word} is named by"
+                         f" {info.get('dataSource') or 'nothing'}, not a"
+                         " host and service - the guide asks for them")
+    else:
+        where = re.sub(r"^[a-z]+:", "", str(info.get("dataSource")
+                                            or info.get("serverName")
+                                            or ""), flags=re.I)
+        host, _, port = where.partition(",")
+        host, _, instance = host.partition("\\")
+        if instance:
+            notes.append(f"the {word} is the named instance {instance} of"
+                         f" {host}: give the port it listens on")
+        if host.strip():
+            long["host"] = host.strip()
+        port = port.strip() or info.get("port")
+        if port and str(port).isdigit():
+            long["port"] = int(port)
+    if info.get("userName"):
+        long["user"] = str(info["userName"])
+    if info.get("encryptConnection") is True:
+        if engine == "postgres":
+            long["sslmode"] = "require"
+        elif engine == "mysql":
+            long["ssl"] = True
+        elif engine == "mssql":
+            long["encrypt"] = "require"
+    elif info.get("encryptConnection") is False:
+        notes.append(f"the migration reaches the {word} without encrypting"
+                     " the connection (encryptConnection false)")
+    if info.get("trustServerCertificate") is True:
+        notes.append(f"the migration takes the {word}'s certificate"
+                     " unchecked (trustServerCertificate)")
+    auth = str(info.get("authentication") or "")
+    if auth and auth not in ("SqlAuthentication", "None"):
+        notes.append(f"the migration signs in to the {word} by {auth}: the"
+                     " guide asks how migkit signs in")
+    return {"engine": engine, "long": long,
+            "db": str(info.get("databaseName") or "")}
+
+
+def _az_selected(selected, engine, kind, notes):
+    """The databases a task names (`selectedDatabases`) and their target
+    names, and in each the tables it takes: a `tableMap` of source table
+    to target table (`schema.table` on SQL Server, `database.table` on
+    MySQL), the tables a PostgreSQL task selects (`schema.table`), a SQL
+    Server sync task's schema - none of these, the whole database. An
+    Oracle task's database is its schema."""
+    got = _scope()
+    whole = True
+    for d in selected:
+        if not isinstance(d, dict):
+            continue
+        db = d.get("schemaName") if engine == "oracle" else d.get("name")
+        if not db:
+            notes.append("a database the task names with no name - not"
+                         " carried")
+            continue
+        _took_db(got, db, d.get("restoreDatabaseName")
+                 or d.get("targetDatabaseName"))
+        pairs = list((d.get("tableMap") or {}).items()) if isinstance(
+            d.get("tableMap"), dict) else []
+        for t in d.get("selectedTables") or []:
+            name = t.get("name") if isinstance(t, dict) else t
+            if name:
+                pairs.append((name, None))
+        if not pairs:
+            if engine == "mssql" and d.get("schemaName"):
+                got["include"].append(f"{db}.{d['schemaName']}.*")
+                whole = False
+            else:
+                got["include"].append(f"{db}.*")
+            continue
+        whole = False
+        for src, dst in pairs:
+            ident, new = _az_table(db, engine, src, dst)
+            if ident:
+                got["include"].append(ident)
+            if new:
+                got["tables"][ident] = new
+        if str(d.get("caseManipulation") or "").lower() == "tolower":
+            got["names"] = {"tables": {"case": "lower"}}
+            notes.append(f"the task writes {db}'s names in lower case: the"
+                         " hop's name rule lowers its tables'; a schema's"
+                         " is not carried")
+    if whole:
+        got["include"] = []
+    return got
+
+
+def _az_table(db, engine, src, dst):
+    """(the table fully named, its new name or None) of one entry of a
+    task's tables - a MySQL or Oracle table named from its database
+    (schema), the rest from the database through the schema."""
+    s = _dotted(src)
+    if not s:
+        return None, None
+    flat = engine in ("mysql", "oracle")
+    sch = "" if flat or len(s) < 2 else s[-2]
+    ident = ".".join(x for x in (db, sch, s[-1]) if x)
+    if not dst:
+        return ident, None
+    t = _dotted(dst) or s
+    if flat:
+        return ident, t[-1] if t[-1] != s[-1] else None
+    new_sch = t[-2] if len(t) >= 2 else sch
+    if (new_sch, t[-1]) == (sch, s[-1]):
+        return ident, None
+    return ident, ".".join(x for x in (new_sch, t[-1]) if x)
+
+
+def _az_collections(databases, notes):
+    """A MongoDB task's databases and the collections of each it takes
+    (`{db: {collections: {name: ...}}}`); a database naming none, all of
+    it."""
+    got = _scope()
+    whole = True
+    for db, spec in (databases or {}).items():
+        _took_db(got, db)
+        colls = spec.get("collections") if isinstance(spec, dict) else None
+        if not colls:
+            got["include"].append(f"{db}.*")
+            continue
+        whole = False
+        got["include"] += [f"{db}.{c}" for c in colls]
+    if not databases:
+        notes.append("the task takes the whole instance; so does the hop")
+    if whole:
+        got["include"] = []
+    return got
+
+
+def _az_mongo(info, word, notes):
+    """A MongoDB side: its connection string with any password left out,
+    or its host and port; a storage container of files is no server."""
+    if not isinstance(info, dict):
+        notes.append(f"the file names no {word} - the guide asks for its"
+                     " address")
+        return {"engine": "mongodb", "long": {}, "db": ""}
+    url = str(info.get("connectionString") or "")
+    if url.startswith(("mongodb://", "mongodb+srv://")):
+        if re.match(r"^mongodb(\+srv)?://[^:/@]*:[^/@]*@", url):
+            url = re.sub(r"(//[^:/@]*):[^/@]*@", r"\1@", url, count=1)
+            notes.append(f"the {word}'s connection string's password was"
+                         " left out")
+        base, _, query = url.partition("?")
+        head = re.match(r"^(mongodb(?:\+srv)?://[^/]*)", base).group(1)
+        user = info.get("userName")
+        if user and "@" not in head:
+            from urllib.parse import quote
+            head = head.replace("://", f"://{quote(str(user), safe='')}@",
+                                1)
+        return {"engine": "mongodb", "long": {}, "uri": (head, query),
+                "db": ""}
+    long = {}
+    if info.get("host"):
+        long["host"] = str(info["host"])
+        if info.get("port"):
+            long["port"] = int(info["port"])
+        if info.get("userName"):
+            long["user"] = str(info["userName"])
+        if info.get("useSsl") is True:
+            long["uri_options"] = "tls=true"
+    elif url:
+        notes.append(f"the {word} is files in a storage container, not a"
+                     " server: give the database they were taken from")
+    else:
+        notes.append(f"the file names no {word} address - the guide asks"
+                     " for it")
+    return {"engine": "mongodb", "long": long, "db": ""}
+
+
+def _az_migration(res, props, notes):
+    """(source, target, scope) of a database migration of the newer
+    service: one SQL Server database, its target database the resource's
+    own name, the tables of `tableList` (all of them where it names
+    none); or MongoDB collections into Cosmos DB, each with the names it
+    lands under."""
+    kind = props["kind"]
+    got = _scope()
+    if AZDMS_KINDS[kind] == "mongodb":
+        src = _az_mongo(props.get("sourceMongoConnection"), "source", notes)
+        dst = _az_mongo(props.get("targetMongoConnection"), "target", notes)
+        whole = True
+        for c in props.get("collectionList") or []:
+            if not isinstance(c, dict) or not c.get("sourceDatabase"):
+                continue
+            db, coll = c["sourceDatabase"], c.get("sourceCollection")
+            _took_db(got, db, c.get("targetDatabase"))
+            if not coll:
+                got["include"].append(f"{db}.*")
+                continue
+            whole = False
+            got["include"].append(f"{db}.{coll}")
+            if c.get("targetCollection") and c["targetCollection"] != coll:
+                got["tables"][f"{db}.{coll}"] = c["targetCollection"]
+        if not got["dbs"]:
+            notes.append("the migration names no collections - the guide"
+                         " asks which")
+        if whole:
+            got["include"] = []
+        return src, dst, got
+    src = _az_end(props.get("sourceSqlConnection"), "mssql", "source",
+                  notes)
+    if isinstance(props.get("targetSqlConnection"), dict):
+        dst = _az_end(props["targetSqlConnection"], "mssql", "target",
+                      notes)
+    else:
+        dst = {"engine": "mssql", "long": {}, "db": ""}
+        _unreached("target", _leaf(props.get("scope")), {
+            "SqlDb": "an Azure SQL server", "SqlMi": "a managed instance",
+            "SqlVm": "SQL Server on a virtual machine"}[kind]
+            + " named by its resource id", notes)
+    db = props.get("sourceDatabaseName")
+    if db:
+        named = res.get("name") if isinstance(res.get("properties"),
+                                              dict) else None
+        _took_db(got, db, named)
+        for t in props.get("tableList") or []:
+            parts = _dotted(t)
+            if parts:
+                got["include"].append(".".join([str(db)] + parts[-2:]))
+    else:
+        notes.append("the migration names no source database - the guide"
+                     " asks for it")
+    if (props.get("offlineConfiguration") or {}).get("offline") is True:
+        notes.append(_ONCE.replace("the job", "the migration"))
+    if kind in ("SqlMi", "SqlVm"):
+        notes.append("the service does not move logins: the target's"
+                     " logins are not the source's")
+    if props.get("targetDatabaseCollation"):
+        notes.append("the target database is made with the collation"
+                     f" {props['targetDatabaseCollation']}: text sorts and"
+                     " compares there in its way")
+    return src, dst, got
 
 
 # ---- a change-capture connector ------------------------------------------
