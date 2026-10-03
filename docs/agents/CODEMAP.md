@@ -223,33 +223,44 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/runners/__init__.py` - (no docstring)
 - `migkit/runners/second_reader.py` - Runs inside the second reader's own environment, never migkit's.
 
-## `migkit/storedcode/` (28 modules)
+## `migkit/storedcode/` (39 modules)
 
 - `migkit/storedcode/__init__.py` - Stored code carried to another engine and proved there (backlog R11).
+- `migkit/storedcode/appscan.py` - The SQL written in the application's own code, found, carried into the target's SQL and proved (leapfrog research P11, backlog CV.P11, W3's 
 - `migkit/storedcode/bench.py` - The sandbox's two servers holding the fixture, with a runner on each watching its tables: what the schema's own proofs run on - constraints  Classes: Bench.
+- `migkit/storedcode/builtins.py` - Built-in functions' meaning at their edges, mined from the engines' own test suites (leapfrog research P17, backlog CV.P17).
 - `migkit/storedcode/collations.py` - A column's collation held to the source's by the column's own values, asked of both servers (leapfrog research P13, backlog CV.P13). Classes: Collation, Reading, Parting.
 - `migkit/storedcode/concolic.py` - Inputs for a branch the search never took, solved for (leapfrog research P7). Classes: Unsolvable.
 - `migkit/storedcode/constraints.py` - The schema's constraints held to the rows they accept and refuse, by running them (leapfrog research P12, backlog CV.P12). Classes: Outside, NotProbed, Column, Check, Unique, Foreign.
 - `migkit/storedcode/convert.py` - Stored code converted one routine at a time, by whichever candidate proves itself on it (backlog R11). Classes: Conversion.
+- `migkit/storedcode/corpus.py` - The source's own statements as a workload corpus, replayed on the target's engine (leapfrog research P10, backlog CV.P10). Classes: OracleSource.
 - `migkit/storedcode/effort.py` - What converting the stored code will cost a person, from two readings set side by side and never merged (backlog 40, research item 15).
 - `migkit/storedcode/harness.py` - One routine run on one side of the sandbox, and everything it did written down (backlog R11). Classes: HarnessError, Outcome, Watched, Runner, MySQLRunner, PostgresRunner.
 - `migkit/storedcode/history.py` - What the application really calls each routine with (leapfrog research P6): the source's own record of the statements it ran, read-only. Classes: Shape, Record, History.
+- `migkit/storedcode/indexadvice.py` - Indexes for the target, measured on the target's own planner before they are advised (leapfrog research P15, backlog CV.P15).
 - `migkit/storedcode/inputs.py` - What a routine is called with in the proof (backlog R11). Classes: Bank.
 - `migkit/storedcode/keep.py` - The proof kept as tests on the target (backlog R11), so it keeps running after the source is gone.
 - `migkit/storedcode/learn.py` - Rules learned from the fixes that proved (leapfrog research P16). Classes: Learned.
 - `migkit/storedcode/model.py` - A model as the last candidate, in a loop the proof closes (backlog R11).
 - `migkit/storedcode/mutants.py` - The proof's own mutation score: can it say "different"? (leapfrog research P18). Classes: Mutant.
 - `migkit/storedcode/mysql_pg.py` - MySQL stored programs in PostgreSQL's PL/pgSQL, by migkit's own rules. Classes: Node, Context.
+- `migkit/storedcode/packages.py` - Oracle's packages as the routines the proof calls one by one (backlog W3).
+- `migkit/storedcode/partitions.py` - A source table's partitioning carried to a PostgreSQL target as advice, and the routing of its rows proved on the sandbox (leapfrog research
 - `migkit/storedcode/pg_mysql.py` - PostgreSQL's PL/pgSQL (and `language sql`) routines as MySQL stored programs, by migkit's own rules - the mirror of `mysql_pg`. Classes: Tok, Node, Decl.
 - `migkit/storedcode/plpgsql.py` - What every converter into PostgreSQL's PL/pgSQL shares: names, the dollar quote, how a routine is wrapped, and the conversion's record. Classes: Converted, Emitter.
+- `migkit/storedcode/plsql_pg.py` - Oracle's PL/SQL in PostgreSQL's PL/pgSQL, by migkit's own rules - standalone functions, procedures and triggers, and packages (backlog W3). Classes: Tok, Node, Package.
 - `migkit/storedcode/programs.py` - Two open converters, driven as programs of their own (backlog R11).
 - `migkit/storedcode/prove.py` - Stored code held to the source's answers, by running it (backlog R11). Classes: Verdict, Proof.
 - `migkit/storedcode/reduce.py` - The smallest part of a routine that still differs (leapfrog research P4: reduce the input and the program).
+- `migkit/storedcode/reference.py` - The source's answers kept as the reference once the target is live (leapfrog research P19, backlog CV.P19).
 - `migkit/storedcode/routines.py` - What one piece of stored code is, whichever engine wrote it. Classes: Param, Routine.
 - `migkit/storedcode/rungs.py` - The candidates for one routine's conversion, as data (backlog R11, P0). Classes: Candidate, Ledger.
 - `migkit/storedcode/sandbox.py` - Where stored code is run: a scratch server of the source's engine and one of the target's, holding the same fixture (backlog R11). Classes: NoSandbox, Sandbox.
+- `migkit/storedcode/scalar.py` - A function of one expression held to its target's version for every input the solver can reach, not only for the inputs tried (leapfrog rese
 - `migkit/storedcode/sequences.py` - Routines held to the source over sequences of calls, not only one call at a time (leapfrog research P8). Classes: Step, Found.
 - `migkit/storedcode/sizing.py` - Columns sized from the data they hold, every change of domain that makes recorded with its evidence, and proved by what the target now refus
+- `migkit/storedcode/statements.py` - The application's own statements proved on the sandbox, as its stored code is (leapfrog research P10, P11 and P21; backlog CV.P10, CV.P11, C Classes: Statement, Verdict, Holes.
+- `migkit/storedcode/trace.py` - Where two versions of a routine part, not only that they do (leapfrog research P5, backlog CV.P5).
 - `migkit/storedcode/translate.py` - One query or expression in another engine's SQL, or a refusal that says why - never a statement the target runs with another meaning. Classes: Refused.
 - `migkit/storedcode/tsql_pg.py` - SQL Server's T-SQL procedures, functions and triggers in PostgreSQL's PL/pgSQL, by migkit's own rules. Classes: Node.
 - `migkit/storedcode/views.py` - Views held to the source by their rows, on the hop's own servers.

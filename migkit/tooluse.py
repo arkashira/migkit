@@ -55,7 +55,8 @@ CONTRIBUTORS = ["migkit.movers", "migkit.verifiers",
                 "migkit.engines.teradata", "migkit.engines.sapodp",
                 "migkit.engines.saas", "migkit.engines.saas_salesforce",
                 "migkit.shared", "migkit.seedtools", "migkit.cloudapi",
-                "migkit.web.uses"]
+                "migkit.web.uses", "migkit.storedcode.appscan",
+                "migkit.storedcode.indexadvice"]
 
 _HERE = Path(__file__).parent
 

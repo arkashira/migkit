@@ -4504,6 +4504,106 @@ three-valued solver), P13 (the collation matrix on the column's own
 values) and P14 (types sized from the data, `types_from_data`) written
 2026-09-30 with their tests (R11).
 
+*Built 2026-10-04 (conversion breadth; its tests written, the one run
+of the suite to come):*
+* *P5, where two versions part* (`storedcode/trace.py`): on a differing
+  call, a copy of each version made beside it reports every variable and
+  parameter of its outermost scope after each statement of its outermost
+  block - PostgreSQL by `RAISE NOTICE`, MySQL into a MyISAM table, SQL
+  Server by `PRINT`, Oracle through an autonomous procedure - each copy
+  first held to its routine's own answer; the two reports aligned in
+  order (a target that runs more statements repeats a state), names met
+  across the rules' renames, values by class. The verdict's reason then
+  says after which source statement the two first part and which
+  variable holds what on each side. Left alone where a report would
+  change what the routine reads (`ROW_COUNT()`, `@@ROWCOUNT`, `SQL%`), a
+  T-SQL function (no `PRINT` there), a trigger, a package's member.
+* *P9, a target that runs the source's own code* (`convert.as_written`,
+  `convert.emulating`, the rung `emulator`): MariaDB in its Oracle mode,
+  IvorySQL and openGauss (A) for Oracle's PL/SQL, Babelfish for T-SQL,
+  openGauss (B) and openHalo for MySQL's - each asked of the target
+  itself (version, database compatibility, extension, setting); the
+  source's own statement made there in the session settings that read
+  it and proved like any other version. A docker sandbox of such a
+  target is not started (named instead); MariaDB's is.
+* *P10, the workload corpus* (`storedcode/corpus.py`, hop option
+  `workload_replay`): every statement on the source's record that reads
+  or writes rows - not migkit's, not the catalogue's, not a routine's
+  call - weighed by its runs, translated through the hop's
+  restructuring, run on both sandboxes with the routines in place and
+  compared by answer, rows written, error and counters
+  (`storedcode/statements.py`); a sample's values only where the masking
+  allows, else the fixture's; kept in `workload-corpus.json` normalised,
+  never a value, growing as the server's record turns over. The same
+  corpus is the workload comparison's list of statements, so an Oracle
+  source joins it through its shared pool and captured binds (plans
+  from `V$SQL_PLAN`, times from the pool's own averages - nothing run on
+  the source to plan or time it).
+* *P11, the application's code* (`storedcode/appscan.py`, hop option
+  `application_sql`): every string literal of Python, Java, Kotlin,
+  Scala, Go, JavaScript, TypeScript, C#, PHP, Ruby, Rust and Swift read
+  by the language's own parser, joined literals as one, `.sql` files and
+  XML mapper statements; SQL only where the translator reads it as a
+  statement; interpolated, formatted and joined-around-a-variable ones
+  found and said as built at run time; an object mapper's own query
+  language left to it. Each proved as the corpus is;
+  `application-sql.sql` holds each translated statement with where it
+  was found. The application is read, never written.
+* *P15, index and partition advice* (`storedcode/indexadvice.py`,
+  `storedcode/partitions.py`, hop option `index_advice`): candidates from
+  each translated statement's equality, range, join and order columns,
+  made on the target hypothetically (the extension must already be
+  there) and advised only where the target's planner chooses one and its
+  estimate falls by half, the largest gains weighted by runs, with the
+  costs, the size and the writes that pay for it; a MySQL or Oracle
+  table partitioned by range or list where its target is not gets the
+  partitioning in PostgreSQL's words, made on the sandbox target in a
+  transaction rolled back, the fixture's rows put in, and each row's
+  partition held to the source's (`partitions-for-the-target.sql`); a
+  hash partitioning is advised and said to route otherwise.
+* *P17, the engines' own tests* (`storedcode/builtins.py`, hop option
+  `builtin_suites`): PostgreSQL's regression files, sqllogictest and
+  MySQL's mysql-test read as data for the cases calling a function the
+  source's code calls on constants, run on both sandboxes; a case
+  answered apart is kept with its file and line and refuses a call with
+  exactly its constants in the translator, adds its constants to every
+  routine calling the function, and is said beside such a routine's
+  verdict.
+* *P19, the source's answers after the cutover* (`storedcode/reference.py`,
+  hop option `code_reference_days`): the proof's calls of each function
+  whose answers need no rows, with the source's answers, kept (never
+  under `mask: all`); after a flip, each check asks the target's version
+  the same calls read-only for the period and says any that answers
+  otherwise.
+* *P20, every input the solver reaches* (`storedcode/scalar.py`): a
+  function of one expression on both sides asked of the constraints'
+  encoder for an input answered apart; each found is run, only the run
+  decides; none found is said with its bound (declared ranges, no
+  overflow modelled). Stops at bodies of statements: their model needs a
+  symbolic executor per procedural language, and the search, the solver
+  for untaken branches and coverage stand in for it.
+* *P21, restructuring proved* (`statements.restructured`,
+  `statements.transformed`): the application's statements read through
+  the hop's column renames and drops (refused by name where they read a
+  column left out) and held to the source on the restructured fixture; a
+  statement reading a column written transformed is said, not compared.
+  A table split or merged is no restructuring a hop can say, and is not
+  claimed.
+* *W3*: PL/SQL by migkit's own rules (`storedcode/plsql_pg.py`,
+  `storedcode/packages.py`) - a package a schema, its state in session
+  settings through its own functions and initialised once a session, its
+  members proved one by one; cursors and their attributes, named and
+  declared exceptions (Oracle's statement-level rollback kept), SELECT
+  INTO's strictness, `''` as NULL, `||`, SUBSTR and `/` as Oracle means
+  them, triggers, autonomous procedures over a loopback connection.
+  T-SQL at depth (`tsql_pg.py`): the procedure-wide transaction under
+  TRY/CATCH, OUTPUT into a table variable, a temporary table or to the
+  caller, MERGE by the target's version, a table variable through a
+  ROLLBACK refused; and the END after a semicolon the translator's
+  tokenizer had read as text (no TRY ending in a semicolon could be
+  read). Found on the way: Oracle's no-row and too-many-rows errors were
+  compared by message, and every proof of them said "different".
+
 ### Leapfrog: engine reach (docs/research/leapfrog-engine-reach-2026-09-28.md)
 
 Today: Db2 is LUW only; warehouse sides write rows with no staged bulk
@@ -4869,7 +4969,7 @@ the gaps nothing above covers yet, now items of their own.
   packages with the emulation libraries they need (orafce and the
   like), T-SQL at depth, and the SQL embedded in application code
   (AWS SCT scans Java, C# and .NET) found and converted, with the same
-  proof by execution.
+  proof by execution. *Built 2026-10-04: see "Leapfrog: conversion".*
 * **W4. Transformation in flight and masking for compliance** - built on
   what migkit already holds rather than a streaming engine of its own
   (the owner, 2026-09-29: "faster, smarter, deeper than Striim"): each
