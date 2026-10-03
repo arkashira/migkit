@@ -2034,10 +2034,24 @@ class Engine:
 
     def _second_pairs(self, db):
         """[(source table, target table)] the second reading reads: every
-        table both sides have, within one engine."""
-        dst = set(self.neutral_tables("dst", db))
-        return [(t, t) for t in sorted(self.neutral_tables("src", db))
-                if t in dst]
+        table both sides have, within one engine - a table the hop renames
+        paired with the name it has on the target, as the pair engine pairs
+        it (`HeteroEngine.match_tables`, the rule read with its database).
+        Paired by its own name, a renamed table was never read twice: the
+        target has no table of that name."""
+        from .hetero import HeteroEngine
+        src = sorted(self.neutral_tables("src", db))
+        dst = list(self.neutral_tables("dst", db))
+
+        def rename(t):
+            return self.hop.target_table_in(
+                db, *[p for p in str(t).split(".") if p])
+        moved = [t for t in src if str(rename(t)) != str(t)]
+        pairs, _, _, _ = HeteroEngine.match_tables(moved, dst, rename)
+        taken = {d for _, d in pairs}
+        there = set(dst) - taken
+        return sorted(pairs + [(t, t) for t in src
+                               if t not in moved and t in there])
 
     def _second_views(self, db):
         """(name, the source's query, the target's) for each view both
