@@ -4125,6 +4125,54 @@ class MySQLEngine(Engine):
         # answered before execution (`max` over an index): nothing ran
         return 0.0 if "before execution" in text else None
 
+    def _errant_transactions(self, db):
+        """Where the target follows the source as its replica by GTID: the
+        transactions the target executed that the source never did - a
+        write made on the replica itself, which the cutover carries into
+        production and a failover back replays nowhere - and the source's
+        the target has not applied yet. Two sets of the servers' own,
+        subtracted by the target's server (`GTID_SUBTRACT`): an exact
+        answer, not a count. None where the target is no replica of this
+        source or GTIDs are off; MariaDB's GTIDs, by domain and server,
+        are said as not compared."""
+        brands = [b.name for b in self._brands()]
+        try:
+            if "mariadb" in brands:
+                return None
+            on, _ = self._gtid_state(brands[0])
+            if not on:
+                return None
+            src_uuid = str(self._q("src", "select @@server_uuid")[0][0])
+            rows = self._q_named("dst", "show replica status")
+            if not any(str(self._repl_field(r, ("Source_UUID", "Master_UUID"))
+                           or "").lower() == src_uuid.lower() for r in rows):
+                return None
+            src_set = str(self._q("src", "select @@global.gtid_executed")
+                          [0][0] or "")
+            errant, behind = self._q(
+                "dst", "select gtid_subtract(@@global.gtid_executed, %s),"
+                       " gtid_subtract(%s, @@global.gtid_executed)",
+                (src_set, src_set))[0]
+        except Exception as e:  # noqa: BLE001 - said, never as clean
+            return Result("deep", f"{db} errant", "warn",
+                          "the target's executed transactions could not be"
+                          " held to the source's: "
+                          + str(e).strip().splitlines()[0][:120])
+        errant = str(errant or "").replace("\n", "").strip()
+        behind = str(behind or "").replace("\n", "").strip()
+        if errant:
+            return Result("deep", f"{db} errant", "diff",
+                          "the target executed transactions the source"
+                          f" never did - written on the replica itself:"
+                          f" {errant[:200]}", "",
+                          "find what wrote them on the target before the"
+                          " cutover; the change it made is not the"
+                          " source's")
+        return Result("deep", f"{db} errant", "ok",
+                      "every transaction the target executed is the"
+                      " source's" + (f"; still to apply: {behind[:120]}"
+                                     if behind else ""))
+
     def stream_identity(self, side, db):
         """The server's own id: a binlog file and offset mean something in
         one server's log only."""
@@ -4445,7 +4493,9 @@ class MySQLEngine(Engine):
                self._duplicate_keys(db),
                self._temporal_meaning(db),
                self._time_zone_rules(db),
-               self._capacity_gaps(db)]
+               self._capacity_gaps(db),
+               self._errant_transactions(db)]
+        res = [r for r in res if r is not None]
         ddb = self._d("dst", db)
 
         # no pk/unique = CDC drops its updates/deletes and it can't be verified
