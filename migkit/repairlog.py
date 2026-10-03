@@ -59,16 +59,28 @@ def _name(table):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(table))[:120]
 
 
+def _synced(handle):
+    """What was written to `handle` on the disk: an undo journal is
+    written ahead of what it undoes, and one a power loss took with it
+    undoes nothing (audit ST12)."""
+    import os
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
 class Record:
-    """One table's repair, written as it goes."""
+    """One table's repair, written as it goes - on the disk before what it
+    records lands (`ready`, `applied`, `landed`)."""
 
     def __init__(self, undo_dir, table, form, columns=(), key=()):
-        undo_dir.mkdir(parents=True, exist_ok=True)
+        from . import durable
+        durable.private_dir(undo_dir)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.path = undo_dir / f"{stamp}-{time.time_ns() % 10 ** 9:09d}-" \
                                f"{_name(table)}{SUFFIX}"
         self.n = 0
         self._handle = self.path.open("a")
+        durable.sync_dir(undo_dir)
         self._line({"record": 1, "table": str(table), "form": form,
                     "columns": [list(c) if isinstance(c, (list, tuple))
                                 else c for c in columns],
@@ -86,14 +98,14 @@ class Record:
         return self.n
 
     def ready(self):
-        """Every statement planned, written out before the first lands."""
-        self._handle.flush()
+        """Every statement planned, on the disk before the first lands."""
+        _synced(self._handle)
 
     def applied(self, upto):
         """The statements up to `upto` have landed."""
         if upto:
             self._line({"applied": int(upto)})
-            self._handle.flush()
+            _synced(self._handle)
 
     def landed(self, n, after):
         """What statement `n` left on the target, read once it landed,
@@ -101,7 +113,7 @@ class Record:
         as the source did while it was copied, not as it did when the
         statement was planned."""
         self._line({"landed": int(n), "after": after})
-        self._handle.flush()
+        _synced(self._handle)
 
     def close(self):
         self._handle.close()
@@ -115,12 +127,27 @@ class Record:
 
 
 def read(path):
-    """(header, [statement], statements applied up to) of one record."""
+    """(header, [statement], statements applied up to) of one record.
+
+    A last line without its newline is a write a crash cut - a statement
+    planned, or an `applied` line, that never finished and that nothing
+    acted on: left out, and the record reads as it stood before it. It
+    used to stop every rollback of the record (audit ST12). A line that
+    is not a record anywhere else stops, naming the file (`durable`)."""
+    from . import durable
     head, out, upto = {}, [], 0
-    for line in path.read_text().splitlines():
+    lines = path.read_text().split("\n")
+    # the part after the last newline: "" where the file ends whole, else
+    # the torn line
+    lines = lines[:-1]
+    for n, line in enumerate(lines, 1):
         if not line.strip():
             continue
-        entry = json.loads(line)
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            raise durable._torn(path, "journal",
+                                f"line {n} is not a record") from None
         if "record" in entry:
             head = entry
         elif "applied" in entry:
@@ -382,6 +409,8 @@ def snapshot(engine, db, table, columns, key, path):
             for row in canon_rows(columns, rows):
                 out.write(json.dumps(row) + "\n")
             kept += len(rows)
+        # on the disk before the table it holds is replaced
+        _synced(out)
     return kept
 
 

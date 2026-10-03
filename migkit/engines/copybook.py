@@ -558,7 +558,15 @@ class CopybookEngine(NeutralCopier, Engine):
         keeps the byte range it took beside the file: written again after a
         restart, it replaces itself and whatever followed it, as a keyed
         batch replaces itself elsewhere. A table with no key is copied from
-        empty, by ranges the copier accounts for itself."""
+        empty, by ranges the copier accounts for itself.
+
+        The batch's entry is written before its records, on the disk, and
+        finished once they are (audit ST6): written after them, a crash
+        between left no entry - a torn index read as none - and the batch
+        was appended again after itself, its records twice. An entry left
+        unfinished is a batch whose write never returned: its copy was not
+        counted, it is written again, and whatever it left after its start
+        is cut first."""
         from .. import copybook as cb
         self._target_only(side, "write rows")
         if not rows:
@@ -586,30 +594,34 @@ class CopybookEngine(NeutralCopier, Engine):
         batch = hashlib.sha1(repr([[rows[0][i] for i in key],
                                    [rows[-1][i] for i in key], len(rows)])
                              .encode()).hexdigest()[:16] if key else None
+        from .. import durable
         index_path = self._index_path(d.path)
-        try:
-            with open(index_path) as f:
-                index = json.load(f)
-        except (OSError, ValueError):
-            index = []
+        index = durable.read_state(index_path, "position") or []
         with open(d.path, "r+b") as f:
             f.seek(0, 2)
             end = f.tell()
+            if index and index[-1][2] is None:
+                # a batch whose write never finished: cut back to where it
+                # began, whichever batch comes now
+                f.truncate(index[-1][1])
+                end = index[-1][1]
+                index = index[:-1]
             for k, (name, begin, _) in enumerate(index):
                 if batch and name == batch:
                     f.truncate(begin)
                     end = begin
                     index = index[:k]
                     break
+            if batch:
+                # where the batch begins, on the disk before its records
+                durable.write_json(index_path, index + [[batch, end, None]])
             f.seek(end)
             f.write(b"".join(out))
             f.flush()
             os.fsync(f.fileno())
-            if batch:
-                index.append([batch, end, f.tell()])
+            stop = f.tell()
         if batch:
-            with open(index_path, "w") as f:
-                json.dump(index, f)
+            durable.write_json(index_path, index + [[batch, end, stop]])
         return len(rows)
 
     def neutral_empty(self, side, db, table, where=None):
