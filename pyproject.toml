@@ -125,6 +125,7 @@ dependencies = [
     "alibabacloud_dds20151201",
     "alibabacloud_polardb20170801",
     "alibabacloud_r_kvstore20150101",
+    "alibabacloud_polardbx20200202",
     "oci",
     "ibm-cloud-sdk-core",
     # the passwords `migkit init` keeps, in the OS keychain

@@ -476,6 +476,100 @@ def test_a_tdsql_source_without_its_sets_says_how_to_follow_it():
         TdsqlEngine(_hop("dcdb")).change_point("src", "shop")
 
 
+#: what a distributed TDSQL instance's proxy answers of itself, in the
+#: shape its documentation gives (two sets, each its hash range)
+PROXY_TWO_SETS = {"cluster": "group_1499858589_10",
+                  "set_1499858817_1:ip": "10.0.0.11:4002;s1@10.0.0.12:4002",
+                  "set_1499858817_1:hash_range": "0---31",
+                  "set_1499859173_3:ip": "10.0.0.13:4002",
+                  "set_1499859173_3:hash_range": "32---63"}
+
+
+def test_a_tdsql_proxy_says_it_spreads_tables_and_a_mysql_server_does_not():
+    from migkit.engines.distmysql import sets_of, spread
+    assert sets_of(PROXY_TWO_SETS) == ["set_1499858817_1",
+                                       "set_1499859173_3"]
+    assert spread(PROXY_TWO_SETS)
+    # a set's hash range alone is enough; one set without one is not
+    assert spread({"set_1:hash_range": "0---63"})
+    assert not spread({"cluster": "g", "set_1:ip": "10.0.0.11:4002"})
+    # what a MySQL server answers the same statement: its own status
+    assert not spread({"Aborted_clients": "0", "Com_set_option": "12",
+                       "Uptime": "3600"})
+
+
+def test_a_hop_named_tdsql_is_moved_as_the_server_says_it_is(monkeypatch):
+    from migkit import engines
+    from migkit.engines.distmysql import TdsqlEngine
+    from migkit.engines.mysql import MySQLEngine
+    asked = []
+
+    def says(answer):
+        def server_says_so(cls, hop, side):
+            asked.append(side)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return classmethod(server_says_so)
+    monkeypatch.setattr(TdsqlEngine, "server_says_so", says(True))
+    hop = _hop("tdsql")
+    monkeypatch.setattr("migkit.tunnel.through", lambda h: None)
+    assert type(engines.get_engine(hop)) is TdsqlEngine
+    assert hop.engine == "dcdb" and asked == ["src"]
+    # asked once a hop: the name is the server's from then on
+    engines.get_engine(hop)
+    assert asked == ["src"]
+    monkeypatch.setattr(TdsqlEngine, "server_says_so", says(False))
+    hop, asked[:] = _hop("tdsql"), []
+    assert type(engines.get_engine(hop)) is MySQLEngine
+    assert hop.engine == "mysql" and asked == ["src", "tgt"]
+    # a server that cannot be asked leaves the name, its alias's engine
+    monkeypatch.setattr(TdsqlEngine, "server_says_so",
+                        says(ConnectionError("refused")))
+    hop = _hop("tdsql")
+    assert type(engines.get_engine(hop)) is MySQLEngine
+    assert hop.engine == "tdsql"
+    # a cross-engine hop's side is asked of its own side alone
+    monkeypatch.setattr(TdsqlEngine, "server_says_so", says(True))
+    hop, asked[:] = _hop("hetero", ), []
+    hop.options = {"source_engine": "postgres", "target_engine": "tdsql"}
+    engines.said_by_server(hop)
+    assert hop.options["target_engine"] == "dcdb" and asked == ["tgt"]
+
+
+def test_a_tdsql_hops_options_are_its_distributed_engines_too():
+    from migkit import hopkeys
+    from migkit.engines import may_be
+    assert may_be("tdsql") == {"mysql", "dcdb"}
+    assert may_be("mysql") == {"mysql"}
+    keys = hopkeys.endpoint_keys_for("tdsql")
+    assert {"sets", "shardkey"} <= keys
+    assert "sets" not in hopkeys.endpoint_keys_for("mysql")
+    hop = _hop("tdsql", sets=["10.0.0.11:4002"])
+    said = dict(hopkeys.said_by_doctor(hop, {"options": {}}))
+    assert "source.sets" not in said, said
+    hop = _hop("mysql", sets=["10.0.0.11:4002"])
+    said = dict(hopkeys.said_by_doctor(hop, {"options": {}}))
+    assert "source.sets" in said, said
+
+
+def test_a_tdsql_side_is_known_by_its_proxy_not_its_version(monkeypatch):
+    from migkit.engines import distmysql
+    eng = distmysql.TdsqlEngine(_hop("dcdb"))
+    monkeypatch.setattr(distmysql, "proxy_status",
+                        lambda e, side: dict(PROXY_TWO_SETS))
+    assert eng._is_it("src", "5.7.17-11-log", "") is True
+    assert eng._cluster("src") == "group_1499858589_10"
+    monkeypatch.setattr(distmysql, "proxy_status",
+                        lambda e, side: {"Uptime": "1"})
+    assert eng._is_it("src", "8.0.36", "MySQL Community Server") is False
+
+    def refused(e, side):
+        raise PermissionError("denied")
+    monkeypatch.setattr(distmysql, "proxy_status", refused)
+    assert eng._is_it("src", "8.0.36", "") is None
+
+
 def test_polardbx_reads_its_binlog_without_asking_mysql_settings(monkeypatch):
     """Its global binlog carries whole rows always: none of MySQL's binlog
     settings is asked (a server may not have them at all)."""

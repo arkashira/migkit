@@ -38,6 +38,7 @@
 #     https://docs.aws.amazon.com/memorydb/latest/devguide/engine-versions.html
 #     https://docs.aws.amazon.com/keyspaces/latest/devguide/cdc.html
 #     https://docs.aws.amazon.com/neptune/latest/userguide/streams-using-enabling.html
+#     https://docs.aws.amazon.com/keyspaces/latest/devguide/PointInTimeRecovery.html
 #     https://docs.aws.amazon.com/opensearch-service/latest/developerguide/supported-operations.html
 #     https://docs.aws.amazon.com/streams/latest/dev/service-sizes-and-limits.html
 #     https://docs.aws.amazon.com/streams/latest/dev/kinesis-extended-retention.html
@@ -153,6 +154,9 @@
 #     https://www.alibabacloud.com/help/en/polardb/polardb-for-mysql/user-guide/account-permissions
 #     https://www.alibabacloud.com/help/en/polardb/polardb-for-mysql/user-guide/enable-binary-logging
 #     https://www.alibabacloud.com/help/en/polardb/api-polardb-2017-08-01-modifydbclusterparameters
+#     https://www.alibabacloud.com/help/en/polardb/api-polardbx-2020-02-02-describebackupset
+#     https://www.alibabacloud.com/help/en/polardb/api-polardbx-2020-02-02-createbackup
+#     https://www.alibabacloud.com/help/en/polardb/api-polardbx-2020-02-02-restoredbinstance
 #     https://www.alibabacloud.com/help/en/polardb/polardb-for-postgresql/account-permissions-1
 #     https://www.alibabacloud.com/help/en/polardb/polardb-for-postgresql/default-values-of-cluster-parameters-1
 #     https://www.alibabacloud.com/help/en/analyticdb/analyticdb-for-postgresql/user-guide/create-and-manage-users
@@ -2192,7 +2196,7 @@ services:
     distinct: null
     hosts: ['\.polarx\.rds\.aliyuncs\.com$']
     signs: {}
-    api: {product: null, restore_point: "", clone: false}
+    api: {product: polardbx, restore_point: backup, clone: true}
     admin:
       role: "the privileged account (MySQL 5.7-style grants, no global or column level)"
       superuser: false
@@ -2538,7 +2542,7 @@ services:
     distinct: null
     hosts: []
     signs: {}
-    api: {product: null, restore_point: "", clone: false}
+    api: {product: gaussdb, restore_point: backup, clone: true}
     admin:
       role: root
       superuser: false
@@ -2670,7 +2674,7 @@ services:
     distinct: null
     hosts: []
     signs: {}
-    api: {product: null, restore_point: "", clone: false}
+    api: {product: geminidb, restore_point: backup, clone: true}
     admin:
       role: ""
       superuser: false
@@ -2693,7 +2697,7 @@ services:
     distinct: null
     hosts: []
     signs: {}
-    api: {product: null, restore_point: "", clone: false}
+    api: {product: geminidb, restore_point: backup, clone: true}
     admin:
       role: ""
       superuser: false
@@ -2717,7 +2721,7 @@ services:
     distinct: null
     hosts: []
     signs: {}
-    api: {product: null, restore_point: "", clone: false}
+    api: {product: geminidb, restore_point: backup, clone: true}
     admin:
       role: ""
       superuser: false

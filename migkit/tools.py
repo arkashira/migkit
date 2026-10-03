@@ -233,7 +233,9 @@ HUAWEI_SDK = "huawei-sdk"
 HUAWEI_SDK_PACKAGES = ("huaweicloudsdkcore==3.1.216",
                        "huaweicloudsdkrds==3.1.216",
                        "huaweicloudsdkdds==3.1.216",
-                       "huaweicloudsdkiam==3.1.216")
+                       "huaweicloudsdkiam==3.1.216",
+                       "huaweicloudsdkgaussdbforopengauss==3.1.216",
+                       "huaweicloudsdkgaussdbfornosql==3.1.216")
 #: {environment: its packages} `install_missing` makes where missing
 OWN_ENVS = {HUAWEI_SDK: HUAWEI_SDK_PACKAGES}
 

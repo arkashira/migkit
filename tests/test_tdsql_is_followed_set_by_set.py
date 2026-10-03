@@ -113,3 +113,27 @@ def test_one_set_read_and_another_not_is_not_caught_up(sets, tmp_path):
     _, token = _all(eng, token)
     eng.release_changes()
     assert eng.position_reached(token, want) is True
+
+
+def test_a_mysql_server_named_tdsql_is_moved_as_mysql(sets, tmp_path):
+    """A hop that names its engine tdsql asks the server: a MySQL server -
+    a set alone, or TDSQL-C - reads the proxy's hint as a comment and
+    names no set, so the hop is moved as MySQL; the distributed engine
+    refuses it by the same answer."""
+    from migkit import engines
+    from migkit.engines.distmysql import TdsqlEngine, proxy_status, spread
+    from migkit.engines.mysql import MySQLEngine
+    port = SETS[0][1]
+
+    def ep():
+        return Endpoint(host="127.0.0.1", port=port, user="root",
+                        password="test")
+    hop = Hop(name="named-tdsql", engine="tdsql", source=ep(), target=ep(),
+              databases=["shop"])
+    hop.report_dir = lambda db=None: tmp_path
+    status = proxy_status(MySQLEngine(hop), "src")
+    assert "Uptime" in status and not spread(status)
+    assert type(engines.get_engine(hop)) is MySQLEngine
+    assert hop.engine == "mysql"
+    with pytest.raises(SystemExit, match="is not TDSQL"):
+        _engine(tmp_path).server_identity("src", "shop")

@@ -720,12 +720,14 @@ ENDPOINT_OPTIONS = {
                    " says), id (its instance at the provider, where its"
                    " address does not find it), region, profile (the"
                    " provider CLI's profile its credentials come from), role"
-                   " (one assumed), and what else the provider asks for",
+                   " (one assumed), keep_days (how long a backup made as a"
+                   " restore point is kept, where the provider asks), and"
+                   " what else the provider asks for",
                    "dict", subs=("service", "id", "region", "profile",
                                  "role", "project", "subscription",
                                  "resource_group", "compartment",
                                  "project_id", "zone", "cluster", "vpc",
-                                 "subnet", "spec", "storage")),
+                                 "subnet", "spec", "storage", "keep_days")),
     "tunnel": Key("reach the server through a tunnel", "str|dict"),
     "tunnel_to": Key("what carries the connection, for the report",
                      "str"),
