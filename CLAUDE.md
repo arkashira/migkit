@@ -4,7 +4,8 @@
 
 - **Where things are**: read `docs/agents/CODEMAP.md` first (every module in one line, and the hubs most changes touch). For a symbol, `grep -P '^name\t' .codemap/SYMBOLS.tsv` gives its `file:line`; the Serena tools (`find_symbol`, `find_referencing_symbols`) and `tags` answer the same by meaning. Search the tree only for what these do not hold.
 - **What changed**: `python tools/gen_codemap.py --since <ref>` - modules and symbols added, removed or changed.
-- **What migkit can do**: ask the code - `decide.coverage()` (every engine, cell by cell) and `capabilities.matrix()` - never memory or a summary.
+- **What migkit can do, and what is left**: `docs/agents/STATE.md` (the capability table and the decision engine's coverage for every engine, every cell not yet done, the backlog by status), written from the code on every commit; `.codemap/LOCAL.md` says what this machine last proved (the full suite, unpushed work, agents' branches kept). Never answer it from memory or a summary.
+- **Who calls what** (the reach of a change): `grep -P '^name\t' .codemap/CALLERS.tsv`, or Serena's `find_referencing_symbols`.
 - **Before a new file or name**: look it up in the map and the symbols. A new file goes only where the map has none; an existing file is read, then edited. A new method name is checked against its class.
 
 ## One place
