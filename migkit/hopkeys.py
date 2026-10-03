@@ -322,7 +322,8 @@ HOP_OPTIONS = {
                     subs=("cron", "timezone", "run", "args", "catchup",
                           "pause_after_failures", "max_duration",
                           "retry_window")),
-    "schema_authority": Key("which schema reading decides", "str"),
+    "schema_authority": Key("which schema reading decides: schema-aware"
+                            " (the default) or every-reading", "str"),
     "server_id": Key("the replica id the binlog reader uses", "int",
                      ("mysql",)),
     "server_to_server": Key("the target may pull the rows from the source"
@@ -1437,6 +1438,8 @@ def check_hop(name, raw):
         out += _egress(f"{where}.options.egress", opts.get("egress"))
         out += _two_way(f"{where}.options.two_way", opts.get("two_way"))
         out += _ddl_problems(f"{where}.options.ddl", opts.get("ddl"))
+        out += _authority_problems(f"{where}.options.schema_authority",
+                                   opts.get("schema_authority"))
         from .web import roles
         for w, text in roles.hop_problems(opts.get("access")):
             out.append(Problem("error", f"{where}.options.{w}", text))
@@ -1557,6 +1560,20 @@ def _two_way(where, got):
     except SystemExit as e:
         return [Problem("error", where, str(e))]
     return []
+
+
+def _authority_problems(where, got):
+    """`schema_authority` said as neither of its words: read as every
+    reading counting, which is likely not what was meant - an error, said
+    before anything runs."""
+    from .engines.base import Engine
+    if got is None:
+        return []
+    word = str(got).strip().lower()
+    if word in Engine.AUTHORITIES or word == Engine.LEGACY_AUTHORITY:
+        return []
+    return [Problem("error", where, f"{got!r} - one of"
+                                    f" {', '.join(Engine.AUTHORITIES)}")]
 
 
 def _ddl_problems(where, got):

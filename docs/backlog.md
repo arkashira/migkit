@@ -2783,8 +2783,10 @@ store). What was still nowhere:
   the tables it knows too (done 2026-10-04, `TableSet._names_among`).
   Test: `test_an_online_rewrites_working_tables_are_left_alone.py`.
 * **`schema_authority: atlas` needs an alias shape** (4-จ from the old
-  queue): how the hop names the authority's own alias for a table the
-  hop renames; open, small.
+  queue): *done (2026-10-04)* - the words name what decides,
+  `schema-aware` (the default) or `every-reading`, never the program
+  behind it; an older hop's `atlas` is read as the default, any other
+  word refused at load.
 * **reladiff as a rung, not a default:** it has no jsonb rendering and
   breaks on Python 3.14; the decision engine keeps it for the pairs it
   proves on and says why it was not used elsewhere (0f).

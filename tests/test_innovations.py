@@ -306,10 +306,30 @@ def test_atlas_authoritative_demotes_textual_diff():
     assert out["db (structural)"] == "diff"
     assert out["db objects"] == "diff"
     # opt-out keeps everything as-is
-    eng2 = Engine(_hop(options={"schema_authority": "strict"}))
+    eng2 = Engine(_hop(options={"schema_authority": "every-reading"}))
     res2 = [Result("schema", "db", "diff", "x"),
             Result("schema", "db (fix DDL)", "ok", "clean")]
     assert eng2._atlas_authoritative(res2)[0].status == "diff"
+
+
+def test_the_schema_authority_is_said_without_naming_a_program():
+    """The words a hop writes name what decides, not the program behind
+    it; an older hop's word for the default is read as it, and a word
+    that is neither is refused before anything runs."""
+    from migkit import hopkeys
+    from migkit.engines.base import Engine, Result
+    assert all("atlas" not in w for w in Engine.AUTHORITIES)
+    res = [Result("schema", "db", "diff", "x"),
+           Result("schema", "db (fix DDL)", "ok", "clean")]
+    for word in ("schema-aware", "atlas", None):
+        opts = {"schema_authority": word} if word else {}
+        got = Engine(_hop(options=opts))._atlas_authoritative(
+            [Result(r.check, r.scope, r.status, r.detail) for r in res])
+        assert got[0].status == "ok", word
+    assert hopkeys._authority_problems("x", "schema-aware") == []
+    assert hopkeys._authority_problems("x", "atlas") == []
+    bad = hopkeys._authority_problems("x", "schema_aware")
+    assert bad and bad[0].level == "error"
 
 
 def test_delta_available_on_all_engines():
