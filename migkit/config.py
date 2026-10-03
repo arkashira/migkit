@@ -738,7 +738,7 @@ class Hop:
 
     def target_db(self, db):
         """Target database name for a source db. Migrations often land in a
-        differently-named db (e.g. cart_uat -> cart), so every dst-side
+        differently-named db (e.g. shop_staging -> shop), so every dst-side
         connection resolves through this map (identity when unmapped).
         Local report paths stay keyed by the source name."""
         return self.db_map.get(db, db)
@@ -748,9 +748,9 @@ class Hop:
         verifies nor repairs it. Pass the dotted name parts, e.g. (db, schema,
         table) for postgres or (db, table) for mysql/mongo. A pattern matches
         the full dotted id or any right-anchored suffix of it, with shell
-        wildcards, so 'pick_dispatch_queue', 'public.pick_dispatch_queue' and
-        'oms_mkp_uat.public.pick_dispatch_queue' all exclude the same table,
-        and 'oms_mkp_uat.public.*' excludes a whole schema. This protects
+        wildcards, so 'job_queue', 'public.job_queue' and
+        'orders_db.public.job_queue' all exclude the same table,
+        and 'orders_db.public.*' excludes a whole schema. This protects
         target-owned tables (rows written on the target, not the source) from
         being deleted by a reconcile."""
         parts = [str(p) for p in parts if p not in (None, "")]

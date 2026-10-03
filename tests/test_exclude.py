@@ -10,27 +10,27 @@ from migkit.engines.postgres import PostgresEngine
 def _hop(engine, exclude):
     return Hop(name="h", engine=engine,
                source=Endpoint(host="s"), target=Endpoint(host="t"),
-               databases=["oms_mkp_uat"], exclude=exclude)
+               databases=["orders_db"], exclude=exclude)
 
 
 def test_excluded_full_id():
-    h = _hop("postgres", ["oms_mkp_uat.public.pick_dispatch_queue"])
-    assert h.excluded("oms_mkp_uat", "public", "pick_dispatch_queue")
-    assert not h.excluded("oms_mkp_uat", "public", "orders")
+    h = _hop("postgres", ["orders_db.public.job_queue"])
+    assert h.excluded("orders_db", "public", "job_queue")
+    assert not h.excluded("orders_db", "public", "orders")
 
 
 def test_excluded_suffix_forms():
-    assert _hop("postgres", ["public.pick_dispatch_queue"]).excluded(
-        "oms_mkp_uat", "public", "pick_dispatch_queue")
-    tbl_only = _hop("postgres", ["pick_dispatch_queue"])
-    assert tbl_only.excluded("oms_mkp_uat", "public", "pick_dispatch_queue")
-    assert tbl_only.excluded("other_db", "public", "pick_dispatch_queue")
+    assert _hop("postgres", ["public.job_queue"]).excluded(
+        "orders_db", "public", "job_queue")
+    tbl_only = _hop("postgres", ["job_queue"])
+    assert tbl_only.excluded("orders_db", "public", "job_queue")
+    assert tbl_only.excluded("other_db", "public", "job_queue")
 
 
 def test_excluded_wildcards():
-    schema = _hop("postgres", ["oms_mkp_uat.public.*"])
-    assert schema.excluded("oms_mkp_uat", "public", "anything")
-    assert not schema.excluded("cart_uat", "public", "anything")
+    schema = _hop("postgres", ["orders_db.public.*"])
+    assert schema.excluded("orders_db", "public", "anything")
+    assert not schema.excluded("shop_staging", "public", "anything")
 
 
 def test_excluded_empty_never_matches():
@@ -39,11 +39,11 @@ def test_excluded_empty_never_matches():
 
 def test_pg_keep_tbl_filters_excluded():
     eng = PostgresEngine(_hop("postgres",
-                              ["oms_mkp_uat.public.pick_dispatch_queue",
-                               "oms_mkp_uat.public.pick_dispatch_oos_queue"]))
-    assert not eng._keep_tbl("oms_mkp_uat", "public.pick_dispatch_queue")
-    assert not eng._keep_tbl("oms_mkp_uat", "public.pick_dispatch_oos_queue")
-    assert eng._keep_tbl("oms_mkp_uat", "public.orders")
+                              ["orders_db.public.job_queue",
+                               "orders_db.public.job_retry_queue"]))
+    assert not eng._keep_tbl("orders_db", "public.job_queue")
+    assert not eng._keep_tbl("orders_db", "public.job_retry_queue")
+    assert eng._keep_tbl("orders_db", "public.orders")
 
 
 def test_mysql_mongo_matcher_two_parts():
