@@ -69,6 +69,15 @@ MIGKIT_OWN = ("migkit_origin", "migkit_cutover_mark")
 KEYED_ENGINES = ("redis", "kafka")
 
 
+def scoped(hop):
+    """Whether the hop leaves anything out by name - an `exclude`, or an
+    `include` that takes less than everything. A way that carries a whole
+    database, a whole server or a whole keyspace serves only a hop that
+    is not; the one `excluded` answers which objects."""
+    return bool(getattr(hop, "exclude", None) or getattr(hop, "include",
+                                                         None))
+
+
 @dataclass
 class Endpoint:
     host: str = ""
@@ -507,6 +516,9 @@ class Hop:
     target: Endpoint
     databases: list = field(default_factory=list)
     exclude: list = field(default_factory=list)
+    #: what the hop takes, where it takes less than everything - the same
+    #: patterns `exclude` reads; empty takes everything (`included`)
+    include: list = field(default_factory=list)
     service: str = ""
     big_rows: int = 5_000_000
     slice: int = 1_000_000
@@ -581,7 +593,103 @@ class Hop:
             if bookkeeping(*parts):
                 return True
         cands = {".".join(parts[i:]) for i in range(len(parts))}
-        return any(fnmatch(c, str(pat)) for pat in self.exclude for c in cands)
+        if any(fnmatch(c, str(pat)) for pat in self.exclude for c in cands):
+            return True
+        return not self.included(*parts)
+
+    def included(self, *parts):
+        """Whether the hop's `include` takes this object - True where it
+        has no `include`, which takes everything.
+
+        The same patterns `exclude` reads, matched the same way against
+        the object's own name and every name it sits in: `orders`,
+        `public.orders`, `appdb.public.orders`, `appdb.public.*` and
+        `appdb` each take `appdb.public.orders`. `exclude` wins where both
+        name it, so a task that took a schema but none of its log tables
+        is said as the two lists it is. Asked through `excluded`, so every
+        reader of the hop's scope - the check, the copy, the repair, the
+        tail - reads one answer and none can verify a table the move
+        left out, or leave out one it moved.
+
+        A single name is a database being listed: it is opened unless
+        every entry names another database first - `orders` and
+        `public.orders` may be in any of them, `crm.public.orders` and,
+        on MySQL, `crm.orders` only in `crm`. Where a name may hold a dot
+        of its own (a collection, a topic) every database is opened. A
+        database opened for nothing has no table taken, never a table
+        too many."""
+        if not self.include:
+            return True
+        from fnmatch import fnmatch
+        names = self._names(*parts)
+        if not names:
+            return True
+        pats = [str(p) for p in self.include if str(p).strip()]
+        if not pats:
+            return True
+        for k in range(1, len(names) + 1):
+            for ident in self._ids(*names[:k]):
+                if any(fnmatch(ident, p) for p in pats):
+                    return True
+        if len(names) > 1:
+            return False
+        db = names[0]
+        whole = self.whole_name()
+        if not whole:
+            return True
+        for p in pats:
+            head, _, rest = p.partition(".")
+            if fnmatch(db, head) or p.count(".") + 1 < whole:
+                return True
+        return False
+
+    def _names(self, *parts):
+        """An object's name as its parts, split the one way names are
+        (`util.split_table`): some callers pass a table as one part
+        (`public.orders`), and a bare `include` entry must take it either
+        way. A quoted name's dots are its own, and so are an unquoted
+        name's on an engine without schemas - a collection `fs.chunks`, a
+        topic `orders.created`."""
+        from .util import _parts
+        eng = self._names_engine()
+        return [x for p in parts if p not in (None, "")
+                for x in _parts(eng, str(p)) if x]
+
+    def whole_name(self):
+        """How many dotted parts name a table from its database down - 3
+        where there are schemas, 2 on an engine whose names hold no dot -
+        or 0 where a name may hold a dot of its own (a collection
+        `fs.chunks`, a topic `orders.created`), so no dotted name is sure
+        of the database it names."""
+        from .util import NO_SCHEMA
+        eng = self._names_engine()
+        if eng in ("mysql", "tidb", "clickhouse", "cassandra"):
+            return 2
+        return 0 if eng in NO_SCHEMA else 3
+
+    def _names_engine(self):
+        """The engine whose names the hop's objects carry: the source's,
+        a pair's own engine being neither side's."""
+        from .util import _canonical
+        eng = self.engine
+        if eng == "hetero":
+            eng = (self.options or {}).get("source_engine") or "mysql"
+        return _canonical(eng)
+
+    def unused_include(self, tables):
+        """`include` entries that take none of these source tables, each
+        `(database, table)` as the engine lists it: an entry that takes
+        nothing is a table the operator believes is moved and checked,
+        and nobody looks at it."""
+        from fnmatch import fnmatch
+        known = set()
+        for db, table in tables:
+            names = self._names(db, table)
+            for k in range(1, len(names) + 1):
+                known.update(self._ids(*names[:k]))
+        return [str(p) for p in self.include
+                if str(p).strip() and not any(fnmatch(i, str(p))
+                                              for i in known)]
 
     @staticmethod
     def _ids(*parts):
@@ -610,6 +718,18 @@ class Hop:
             if ident in rules:
                 return str(rules[ident])
         return ".".join(str(p) for p in parts if p not in (None, ""))
+
+    def target_table_in(self, db, *parts):
+        """`target_table` for a table of database `db`, named without it.
+
+        A rule may name the database - the only way to tell two
+        databases' `orders` apart - so the database is part of what is
+        matched; the answer is the rule's target, or the table's name as
+        the caller gave it where no rule applies.
+        """
+        got = str(self.target_table(db, *parts))
+        own = [str(p) for p in parts if p not in (None, "")]
+        return ".".join(own) if got == ".".join([str(db), *own]) else got
 
     def column_rules(self, *parts):
         """What the hop's `mapping.columns` says about this table's columns:
@@ -903,6 +1023,7 @@ def build_hop(name, raw):
         target=ends["target"],
         databases=dbs,
         exclude=raw.get("exclude") or [],
+        include=[str(p) for p in raw.get("include") or []],
         service=raw.get("service", ""),
         big_rows=int(raw.get("big_rows", 5_000_000)),
         slice=int(raw.get("slice", 1_000_000)),

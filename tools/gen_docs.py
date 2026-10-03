@@ -1193,6 +1193,34 @@ RECIPES = (
                       "source": "mysql://app@db1.example.com:3306/shop",
                       "target": "postgres://app@db2.example.com:5432/shop"}},
            needs=(("source", "data"), ("target", "data"))),
+    Recipe("verify-what-a-service-moved",
+           "What a cloud's migration service moved, proved table by table,"
+           " and only that",
+           "A service told to take some databases, schemas and tables -"
+           " leaving its log tables behind, renaming one, filtering another's"
+           " rows, taking some columns - is checked against exactly that:"
+           " `include` names what it took, `exclude` what it was told to"
+           " leave, `mapping` its renames, filters and columns. A table it"
+           " never took is neither compared nor called missing, and the"
+           " verdict says the scope it covers. Given the job's own file"
+           " where it asks for the source, `migkit init` writes this hop"
+           " from it, with every setting of the job that makes a correct"
+           " move look different said beside it.",
+           {"orders-moved": {"goal": "verify",
+                             "source": "mysql://app@db1.example.com:3306/"
+                                       "billing,logistics",
+                             "target": "mysql://app@db2.example.com:3306/"
+                                       "billing,logistics_new",
+                             "include": ["billing.*", "logistics.orders",
+                                         "logistics.parcels"],
+                             "exclude": ["billing.*_log"],
+                             "mapping": {
+                                 "tables": {"logistics.parcels": "parcel"},
+                                 "where": {"logistics.parcels": "id > 10"},
+                                 "columns": {"logistics.orders": {
+                                     "keep": ["id", "status", "total"]}}}}},
+           needs=(("source", "data"), ("target", "data")),
+           then=("migkit check orders-moved",)),
     Recipe("masked-test-copy",
            "Production to a staging database, as a masked subset",
            "The rows chosen and every row they refer to, masked where the"

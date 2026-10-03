@@ -3602,7 +3602,8 @@ select json_build_object(
             sch, tbl = self._split(t)
             if side == "dst":
                 sch, tbl = split_table("postgres",
-                                       self.hop.target_table(sch, tbl), sch)
+                                       self.hop.target_table_in(db, sch,
+                                                                tbl), sch)
             out.add((sch, tbl))
         return out
 

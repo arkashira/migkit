@@ -71,6 +71,9 @@ HOP_KEYS = {
     "databases": Key("the source databases to move, all of them when left"
                      " out", "list"),
     "exclude": Key("databases, schemas or tables left alone", "list"),
+    "include": Key("the only databases, schemas or tables taken - moved,"
+                   " checked and repaired - the rest left alone as if"
+                   " excluded; exclude wins where both name one", "list"),
     "service": Key("the playbook `migkit advise` shows", "str"),
     "big_rows": Key("read by nothing", "int", knob="nothing"),
     "slice": Key("the rows one compared range of a large table holds",
@@ -1546,12 +1549,59 @@ def _two_way_pairs(hops):
     return out
 
 
+def _include_problems(where, raw, probe):
+    """`include` said wrong, or said against the rest of the hop: an
+    entry that is not a name, one `exclude` takes back whole, a mapping
+    rule for a table it does not take. Each is a table the operator
+    believes is moved and checked while nothing looks at it."""
+    from fnmatch import fnmatch
+    out = []
+    got = raw.get("include")
+    if got is None:
+        return out
+    if not isinstance(got, list):
+        # its type is said with every other key's
+        return out
+    for i, p in enumerate(got):
+        if not isinstance(p, str) or not p.strip() or p.strip() != p \
+                or ".." in p or p.startswith(".") or p.endswith("."):
+            out.append(Problem("error", f"{where}.include[{i}]",
+                               f"{p!r} is not a dotted name"))
+            continue
+        if any(fnmatch(p, str(x)) for x in raw.get("exclude") or []):
+            out.append(Problem(
+                "error", f"{where}.include[{i}]",
+                f"{p} is excluded as a whole as well, so it takes nothing"
+                " - drop one of the two"))
+    probe.include = [p for p in got if isinstance(p, str) and p.strip()]
+    if not probe.include:
+        return out
+    whole = probe.whole_name()
+    for part in ("where", "tables", "columns", "tolerance"):
+        rules = (raw.get("mapping") or {}).get(part) or {}
+        if not isinstance(rules, dict):
+            continue
+        for table in rules:
+            names = str(table).split(".")
+            # only a rule that names its database says which table it is;
+            # a shorter one may be any database's, one include takes
+            if whole and len(names) == whole and \
+                    not probe.included(*names):
+                out.append(Problem(
+                    "error", f"{where}.mapping.{part}.{table}",
+                    f"{table} is not among what include takes, so this rule"
+                    " touches nothing - add it to include or drop the rule"))
+    return out
+
+
 def _contradictions(where, raw, opts, goal, engine):
     from .config import Endpoint, Hop
     out = []
     probe = Hop(name="", engine=engine, source=Endpoint(),
                 target=Endpoint(),
-                exclude=[str(p) for p in (raw.get("exclude") or [])])
+                exclude=[str(p) for p in (raw.get("exclude") or [])],
+                options={k: v for k, v in opts.items()
+                         if k == "source_engine"})
     mapping = raw.get("mapping") or {}
     for part in ("where", "tables", "columns"):
         rules = mapping.get(part) or {}
@@ -1565,6 +1615,7 @@ def _contradictions(where, raw, opts, goal, engine):
                     "error", f"{where}.mapping.{part}.{table}",
                     f"{table} is also excluded, so this rule touches"
                     " nothing - drop one of the two"))
+    out += _include_problems(where, raw, probe)
     if goal in GOALS and not GOALS[goal]["writes"]:
         for k in WRITING:
             if opts.get(k):
@@ -1886,6 +1937,7 @@ def decisions(hop):
             "target": side(hop.target),
             "databases": [str(d) for d in hop.databases or []],
             "exclude": list(hop.exclude or []),
+            "include": list(getattr(hop, "include", None) or []),
             "service": hop.service or "native", "slice": hop.slice,
             "workers": hop.workers if hop.workers_set else None,
             "options": opts,
@@ -1959,7 +2011,7 @@ def smallest(name, raw):
         out["workers"] = raw["workers"]
     if "slice" in raw and int(raw["slice"]) != 1_000_000:
         out["slice"] = raw["slice"]
-    for k in ("exclude", "mapping"):
+    for k in ("exclude", "include", "mapping"):
         if raw.get(k):
             out[k] = raw[k]
     if opts:

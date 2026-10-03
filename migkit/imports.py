@@ -13,7 +13,13 @@ task it describes and writes the hop that does the same:
   worker is given, or its properties file): the database it reads, its
   include and exclude lists, its snapshot mode;
 * a load-command file (`LOAD DATABASE FROM ... INTO ...`): both
-  addresses, the tables it includes and excludes, its renames.
+  addresses, the tables it includes and excludes, its renames;
+* a Tencent Cloud DTS job - a migration job's detail, a sync job, or the
+  objects a data check compares, as the service prints them - or an
+  Alibaba Cloud DTS job's detail or request (its objects): the hop
+  checks exactly what the job takes, down to its tables' row filters and
+  columns, and says each of the job's settings that makes a correct move
+  look different (`from_tencent_dts`).
 
 What migkit decides for itself - types, batch sizes, workers, how a
 table is loaded - is left behind and said so; so is anything the other
@@ -22,8 +28,9 @@ prefix added to every name), rather than carried half-way. A password in
 the file is never copied: the guide asks for it and keeps it in the
 keychain.
 
-A list of tables to include, which migkit has no key for (a hop says what
-it leaves out), is returned as `include` and made into the hop's
+A list of tables to include is the hop's own `include` where each entry
+is a name or a shell pattern; one a pattern cannot say (a regular
+expression, a search) is returned as `include` and made into the hop's
 `exclude` against the source's own tables when the guide connects.
 """
 import json
@@ -60,13 +67,19 @@ def read(path):
     head = text.lstrip()
     if head.startswith("{") or head.startswith("["):
         data = json.loads(text)
+        if _is_tencent_dts(data):
+            return from_tencent_dts(data, stem)
+        if _is_alibaba_dts(data):
+            return from_alibaba_dts(data, stem)
         if _is_dms(data):
             return from_dms(data, stem)
         if _is_connector(data):
             return from_connector(data, stem)
-        raise SystemExit(f"{p}: JSON, but neither a replication task (it"
-                         " has no TableMappings) nor a connector's"
-                         " configuration (it has no connector.class)")
+        raise SystemExit(f"{p}: JSON, but not a replication task (it"
+                         " has no TableMappings), a DTS job (no"
+                         " MigrateOption, Objects, ObjectItems or"
+                         " DbObject) or a"
+                         " connector's configuration (no connector.class)")
     if re.search(r"(?is)^\s*load\s+\w+", _strip_comments(text)):
         return from_load_file(text, stem)
     props = _properties(text)
@@ -240,6 +253,12 @@ def from_dms(data, stem="hop"):
         out.raw.pop("db_map", None)
     if exclude:
         out.raw["exclude"] = exclude
+    if out.include and all(k == "glob" for k, _ in out.include):
+        # what the task took, said as the hop's own `include`: the same
+        # scope for a table made on the source later, which a list of
+        # what it left out, read once, would take
+        out.raw["include"] = [p for _, p in out.include]
+        out.include = []
     mapping = {k: v for k, v in (("tables", tables), ("columns", columns),
                                  ("where", where)) if v}
     if mapping:
@@ -341,6 +360,585 @@ def _dms_filter(filters, engine):
             parts.append(conds[0] if len(conds) == 1
                          else "(" + " or ".join(conds) + ")")
     return " and ".join(parts)
+
+
+# ---- Tencent Cloud DTS ---------------------------------------------------
+
+#: DTS's DatabaseType and the engine migkit reads it as
+TDTS_ENGINES = {"mysql": "mysql", "mariadb": "mysql", "percona": "mysql",
+                "cynosdbmysql": "mysql", "tdsqlmysql": "mysql",
+                "tdstore": "mysql", "postgresql": "postgres",
+                "cynosdbpg": "postgres", "tdpg": "postgres",
+                "mongodb": "mongodb", "redis": "redis", "keewidb": "redis",
+                "tendis": "redis", "sqlserver": "mssql", "kafka": "kafka",
+                "ckafka": "kafka", "clickhouse": "clickhouse",
+                "oracle": "oracle", "tidb": "tidb"}
+
+
+def _unwrap(data):
+    """A response as `tccli` saves it, `{"Response": {...}}`, or as an SDK
+    gives it."""
+    if isinstance(data, dict) and isinstance(data.get("Response"), dict):
+        return data["Response"]
+    return data
+
+
+def _is_tencent_dts(data):
+    d = _unwrap(data)
+    if not isinstance(d, dict):
+        return False
+    if isinstance(d.get("MigrateOption"), dict):
+        return True
+    jobs = d.get("JobList")
+    if isinstance(jobs, list) and jobs and all(
+            isinstance(j, dict) and isinstance(j.get("Objects"), dict)
+            for j in jobs):
+        return True
+    if isinstance(d.get("Objects"), dict) and (
+            "SrcDatabaseType" in d or "DstDatabaseType" in d):
+        return True
+    return isinstance(d.get("ObjectItems"), list)
+
+
+def from_tencent_dts(data, stem="hop"):
+    """A hop that checks what a Tencent Cloud DTS job takes, read from what
+    the service says of it: a migration job's detail
+    (DescribeMigrationDetail), a sync job (DescribeSyncJobs, one job), or
+    the objects a data check compares (a CompareObject).
+
+    The job moves the data, so the hop's goal is `verify`: it compares
+    exactly what the job was told to take - its databases and their new
+    names, the schemas, tables and views it picked and their new names,
+    each table's row filter and its columns - and nothing it left out, so
+    a log table the job was told to leave behind is neither moved by
+    migkit nor called missing. Every setting of the job that makes a
+    correct move look different (deletes it does not carry, conflicts it
+    ignores, a target left writable) is said beside it."""
+    d = _unwrap(data)
+    jobs = d.get("JobList")
+    if isinstance(jobs, list):
+        if len(jobs) != 1:
+            names = ", ".join(str(j.get("JobName") or j.get("JobId"))
+                              for j in jobs[:6])
+            raise SystemExit(f"the file holds {len(jobs)} sync jobs ({names});"
+                             " give it one (a hop is one job)")
+        d = jobs[0]
+    notes = []
+    out = Imported(_name(d.get("JobName") or d.get("JobId") or stem), {},
+                   notes)
+    out.raw["goal"] = "verify"
+    notes.append("the job moves the data and this hop checks what it took"
+                 " (goal: verify) - make the goal copy or cutover to have"
+                 " migkit move it instead")
+    src = _tdts_end(d, "Src", notes)
+    dst = _tdts_end(d, "Dst", notes)
+    if isinstance(d.get("MigrateOption"), dict):
+        opt = d["MigrateOption"]
+        picked = opt.get("DatabaseTable") or {}
+        mode, items = picked.get("ObjectMode"), picked.get("Databases")
+        _tdts_migrate_notes(opt, notes)
+    elif isinstance(d.get("Objects"), dict):
+        picked = d["Objects"]
+        mode, items = picked.get("Mode"), picked.get("Databases")
+        _tdts_sync_notes(d.get("Options") or {}, picked, notes)
+    else:
+        picked = d
+        mode, items = d.get("ObjectMode"), d.get("ObjectItems")
+    got = _tdts_selection(mode, items or [], notes)
+    if isinstance(d.get("MigrateOption"), dict):
+        _tdts_own_check(d["MigrateOption"].get("Consistency") or {}, got,
+                        notes)
+    dbs, db_map = got["dbs"], got["db_map"]
+    src_e, dst_e = src and src["engine"], dst and dst["engine"]
+    for side, end, names in (("source", src, dbs),
+                             ("target", dst, [db_map.get(x, x)
+                                              for x in dbs])):
+        if end is None or not end["long"].get("host"):
+            continue
+        out.raw[side] = _side(end["engine"], end["long"], names)
+    if src_e and dst_e and src_e != dst_e:
+        out.raw["engine"] = "hetero"
+        out.raw["options"] = {"source_engine": src_e,
+                              "target_engine": dst_e}
+    elif (src_e or dst_e) and any(isinstance(out.raw.get(x), dict)
+                                  for x in ("source", "target")):
+        out.raw["engine"] = src_e or dst_e
+    if dbs and not isinstance(out.raw.get("source"), str):
+        out.raw["databases"] = dbs
+    if db_map and not isinstance(out.raw.get("target"), str):
+        out.raw["db_map"] = db_map
+    if got["include"]:
+        out.raw["include"] = got["include"]
+    mapping = {k: got[k] for k in ("tables", "columns", "where") if got[k]}
+    if mapping:
+        out.raw["mapping"] = mapping
+    return out
+
+
+def _tdts_end(d, side, notes):
+    """One side of the job: its engine and the long form of its address,
+    or None where the file does not say. The password is never read; the
+    instance the job reaches by its own network is said where there is
+    no address migkit could use."""
+    word = "source" if side == "Src" else "target"
+    info = d.get(f"{side}Info")
+    kind = d.get(f"{side}DatabaseType") or (
+        info.get("DatabaseType") if isinstance(info, dict) else None)
+    nodes = []
+    if isinstance(info, dict) and isinstance(info.get("Info"), list):
+        nodes = [n for n in info["Info"] if isinstance(n, dict)]
+        access = info.get("AccessType")
+    elif isinstance(info, dict):
+        nodes = [info]
+        access = d.get(f"{side}AccessType")
+    else:
+        many = d.get(f"{side}Infos")
+        if isinstance(many, dict):
+            nodes = [n for n in many.get("Info") or [] if isinstance(n, dict)]
+            kind = kind or many.get("DatabaseType")
+            access = many.get("AccessType")
+        else:
+            access = d.get(f"{side}AccessType")
+    if not kind and not nodes:
+        notes.append(f"the file names no {word} - the guide asks for its"
+                     " address")
+        return None
+    engine = TDTS_ENGINES.get(str(kind or "").lower())
+    if engine is None:
+        raise SystemExit(f"the job's {word} is a {kind} one, which migkit"
+                         " has no engine for")
+    node = nodes[0] if nodes else {}
+    if len(nodes) > 1:
+        notes.append(f"the {word} is {len(nodes)} nodes; the address is the"
+                     " first one's - give the one migkit should read")
+    long = {}
+    host = node.get("Host") or node.get("Ip")
+    if host:
+        long["host"] = str(host)
+    if node.get("Port"):
+        long["port"] = int(node["Port"])
+    if node.get("User"):
+        long["user"] = str(node["User"])
+    if str(node.get("EncryptConn") or "") == "Encrypted":
+        if engine == "postgres":
+            long["sslmode"] = "require"
+        elif engine == "mysql":
+            long["ssl"] = True
+    elif str(node.get("EncryptConn") or "") == "UnEncrypted":
+        notes.append(f"the job reaches the {word} without encrypting the"
+                     " connection (EncryptConn UnEncrypted)")
+    if not host:
+        what = node.get("InstanceId") or node.get("CvmInstanceId") or ""
+        notes.append(f"the {word} is {what or 'an instance'}, which the job"
+                     " reaches through the cloud's own network"
+                     f" ({access or 'not said'}) - the guide asks for an"
+                     " address migkit can reach")
+    return {"engine": engine, "long": long}
+
+
+def _tdts_selection(mode, items, notes):
+    """What the job takes, as the hop says it: its databases and their
+    new names, `include` where it takes less than whole databases, table
+    renames, row filters and columns - each named from its database
+    down, so two databases' `orders` cannot be confused."""
+    got = {"dbs": [], "db_map": {}, "include": [], "tables": {},
+           "where": {}, "columns": {}}
+    if str(mode or "").lower() == "all":
+        notes.append("the job takes the whole instance; so does the hop")
+        return got
+    whole = True
+    for it in items:
+        db = it.get("DbName")
+        if not db:
+            notes.append("an object with no database name - not carried")
+            continue
+        if db not in got["dbs"]:
+            got["dbs"].append(db)
+        new = it.get("NewDbName")
+        if new and new != db:
+            if got["db_map"].get(db, new) != new:
+                raise SystemExit(f"the job sends database {db} to both"
+                                 f" {got['db_map'][db]} and {new}")
+            got["db_map"][db] = new
+        sch, new_sch = it.get("SchemaName") or "", it.get("NewSchemaName")
+        tables = it.get("Tables") or []
+        tmode = str(it.get("TableMode") or (
+            "partial" if tables else "all")).lower()
+        base = f"{db}.{sch}" if sch else db
+        if new_sch and new_sch != sch and tmode != "partial":
+            notes.append(f"schema {base} lands as {new_sch}: migkit renames"
+                         " a table by its name - not carried")
+        if tmode != "partial":
+            got["include"].append(f"{base}.*")
+            whole = whole and not sch
+        else:
+            whole = False
+            for t in tables:
+                _tdts_table(got, base, sch, new_sch, t, notes)
+        vmode = str(it.get("ViewMode") or "").lower()
+        if vmode == "partial":
+            whole = False
+            got["include"] += [f"{base}.{v.get('ViewName')}"
+                               for v in it.get("Views") or []
+                               if v.get("ViewName")]
+        elif vmode == "all" and tmode == "partial":
+            notes.append(f"the job takes every view of {base}; the hop names"
+                         " the tables it takes, so a view is checked only"
+                         " where include names it")
+    if whole:
+        # whole databases: the databases say it
+        got["include"] = []
+    return got
+
+
+def _tdts_table(got, base, sch, new_sch, t, notes):
+    name = t.get("TableName")
+    if not name:
+        return
+    ident = f"{base}.{name}"
+    got["include"].append(ident)
+    new = t.get("NewTableName")
+    if (new and new != name) or (new_sch and new_sch != sch):
+        got["tables"][ident] = ".".join(
+            x for x in (new_sch or sch, new or name) if x)
+    if t.get("FilterCondition"):
+        got["where"][ident] = str(t["FilterCondition"])
+        if t.get("FilterTimeZone") not in (None, "", "+00:00"):
+            notes.append(f"the row filter of {ident} reads its times in"
+                         f" {t['FilterTimeZone']}; migkit asks it of each"
+                         " server in that server's own zone")
+    if str(t.get("ColumnMode") or "").lower() == "partial":
+        cols = [c for c in t.get("Columns") or [] if c.get("ColumnName")]
+        rule = {"keep": [c["ColumnName"] for c in cols]}
+        renamed = {c["ColumnName"]: c["NewColumnName"] for c in cols
+                   if c.get("NewColumnName")
+                   and c["NewColumnName"] != c["ColumnName"]}
+        if renamed:
+            rule["rename"] = renamed
+        got["columns"][ident] = rule
+    if t.get("TmpTables"):
+        notes.append(f"the online schema change tables of {ident}"
+                     f" ({', '.join(t['TmpTables'])}): migkit knows such"
+                     " working tables by itself - not carried")
+
+
+def _tdts_migrate_notes(opt, notes):
+    kind = str(opt.get("MigrateType") or "")
+    if kind == "structure":
+        notes.append("the job moves the structure only: every table's rows"
+                     " will read as missing")
+    elif kind == "full":
+        notes.append("the job moves the data once and no change after it:"
+                     " a row changed on the source since reads as different")
+    if opt.get("IsMigrateAccount") is False:
+        notes.append("the job does not move accounts (IsMigrateAccount"
+                     " false): the target's users and grants are not the"
+                     " source's")
+    if opt.get("IsDstReadOnly") is False:
+        notes.append("the target stays writable while the job runs"
+                     " (IsDstReadOnly false): a row written there directly"
+                     " reads as a difference")
+    adv = (opt.get("DatabaseTable") or {}).get("AdvancedObjects")
+    if adv:
+        notes.append(f"the job also takes {', '.join(adv)}; migkit compares"
+                     " them with the schema")
+
+
+def _tdts_sync_notes(options, objects, notes):
+    ops = [str(o) for o in options.get("OpTypes") or []]
+    if ops:
+        for op, said in (("Delete", "a row deleted on the source stays on"
+                                    " the target and reads as extra"),
+                         ("Update", "a row updated on the source keeps its"
+                                    " old values on the target and reads as"
+                                    " different"),
+                         ("Insert", "a row added on the source never"
+                                    " arrives and reads as missing")):
+            if op not in ops:
+                notes.append(f"the job does not carry {op.lower()}s: {said}")
+    init = options.get("InitType")
+    if init == "None":
+        notes.append("the job carries changes only, from when it began: a"
+                     " row from before is on the target only if it was"
+                     " there already")
+    elif init == "Structure":
+        notes.append("the job made the structure and carries changes only:"
+                     " the rows from before it began read as missing")
+    conflict = options.get("ConflictHandleType")
+    if conflict == "Ignore":
+        notes.append("the job keeps a row the target already had under the"
+                     " same key (ConflictHandleType Ignore): it reads as"
+                     " different")
+    elif conflict == "ConditionCover":
+        notes.append("the job overwrites a row the target already had only"
+                     " under a condition (ConditionCover): the rows it"
+                     " kept read as different")
+    if options.get("DealOfExistSameTable") == "ExecuteAfterIgnore":
+        notes.append("the job wrote into tables the target already had"
+                     " (ExecuteAfterIgnore): a row the target had of its"
+                     " own reads as extra")
+    if options.get("AddAdditionalColumn"):
+        notes.append("the job adds columns of its own to each target table")
+    for f in objects.get("DatabasesOpFilter") or []:
+        if not isinstance(f, dict):
+            continue
+        for t in f.get("Tables") or []:
+            ops = (t.get("OpFilter") or {}).get("OpTypes") or []
+            if ops:
+                notes.append(f"{f.get('DbName')}.{t.get('TableName')}: the"
+                             f" job carries only {', '.join(ops)}")
+        ops = (f.get("OpFilter") or {}).get("OpTypes") or []
+        if ops:
+            notes.append(f"{f.get('DbName')}: the job carries only"
+                         f" {', '.join(ops)}")
+
+
+def _tdts_own_check(consistency, moved, notes):
+    """What the job's own data check looks at, beside what it moves: a
+    check that is off, that samples, that counts, or that covers less
+    than the job moves is a claim of consistency about less than the
+    whole."""
+    if not consistency:
+        return
+    mode = consistency.get("Mode")
+    if mode in ("noCheck", "notConfigured"):
+        notes.append(f"the job's own data check is off ({mode})")
+        return
+    how = consistency.get("Options") or {}
+    method = how.get("Method")
+    if method == "rowsCount":
+        notes.append("the job's own data check counts rows only")
+    elif method == "sampleDataCheck":
+        notes.append(f"the job's own data check reads"
+                     f" {how.get('SampleRate', '?')}% of the rows")
+    if consistency.get("ObjectMode") == "custom":
+        objs = consistency.get("Objects") or {}
+        own = _tdts_selection(objs.get("ObjectMode"),
+                              objs.get("Databases") or [], [])
+        said = own["include"] or own["dbs"]
+        if said and (set(own["include"]) != set(moved["include"])
+                     or set(own["dbs"]) != set(moved["dbs"])):
+            notes.append("the job's own data check covers only"
+                         f" {', '.join(said[:8])}"
+                         + (" ..." if len(said) > 8 else ""))
+
+
+# ---- Alibaba Cloud DTS ---------------------------------------------------
+
+#: DTS's EngineName and the engine migkit reads it as
+ADTS_ENGINES = {"mysql": "mysql", "mariadb": "mysql", "polardb": "mysql",
+                "polardb_mysql": "mysql", "drds": "mysql",
+                "postgresql": "postgres", "polardb_pg": "postgres",
+                "polardb_o": "postgres", "greenplum": "postgres",
+                "oracle": "oracle", "mssql": "mssql", "sqlserver": "mssql",
+                "mongodb": "mongodb", "redis": "redis", "tair": "redis",
+                "kafka": "kafka", "clickhouse": "clickhouse",
+                "tidb": "tidb", "db2": "db2"}
+
+
+def _is_alibaba_dts(data):
+    if not isinstance(data, dict):
+        return False
+    if isinstance(data.get("DtsJobList"), list) and data["DtsJobList"]:
+        return all(isinstance(j, dict) and ("DbObject" in j or "DbList" in j)
+                   for j in data["DtsJobList"])
+    return ("DbObject" in data or "DbList" in data) and any(
+        k in data for k in ("SourceEndpoint", "DtsJobId", "DtsJobName",
+                            "SourceEndpointEngineName"))
+
+
+def from_alibaba_dts(data, stem="hop"):
+    """A hop that checks what an Alibaba Cloud DTS job takes, read from
+    `DescribeDtsJobDetail` (its `DbObject`) or the request that made it
+    (its `DbList`): the same hop `from_tencent_dts` makes of a Tencent
+    job - goal `verify`, its databases (schemas, where the source has
+    them) and their new names, its tables, their row filters and columns,
+    and the job's settings that make a correct move look different."""
+    jobs = data.get("DtsJobList")
+    if isinstance(jobs, list):
+        if len(jobs) != 1:
+            names = ", ".join(str(j.get("DtsJobName") or j.get("DtsJobId"))
+                              for j in jobs[:6])
+            raise SystemExit(f"the file holds {len(jobs)} DTS jobs ({names});"
+                             " give it one (a hop is one job)")
+        data = jobs[0]
+    notes = []
+    out = Imported(_name(data.get("DtsJobName") or data.get("DtsJobId")
+                         or stem), {}, notes)
+    out.raw["goal"] = "verify"
+    notes.append("the job moves the data and this hop checks what it took"
+                 " (goal: verify) - make the goal copy or cutover to have"
+                 " migkit move it instead")
+    src = _adts_end(data, "Source", notes)
+    dst = _adts_end(data, "Destination", notes)
+    objects = data.get("DbObject", data.get("DbList")) or {}
+    if isinstance(objects, str):
+        objects = json.loads(objects or "{}")
+    src_e, dst_e = src and src["engine"], dst and dst["engine"]
+    # where the source has schemas, the job's top level is its schemas
+    # and the database is the endpoint's own
+    one_db = src and src["db"] if src_e in ("postgres", "mssql",
+                                            "oracle", "db2") else ""
+    got = _adts_selection(objects, one_db, notes)
+    _adts_mode_notes(data.get("MigrationMode") or {}, notes)
+    dbs, db_map = got["dbs"], got["db_map"]
+    for side, end, names in (("source", src, dbs),
+                             ("target", dst, [db_map.get(x, x)
+                                              for x in dbs])):
+        if end is None or not end["long"].get("host"):
+            continue
+        if side == "target" and one_db and dst["db"]:
+            names = [dst["db"]]
+        out.raw[side] = _side(end["engine"], end["long"], names)
+    if src_e and dst_e and src_e != dst_e:
+        out.raw["engine"] = "hetero"
+        out.raw["options"] = {"source_engine": src_e,
+                              "target_engine": dst_e}
+    elif (src_e or dst_e) and any(isinstance(out.raw.get(x), dict)
+                                  for x in ("source", "target")):
+        out.raw["engine"] = src_e or dst_e
+    if one_db and dst and dst["db"] and dst["db"] != one_db:
+        db_map = {one_db: dst["db"]}
+    if dbs and not isinstance(out.raw.get("source"), str):
+        out.raw["databases"] = dbs
+    if db_map and not isinstance(out.raw.get("target"), str):
+        out.raw["db_map"] = db_map
+    if got["include"]:
+        out.raw["include"] = got["include"]
+    mapping = {k: got[k] for k in ("tables", "columns", "where") if got[k]}
+    if mapping:
+        out.raw["mapping"] = mapping
+    return out
+
+
+def _adts_end(data, side, notes):
+    word = "source" if side == "Source" else "target"
+    ep = data.get(f"{side}Endpoint")
+    if not isinstance(ep, dict):
+        ep = {k[len(f"{side}Endpoint"):]: v for k, v in data.items()
+              if k.startswith(f"{side}Endpoint")}
+    kind = ep.get("EngineName") or ep.get("Engine")
+    if not kind:
+        notes.append(f"the file names no {word} - the guide asks for its"
+                     " address")
+        return None
+    engine = ADTS_ENGINES.get(str(kind).lower())
+    if engine is None:
+        raise SystemExit(f"the job's {word} is a {kind} one, which migkit"
+                         " has no engine for")
+    long = {}
+    host = ep.get("Ip") or ep.get("IP") or ep.get("Host")
+    if host:
+        long["host"] = str(host)
+    if ep.get("Port"):
+        long["port"] = int(ep["Port"])
+    user = ep.get("UserName") or ep.get("User")
+    if user:
+        long["user"] = str(user)
+    if str(ep.get("SslSolutionEnum") or "").lower() not in ("", "disable"):
+        if engine == "postgres":
+            long["sslmode"] = "require"
+        elif engine == "mysql":
+            long["ssl"] = True
+    if not host:
+        what = ep.get("InstanceID") or ep.get("InstanceId") or ""
+        notes.append(f"the {word} is {what or 'an instance'}, which the job"
+                     " reaches through the cloud's own network"
+                     f" ({ep.get('InstanceType') or 'not said'}) - the"
+                     " guide asks for an address migkit can reach")
+    return {"engine": engine, "long": long,
+            "db": str(ep.get("DatabaseName") or "")}
+
+
+def _flag(value):
+    return str(value).lower() == "true"
+
+
+def _adts_selection(objects, one_db, notes):
+    """The job's objects as the hop says them: `{name: {name, all, Table:
+    {name: {name, all, filter, column}}}}` - its top level databases, or a
+    source with schemas' schemas inside the endpoint's one database."""
+    got = {"dbs": [], "db_map": {}, "include": [], "tables": {},
+           "where": {}, "columns": {}}
+    whole = True
+    if one_db:
+        got["dbs"].append(one_db)
+    for top, spec in objects.items():
+        spec = spec if isinstance(spec, dict) else {}
+        new = spec.get("name")
+        if one_db:
+            base = f"{one_db}.{top}"
+            whole = False
+            if new and new != top:
+                notes.append(f"schema {top} lands as {new}: migkit renames a"
+                             " table by its name - renamed table by table")
+        else:
+            base = top
+            if top not in got["dbs"]:
+                got["dbs"].append(top)
+            if new and new != top:
+                got["db_map"][top] = new
+        tables = spec.get("Table") or spec.get("table") or {}
+        if _flag(spec.get("all")) or not tables:
+            got["include"].append(f"{base}.*")
+            _adts_ops(base, spec, notes)
+            continue
+        whole = False
+        for name, t in tables.items():
+            t = t if isinstance(t, dict) else {}
+            ident = f"{base}.{name}"
+            got["include"].append(ident)
+            target = t.get("name") or name
+            if target != name or (one_db and new and new != top):
+                got["tables"][ident] = ".".join(
+                    x for x in ((new or top) if one_db else "", target) if x)
+            if t.get("filter"):
+                got["where"][ident] = str(t["filter"])
+            cols = t.get("column") or t.get("Column") or {}
+            if cols and not _flag(t.get("all")):
+                picked = {c: v for c, v in cols.items()
+                          if not isinstance(v, dict)
+                          or v.get("state", "checked") == "checked"}
+                rule = {"keep": sorted(picked)}
+                renamed = {c: v["name"] for c, v in picked.items()
+                           if isinstance(v, dict) and v.get("name")
+                           and v["name"] != c}
+                if renamed:
+                    rule["rename"] = renamed
+                got["columns"][ident] = rule
+            _adts_ops(ident, t, notes)
+    if whole:
+        got["include"] = []
+    return got
+
+
+def _adts_ops(ident, spec, notes):
+    ops = spec.get("dml_op")
+    if ops in (None, ""):
+        return
+    have = {o.strip() for o in str(ops).split(",") if o.strip()}
+    for op, word, said in (("d", "deletes", "a row deleted on the source"
+                                            " stays on the target and reads"
+                                            " as extra"),
+                           ("u", "updates", "a row updated on the source"
+                                            " keeps its old values on the"
+                                            " target"),
+                           ("i", "inserts", "a row added on the source never"
+                                            " arrives")):
+        if op not in have:
+            notes.append(f"{ident}: the job does not carry {word} - {said}")
+
+
+def _adts_mode_notes(mode, notes):
+    if not mode:
+        return
+    if mode.get("DataInitialization") is False:
+        notes.append("the job does not copy the rows that were there before"
+                     " it began: they are on the target only if they were"
+                     " there already")
+    if mode.get("DataSynchronization") is False:
+        notes.append("the job moves the data once and no change after it:"
+                     " a row changed on the source since reads as different")
 
 
 # ---- a change-capture connector ------------------------------------------

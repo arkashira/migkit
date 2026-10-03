@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 from . import envkeys, leftovers, runner, toolversion, tooluse
 from .runner import run
+from .config import scoped as _scoped
 from .tools import IMAGES, PROGRAM
 from .tools import names as tool_names
 from .tooluse import TOPPED, UNUSED, USED
@@ -289,7 +290,7 @@ def _routes_any(hop, db):
     """Whether a table of `db` may leave the bulk path: excluded, under a
     row filter, or with its columns mapped. The table list is asked for
     only then; `routed_to_copier` decides table by table."""
-    return bool(getattr(hop, "exclude", None) or _filtered_here(hop, db)
+    return bool(_scoped(hop) or _filtered_here(hop, db)
                 or (getattr(hop, "mapping", None) or {}).get("columns"))
 
 
@@ -637,9 +638,9 @@ def _truncate_step(hop, db=""):
     describes a move that empties a table and never refills it.
     """
     where = f" {db}" if db else ""
-    if getattr(hop, "exclude", None):
+    if _scoped(hop):
         return (f"# empty the target's{where} user tables, except the ones"
-                " the hop excludes (generated from catalog)")
+                " the hop leaves out (generated from catalog)")
     return (f"# empty all the target's{where} user tables"
             " (generated from catalog)")
 
@@ -3764,7 +3765,7 @@ def mongodump_move(hop, db, workers, go, log):
     from .wording import Step, phase
     s, t = hop.source, hop.target
     skip, unresolved = [], ""
-    if getattr(hop, "exclude", None):
+    if _scoped(hop):
         try:
             from .engines.mongodb import MongoEngine
             names = MongoEngine(hop)._client("src")[db].list_collection_names()
@@ -3904,7 +3905,7 @@ def _riotx_unfit(hop):
                 " Redis Community Edition, Redis Cloud or Redis Software,"
                 " and the target is not known to be one (redis_product:"
                 " community, cloud or software on the target, where it is)")
-    if getattr(hop, "exclude", None):
+    if _scoped(hop):
         return ("the hop leaves keys out, and the Redis products' own copy"
                 " tool takes one pattern of keys to carry")
     from .engines.redis import RedisEngine
@@ -4001,7 +4002,7 @@ def mongosync_move(hop, db, workers, go, log):
     is readable by this user only and removed when it ends."""
     from .wording import Step, phase
     skip, unresolved = [], ""
-    if getattr(hop, "exclude", None):
+    if _scoped(hop):
         try:
             from .engines.mongodb import MongoEngine
             names = MongoEngine(hop)._client("src")[db].list_collection_names()
@@ -5895,7 +5896,7 @@ def _stream_facts(hop, dbs, src_is_mysql):
     tables, rows, size = {}, 0, 0
     # the names only where the hop has something to match against them;
     # the sizes only for as long as a plan waits for anything
-    named = bool(getattr(hop, "exclude", None) or hop.mapping)
+    named = bool(_scoped(hop) or hop.mapping)
     for one in dbs or ["postgres"]:
         try:
             tables[one] = eng._all_tables("src", one) if named else []
@@ -6104,7 +6105,7 @@ def stream_codegen(hop, dbs, engine):
     # what the hop already excludes, kept out of the stream as well. The
     # same resolution the bulk movers and `check` use, so a table nobody
     # wants is not carried by the CDC leg either.
-    if getattr(hop, "exclude", None):
+    if _scoped(hop):
         one = dbs[0] if dbs else "postgres"
         listed = tables.get(one)
         # a source that cannot be listed leaves the stream unfiltered

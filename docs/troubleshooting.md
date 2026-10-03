@@ -91,13 +91,21 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: not a file migkit reads a hop from - a replication task's JSON, a connector's configuration, or a LOAD DATABASE command file
 
-* <...>: JSON, but neither a replication task (it has no TableMappings) nor a connector's configuration (it has no connector.class)
+* <...>: JSON, but not a replication task (it has no TableMappings), a DTS job (no MigrateOption, Objects, ObjectItems or DbObject) or a connector's configuration (no connector.class)
 
 * the file holds <...> replication tasks; give it one (a hop is one task)
 
 * the endpoint <...> is a <...> one, which migkit has no engine for
 
 * filter operator <...>: not one migkit reads
+
+* the file holds <...> sync jobs (<...>); give it one (a hop is one job)
+
+* the job's <...> is a <...> one, which migkit has no engine for
+
+* the job sends database <...> to both <...> and <...>
+
+* the file holds <...> DTS jobs (<...>); give it one (a hop is one job)
 
 * the file's connector.class reads no database migkit has an engine for
 

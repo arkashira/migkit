@@ -39,6 +39,7 @@ import threading
 import time
 
 from . import runner, tooluse
+from .config import scoped as _scoped
 from .tooluse import TOPPED, UNUSED, USED
 
 PROGRAM = "redis-shake"
@@ -179,6 +180,9 @@ def key_filters(hop, db):
     with (it then never matches that way). A pattern that starts with a
     wildcard, or with part of the database's name, could match across the
     dot, and is not guessed at."""
+    if getattr(hop, "include", None):
+        return None, ("the hop takes only some keys, and the fast keyspace"
+                      " copy is told only the keys to leave out")
     out = []
     prefix = f"{db}."
     for pat in hop.exclude or ():
@@ -547,7 +551,7 @@ def move(hop, db, workers, go, log):
         port = movers._free_port()
         text = toml_text(config(hop, db, reader.path, work, port, workers,
                                 bool(refused)))
-        total = None if hop.exclude else eng._dbsize("src", db)
+        total = None if _scoped(hop) else eng._dbsize("src", db)
         if log:
             log(step)
             log(f"db{db}: read by {reader.said} - {reader.reason}")

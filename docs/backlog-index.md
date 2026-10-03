@@ -39,29 +39,30 @@ gaps in "Paused"), `AUD.*` ("Audited again 2026-09-27"), `DEC.*` ("Decided
 by the owner 2026-09-28"), `DEC30.*` ("Decided by the owner 2026-09-30"),
 `DEC1001.*` ("Decided by the owner 2026-10-01 - scope"), `P0-DEPTH.*` and
 `P0-PARITY.*` (owner, 2026-10-01), `P0-SMART.*` (owner, 2026-09-30),
-`P0-CLOUDS.*` and `P0-SCENARIOS.*` (owner, 2026-10-01), `P0-AUDIT` and
+`P0-CLOUDS.*` and `P0-SCENARIOS.*` (owner, 2026-10-01), `P0-SCOPE.*` (owner,
+2026-10-03), `P0-AUDIT` and
 `AUD-0`-`AUD-Z` (the audit's groups, not the `AUD.*` of 2026-09-27),
 `P3.*` (the P3 table), `REL.*` (the release), plan and problem items by
 their own names, and `LADDER.table` (a WAVE queue item).
 
 ## Summary
 
-434 items.
+438 items.
 
 | Status | S | M | L | Total |
 |---|---|---|---|---|
-| DONE | 92 | 135 | 29 | 256 |
+| DONE | 93 | 137 | 29 | 259 |
 | PARTLY | 4 | 24 | 20 | 48 |
 | IN PROGRESS | 0 | 7 | 11 | 18 |
-| OPEN | 38 | 35 | 10 | 83 |
+| OPEN | 38 | 36 | 10 | 84 |
 | BLOCKED | 10 | 4 | 6 | 20 |
 | NOT PURSUED | 8 | 1 | 0 | 9 |
-| **Total** | 152 | 206 | 76 | **434** |
+| **Total** | 153 | 209 | 76 | **438** |
 
 | Area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED | Total |
 |---|---|---|---|---|---|---|---|
 | move | 29 | 10 | 2 | 11 | 0 | 2 | 54 |
-| verify | 37 | 4 | 0 | 9 | 1 | 1 | 52 |
+| verify | 40 | 4 | 0 | 10 | 1 | 1 | 56 |
 | change follow | 34 | 3 | 1 | 19 | 5 | 0 | 62 |
 | two-way | 4 | 2 | 0 | 3 | 0 | 0 | 9 |
 | cutover | 14 | 1 | 1 | 4 | 0 | 0 | 20 |
@@ -72,7 +73,7 @@ their own names, and `LADDER.table` (a WAVE queue item).
 | ease of use | 19 | 2 | 1 | 3 | 1 | 1 | 27 |
 | operations/scale | 26 | 9 | 0 | 11 | 5 | 3 | 54 |
 | tools used whole | 30 | 6 | 0 | 4 | 0 | 0 | 40 |
-| **Total** | 256 | 48 | 18 | 83 | 20 | 9 | **434** |
+| **Total** | 259 | 48 | 18 | 84 | 20 | 9 | **438** |
 
 ## Items
 
@@ -512,3 +513,7 @@ their own names, and `LADDER.table` (a WAVE queue item).
 | 432 | R25.1 | Driving the managed services (creating, starting, stopping DMS or DTS tasks): migkit watches the databases while the service moves them, proves what it carried and repairs what it did not | NOT PURSUED (the owner, 2026-09-29) | S | operations/scale | L7970-7976 |
 | 433 | R25.2 | The cloud side of readiness: the clusters' network (VPC, subnets, security groups, routes), maintenance windows and pending maintenance, instance classes on both sides, snapshots and restores through the provider's API, audited before the move and in `assess` | PARTLY c21a784 (done: `cloudapi` reads each instance's class, CPU, memory, storage, version and maintenance window through the provider's API on both sides, restore points and clones through it, and `assess` compares the target to the source (collations, time zone, connections); missing: the clusters' network audited (VPC, subnets, security groups, routes) and pending maintenance) | M | operations/scale | L7977-7980 |
 | 434 | R25.3 | The organisation's own change sheet: the plan's steps exported with ids that map onto a team's task sheet, each step's progress and evidence written back | OPEN | M | operations/scale | L7981-7984 |
+| 435 | P0-SCOPE.include | A hop's `include`: the databases, schemas and tables it takes, read inside the one scope answer every reader asks, so the check compares exactly what the move took | DONE 2026-10-03 (`Hop.included`, `config.scoped`, pre-flight `scope`, `verdict.hop_scope`, the report's scope card) | M | verify | P0-SCOPE.1 |
+| 436 | P0-SCOPE.dts | A Tencent or Alibaba DTS job read as a hop that verifies what it takes, down to row filters and columns, with every job setting that makes a correct move look different said | DONE 2026-10-03 (`imports.from_tencent_dts`, `imports.from_alibaba_dts`; DMS includes become `include`) | M | verify | P0-SCOPE.2 |
+| 437 | P0-SCOPE.renames | A rename rule that names its database read with it by the pair engine, the PostgreSQL schema check and the parallel copier | DONE 2026-10-03 (`Hop.target_table_in`) | S | verify | P0-SCOPE.3 |
+| 438 | P0-SCOPE.open | Alibaba schema-level shape confirmed on a real job; regex includes of the connector and LOAD imports; Huawei/GCP/Azure job imports; `include` read by a live tail's filter | OPEN | M | verify | P0-SCOPE.4 |

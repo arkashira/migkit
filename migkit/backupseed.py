@@ -41,6 +41,7 @@ import re
 import time
 
 from . import physical
+from .config import scoped
 from .physical import Need, _hop_allows, _hop_says, _said_count
 
 #: what an operator reads for this way
@@ -211,7 +212,7 @@ def _why_fits(f):
 def _covers(f):
     hop = f.hop
     mapping = hop.mapping or {}
-    return not (hop.exclude or mapping.get("where") or mapping.get("columns")
+    return not (scoped(hop) or mapping.get("where") or mapping.get("columns")
                 or mapping.get("tables"))
 
 

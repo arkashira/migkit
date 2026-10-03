@@ -1815,6 +1815,13 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                   f" {workers} workers"
                   + (" (counts merged into the checksum pass)"
                      if _merged(eng, checks, table) else ""))
+    if getattr(hop, "include", None):
+        # the verdict is about what the hop takes; said before it is
+        console.print(f"  within the hop's scope: it takes only"
+                      f" {len(hop.include)} names"
+                      + (f" and leaves out {len(hop.exclude)}"
+                         if hop.exclude else "")
+                      + " (the report lists them)")
     results, timings = run_checks(
         hop, eng, dbs, checks, table, consistent, workers, prev, prev_at,
         whole=not table and not only, show=_said_row, timer=timer)
