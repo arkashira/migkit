@@ -3237,8 +3237,11 @@ lease a process holds is asked between a copy's ranges and a tail's
 batches (`lease.check_held`); every read-modify-write of a kept file goes
 through `durable.change_json` under the file's lock, and no file is
 written through a temporary name another writer shares (ST23).
-PostgreSQL's catalogue is digested by the server (`shape_mark`) and read
-whole only where the digest moved (SP8). A restore point's copy under
+Every source whose tail asks its shape digests its catalogue on the
+server first - PostgreSQL, SQL Server, Oracle, MySQL and TiDB, SQLite
+(`shape_mark`, over exactly the rows the whole read reads) - and the
+whole shape is read only where the digest moved; a MySQL tail asks only
+once a minute, its binlog carrying every DDL (SP8). A restore point's copy under
 the reports is sealed file by file to the hop's `at_rest` recipients and
 opened into a directory of the run's own to read (ST15). Spool frames
 are still pickled: read back only into the classes a change log's values
