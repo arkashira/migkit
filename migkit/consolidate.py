@@ -204,7 +204,7 @@ def _classes(e, side, db, table):
 def _tables(hop, pair, db):
     src = pair.src_engine
     return [t for t in src.neutral_tables("src", db)
-            if not hop.excluded(db, *str(t).split("."))]
+            if hop.takes_table(db, t)]
 
 
 def _key_texts(s, eng, table):
@@ -217,7 +217,7 @@ def _key_texts(s, eng, table):
         return key, None
     cls = _classes(src, "src", s.db, table)
     read = [(k, cls.get(k)) for k in key]
-    where = s.hop.row_filter(s.db, *str(table).split("."))
+    where = s.hop.row_filter(s.db, *s.hop.parts_of(table))
     out = set()
     for rows in src._every_row("src", s.db, table, read, where):
         for r in rows:
@@ -401,7 +401,7 @@ def table_plans(hop, eng, db, group_=None):
     there = [] if pair.dst_engine.target_missing(db) else \
         pair.dst_engine.neutral_tables("dst", db)
     pairs, _, _, _ = pair.match_tables(_tables(hop, pair, db), there,
-                                       pair._rename)
+                                       pair._renamer(db))
     names = dict(pairs)
     ways, wrong, chosen = {}, [], {}
     for t in _tables(hop, pair, db):
@@ -422,7 +422,8 @@ def table_plans(hop, eng, db, group_=None):
         except SystemExit as e:
             wrong.append(str(e))
             continue
-        out.append(TablePlan(t, names.get(t) or pair._leaf(pair._rename(t)),
+        out.append(TablePlan(t, names.get(t)
+                             or pair._leaf(pair._rename(t, db)),
                              list(pair.src_engine.neutral_key("src", db, t)
                                   or []), w, shifted, chosen[t]))
     return out, wrong
@@ -674,7 +675,7 @@ def _carry(hop, pair, db, p, me, offsets, log):
     names = [n for n, _ in src_cols]
     cls, _ = _tenant_column(me.value)
     columns = list(dst_cols) + [(got["column"], cls)]
-    where = hop.row_filter(db, *str(p.table).split("."))
+    where = hop.row_filter(db, *hop.parts_of(p.table))
     n = 0
     for rows in src._every_row("src", db, p.table, src_cols, where):
         batch = [_shift(r, names, p, offsets) + [me.value] for r in rows]
@@ -739,7 +740,7 @@ def prove(hop, eng, db):
             offsets = {t.table: offset_of(hop, eng, s, group_, [t.table])
                        for t in plans}
             from collections import Counter
-            where = hop.row_filter(db, *str(p.table).split("."))
+            where = hop.row_filter(db, *hop.parts_of(p.table))
             # by key; a table without one as a multiset of rows, so a row
             # there twice on one side is not one row
             a, b = ({}, {}) if key else (Counter(), Counter())
@@ -869,14 +870,17 @@ def _counters(dst, db):
 
 
 def _mysql_counters(dst, db):
+    """One Result: the target's AUTO_INCREMENT counters of the tables the
+    hop takes past their rows - a table it leaves out keeps the counter
+    its own writer gives it (`Engine.in_scope`)."""
     from .engines.base import Result
     ddb = dst._d("dst", db)
-    rows = dst._q("dst", "select c.table_name, c.column_name,"
-                         " t.auto_increment from information_schema.columns"
-                         " c join information_schema.tables t on"
-                         " t.table_schema = c.table_schema and t.table_name"
-                         " = c.table_name where c.table_schema = %s and"
-                         " c.extra like %s", (ddb, "%auto_increment%"))
+    rows = [r for r in dst._q(
+        "dst", "select c.table_name, c.column_name, t.auto_increment from"
+               " information_schema.columns c join information_schema.tables"
+               " t on t.table_schema = c.table_schema and t.table_name ="
+               " c.table_name where c.table_schema = %s and c.extra like %s",
+        (ddb, "%auto_increment%")) if dst.in_scope(db, r[0])]
     behind = []
     for t, c, nxt in rows:
         top = dst._q("dst", f"select max({dst._quote_ident(c)}) from"

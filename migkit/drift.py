@@ -216,6 +216,69 @@ def reader(engine):
                    or hasattr(src, "column_catalog")) else None
 
 
+def side_reader(engine, side):
+    """`reader` for either side: a pair's target read through its target's
+    engine."""
+    if side == "src":
+        return reader(engine)
+    dst = getattr(engine, "dst_engine", None) or engine
+    return dst if (hasattr(dst, "shape_catalog")
+                   or hasattr(dst, "column_catalog")) else None
+
+
+#: the two sides' shapes as a move left them (`kept_at_move`)
+AT_MOVE = "schema-at-move.json"
+
+
+def kept_at_move(hop, engine, db):
+    """Both sides' shapes as the move of `db` left them, kept beside its
+    reports: the baseline a later check holds each side to, so it can say
+    what changed since the move - a schema snapshot at each change, as a
+    schema tool keeps one at each migration it runs. Nothing is kept for
+    a side that cannot be read."""
+    import json
+    import time
+    got = {"at": time.time()}
+    for side in ("src", "dst"):
+        r = side_reader(engine, side)
+        got[side] = shape(r, side, db) if r is not None else None
+    if got["src"] is None and got["dst"] is None:
+        return
+    if hasattr(hop, "scope_fingerprint"):
+        got["scope_fingerprint"] = hop.scope_fingerprint()
+    from . import durable
+    durable.write_atomic(hop.report_dir(db) / AT_MOVE,
+                         json.dumps(got, default=list))
+
+
+def since_the_move(hop, engine, db):
+    """[(side, when the move left it, lines)] of what changed in each
+    side's schema since the move left it (`kept_at_move`) - [] where
+    nothing did, no move was kept, or it was kept under another scope (its
+    tables are not this scope's)."""
+    import json
+    import time
+    try:
+        kept = json.loads((hop.report_dir(db) / AT_MOVE).read_text())
+    except (OSError, ValueError):
+        return []
+    if hasattr(hop, "scope_changed") and hop.scope_changed(kept):
+        return []
+    when = time.strftime("%Y-%m-%d %H:%M",
+                         time.localtime(float(kept.get("at") or 0)))
+    out = []
+    for side in ("src", "dst"):
+        before = kept.get(side)
+        r = side_reader(engine, side)
+        if before is None or r is None:
+            continue
+        before = {t: [tuple(c) for c in cols] for t, cols in before.items()}
+        said = changes(before, shape(r, side, db))
+        if said:
+            out.append((side, when, said))
+    return out
+
+
 def shape(engine, side, db):
     """{table: [(column, definition), ...]} as the engine sees it now, or
     None when it cannot be read - never an exception: a move is not
@@ -244,7 +307,7 @@ def in_scope(engine, db, got):
     online schema change."""
     working = transient_among(got)
     return {t: cols for t, cols in got.items()
-            if not engine.hop.excluded(db, *str(t).split("."))
+            if engine.hop.takes_table(db, t)
             and t not in working}
 
 

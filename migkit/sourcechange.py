@@ -67,6 +67,7 @@ class Ctx:
     name: str = ""         #: a publication's name
     short: list = field(default_factory=list)   #: privileges it lacks
     docdb: bool = False
+    before: str = ""       #: a setting's value before the change
 
     @property
     def cloud(self):
@@ -80,6 +81,13 @@ class Ctx:
     def aurora(self):
         return self.aws and "aurora" in (getattr(self.where, "service", "")
                                          or "")
+
+    def admin(self, engine):
+        """What the managed-service catalogue says the side's service
+        gives its admin ({} for a server run by its owner)."""
+        from . import managed
+        got = managed.service_of(self.where, engine)
+        return dict(got.admin or {}) if got is not None else {}
 
 
 @dataclass(frozen=True)
@@ -119,6 +127,34 @@ def _setting(engine, name, value, restart=False):
         r = restart(c) if callable(restart) else restart
         return spell(engine, c.where, name, value, r, c.label)
     return (lambda c: both(c)[0]), (lambda c: both(c)[1])
+
+
+def _by_service(c, engine, what, default=""):
+    """(statements, lines said about the cloud) of one of the side's
+    service's own templates (`admin.<what>` in the managed-service
+    catalogue), `default` on a server run by its owner or a service that
+    has none (`managed.statement`)."""
+    from . import managed
+    template = c.admin(engine).get(what) or default
+    return managed.statement(template, c.who)
+
+
+def _undone(statements):
+    """Each statement taken off again (`managed.undo_of`)."""
+    from . import managed
+    return [u for u in (managed.undo_of(s) for s in statements) if u]
+
+
+def _spelled(c, engine, name, value):
+    """A setting changed through the side's provider, as one line - the
+    provider's own command where the catalogue has one, its words
+    otherwise (`managed.spell`) - which the change's runner carries out
+    through the provider's API."""
+    from . import managed
+    got = managed.spell(engine, c.where, name, value, False, c.label)
+    if not got:
+        return [f"set global {name} = {value};"]
+    return [(got[1] or got[0])[-1]]
 
 
 def _ms(name):
@@ -215,10 +251,14 @@ DEFINITIONS = {d.name: d for d in (
     Definition(
         "replication_role", "postgres", "the right to read the change log"
         " (replication)",
-        make=lambda c: ([f"grant rds_replication to {c.who};"] if c.aws
-                        else [f"alter role {c.who} with replication;"]),
-        undo=lambda c: ([f"revoke rds_replication from {c.who};"] if c.aws
-                        else [f"alter role {c.who} with noreplication;"])),
+        make=lambda c: _by_service(c, "postgres", "replication",
+                                   "alter role {who} with replication;")[0],
+        undo=lambda c: _undone(_by_service(
+            c, "postgres", "replication",
+            "alter role {who} with replication;")[0]),
+        outside=lambda c: _by_service(c, "postgres", "replication",
+                                      "alter role {who} with"
+                                      " replication;")[1]),
     Definition(
         "publication", "postgres", "a publication of every table's changes",
         make=lambda c: [f"-- in database {c.db}:",
@@ -241,16 +281,43 @@ DEFINITIONS = {d.name: d for d in (
                make=_IMAGE[0], outside=_IMAGE[1]),
     Definition(
         "binlog_retention", "mysql", "a log kept a day or more",
-        make=lambda c: (["call mysql.rds_set_configuration('binlog retention"
-                         " hours', 24);"] if c.aws else _EXPIRE[0](c)),
-        outside=lambda c: [] if c.aws else _EXPIRE[1](c),
+        make=lambda c: (_by_service(c, "mysql", "binlog_retention")[0]
+                        if c.admin("mysql").get("binlog_retention")
+                        else _EXPIRE[0](c)),
+        outside=lambda c: (_by_service(c, "mysql", "binlog_retention")[1]
+                           if c.admin("mysql").get("binlog_retention")
+                           else _EXPIRE[1](c)),
         without="without it the log a stream reads from may be gone before"
                 " it is read, and the copy is made again"),
+    # the whole server read-only through the provider's parameter group,
+    # where the account the service gives may not switch it itself (no
+    # SUPER): a way of the cutover's freeze (`freeze.MySQLHold`), made
+    # through the provider's API and taken off at the thaw
+    Definition(
+        "param_read_only", "mysql",
+        "the server read-only through its parameter group (read_only 1)",
+        make=lambda c: _spelled(c, "mysql", "read_only", "1"),
+        undo=lambda c: _spelled(c, "mysql", "read_only", c.before or "0"),
+        speeds=False, after="when the cutover gives the source back",
+        without="the application's grants are revoked per database"
+                " instead, and an account that writes server-wide is"
+                " named rather than stopped"),
     Definition(
         "replication_grants", "mysql",
         "the right to read the binary log (replication)",
         make=lambda c: [f"grant replication slave, replication client on"
                         f" *.* to {c.who};"]),
+    # the commits under way when a copy's position is taken are waited out
+    # (`MySQLEngine._commits_under_way`): an account that sees only its own
+    # session cannot, and the copy is refused
+    Definition(
+        "process_grant", "mysql",
+        "the right to see the other sessions (PROCESS)",
+        make=lambda c: [f"grant process on *.* to {c.who};"],
+        without="a copy followed by the change tail is refused: which"
+                " commits are under way when it starts cannot be read, and"
+                " one in the binary log but not yet visible would be in"
+                " neither"),
     # -- MongoDB ------------------------------------------------------------
     Definition(
         "replica_set", "mongodb", "a change stream (a replica set)",
@@ -451,7 +518,9 @@ def answers(hop):
     for name, got in (_record(hop).get("answers") or {}).items():
         a = answer_word(got.get("answer"))
         if a:
-            out[name] = (a, f"answered at a terminal by {got.get('by') or '?'}"
+            where = "in the web view" if got.get("through") == "web" \
+                else "at a terminal"
+            out[name] = (a, f"answered {where} by {got.get('by') or '?'}"
                             f" on {got.get('at') or '?'}")
     opts = hop.options or {}
     phys = opts.get("physical")
@@ -490,22 +559,27 @@ def put_answers(hop, facts, rungs):
                 facts[decide.answer_key(c.name)] = a
 
 
-def record_answer(hop, changes, answer):
-    """An answer given at a terminal, kept for the hop's later runs and in
-    its changelog."""
+def record_answer(hop, changes, answer, by=None, through="terminal"):
+    """An answer given at a terminal - or in the web view, by the person
+    signed in (`by`) - kept for the hop's later runs and in its
+    changelog; the offer it answers no longer stands."""
     import getpass
-    try:
-        who = getpass.getuser()
-    except Exception:  # noqa: BLE001 - nobody to name
-        who = ""
+    who = by
+    if not who:
+        try:
+            who = getpass.getuser()
+        except Exception:  # noqa: BLE001 - nobody to name
+            who = ""
     rec = _record(hop)
     for c in changes:
         rec.setdefault("answers", {})[c.name] = {
             "answer": answer, "at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "by": who, "source": _source(hop)}
+            "by": who, "source": _source(hop), "through": through}
+        (rec.get("offered") or {}).pop(c.name, None)
     _save(hop, rec)
     _audit(hop, {"op": "source-change-answer", "answer": answer,
-                 "changes": [c.name for c in changes]})
+                 "changes": [c.name for c in changes], "by": who,
+                 "through": through})
 
 
 # --- the offer, in words -----------------------------------------------------
@@ -585,8 +659,12 @@ def settle(hop, offer, facts, saving, go, ask, log):
     under `--go` (`ask(question)` -> "yes", "no" or "dba"), the answer
     recorded and put in the facts. Returns the answer, or None - and then
     the source is left as it is and the next way runs, said so."""
-    for line in offer_lines(offer, facts, saving):
+    said = offer_lines(offer, facts, saving)
+    for line in said:
         log(line)
+    if not (go and ask is not None):
+        # not answered here: kept as standing, for the web view to answer
+        _offered(hop, offer, said)
     if go and ask is not None:
         got = answer_word(ask(QUESTION))
         if got is None:
@@ -601,7 +679,8 @@ def settle(hop, offer, facts, saving, go, ask, log):
             " answers nothing ahead: the source is left as it is, and"
             f" {saving.instead or 'the next way'} runs")
     else:
-        log("dry-run: --go at a terminal asks it")
+        log("dry-run: --go at a terminal asks it, or an operator answers it"
+            " in the web view")
     return None
 
 
@@ -645,6 +724,55 @@ def written(hop, entry):
         "id", "change", "state", "table", "rows")}})
 
 
+def _offered(hop, offer, said):
+    """The offer kept as standing until it is answered: what it is, the
+    way it is for, and the words the plan said it in - what the view
+    shows beside the answer."""
+    try:
+        rec = _record(hop)
+        kept = rec.setdefault("offered", {})
+        for c in offer.changes:
+            if c.name in (rec.get("answers") or {}):
+                continue
+            kept[c.name] = {"said": c.said, "for": offer.rung.said,
+                            "lines": list(said),
+                            "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        _save(hop, rec)
+    except OSError:
+        # the offer is said either way; only the view misses it
+        pass
+
+
+def standing(hop):
+    """{"offered": {change: what the plan said}, "answers": {change:
+    (answer, where)}, "handed": {change: for the DBA}} - the offers not
+    answered, the answers standing (the hop's own over one given at a
+    terminal or in the view) and what is the DBA's to make."""
+    rec = _record(hop)
+    got = answers(hop)
+    offered = {k: v for k, v in (rec.get("offered") or {}).items()
+               if answer_of(hop, k, got)[0] is None}
+    return {"offered": offered, "answers": got,
+            "handed": dict(rec.get("handed") or {})}
+
+
+def answer_from_view(hop, name, answer, by):
+    """An offer standing on the hop answered in the web view by `by`,
+    recorded as a terminal's answer is. ValueError where no such offer
+    stands, the answer is not one, or the hop's file answers it."""
+    word = answer_word(answer)
+    if word is None:
+        raise ValueError(f"{answer!r} is not yes, no or dba")
+    if name not in standing(hop)["offered"]:
+        raise ValueError(f"no change {name!r} is offered on this hop now")
+    held, where = answer_of(hop, name)
+    if held is not None and "the hop's" in where:
+        raise ValueError(f"the hop's file answers {name} ({where}); change"
+                         " it there")
+    record_answer(hop, [_Named(name)], word, by=by, through="web")
+    return word
+
+
 # --- the record -------------------------------------------------------------
 
 FILE = "source-changes.json"
@@ -668,11 +796,8 @@ def _record(hop):
 
 
 def _save(hop, rec):
-    import os
-    path = _path(hop)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=1, default=str))
-    os.replace(tmp, path)
+    from . import durable
+    durable.write_json(_path(hop), rec, indent=1)
 
 
 def _audit(hop, entry):
@@ -842,6 +967,14 @@ def undo_left(hop, run, log):
     return ok
 
 
+def entry(hop, entry_id):
+    """The change recorded under `entry_id` (`put_on`), or None."""
+    for e in _record(hop).get("made") or []:
+        if entry_id and e.get("id") == entry_id:
+            return e
+    return None
+
+
 def left_on_source(hop):
     """The changes recorded as made and not taken off: for `doctor`."""
     return [e for e in _record(hop).get("made") or []
@@ -855,6 +988,26 @@ def making(hop, change, facts, run, db, log, version=""):
     block or on any failure. `run(statement)` runs one statement on the
     source. The server refusing it is recorded (`refused_here`) and raised
     as `Refused`, what it had made taken off first."""
+    entry = put_on(hop, change, facts, run, db, log, version)
+    try:
+        yield entry
+    finally:
+        _take_off(hop, entry, run, log)
+
+
+def take_off(hop, entry, run, log):
+    """What `put_on` made taken off again, from its entry: True where
+    nothing is left (`_take_off`)."""
+    return _take_off(hop, entry, run, log)
+
+
+def put_on(hop, change, facts, run, db, log, version=""):
+    """`change` made on the source and left on - for a change that lasts
+    past one block, as a freeze of the cutover's lasts to its thaw: behind
+    the hop's approvals, recorded before it acts; the entry `take_off`
+    takes it off with, as the next run does where this one is killed
+    (`undo_left`). The server refusing it is recorded (`refused_here`) and
+    raised as `Refused`, what it had made taken off first."""
     from . import approvals
     make = change.statements(facts)
     undo = change.statements(facts, "undo")
@@ -893,10 +1046,7 @@ def making(hop, change, facts, run, db, log, version=""):
         raise
     _state(hop, entry["id"], "made")
     log(f"on the source: {change.said} put on ({'; '.join(make)})")
-    try:
-        yield entry
-    finally:
-        _take_off(hop, entry, run, log)
+    return entry
 
 
 def said_by_doctor(hop):

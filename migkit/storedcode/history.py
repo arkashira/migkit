@@ -324,11 +324,23 @@ def _mssql(eng, db):
 
 
 def _oracle(eng, db):
+    return [(text, runs, sample) for _, text, runs, sample, _ in
+            oracle_statements(eng, db, (3, 47, 170))]
+
+
+def oracle_statements(eng, db, commands=(2, 3, 6, 7, 47, 170, 189)):
+    """[(sql id, text, runs, sample, mean ms)] of the shared pool's
+    statements parsed in the schema, of the kinds `commands` names (V$SQL's
+    command types: 2 INSERT, 3 SELECT, 6 UPDATE, 7 DELETE, 47 a PL/SQL
+    block, 170 CALL, 189 MERGE), the most run first; each sample with the
+    values its binds were captured with in the place of their marks."""
     from ..engines.dbapi import MARK
     owner = eng._owner("src", db)
-    rows = eng._rows("src", db, "select sql_id, sql_fulltext, executions"
-                                " from v$sql where parsing_schema_name ="
-                                f" {MARK} and command_type in (3, 47, 170)"
+    kinds = ", ".join(str(int(c)) for c in commands)
+    rows = eng._rows("src", db, "select sql_id, sql_fulltext, executions,"
+                                " elapsed_time / greatest(executions, 1) /"
+                                " 1000 from v$sql where parsing_schema_name"
+                                f" = {MARK} and command_type in ({kinds})"
                                 " order by executions desc fetch first"
                                 f" {int(MOST)} rows only", (owner,))
     binds = {}
@@ -341,7 +353,7 @@ def _oracle(eng, db):
     except Exception:  # noqa: BLE001 - no captured binds to read
         pass
     out = []
-    for sql_id, text, runs in rows:
+    for sql_id, text, runs, mean in rows:
         text = str(text.read() if hasattr(text, "read") else text or "")
         sample = text
         got = binds.get(sql_id)
@@ -356,7 +368,8 @@ def _oracle(eng, db):
                 return v if re.fullmatch(r"[+-]?\d+(\.\d+)?", str(v)) \
                     else "'" + str(v).replace("'", "''") + "'"
             sample = re.sub(r":\w+", lit, text)
-        out.append((text, int(runs or 0), sample))
+        out.append((sql_id, text, int(runs or 0), sample,
+                    float(mean) if mean is not None else None))
     return out
 
 

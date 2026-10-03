@@ -48,6 +48,7 @@ AREAS = (
     ("Schedules, the run's state and tunnels",
      ("schedule", "state", "tunnel", "session")),
     ("Help from a model", ("assist",)),
+    ("The web view and the API", ("web",)),
 )
 #: what the engine modules shared by every engine are
 EVERY_ENGINE = "Every engine"

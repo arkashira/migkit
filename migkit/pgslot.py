@@ -44,6 +44,11 @@ whatever happened to be non-null in that row.
 # what tells it apart from the string.
 NULL_TOKEN = "null"
 
+# What the plugin prints, unquoted, for a large value stored out of line
+# that an UPDATE did not touch: the log holds a pointer to it, not the
+# value. Read as text, it was written over the target's value
+UNCHANGED_TOAST = "unchanged-toast-datum"
+
 # The markers that split an UPDATE into its two tuples.
 OLD_KEY = "old-key:"
 NEW_TUPLE = "new-tuple:"
@@ -227,6 +232,13 @@ def pgoutput_message(buf, streamed=False):
     return transactional, prefix, buf[at + 4:at + 4 + size]
 
 
+def unchanged(raw, quoted):
+    """Whether a field is the plugin's word for a large value the change
+    did not touch (`UNCHANGED_TOAST`) - never a value of that text, which
+    is quoted."""
+    return not quoted and raw == UNCHANGED_TOAST
+
+
 def value(declared, raw, quoted):
     """One field turned back into something a driver can be handed.
 
@@ -297,11 +309,26 @@ def change(parsed, keys, txn=None):
     line does not always carry one: an UPDATE that did not move the key has
     no `old-key` section at all, and a DELETE under REPLICA IDENTITY FULL
     drops whatever columns were NULL.
+
+    A large value stored out of line that an UPDATE did not touch comes
+    as the plugin's placeholder (`unchanged`), not the value: taken from
+    the whole previous row where the table keeps one, and otherwise left
+    out of the change, so the target keeps the value it holds - the
+    change names those columns (`canon.UNCHANGED`) for the tail's
+    accounts.
     """
     from . import canon
     table = parsed["table"]
-    old = {n: value(t, v, q) for n, t, v, q in parsed["old"]}
-    new = {n: value(t, v, q) for n, t, v, q in parsed["new"]}
+    old = {n: value(t, v, q) for n, t, v, q in parsed["old"]
+           if not unchanged(v, q)}
+    new, kept = {}, []
+    for n, t, v, q in parsed["new"]:
+        if not unchanged(v, q):
+            new[n] = value(t, v, q)
+        elif n in old:
+            new[n] = old[n]
+        else:
+            kept.append(n)
     if parsed["op"] == "delete":
         source = old or new
     else:
@@ -318,5 +345,8 @@ def change(parsed, keys, txn=None):
     before = old if old and set(old) - set(keys) else None
     if parsed["op"] == "delete":
         return canon.change("delete", table, key, before=before, txn=txn)
-    return canon.change(parsed["op"], table, key, new, before=before,
-                        txn=txn)
+    out = canon.change(parsed["op"], table, key, new, before=before,
+                       txn=txn)
+    if kept:
+        out[canon.UNCHANGED] = kept
+    return out

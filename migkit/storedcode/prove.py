@@ -99,6 +99,15 @@ def routines_of(eng, side, db, notes=None):
                          " read, so only its functions of one expression"
                          " are held here:"
                          f" {(str(e).strip().splitlines() or [''])[0][:100]}")
+    if got and eng.CANON_ENGINE == "oracle":
+        # each public subprogram of a package, as a routine of its own
+        from . import packages
+        try:
+            got = list(got) + packages.members(eng, side, db, notes)
+        except Exception as e:  # noqa: BLE001 - said; the rest proved
+            if notes is not None:
+                notes.append("the packages could not be read: " + (
+                    str(e).strip().splitlines() or [""])[0][:100])
     if got:
         return got
     out = []
@@ -333,6 +342,11 @@ class Proof:
         self.notes = []
         self.src_list = routines_of(pair.src_engine, "src", db, self.notes)
         self.dst_list = routines_of(pair.dst_engine, "dst", db, self.notes)
+        from . import packages
+        #: the source's packages, which the target keeps as schemas
+        self.packages = {r.settings["package"] for r in self.src_list
+                         if r.settings.get("package")}
+        packages.qualify(self.dst_list, self.packages)
         self.src_known = {r.name.lower(): r for r in self.src_list}
         self.expr = expressions(pair.src_engine, "src", db)
         for r in self.src_list:
@@ -349,6 +363,11 @@ class Proof:
         self.searching = True
         #: the source's record of its calls, read once when first asked
         self.history = None
+        #: per pure function, the calls made and the source's answers,
+        #: kept as the reference after the cutover (`reference`)
+        from . import reference
+        self.reference = {} if reference.turned_on(pair.hop) and \
+            reference.after_cutover(pair.hop) is None else None
 
     def target_of(self, r):
         return self.dst.get(r.key)
@@ -401,14 +420,19 @@ class Proof:
         # the hop's own servers
         needs = any(not self._on_own(r) for r, _ in runnable)
         named = spec(self.pair.hop) is not None
+        wanted = self.application_statements() if schema is not None \
+            else []
         self.open((bool(runnable) and (needs or named))
                   or (schema is not None and named))
         try:
             if self.sandbox is not None:
                 if schema is not None:
                     schema += self.schema_proofs()
-                if runnable:
-                    verdicts += self._in_sandbox(runnable)
+                from . import partitions
+                if runnable or wanted or (schema is not None and
+                                          partitions.turned_on(
+                                              self.pair.hop)):
+                    verdicts += self._in_sandbox(runnable, wanted, schema)
             else:
                 for r, t in runnable:
                     if self._on_own(r):
@@ -417,10 +441,101 @@ class Proof:
                         verdicts.append(Verdict(
                             r.said, "not proved", self.why_not or
                             "nothing was run"))
+                for where, scope, stmts, _ in wanted:
+                    if stmts:
+                        schema.append(self._unrun(scope, where, stmts))
         finally:
             self.close()
             self.bank.save()
         return verdicts
+
+    # ---- the application's own statements ------------------------------
+
+    def application_statements(self):
+        """[(where they came from, the line's scope, [Statement], the file
+        they are written to)] the hop turns on: the source's record of its
+        statements (`workload_replay`, `corpus`) and the application's
+        code (`application_sql`, `appscan`). What could not be read is
+        said in the notes."""
+        from . import appscan, corpus
+        hop, out = self.pair.hop, []
+        if corpus.turned_on(hop):
+            stmts, why = corpus.statements(self.pair, self.db)
+            if why:
+                self.notes.append(f"the workload was not replayed: {why}")
+            if stmts:
+                corpus.keep(hop, self.db, stmts)
+                out.append(("the source's record", "workload replayed",
+                            stmts, "workload-replay"))
+        if appscan.turned_on(hop):
+            stmts, said = appscan.found(
+                hop, self.pair.src_engine.SQL_DIALECT or "mysql")
+            self.notes += said
+            if stmts:
+                out.append(("the application's code",
+                            "application statements", stmts,
+                            "application-sql"))
+            elif not said:
+                self.notes.append("the application's code named holds no"
+                                  " statement migkit could find")
+        return out
+
+    def _unrun(self, scope, where, stmts):
+        from ..engines.base import Result
+        why = self.why_not or ("no sandbox is named for this hop"
+                               " (proof_sandbox)")
+        return Result("schema", f"{self.db} {scope}", "warn",
+                      f"{len(stmts)} statements from {where}, none proved:"
+                      f" {why}", "",
+                      "name a sandbox for the proof (hop option"
+                      " proof_sandbox: docker, or two scratch servers)")
+
+    #: the mined cases of the functions the source's code calls, and those
+    #: its target answers apart (`builtins`)
+    mined, parting = {}, {}
+
+    def builtin_cases(self, schema):
+        """The cases the engines' own tests hold for the functions the
+        source's code calls, run on both sandboxes before any routine is
+        proved, so their constants are among every routine's inputs and a
+        case answered apart is said (`builtins`)."""
+        from . import builtins
+        hop = self.pair.hop
+        if not builtins.turned_on(hop):
+            return
+        texts = [r.body or r.settings.get("expression") or ""
+                 for r in self.src_list]
+        wanted = builtins.called(texts)
+        if not wanted:
+            return
+        self.mined = builtins.mine(
+            hop, self.pair.src_engine.SQL_DIALECT or "mysql", wanted)
+        try:
+            got = builtins.run(self, self.mined)
+        except Exception as e:  # noqa: BLE001 - said, the proof goes on
+            self.notes.append("the engines' own tests could not be run: "
+                              + (str(e).strip().splitlines()
+                                 or [""])[0][:100])
+            return
+        builtins.keep(hop, self.db, f"{self.pair.src_name}->"
+                                    f"{self.pair.dst_name}", got)
+        self.parting = {fn: v["apart"] for fn, v in got.items()
+                        if v["apart"]}
+        line = builtins.result(self.db, got)
+        if line is not None and schema is not None:
+            schema.append(line)
+
+    def statement_proofs(self, wanted, schema):
+        """The application's statements proved on the sandbox, its
+        routines made in it (`statements`): a line each for the record's
+        and the code's, their verdicts beside the reports."""
+        from . import statements
+        for where, scope, stmts, stem in wanted:
+            got = statements.prove(self, stmts)
+            statements.write(self.pair.hop.report_dir(self.db) / stem, got)
+            line = statements.result(self.db, got, where, scope)
+            if line is not None and schema is not None:
+                schema.append(line)
 
     def schema_proofs(self):
         """[Result]: the schema's own proofs on the sandbox's fixture, made
@@ -496,6 +611,12 @@ class Proof:
         nums, strs = inputs.constants(r.body or r.settings.get("expression"),
                                       self.pair.src_engine.SQL_DIALECT or
                                       "mysql")
+        if self.mined:
+            from . import builtins
+            more = builtins.constants(
+                self.mined, r.body or r.settings.get("expression") or "",
+                self.pair.src_engine.SQL_DIALECT or "mysql")
+            nums, strs = nums | more[0], strs | more[1]
         for p in r.params:
             if p.mode == "out":
                 pools.append([None])
@@ -551,8 +672,10 @@ class Proof:
         calls, seen_error, masked = 0, set(), False
         mode = harness.clock_mode(a, b, _text(r), _text(t))
         recorded, values, said = self._recorded(r)
+        ref = self._referenced(r, pair.src_engine.CANON_ENGINE)
         try:
-            for args in _once(recorded + self._args(r, t, values)):
+            for args in _once(recorded + self._args(r, t, values)
+                              + self._bounded(r, t)):
                 try:
                     x, y, clock = self._both(
                         a, b, lambda: self._render(r, a.call(
@@ -563,6 +686,8 @@ class Proof:
                     return Verdict(r.said, "not proved", f"a call could not"
                                    f" be made: {str(e)[:100]}")
                 calls += 1
+                if ref is not None and len(ref) < 20:
+                    ref.append((args, x))
                 if any(o.error and (o.error[0] == "25006" or "READ ONLY" in
                                     str(o.error[1]).upper())
                        for o in (x, y)):
@@ -591,9 +716,11 @@ class Proof:
                              " to compare")
             if masked:
                 short.append(CLOCK_TOLERATED)
+            bound = getattr(self, "bounded", {}).get(r.name)
             return Verdict(r.said, "warn" if short else "ok",
                            "; ".join(short), calls,
-                           coverage="one expression, reached by every call",
+                           coverage="one expression, reached by every call"
+                           + (f"; {bound}" if bound else ""),
                            history=said)
         return Verdict(r.said, "warn", f"{calls} calls answered the same on"
                        " the hop's own servers, read-only, but which of its"
@@ -692,9 +819,18 @@ class Proof:
             if got:
                 return [got[0]], got[1], None
             return [r.definition], None, None
+        if engine == "oracle" and r.settings.get("made"):
+            # a package's member: its spec and body, made whole
+            return list(r.settings["made"]), None, None
         if engine in ("mssql", "oracle"):
             # a CREATE is a batch of its own; the server keeps it whole
             return [r.definition], None, None
+        if engine == "postgres" and "." in r.name and \
+                r.settings.get("package"):
+            # a package's member on the target: its schema first
+            return [f"create schema if not exists"
+                    f" {runner_ident(r.name.split('.')[0])}"] + \
+                [s for s in _pg_statements(r.definition)], None, None
         return [s for s in _pg_statements(r.definition)], None, None
 
     def begin(self, targets):
@@ -738,8 +874,10 @@ class Proof:
     def made(self, r):
         """The target's version of `r` as the target's sandbox now keeps
         it, or None."""
+        from . import packages
         sb = self.sandbox
-        return by_key(sb.dst.code_routines("dst", sb.tdb)).get(r.key)
+        return by_key(packages.qualify(sb.dst.code_routines("dst", sb.tdb),
+                                       self.packages)).get(r.key)
 
     def install(self, r, statements):
         """A version already proved, made again in the target's sandbox in
@@ -830,13 +968,19 @@ class Proof:
             gone()
         return v, t
 
-    def _in_sandbox(self, runnable):
+    def _in_sandbox(self, runnable, wanted=(), schema=None):
         out = []
         try:
             self.begin(self.dst_list)
+            self.builtin_cases(schema)
             for r, t in runnable:
                 out.append(self.verdict_for(r, t))
             self.in_sequences(runnable, out)
+            if wanted:
+                self.statement_proofs(wanted, schema)
+            from . import partitions
+            if schema is not None and partitions.turned_on(self.pair.hop):
+                partitions.advise(self, schema)
         finally:
             self.end()
         return out
@@ -910,6 +1054,7 @@ class Proof:
         kept = self.kept.setdefault(r.name, []) if (
             keep.pure(r) and r.kind == "function" and
             self._classes(r)[0] in keep.EXACT) else None
+        ref = self._referenced(r, a.engine)
 
         def once(args):
             nonlocal masked, unknown
@@ -920,6 +1065,8 @@ class Proof:
                 mode)
             if kept is not None and len(kept) < keep.KEEP:
                 kept.append((args, x))
+            if ref is not None and len(ref) < keep.KEEP:
+                ref.append((args, x))
             found = differences(x, y, clock)
             if clock is True and not found and differences(x, y):
                 masked = True
@@ -928,6 +1075,11 @@ class Proof:
                 unknown = True
             return found
 
+        def apart(args, what, n):
+            v = Verdict(r.said, "diff", self._first(r, args, what), n,
+                        first={"args": repr(args), "found": what}, args=args)
+            return self._where(v, r, t, args, writes, commits)
+
         for args in argsets:
             found = once(args)
             calls += 1
@@ -935,28 +1087,65 @@ class Proof:
                 small = self._shrink(once, r, args)
                 self.bank.keep(f"{r.kind}:{r.name}", small)
                 what = once(small)
-                return Verdict(r.said, "diff", self._first(r, small, what),
-                               calls, first={"args": repr(small),
-                                             "found": what}, args=small)
+                return apart(small, what, calls)
         per_call = (time.monotonic() - began) / max(1, calls)
         found = self._search(once, r, per_call) if self.searching else None
         if found:
             args, what = found
             self.bank.keep(f"{r.kind}:{r.name}", args)
-            return Verdict(r.said, "diff", self._first(r, args, what),
-                           calls + self._searched, first={
-                               "args": repr(args), "found": what},
-                           args=args)
+            return apart(args, what, calls + self._searched)
         calls += self._searched
-        for args in (self._solved(a, r) if self.searching else ()):
+        for args in (list(self._solved(a, r)) + self._bounded(r, t)
+                     if self.searching else []):
             calls += 1
             found = once(args)
             if found:
                 self.bank.keep(f"{r.kind}:{r.name}", args)
-                return Verdict(r.said, "diff", self._first(r, args, found),
-                               calls, first={"args": repr(args),
-                                             "found": found}, args=args)
+                return apart(args, found, calls)
         return self._covered(a, b, r, t, calls, findings, masked, unknown)
+
+    def _referenced(self, r, engine):
+        """The list a pure function's calls are kept in for the reference
+        after the cutover, or None (`reference`)."""
+        from . import reference
+        if self.reference is None or not reference.pure(r, engine):
+            return None
+        return self.reference.setdefault(r.name, [])
+
+    def reference_classes(self):
+        """{name: (the class a kept function returns, whether a decimal is
+        compared by its value)} - how its kept answers were rendered."""
+        loose = self.pair.src_engine.CANON_ENGINE == "oracle"
+        by = {r.name: r for r in self.src_list}
+        return {n: (self._classes(by[n])[0], loose or bool(
+            by[n].returns and "(" not in str(by[n].returns)))
+            for n in (self.reference or {}) if n in by}
+
+    def _where(self, v, r, t, args, writes, commits):
+        """A differing verdict with where the two versions first part,
+        from the states each reports statement by statement (`trace`),
+        where both engines can report them."""
+        if not self.searching:
+            return v
+        from . import trace
+        try:
+            where = trace.first_apart(self, r, t, args, writes, commits)
+        except Exception:  # noqa: BLE001 - the verdict stands as it is
+            where = None
+        if where:
+            v.reason += f"; {where}"
+            v.first["state"] = where
+        return v
+
+    def _bounded(self, r, t):
+        """Inputs the solver finds where a function of one expression and
+        its target's version answer apart (`scalar`); each is run like any
+        other, and only the run decides."""
+        from . import scalar
+        try:
+            return scalar.counterexamples(self, r, t)
+        except Exception:  # noqa: BLE001 - the calls made decide alone
+            return []
 
     def argsets(self, a, r, t):
         """What `r` is called with, in the order tried: every input that
@@ -1146,6 +1335,10 @@ class Proof:
                          " compare")
         if r.kind == "event":
             short.append(self._event_said(r))
+        cov_said.append(getattr(self, "bounded", {}).get(r.name, ""))
+        if self.parting:
+            from . import builtins
+            cov_said += builtins.caveats(self.parting, _text(r))
         status = "warn" if short else "ok"
         reason = "; ".join(short) if short else \
             f"{calls} calls answered the same"
@@ -1372,10 +1565,19 @@ def _unprobed(routine):
 def commits_itself(engine, r):
     """Whether a routine commits or rolls back for itself, as its own
     body says - so it cannot be run inside a transaction the proof rolls
-    back, or held with others in one."""
+    back, or held with others in one. An Oracle routine in an autonomous
+    transaction, and a PostgreSQL one run over a loopback connection (the
+    emulation of one), commit what they write whatever the caller does."""
     from . import mysql_pg, tsql_pg
     if r is None or not r.body:
         return False
+    if engine == "oracle":
+        return bool(re.search(r"(?i)\bpragma\s+autonomous_transaction\b|"
+                              r"\b(commit|rollback)\b\s*(work\b\s*)?;",
+                              r.body))
+    if engine == "postgres" and re.search(r"(?i)\bdblink_exec\s*\(",
+                                          r.body):
+        return True
     try:
         if engine == "mysql":
             return any(n.kind == "tx" for n in mysql_pg.read(r.body).walk())
@@ -1410,6 +1612,12 @@ def _plpgsql_commits(definition):
     except Exception:  # noqa: BLE001 - read by its words instead
         return bool(re.search(r"(?im)^\s*(commit|rollback)\s*;",
                               definition))
+
+
+def runner_ident(name):
+    """A schema's name as PostgreSQL reads it."""
+    from .plpgsql import ident
+    return ident(name)
 
 
 def _once(argsets):
@@ -1491,11 +1699,18 @@ def prove_database(pair, db, schema=None):
     hop's own servers, everything else by running it (see the module's
     docstring). None where the source keeps no code. With `schema` (a
     list), the schema's own proofs on the sandbox are appended to it."""
+    from . import reference
     from .convert import translatable
     from .views import prove_views
+    after = reference.check(pair, db)
+    if after is not None and schema is not None:
+        schema.append(after)
     verdicts = prove_views(pair, db)
     proof = Proof(pair, db)
     verdicts += proof.run(schema)
+    if proof.reference:
+        reference.record(pair, db, {n: c for n, c in proof.reference.items()
+                                    if c}, proof.reference_classes())
     ok = {v.said.split(" ", 1)[1] for v in verdicts if v.status == "ok"}
     if pair.dst_engine.CANON_ENGINE == "postgres" and proof.kept:
         from . import keep

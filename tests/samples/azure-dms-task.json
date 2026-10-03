@@ -1,0 +1,46 @@
+{
+ "id": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example-rg/providers/Microsoft.DataMigration/services/example-dms/projects/example-project/tasks/shop-offline",
+ "name": "shop-offline",
+ "type": "Microsoft.DataMigration/services/projects/tasks",
+ "etag": "example-etag",
+ "properties": {
+  "taskType": "Migrate.MySql.AzureDbForMySql",
+  "state": "Succeeded",
+  "input": {
+   "sourceConnectionInfo": {
+    "type": "MySqlConnectionInfo",
+    "serverName": "10.0.0.61",
+    "dataSource": "10.0.0.61",
+    "port": 3306,
+    "userName": "dms",
+    "authentication": "SqlAuthentication",
+    "encryptConnection": true
+   },
+   "targetConnectionInfo": {
+    "type": "MySqlConnectionInfo",
+    "serverName": "shop.mysql.example.com",
+    "port": 3306,
+    "userName": "admin",
+    "encryptConnection": true
+   },
+   "selectedDatabases": [
+    {
+     "name": "shop",
+     "targetDatabaseName": "shop_new",
+     "tableMap": {
+      "shop.orders": "shop_new.orders",
+      "shop.users": "shop_new.members"
+     }
+    },
+    {
+     "name": "crm",
+     "targetDatabaseName": "crm"
+    }
+   ],
+   "makeSourceServerReadOnly": false,
+   "optionalAgentSettings": {
+    "WriteDataRangeBatchTaskCount": "12"
+   }
+  }
+ }
+}

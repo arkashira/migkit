@@ -408,6 +408,11 @@ def _parts(engine, name):
     return parts
 
 
+#: the schema a table named without one is in, where the engine reads a
+#: bare name in one - PostgreSQL's `regclass` on the search path
+DEFAULT_SCHEMA = {"postgres": "public"}
+
+
 def split_table(engine, name, default=""):
     """(schema, table) of a table's name, plain (`public.orders`) or
     quoted (`public."v1.orders"`, `` `a.b` ``, `[dbo].[x]`), one way for

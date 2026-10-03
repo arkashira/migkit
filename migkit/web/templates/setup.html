@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}The operator's account - migkit{% endblock %}
+{% block main %}
+<section class="card narrow">
+  <h1>{% if again %}Set the password again{% else %}The operator's account{% endif %}</h1>
+  {% if error %}<p class="note error">{{ error }}</p>{% endif %}
+  <p class="muted">This install has no identity provider, so it has one
+  operator, who is the admin of every hop. The address this view printed
+  sets the account once; a password of 12 characters at the least.</p>
+  <form method="post" action="/setup" data-setup>
+    <input type="hidden" name="form" value="{{ form }}">
+    <label>The code from the printed address <input name="code" autocomplete="off" required></label>
+    <label>Name <input name="name" autocomplete="username" required></label>
+    <label>Password <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+    <label>The password again <input name="again" type="password" autocomplete="new-password" minlength="12" required></label>
+    <button type="submit">Set it</button>
+  </form>
+</section>
+{% endblock %}

@@ -1027,13 +1027,11 @@ def for_move(hop, model, facts, tables=None, workers=None, db=None):
     plan = plan_move(model, got, lim, ways_of(model), check_of(model))
     if plan is not None and db is not None:
         try:
-            import json
             import os
-            path = os.path.join(str(hop.report_dir(db)), PLAN_FILE)
-            tmp = path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(plan.as_evidence(), f, default=str)
-            os.replace(tmp, path)
+
+            from . import durable
+            durable.write_json(os.path.join(str(hop.report_dir(db)),
+                                            PLAN_FILE), plan.as_evidence())
         except (OSError, AttributeError, TypeError):
             pass
     return plan

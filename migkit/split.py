@@ -80,10 +80,10 @@ class Part:
         return self.hop.name
 
     def carries(self, db, table):
-        return not self.hop.excluded(db, *str(table).split("."))
+        return self.hop.takes_table(db, table)
 
     def rule(self, db, table):
-        return self.hop.row_filter(db, *str(table).split("."))
+        return self.hop.row_filter(db, *self.hop.parts_of(table))
 
 
 def parts(hop, siblings=None):
@@ -338,7 +338,7 @@ def prove(hop, eng, db):
             dst = pair.dst_engine
             there = [] if dst.target_missing(db) else \
                 dst.neutral_tables("dst", db)
-            got, _, _, _ = pair.match_tables([t], there, pair._rename)
+            got, _, _, _ = pair.match_tables([t], there, pair._renamer(db))
             if not got:
                 missing_part.append(p.name)
                 continue

@@ -1,0 +1,3592 @@
+# Every managed database service migkit knows, provider by provider - the
+# clouds' own and the DBaaS vendors'. Each entry says the engine migkit moves
+# it as (or, for an engine migkit lacks, what it is); how it is recognised -
+# what the server says of itself first, its address a hint only; what the
+# account the service hands over may and may not do; how a server setting
+# is changed on it, in the provider's own words; what following its changes
+# needs; its restore points, limits and defaults. Read by migkit.managed.
+# A fact its documentation does not give is left out or said as "not
+# documented"; `where` is the word migkit.clouds names the service by, and
+# (where, family) is one entry.
+#
+# Sources (documentation read, 2026):
+#   AWS
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.MasterAccounts.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.MySQL.CommonDBATasks.privilege-model.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.PostgreSQL.CommonDBATasks.Roles.rds_superuser.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/PostgreSQL.Concepts.General.FeatureSupport.LogicalReplication.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Limits.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/mysql-stored-proc-configuring.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_SQLServerMultiAZ.Recommendations.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/db2-sp-managing-databases.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.MasterAccounts.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Managing.Performance.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_Limits.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/mysql-stored-proc-configuring.html
+#     https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/mysql-stored-proc-replicating.html
+#     https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-postgresql-compatibility-unsupported-features.html
+#     https://docs.aws.amazon.com/aurora-dsql/latest/userguide/cdc-streams.html
+#     https://docs.aws.amazon.com/aurora-dsql/latest/userguide/backup-aurora-dsql.html
+#     https://docs.aws.amazon.com/documentdb/latest/developerguide/mongo-apis.html
+#     https://docs.aws.amazon.com/documentdb/latest/developerguide/limits.html
+#     https://docs.aws.amazon.com/documentdb/latest/developerguide/security.managing-users.html
+#     https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html
+#     https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Clusters.RBAC.html
+#     https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/engine-versions.html
+#     https://docs.aws.amazon.com/memorydb/latest/devguide/restrictedcommands.html
+#     https://docs.aws.amazon.com/memorydb/latest/devguide/engine-versions.html
+#     https://docs.aws.amazon.com/keyspaces/latest/devguide/cdc.html
+#     https://docs.aws.amazon.com/neptune/latest/userguide/streams-using-enabling.html
+#     https://docs.aws.amazon.com/opensearch-service/latest/developerguide/supported-operations.html
+#     https://docs.aws.amazon.com/streams/latest/dev/service-sizes-and-limits.html
+#     https://docs.aws.amazon.com/streams/latest/dev/kinesis-extended-retention.html
+#     https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Source.DB2.html
+#   Google Cloud
+#     https://docs.cloud.google.com/sql/docs/postgres/users
+#     https://docs.cloud.google.com/sql/docs/postgres/flags
+#     https://docs.cloud.google.com/sql/docs/postgres/replication/configure-logical-replication
+#     https://docs.cloud.google.com/sql/docs/postgres/create-manage-databases
+#     https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/pitr
+#     https://docs.cloud.google.com/sql/docs/mysql/users
+#     https://docs.cloud.google.com/sql/docs/mysql/flags
+#     https://docs.cloud.google.com/sql/docs/mysql/manage-connections
+#     https://docs.cloud.google.com/sql/docs/mysql/backup-recovery/configure-pitr
+#     https://docs.cloud.google.com/sql/docs/mysql/create-manage-databases
+#     https://docs.cloud.google.com/sql/docs/mysql/configure-dns
+#     https://docs.cloud.google.com/sql/docs/sqlserver/users
+#     https://docs.cloud.google.com/sql/docs/sqlserver/replication/enable-cdc
+#     https://docs.cloud.google.com/sql/docs/sqlserver/instance-settings
+#     https://docs.cloud.google.com/sql/docs/quotas
+#     https://docs.cloud.google.com/alloydb/docs/database-users/overview
+#     https://docs.cloud.google.com/alloydb/docs/instance-configure-database-flags
+#     https://docs.cloud.google.com/alloydb/docs/reference/database-flags
+#     https://docs.cloud.google.com/alloydb/docs/configure-private-service-connect
+#     https://docs.cloud.google.com/alloydb/docs/backup/overview
+#     https://docs.cloud.google.com/alloydb/quotas
+#     https://docs.cloud.google.com/spanner/docs/change-streams
+#     https://docs.cloud.google.com/spanner/docs/pitr
+#     https://docs.cloud.google.com/spanner/quotas
+#     https://docs.cloud.google.com/bigtable/docs/change-streams-overview
+#     https://docs.cloud.google.com/bigtable/quotas
+#     https://docs.cloud.google.com/firestore/quotas
+#     https://docs.cloud.google.com/firestore/mongodb-compatibility/docs/change-streams
+#     https://docs.cloud.google.com/memorystore/docs/redis/supported-commands
+#     https://docs.cloud.google.com/memorystore/docs/redis/redis-configs
+#     https://docs.cloud.google.com/memorystore/docs/cluster/supported-commands
+#     https://docs.cloud.google.com/memorystore/docs/valkey/supported-commands
+#     https://docs.cloud.google.com/memorystore/docs/valkey/supported-versions
+#     https://docs.cloud.google.com/memorystore/docs/valkey/configure-instances
+#     https://docs.cloud.google.com/bigquery/docs/change-history
+#     https://docs.cloud.google.com/bigquery/docs/time-travel
+#     https://docs.cloud.google.com/pubsub/docs/subscription-properties
+#     https://docs.cloud.google.com/pubsub/quotas
+#   Azure
+#     https://learn.microsoft.com/en-us/azure/azure-sql/database/logins-create-manage
+#     https://learn.microsoft.com/en-us/azure/azure-sql/database/transact-sql-tsql-differences-sql-server
+#     https://learn.microsoft.com/en-us/azure/azure-sql/database/change-data-capture-overview
+#     https://learn.microsoft.com/en-us/azure/azure-sql/database/recovery-using-backups
+#     https://learn.microsoft.com/en-us/azure/azure-sql/managed-instance/transact-sql-tsql-differences-sql-server
+#     https://learn.microsoft.com/en-us/azure/azure-sql/managed-instance/resource-limits
+#     https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-database-transact-sql-set-options
+#     https://learn.microsoft.com/en-us/sql/t-sql/functions/serverproperty-transact-sql
+#     https://learn.microsoft.com/en-us/azure/postgresql/security/security-manage-database-users
+#     https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-logical
+#     https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-limits
+#     https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore
+#     https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-limitations
+#     https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-server-parameters
+#     https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concept-servers
+#     https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-backup-restore
+#     https://learn.microsoft.com/en-us/azure/cosmos-db/concepts-limits
+#     https://learn.microsoft.com/en-us/azure/cosmos-db/nosql/change-feed-modes
+#     https://learn.microsoft.com/en-us/azure/cosmos-db/mongodb/feature-support-70
+#     https://learn.microsoft.com/en-us/azure/cosmos-db/mongodb/change-streams
+#     https://learn.microsoft.com/en-us/azure/documentdb/limitations
+#     https://learn.microsoft.com/en-us/azure/documentdb/change-streams
+#     https://learn.microsoft.com/en-us/azure/cosmos-db/cassandra/support
+#     https://learn.microsoft.com/en-us/azure/cosmos-db/postgresql/concepts-authentication
+#     https://learn.microsoft.com/en-us/azure/cosmos-db/postgresql/reference-limits
+#     https://learn.microsoft.com/en-us/azure/azure-cache-for-redis/cache-configure
+#     https://learn.microsoft.com/en-us/azure/redis/configure
+#     https://learn.microsoft.com/en-us/azure/synapse-analytics/sql-data-warehouse/sql-data-warehouse-service-capacity-limits
+#     https://learn.microsoft.com/en-us/azure/synapse-analytics/sql-data-warehouse/backup-and-restore
+#     https://learn.microsoft.com/en-us/azure/event-hubs/apache-kafka-configurations
+#     https://learn.microsoft.com/en-us/azure/event-hubs/event-hubs-quotas
+#   Tencent Cloud
+#     https://www.tencentcloud.com/document/product/409/43242
+#     https://www.tencentcloud.com/document/product/409/69863
+#     https://www.tencentcloud.com/document/product/409/43453
+#     https://www.tencentcloud.com/document/product/409/46146
+#     https://cloud.tencent.com/document/product/409/67114
+#     https://www.tencentcloud.com/document/product/236/13390
+#     https://www.tencentcloud.com/document/product/236/37785
+#     https://cloud.tencent.com/document/product/236/42539
+#     https://cloud.tencent.com/document/product/236/7259
+#     https://www.tencentcloud.com/document/product/237/6988
+#     https://www.tencentcloud.com/document/product/238/47716
+#     https://www.tencentcloud.com/document/product/238/41608
+#     https://www.tencentcloud.com/document/product/240/18695
+#     https://cloud.tencent.com/document/product/240/89184
+#     https://www.tencentcloud.com/document/product/239/50393
+#     https://cloud.tencent.com/document/product/239/79933
+#     https://www.tencentcloud.com/document/product/1098/53398
+#     https://www.tencentcloud.com/document/product/1098/40618
+#     https://www.tencentcloud.com/document/product/1174/65003
+#     https://cloud.tencent.com/document/product/1556/68618
+#     https://www.tencentcloud.com/document/product/1292/78138
+#     https://www.tencentcloud.com/document/product/597/35368
+#     https://www.tencentcloud.com/document/product/845/40979
+#     (API shapes checked against the installed Tencent Cloud SDK's models)
+#   Alibaba Cloud
+#     https://www.alibabacloud.com/help/en/rds/apsaradb-rds-for-mysql/account-permissions
+#     https://www.alibabacloud.com/help/en/rds/how-do-i-terminate-sessions-on-an-apsaradb-rds-for-mysql-instance
+#     https://www.alibabacloud.com/help/en/rds/developer-reference/api-rds-2014-08-15-modifyparameter
+#     https://www.alibabacloud.com/help/en/rds/developer-reference/api-rds-2014-08-15-modifybackuppolicy
+#     https://www.alibabacloud.com/help/en/rds/apsaradb-rds-for-mysql/view-and-delete-the-binary-log-files-of-an-apsaradb-rds-for-mysql-instance
+#     https://www.alibabacloud.com/help/en/rds/apsaradb-rds-for-mysql/primary-apsaradb-rds-for-mysql-instance-types
+#     https://www.alibabacloud.com/help/en/rds/apsaradb-rds-for-postgresql/account-permissions-1
+#     https://www.alibabacloud.com/help/en/rds/apsaradb-rds-for-postgresql/logical-subscription
+#     https://www.alibabacloud.com/help/en/rds/apsaradb-rds-for-postgresql/quotas-and-limits
+#     https://www.alibabacloud.com/help/en/rds/apsaradb-rds-for-sql-server/account-permissions-in-an-apsaradb-rds-for-sql-server-instance
+#     https://www.alibabacloud.com/help/en/rds/apsaradb-rds-for-sql-server/operations-related-to-a-stored-procedure
+#     https://www.alibabacloud.com/help/en/polardb/polardb-for-mysql/user-guide/account-permissions
+#     https://www.alibabacloud.com/help/en/polardb/polardb-for-mysql/user-guide/enable-binary-logging
+#     https://www.alibabacloud.com/help/en/polardb/api-polardb-2017-08-01-modifydbclusterparameters
+#     https://www.alibabacloud.com/help/en/polardb/polardb-for-postgresql/account-permissions-1
+#     https://www.alibabacloud.com/help/en/polardb/polardb-for-postgresql/default-values-of-cluster-parameters-1
+#     https://www.alibabacloud.com/help/en/analyticdb/analyticdb-for-postgresql/user-guide/create-and-manage-users
+#     https://www.alibabacloud.com/help/en/redis/developer-reference/commands-supported-by-apsaradb-for-redis-community-edition
+#     https://www.alibabacloud.com/help/en/redis/developer-reference/api-r-kvstore-2015-01-01-modifyinstanceconfig-redis
+#     https://www.alibabacloud.com/help/en/mongodb/support/what-commands-are-supported-and-not-supported-by-apsaradb-for-mongodb
+#     https://www.alibabacloud.com/help/en/mongodb/support/what-permissions-are-the-root-account-granted-when-an-instance-is-created
+#     https://www.alibabacloud.com/help/en/mongodb/developer-reference/api-dds-2015-12-01-modifyparameters
+#     https://www.alibabacloud.com/help/en/apsaramq-for-kafka/cloud-message-queue-for-kafka/developer-reference/api-alikafka-2019-09-16-updateinstanceconfig
+#   Huawei Cloud
+#     https://support.huaweicloud.com/intl/en-us/productdesc-rds-mysql/rds_02_0002.html
+#     https://support.huaweicloud.com/intl/en-us/rds-mysql_faq/rds_faq_0075.html
+#     https://support.huaweicloud.com/intl/en-us/usermanual-rds-mysql/rds_05_0037.html
+#     https://support.huaweicloud.com/intl/en-us/usermanual-rds-pg/rds_pg_05_0009.html
+#     https://support.huaweicloud.com/intl/en-us/bestpractice-rds-pg/rds_pg_03_0002.html
+#     https://support.huaweicloud.com/intl/en-us/productdesc-rds-mssql/rds_03_0003.html
+#     https://support.huaweicloud.com/intl/en-us/usermanual-rds-mssql/rds_09_0004.html
+#     https://support.huaweicloud.com/intl/en-us/api-rds/rds_09_0303.html
+#     https://support.huaweicloud.com/intl/en-us/usermanual-taurusdb/taurusdb_03_0400.html
+#     https://support.huaweicloud.com/intl/en-us/usermanual-dds/dds_03_0033.html
+#     https://support.huaweicloud.com/intl/en-us/productdesc-dcs/dcs_01_0001.html
+#     https://support.huaweicloud.com/intl/en-us/usermanual-kafka/kafka-ug-0003.html
+#   Oracle Cloud
+#     https://docs.oracle.com/en/cloud/paas/autonomous-database/serverless/adbsb/autonomous-sql-commands.html
+#     https://docs.oracle.com/en/cloud/paas/autonomous-database/serverless/adbsb/private-endpoints-autonomous.html
+#     https://docs.oracle.com/en-us/iaas/base-database/doc/backup-and-recovery-overview.html
+#     https://docs.oracle.com/en-us/iaas/mysql-database/doc/default-mysql-privileges.html
+#     https://docs.oracle.com/en-us/iaas/mysql-database/doc/configuration-variables.html
+#     https://docs.oracle.com/en-us/iaas/Content/postgresql/config.htm
+#     https://docs.oracle.com/en-us/iaas/Content/postgresql/upgrades.htm
+#     https://docs.oracle.com/en-us/iaas/Content/ocicache/restrictedcommands.htm
+#     https://docs.oracle.com/en-us/iaas/Content/Streaming/Tasks/kafkacompatibility.htm
+#   IBM Cloud
+#     https://cloud.ibm.com/docs/databases-for-postgresql?topic=databases-for-postgresql-user-management
+#     https://cloud.ibm.com/docs/databases-for-postgresql?topic=databases-for-postgresql-wal2json
+#     https://cloud.ibm.com/docs/databases-for-postgresql?topic=databases-for-postgresql-changing-configuration
+#     https://github.com/ibm-cloud-docs/cloud-databases/blob/master/cloud-databases-cli.md
+#     https://github.com/ibm-cloud-docs/databases-for-mysql/blob/master/howto-user-management.md
+#     https://github.com/ibm-cloud-docs/databases-for-mysql/blob/master/howto-changing-config.md
+#     https://github.com/ibm-cloud-docs/databases-for-mongodb/blob/master/howto-user-management.md
+#     https://github.com/ibm-cloud-docs/databases-for-redis/blob/master/howto-user-management.md
+#     https://github.com/ibm-cloud-docs/databases-for-elasticsearch/blob/master/howto-user-management.md
+#     https://cloud.ibm.com/docs/EventStreams?topic=EventStreams-security
+#     https://cloud.ibm.com/docs/db2-saas?topic=db2-saas-bnr
+#   DBaaS vendors
+#     https://www.mongodb.com/docs/atlas/unsupported-commands/
+#     https://www.mongodb.com/docs/atlas/cluster-additional-settings/
+#     https://www.mongodb.com/docs/atlas/security-add-mongodb-users/
+#     https://redis.io/docs/latest/operate/rs/references/compatibility/commands/server/
+#     https://redis.io/docs/latest/operate/rs/references/compatibility/commands/connection/
+#     https://redis.io/docs/latest/operate/rc/databases/version-management/
+#     https://aiven.io/docs/products/postgresql/concepts/dba-tasks-pg
+#     https://aiven.io/docs/products/postgresql/howto/setup-logical-replication
+#     https://aiven.io/docs/products/mysql/reference/advanced-params
+#     https://aiven.io/docs/products/kafka/concepts/acl
+#     https://aiven.io/docs/products/opensearch/reference/restapi-limited-access
+#     https://aiven.io/docs/products/valkey/reference/restricted-commands
+#     https://aiven.io/docs/platform/reference/end-of-life
+#     https://neon.com/docs/manage/roles
+#     https://neon.com/docs/guides/logical-replication-neon
+#     https://supabase.com/docs/guides/database/postgres/roles-superuser
+#     https://supabase.com/docs/guides/database/postgres/setup-replication-external
+#     https://planetscale.com/docs/vitess/mysql-compatibility.md
+#     https://planetscale.com/docs/postgres/connecting/roles.md
+#     https://planetscale.com/docs/postgres/integrations/logical-cdc.md
+#     https://docs.crunchybridge.com/concepts/configuration-parameters
+#     https://docs.crunchybridge.com/how-to/logical-replication
+#     https://www.tigerdata.com/docs/migrate/troubleshooting
+#     https://docs.cockroachlabs.com/docs/stable/create-and-configure-changefeeds
+#     https://docs.yugabyte.com/stable/additional-features/change-data-capture/using-logical-replication/
+#     https://docs.singlestore.com/cloud/connect-to-singlestore/connect-with-mysql/connect-with-mysql-client/
+#     https://docs.confluent.io/cloud/current/clusters/cluster-types.html
+#     https://docs.confluent.io/cloud/current/security/access-control/acls/overview.html
+version: 1
+providers:
+  aws:     {label: AWS, api: aws, console: the AWS console, cli: aws}
+  gcp:     {label: Google Cloud, api: gcp, console: the Google Cloud console, cli: gcloud}
+  azure:   {label: Azure, api: azure, console: the Azure portal, cli: az}
+  tencent: {label: Tencent Cloud, api: tencent, console: the Tencent Cloud console, cli: tccli}
+  alibaba: {label: Alibaba Cloud, api: alibaba, console: the Alibaba Cloud console, cli: aliyun}
+  huawei:  {label: Huawei Cloud, api: huawei, console: the Huawei Cloud console, cli: hcloud}
+  oracle:  {label: Oracle Cloud, api: oracle, console: the OCI console, cli: oci}
+  ibm:     {label: IBM Cloud, api: ibm, console: the IBM Cloud console, cli: ibmcloud}
+  # DBaaS vendors: api none - migkit drives no API of theirs, their console
+  # is said
+  atlas:           {label: MongoDB Atlas, api: none, console: the Atlas UI, cli: atlas}
+  redis-cloud:     {label: Redis Cloud, api: none, console: the Redis Cloud console, cli: null}
+  aiven:           {label: Aiven, api: none, console: the Aiven Console, cli: avn}
+  neon:            {label: Neon, api: none, console: the Neon Console, cli: neon}
+  supabase:        {label: Supabase, api: none, console: the Supabase dashboard, cli: supabase}
+  planetscale:     {label: PlanetScale, api: none, console: the PlanetScale dashboard, cli: pscale}
+  crunchy-bridge:  {label: Crunchy Bridge, api: none, console: the Crunchy Bridge dashboard, cli: cb}
+  timescale:       {label: Tiger Cloud (Timescale), api: none, console: the Tiger Cloud console, cli: null}
+  cockroach-cloud: {label: CockroachDB Cloud, api: none, console: the CockroachDB Cloud Console, cli: ccloud}
+  yugabyte-cloud:  {label: YugabyteDB Aeon, api: none, console: the YugabyteDB Aeon UI, cli: ybm}
+  singlestore:     {label: SingleStore Helios, api: none, console: the SingleStore Portal, cli: null}
+  confluent:       {label: Confluent Cloud, api: none, console: the Confluent Cloud Console, cli: confluent}
+services:
+
+  # ---- AWS -------------------------------------------------------------------
+
+  aws-rds-postgres:
+    provider: aws
+    where: rds
+    label: Amazon RDS for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: []
+    signs: {pg_roles: [rds_superuser, rds_replication, rds_password, rdsadmin]}
+    api: {product: rds, restore_point: snapshot, clone: true}
+    admin:
+      superuser: false
+      role: rds_superuser
+      alter_system: false
+      createrole: true
+      signal_backend: true
+      owns_databases: true
+      subscribe: true
+      replication: "grant rds_replication to {who};"
+    change:
+      how: parameter group
+      words: "in {label}'s DB parameter group: {name} = {value}{after}"
+      cli: 'aws rds modify-db-parameter-group --db-parameter-group-name <its parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {wal_level: {logical: [rds.logical_replication, "1"]}}
+    cdc:
+      - "rds.logical_replication = 1 in the DB parameter group turns logical decoding on; the parameter is static, so the instance reboots to take it"
+      - "the account that reads the log needs the rds_replication role, which an rds_superuser grants"
+      - "a replication slot nobody reads keeps its WAL and fills the instance's storage"
+    limits:
+      max_connections: "LEAST({DBInstanceClassMemory/9531392}, 5000) by default, set in the DB parameter group"
+      storage: "64 TiB"
+    defaults: {time_zone: UTC}
+    notes:
+      - "the admin is created NOSUPERUSER CREATEDB CREATEROLE NOREPLICATION and is a member of rds_superuser; it may end any session with pg_terminate_backend or pg_cancel_backend"
+
+  aws-rds-mysql:
+    provider: aws
+    where: rds
+    label: Amazon RDS for MySQL
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {my_basedir: ["/rdsdbbin/"]}
+    api: {product: rds, restore_point: snapshot, clone: true}
+    admin:
+      superuser: false
+      role: rds_superuser_role
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: "call mysql.rds_kill({id})"
+      grant_option: true
+      read_only_by_api: true
+      binlog_retention: "call mysql.rds_set_configuration('binlog retention hours', 24);"
+    change:
+      how: parameter group
+      words: "in {label}'s DB parameter group: {name} = {value}{after}"
+      cli: 'aws rds modify-db-parameter-group --db-parameter-group-name <its parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {}
+    cdc:
+      - "the binary log is on while automated backups are on (a backup retention period above 0)"
+      - "binlog_format ROW in the DB parameter group"
+      - "the binary log is kept only as long as mysql.rds_set_configuration('binlog retention hours', N) says - by default it is purged as soon as possible - and 168 hours (7 days) is the most"
+      - "the reading account needs REPLICATION SLAVE and REPLICATION CLIENT, which the admin may grant"
+    limits:
+      max_connections: "{DBInstanceClassMemory/12582880} by default (about one per 12 MiB of the class's memory), set in the DB parameter group"
+      storage: "64 TiB"
+    defaults: {time_zone: UTC}
+    notes:
+      - "from 8.0.36 the admin holds rds_superuser_role (with grant option) and the tables of the mysql schema can no longer be written directly"
+      - "the admin has no SUPER, SYSTEM_VARIABLES_ADMIN or CONNECTION_ADMIN: another account's session is ended with mysql.rds_kill"
+
+  aws-rds-mariadb:
+    provider: aws
+    where: rds-mariadb
+    label: Amazon RDS for MariaDB
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: rds, restore_point: snapshot, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: "call mysql.rds_kill({id})"
+      grant_option: true
+      read_only_by_api: true
+      binlog_retention: "call mysql.rds_set_configuration('binlog retention hours', 24);"
+    change:
+      how: parameter group
+      words: "in {label}'s DB parameter group: {name} = {value}{after}"
+      cli: 'aws rds modify-db-parameter-group --db-parameter-group-name <its parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {}
+    cdc:
+      - "the binary log is on while automated backups are on (a backup retention period above 0)"
+      - "binlog_format ROW in the DB parameter group"
+      - "the binary log is kept only as long as mysql.rds_set_configuration('binlog retention hours', N) says; by default it is purged as soon as possible"
+      - "the reading account needs REPLICATION SLAVE and REPLICATION CLIENT, which the admin may grant"
+    limits:
+      max_connections: "LEAST({DBInstanceClassMemory/25165760}, 12000) by default from MariaDB 10.5 ({DBInstanceClassMemory/12582880} on 10.4)"
+      storage: "64 TiB"
+    defaults: {time_zone: UTC}
+    notes:
+      - "its address and its server read as Amazon RDS, like RDS for MySQL's: migkit takes it for that entry unless the side names this one (managed: {service: aws-rds-mariadb})"
+
+  aws-rds-sqlserver:
+    provider: aws
+    where: rds
+    label: Amazon RDS for SQL Server
+    family: mssql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: rds, restore_point: snapshot, clone: true}
+    admin:
+      role: "processadmin and setupadmin on the server, db_owner of the databases it creates"
+      alter: true
+      control: true
+      kill: true
+      availability_group: false
+    change:
+      how: parameter group
+      words: "in {label}'s DB parameter group: {name} = {value}{after}"
+      cli: 'aws rds modify-db-parameter-group --db-parameter-group-name <its parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {}
+    cdc:
+      - "change data capture is turned on per database with exec msdb.dbo.rds_cdc_enable_db '<database>', then sys.sp_cdc_enable_table for each table; SQL Server Agent runs its capture jobs"
+      - "change tracking is turned on with ALTER DATABASE ... SET CHANGE_TRACKING = ON and ALTER TABLE ... ENABLE CHANGE_TRACKING, which the admin may run as db_owner"
+    limits:
+      max_connections: "user connections 0 (unlimited, up to 32,767), a server property"
+      storage: "16 TiB; 64 TiB on io2 Block Express; up to 256 TiB with additional storage volumes"
+    defaults: {collation: SQL_Latin1_General_CP1_CI_AS, time_zone: UTC}
+    notes:
+      - "the admin holds ALTER ANY CONNECTION (it may KILL others' sessions), ALTER ANY LOGIN, CREATE ANY DATABASE and VIEW SERVER STATE, and is no sysadmin"
+      - "in a Multi-AZ deployment every database sits in database mirroring, an Always On availability group or block-level replication; there a database cannot be taken offline or renamed (documented), and whether SET READ_ONLY is refused there is not documented"
+
+  aws-rds-oracle:
+    provider: aws
+    where: rds
+    label: Amazon RDS for Oracle
+    family: oracle
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: rds, restore_point: snapshot, clone: true}
+    admin:
+      role: "DBA, less ALTER DATABASE, ALTER SYSTEM, CREATE ANY DIRECTORY, CREATE EXTERNAL JOB, CREATE PLUGGABLE DATABASE, GRANT ANY PRIVILEGE, GRANT ANY ROLE and READ ANY FILE GROUP"
+      superuser: false
+    change:
+      how: parameter group
+      words: "in {label}'s DB parameter group: {name} = {value}{after}"
+      cli: 'aws rds modify-db-parameter-group --db-parameter-group-name <its parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {}
+    cdc:
+      - "supplemental logging is added with the rdsadmin.rdsadmin_util.alter_supplemental_logging procedure (ALTER DATABASE is not the admin's)"
+      - "archived redo logs are kept as long as rdsadmin.rdsadmin_util.set_configuration('archivelog retention hours', N) says"
+    limits:
+      max_connections: "processes LEAST({DBInstanceClassMemory/9868951}, 20000) by default"
+      storage: "64 TiB; up to 256 TiB with additional storage volumes"
+    defaults: {time_zone: UTC}
+    notes:
+      - "the admin also holds SELECT ANY TABLE, FLASHBACK ANY TABLE, RESTRICTED SESSION and GRANT ANY OBJECT PRIVILEGE"
+
+  aws-rds-db2:
+    provider: aws
+    where: rds
+    label: Amazon RDS for Db2
+    family: db2
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: rds, restore_point: snapshot, clone: true}
+    admin:
+      role: "the masterdba group and master_user_role: DBADM with DATAACCESS and ACCESSCTRL, SQLADM, WLMADM, LOAD"
+      superuser: false
+    change:
+      how: parameter group
+      words: "in {label}'s DB parameter group: {name} = {value}{after}"
+      cli: 'aws rds modify-db-parameter-group --db-parameter-group-name <its parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {}
+    cdc:
+      - "archive logs are kept only 5 minutes by default: call rdsadmin.set_archive_log_retention(?, '<database>', '<hours>') keeps them longer, up to 840 hours (35 days), connected to the rdsadmin database as the admin"
+      - "a table's changes are captured only where it was created or altered with DATA CAPTURE CHANGES"
+    limits:
+      max_connections: "64,000, not settable"
+      storage: "64 TiB"
+    defaults: {}
+    notes: []
+
+  aws-aurora-postgres:
+    provider: aws
+    where: aurora
+    label: Amazon Aurora PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: []
+    signs: {pg_functions: [aurora_version]}
+    api: {product: rds, restore_point: snapshot, clone: true}
+    admin:
+      superuser: false
+      role: rds_superuser
+      alter_system: false
+      createrole: true
+      signal_backend: true
+      owns_databases: true
+      subscribe: true
+      replication: "grant rds_replication to {who};"
+    change:
+      how: cluster parameter group
+      words: "in {label}'s DB cluster parameter group: {name} = {value}{after}"
+      cli: 'aws rds modify-db-cluster-parameter-group --db-cluster-parameter-group-name <its cluster parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {wal_level: {logical: [rds.logical_replication, "1"]}}
+    cdc:
+      - "rds.logical_replication = 1 in the DB cluster parameter group turns logical decoding on; the writer reboots to take it"
+      - "the account that reads the log needs the rds_replication role, which an rds_superuser grants"
+      - "a slot is read from the writer: readers share the cluster volume and hold no slots of their own"
+    limits:
+      max_connections: "LEAST({DBInstanceClassMemory/9531392}, 5000) by default, set in the DB parameter group"
+      storage: "256 TiB from Aurora PostgreSQL 17.5, 16.9 and 15.13; 128 TiB before"
+    defaults: {time_zone: UTC}
+    notes:
+      - "the admin is created NOSUPERUSER CREATEDB CREATEROLE NOREPLICATION and is a member of rds_superuser, as on RDS"
+      - "the largest table is 32 TiB"
+
+  aws-aurora-mysql:
+    provider: aws
+    where: aurora
+    label: Amazon Aurora MySQL
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {my_variables: [aurora_version]}
+    api: {product: rds, restore_point: snapshot, clone: true}
+    admin:
+      superuser: false
+      role: rds_superuser_role
+      super: false
+      system_variables_admin: false
+      connection_admin: true
+      kill: "kill {id}"
+      grant_option: true
+      read_only_by_api: true
+      binlog_retention: "call mysql.rds_set_configuration('binlog retention hours', 24);"
+    change:
+      how: cluster parameter group
+      words: "in {label}'s DB cluster parameter group: {name} = {value}{after}"
+      cli: 'aws rds modify-db-cluster-parameter-group --db-cluster-parameter-group-name <its cluster parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {}
+    cdc:
+      - "the binary log is off by default: binlog_format (ROW) in the DB cluster parameter group turns it on, and the writer reboots to take it"
+      - "binlog retention hours (mysql.rds_set_configuration) goes up to 2160 hours (90 days) on Aurora MySQL 3"
+      - "the reading account needs REPLICATION SLAVE and REPLICATION CLIENT, which the admin may grant"
+    limits:
+      max_connections: "by instance class: 1000 on a db.r*.large, 1000 more each time the memory doubles, up to 8000; at most 16,000 through the parameter"
+      storage: "256 TiB from Aurora MySQL 3.10; 128 TiB before"
+    defaults: {time_zone: UTC}
+    notes:
+      - "the admin of Aurora MySQL 3 holds CONNECTION_ADMIN: it may KILL any session, and read_only does not stop its own writes"
+      - "read_only is a DB cluster parameter; mysql.rds_set_read_only changes it until the next reboot"
+      - "the largest table is 64 TiB"
+
+  aws-aurora-dsql:
+    provider: aws
+    where: dsql
+    label: Amazon Aurora DSQL
+    family: dsql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: admin
+      superuser: false
+    change:
+      how: not changeable
+      words: "Aurora DSQL takes no server settings - its configuration is the service's own: {name} = {value} cannot be set"
+      cli: null
+      names: {}
+    cdc:
+      - "change data capture streams the committed results of inserts, updates and deletes of every table to a Kinesis data stream in the same account and Region (aws dsql create-stream); records arrive at least once and not strictly in commit order"
+      - "it is not PostgreSQL logical replication: there are no replication slots or publications"
+    limits:
+      max_connections: "a connection is closed after 1 hour"
+      storage: ""
+      transaction: "a transaction changes at most 3,000 rows and holds one DDL statement, never DDL and DML together"
+    defaults: {charset: UTF8, collation: C, time_zone: UTC}
+    notes:
+      - "one database, postgres, per cluster; isolation fixed at Repeatable Read, with optimistic concurrency (a conflict fails at commit)"
+      - "backed up and restored through AWS Backup only (a whole cluster, full backups); a restore always makes a new cluster"
+
+  aws-documentdb:
+    provider: aws
+    where: documentdb
+    label: Amazon DocumentDB
+    family: mongodb
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: docdb, restore_point: snapshot, clone: true}
+    admin:
+      superuser: true
+      role: root
+      version: "8.0"
+      commands_missing: [setUserWriteBlockMode, fsync, fsyncUnlock]
+      user_roles: true
+      change_streams: "modifyChangeStreams per database or collection, and change_stream_log_retention_duration in the cluster parameter group"
+    change:
+      how: cluster parameter group
+      words: "in {label}'s DB cluster parameter group: {name} = {value}{after}"
+      cli: 'aws docdb modify-db-cluster-parameter-group --db-cluster-parameter-group-name <its cluster parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {}
+    cdc:
+      - "change streams are off until db.adminCommand({modifyChangeStreams: 1, database: '<db>', collection: '', enable: true}) turns them on for a database (or one collection)"
+      - "the change stream log is kept for change_stream_log_retention_duration (a cluster parameter)"
+      - "elastic clusters have no change streams"
+    limits:
+      max_connections: "by instance class: 3,400 on an r*.large up to 60,000 (DocumentDB 4.0 and later)"
+      storage: "256 TiB for DocumentDB 8.0; 128 TiB before"
+      document: "16 MiB"
+    defaults: {}
+    notes:
+      - "the admin holds the root role, which cannot be revoked; a second user, serviceadmin, is the service's own"
+      - "killSessions and killAllSessions are there from DocumentDB 4.0; killOp and currentOp in every version"
+
+  aws-dynamodb:
+    provider: aws
+    where: dynamodb
+    label: Amazon DynamoDB
+    family: dynamodb
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: dynamodb, restore_point: backup, clone: true}
+    admin:
+      role: "IAM policies on the table"
+      superuser: false
+    change:
+      how: not changeable
+      words: "DynamoDB has no server settings: {name} = {value} is not one of its table's settings"
+      cli: null
+      names: {}
+    cdc:
+      - "DynamoDB Streams on the table (StreamSpecification: StreamEnabled, a view type), each record kept 24 hours"
+      - "or Kinesis Data Streams for DynamoDB, turned on per table into a Kinesis data stream"
+    limits:
+      item: "400 KB"
+    defaults: {}
+    notes:
+      - "an on-demand backup or a point-in-time restore (up to 35 days back) is restored into a new table"
+
+  aws-elasticache:
+    provider: aws
+    where: elasticache
+    label: Amazon ElastiCache (Valkey, Redis OSS)
+    family: redis
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: elasticache, restore_point: snapshot, clone: true}
+    admin:
+      role: "the default user (an AUTH token) or users from the ElastiCache API, in user groups"
+      version: "9.1"
+      acl: false
+      pause: true
+    change:
+      how: parameter group
+      words: "in {label}'s cache parameter group: {name} = {value}{after}"
+      cli: 'aws elasticache modify-cache-parameter-group --cache-parameter-group-name <its parameter group> --parameter-name-values "ParameterName={name},ParameterValue={value}"'
+      names: {}
+    cdc:
+      - "PSYNC, SYNC and REPLICAOF are refused: nothing outside ElastiCache replicates from it"
+    limits: {}
+    defaults: {}
+    notes:
+      - "CONFIG, BGSAVE, SAVE, BGREWRITEAOF, DEBUG, MIGRATE and SHUTDOWN are refused on every cache; a serverless cache refuses CLIENT PAUSE, CLIENT KILL and CLIENT LIST as well"
+      - "users are created with the ElastiCache API (CreateUser, user groups); on the server only ACL LIST, ACL WHOAMI, ACL USERS and ACL CAT answer"
+      - "a serverless cache has no parameter group: its configuration cannot be changed"
+      - "Redis OSS up to 7.1; Valkey up to 9.1"
+
+  aws-memorydb:
+    provider: aws
+    where: memorydb
+    label: Amazon MemoryDB
+    family: redis
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: memorydb, restore_point: snapshot, clone: true}
+    admin:
+      role: "users and access control lists from the MemoryDB API"
+      version: "7.3"
+      acl: false
+      pause: true
+    change:
+      how: parameter group
+      words: "in {label}'s parameter group: {name} = {value}{after}"
+      cli: 'aws memorydb update-parameter-group --parameter-group-name <its parameter group> --parameter-name-values "ParameterName={name},ParameterValue={value}"'
+      names: {}
+    cdc:
+      - "PSYNC, SYNC and REPLICAOF are refused: nothing outside MemoryDB replicates from it"
+    limits: {}
+    defaults: {}
+    notes:
+      - "ACL SETUSER, ACL DELUSER, ACL LOAD, ACL SAVE, CONFIG, BGSAVE, SAVE, DEBUG, MIGRATE, MODULE and SHUTDOWN are refused"
+
+  aws-keyspaces:
+    provider: aws
+    where: keyspaces
+    label: Amazon Keyspaces (for Apache Cassandra)
+    family: none
+    distinct: "a serverless service that answers the Cassandra Query Language over its own storage"
+    hosts: ['^cassandra\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$']
+    signs: {}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      role: "IAM policies, or service-specific credentials"
+      superuser: false
+    change:
+      how: not changeable
+      words: "Amazon Keyspaces has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc:
+      - "change data capture streams, turned on per table (a view type: NEW_AND_OLD_IMAGES by default, NEW_IMAGE, OLD_IMAGE or KEYS_ONLY), keep each record 24 hours and are read at the cassandra-streams endpoint of the table's Region"
+    limits: {}
+    defaults: {}
+    notes:
+      - "a point-in-time restore makes a new table"
+
+  aws-neptune:
+    provider: aws
+    where: neptune
+    label: Amazon Neptune
+    family: none
+    distinct: "a graph database of its own, queried with Gremlin, openCypher or SPARQL"
+    hosts: ['\.neptune\.amazonaws\.com(\.cn)?$']
+    signs: {}
+    api: {product: null, restore_point: snapshot, clone: true}
+    admin:
+      role: "IAM database authentication, where it is on"
+      superuser: false
+    change:
+      how: cluster parameter group
+      words: "in {label}'s DB cluster parameter group: {name} = {value}{after}"
+      cli: 'aws neptune modify-db-cluster-parameter-group --db-cluster-parameter-group-name <its cluster parameter group> --parameters "ParameterName={name},ParameterValue={value},ApplyMethod={apply}"'
+      names: {}
+    cdc:
+      - "Neptune Streams: neptune_streams = 1 in the DB cluster parameter group, every instance rebooted; records are kept neptune_streams_expiry_days (1 to 90, 7 by default) and read over HTTP at /propertygraph/stream or /sparql/stream"
+    limits: {}
+    defaults: {}
+    notes: []
+
+  aws-timestream:
+    provider: aws
+    where: timestream
+    label: Amazon Timestream
+    family: none
+    distinct: "a time-series database (Timestream for LiveAnalytics; Timestream for InfluxDB runs InfluxDB)"
+    hosts: ['\.timestream\.[a-z0-9-]+\.amazonaws\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "IAM policies"
+      superuser: false
+    change:
+      how: not changeable
+      words: "Timestream for LiveAnalytics has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes: []
+
+  aws-redshift:
+    provider: aws
+    where: redshift
+    label: Amazon Redshift
+    family: redshift
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: redshift, restore_point: snapshot, clone: true}
+    admin:
+      role: ""
+      superuser: true
+    change:
+      how: parameter group
+      words: "in {label}'s cluster parameter group: {name} = {value}{after}"
+      cli: "aws redshift modify-cluster-parameter-group --parameter-group-name <its parameter group> --parameters ParameterName={name},ParameterValue={value}"
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {time_zone: UTC}
+    notes:
+      - "the admin user created with the cluster is a superuser"
+      - "Redshift Serverless takes its settings on the workgroup, not in a parameter group"
+      - "a snapshot is restored into a new cluster"
+
+  aws-opensearch:
+    provider: aws
+    where: opensearch
+    label: Amazon OpenSearch Service
+    family: opensearch
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: opensearch, restore_point: snapshot, clone: false}
+    admin:
+      role: "all_access and security_manager (the master user of fine-grained access control)"
+      cluster_settings: false
+    change:
+      how: API
+      words: "the domain's advanced options: {name} = {value}{after}"
+      cli: "aws opensearch update-domain-config --domain-name <domain> --advanced-options {name}={value}"
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "PUT _cluster/settings takes only a listed few settings (action.auto_create_index, action.search.shard_count.limit, indices.breaker.*, cluster.search.request.slowlog.*, search.phase_took_enabled), in the flat form; cluster.blocks.read_only is not among them"
+      - "index.blocks.read_only: true is how an index is made read-only there: index.blocks.write is removed by the service within 2 minutes"
+      - "snapshots are taken and restored through the _snapshot API into a registered repository"
+
+  aws-msk:
+    provider: aws
+    where: msk
+    label: Amazon MSK
+    family: kafka
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: msk, restore_point: "", clone: false}
+    admin:
+      role: ""
+      authorizer: true
+    change:
+      how: configuration
+      words: "a new revision of {label}'s MSK configuration with {name}={value}, applied to the cluster{after}"
+      cli: "aws kafka update-configuration --arn <its configuration> --server-properties fileb://<a file of {name}={value} and the lines it keeps>, then aws kafka update-cluster-configuration --cluster-arn <cluster> --configuration-info Arn=<its configuration>,Revision=<the new revision> --current-version <the cluster's version>"
+      names: {}
+    cdc:
+      - "a topic is read from any offset its retention still keeps"
+    limits: {}
+    defaults: {}
+    notes:
+      - "Kafka ACLs are set through the Kafka admin API where clients sign in with mutual TLS or SASL/SCRAM; with IAM access control, IAM policies decide instead, and MSK Serverless takes IAM only"
+
+  aws-kinesis:
+    provider: aws
+    where: kinesis
+    label: Amazon Kinesis Data Streams
+    family: kinesis
+    distinct: null
+    hosts: ['(^|\.)kinesis\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "IAM policies on the stream"
+      superuser: false
+    change:
+      how: not changeable
+      words: "a Kinesis data stream has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc:
+      - "a stream keeps its records 24 hours by default, up to 365 days (IncreaseStreamRetentionPeriod), and is read from any point it still keeps"
+    limits:
+      record: "1 MiB by default; up to 10 MiB where the stream's maximum record size is raised"
+    defaults: {}
+    notes: []
+
+  # ---- Azure -----------------------------------------------------------------
+
+  azure-sql-database:
+    provider: azure
+    where: sql-database
+    label: Azure SQL Database
+    family: mssql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: sql, restore_point: point in time, clone: true}
+    admin:
+      role: "the server admin: dbo (db_owner) in every user database"
+      alter: true
+      control: true
+      kill: true
+      availability_group: false
+    change:
+      how: database setting
+      words: "server settings (sp_configure) are not open on Azure SQL Database: {name} = {value} is set per database, with ALTER DATABASE or ALTER DATABASE SCOPED CONFIGURATION{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change data capture: exec sys.sp_cdc_enable_db as db_owner, then sys.sp_cdc_enable_table; any vCore tier, S3 and above on DTU tiers; a scheduler of the service captures every 20 seconds, in place of SQL Server Agent"
+      - "change tracking: ALTER DATABASE ... SET CHANGE_TRACKING = ON, then per table"
+    limits:
+      databases: "5000 per logical server"
+    defaults: {collation: SQL_Latin1_General_CP1_CI_AS, time_zone: UTC}
+    notes:
+      - "ALTER DATABASE ... SET READ_ONLY: its reference says only that it is disabled on federated databases"
+      - "the server admin holds KILL DATABASE CONNECTION; no second login can be given full admin rights"
+      - "a point-in-time restore makes a new database on the same server; it never overwrites one"
+      - "time zone is always UTC"
+
+  azure-sql-mi:
+    provider: azure
+    where: sql-mi
+    label: Azure SQL Managed Instance
+    family: mssql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      role: sysadmin
+      alter: false
+      control: true
+      kill: true
+      availability_group: false
+    change:
+      how: configuration file
+      words: "sp_configure on the instance: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change data capture as on SQL Server: sys.sp_cdc_enable_db and sys.sp_cdc_enable_table, its jobs run by SQL Server Agent (always running on Managed Instance)"
+      - "change tracking: ALTER DATABASE ... SET CHANGE_TRACKING = ON, then per table"
+    limits:
+      max_connections: "30,000 sessions"
+      storage: "16 TB General Purpose, 32 TB next-gen General Purpose, 4 to 16 TB Business Critical by hardware"
+    defaults: {collation: SQL_Latin1_General_CP1_CI_AS, time_zone: UTC}
+    notes:
+      - "ALTER DATABASE cannot change READ_ONLY, SINGLE_USER, RESTRICTED_USER, OFFLINE or the recovery model there"
+      - "its address (<name>.<dns zone>.database.windows.net) reads as Azure SQL Database; SERVERPROPERTY('EngineEdition') = 8 names Managed Instance"
+      - "sp_configure works, bar a listed few options; the collation and the time zone are set only at creation"
+
+  azure-flexible-postgres:
+    provider: azure
+    where: flexible
+    label: Azure Database for PostgreSQL flexible server
+    family: postgres
+    distinct: null
+    hosts: []
+    signs: {pg_roles: [azure_pg_admin, azuresu]}
+    api: {product: flexible-postgres, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: azure_pg_admin
+      alter_system: false
+      createrole: true
+      signal_backend: false
+      owns_databases: true
+      subscribe: true
+      replication: "alter role {who} with replication;"
+    change:
+      how: server parameter
+      words: "server parameter {name} = {value}{after}"
+      cli: "az {kind} flexible-server parameter set --resource-group <group> --server-name <server> --name {name} --value {value}"
+      names: {}
+    cdc:
+      - "server parameter wal_level = logical, and max_worker_processes at least 16; the server restarts to take them"
+      - "the reading account needs ALTER ROLE ... WITH REPLICATION, which the admin gives"
+      - "up to PostgreSQL 16 a replication slot is lost when the server fails over to its standby, unless pg_failover_slots keeps it; from 17, sync_replication_slots and hot_standby_feedback do"
+      - "the service drops a replication slot nobody reads once storage reaches its threshold"
+    limits:
+      max_connections: "by SKU: 50 on B1ms, 859 on D2, 1,718 on D4, 3,437 on D8, 5,000 from 16 vCores; 15 of them reserved"
+      storage: "32 TiB on Premium SSD, 64 TiB on Premium SSD v2"
+    defaults: {}
+    notes:
+      - "the admin is created NOSUPERUSER CREATEDB CREATEROLE and is a member of azure_pg_admin; azuresu (azure_superuser in some pages) is the service's own superuser"
+      - "whether azure_pg_admin may end other roles' sessions is not in the product documentation; Microsoft Q&A answers show it holding pg_signal_backend and pg_create_subscription on PostgreSQL 16"
+      - "the server turns read-only at 95% of its storage or under 5 GiB free"
+      - "a restore always makes a new server; firewall rules and parameter values are not carried to it"
+      - "CREATE SUBSCRIPTION is documented by example on a flexible server"
+
+  azure-flexible-mysql:
+    provider: azure
+    where: flexible
+    label: Azure Database for MySQL flexible server
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {my_variables: [azure_server_name, logical_server_name]}
+    api: {product: flexible-mysql, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: "call mysql.az_kill({id})"
+      grant_option: true
+      read_only_by_api: false
+      binlog_retention: "server parameter binlog_expire_logs_seconds = 86400"
+    change:
+      how: server parameter
+      words: "server parameter {name} = {value}{after}"
+      cli: "az {kind} flexible-server parameter set --resource-group <group> --server-name <server> --name {name} --value {value}"
+      names: {}
+    cdc:
+      - "the binary log is always on, in ROW format"
+      - "server parameter binlog_expire_logs_seconds is 0 by default - a binary log is purged as soon as it is freed - and is ignored while accelerated logs are on"
+      - "the reading account needs REPLICATION SLAVE and REPLICATION CLIENT, which the admin holds and may grant"
+      - "replicating out is not supported while Microsoft Entra authentication is configured"
+    limits:
+      max_connections: "by SKU, a table on the server parameters page (683 by default on D2ads_v5)"
+      storage: "16 TiB; 32 TiB on Memory-Optimized"
+    defaults: {}
+    notes:
+      - "no SUPER: of the dynamic privileges only REPLICATION_APPLIER, ROLE_ADMIN, SESSION_VARIABLES_ADMIN, SHOW ROUTINE and XA_RECOVER_ADMIN are granted, so no SYSTEM_VARIABLES_ADMIN or CONNECTION_ADMIN; another session is ended with mysql.az_kill"
+      - "whether read_only is a server parameter here is not documented"
+      - "the mysql schema is read-only; tables of mysql.__* are the service's own, and a replica out must filter them"
+      - "sql_generate_invisible_primary_key is ON by default (an invisible my_row_id column); lower_case_table_names is 1"
+      - "after a restore, time_zone is back to SYSTEM"
+
+  azure-cosmos-nosql:
+    provider: azure
+    where: cosmos-nosql
+    label: Azure Cosmos DB for NoSQL
+    family: cosmosdb
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: cosmosdb, restore_point: point in time, clone: true}
+    admin:
+      role: "the account keys, or data-plane roles (Cosmos DB Built-in Data Contributor, Data Reader)"
+      superuser: false
+    change:
+      how: API
+      words: "the account's settings (Azure portal, az cosmosdb): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "the change feed in latest-version mode carries inserts and updates, not deletes"
+      - "all-versions-and-deletes mode needs continuous backup on the account, starts only from now or a checkpoint, and is refused on an account whose partitions were ever merged"
+    limits:
+      item: "2 MB"
+      partition: "20 GB per logical partition"
+    defaults: {}
+    notes:
+      - "continuous backup (7, 30 or 35 days) restores into a new account; periodic backup is restored by a support request"
+
+  azure-cosmos-mongodb:
+    provider: azure
+    where: cosmos
+    label: Azure Cosmos DB for MongoDB (RU)
+    family: mongodb
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: cosmosdb, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: "the account keys (role-based access where EnableMongoRoleBasedAccessControl is on)"
+      version: "7.0"
+      commands_missing: [setUserWriteBlockMode, fsync, fsyncUnlock, killSessions, killOp, grantRolesToUser, revokeRolesFromUser, usersInfo]
+      user_roles: false
+      change_streams: "inserts, updates and replaces only - no deletes; a stream must $match, $project and ask fullDocument"
+    change:
+      how: API
+      words: "the account's settings (Azure portal, az cosmosdb): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change streams carry inserts, updates and replaces - not deletes - and give no operationType or updateDescription"
+    limits:
+      document: "2 MB by default, 16 MB where that feature is turned on"
+    defaults: {}
+    notes:
+      - "session commands are not supported and write concern is ignored (every write is a quorum write)"
+      - "its 7.0 feature page lists killOp as unsupported and does not list setUserWriteBlockMode, fsync or the user-management commands"
+
+  azure-documentdb:
+    provider: azure
+    where: cosmos-vcore
+    label: Azure DocumentDB (formerly Azure Cosmos DB for MongoDB vCore)
+    family: mongodb
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: "userAdmin (the built-in admin); other users get readWriteAnyDatabase, clusterAdmin or readAnyDatabase"
+      version: "8.0"
+      commands_missing: [setUserWriteBlockMode, fsync, fsyncUnlock, grantRolesToUser, revokeRolesFromUser]
+      user_roles: false
+      change_streams: "on: inserts, updates and deletes; pre-images and streams across shards by a support request"
+    change:
+      how: API
+      words: "the cluster's settings in the Azure portal: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change streams carry inserts, updates and deletes; the active change log is 400 MB, and a stream resumes up to 35 days back from the point-in-time restore log"
+    limits:
+      document: "16 MB"
+      transaction: "30 seconds"
+    defaults: {}
+    notes:
+      - "it does not run MongoDB server code; documented as answering MongoDB 5.0 to 8.0"
+      - "its address (*.mongocluster.cosmos.azure.com) reads as Azure Cosmos DB; the side names this entry (managed: {service: azure-documentdb})"
+      - "updateUser changes a password only, so a user's roles are not granted or revoked afterwards; setUserWriteBlockMode and fsync are not documented either way"
+
+  azure-cosmos-cassandra:
+    provider: azure
+    where: cosmos
+    label: Azure Cosmos DB for Apache Cassandra
+    family: cassandra
+    distinct: null
+    hosts: ['\.cassandra\.cosmos(db)?\.azure\.com$']
+    signs: {}
+    api: {product: cosmosdb, restore_point: "", clone: false}
+    admin:
+      role: "the account's read-write or read-only keys"
+      superuser: false
+      authorizer: false
+      authorize: false
+    change:
+      how: API
+      words: "the account's settings (Azure portal, az cosmosdb): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "the change feed, read with a query on COSMOS_CHANGEFEED_START_TIME(), carries inserts and updates, not deletes"
+    limits:
+      row: "2 MB"
+    defaults: {}
+    notes:
+      - "CREATE/ALTER/DROP ROLE and USER, GRANT, REVOKE, LIST ROLES and LIST PERMISSIONS are not supported"
+      - "gc_grace_seconds must be 0; continuous backup is not offered for this API, periodic backup is restored by a support request"
+      - "Azure Managed Instance for Apache Cassandra is another service: Cassandra 4.0 or 5.0 nodes in the customer's network"
+
+  azure-cosmos-postgres:
+    provider: azure
+    where: cosmos
+    label: Azure Cosmos DB for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: ['\.postgres\.cosmos\.azure\.com$']
+    signs: {}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: citus
+      alter_system: false
+      createrole: false
+      signal_backend: false
+      owns_databases: false
+      subscribe: false
+      replication: ""
+    change:
+      how: server parameter
+      words: "the cluster's server parameters in the Azure portal (coordinator and worker nodes): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits:
+      max_connections: "per node: 300 up to 3 vCores, 500 up to 15, 1,000 from 16; the managed pooler takes up to 2,000"
+      storage: "32 TiB per node (2 TiB on a single node)"
+    defaults: {}
+    notes:
+      - "on a retirement path: Microsoft points new work to flexible server's elastic clusters"
+      - "one database per cluster (citus); CREATE DATABASE fails, and other roles are created in the portal, not by the citus role"
+      - "logical replication out of it is not documented"
+      - "a restore makes a new cluster"
+
+  azure-cache-redis:
+    provider: azure
+    where: cache
+    label: Azure Cache for Redis
+    family: redis
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: redis, restore_point: "", clone: false}
+    admin:
+      role: "the access keys, or Microsoft Entra data access policies (Data Owner, Data Contributor, Data Reader, or a custom ACL string)"
+      version: "6.0"
+      acl: false
+      pause: true
+    change:
+      how: console
+      words: "the cache's Advanced settings in the Azure portal: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "PSYNC, SYNC, REPLICAOF and REPLCONF are disabled: nothing outside the service replicates from it"
+    limits:
+      max_connections: "maxclients by size: 256 on C0 up to 40,000 on P4 and P5"
+    defaults: {maxmemory_policy: volatile-lru}
+    notes:
+      - "ACL, CONFIG, BGSAVE, SAVE, BGREWRITEAOF, DEBUG, MIGRATE and SHUTDOWN are disabled; CLIENT is not"
+      - "Microsoft has announced its retirement in favour of Azure Managed Redis"
+      - "the Premium tier exports its data to a storage blob"
+
+  azure-managed-redis:
+    provider: azure
+    where: managed-redis
+    label: Azure Managed Redis
+    family: redis
+    distinct: null
+    hosts: ['\.redis\.azure\.net$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "the access keys, or Microsoft Entra ID"
+      version: "7.4"
+      acl: false
+      pause: true
+    change:
+      how: console
+      words: "the cache's settings in the Azure portal: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "PSYNC, SYNC, REPLICAOF and REPLCONF are blocked: nothing outside the service replicates from it"
+    limits:
+      max_connections: "up to 200,000 by SKU"
+    defaults: {}
+    notes:
+      - "one database only (SELECT is blocked), reached on port 10000; BGSAVE, SAVE, BGREWRITEAOF, MODULE LOAD, MOVE and SHUTDOWN are blocked too"
+
+  azure-synapse:
+    provider: azure
+    where: synapse
+    label: Azure Synapse Analytics (dedicated SQL pool)
+    family: none
+    distinct: "a massively parallel data warehouse answering T-SQL, not SQL Server's engine"
+    hosts: ['\.sql\.azuresynapse\.net$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: "the workspace's SQL admin"
+      superuser: false
+    change:
+      how: not changeable
+      words: "a dedicated SQL pool takes no server settings: {name} = {value} cannot be set"
+      cli: null
+      names: {}
+    cdc: []
+    limits:
+      max_connections: "1,024 open sessions (512 at DW500c and below), 128 queries at once"
+      row: "8,060 bytes, 1,024 columns"
+    defaults: {collation: SQL_Latin1_General_CP1_CI_AS}
+    notes:
+      - "restore points are kept 7 days (42 of one's own besides); a restore makes a new data warehouse"
+      - "SERVERPROPERTY('EngineEdition') = 6 names a dedicated SQL pool"
+
+  azure-event-hubs:
+    provider: azure
+    where: event-hubs
+    label: Azure Event Hubs (Kafka endpoint)
+    family: kafka
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "shared access signatures, or Microsoft Entra roles"
+      authorizer: false
+    change:
+      how: console
+      words: "the event hub's settings in the Azure portal: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "an event hub keeps its events 1 day (Basic), up to 7 days (Standard), up to 90 days (Premium, Dedicated), and is read from any offset still kept"
+    limits:
+      message: "256 KB (Basic), 1 MB (Standard, Premium), 20 MB (Dedicated)"
+    defaults: {}
+    notes:
+      - "the Kafka endpoint is on Standard, Premium and Dedicated, at <namespace>.servicebus.windows.net:9093 over SASL_SSL"
+      - "access is SAS or Entra roles, not Kafka ACLs; topics are not managed through the Kafka AdminClient; gzip is the only compression"
+
+  # ---- Google Cloud ----------------------------------------------------------
+
+  gcp-cloudsql-postgres:
+    provider: gcp
+    where: cloud-sql
+    label: Cloud SQL for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: ['\.sql-ps[ac]\.goog\.?$']
+    signs: {pg_roles: [cloudsqlsuperuser, cloudsqladmin, cloudsqlagent, cloudsqlreplica, cloudsqlimportexport, cloudsqliamuser, cloudsqliamserviceaccount]}
+    api: {product: cloudsql, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: cloudsqlsuperuser
+      alter_system: false
+      createrole: true
+      signal_backend: false
+      owns_databases: true
+      subscribe: true
+      replication: "alter user {who} with replication;"
+    change:
+      how: database flag
+      words: "database flag {name}={value}{after}"
+      cli: "gcloud sql instances patch <instance> --database-flags={name}={value}  (the list replaces every flag the instance has: name the ones it keeps as well)"
+      names: {wal_level: {logical: [cloudsql.logical_decoding, "on"]}}
+    cdc:
+      - "database flag cloudsql.logical_decoding = on (off by default; the instance restarts to take it)"
+      - "the reading account needs the REPLICATION attribute: ALTER USER ... WITH REPLICATION, which a cloudsqlsuperuser gives"
+      - "max_wal_senders and max_replication_slots are 10 by default; a restore does not bring replication state back"
+      - "an instance with high availability cannot be a subscriber"
+    limits:
+      max_connections: "by memory: 25 at 0.5 GB, 50 at 1.7 GB, 100 from 3.75 GB, 200 from 6 GB, 400 from 15 GB, 600 from 30 GB, 800 from 60 GB, 1,000 from 120 GB"
+      storage: "64 TB (3 TB on shared-core machines)"
+    defaults: {charset: UTF8, collation: en_US.UTF8}
+    notes:
+      - "the admin (postgres) is a member of cloudsqlsuperuser with CREATEROLE and CREATEDB, and has neither SUPERUSER nor REPLICATION; ALTER ROLE cannot lift NOSUPERUSER or NOREPLICATION"
+      - "cloudsqlsuperuser may create extensions, event triggers, replication users, publications and subscriptions"
+      - "whether the admin may end other roles' sessions (pg_signal_backend) is not documented"
+      - "a point-in-time recovery always makes a new instance (gcloud sql instances clone ... --point-in-time)"
+
+  gcp-cloudsql-mysql:
+    provider: gcp
+    where: cloud-sql
+    label: Cloud SQL for MySQL
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {my_variables: [cloudsql_iam_authentication]}
+    api: {product: cloudsql, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: cloudsqlsuperuser
+      super: false
+      system_variables_admin: false
+      connection_admin: true
+      kill: "kill {id}"
+      grant_option: true
+      read_only_by_api: false
+      binlog_retention: "console: point-in-time recovery on, which keeps the binary log its transaction log retention days (1 to 7 on Enterprise, 1 to 35 on Enterprise Plus)"
+    change:
+      how: database flag
+      words: "database flag {name}={value}{after}"
+      cli: "gcloud sql instances patch <instance> --database-flags={name}={value}  (the list replaces every flag the instance has: name the ones it keeps as well)"
+      names: {}
+    cdc:
+      - "the binary log is on with point-in-time recovery (gcloud sql instances patch --enable-bin-log restarts an existing instance)"
+      - "binlog_format is set to ROW by Cloud SQL, binlog_row_image is full by default, and GTIDs cannot be turned off"
+      - "the reading account needs REPLICATION SLAVE, REPLICATION CLIENT and SELECT"
+    limits:
+      max_connections: "no default is published: the server's max_connections says"
+      storage: "64 TB"
+      tables: "50,000 (500,000 with 32 cores and 200 GB or more)"
+    defaults: {charset: utf8mb4}
+    notes:
+      - "root@% holds every privilege but SUPER and FILE; cloudsqlsuperuser (8.0 and later) adds CONNECTION_ADMIN, ROLE_ADMIN, SET_USER_ID (8.4: SET_ANY_DEFINER, ALLOW_NONEXISTENT_DEFINER), XA_RECOVER_ADMIN and CLOUDSQL_SPECIAL_VARIABLES_ADMIN; SYSTEM_VARIABLES_ADMIN is not among them"
+      - "KILL ends another session (CONNECTION_ADMIN on 8.0); users carried over from 5.7 by an in-place upgrade lack CONNECTION_ADMIN; Cloud SQL's own users cannot be killed"
+      - "a database made in the console is utf8 / utf8_general_ci; one made through gcloud or the API on 8.0 and later is utf8mb4 / utf8mb4_0900_ai_ci"
+      - "default_time_zone is a flag set by hand (the instance restarts)"
+
+  gcp-cloudsql-sqlserver:
+    provider: gcp
+    where: cloud-sql
+    label: Cloud SQL for SQL Server
+    family: mssql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: cloudsql, restore_point: backup, clone: true}
+    admin:
+      role: CustomerDbRootRole
+      alter: false
+      control: true
+      kill: true
+      availability_group: false
+    change:
+      how: database flag
+      words: "database flag {name}={value}{after}"
+      cli: "gcloud sql instances patch <instance> --database-flags={name}={value}  (the list replaces every flag the instance has: name the ones it keeps as well)"
+      names: {}
+    cdc:
+      - "change data capture: EXEC msdb.dbo.gcloudsql_cdc_enable_db '<database>', then sys.sp_cdc_enable_table per table (SQL Server 2017, 2019, 2022 Standard and Enterprise)"
+    limits:
+      max_connections: "up to 32,767 user connections"
+      storage: "64 TB"
+    defaults: {time_zone: UTC}
+    notes:
+      - "the admin (sqlserver) holds ALTER ANY CONNECTION (KILL), ALTER ANY LOGIN, CREATE ANY DATABASE and VIEW SERVER STATE; sysadmin is not offered"
+      - "whether ALTER DATABASE ... SET READ_ONLY is allowed is not documented; a read replica cannot be made while a database is read-only, single-user or offline"
+      - "read replicas use read-scale availability groups; high availability is a regional persistent disk"
+      - "the collation is set at creation and cannot be changed afterwards"
+
+  gcp-alloydb:
+    provider: gcp
+    where: alloydb
+    label: AlloyDB for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: ['\.alloydb-psc\.goog\.?$']
+    signs: {pg_roles: [alloydbsuperuser]}
+    api: {product: alloydb, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: alloydbsuperuser
+      alter_system: false
+      createrole: true
+      signal_backend: false
+      owns_databases: true
+      subscribe: true
+      replication: "alter user {who} with replication;"
+    change:
+      how: database flag
+      words: "database flag {name}={value}{after}"
+      cli: "gcloud alloydb instances update <instance> --cluster=<cluster> --region=<region> --database-flags={name}={value}  (the list replaces every flag the instance has: name the ones it keeps as well)"
+      names: {wal_level: {logical: [alloydb.logical_decoding, "on"]}}
+    cdc:
+      - "database flag alloydb.logical_decoding = on (off by default; the instance restarts to take it)"
+      - "the reading account needs ALTER USER ... WITH REPLICATION"
+      - "max_replication_slots and max_wal_senders are 50 by default"
+    limits:
+      max_connections: "by vCPUs: 100 up to 2, 200 at 4, 400 at 8, 700 at 14, 800 at 16, 1,000 from 22; at most 240,000"
+      storage: "16 TiB per cluster by default, 128 TiB at most"
+    defaults: {}
+    notes:
+      - "the admin (postgres) is a member of alloydbsuperuser; AlloyDB gives no one the PostgreSQL superuser role"
+      - "alloydbsuperuser may create extensions, event triggers, replication users, publications and subscriptions"
+      - "whether the admin may end other roles' sessions (pg_signal_backend) is not documented"
+      - "a restore (backup or continuous backup, 14 days by default, 1 to 35) always makes a new cluster"
+      - "AlloyDB Omni is the same engine run by its owner: there postgres is a real superuser"
+
+  gcp-spanner:
+    provider: gcp
+    where: spanner
+    label: Spanner
+    family: none
+    distinct: "a globally distributed SQL database of its own (GoogleSQL or PostgreSQL dialect)"
+    hosts: ['(^|\.)spanner(\.[a-z0-9-]+\.rep)?\.googleapis\.com$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: "IAM"
+      superuser: false
+    change:
+      how: database option
+      words: "ALTER DATABASE ... SET OPTIONS ({name} = {value}){after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change streams: CREATE CHANGE STREAM ... FOR ALL or FOR a table, kept 1 to 30 days (7 by default), read through the ReadChangeStream API; at most 10 per database"
+    limits:
+      cell: "10 MiB"
+      commit: "80,000 mutations"
+    defaults: {time_zone: America/Los_Angeles}
+    notes:
+      - "point-in-time reads go back version_retention_period (1 hour by default, up to 7 days); a backup is restored into a new database"
+
+  gcp-bigtable:
+    provider: gcp
+    where: bigtable
+    label: Bigtable
+    family: none
+    distinct: "a wide-column key-value store of its own, with an HBase-compatible API"
+    hosts: ['(^|\.)bigtable(admin)?(\.[a-z0-9-]+\.rep)?\.googleapis\.com$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: "IAM"
+      superuser: false
+    change:
+      how: not changeable
+      words: "Bigtable has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc:
+      - "change streams, turned on per table and kept 1 to 7 days, read with a single-cluster-routing app profile; schema and topology changes are not in them"
+    limits:
+      row: "256 MB"
+      cell: "100 MB"
+    defaults: {}
+    notes:
+      - "a backup is restored into a new table"
+
+  gcp-firestore:
+    provider: gcp
+    where: firestore
+    label: Firestore
+    family: none
+    distinct: "a document database of its own (its MongoDB-compatible edition answers the MongoDB wire protocol)"
+    hosts: ['(^|\.)firestore\.googleapis\.com$', '\.firestore\.goog$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: "IAM (roles/datastore.user for data)"
+      superuser: false
+    change:
+      how: not changeable
+      words: "Firestore has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc:
+      - "Firestore (native) has no change stream to follow: its documented ways are triggers and real-time listeners"
+      - "the MongoDB-compatible edition has change streams in preview, made in the console only and kept 1 to 7 days"
+    limits:
+      document: "1 MiB"
+    defaults: {}
+    notes:
+      - "point-in-time recovery keeps 7 days where it is on (1 hour otherwise); a backup is restored into a new database"
+
+  gcp-memorystore-redis:
+    provider: gcp
+    where: memorystore
+    label: Memorystore for Redis
+    family: redis
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: memorystore, restore_point: snapshot, clone: false}
+    admin:
+      role: "the AUTH string, where AUTH is on"
+      version: "7.2"
+      acl: false
+      pause: false
+    change:
+      how: configuration
+      words: "the instance's Redis configuration: {name} = {value}{after}"
+      cli: "gcloud redis instances update <instance> --region=<region> --update-redis-config={name}={value}"
+      names: {}
+    cdc:
+      - "REPLICAOF is blocked: nothing outside the service replicates from it"
+    limits:
+      max_connections: "maxclients 65,000, fixed"
+      storage: "300 GB"
+    defaults: {maxmemory_policy: volatile-lru}
+    notes:
+      - "ACL, CLIENT, CONFIG, CLUSTER, COMMAND, OBJECT, BGSAVE, SAVE, BGREWRITEAOF, DEBUG, MIGRATE and SHUTDOWN answer NOPERM"
+      - "RDB snapshots are exported to and imported from Cloud Storage; there is no AOF"
+
+  gcp-memorystore-cluster:
+    provider: gcp
+    where: memorystore-cluster
+    label: Memorystore for Redis Cluster
+    family: redis
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "IAM tokens through AUTH"
+      version: "7.2"
+      acl: false
+      pause: false
+    change:
+      how: configuration
+      words: "the cluster's Redis configuration: {name} = {value}{after}"
+      cli: "gcloud redis clusters update <cluster> --region=<region> --update-redis-config={name}={value}"
+      names: {}
+    cdc:
+      - "PSYNC and SYNC are blocked: nothing outside the service replicates from it"
+    limits: {}
+    defaults: {}
+    notes:
+      - "every ACL subcommand, CLIENT PAUSE and UNPAUSE, and CONFIG GET/SET are blocked; it is reached through a Private Service Connect discovery endpoint"
+
+  gcp-memorystore-valkey:
+    provider: gcp
+    where: memorystore-valkey
+    label: Memorystore for Valkey
+    family: redis
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: backup, clone: false}
+    admin:
+      role: "IAM tokens through AUTH (roles/memorystore.dbConnectionUser), or basic token authentication"
+      version: "9.1"
+      acl: false
+      pause: false
+    change:
+      how: configuration
+      words: "the instance's engine configuration: {name} = {value}{after}"
+      cli: "gcloud memorystore instances update <instance> --location=<region> --update-engine-configs={name}={value}"
+      names: {}
+    cdc:
+      - "PSYNC and SYNC are blocked: nothing outside the service replicates from it"
+    limits: {}
+    defaults: {}
+    notes:
+      - "every ACL subcommand, CLIENT PAUSE and UNPAUSE, CONFIG GET/SET and SLOWLOG are blocked; engine configuration changes need no restart"
+      - "RDB and AOF persistence; backups on demand or on a schedule"
+
+  gcp-bigquery:
+    provider: gcp
+    where: bigquery
+    label: BigQuery
+    family: bigquery
+    distinct: null
+    hosts: ['(^|\.)bigquery\.googleapis\.com$']
+    signs: {}
+    api: {product: bigquery, restore_point: snapshot, clone: true}
+    admin:
+      role: "IAM"
+      superuser: false
+    change:
+      how: not changeable
+      words: "BigQuery has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc:
+      - "the APPENDS table function gives the rows added within the time-travel window; CHANGES gives updates, deletes and truncates as well, once a table has enable_change_history = TRUE"
+    limits:
+      row: "100 MB (query results, CSV and JSON loads); 10 MB per streamed row"
+    defaults: {}
+    notes:
+      - "time travel reaches back 2 to 7 days (7 by default); table snapshots keep a table as it was"
+
+  gcp-pubsub:
+    provider: gcp
+    where: pubsub
+    label: Pub/Sub
+    family: pubsub
+    distinct: null
+    hosts: ['(^|\.)pubsub\.googleapis\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "IAM"
+      superuser: false
+    change:
+      how: not changeable
+      words: "Pub/Sub has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc:
+      - "a subscription keeps unacknowledged messages 7 days by default (10 minutes to 31 days); a topic keeps messages up to 31 days where retention is on; seek replays to a time or a snapshot (kept 7 days at most)"
+    limits:
+      message: "10 MB"
+    defaults: {}
+    notes: []
+
+  # ---- Tencent Cloud ---------------------------------------------------------
+
+  tencent-tencentdb-postgres:
+    provider: tencent
+    where: tencentdb
+    label: TencentDB for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: []
+    signs: {pg_roles: [pg_tencentdb_superuser]}
+    api: {product: postgres, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: pg_tencentdb_superuser
+      alter_system: false
+      createrole: true
+      signal_backend: true
+      owns_databases: true
+      subscribe: true
+      replication: "alter role {who} with replication;"
+    change:
+      how: console
+      words: "TencentDB console, the instance's parameter settings: {name} = {value}{after}"
+      cli: "tccli postgres ModifyDBInstanceParameters --DBInstanceId <instance> --ParamList '[{\"Name\":\"{name}\",\"ExpectedValue\":\"{value}\"}]'"
+      names: {}
+    cdc:
+      - "wal_level = logical in the console's Parameter Settings (the instance restarts to take it)"
+      - "the admin holds REPLICATION and may give it to other accounts"
+      - "the tencentdb_failover_slot extension (pg_create_logical_failover_slot) keeps a logical slot across a failover"
+    limits:
+      max_connections: "fixed by specification: 2,048 up to 8 cores 16 GB, 4,000 at 8 cores 32 GB, 5,500 at 8 cores 64 GB, up to 40,000 at 156 cores 960 GB"
+      storage: "local SSD 3,000 to 16,000 GB by specification; cloud disk up to 32,000 GB (PostgreSQL 13 to 18)"
+    defaults: {charset: "UTF8 or LATIN1, chosen at creation"}
+    notes:
+      - "the admin is not a superuser: pg_tencentdb_superuser holds CREATEDB, CREATEROLE and BYPASSRLS, may create publications, subscriptions and slots, and only it may end pg_tencentdb_superuser sessions; pg_execute_server_program and the server-file roles are withheld"
+      - "the admin's name may not be postgres or begin with pg_ or tencentdb_"
+      - "the public address runs through a load balancer (2,000 concurrent connections, 200 new per second, 20 Mbps); read-only instances have none"
+      - "backups are physical only; a backup set or a time within the log retention is cloned into a new instance"
+      - "SHOW tencentdb_version gives the kernel's version"
+
+  tencent-tencentdb-mysql:
+    provider: tencent
+    where: tencentdb
+    label: TencentDB for MySQL
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {my_variables: [cdb_kill_user_extra, cdb_more_gtid_feature_supported, txsql_fast_path_mode]}
+    api: {product: cdb, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: "kill {id}"
+      grant_option: false
+      read_only_by_api: false
+      binlog_retention: "console: local binlog retention hours (ModifyLocalBinlogConfig SaveHours: 120 by default, 6 to 168)"
+    change:
+      how: console
+      words: "TencentDB console, the instance's parameter settings: {name} = {value}{after}"
+      cli: "tccli cdb ModifyInstanceParam --InstanceIds '[\"<instance>\"]' --ParamList '[{\"Name\":\"{name}\",\"CurrentValue\":\"{value}\"}]'"
+      names: {}
+    cdc:
+      - "the binary log cannot be turned off; the local binary log is kept SaveHours (120 by default, 6 to 168)"
+      - "Tencent's own migration guide asks binlog_format ROW, binlog_row_image FULL and gtid_mode ON of a source; GTID is turned on with OpenDBInstanceGTID"
+      - "the default binlog_format and GTID state are not documented"
+    limits:
+      storage: "20 to 30,000 GB (single node), up to 32,000 GB (cluster edition)"
+      tables: "above 300,000 tables backup, monitoring and upgrades may fail"
+    defaults: {charset: "UTF8 (UTF8MB4 from 8.0.29)"}
+    notes:
+      - "root has no SUPER, SHUTDOWN or FILE: SET GLOBAL fails with error 1227 and a global setting goes through the console's Parameter Settings"
+      - "the accounts listed in cdb_kill_user_extra (root@% by default) may KILL other accounts' sessions without SUPER"
+      - "whether root holds GRANT OPTION, SYSTEM_VARIABLES_ADMIN or CONNECTION_ADMIN, and whether read_only is a console parameter, are not documented"
+      - "VERSION() ends in -txsql"
+
+  tencent-tencentdb-mariadb:
+    provider: tencent
+    where: tencentdb-mariadb
+    label: TencentDB for MariaDB
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: mariadb, restore_point: backup, clone: false}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: "kill {id}"
+      grant_option: false
+      read_only_by_api: false
+      binlog_retention: "console: the instance's log retention period (ModifyLogFileRetentionPeriod)"
+    change:
+      how: console
+      words: "TencentDB console, the instance's parameter settings: {name} = {value}{after}"
+      cli: "tccli mariadb ModifyDBParameters --InstanceId <instance> --Params '[{\"Param\":\"{name}\",\"Value\":\"{value}\"}]'"
+      names: {}
+    cdc:
+      - "the binary log is always in ROW format; its GTIDs are not MySQL 5.6's, so a MySQL server cannot replicate from it"
+    limits: {}
+    defaults: {}
+    notes:
+      - "root access is off by default and accounts are made in the console; Tencent advises granting SUPER to no one"
+      - "its address and its server read as TencentDB, like TencentDB for MySQL's: the side names this entry (managed: {service: tencent-tencentdb-mariadb})"
+      - "an instance is rolled back to any point of the last 30 days"
+
+  tencent-tencentdb-sqlserver:
+    provider: tencent
+    where: tencentdb
+    label: TencentDB for SQL Server
+    family: mssql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: sqlserver, restore_point: backup, clone: false}
+    admin:
+      role: "the console's admin account (no sysadmin on two-node or cluster instances)"
+      alter: false
+      control: false
+      kill: false
+      availability_group: true
+    change:
+      how: console
+      words: "TencentDB console, the instance's parameter settings: {name} = {value}{after}"
+      cli: "tccli sqlserver ModifyInstanceParam --InstanceIds '[\"<instance>\"]' --ParamList '[{\"Name\":\"{name}\",\"CurrentValue\":\"{value}\"}]'"
+      names: {}
+    cdc:
+      - "change data capture is turned on per database in the console (Database Management, Other, Enable/Disable CDC) or with ModifyDatabaseCDC; running sp_cdc_enable_db oneself is not documented"
+    limits: {}
+    defaults: {collation: Chinese_PRC_CI_AS, time_zone: China Standard Time}
+    notes:
+      - "two-node Enterprise editions (2017 to 2025) run Always On; a single-node instance can be given a sysadmin account by a ticket, and then leaves the SLA"
+      - "accounts and permissions are managed in the console, not in the server's own tools"
+      - "whether the admin may ALTER DATABASE ... SET READ_ONLY or KILL is not documented"
+      - "the collation and the time zone are chosen at purchase; the console changes fill factor, max worker threads, cost threshold for parallelism, max degree of parallelism, optimize for ad hoc workloads, min server memory and blocked process threshold"
+
+  tencent-tencentdb-mongodb:
+    provider: tencent
+    where: tencentdb
+    label: TencentDB for MongoDB
+    family: mongodb
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: mongodb, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: "mongouser: readWriteAnyDatabase and dbAdmin"
+      version: "8.0"
+      commands_missing: [setUserWriteBlockMode, fsync, fsyncUnlock, grantRolesToUser, revokeRolesFromUser]
+      user_roles: false
+      change_streams: "not documented by Tencent; the oplog is 10% of the disk by default (up to 90%, never shrunk)"
+    change:
+      how: console
+      words: "TencentDB console, the instance's parameter settings: {name} = {value}{after}"
+      cli: "tccli mongodb ModifyInstanceParams --InstanceId <instance> --InstanceParams '[{\"Key\":\"{name}\",\"Value\":\"{value}\"}]'"
+      names: {}
+    cdc:
+      - "the oplog is 10% of the disk by default, grown up to 90% in the console, never shrunk"
+    limits: {}
+    defaults: {}
+    notes:
+      - "mongouser is not root and cannot run high-risk operations; its permissions cannot be changed, and other accounts and roles are made in the console"
+      - "the commands listed missing are not documented either way: mongouser's roles do not carry them in MongoDB"
+      - "only parameters that need no restart are changed through ModifyInstanceParams"
+      - "a point in time within 7 days (by default) is cloned into a new instance; public access (4.0 and later) runs through a load balancer"
+
+  tencent-tencentdb-redis:
+    provider: tencent
+    where: tencentdb
+    label: TencentDB for Redis
+    family: redis
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: redis, restore_point: backup, clone: true}
+    admin:
+      role: "accounts from the console's Account Management (read-only or read-write)"
+      version: "9.0"
+      acl: false
+      pause: false
+    change:
+      how: console
+      words: "TencentDB console, the instance's parameter settings: {name} = {value}{after}"
+      cli: "tccli redis ModifyInstanceParams --InstanceId <instance> --InstanceParams '[{\"Key\":\"{name}\",\"Value\":\"{value}\"}]'"
+      names: {}
+    cdc:
+      - "SLAVEOF and REPLICAOF are unsupported; PSYNC is opened by a ticket"
+    limits: {}
+    defaults: {}
+    notes:
+      - "Redis 2.8, 4.0, 5.0, 6.2 and 7.0, and Valkey 8.0 and 9.0"
+      - "BGREWRITEAOF, BGSAVE, CONFIG, DEBUG, SHUTDOWN, the cluster's write commands and the ACL management commands are unsupported; CLIENT LIST and CLIENT UNPAUSE are unsupported, and CLIENT PAUSE is not in its command table"
+      - "the disable-command-list parameter blocks further commands"
+
+  tencent-tdsqlc-mysql:
+    provider: tencent
+    where: tdsql-c
+    label: TDSQL-C for MySQL
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {my_variables: [cynos_version]}
+    api: {product: cynosdb, restore_point: backup, clone: false}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: ""
+      grant_option: false
+      read_only_by_api: false
+      binlog_retention: "console: the cluster's binlog retention days (ModifyBinlogSaveDays)"
+    change:
+      how: console
+      words: "TencentDB console, the cluster's parameter settings: {name} = {value}{after}"
+      cli: "tccli cynosdb ModifyClusterParam --ClusterId <cluster> --ParamList '[{\"ParamName\":\"{name}\",\"CurrentValue\":\"{value}\",\"OldValue\":\"<its current value>\"}]'"
+      names: {}
+    cdc:
+      - "the binary log is on by default and GTIDs cannot be turned off; binlog_format and binlog_row_image are set in the parameter settings (the cluster restarts to take binlog_row_image)"
+    limits:
+      max_connections: "MIN(DBInitMemory/4 + 500, 100000)"
+    defaults: {}
+    notes:
+      - "a serverless cluster pauses after 1 hour with no connections and no CPU by default, resumes in seconds on a connection, and takes no console changes while paused"
+      - "root's privileges on TDSQL-C are not documented"
+
+  tencent-tdsqlc-postgres:
+    provider: tencent
+    where: tdsql-c
+    label: TDSQL-C for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      superuser: false
+      role: ""
+      alter_system: false
+      createrole: false
+      signal_backend: false
+      owns_databases: false
+      subscribe: false
+      replication: ""
+    change:
+      how: console
+      words: "TencentDB console, the cluster's parameter settings: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "no longer sold (a backend upgrade); existing clusters run PostgreSQL 10.17 or 14.4, and their admin's rights are not documented"
+
+  tencent-tdsql:
+    provider: tencent
+    where: tdsql
+    label: TDSQL (distributed)
+    family: none
+    distinct: "a distributed database of its own that speaks MySQL's protocol (TDSQL for MySQL; TDSQL Boundless)"
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "accounts made in the console (root is off by default)"
+      superuser: false
+    change:
+      how: console
+      words: "the instance's parameters in the Tencent Cloud console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "TDSQL for MySQL: Tencent's migration guide asks binlog_format ROW, binlog_row_image FULL and gtid_mode ON of it"
+      - "TDSQL Boundless: the binary log is turned on by hand (no restart, 1 to 2 minutes), kept 7 days by default, read over the binlog dump protocol or into CKafka with REPLICATION SLAVE and REPLICATION CLIENT"
+    limits: {}
+    defaults: {}
+    notes: []
+
+  tencent-ckafka:
+    provider: tencent
+    where: ckafka
+    label: Tencent Cloud CKafka
+    family: kafka
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "SASL users named instanceId#username"
+      authorizer: false
+    change:
+      how: console
+      words: "the instance's configuration in the Tencent Cloud console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "a topic is read from any offset its retention still keeps"
+    limits: {}
+    defaults: {}
+    notes:
+      - "ACLs are set in the console (ACL Policy Management) or with CreateAcl, BatchCreateAcl and CreateAclRule; through the Kafka admin API is not documented"
+      - "PLAINTEXT works only inside a VPC"
+
+  tencent-es:
+    provider: tencent
+    where: tencent-es
+    label: Tencent Cloud Elasticsearch Service
+    family: opensearch
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: elastic
+      cluster_settings: true
+    change:
+      how: console
+      words: "the cluster's configuration in the Tencent Cloud console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "Tencent's own guides use PUT _cluster/settings (action.destructive_requires_name; clearing cluster.blocks.read_only_allow_delete below 7.5.1)"
+
+  # ---- Alibaba Cloud ---------------------------------------------------------
+
+  alibaba-rds-mysql:
+    provider: alibaba
+    where: apsaradb
+    label: ApsaraDB RDS for MySQL
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {my_variables: [rds_release_date]}
+    api: {product: rds, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: "kill {id}"
+      grant_option: false
+      read_only_by_api: false
+      binlog_retention: "console: Backup and Restoration, Local Log Retention Policy (LocalLogRetentionHours 0 to 168 through ModifyBackupPolicy)"
+    change:
+      how: console
+      words: "the instance's parameters in the console, or `aliyun rds ModifyParameter --DBInstanceId <id> --Parameters '{\"{name}\":\"{value}\"}'{restart_flag}`"
+      cli: null
+      names: {}
+    cdc:
+      - "the binary log is always on, in ROW format, and neither can be changed"
+      - "the local binary log is kept 3 hours by default (and no more than 30% of the storage, 60 files): the Local Log Retention Policy keeps it up to 168 hours"
+      - "the privileged account holds REPLICATION SLAVE and REPLICATION CLIENT"
+    limits:
+      max_connections: "by instance class: 2,000 on mysql.n2.small.2c up to 128,000 on mysql.x4.16xlarge.2c"
+      storage: "64,000 GB"
+    defaults: {charset: utf8, time_zone: SYSTEM}
+    notes:
+      - "the privileged account's rights are fixed and hold no SUPER, SYSTEM_VARIABLES_ADMIN, CONNECTION_ADMIN or GRANT OPTION; SET GLOBAL is not supported"
+      - "the privileged account may KILL every session; a standard account only its own"
+      - "read_only is not among its parameters"
+      - "rds_release_date gives the minor version; SELECT VERSION() gives only MySQL's"
+      - "a backup set or a point in time is restored into a new instance"
+
+  alibaba-rds-postgres:
+    provider: alibaba
+    where: apsaradb
+    label: ApsaraDB RDS for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: []
+    signs: {pg_roles: [pg_rds_superuser]}
+    api: {product: rds, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: pg_rds_superuser
+      alter_system: false
+      createrole: false
+      signal_backend: true
+      owns_databases: false
+      subscribe: true
+      replication: "alter user {who} with replication;"
+    change:
+      how: console
+      words: "the instance's parameters in the console, or `aliyun rds ModifyParameter --DBInstanceId <id> --Parameters '{\"{name}\":\"{value}\"}'{restart_flag}`"
+      cli: null
+      names: {}
+    cdc:
+      - "wal_level is replica by default: logical on the Parameters page, and the instance restarts to take it"
+      - "the privileged account gives the reading account ALTER USER ... WITH REPLICATION"
+      - "a logical replication slot fails over with the instance"
+    limits:
+      max_connections: "by instance class, up to 76,800"
+      storage: "64,000 GB on ESSD, 6,000 GB on local SSD"
+    defaults: {time_zone: Asia/Shanghai}
+    notes:
+      - "no superuser is given; the privileged account may CREATE PUBLICATION and SUBSCRIPTION, event triggers and extensions, end other accounts' sessions, and grant on standard accounts' objects"
+      - "the documentation names the privileged role pg_rds_superuser and, on the logical subscription page, rds_superuser"
+      - "tablespaces cannot be created; no account reads pg_authid"
+      - "whether the privileged account holds CREATEROLE or owns the databases made for it is not documented"
+
+  alibaba-rds-sqlserver:
+    provider: alibaba
+    where: apsaradb
+    label: ApsaraDB RDS for SQL Server
+    family: mssql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: rds, restore_point: backup, clone: true}
+    admin:
+      role: "the privileged account: db_owner of its databases, ALTER ANY CONNECTION, ALTER ANY LOGIN, VIEW SERVER STATE (no sysadmin)"
+      alter: false
+      control: true
+      kill: true
+      availability_group: false
+    change:
+      how: console
+      words: "the instance's parameters in the console, or `aliyun rds ModifyParameter --DBInstanceId <id> --Parameters '{\"{name}\":\"{value}\"}'{restart_flag}`"
+      cli: null
+      names: {}
+    cdc:
+      - "change data capture is turned on for a database with the wrapped procedure sp_rds_cdc_enable_db, then sys.sp_cdc_enable_table per table; sp_rds_change_tracking turns change tracking on"
+    limits: {}
+    defaults: {collation: Chinese_PRC_CI_AS, time_zone: China Standard Time}
+    notes:
+      - "a Sysadmin account type holds every permission but takes the instance out of the SLA"
+      - "the recovery model stays FULL; a database set OFFLINE comes back with sp_rds_set_db_online; whether SET READ_ONLY is allowed is not documented"
+      - "Cluster Edition runs Always On (up to 7 read-only replicas)"
+      - "the collation changes only while there is no user database (ModifyCollationTimeZone)"
+
+  alibaba-rds-mariadb:
+    provider: alibaba
+    where: apsaradb-mariadb
+    label: ApsaraDB RDS for MariaDB
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: rds, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: ""
+      grant_option: false
+      read_only_by_api: false
+      binlog_retention: ""
+    change:
+      how: console
+      words: "the instance's parameters in the console, or `aliyun rds ModifyParameter --DBInstanceId <id> --Parameters '{\"{name}\":\"{value}\"}'{restart_flag}`"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "the privileged account has full permissions on all databases; its exact privileges, the binary log's retention and the restore are not documented"
+      - "its address reads as Alibaba ApsaraDB, like RDS for MySQL's: the side names this entry (managed: {service: alibaba-rds-mariadb})"
+
+  alibaba-polardb-mysql:
+    provider: alibaba
+    where: polardb
+    label: PolarDB for MySQL
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {my_variables: [polardb_version]}
+    api: {product: polardb, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: "kill {id}"
+      grant_option: false
+      read_only_by_api: false
+      binlog_retention: "parameter binlog_expire_logs_seconds (259,200 by default; loose_expire_logs_hours on 5.6)"
+    change:
+      how: console
+      words: "the cluster's parameters in the console: {name} = {value}{after}"
+      cli: "aliyun polardb ModifyDBClusterParameters --DBClusterId <cluster> --Parameters '{\"{name}\":\"{value}\"}'"
+      names: {log_bin: {"ON": [loose_polar_log_bin, "ON"], "1": [loose_polar_log_bin, "ON"]}}
+    cdc:
+      - "the binary log is off by default: loose_polar_log_bin = ON turns it on, and the cluster restarts"
+      - "it is kept binlog_expire_logs_seconds (259,200, 3 days, by default) and read through the primary endpoint"
+    limits: {}
+    defaults: {time_zone: SYSTEM}
+    notes:
+      - "the privileged account holds no SUPER or GRANT OPTION, and may disconnect any account"
+      - "polardb_version names it on 5.7 and 8.0; 5.6 has only rds_release_date, as RDS for MySQL does"
+      - "a point-in-time restore makes a new cluster with its data and accounts, not its parameters"
+
+  alibaba-polardb-postgres:
+    provider: alibaba
+    where: polardb
+    label: PolarDB for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: []
+    signs: {pg_roles: [pg_polar_superuser, pg_polar_replication]}
+    api: {product: polardb, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: pg_polar_superuser
+      alter_system: false
+      createrole: false
+      signal_backend: true
+      owns_databases: true
+      subscribe: true
+      replication: "grant pg_polar_replication to {who};"
+    change:
+      how: console
+      words: "the cluster's parameters in the console: {name} = {value}{after}"
+      cli: "aliyun polardb ModifyDBClusterParameters --DBClusterId <cluster> --Parameters '{\"{name}\":\"{value}\"}'"
+      names: {}
+    cdc:
+      - "wal_level is replica by default; logical in the cluster's parameters, and the cluster restarts"
+      - "max_replication_slots is 64 by default"
+    limits: {}
+    defaults: {time_zone: UTC}
+    notes:
+      - "the privileged account holds pg_polar_superuser, pg_polar_replication, pg_signal_backend and pg_monitor; it may create databases, extensions, event triggers, publications and subscriptions, and no account may change system parameters, create tablespaces or end a superuser's process"
+      - "SHOW polardb_version names it; the Oracle-compatible edition follows the same model"
+
+  alibaba-polardb-x:
+    provider: alibaba
+    where: polardb-x
+    label: PolarDB-X
+    family: none
+    distinct: "a distributed database of its own that speaks MySQL's protocol and merges its nodes' binary logs into one MySQL-format global binary log"
+    hosts: ['\.polarx\.rds\.aliyuncs\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "the privileged account (MySQL 5.7-style grants, no global or column level)"
+      superuser: false
+    change:
+      how: console
+      words: "the instance's parameters in the console (compute or storage level): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "the global binary log is on by default and is read as a MySQL source's (CHANGE MASTER, SHOW MASTER STATUS, SHOW BINLOG EVENTS)"
+    limits: {}
+    defaults: {}
+    notes: []
+
+  alibaba-analyticdb-mysql:
+    provider: alibaba
+    where: analyticdb-mysql
+    label: AnalyticDB for MySQL
+    family: none
+    distinct: "an analytic data warehouse of its own that speaks MySQL's protocol"
+    hosts: ['\.ads\.aliyuncs\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "the privileged account, made in the console"
+      superuser: false
+    change:
+      how: console
+      words: "the cluster's settings in the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "a table's binary log is turned on per table (ALTER TABLE ... BINLOG=true) and kept binlog_ttl (6 hours by default)"
+    limits: {}
+    defaults: {}
+    notes: []
+
+  alibaba-analyticdb-postgres:
+    provider: alibaba
+    where: analyticdb-postgres
+    label: AnalyticDB for PostgreSQL
+    family: none
+    distinct: "a massively parallel data warehouse built on Greenplum"
+    hosts: ['\.gpdb\.rds\.aliyuncs\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "RDS_SUPERUSER (no SUPERUSER)"
+      superuser: false
+    change:
+      how: console
+      words: "the instance's parameters in the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "its privileged role is named RDS_SUPERUSER, as Amazon RDS's is: a server's role alone does not tell the two apart"
+      - "the privileged account may create databases and accounts, end other accounts' sessions and create extensions"
+
+  alibaba-tair:
+    provider: alibaba
+    where: tair
+    label: Tair (ApsaraDB for Redis)
+    family: redis
+    distinct: null
+    hosts: ['\.redis\.rds\.aliyuncs\.com$']
+    signs: {}
+    api: {product: kvstore, restore_point: backup, clone: true}
+    admin:
+      role: "accounts from the console or API (CreateAccount, GrantAccountPrivilege: RoleReadOnly or RoleReadWrite), signed in with AUTH user:password"
+      version: "7.0"
+      acl: false
+      pause: false
+    change:
+      how: console
+      words: "the instance's parameters in the console: {name} = {value}{after}"
+      cli: "aliyun r-kvstore ModifyInstanceConfig --InstanceId <instance> --Config '{\"{name}\":\"{value}\"}'"
+      names: {}
+    cdc:
+      - "PSYNC and SYNC are refused on every version, and REPLICAOF too: nothing outside the service replicates from it"
+    limits: {}
+    defaults: {}
+    notes:
+      - "CONFIG SET answers OK and changes nothing: a setting is changed only through the console or ModifyInstanceConfig"
+      - "CLIENT PAUSE, CLIENT UNPAUSE, ACL SETUSER and ACL LIST are refused; CLIENT KILL, CLIENT LIST and MONITOR are allowed"
+      - "a daily backup (kept 7 days) is restored into a new instance; data flashback to a point in time only on Tair Enterprise (DRAM)"
+
+  alibaba-mongodb:
+    provider: alibaba
+    where: apsaradb
+    label: ApsaraDB for MongoDB
+    family: mongodb
+    distinct: null
+    hosts: ['\.mongodb\.rds\.aliyuncs\.com$']
+    signs: {}
+    api: {product: dds, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: "alibabaCloudAdmin (4.4 and later; root on 4.2 and earlier)"
+      version: "8.3"
+      commands_missing: [setUserWriteBlockMode, fsync, fsyncUnlock]
+      user_roles: true
+      change_streams: "on for replica sets and sharded clusters (database and cluster level from 4.0), not on a standalone"
+    change:
+      how: console
+      words: "the instance's parameters in the console: {name} = {value}{after}"
+      cli: "aliyun dds ModifyParameters --DBInstanceId <instance> --Parameters '{\"{name}\":\"{value}\"}'"
+      names: {}
+    cdc:
+      - "change streams on replica sets and sharded clusters, not on a standalone instance"
+    limits: {}
+    defaults: {}
+    notes:
+      - "alibabaCloudAdmin is readWriteAnyDatabase, userAdminAnyDatabase, dbAdminAnyDatabase, clusterMonitor, backup, restore and enableSharding; the admin database is read-only to it, and clusterAdmin, clusterManager and hostManager cannot be granted"
+      - "fsync is listed as supported, yet in MongoDB it and setUserWriteBlockMode come with hostManager or clusterManager, which its admin cannot hold; setUserWriteBlockMode, fsyncUnlock, killSessions, killOp and currentOp are not on its command list"
+      - "a point in time or a backup is restored into a new instance; a sharded cluster only to a point in time; a standalone has no point-in-time restore"
+
+  alibaba-lindorm:
+    provider: alibaba
+    where: lindorm
+    label: Lindorm
+    family: none
+    distinct: "a multi-model database of its own (wide table, time series, search), answering SQL over MySQL's protocol, the HBase API and CQL"
+    hosts: ['\.lindorm\.rds\.aliyuncs\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: ""
+      superuser: false
+    change:
+      how: console
+      words: "the instance's settings in the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change tracking needs its tunnel service's nodes, pulled or pushed into an ApsaraMQ for Kafka topic"
+    limits: {}
+    defaults: {}
+    notes:
+      - "not a relational database: no transactions, no auto increment"
+
+  alibaba-oceanbase:
+    provider: alibaba
+    where: oceanbase
+    label: ApsaraDB for OceanBase
+    family: none
+    distinct: "a distributed database of its own whose tenants run in MySQL mode or Oracle mode"
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: ""
+      superuser: false
+    change:
+      how: console
+      words: "the tenant's parameters in the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "a binary log service for MySQL-mode tenants (V3.2.4 and later, off by default, turned on per tenant in the console), read as a MySQL source's; kept 18 hours by default, 50 GB at most"
+    limits: {}
+    defaults: {}
+    notes:
+      - "several of its binary log pages are marked deprecated"
+
+  alibaba-elasticsearch:
+    provider: alibaba
+    where: alibaba-es
+    label: Alibaba Cloud Elasticsearch
+    family: opensearch
+    distinct: null
+    hosts: ['\.elasticsearch\.aliyuncs\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: elastic
+      cluster_settings: true
+    change:
+      how: console
+      words: "the cluster's YML configuration in the console (static settings; the cluster restarts): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "PUT _cluster/settings takes dynamic settings; static ones go through the console's YML configuration, only for the parameters it lists"
+
+  alibaba-kafka:
+    provider: alibaba
+    where: apsaramq
+    label: ApsaraMQ for Kafka
+    family: kafka
+    distinct: null
+    hosts: ['\.alikafka\.aliyuncs\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "SASL users (CreateSaslUser) and ACLs (CreateAcl) from the console or API"
+      authorizer: false
+    change:
+      how: API
+      words: "the instance's configuration (UpdateInstanceConfig): {name} = {value}{after}"
+      cli: "aliyun alikafka UpdateInstanceConfig --RegionId <region> --InstanceId <instance> --Config '{\"{name}\":\"{value}\"}'"
+      names: {}
+    cdc:
+      - "a topic is read from any offset its retention keeps (log.retention.hours: 72 by default, 24 to 8,760)"
+    limits:
+      message: "up to 10 MB (message.max.bytes)"
+    defaults: {}
+    notes:
+      - "ACLs only on Professional and Serverless editions (2.2.0 and later), through the console or API; non-serverless instances grant only Read, Write and Idempotent Write"
+
+  # ---- Huawei Cloud ----------------------------------------------------------
+
+  huawei-rds-mysql:
+    provider: huawei
+    where: huawei-rds
+    label: Huawei Cloud RDS for MySQL
+    family: mysql
+    distinct: null
+    hosts: ['\.rds\.myhuaweicloud\.com$']
+    signs: {}
+    api: {product: rds, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: ""
+      grant_option: true
+      read_only_by_api: false
+      binlog_retention: "console: the instance's local binlog retention (0 to 168 hours)"
+    change:
+      how: parameter template
+      words: "in {label}'s parameters (or its parameter template) on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "the binary log is on by default, row-based; read replicas give none"
+      - "a local binary log is deleted once it is backed up unless the console's local retention (0 to 168 hours) keeps it; expire_logs_days and binlog_expire_logs_seconds do not show the real retention"
+    limits:
+      max_connections: "by memory: 10,000 at 32 GB, 18,000 at 64 GB, 30,000 at 128 GB, 60,000 at 256 GB, 100,000 at 512 GB"
+      storage: "20 to 10,000 GB"
+      tables: "500,000"
+    defaults: {}
+    notes:
+      - "root holds every listed privilege with Grant, but not Super (ending other threads), File, Shutdown or Create tablespace: SET GLOBAL is replaced by the console's parameters"
+      - "the time zone is chosen at purchase and can be changed later; lower_case_table_names cannot be changed on 8.0 and 8.4"
+      - "a point in time is restored into a new, the original or another instance (restoring onto an existing one overwrites its data and passwords)"
+
+  huawei-rds-postgres:
+    provider: huawei
+    where: huawei-rds
+    label: Huawei Cloud RDS for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: rds, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      alter_system: false
+      createrole: true
+      signal_backend: true
+      owns_databases: false
+      subscribe: true
+      replication: "alter user {who} with replication;"
+    change:
+      how: parameter template
+      words: "in {label}'s parameters (or its parameter template) on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "wal_level is replica by default: logical on the Parameters page, and the instance reboots"
+      - "root gives the reading account ALTER USER ... REPLICATION; the log is read from the primary only, and logical slots fail over"
+    limits: {}
+    defaults: {}
+    notes:
+      - "root is not a superuser; on the kernels with root privilege escalation (11.11, 12.6, 13.2, 14.4, 15.4, 16.2 and all of 17 onward) it may create publications, subscriptions and replication users"
+      - "root may end sessions with pg_terminate_backend"
+
+  huawei-rds-sqlserver:
+    provider: huawei
+    where: huawei-rds
+    label: Huawei Cloud RDS for SQL Server
+    family: mssql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: rds, restore_point: point in time, clone: true}
+    admin:
+      role: "rdsuser: processadmin and dbcreator (no sysadmin)"
+      alter: false
+      control: true
+      kill: true
+      availability_group: false
+    change:
+      how: parameter template
+      words: "in {label}'s parameters (or its parameter template) on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change data capture: EXEC msdb.dbo.rds_cdc_db '<database>', 1, then sys.sp_cdc_enable_table (Enterprise editions, Standard 2016 and later; the caller needs CREATE ANY DATABASE)"
+    limits:
+      storage: "40 to 10,000 GB"
+    defaults: {}
+    notes:
+      - "whether rdsuser may ALTER DATABASE ... SET READ_ONLY is not documented"
+
+  huawei-gaussdb:
+    provider: huawei
+    where: gaussdb
+    label: Huawei Cloud GaussDB
+    family: none
+    distinct: "a relational database of its own, in distributed and centralized editions"
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: root
+      superuser: false
+    change:
+      how: parameter template
+      words: "in {label}'s parameters on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "logical decoding needs wal_level = logical and SYSADMIN, REPLICATION or the gs_role_replication role; the centralized edition also enable_slot_log = on, 20 decoding slots at most and REPLICA IDENTITY FULL; the distributed edition decodes on each data node"
+    limits: {}
+    defaults: {}
+    notes: []
+
+  huawei-taurusdb:
+    provider: huawei
+    where: taurusdb
+    label: Huawei Cloud TaurusDB (formerly GaussDB(for MySQL))
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: ""
+      grant_option: true
+      read_only_by_api: false
+      binlog_retention: "parameter binlog_expire_logs_seconds (3,600 by default)"
+    change:
+      how: parameter template
+      words: "in {label}'s parameters (or its parameter template) on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "the binary log is off by default: rds_global_sql_log_bin = ON turns it on at once from kernel 2.0.45.230900 (log-bin = ON and a reboot before)"
+      - "binlog_expire_logs_seconds keeps it 3,600 seconds by default; copies in object storage are kept 7 days"
+    limits: {}
+    defaults: {}
+    notes:
+      - "documented as 100% compatible with MySQL 8.0; root holds every privilege but super, file, shutdown and create tablespace"
+
+  huawei-dds:
+    provider: huawei
+    where: dds
+    label: Huawei Cloud Document Database Service (DDS)
+    family: mongodb
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: dds, restore_point: "", clone: false}
+    admin:
+      superuser: false
+      role: "rwuser (limited rights on the admin and config databases)"
+      version: "5.0"
+      commands_missing: [setUserWriteBlockMode, fsyncUnlock, killSessions]
+      user_roles: true
+      change_streams: "on"
+    change:
+      how: parameter template
+      words: "in {label}'s parameters (or its parameter template) on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change streams are supported"
+    limits: {}
+    defaults: {}
+    notes:
+      - "its command table (3.4, 4.0, 4.2) supports fsync, killOp, grantRolesToUser, revokeRolesFromUser and usersInfo, and does not list fsyncUnlock, killSessions, currentOp or setUserWriteBlockMode"
+      - "rwuser's limited rights on admin and config make a whole-instance dump fail"
+
+  huawei-dcs:
+    provider: huawei
+    where: dcs
+    label: Huawei Cloud Distributed Cache Service (DCS) for Redis
+    family: redis
+    distinct: null
+    hosts: ['\.dcs\.huaweicloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "the instance's password, set on the console"
+      version: "7.0"
+      acl: false
+      pause: true
+    change:
+      how: console
+      words: "the instance's parameters on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "PSYNC, SYNC, REPLICAOF and SLAVEOF are disabled: nothing outside the service replicates from it"
+    limits: {}
+    defaults: {}
+    notes:
+      - "Redis 7.0 disables ACL SETUSER, DELUSER, LOAD and SAVE, CONFIG SET and REWRITE, BGSAVE, SAVE, BGREWRITEAOF, MIGRATE, MODULE, DEBUG and SHUTDOWN; CLIENT PAUSE, CLIENT KILL and MONITOR are supported"
+
+  huawei-geminidb:
+    provider: huawei
+    where: geminidb
+    label: Huawei Cloud GeminiDB
+    family: none
+    distinct: "a multi-model NoSQL database of its own answering the Redis, DynamoDB, Cassandra, HBase and InfluxDB APIs over its own storage"
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: ""
+      superuser: false
+    change:
+      how: console
+      words: "the instance's parameters on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "its Redis API is documented as compatible with Redis 6.2 and earlier, partly with 7.0; its MongoDB API has reached end of support"
+
+  huawei-kafka:
+    provider: huawei
+    where: dms-kafka
+    label: Huawei Cloud Distributed Message Service (DMS) for Kafka
+    family: kafka
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "SASL users (SCRAM-SHA-512, optionally PLAIN) and topic permissions from the console or API"
+      authorizer: false
+    change:
+      how: console
+      words: "the instance's parameters on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "a topic is read from any offset its retention still keeps"
+    limits: {}
+    defaults: {}
+    notes:
+      - "Kafka 1.1.0, 2.7 and 3.x; allow.everyone.if.no.acl.found decides a topic with no grants; single-node instances have no users"
+
+  huawei-css:
+    provider: huawei
+    where: css
+    label: Huawei Cloud Search Service (CSS)
+    family: opensearch
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "admin (security mode)"
+      cluster_settings: true
+    change:
+      how: console
+      words: "the cluster's parameters on the console (the cluster restarts): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "Huawei's own guides use PUT _cluster/settings; elasticsearch.yml settings change on the console, with a restart"
+
+  # ---- Oracle Cloud ----------------------------------------------------------
+
+  oracle-autonomous:
+    provider: oracle
+    where: autonomous
+    label: Oracle Autonomous Database
+    family: oracle
+    distinct: null
+    hosts: ['(^|\.)adb\.[a-z0-9-]+\.oraclecloud(apps)?\.com$']
+    signs: {}
+    api: {product: autonomous, restore_point: backup, clone: true}
+    admin:
+      role: "ADMIN: no SYSDBA and no GRANT ANY PRIVILEGE; ALTER SYSTEM only to set the parameters it lists, KILL SESSION and CANCEL SQL"
+      superuser: false
+    change:
+      how: database setting
+      words: "ALTER SYSTEM SET {name} = {value}, only for the parameters Autonomous Database lists{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change capture is documented only through Oracle's own replication product: ADMIN unlocks GGADMIN and runs ALTER PLUGGABLE DATABASE ADD SUPPLEMENTAL LOG DATA (not on Always Free)"
+    limits: {}
+    defaults: {charset: AL32UTF8, national_charset: AL16UTF16, time_zone: UTC}
+    notes:
+      - "ALTER DATABASE allows only DEFAULT EDITION, SET TIME_ZONE and SET CMU_WALLET; tablespaces, database links (through DBMS_CLOUD_ADMIN instead) and libraries are not the admin's"
+      - "backups kept up to 60 days; a point in time is restored in place or cloned into a new database"
+      - "SYSDATE returns UTC unless SYSDATE_AT_DBTIMEZONE is set; the character set cannot be changed after creation"
+
+  oracle-basedb:
+    provider: oracle
+    where: basedb
+    label: Oracle Base Database Service
+    family: oracle
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: backup, clone: false}
+    admin:
+      role: "SYS, with the host reached over SSH as opc"
+      superuser: true
+    change:
+      how: configuration file
+      words: "ALTER SYSTEM SET {name} = {value} as SYS{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "supplemental logging and archive logging are the DBA's own (as SYS), as on a database run by its owner"
+    limits: {}
+    defaults: {}
+    notes:
+      - "automatic backups kept 7, 15, 30 (default), 45 or 60 days; restored to the latest, a time or an SCN"
+
+  oracle-heatwave:
+    provider: oracle
+    where: heatwave
+    label: MySQL HeatWave
+    family: mysql
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: mysql, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: administrator
+      super: false
+      system_variables_admin: false
+      connection_admin: true
+      kill: "kill {id}"
+      grant_option: true
+      read_only_by_api: false
+      binlog_retention: "configuration variable binlog_expire_logs_seconds (3,600 by default)"
+    change:
+      how: configuration
+      words: "a configuration of the DB system with {name} = {value} (a configuration is not edited: copy it, change it, attach it){after}"
+      cli: null
+      names: {}
+    cdc:
+      - "binlog_expire_logs_seconds is 3,600 by default, too short for a reader that falls behind: a configuration with a longer value keeps it"
+      - "binlog_row_image is FULL by default"
+    limits:
+      max_connections: "by shape: 500 at 8 GB, 1,000 at 16 GB, 2,000 at 32 GB, 4,000 at 64 GB, 8,000 above"
+    defaults: {charset: utf8mb4, collation: utf8mb4_0900_ai_ci, time_zone: UTC}
+    notes:
+      - "the admin holds 25 static and 18 dynamic privileges with grant option (among them CONNECTION_ADMIN, ROLE_ADMIN, REPLICATION SLAVE and CLIENT) and the administrator role; not SUPER, SYSTEM_VARIABLES_ADMIN or BINLOG_ADMIN"
+      - "user variables and initialization variables are set in a configuration, system variables are not; sql_require_primary_key is ON on high-availability shapes"
+      - "a point-in-time restore always makes a new DB system; the address is a private IP in the customer's network"
+
+  oracle-postgres:
+    provider: oracle
+    where: oci-postgres
+    label: OCI Database with PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: ['\.postgresql\.[a-z0-9-]+\.oci\.oraclecloud\.com$']
+    signs: {pg_roles: [oci_admin_role]}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: oci_admin_role
+      alter_system: false
+      createrole: true
+      signal_backend: false
+      owns_databases: false
+      subscribe: false
+      replication: "alter role {who} with replication;"
+    change:
+      how: configuration
+      words: "a configuration of the DB system with {name} = {value} (a configuration is not edited: copy it, change it, apply it){after}"
+      cli: null
+      names: {}
+    cdc:
+      - "wal_level = logical and track_commit_timestamp = 1 in the DB system's configuration"
+      - "the admin may ALTER ROLE ... WITH REPLICATION; from version 16 it inherits the replication role"
+    limits:
+      max_connections: "set by the shape's configuration, as an expression such as min(DB_INSTANCE_MEMORY_IN_BYTES/76251136, 5000)"
+    defaults: {}
+    notes:
+      - "the admin is not a superuser; it may create users and roles"
+      - "whether it may CREATE SUBSCRIPTION or end other roles' sessions is not documented"
+      - "no public endpoint; automatic backups up to 35 days; a point-in-time recovery makes a new DB system"
+
+  oracle-cache:
+    provider: oracle
+    where: oci-cache
+    label: OCI Cache
+    family: redis
+    distinct: null
+    hosts: ['\.redis\.[a-z0-9-]+\.oci\.oraclecloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "OCI Cache users (ACL strings from the API, CLI or Terraform), attached to the cluster"
+      version: "8.1"
+      acl: false
+      pause: false
+    change:
+      how: configuration
+      words: "a configuration of the cluster with {name} = {value} (a configuration is not edited once made){after}"
+      cli: null
+      names: {}
+    cdc:
+      - "PSYNC, SYNC and REPLICAOF are disabled: nothing outside the service replicates from it"
+    limits: {}
+    defaults: {}
+    notes:
+      - "ACL, CONFIG SET, CLUSTER, BGSAVE, SAVE, BGREWRITEAOF, DEBUG, MIGRATE, MODULE and SHUTDOWN are disabled; whether CLIENT PAUSE is, is not documented; TLS only, on 6379"
+
+  oracle-streaming:
+    provider: oracle
+    where: oci-streaming
+    label: OCI Streaming (Kafka-compatible)
+    family: kafka
+    distinct: null
+    hosts: ['(^|\.)streaming\.[a-z0-9-]+\.oci\.oraclecloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "OCI IAM users with an auth token (tenancy/user/stream pool)"
+      authorizer: false
+    change:
+      how: not changeable
+      words: "a stream's settings are fixed when it is made: {name} = {value} cannot be set"
+      cli: null
+      names: {}
+    cdc:
+      - "a stream keeps messages 24 to 168 hours (fixed when made) and is read from any offset still kept"
+    limits:
+      message: "1 MB per message and per request"
+    defaults: {}
+    notes:
+      - "Kafka Streams, compaction, transactions, idempotent producers and adding partitions are not supported; Kafka ACLs are not mentioned"
+
+  # ---- IBM Cloud -------------------------------------------------------------
+
+  ibm-icd-postgres:
+    provider: ibm
+    where: icd
+    label: IBM Cloud Databases for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: ['\.databases\.appdomain\.cloud$']
+    signs: {pg_roles: [ibm-cloud-base-user]}
+    api: {product: icd, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      alter_system: false
+      createrole: false
+      signal_backend: true
+      owns_databases: false
+      subscribe: false
+      replication: "console: the repl user reads the log - its password is set through the API, and logical slots are made through the API"
+    change:
+      how: API
+      words: "the deployment's configuration: {name} = {value}{after}"
+      cli: "ibmcloud cdb deployment-configuration <deployment> '{\"configuration\": {\"{name}\": \"{value}\"}}'"
+      names: {}
+    cdc:
+      - "wal_level = logical through the deployment's configuration (replica by default; the deployment restarts)"
+      - "max_replication_slots and max_wal_senders above 20: 20 are kept for high availability"
+      - "logical slots are made through the API with the service's JSON output plugin; DDL, sequences and TRUNCATE are not carried, and an event may come twice after a switchover"
+    limits:
+      max_connections: "115 by default (15 reserved)"
+    defaults: {time_zone: UTC}
+    notes:
+      - "ibm is the only superuser; admin holds pg_monitor and pg_signal_backend"
+      - "CREATE SUBSCRIPTION needs a superuser: the service's create_subscription() and delete_subscription() functions stand in; CREATE PUBLICATION works"
+      - "the time zone is always UTC and cannot be configured; a restore always makes a new deployment (point in time within 7 days)"
+
+  ibm-icd-mysql:
+    provider: ibm
+    where: icd
+    label: IBM Cloud Databases for MySQL
+    family: mysql
+    distinct: null
+    hosts: ['\.databases\.appdomain\.cloud$']
+    signs: {}
+    api: {product: icd, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: "kill {id}"
+      grant_option: true
+      read_only_by_api: false
+      binlog_retention: "configuration mysql_max_binlog_age_sec (1,800 by default)"
+    change:
+      how: API
+      words: "the deployment's configuration: {name} = {value}{after}"
+      cli: "ibmcloud cdb deployment-configuration <deployment> '{\"configuration\": {\"{name}\": \"{value}\"}}'"
+      names: {}
+    cdc:
+      - "the binary log is kept mysql_max_binlog_age_sec (1,800 seconds by default), set in the deployment's configuration"
+    limits:
+      max_connections: "200 by default (configuration)"
+    defaults: {time_zone: "+00:00"}
+    notes:
+      - "ibm and ibm-replication are the only superusers; admin holds CREATE USER and GRANT OPTION"
+      - "KILL is documented, as is killing every connection through the API; whether admin may end other accounts' sessions is not said"
+      - "time_zone must be set again on a restore and on a read replica; a point in time within 7 days is restored into a new deployment"
+
+  ibm-icd-mongodb:
+    provider: ibm
+    where: icd
+    label: IBM Cloud Databases for MongoDB
+    family: mongodb
+    distinct: null
+    hosts: ['\.databases\.appdomain\.cloud$']
+    signs: {}
+    api: {product: icd, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: "admin: userAdminAnyDatabase, readWriteAnyDatabase, dbAdminAnyDatabase"
+      version: "8.0"
+      commands_missing: [setUserWriteBlockMode, fsync, fsyncUnlock]
+      user_roles: true
+      change_streams: "not documented; a user with read on local reads the oplog"
+    change:
+      how: API
+      words: "the deployment's configuration: {name} = {value}{after}"
+      cli: "ibmcloud cdb deployment-configuration <deployment> '{\"configuration\": {\"{name}\": \"{value}\"}}'"
+      names: {}
+    cdc:
+      - "a user granted read on the local database reads the oplog"
+    limits: {}
+    defaults: {}
+    notes:
+      - "ibm is the internal root; currentOp and killOp are documented for admin"
+      - "the commands listed missing are not documented either way: admin's roles do not carry them in MongoDB (the service's own upgrade uses setUserWriteBlockMode)"
+
+  ibm-icd-redis:
+    provider: ibm
+    where: icd
+    label: IBM Cloud Databases for Redis
+    family: redis
+    distinct: null
+    hosts: ['\.databases\.appdomain\.cloud$']
+    signs: {}
+    api: {product: icd, restore_point: backup, clone: true}
+    admin:
+      role: "users from the API, CLI or UI (roles admin, all, read, write)"
+      version: "8.2"
+      acl: false
+      pause: false
+    change:
+      how: API
+      words: "the deployment's configuration: {name} = {value}{after}"
+      cli: "ibmcloud cdb deployment-configuration <deployment> '{\"configuration\": {\"{name}\": \"{value}\"}}'"
+      names: {}
+    cdc: []
+    limits:
+      max_connections: "10,000"
+    defaults: {maxmemory_policy: noeviction}
+    notes:
+      - "only CONFIG GET and CONFIG RESETSTAT, and the read-only ACL subcommands, are exposed; CLIENT KILL is documented, CLIENT PAUSE and PSYNC are not"
+      - "maxmemory is 80% of memory; appendonly is yes"
+
+  ibm-icd-elasticsearch:
+    provider: ibm
+    where: icd
+    label: IBM Cloud Databases for Elasticsearch
+    family: opensearch
+    distinct: null
+    hosts: ['\.databases\.appdomain\.cloud$']
+    signs: {}
+    api: {product: icd, restore_point: backup, clone: true}
+    admin:
+      role: "ibm_superuser (every user, admin too)"
+      cluster_settings: true
+    change:
+      how: API
+      words: "the deployment's configuration: {name} = {value}{after}"
+      cli: "ibmcloud cdb deployment-configuration <deployment> '{\"configuration\": {\"{name}\": \"{value}\"}}'"
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "ibm_superuser is Elasticsearch's superuser but for hidden and internal indexes; a Databases for OpenSearch offering was not found in IBM's documentation"
+
+  ibm-event-streams:
+    provider: ibm
+    where: event-streams
+    label: IBM Event Streams
+    family: kafka
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "IAM (SASL PLAIN with an API key, or OAUTHBEARER)"
+      authorizer: false
+    change:
+      how: console
+      words: "the topic's settings in the IBM Cloud console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "a topic keeps messages 24 hours by default (1 hour to 30 days; any value on Enterprise) and is read from any offset still kept"
+    limits:
+      message: "1 MB"
+    defaults: {}
+    notes:
+      - "access is IAM, not Kafka ACLs"
+
+  ibm-db2-cloud:
+    provider: ibm
+    where: db2-cloud
+    label: IBM Db2 on Cloud (Db2 SaaS)
+    family: db2
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: "bluadmin (its authorities are not documented)"
+      superuser: false
+    change:
+      how: console
+      words: "the instance's settings in the IBM Cloud console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change capture is documented only as a tutorial with IBM's own replication product"
+    limits: {}
+    defaults: {}
+    notes:
+      - "its address (*.databases.appdomain.cloud) reads as IBM Cloud Databases: the side names this entry (managed: {service: ibm-db2-cloud})"
+      - "daily backups kept 14 days; restore and point-in-time restore in the console; Copy Database makes a new instance; the database is bludb"
+
+  ibm-db2-warehouse:
+    provider: ibm
+    where: db2-warehouse
+    label: IBM Db2 Warehouse on Cloud
+    family: db2
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: snapshot, clone: false}
+    admin:
+      role: "bluadmin (its authorities are not documented)"
+      superuser: false
+    change:
+      how: console
+      words: "the instance's settings in the IBM Cloud console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "daily snapshots, kept 7 days by default"
+      - "its address (*.databases.appdomain.cloud) reads as IBM Cloud Databases: the side names this entry (managed: {service: ibm-db2-warehouse})"
+
+  # ---- DBaaS vendors ---------------------------------------------------------
+
+  atlas-mongodb:
+    provider: atlas
+    where: atlas
+    label: MongoDB Atlas
+    family: mongodb
+    distinct: null
+    hosts: ['\.mongodb\.net$']
+    signs: {}
+    api: {product: null, restore_point: snapshot, clone: false}
+    admin:
+      superuser: false
+      role: atlasAdmin
+      version: "9.0"
+      commands_missing: [fsync, fsyncUnlock, grantRolesToUser, revokeRolesFromUser, usersInfo]
+      user_roles: false
+      change_streams: "on"
+    change:
+      how: console
+      words: "the cluster's Additional Settings in the Atlas UI: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change streams are on; M10 and M20 clusters allow 100 open change streams, M30 and up 1,000"
+      - "the oplog is sized in the cluster's Additional Settings (990 MB at least), and a minimum oplog window may be set there (24 hours by default)"
+    limits:
+      document: "16 MiB"
+      max_connections: "by tier: 1,500 per node on M10"
+    defaults: {}
+    notes:
+      - "database users are made in the Atlas UI, its CLI or Admin API only: Atlas rolls back any user changed on the server, and createUser, updateUser, grantRolesToUser and usersInfo are unsupported on dedicated clusters"
+      - "on dedicated clusters (M10 and up) killOp ends only the caller's own operations; setParameter, shutdown and the replSet* commands are unsupported"
+      - "setUserWriteBlockMode is not on Atlas's unsupported list; whether atlasAdmin holds its privilege is not documented"
+      - "continuous cloud backup restores to a point in time, into this or another cluster of the same MongoDB version"
+
+  redis-cloud-redis:
+    provider: redis-cloud
+    where: redis-cloud
+    label: Redis Cloud
+    family: redis
+    distinct: null
+    hosts: ['\.redns\.redis-cloud\.com$', '\.cloud\.redislabs\.com$', '\.cloud\.rlrcp\.com$', '\.db\.redis\.io$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: false}
+    admin:
+      role: "the default user, or users and roles from the console's role-based access control"
+      version: "8.6"
+      acl: false
+      pause: false
+    change:
+      how: console
+      words: "the database's configuration in the Redis Cloud console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "PSYNC, SYNC, REPLCONF, REPLICAOF and SLAVEOF are not supported: nothing outside Redis Cloud replicates from it"
+      - "Active-Passive replication brings a source (an outside one too) into a Pro database; turning it on flushes the target"
+    limits: {}
+    defaults: {}
+    notes:
+      - "ACL SETUSER, DELUSER, LOAD and SAVE, CLIENT PAUSE and UNPAUSE, BGSAVE, SAVE, BGREWRITEAOF, DEBUG, SHUTDOWN and SWAPDB are not supported; CLIENT KILL and CLIENT LIST are"
+      - "CONFIG SET takes only a few settings (notify-keyspace-events, slowlog-*, the listpack settings)"
+      - "backups are RDB files per shard (every 1 to 24 hours on Pro), restored by import"
+
+  aiven-postgres:
+    provider: aiven
+    where: aiven
+    label: Aiven for PostgreSQL
+    family: postgres
+    distinct: null
+    hosts: ['\.aivencloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      alter_system: false
+      createrole: true
+      signal_backend: false
+      owns_databases: true
+      subscribe: false
+      replication: "console: avnadmin holds REPLICATION; the log is read as avnadmin"
+    change:
+      how: console
+      words: "the service's advanced configuration in the Aiven Console: pg.{name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "logical replication is read as avnadmin, which holds REPLICATION; the preinstalled aiven_extras extension creates a publication for all tables and subscriptions"
+      - "pg.max_replication_slots and pg.max_wal_senders (20 by default; the service restarts to take a change) and pg.max_slot_wal_keep_size are advanced parameters"
+    limits:
+      max_connections: "pg.max_connections, 25 to 60,000 (the service restarts to take it)"
+    defaults: {}
+    notes:
+      - "Aiven gives no superuser; avnadmin may create databases, roles and extensions and grant what it holds"
+      - "CREATE SUBSCRIPTION goes through aiven_extras (pg_create_subscription), since pg_subscription is a superuser's"
+      - "whether avnadmin may end other roles' sessions, and wal_level's default, are not documented"
+      - "a restore forks a new service at a point in time; a service is never rolled back in place"
+
+  aiven-mysql:
+    provider: aiven
+    where: aiven
+    label: Aiven for MySQL
+    family: mysql
+    distinct: null
+    hosts: ['\.aivencloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: ""
+      grant_option: false
+      read_only_by_api: false
+      binlog_retention: "console: advanced parameter binlog_retention_period (seconds, 600 at least)"
+    change:
+      how: console
+      words: "the service's advanced configuration in the Aiven Console: mysql.{name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "the binary log is kept binlog_retention_period seconds (an advanced parameter, 600 at least), which a reader's lag must stay inside"
+    limits:
+      max_connections: "mysql.max_connections, 30 to 100,000"
+    defaults: {}
+    notes:
+      - "avnadmin's privileges (SUPER, CONNECTION_ADMIN, GRANT OPTION, ending others' sessions) are not documented; the console ends a query with its Terminate button"
+      - "a restore forks a new service at a point in time; DDL waits while a full backup runs"
+
+  aiven-kafka:
+    provider: aiven
+    where: aiven
+    label: Aiven for Apache Kafka
+    family: kafka
+    distinct: null
+    hosts: ['\.aivencloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "avnadmin, admin of every topic through an ordinary ACL entry"
+      authorizer: false
+    change:
+      how: console
+      words: "the service's advanced configuration in the Aiven Console: kafka.{name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "a topic is read from any offset its retention still keeps"
+    limits:
+      message: "kafka.message_max_bytes, 1,048,588 by default, 100,001,200 at most"
+    defaults: {}
+    notes:
+      - "ACLs (Aiven's and Kafka-native) are managed in the Aiven Console, its CLI, REST API or Terraform; setting them through the Kafka admin API is not documented"
+      - "topic data is not backed up (configuration only)"
+
+  aiven-opensearch:
+    provider: aiven
+    where: aiven
+    label: Aiven for OpenSearch
+    family: opensearch
+    distinct: null
+    hosts: ['\.aivencloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: avnadmin
+      cluster_settings: false
+    change:
+      how: console
+      words: "the service's advanced configuration in the Aiven Console: opensearch.{name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "_cluster/settings is GET only (PUT is blocked); _nodes is read-only and _snapshot is closed"
+      - "a restore forks a new service from a backup"
+
+  aiven-valkey:
+    provider: aiven
+    where: aiven
+    label: Aiven for Valkey
+    family: redis
+    distinct: null
+    hosts: ['\.aivencloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: "users and ACLs from the Aiven Console, its CLI or Terraform"
+      version: "9.1"
+      acl: false
+      pause: true
+    change:
+      how: console
+      words: "the service's advanced configuration in the Aiven Console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "restricted: ACL, CONFIG, CLUSTER, COMMAND, DEBUG, FAILOVER, MIGRATE, MONITOR, REPLICAOF, SLAVEOF, BGSAVE, SAVE, BGREWRITEAOF, LASTSAVE, SHUTDOWN; CLIENT, SYNC and PSYNC are not on the list"
+      - "Aiven for Caching (Redis) reached end of life on 2025-03-31 and was upgraded to Valkey"
+
+  aiven-clickhouse:
+    provider: aiven
+    where: aiven
+    label: Aiven for ClickHouse
+    family: clickhouse
+    distinct: null
+    hosts: ['\.aivencloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: "avnadmin, which holds every grant"
+      superuser: false
+    change:
+      how: console
+      words: "the service's advanced configuration in the Aiven Console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "only avnadmin creates databases in SQL, with the Replicated database engine; MergeTree tables become their replicated kind"
+      - "daily backups restored by a fork; no point-in-time recovery"
+
+  aiven-cassandra:
+    provider: aiven
+    where: aiven
+    label: Aiven for Apache Cassandra
+    family: cassandra
+    distinct: null
+    hosts: ['\.aivencloud\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: avnadmin
+      superuser: false
+    change:
+      how: not changeable
+      words: "Aiven for Apache Cassandra is no longer offered: {name} = {value} cannot be set"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "reached end of life on 2026-01-07: the service is no longer available and its data is inaccessible"
+
+  neon-postgres:
+    provider: neon
+    where: neon
+    label: Neon
+    family: postgres
+    distinct: null
+    hosts: ['\.neon\.tech$']
+    signs: {pg_roles: [neon_superuser]}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: neon_superuser
+      alter_system: false
+      createrole: true
+      signal_backend: true
+      owns_databases: true
+      subscribe: true
+      replication: "console: a role made in the Neon Console, CLI or API is a member of neon_superuser and holds REPLICATION; a role made in SQL cannot be given it"
+    change:
+      how: support request
+      words: "Neon's server settings are changed by Neon support (Scale plan); {name} = {value} may be set per database or role instead (ALTER DATABASE / ALTER ROLE ... SET){after}"
+      cli: null
+      names: {}
+    cdc:
+      - "logical replication is turned on in the Neon Console (Settings, Postgres, Logical replication), its CLI or API: wal_level turns logical, every compute restarts, and it cannot be turned off again"
+      - "max_wal_senders and max_replication_slots are 10; a slot left unread for about 40 hours is removed"
+    limits:
+      max_connections: "max(100, min(4000, floor(compute units x 419.66)))"
+    defaults: {charset: UTF8, collation: C.UTF-8, time_zone: GMT}
+    notes:
+      - "neon_superuser holds CREATEDB, CREATEROLE, BYPASSRLS, REPLICATION, pg_read_all_data, pg_write_all_data, pg_signal_backend, pg_monitor and pg_create_subscription (PostgreSQL 16 and later)"
+      - "the pooled address carries -pooler; replication and session-level work go to the direct one"
+      - "instant restore rewinds a root branch in place (keeping the old state as a branch); a branch at a past point is a new copy"
+
+  supabase-postgres:
+    provider: supabase
+    where: supabase
+    label: Supabase
+    family: postgres
+    distinct: null
+    hosts: ['\.supabase\.co$', '\.pooler\.supabase\.com$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      alter_system: false
+      createrole: true
+      signal_backend: false
+      owns_databases: false
+      subscribe: false
+      replication: "console: read the log as postgres, or as a role created WITH REPLICATION (postgres may give it from PostgreSQL 17)"
+    change:
+      how: API
+      words: "the project's Postgres configuration through Supabase's CLI or Management API: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "logical replication is read over a direct connection: through the pooler it does not work"
+      - "replication slots and WAL senders are bounded by compute size (5 up to Small, 8 on Large, 24 on XL)"
+      - "wal_level's default is not documented"
+    limits:
+      max_connections: "by compute size: 60 direct (Nano, Micro), 90 (Small), 160 (Large), 240 (XL)"
+      storage: "by compute size: 500 MB (Nano) up to 500 GB (XL) of disk"
+    defaults: {}
+    notes:
+      - "the admin (postgres) is not a superuser; supabase_admin is the service's own"
+      - "a restore goes into the same project, with downtime, and needs its subscriptions and replication slots dropped first; Duplicate Project makes a new copy"
+
+  planetscale-mysql:
+    provider: planetscale
+    where: planetscale
+    label: PlanetScale (MySQL, on Vitess)
+    family: mysql
+    distinct: null
+    hosts: ['\.psdb\.cloud$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      super: false
+      system_variables_admin: false
+      connection_admin: false
+      kill: ""
+      grant_option: false
+      read_only_by_api: false
+      binlog_retention: ""
+    change:
+      how: not changeable
+      words: "PlanetScale takes no global server settings (SET GLOBAL is unsupported): {name} = {value} is not one of them"
+      cli: null
+      names: {}
+    cdc:
+      - "PlanetScale does not replicate its binary log to outside databases: changes are read through Vitess VStream, over gRPC on port 443, with the connectors PlanetScale documents"
+    limits:
+      tables: "2,048 per database, 1,017 columns per table"
+      transaction: "20 seconds; 100,000 rows and 64 MiB per query result"
+      storage: "up to 4 TB of network storage"
+    defaults: {collation: utf8mb4_0900_ai_ci, time_zone: UTC}
+    notes:
+      - "KILL, stored procedures and functions, triggers, events and LOAD DATA INFILE are unsupported; InnoDB only, and every table needs a unique key that is not null"
+      - "foreign keys only in unsharded databases, and only where turned on in the database's settings"
+      - "the time zone is UTC and cannot be changed; a connection lives at most 24 hours"
+      - "a backup is restored into a new branch"
+
+  planetscale-postgres:
+    provider: planetscale
+    where: planetscale
+    label: PlanetScale for Postgres
+    family: postgres
+    distinct: null
+    hosts: ['\.psdb\.cloud$']
+    signs: {pg_roles: [pscale_superuser]}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      superuser: false
+      role: pscale_superuser
+      alter_system: false
+      createrole: true
+      signal_backend: true
+      owns_databases: true
+      subscribe: true
+      replication: "console: the default role holds REPLICATION; the log is read as it"
+    change:
+      how: console
+      words: "the cluster's parameters in the PlanetScale dashboard (Clusters, Parameters): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "wal_level = logical in the cluster's Parameters tab (the cluster restarts to take it)"
+      - "replication slots are made with failover = true; sync_replication_slots = on and hot_standby_feedback = on are recommended so they survive a failover"
+    limits: {}
+    defaults: {}
+    notes:
+      - "the default role is NOSUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS; pscale_superuser holds pg_read_all_data, pg_write_all_data, pg_monitor, pg_signal_backend, pg_checkpoint, pg_maintain and pg_create_subscription"
+      - "generally available since 2025-09-22; port 5432 is direct, 6432 the pooler"
+      - "a point-in-time restore makes a new branch; extensions are installed again"
+
+  crunchy-bridge-postgres:
+    provider: crunchy-bridge
+    where: crunchy-bridge
+    label: Crunchy Bridge
+    family: postgres
+    distinct: null
+    hosts: ['\.postgresbridge\.com$']
+    signs: {}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      superuser: true
+      role: ""
+      alter_system: true
+      createrole: true
+      signal_backend: true
+      owns_databases: true
+      subscribe: true
+      replication: "alter role {who} with replication;"
+    change:
+      how: console
+      words: "the cluster's configuration parameters in the Crunchy Bridge dashboard or API: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "logical replication is on by default: wal_level logical, max_wal_senders 10, max_replication_slots 10"
+      - "from PostgreSQL 17 slots are synced to the high-availability replica"
+    limits: {}
+    defaults: {}
+    notes:
+      - "the postgres role is a real superuser; application is not"
+      - "ALTER SYSTEM works but does not survive a failover and is not applied to the HA or replica nodes: the dashboard's parameters are the way"
+      - "the pooler (port 5431) takes only roles that are neither superuser nor replication"
+      - "a fork makes a new cluster at a point in time (10 days of backups)"
+
+  timescale-postgres:
+    provider: timescale
+    where: timescale
+    label: Tiger Cloud (Timescale)
+    family: postgres
+    distinct: null
+    hosts: ['\.tsdb\.cloud\.timescale\.com$']
+    signs: {pg_roles: [tsdbowner]}
+    api: {product: null, restore_point: point in time, clone: true}
+    admin:
+      superuser: false
+      role: ""
+      alter_system: false
+      createrole: false
+      signal_backend: false
+      owns_databases: false
+      subscribe: true
+      replication: ""
+    change:
+      how: console
+      words: "the service's Database parameters in the Tiger Cloud console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "following its changes (it as a logical replication source) is not documented; it is documented as a target"
+    limits:
+      max_connections: "25 on the Performance plan; 25 to 500 on larger compute"
+    defaults: {}
+    notes:
+      - "the admin (tsdbadmin) is not a superuser; tsdbowner is a group role; one database (tsdb) per service"
+      - "tsdbadmin may grant pg_checkpoint, pg_monitor, pg_signal_backend, pg_read_all_stats and pg_stat_scan_tables"
+      - "a recovery fork makes a new service at a point in time (3 days on Performance, 14 on Scale and Enterprise)"
+
+  cockroach-cloud:
+    provider: cockroach-cloud
+    where: cockroach-cloud
+    label: CockroachDB Cloud
+    family: cockroachdb
+    distinct: null
+    hosts: ['\.cockroachlabs\.cloud$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: false}
+    admin:
+      role: admin
+      superuser: true
+    change:
+      how: cluster setting
+      words: "SET CLUSTER SETTING {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "changefeeds: kv.rangefeed.enabled is on by default on Basic and Standard, set with SET CLUSTER SETTING on Advanced; creating one needs the CHANGEFEED privilege or admin"
+    limits: {}
+    defaults: {}
+    notes:
+      - "users made in the Cloud Console or API are granted the admin SQL role"
+      - "managed backups (hourly on Standard, daily on Basic, kept 30 days) restore the whole cluster into an empty one"
+
+  yugabyte-aeon:
+    provider: yugabyte-cloud
+    where: yugabyte-cloud
+    label: YugabyteDB Aeon
+    family: none
+    distinct: "a distributed SQL database that speaks PostgreSQL's wire protocol (YSQL) and Cassandra's (YCQL), with a logical replication of its own: its LSNs are not byte offsets, and pg_current_wal_lsn, pg_wal_lsn_diff and IDENTIFY_SYSTEM are refused"
+    hosts: ['\.yugabyte\.cloud$']
+    signs: {}
+    api: {product: null, restore_point: backup, clone: true}
+    admin:
+      role: "yb_superuser (the admin user is a member)"
+      superuser: false
+    change:
+      how: console
+      words: "the cluster's settings in the YugabyteDB Aeon UI: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "change data capture over PostgreSQL's logical replication protocol with its own output plugin (yboutput), from v2024.1.1, two slots at first, not on Sandbox clusters"
+    limits: {}
+    defaults: {}
+    notes:
+      - "yb_superuser holds CREATEROLE, CREATEDB, BYPASSRLS, pg_signal_backend, yb_db_admin and yb_extension"
+      - "backups every 24 hours kept 8 days, restorable into another cluster; a clone to a point in time makes a new database"
+
+  singlestore-helios:
+    provider: singlestore
+    where: singlestore
+    label: SingleStore Helios
+    family: none
+    distinct: "a distributed SQL database of its own (formerly MemSQL) that speaks MySQL's wire protocol"
+    hosts: ['\.svc\.singlestore\.com$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "admin (the user the portal creates)"
+      superuser: false
+    change:
+      how: console
+      words: "the workspace's settings in the SingleStore Portal: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "an OBSERVE query reading changes from an offset appears in its release notes only"
+    limits: {}
+    defaults: {}
+    notes:
+      - "its server banner reads 5.5.58 MemSQL source distribution"
+
+  confluent-kafka:
+    provider: confluent
+    where: confluent
+    label: Confluent Cloud
+    family: kafka
+    distinct: null
+    hosts: ['\.confluent\.cloud$']
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "service accounts and API keys; ACLs from the Confluent CLI, REST API or Console"
+      authorizer: false
+    change:
+      how: console
+      words: "the cluster's settings in the Confluent Cloud Console (Dedicated clusters only; a topic's settings on every type): {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "a topic is read from any offset its retention still keeps"
+    limits:
+      message: "8 MB on Basic and Standard, 20 MB on Enterprise, Dedicated and Freight"
+      max_connections: "1,000 (Basic), 10,000 (Standard), 576,000 (Enterprise), 2,736,000 (Dedicated, Freight)"
+    defaults: {}
+    notes:
+      - "an ACL made through the Kafka admin API is not stated in its documentation; its audit log records CreateAcls from an admin client"

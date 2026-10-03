@@ -269,12 +269,20 @@ def test_pg_dump_gets_the_same_excluded_tables(tmp_path, monkeypatch):
         def _all_tables(self, side, db):
             return ["public.orders", "public.audit_log"]
 
+        def partition_roots(self, side, db):
+            return {}
+
     import migkit.engines.postgres as pg
     monkeypatch.setattr(pg, "PostgresEngine", FakeEngine)
+    # the excluded tables' sequences are read off the catalogue, which
+    # this engine has none of (`_pg_sequences_left_out`)
+    monkeypatch.setattr(movers, "_pg_sequences_left_out",
+                        lambda hop, db: [])
     steps = movers.pgdump_move(hop, "appdb", 2, False, None)
     dump = _dump_command(steps)
-    assert "-T public.audit_log" in dump, dump
-    assert "-T public.orders" not in dump, dump
+    # quoted, so the dump keeps its case (`movers._pg_pattern`)
+    assert '-T "public"."audit_log"' in dump, dump
+    assert '"orders"' not in dump, dump
     assert any("1 tables the hop excludes are not dumped" in s
                for s in steps), steps
 

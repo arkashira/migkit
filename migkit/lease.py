@@ -52,30 +52,44 @@ class Lost(SystemExit):
 
 
 class _FileRecord:
-    """The lease as a file, changed under a lock on the file beside it."""
+    """The lease as a file, changed under a lock on the file beside it -
+    written whole and on the disk (`durable`): a holder a power loss
+    rolled back to "nobody" would be two writers once it came back."""
 
-    def __init__(self, path):
+    def __init__(self, path, legacy=None):
         self.path = path
         self.guard = path.with_name(path.name + ".guard")
+        #: text -> a record, for a file an earlier version wrote in a
+        #: shape of its own (`tailctl`'s "host pid")
+        self.legacy = legacy
+
+    def read(self):
+        try:
+            text = self.path.read_text()
+        except OSError:
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            # a torn lease names nobody: taken, and the holder that wrote
+            # it finds it is not its own at its next renewal
+            return self.legacy(self.path, text) if self.legacy else None
 
     def change(self, decide):
         """`decide(record)` -> the record to write, None to remove it, or
         KEEP to leave it; returns what it decided."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        from . import durable
+        if not self.path.parent.exists():
+            durable.private_dir(self.path.parent)
         fd = os.open(self.guard, os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            try:
-                have = json.loads(self.path.read_text())
-            except (OSError, ValueError):
-                have = None
-            new = decide(have)
+            new = decide(self.read())
             if new is None:
                 self.path.unlink(missing_ok=True)
+                durable.sync_dir(self.path.parent)
             elif new is not KEEP:
-                tmp = self.path.with_name(self.path.name + ".tmp")
-                tmp.write_text(json.dumps(new))
-                os.replace(tmp, self.path)
+                durable.write_json(self.path, new)
             return new
         finally:
             os.close(fd)
@@ -114,8 +128,69 @@ class _BucketRecord:
 #: `decide` leaves the record as it is
 KEEP = object()
 
+#: every lease this process holds now, from `acquire` to `release`: what
+#: `check_held` asks
+_HOLDING = set()
+_HOLDING_LOCK = threading.Lock()
 
-def holder(path, remote=None):
+
+def check_held():
+    """Nothing, where this process still holds every lease it took; `Lost`
+    where one was taken over or could not be renewed within its term.
+    Asked by the write loops between ranges and batches (audit ST11): the
+    heartbeat that renews a lease cannot stop the work, and a run that
+    went on writing under a lease another took was two writers."""
+    with _HOLDING_LOCK:
+        held = list(_HOLDING)
+    for lease in held:
+        lease.check()
+
+
+def _pid_alive(pid):
+    """Whether a process of this machine's is there: True, False, or None
+    where there is no process number to ask. One that is there under
+    another user answers "not permitted" - there, then."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        # 0 and below name process groups, not a process
+        return None
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OverflowError:
+        return None
+
+
+def liveness(have, now=None):
+    """Whether whoever a lease record names may still be running - the one
+    answer migkit gives to "is it still running?" (audit 2026-10-01,
+    ST10), for a hop's lease, a tail's (`tailctl.alive`) and the loads
+    that set something aside (`setaside`).
+
+    A record that names nobody is not. On this machine its process is
+    asked, and that answer stands whatever the term says: a process that
+    is there may still write, and one that is gone never will. On another
+    machine the term decides - renewed by the holder's heartbeat, so a
+    holder that stopped, or a pod that was replaced, lapses once its
+    term runs out, instead of counting as running for good."""
+    if not isinstance(have, dict) or not have.get("holder"):
+        return False
+    if have.get("host") == socket.gethostname():
+        got = _pid_alive(have.get("pid"))
+        if got is not None:
+            return got
+    return float(have.get("expires") or 0) > (time.time() if now is None
+                                              else now)
+
+
+def holder(path, remote=None, legacy=None):
     """The record of whoever holds the lease at `path` now - renewed
     within its term and, on this machine, its process still there - or
     None. Reads only: nothing is taken or renewed."""
@@ -124,22 +199,18 @@ def holder(path, remote=None):
         if have == _BucketRecord.RELEASED:
             have = None
     else:
-        try:
-            have = json.loads(path.read_text())
-        except (OSError, ValueError):
-            have = None
-    if not isinstance(have, dict) or not have.get("holder") \
-            or have.get("expires", 0) <= time.time() or Lease._dead(have):
+        have = _FileRecord(path, legacy).read()
+    if not liveness(have) or have.get("expires", 0) <= time.time():
         return None
     return have
 
 
 class Lease:
     def __init__(self, path, what="a write operation", remote=None,
-                 fenced=False, term=None):
+                 fenced=False, term=None, legacy=None):
         self.path = path
         self.record = (_BucketRecord(remote, path) if remote
-                       else _FileRecord(path))
+                       else _FileRecord(path, legacy))
         self.what = what
         self.me = f"{socket.gethostname()}:{os.getpid()}:{id(self)}"
         self.took_over = None
@@ -187,21 +258,16 @@ class Lease:
         self.renewed = began
         self._beat = threading.Thread(target=self._renew, daemon=True)
         self._beat.start()
+        with _HOLDING_LOCK:
+            _HOLDING.add(self)
         return self
 
     @staticmethod
     def _dead(have):
         """A holder on this machine whose process is gone does not need
         its term waited out."""
-        if have.get("host") != socket.gethostname():
-            return False
-        try:
-            os.kill(int(have.get("pid")), 0)
-            return False
-        except ProcessLookupError:
-            return True
-        except (PermissionError, TypeError, ValueError):
-            return False
+        return have.get("host") == socket.gethostname() and \
+            _pid_alive(have.get("pid")) is False
 
     def _renew_once(self):
         """One renewal: True where this holder still holds and its term is
@@ -234,6 +300,10 @@ class Lease:
                 if not self._renew_once():
                     return
             except Exception:  # noqa: BLE001 - the next beat tries again
+                # not renewed: `fresh` goes false within the term, and the
+                # write loops' `check` then raises `Lost` between batches
+                # (ST11) - the operation stops writing rather than going
+                # on under a lease another may have taken
                 continue
 
     def fresh(self):
@@ -286,6 +356,8 @@ class Lease:
         return self.fence
 
     def release(self):
+        with _HOLDING_LOCK:
+            _HOLDING.discard(self)
         self._stop.set()
         if self._beat:
             self._beat.join(timeout=5)

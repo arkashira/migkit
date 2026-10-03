@@ -40,11 +40,14 @@ def test_a_replication_task_with_its_endpoints():
     # the conditions of a column any of them, the columns all
     assert m["where"] == {"public.orders": "(region = 'EU' or region ="
                                            " 'UK') and id >= '1000'"}
-    assert got.include == [("glob", "public.orders"),
-                           ("glob", "public.order_items")]
+    # what the task took is the hop's own include, not a guess made later
+    assert got.raw["include"] == ["public.orders", "public.order_items"]
+    assert got.include == []
+    # a name rule for every schema is the hop's own name rule
+    assert m["names"] == {"schemas": {"case": "lower"}}
     said = " | ".join(got.notes)
-    assert "convert-lowercase" in said and "DROP_AND_CREATE" in said \
-        and "LOB" in said, said
+    assert "convert-lowercase" not in said
+    assert "DROP_AND_CREATE" in said and "LOB" in said, said
     hop = _hop(got)
     assert hop.engine == "hetero" and hop.databases == ["orders"]
     assert hop.options["reverse"] == "at_cutover"

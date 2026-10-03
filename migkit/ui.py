@@ -668,7 +668,7 @@ PARTS = (
     ("copy", lambda n, h, w, lbl: _copy_metrics(w, lbl)),
     ("check", lambda n, h, w, lbl: _check_metrics(w, lbl)),
     ("verify", lambda n, h, w, lbl: _verify_metrics(w, lbl)),
-    ("table", lambda n, h, w, lbl: _table_metrics(w, lbl)),
+    ("table", lambda n, h, w, lbl: _table_metrics(w, lbl, h)),
     ("cutover", lambda n, h, w, lbl: _cutover_metrics(w, lbl)),
     ("conflict", lambda n, h, w, lbl: _conflict_metrics(w, lbl)),
     ("stream", lambda n, h, w, lbl: _stream_metrics(w, lbl)),
@@ -706,7 +706,8 @@ def _tables_moved_metrics(where, lbl):
     where it stands in a table - that is a key, which is data."""
     out = []
     for d in _db_dirs(where):
-        ck = _json_at(d / "move.json", {}) or {}
+        from . import checkpoint
+        ck = checkpoint.read_move(d / "move.json", "cache") or {}
         tables = {k: v for k, v in ck.items() if isinstance(v, dict)
                   and ("moved" in v or "done" in v)}
         if not tables:
@@ -785,13 +786,15 @@ def _verify_metrics(where, lbl):
     return out
 
 
-def _table_metrics(where, lbl):
+def _table_metrics(where, lbl, hop=None):
     """Every table's rows on each side and whether the two agree, as one
     run took them (`digests.read_in`): a table whose last run took one
-    side only has no `migkit_table_same`."""
+    side only has no `migkit_table_same`, and a table the hop no longer
+    takes has none at all."""
     from . import digests
     out = []
-    for (db, table, scope), sides in sorted(digests.read_in(where).items()):
+    got = digests.read_in(where, hop=hop)
+    for (db, table, scope), sides in sorted(got.items()):
         if scope:
             continue
         for side, line in sorted(sides.items()):

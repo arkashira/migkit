@@ -14,9 +14,11 @@ against the hop's list of who may approve.
         signers: /etc/migkit/allowed_signers   # ssh-keygen's format
         expires: 3600                # seconds a request stands (1 hour)
 
-No server and no new command: the request is a file in the run's reports,
-and an approver signs it with the machine's own `ssh-keygen`, as migkit
-prints. A signature is counted only for this request - the hop, the step,
+No new command: the request is a file in the run's reports, and an
+approver signs it with the machine's own `ssh-keygen`, as migkit prints -
+or approves it in the web view, signed in as themselves, where the hop's
+`access` names who approves (`web.approve`; then `signers` may be left
+out). A signature is counted only for this request - the hop, the step,
 the database and when it expires, all signed - so one given for another
 step, another run, or a request since changed, counts for nothing.
 
@@ -27,7 +29,9 @@ signature made with that key - or by the principal the signers list
 names for it - is not counted. It was told apart by the login name, which
 never matches a signers list's principals (e-mail addresses, usually), so
 a requester's own signature counted; and `count: 0` approved with none.
-Every approval is written to the run's record.
+In the web view the one who asked is the person a run started from the
+view was started by (`MIGKIT_ACTOR`), and their approval there does not
+count either. Every approval is written to the run's record.
 """
 import getpass
 import json
@@ -52,6 +56,11 @@ def rules(hop):
 
 
 def _requester():
+    """Who asks: the person a run started from the web view was started
+    by, the machine's user otherwise."""
+    actor = os.environ.get("MIGKIT_ACTOR", "").strip()
+    if actor:
+        return actor
     try:
         return getpass.getuser()
     except Exception:  # noqa: BLE001 - nobody to name
@@ -225,25 +234,18 @@ def require(hop, step, db, log=None, detail=None):
     rule = rules(hop)
     if step not in check_steps(rule):
         return []
-    signers = rule.get("signers")
-    if not signers or not os.path.exists(os.path.expanduser(str(signers))):
+    from .web import approve as view
+    if _signers(rule) is None and not view.accepts(hop):
         raise SystemExit(f"{step} needs approval, and the hop's"
                          " `approvals.signers` - the list of who may"
-                         " approve - is not there")
-    signers = os.path.expanduser(str(signers))
+                         " approve - is not there, and no one approves it"
+                         " in the web view either (the hop's `access`"
+                         " names no approver)")
     where = hop.report_dir(db) / "approvals"
     key = _identity()
     path, req = _request(hop, step, db, where, rule, detail, key)
-    data = path.read_bytes()
     need = max(1, int(rule.get("count", 1)))
-    asker = {req.get("asked_by")} | _principals_of(key, signers)
-    theirs = {req.get("asked_by_key"), _fingerprint(key)} - {None}
-    who = set()
-    for sig in sorted(where.glob(f"{path.name[:-len('.request.json')]}"
-                                 ".*.sig")):
-        principal, fp = _signer(sig, signers, data)
-        if principal and principal not in asker and fp not in theirs:
-            who.add(principal)
+    who = _approvers(hop, rule, path, req, key)
     from . import notify
     if len(who) >= need:
         from . import audit
@@ -263,8 +265,82 @@ def require(hop, step, db, log=None, detail=None):
         f"    ssh-keygen -Y sign -n {NAMESPACE} -f ~/.ssh/id_ed25519"
         f" < {path} > {path.parent / (path.name[:-len('.request.json')])}"
         ".$(whoami).sig\n"
-        "then this is run again.")
+        + ("or approves it in the web view, on the hop's page;\n"
+           if view.accepts(hop) else "")
+        + "then this is run again.")
     # the approvers are told where the team is, once for this request
     notify.approval_asked(hop, step, db, need, len(who), req["expires"],
                           req["nonce"], log, stop=stop)
     raise SystemExit(stop)
+
+
+def _signers(rule):
+    """The hop's list of who signs with their own key, where it is there."""
+    signers = rule.get("signers")
+    if not signers:
+        return None
+    signers = os.path.expanduser(str(signers))
+    if not os.path.exists(signers):
+        return None
+    # whoever may change the list may approve: refused where anyone but
+    # this user or root may (audit SEC21)
+    from .config import trusted_file
+    trusted_file(signers, "the approvals' signers list",
+                 owners=(os.getuid(), 0))
+    return signers
+
+
+def _approvers(hop, rule, path, req, key=None):
+    """{who} approved the request at `path`: each signature made with an
+    approver's own key over it, and each approval given in the web view
+    that holds (`web.approve.counted`) - never the one who asked, by name
+    or by key (`key`: the requester's own, where this is the requester's
+    run; the request names its fingerprint either way)."""
+    from .web import approve as view
+    data = path.read_bytes()
+    who = set()
+    signers = _signers(rule)
+    if signers is not None:
+        asker = {req.get("asked_by")} | _principals_of(key, signers)
+        theirs = {req.get("asked_by_key"), _fingerprint(key)} - {None}
+        for sig in sorted(path.parent.glob(
+                f"{path.name[:-len('.request.json')]}.*.sig")):
+            principal, fp = _signer(sig, signers, data)
+            if principal and principal not in asker and fp not in theirs:
+                who.add(principal)
+    who |= view.counted(hop, path, data, req)
+    return who
+
+
+#: what approving each step lets happen, as the web view says it
+LETS = {
+    "cutover": "the cutover goes ahead: the source's writes are held, the"
+               " last changes applied, the application moved to the target",
+    "repair": "the repair writes the target's rows, its undo kept",
+    "rollback": "the saved state is put back on the target",
+    "source-setting": "migkit makes the change on the source it was answered"
+                      " yes to, records it and takes it off again after",
+    "point-of-no-return": "the cutover goes past going back: the stream back"
+                          " is dropped and the old source given back",
+}
+
+
+def standing(hop):
+    """[(request path, request, approvals needed, {who approved})] of
+    every request of the hop standing now - not expired - for the web
+    view, counted the way `require` counts them."""
+    rule = rules(hop)
+    need = max(1, int(rule.get("count", 1)))
+    root = hop.report_dir()
+    out = []
+    for path in sorted(list(root.glob("approvals/*.request.json"))
+                       + list(root.glob("*/approvals/*.request.json"))):
+        try:
+            req = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(req, dict) or req.get("hop") != hop.name \
+                or int(req.get("expires", 0)) <= time.time():
+            continue
+        out.append((path, req, need, _approvers(hop, rule, path, req)))
+    return out

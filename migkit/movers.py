@@ -20,6 +20,7 @@ from urllib.parse import quote
 
 from . import envkeys, leftovers, runner, toolversion, tooluse
 from .runner import run
+from .config import scoped as _scoped
 from .tools import IMAGES, PROGRAM
 from .tools import names as tool_names
 from .tooluse import TOPPED, UNUSED, USED
@@ -118,6 +119,26 @@ def _ladder():
     )
 
 
+#: what a stop costs each bulk way, as the plan says it before it starts:
+#: a way not named starts over, and every table it had copied is copied
+#: again (DTS says it as "resumable dump status"; nobody here did)
+AFTER_A_STOP = {
+    "builtin": "a stop goes on from the ranges it had finished",
+    "pgcopydb": "a stop goes on from the tables it had finished - a table"
+                " cut in parts, a copy run in a container, or one begun"
+                " under another scope starts over",
+    "mysqlsh": "a stop goes on loading from the dump it kept, where the"
+               " source has not been written since; otherwise it starts"
+               " over",
+}
+
+
+def after_a_stop(via):
+    """What a stop costs the bulk way `via`, in words (`AFTER_A_STOP`)."""
+    return AFTER_A_STOP.get(via, "a stop starts it over: every table it"
+                                 " had copied is copied again")
+
+
 def pick(engine, table="", hop=None, go=False):
     """Fastest installed tool for whole-db moves, builtin for single tables
     (chunk resume matters more than raw speed there)."""
@@ -188,10 +209,11 @@ def fitted(hop, engine, via):
     The one-pass cross-engine load is chosen for every cross-engine hop
     once it is installed, and the load file migkit writes for it reads
     MySQL into PostgreSQL, the whole database, with nothing else: no
-    exclude list, no table or column mapping, no row filter. For any
-    other pair it reads the wrong server as the wrong kind; on a hop with
-    an exclude list it loads the tables the target owns. The table copier
-    carries all of those, so the decision is made here, from the hop.
+    exclude or include list, no table or column mapping, no row filter.
+    For any other pair it reads the wrong server as the wrong kind; on a
+    hop that leaves tables out it loads the tables the target owns. The
+    table copier carries all of those, so the decision is made here, from
+    the hop.
 
     `via` stands first with what it needs of the hop (`_FITS`), and the
     ways below it in `_ladder` are the fallback: one ladder for the pick
@@ -232,10 +254,13 @@ def _fits():
         Need("MySQL into PostgreSQL",
              lambda f: f["pair"] == ("mysql", "postgres"),
              "the one-pass load reads MySQL into PostgreSQL only"),
-        Need("no exclude list", lambda f: not getattr(f["hop"], "exclude",
-                                                      None),
+        # an include as much as an exclude: asked of `exclude` alone, a hop
+        # taking some tables got the whole database, and the target's step
+        # that empties it judged `public.orders` against `appdb.orders` -
+        # an included table left full, and the load appended to it
+        Need("nothing left out", lambda f: not _scoped(f["hop"]),
              "the one-pass load has no way to leave out the tables the hop"
-             " excludes"),
+             " excludes, or to take only the ones it includes"),
         Need("no mapping", lambda f: not any(
             f["mapping"].get(k) for k in ("tables", "columns", "where")),
             "the one-pass load reads no table, column or row mapping, and"
@@ -267,6 +292,12 @@ ROW_FILTER_MOVERS = ("mydumper", "mysqlsh")
 #: be carried by the table copier instead.
 ROUTING_MOVERS = ("pgdump", "pgcopydb", "native", "pgpull", "pgsubscribe")
 
+#: Bulk paths that write a table under the name the hop gives it on the
+#: target (`mapping.tables`); on every other one a renamed table is left
+#: out of the bulk copy and carried by the copier that renames it - the
+#: rest loaded it under the source's name
+RENAMING_MOVERS = ("mongodump",)
+
 #: Bulk paths that carry only a table with a key: a temporary
 #: subscription publishes the tables it copies, and a table without a key
 #: in a publication makes the source refuse its application's updates and
@@ -287,10 +318,13 @@ FILTERING_COPIERS = ("postgres", "mysql", "hetero", "sqlite")
 
 def _routes_any(hop, db):
     """Whether a table of `db` may leave the bulk path: excluded, under a
-    row filter, or with its columns mapped. The table list is asked for
-    only then; `routed_to_copier` decides table by table."""
-    return bool(getattr(hop, "exclude", None) or _filtered_here(hop, db)
-                or (getattr(hop, "mapping", None) or {}).get("columns"))
+    row filter, with its columns mapped, or renamed (`hop.table_map()`) -
+    a rename was not asked, so a bulk path never listed its tables and
+    loaded the renamed one under the source's name. The table list is
+    asked for only then; `routed_to_copier` decides table by table."""
+    return bool(_scoped(hop) or _filtered_here(hop, db)
+                or (getattr(hop, "mapping", None) or {}).get("columns")
+                or renames_any(hop))
 
 
 def _filtered_here(hop, db):
@@ -327,7 +361,7 @@ def _filtered_here(hop, db):
 
 
 def routed_to_copier(hop, db, via, tables, qualifier="public", choice=None,
-                     facts=None):
+                     facts=None, roots=None):
     """The tables a bulk path cannot filter, carried by the table copier.
 
     `via` copies whole tables; the copier reads and replaces only the rows
@@ -337,7 +371,8 @@ def routed_to_copier(hop, db, via, tables, qualifier="public", choice=None,
     plan and the move, so none of them can disagree about which tables took
     which path. Nothing is routed for a path that applies the filter itself.
     `choice` is the table ladder's per-table choice where the caller made
-    it already (`tableway.choose`).
+    it already (`tableway.choose`); `roots` the source's partitions' roots
+    (`_pg_roots`), so a partition goes where its table goes.
     """
     from . import planner
     if facts is None and via in NEEDS_KEYS:
@@ -345,7 +380,7 @@ def routed_to_copier(hop, db, via, tables, qualifier="public", choice=None,
         from .engines import get_engine
         facts = get_engine(hop).table_facts("src", db)
     return [d.table for d in planner.plan(hop, db, via, tables, qualifier,
-                                          facts, choice=choice)
+                                          facts, choice=choice, roots=roots)
             if d.path == planner.COPIER]
 
 
@@ -419,9 +454,11 @@ def native_move(hop, db, workers, go, log):
                         qualifier_for(hop), eng.table_facts("src", db))
     tables = [d.table for d in plan if d.path == planner.BULK]
     # a table routed for its row filter alone keeps the source's shape: the
-    # engine makes it as it makes the rest, and the copier fills it
+    # engine makes it as it makes the rest, and the copier fills it - not
+    # one it renames, which the engine would make under the source's name
     shaped = [d.table for d in plan if d.path == planner.COPIER
-              and not hop.column_rules(db, *d.table.split("."))]
+              and not hop.column_rules(db, *_asked(hop, d.table))
+              and not _renamed(hop, db, _asked(hop, d.table))]
     return eng.native_bulk(db, tables, go, log, shape_only=shaped) or []
 
 
@@ -485,12 +522,14 @@ def _source_sizes(hop, db):
     where the catalogue says nothing."""
     from .engines import get_engine
     try:
-        facts = get_engine(hop).table_facts("src", db)
+        eng = get_engine(hop)
+        facts = eng.table_facts("src", db)
     except Exception:  # noqa: BLE001 - progress without sizes, then
         return {}
+    # a partition is carried where its table is (`Engine.in_scope`)
     return {name: int(f.get("bytes") or 0) for name, f in facts.items()
             if isinstance(f, dict) and f.get("bytes")
-            and not hop.excluded(db, *str(name).split("."))}
+            and eng.in_scope(db, name)}
 
 
 def _tables_done(pattern, verb, total=None):
@@ -550,14 +589,18 @@ PG_DUMP_TABLE = r'dumping contents of table "(?P<table>[^"]+)"'
 PG_RESTORE_TABLE = r'processing data for table "(?P<table>[^"]+)"'
 
 
-#: The target's user tables, one per line. This used to assemble the whole
-#: `truncate` statement with `string_agg`, which put "which tables count as
-#: the application's" in SQL while "which tables the hop excludes" stayed in
-#: Python - so the two never met and the excluded ones were emptied.
+#: The target's user tables, partitioned ones too, one per line: the name
+#: as the server quotes it, which the statement is built from, then its
+#: schema and its own name, which it is matched by. This used to assemble
+#: the whole `truncate` statement with `string_agg`, which put "which
+#: tables count as the application's" in SQL while "which tables the hop
+#: excludes" stayed in Python - so the two never met and the excluded ones
+#: were emptied.
 PG_USER_TABLES_SQL = (
     "select format('%I.%I', n.nspname, c.relname)"
+    "||chr(31)||n.nspname||chr(31)||c.relname"
     " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
-    " where c.relkind = 'r'"
+    " where c.relkind in ('r', 'p')"
     " and n.nspname not in ('pg_catalog','information_schema')"
     " and n.nspname not like 'pg\\_%'"
     " and n.nspname not like '\\_\\_%'"
@@ -610,9 +653,10 @@ def _unresolved_exclusion(db, why):
     stop at the same point and say the same thing.
     """
     return SystemExit(
-        f"{db}: the hop excludes tables or filters their rows, and the"
-        f" source's table list could not be read ({why}), so the copy cannot"
-        " be told to skip them. Nothing has been changed on the target.")
+        f"{db}: the hop excludes tables, filters their rows or renames"
+        f" them, and the source's table list could not be read ({why}), so"
+        " the copy cannot be told to skip them. Nothing has been changed"
+        " on the target.")
 
 
 def _pg_literal(text):
@@ -637,11 +681,16 @@ def _truncate_step(hop, db=""):
     describes a move that empties a table and never refills it.
     """
     where = f" {db}" if db else ""
-    if getattr(hop, "exclude", None):
-        return (f"# empty the target's{where} user tables, except the ones"
-                " the hop excludes (generated from catalog)")
-    return (f"# empty all the target's{where} user tables"
-            " (generated from catalog)")
+    # a table only the target has is never emptied, and a filtered one
+    # only of the rows its filter selects (`_pg_truncate_target`)
+    rows = ("; of a table the hop filters, only the rows its filter"
+            " selects" if _filtered_here(hop, db) else "")
+    if _scoped(hop):
+        return (f"# empty the target's{where} user tables the source has"
+                " too, except the ones the hop excludes or does not take"
+                f" (generated from catalog){rows}")
+    return (f"# empty all the target's{where} user tables the source has"
+            f" too (generated from catalog){rows}")
 
 
 def _pg_truncate_target(hop, db, log=None):
@@ -667,7 +716,27 @@ def _pg_truncate_target(hop, db, log=None):
 
     The set is resolved through the same `excluded_tables()` the dump and
     `check` use, so all three empty, carry and verify the same tables.
+
+    **Only what the move carries is emptied** (`_pg_carried`): it was every
+    target table the hop did not exclude, so a table the source does not
+    have at all - the target's own, never named in `exclude` - was emptied
+    and nothing refilled it, and a renamed table was emptied under the
+    name the load did not fill. A partition goes as its table goes, on the
+    target as on the source.
+
+    **A table under a row filter is not emptied whole**: the move carries
+    only the rows the filter selects, so those are deleted and the rest -
+    the target's own - stay, as the table copier keeps them. One
+    transaction with the truncate, so a delete the target refuses empties
+    nothing. Where the pair's copier carries it (`through_pair`), the
+    filter may name columns the target calls otherwise, and that copier
+    replaces the rows it selects itself.
+
+    **A table the hop carries only some changes of** (`mapping.ops`) is not
+    emptied over the rows the target holds of it - those are what its
+    contract keeps (`_refuse_kept_rows`).
     """
+    from .util import split_table
     t = hop.target
     ddb = hop.target_db(db) if hasattr(hop, "target_db") else db
     env_t = {**t.libpq_env(),
@@ -677,33 +746,170 @@ def _pg_truncate_target(hop, db, log=None):
         return _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
                     "-d", ddb, "-X"] + list(args), env_t)
 
-    names = [ln for ln in psql("-At", "-c", PG_USER_TABLES_SQL
-                               ).stdout.splitlines() if ln.strip()]
-    skip = set(excluded_tables(hop, db, names))
-    keep = [n for n in names if n not in skip]
-    if not keep:
+    carried = _pg_carried(hop, db)
+    there = {}
+    for ln in psql("-At", "-c", PG_USER_TABLES_SQL).stdout.splitlines():
+        quoted, sch, tbl = (ln.split("\x1f") + ["", ""])[:3]
+        if quoted.strip():
+            there[(sch, tbl)] = quoted
+    # the target's partitions by its own tree, which need not be the
+    # source's: one the source lacks is still its table's
+    tree = _pg_target_tree(hop, db) if there else {}
+    from .engines.postgres import PostgresEngine
+    eng = PostgresEngine(hop)
+    from .config import OPS
+    keep, filtered, spared, some = [], {}, {}, {}
+    for key, quoted in sorted(there.items(), key=lambda kv: kv[1]):
+        own = key in carried
+        asked = carried.get(key) or carried.get(tree.get(key))
+        if asked is None:
+            spared[quoted] = None
+            continue
+        rf = hop.row_filter(db, *asked)
+        if hop.carries(db, *asked) != frozenset(OPS):
+            some[quoted] = rf
+        if rf:
+            # the rows outside the filter are the target's own
+            spared[quoted] = rf
+            if own and not eng.through_pair(db, ".".join(asked)):
+                filtered[quoted] = rf
+            continue
+        keep.append(quoted)
+    if not keep and not filtered:
         return ""
-    if skip:
+    _refuse_kept_rows([n for n in keep + sorted(filtered) if n in some
+                       and _pg_holds_own_rows(psql, n, some[n], True)])
+    if keep and spared:
         reached = {ln for ln in psql("-At", "-c", PG_CASCADE_REACH_SQL.format(
             names=_pg_literal(chr(31).join(keep)))).stdout.splitlines()
             if ln.strip()}
-        caught = sorted(skip & reached)
+        # what the hop excludes is refused whether or not it holds rows
+        # now - the target writes them while the move runs; any other
+        # table only where emptying it would lose some
+        by_name = {there[k]: ".".join(v) for k, v in tree.items()
+                   if k in there}
+        owned = set(excluded_tables(hop, db, [n for n in spared
+                                              if n in reached],
+                                    roots=by_name))
+        caught = [n for n in sorted(spared) if n in reached
+                  and (n in owned or _pg_holds_own_rows(psql, n, spared[n]))]
         if caught:
+            # in words for each kind: excluded, filtered, the target's own
+            filters = any(spared[n] for n in caught if n not in owned)
+            alone = any(spared[n] is None for n in caught if n not in owned)
             raise SystemExit(
                 f"{', '.join(caught)} would be emptied anyway: the table"
                 " references one of the tables this move replaces, and"
                 " emptying a table empties everything pointing at it.\n"
-                "  the hop excludes it, which says its rows are written here"
-                " and not carried, so they cannot be put back afterwards.\n"
-                "  either it is not target-owned after all - take it out of"
-                " the hop's exclude list and let the move carry it - or the"
-                " reference has to go before the move can run.")
-    stmt = "truncate table " + ", ".join(keep) + " cascade"
+                + ("  the hop excludes it, which says its rows are written"
+                   " here and not carried, so they cannot be put back"
+                   " afterwards.\n  either it is not target-owned after all"
+                   " - take it out of the hop's exclude list and let the"
+                   " move carry it - or the reference has to go before the"
+                   " move can run.\n" if owned & set(caught) else "")
+                + ("  the hop carries only the rows its filter selects into"
+                   " it, and the rows outside the filter are the target's"
+                   " own, so they cannot be put back afterwards. Either the"
+                   " filter goes, or the reference has to go before the"
+                   " move can run.\n" if filters else "")
+                + ("  the source has no such table, so the move does not"
+                   " carry it and its rows are the target's own, which"
+                   " cannot be put back afterwards. Either the reference"
+                   " goes before the move can run, or the hop leaves out"
+                   " the table it points at." if alone else ""))
+    stmts = (["truncate table " + ", ".join(keep) + " cascade"] if keep
+             else []) + [f"delete from {n} where {rf}"
+                         for n, rf in sorted(filtered.items())]
+    stmt = "; ".join(stmts)
+    # one statement string, one transaction: a delete the target refuses
+    # undoes the truncate before it
     _sh(["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
          "-d", ddb, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c", stmt],
         env_t, log)
+    if filtered and log:
+        log(f"{len(filtered)} tables the hop filters keep their rows outside"
+            " the filter: only the rows it selects were removed")
     _pg_clear_carried_objects(hop, db, env_t, log)
     return stmt
+
+
+def _refuse_kept_rows(tables):
+    """Stop before the target is emptied where a table the hop carries
+    only some changes of (`Hop.carries`, `mapping.ops`) holds rows there
+    the emptying would take: the target keeps what the source deletes, or
+    the rows as they were before the source changed them, and a load that
+    empties the table first would lose exactly those. A table the target
+    holds none of is filled as the copy of the source it then is."""
+    if tables:
+        raise SystemExit(
+            f"{', '.join(tables[:6])}" + (" ..." if len(tables) > 6 else "")
+            + ": the hop carries only some of their changes (mapping.ops),"
+            " so the rows the target holds of them are kept as they are - a"
+            " row the source deleted, or changed, stays as it was there -"
+            " and emptying them for the load would take those rows."
+            " Nothing has been emptied. Move them while the target holds"
+            " none of their rows, or follow only their changes"
+            " (`migkit move --mode cdc`)")
+
+
+def _pg_holds_own_rows(psql, name, rf, inside=False):
+    """Whether target table `name` holds rows the move would lose by
+    emptying it: any at all where the move does not carry it (`rf` None),
+    any outside its row filter where it does - or, `inside`, any the
+    filter selects (every one without a filter), which a table whose
+    changes the hop carries only some of keeps. Asked, a table that holds
+    none costs nothing; one that cannot be asked is taken to hold some."""
+    where = ((f" where {rf}" if rf else "") if inside else
+             f" where ({rf}) is not true" if rf else "")
+    try:
+        got = psql("-At", "-c", f"select exists(select 1 from {name}{where})"
+                   ).stdout.strip()
+    except Exception:  # noqa: BLE001 - not known, so not risked
+        return True
+    return got != "f"
+
+
+def _pg_carried(hop, db):
+    """{(schema, table) on the target: the parts the hop's rules are asked
+    with} of every table of `db` the move carries: the source's tables the
+    hop takes, each under the name the hop gives it on the target - a
+    partition as its table is taken (`_pg_roots`), and only through its
+    table where that is renamed. One reading for the step that empties
+    the target and for the window that sets its indexes aside: both reached
+    every target table the hop did not exclude, so one the source does not
+    have was emptied, and a renamed one looked for under its old name."""
+    from .engines import ALIASES
+    from .util import split_table
+    source = ((hop.options or {}).get("source_engine", "")
+              if hop.engine == "hetero" else hop.engine)
+    same = ALIASES.get(source, source) == "postgres"
+    if same:
+        from .engines.postgres import PostgresEngine
+        eng = PostgresEngine(hop)
+        names = eng._all_tables("src", db)
+        roots = _pg_roots(hop, db, eng=eng)
+    else:
+        # the one-pass load from another engine lands every table in
+        # `public`, under its name in lower case (`pgloader_move`)
+        from .engines import get_engine
+        names = get_engine(hop).src_engine.neutral_tables("src", db)
+        roots = {}
+    out = {}
+    for name in names:
+        asked = _asked(hop, name, roots)
+        if hop.excluded(db, *asked):
+            continue
+        if name in roots:
+            if _renamed(hop, db, asked):
+                # filled through its table, under that table's new name
+                continue
+            out[split_table("postgres", name, "public")] = asked
+            continue
+        sch = asked[0] if len(asked) > 1 else "public"
+        there = str(hop.target_table_in(db, *asked))
+        out[split_table("postgres", there if same else there.lower(),
+                        sch)] = asked
+    return out
 
 
 def _pg_clear_carried_objects(hop, db, env_t, log=None):
@@ -771,8 +977,13 @@ def _pg_psql(hop, db, sql, log=None):
                 "-c", sql], env, log).stdout
 
 
-def _outside_exclusion(hop, db, rows, log=None, qualifier="public"):
-    """The index `rows` - table first - on tables the hop does not exclude.
+def _outside_exclusion(hop, db, rows, log=None, qualifier="public",
+                       fills=None):
+    """The index `rows` - table first - on tables the hop does not exclude,
+    and - where `fills` says which tables the load fills (`_pg_fills`,
+    `_my_carried`) - only on those: a table the source does not have is the
+    target's own as much as an excluded one, and its indexes were dropped
+    for a load that put nothing in it.
 
     A table the hop excludes is one the target owns: its rows are written
     there, often by the application while the move runs. Dropping its
@@ -792,11 +1003,40 @@ def _outside_exclusion(hop, db, rows, log=None, qualifier="public"):
     """
     owned = {t for t in {r[0] for r in rows}
              if excluded_tables(hop, db, [t], qualifier)}
-    kept = [r for r in rows if r[0] not in owned]
+    alone = {t for t in {r[0] for r in rows} - owned
+             if fills is not None and not fills(t)}
+    kept = [r for r in rows if r[0] not in owned | alone]
     if owned and log:
-        log(f"{len(rows) - len(kept)} indexes on {len(owned)} tables the hop"
-            " excludes were left in place")
+        log(f"{sum(r[0] in owned for r in rows)} indexes on {len(owned)}"
+            " tables the hop excludes were left in place")
+    if alone and log:
+        log(f"{sum(r[0] in alone for r in rows)} indexes on {len(alone)}"
+            " tables the move does not fill were left in place")
     return kept
+
+
+def _pg_target_tree(hop, db):
+    """{(schema, table): (schema, table) of its root} of the target's
+    partitions (`_pg_roots` on the target): a partition the source does
+    not have is still part of its table there."""
+    from .util import split_table
+    return {split_table("postgres", k, "public"):
+            split_table("postgres", v, "public")
+            for k, v in _pg_roots(hop, db, "dst").items()}
+
+
+def _pg_fills(hop, db):
+    """`fills(name)`: whether the move fills the target table `name`
+    (`schema.table`) - one it carries (`_pg_carried`), or a partition of
+    one by the target's own tree."""
+    from .util import split_table
+    carried = _pg_carried(hop, db)
+    tree = _pg_target_tree(hop, db)
+
+    def fills(name):
+        key = split_table("postgres", str(name), "public")
+        return key in carried or tree.get(key) in carried
+    return fills
 
 
 def _rebuild(names, build, workers, log):
@@ -958,6 +1198,9 @@ class _IndexWindow:
                    else _pg_psql(self.hop, self.db, sql))
             there = set(_pg_psql(self.hop, self.db, PG_INDEX_NAMES_SQL
                                  ).split())
+            # the whole database's load: only the tables it fills
+            fills = (_pg_fills(self.hop, self.db)
+                     if raw and not self.table else None)
         except Exception:
             return self
         found = []
@@ -972,7 +1215,8 @@ class _IndexWindow:
         # them was never rebuilt
         rows = [(f"{t.split('.', 1)[0]}.{name}", definition, isc)
                 for t, name, definition, isc in
-                _outside_exclusion(self.hop, self.db, found, self.log)]
+                _outside_exclusion(self.hop, self.db, found, self.log,
+                                   fills=fills)]
         if self.table:
             # one table's copy: an index that makes its rows unique stays -
             # a copier may find rows by it, and a load that let a duplicate
@@ -1062,15 +1306,21 @@ def pgdump_move(hop, db, workers, go, log):
     s, t = hop.source, hop.target
     outdir = hop.report_dir(db) / "pgdump"
     # the same resolution pgcopydb and `check` use, so all three exclude
-    # exactly the same tables rather than three readings of one pattern
-    skip, routed, unresolved = [], [], ""
+    # exactly the same tables rather than three readings of one pattern.
+    # Each partition is named beside its table: `-T` of a partitioned
+    # table leaves out its own rows, which it has none of, and not its
+    # partitions'
+    skip, routed, unresolved, seqs = [], [], "", []
     if _routes_any(hop, db):
         try:
             from .engines.postgres import PostgresEngine
             tables = PostgresEngine(hop)._all_tables("src", db)
-            skip = excluded_tables(hop, db, tables)
-            routed = [n for n in routed_to_copier(hop, db, "pgdump", tables)
+            roots = _pg_roots(hop, db)
+            skip = excluded_tables(hop, db, tables, roots=roots)
+            routed = [n for n in routed_to_copier(hop, db, "pgdump", tables,
+                                                  roots=roots)
                       if n not in skip]
+            seqs = _pg_sequences_left_out(hop, db)
         except Exception as e:
             unresolved = str(e).splitlines()[-1][:70] if str(e) \
                 else type(e).__name__
@@ -1084,7 +1334,9 @@ def pgdump_move(hop, db, workers, go, log):
               routed=len(routed)),
         ["pg_dump", "-h", s.host, "-p", s.port, "-U", s.user, "-d", db,
          "-Fd", "-j", reads, "--data-only", "-v", "-f", outdir,
-         *[a for name in left_out for a in ("-T", name)],
+         # quoted, as the catalogue names it: unquoted, the dump folds a
+         # name to lower case and leaves `"AuditLog"` in
+         *[a for name in left_out + seqs for a in ("-T", _pg_pattern(name))],
          *leftovers.pg_dump_args()])
     load = Step(
         phase("load", workers=writes),
@@ -1102,7 +1354,9 @@ def pgdump_move(hop, db, workers, go, log):
             steps.insert(1, _routed_note(routed))
         if skip:
             steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
-                            " dumped at all")
+                            " dumped at all"
+                         + (f", nor the {len(seqs)} sequences that go with"
+                            " them" if seqs else ""))
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
@@ -1292,8 +1546,13 @@ def _create_note(missing):
 def _pg_pattern(name):
     """`schema.table` as a dump's table pattern that matches it and
     nothing else: each part quoted, so case is kept and no character in
-    it is read as a wildcard."""
-    sch, _, tbl = str(name).partition(".")
+    it is read as a wildcard - the dump folds an unquoted pattern to lower
+    case, and `-T public.AuditLog` left `"AuditLog"` in. Split the one way
+    names are (`util.split_table`): a name the catalogue quoted
+    (`public."AuditLog"`) is unquoted first, and one with no schema is in
+    `public`."""
+    from .util import split_table
+    sch, tbl = split_table("postgres", str(name), "public")
     return ".".join('"' + p.replace('"', '""') + '"' for p in (sch, tbl))
 
 
@@ -1303,11 +1562,12 @@ def _pg_missing_tables(hop, db):
     from .engines.postgres import PostgresEngine
     eng = PostgresEngine(hop)
     have = set(eng._all_tables("dst", db))
-    # a table whose columns the hop maps is built by the pair's copier,
-    # under the names and without the columns the mapping says
-    want = [t for t in eng._all_tables("src", db)
-            if not hop.excluded(db, *t.split(".", 1))
-            and not eng.through_pair(db, t)]
+    # a table whose columns the hop maps, or that it renames, is built by
+    # the pair's copier, under the names and without the columns the
+    # mapping says - made here, it stood under the source's name; and a
+    # partition goes as its table goes (`in_scope`, `_ruled`)
+    want = [t for t in eng._all_tables("src", db) if eng.in_scope(db, t)
+            and not eng.through_pair(db, ".".join(eng._ruled(db, t)))]
     return [t for t in want if t not in have], not have
 
 
@@ -1323,18 +1583,51 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
     differ. `workers`: the post-data section's keys and indexes built that
     many at once, as the move's sizing gives them, where they were built
     one at a time.
+
+    What depends on a table the target is not given is left out with it
+    (`_pg_depending`): the tables the hop leaves out - a partition as its
+    table is (`partition_roots`) - and, where the target has tables, only
+    those it lacks; and the tables the pair's copier makes later under
+    the name the hop gives them (`through_pair`). A view over one made
+    the restore refuse the whole schema; a foreign key into one stopped
+    the move once the rows were in. So are the views, routines and
+    triggers the hop's `objects` does not take (`objects_left_out`), and
+    what depends on them. Each is said, a foreign key with the table it
+    points at, and kept in the run's decision record.
     """
     from .engines.postgres import PostgresEngine
     s, t = hop.source, hop.target
+    eng = PostgresEngine(hop)
+    every = eng._all_tables("src", db)
+    roots = _pg_roots(hop, db, eng=eng)
+    skip = excluded_tables(hop, db, every, roots=roots)
+    # built by the pair's copier after the load, under the name the hop
+    # gives them (`through_pair`)
+    paired = [n for n in every if n not in skip
+              and eng.through_pair(db, roots.get(n, n))]
     if whole:
-        eng = PostgresEngine(hop)
-        every = eng._all_tables("src", db)
-        skip = excluded_tables(hop, db, every) + [
-            n for n in every if eng.through_pair(db, n)]
-        pick = [a for n in skip for a in ("-T", _pg_pattern(n))]
+        gone = skip + paired
+    else:
+        # a table left out that the target has is the target's own, and
+        # what refers to it finds it there
+        have = set(eng._all_tables("dst", db))
+        gone = [n for n in skip if n not in have] + paired
+    # the objects the hop's `objects` does not take, and what reads them
+    objects = eng.objects_left_out("src", db)
+    gone += [n for k in ("view", "matview") for n in objects.get(k, ())]
+    routines = [n for k in ("function", "procedure")
+                for n in objects.get(k, ())]
+    triggers = list(objects.get("trigger", ()))
+    left = (_pg_depending(hop, db, gone, routines, triggers)
+            if gone or routines or triggers else [])
+    views = [x["view"] for x in left if x["view"]]
+    if whole:
+        pick = [a for n in skip + paired + views
+                for a in ("-T", _pg_pattern(n))]
     else:
         pick = [a for n in tables for a in ("-t", _pg_pattern(n))]
     out = hop.report_dir(db) / f"schema-{section}.dump"
+    listed = out.with_suffix(".list")
     dump = ["pg_dump", "-h", s.host, "-p", str(s.port), "-U", s.user,
             "-d", db, "-Fc", "--schema-only", f"--section={section}",
             *pick, *(leftovers.pg_dump_args() if whole else []),
@@ -1344,9 +1637,26 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
             "--no-privileges",
             *(["-j", str(int(workers))] if section == "post-data"
               and int(workers or 1) > 1 else []), str(out)]
+    env_s = {**s.libpq_env(), "PGPASSWORD": s.password,
+             "PGCONNECT_TIMEOUT": "15"}
     try:
-        _sh(dump, {**s.libpq_env(),
-                   "PGPASSWORD": s.password, "PGCONNECT_TIMEOUT": "15"}, log)
+        _sh(dump, env_s, log)
+        # what depends on a table the target is not given is left out of
+        # the restore by its own entry in the dump's list: a foreign key
+        # into one stopped the move after its rows were in, a function
+        # reading one before they were
+        entries = {x["entry"]: x for x in left if not x["view"]}
+        dropped = []
+        if entries:
+            text, dropped = _toc_without(
+                _sh(["pg_restore", "-l", str(out)], env_s).stdout, entries)
+            if dropped:
+                listed.write_text(text)
+                load[-1:-1] = ["-L", str(listed)]
+        _schema_left_out(hop, db, section,
+                         [x for x in left if x["view"]] if section ==
+                         "pre-data" and whole else [],
+                         [entries[k] for k in dict.fromkeys(dropped)], log)
         # a target with no tables can still have the schemas, types or
         # extensions someone made ready for it; those are left as they are
         _restore(load, {**t.libpq_env(),
@@ -1354,6 +1664,153 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
                  log, "the schema", existing_ok=True)
     finally:
         out.unlink(missing_ok=True)
+        listed.unlink(missing_ok=True)
+
+
+#: What depends on the relations `{names}` lists, the routines
+#: `{routines}` lists (`schema.name`) and the triggers `{triggers}` lists
+#: (`schema.table.trigger`), at any depth: a view over one (by its rule), a
+#: function whose body reads one, a trigger calling such a function, a
+#: foreign key into one, a policy or rule naming one - as the class and
+#: number the dump's own list names each entry by, what PostgreSQL calls
+#: it, the view's name where it is one, the table a foreign key
+#: references, and whether it is one of those listed (1) or reads one (0)
+PG_DEPENDING_SQL = """
+with recursive gone(classid, objid, own) as (
+    select * from (
+        select 'pg_class'::regclass::oid, c.oid, true from pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname || '.' || c.relname
+               = any (string_to_array({names}, chr(31)))
+        union all
+        select 'pg_proc'::regclass::oid, p.oid, true from pg_proc p
+          join pg_namespace n on n.oid = p.pronamespace
+         where n.nspname || '.' || p.proname
+               = any (string_to_array({routines}, chr(31)))
+        union all
+        select 'pg_trigger'::regclass::oid, t.oid, true from pg_trigger t
+          join pg_class c on c.oid = t.tgrelid
+          join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname || '.' || c.relname || '.' || t.tgname
+               = any (string_to_array({triggers}, chr(31)))) listed
+    union
+    select case when v.oid is null then d.classid
+                else 'pg_class'::regclass::oid end,
+           coalesce(v.oid, d.objid), false
+      from gone g
+      join pg_depend d on d.refclassid = g.classid and d.refobjid = g.objid
+                      and d.deptype = 'n'
+      left join pg_rewrite r on d.classid = 'pg_rewrite'::regclass
+                            and r.oid = d.objid
+      left join pg_class v on v.oid = r.ev_class and r.rulename = '_RETURN'
+                          and v.relkind in ('v', 'm')
+     where d.classid in ('pg_rewrite'::regclass, 'pg_proc'::regclass,
+                         'pg_trigger'::regclass, 'pg_constraint'::regclass,
+                         'pg_policy'::regclass)
+       and coalesce(v.oid, 0::oid) <> g.objid
+)
+select distinct on (g.classid, g.objid) g.classid || ' ' || g.objid
+       || chr(31) || coalesce(pg_describe_object(g.classid, g.objid, 0), '')
+       || chr(31) || coalesce((select n.nspname || '.' || c.relname
+                                 from pg_class c
+                                 join pg_namespace n
+                                   on n.oid = c.relnamespace
+                                where g.classid = 'pg_class'::regclass
+                                  and c.oid = g.objid
+                                  and c.relkind in ('v', 'm')), '')
+       || chr(31) || coalesce((select k.confrelid::regclass::text
+                                 from pg_constraint k
+                                where g.classid = 'pg_constraint'::regclass
+                                  and k.oid = g.objid
+                                  and k.contype = 'f'), '')
+       || chr(31) || g.own::int
+  from gone g
+ where g.classid <> 'pg_class'::regclass
+    or exists (select 1 from pg_class c where c.oid = g.objid
+                                          and c.relkind in ('v', 'm'))
+ order by g.classid, g.objid, g.own desc"""
+
+
+def _pg_depending(hop, db, gone, routines=(), triggers=()):
+    """[{"entry", "said", "view", "references", "own"}] of the source's
+    objects the target is not given: what depends on the relations `gone`
+    (`schema.table`) - tables the hop leaves out, or the pair's copier
+    makes later under another name, and views its `objects` does not
+    take - and the `routines` and `triggers` its `objects` does not take,
+    with what depends on those. `own` is one the hop does not take itself;
+    `entry` the class and number the dump's list names it by
+    (`_toc_without`), `view` a view's name where it is one (left out of
+    the dump by name, its comments with it), and `references` the table a
+    foreign key points at."""
+    from .engines.postgres import PostgresEngine
+    got = PostgresEngine(hop)._psql("src", db, PG_DEPENDING_SQL.format(
+        names=_pg_literal(chr(31).join(gone)),
+        routines=_pg_literal(chr(31).join(routines)),
+        triggers=_pg_literal(chr(31).join(triggers))))
+    out = []
+    for line in got.splitlines():
+        entry, said, view, refs, own = (line.split("\x1f")
+                                        + ["", "", "", ""])[:5]
+        if entry:
+            out.append({"entry": entry, "said": said, "view": view,
+                        "references": refs, "own": own == "1"})
+    return out
+
+
+#: one entry of a dump's list: its number, then the class and number of
+#: the object it makes
+_TOC_ENTRY = re.compile(r"^\s*\d+;\s+(?P<cls>\d+)\s+(?P<oid>\d+)\s")
+
+
+def _toc_without(listing, entries):
+    """(the dump's list with `entries` - "class number" - commented out,
+    the ones it held). The restore reads only the lines left: `;` begins
+    a comment there, which is how its own documentation leaves an entry
+    out."""
+    out, dropped = [], []
+    for line in listing.splitlines():
+        m = _TOC_ENTRY.match(line)
+        key = f"{m.group('cls')} {m.group('oid')}" if m else None
+        if key in entries:
+            dropped.append(key)
+            line = ";" + line
+        out.append(line)
+    return "\n".join(out) + "\n", dropped
+
+
+def _schema_left_out(hop, db, section, views, entries, log=None):
+    """Say what the schema step left out of the target, and why: in the
+    run's words and in its decision record, which is part of the
+    evidence - a foreign key named with the table it points at, so the
+    reader knows which reference the target does not enforce."""
+    if not views and not entries:
+        return
+    from . import decide
+    every = list(views) + list(entries)
+    groups = (
+        ([x for x in every if x["references"] and not x["own"]],
+         "foreign keys are not made on the target - each refers to a table"
+         " the hop does not take, or one the table copier makes later under"
+         " another name"),
+        ([x for x in every if x["own"]],
+         "objects the hop does not take are not made there"),
+        ([x for x in every if not x["references"] and not x["own"]],
+         "objects that read a table or an object the target is not given"
+         " are not made there"))
+    said = [f"{x['said']} -> {x['references']}" if x["references"]
+            else x["said"] for group, _ in groups for x in group]
+    if log:
+        for group, words in groups:
+            if group:
+                named = [f"{x['said']} -> {x['references']}"
+                         if x["references"] else x["said"] for x in group]
+                log(f"{db}: {len(group)} {words}: " + "; ".join(named[:8])
+                    + (" ..." if len(group) > 8 else ""))
+    decide.record(hop, {"work": f"the schema of {db} ({section})",
+                        "left out": said},
+                  work=f"the schema of {db}", way="left out of the schema",
+                  reason="the hop does not take them, or they depend on what"
+                         " the target is not given")
 
 
 def _pg_created_path(hop, db):
@@ -1416,19 +1873,23 @@ PG_REFERENCES_SQL = """
 
 def _pg_references_into(hop, db, routed=()):
     """The target's foreign keys into a table the streaming copy would
-    empty - every table in scope but the ones routed to the table copier -
-    as `referenced <- referencing`. [] when there are none, or when the
-    target cannot be asked (the copy then says for itself)."""
+    empty - every table it fills (`_pg_fills`) but the ones routed to the
+    table copier - as `referenced <- referencing`. [] when there are none,
+    or when the target cannot be asked (the copy then says for itself).
+    Each name split the one way names are: the catalogue quotes a name
+    with case, and its quotes were taken for part of it."""
+    from .util import split_table
     try:
         raw = _pg_psql(hop, db, PG_REFERENCES_SQL)
+        fills = _pg_fills(hop, db)
     except Exception:
         return []
+    away = {split_table("postgres", str(n), "public") for n in routed}
     out = []
     for line in raw.splitlines():
         ref, _, by = line.partition(chr(31))
-        if not by or ref in routed:
-            continue
-        if hop.excluded(db, *ref.replace('"', "").split(".", 1)):
+        if not by or split_table("postgres", ref, "public") in away \
+                or not fills(ref):
             continue
         out.append(f"{ref} <- {by}")
     return sorted(set(out))
@@ -1495,6 +1956,21 @@ def _pg_quiet_triggers(hop, db, tables):
         " service's admin user.")
 
 
+def _pg_sequences_left_out(hop, db):
+    """The source's sequences the hop does not take, as `schema.sequence`
+    (`PostgresEngine._seq_left_out`): a dump of the data alone still writes
+    the value of a serial's sequence whose table it was told to leave out -
+    it dumps a sequence its table owns with that table's flags and its own
+    - so the counter of a table the target writes itself was set back to
+    the source's. Left out of the dump by name; the carry after it leaves
+    them too (`_pg_carry_sequences`)."""
+    from .engines.postgres import PostgresEngine
+    eng = PostgresEngine(hop)
+    names = [line.rpartition("|")[0] for line in
+             eng._psql("src", db, eng.SEQ_Q).splitlines() if "|" in line]
+    return sorted(eng._seq_left_out("src", db, names))
+
+
 def _pg_carry_sequences(hop, db, log=None):
     """Set the target's sequences from the source's after a copy that
     carries rows and not sequences.
@@ -1504,8 +1980,9 @@ def _pg_carry_sequences(hop, db, log=None):
     `duplicate key ... Key (id)=(1) already exists`. The copy program's own
     sequence command, run on its own, read 0 sequences and reset the
     target's. The engine's sequence repair decides the value instead - the
-    source's, never below a row the target holds - and refuses a target
-    already ahead of the source, which it says.
+    source's, never below a row the target holds, never below where the
+    target's counter stands, and only of the tables the hop takes - and
+    refuses a target already ahead of the source, which it says.
     """
     from .engines.postgres import PostgresEngine
     eng = PostgresEngine(hop)
@@ -1597,9 +2074,17 @@ class _MyTriggerWindow:
                            " from information_schema.triggers"
                            " where trigger_schema = %s", (self.tdb,))
         there = {str(r[0]) for r in on}
+        # the whole database's load writes only the tables it carries: a
+        # table the source does not have kept its triggers off for a load
+        # that never reached it, while its own application wrote to it
+        from .engines import ALIASES
+        whole = (self.tables is None and on and ALIASES.get(
+            self.hop.engine, self.hop.engine) == "mysql")
+        tables = (set(_my_carried(self.hop, self.db, eng)) if whole
+                  else self.tables)
         rows = [r for r in on
-                if not self.hop.excluded(self.db, str(r[1]))
-                and (self.tables is None or str(r[1]) in self.tables)]
+                if eng.in_scope(self.db, str(r[1]))
+                and (tables is None or str(r[1]) in tables)]
         # what a load that died took off: back at the end of this one,
         # whichever tables this one writes. Held by a running one: off, as
         # this load needs them, and that one puts them back.
@@ -1724,10 +2209,14 @@ class _MyIndexWindow:
                 "dst", "select distinct table_name, index_name from"
                        " information_schema.statistics"
                        " where table_schema = %s", (ddb,))}
+            # the whole database's load: only the tables it fills
+            filled = (set(_my_carried(self.hop, self.db, self.eng))
+                      if rows and not self.table else None)
         except Exception:
             return self
-        rows = _outside_exclusion(self.hop, self.db, list(rows), self.log,
-                                  qualifier=self.db)
+        rows = _outside_exclusion(
+            self.hop, self.db, list(rows), self.log, qualifier=self.db,
+            fills=None if filled is None else (lambda t: t in filled))
         if self.table:
             # one table's copy, and its unique indexes stay (as PostgreSQL's)
             rows = [r for r in rows
@@ -1820,7 +2309,7 @@ class _MyIndexWindow:
             self.record.done()
 
 
-def excluded_tables(hop, db, tables, qualifier="public"):
+def excluded_tables(hop, db, tables, qualifier="public", roots=None):
     """The hop's excluded tables as concrete `schema.table` names.
 
     One resolution for every mover, and the reason is that the alternative
@@ -1839,19 +2328,75 @@ def excluded_tables(hop, db, tables, qualifier="public"):
     Another tool's bookkeeping is among them whether or not the hop
     excludes anything (`leftovers.bookkeeping`, through `hop.excluded()`):
     it is not the application's to carry.
+
+    `roots` is {partition: its root} of a PostgreSQL side (`_pg_roots`): a
+    partition is left out exactly where its table is, which is what the
+    hop's patterns name. Each name is split the one way names are
+    (`util.split_table`), so `public."Audit.Log"` keeps its dot; it comes
+    back as it was given.
     """
     if not hasattr(hop, "excluded"):
         return []
+    from .util import split_table
     out = []
     for ident in sorted(tables):
-        parts = [p for p in str(ident).split(".") if p]
-        if hop.excluded(db, *parts):
-            out.append(".".join(parts) if len(parts) > 1
-                       else f"{qualifier}.{parts[0]}")
+        if hop.excluded(db, *_asked(hop, ident, roots)):
+            schema, _ = split_table(_names_engine(hop), str(ident))
+            out.append(str(ident) if schema else f"{qualifier}.{ident}")
     return out
 
 
-def pgcopydb_filters(hop, db, tables, also=()):
+def _names_engine(hop):
+    """The engine whose names the hop's tables carry (`Hop._names_engine`):
+    the source's, where a pair has an engine of its own."""
+    got = getattr(hop, "_names_engine", None)
+    return got() if callable(got) else str(getattr(hop, "engine", ""))
+
+
+def _asked(hop, name, roots=None):
+    """The parts every question the hop answers about table `name` is
+    asked with - left out or taken, its row filter, its columns, its name
+    on the target: its root's where it is a partition (`roots`, from
+    `_pg_roots`), its own otherwise, split the one way names are
+    (`util.split_table`). Each list split it at every dot, so a quoted
+    name's own dot made it two parts, and a partition matched none of the
+    rules written for its table."""
+    from .util import split_table
+    name = str((roots or {}).get(name, name))
+    return [p for p in split_table(_names_engine(hop), name) if p]
+
+
+def rules_by_name(hop):
+    """Whether the hop has a rule a partition's table's name answers and
+    its own may not: a scope (`config.scoped`), a row filter, a column
+    rule or a rename. Without one, a partition goes as itself, and its
+    root is never asked for."""
+    mapping = getattr(hop, "mapping", None) or {}
+    return bool(_scoped(hop) or mapping.get("where")
+                or mapping.get("columns") or renames_any(hop))
+
+
+def _pg_roots(hop, db, side="src", eng=None):
+    """{partition: its root} of one side's PostgreSQL database, each as
+    `schema.table` the way the move's lists name them, read from the one
+    reading of partitions (`PostgresEngine.partition_roots`): what every
+    list of a move hands `_asked`, so a partition is taken, left out,
+    filtered, mapped and renamed as its table is. {} for a hop with no
+    rule a root answers (`rules_by_name`)."""
+    if not rules_by_name(hop):
+        return {}
+    if eng is None:
+        from .engines.postgres import PostgresEngine
+        eng = PostgresEngine(hop)
+    out = {}
+    for table, root in eng.partition_roots(side, db).items():
+        a, b = ".".join(eng._split(table)), ".".join(eng._split(root))
+        if a != b:
+            out[a] = b
+    return out
+
+
+def pgcopydb_filters(hop, db, tables, also=(), roots=None):
     """`[exclude-table]` entries for what this hop already excludes, or None.
 
     `hop.exclude` is patterns - `audit_log`, `public.audit_log`,
@@ -1867,9 +2412,10 @@ def pgcopydb_filters(hop, db, tables, also=()):
 
     Until now `exclude` was honoured by the check and ignored by the mover,
     so an excluded table was copied and then never looked at. Filtering it
-    here means it is not carried at all.
+    here means it is not carried at all. A partition is named on its own
+    beside its table (`roots`): the filter file reads names, not trees.
     """
-    out = excluded_tables(hop, db, tables)
+    out = excluded_tables(hop, db, tables, roots=roots)
     # tables left to the table copier (`routed_to_copier`) are left out of
     # the bulk copy the same way
     out += [n for n in also if n not in out]
@@ -1953,10 +2499,10 @@ class client_defaults:
         return False
 
 
-def mydumper_session(hop, db, sections=None):
+def mydumper_session(hop, db, sections=None, tables=None):
     """The dump's defaults file: its session's sql_mode, then the hop's
-    row filters and the lines migkit adds per table (`sections`: the
-    chunk size, the masking).
+    row filters of the tables it dumps (`tables`) and the lines migkit
+    adds per table (`sections`: the chunk size, the masking).
 
     The dump writes its session's sql_mode at the head of every data file,
     and the load runs under it. Left to itself it takes the source's mode
@@ -1970,10 +2516,10 @@ def mydumper_session(hop, db, sections=None):
     from .engines.mysql import MySQLEngine
     return ("[mydumper_session_variables]\nsql_mode ="
             f" '{MySQLEngine.WRITE_SQL_MODE}'\n"
-            + (mydumper_defaults(hop, db, sections) or ""))
+            + (mydumper_defaults(hop, db, sections, tables) or ""))
 
 
-def mydumper_defaults(hop, db, sections=None):
+def mydumper_defaults(hop, db, sections=None, tables=None):
     """The hop's row filters as a mydumper defaults file, or None.
 
     `sections` is {table: [line]} more to say about a table - its chunk
@@ -1998,14 +2544,27 @@ def mydumper_defaults(hop, db, sections=None):
     A rule naming another database is skipped rather than applied to this
     one: `where` keys are right-anchored like every other name in the hop,
     so `orders` means this database's, and `other.orders` does not.
+
+    Each table's section holds the one filter the hop gives it
+    (`hop.row_filter`), the most particular key that names it, asked for
+    every table the dump takes (`tables`). Read off the keys, a table both
+    `orders` and `appdb.orders` named had two `where =` lines in its
+    section, and which the dump went by was its own business - not the
+    one the check compares with. Without `tables`, the tables the keys
+    name in this database.
     """
-    rules = (getattr(hop, "mapping", None) or {}).get("where") or {}
+    if tables is None:
+        rules = (getattr(hop, "mapping", None) or {}).get("where") or {}
+        tables = set()
+        for key in rules:
+            parts = [p for p in str(key).split(".") if p]
+            if len(parts) == 1 or parts[0] == db:
+                tables.add(parts[-1])
     per = {}
-    for key, predicate in sorted(rules.items()):
-        parts = [p for p in str(key).split(".") if p]
-        if len(parts) > 1 and parts[0] != db:
-            continue
-        per.setdefault(parts[-1], []).append(f"where = {predicate}")
+    for table in sorted(tables):
+        predicate = hop.row_filter(db, table)
+        if predicate:
+            per.setdefault(table, []).append(f"where = {predicate}")
     for table, more in (sections or {}).items():
         per.setdefault(table, []).extend(more)
     lines = ["[mydumper]"]
@@ -2013,6 +2572,48 @@ def mydumper_defaults(hop, db, sections=None):
         lines.append(f"[`{db}`.`{table}`]")
         lines += per[table]
     return "\n".join(lines) + "\n" if len(lines) > 1 else None
+
+
+def scope_alternatives(hop, db, with_db):
+    """(the expressions of the names the hop's `exclude` takes in database
+    `db`, those its `include` takes - or None where it takes the whole
+    database), each a part of one larger expression (`redisshake.glob_body`)
+    read the way `Hop.excluded` reads the pattern. `with_db`: a name is
+    `db.table`, as the parallel dump matches it; otherwise a name inside
+    the database, as the online sync matches a collection's.
+
+    For a program that reads patterns, so a table made under one while it
+    runs is taken or left out as the hop says: a list resolved before it
+    started missed it - and the online sync runs for days."""
+    from .config import name_matches, pattern_after
+    from .redisshake import glob_body
+    head = re.escape(f"{db}.")
+
+    def parts(p):
+        if with_db:
+            return [glob_body(p), head + glob_body(p)]
+        # a pattern written with the database, read after it
+        return [glob_body(p)] + [glob_body(r) for r in
+                                 pattern_after(p, f"{db}.") if r]
+    out = sorted({x for p in hop.exclude or () for x in parts(str(p))})
+    pats = [str(p) for p in getattr(hop, "include", None) or ()
+            if str(p).strip()]
+    if not pats or any(name_matches(db, p, hop.folds_case()) for p in pats):
+        return out, None
+    return out, sorted({x for p in pats for x in parts(p)})
+
+
+def _mydumper_regex(hop, db):
+    """The hop's scope as the parallel dump's one `--regex` over
+    `db.table`, or None where it leaves nothing out: no name `exclude`
+    takes, and - where `include` narrows the database - only a name it
+    takes."""
+    out, taken = scope_alternatives(hop, db, True)
+    if not out and taken is None:
+        return None
+    return ("(?s)^" + (f"(?!(?:{'|'.join(out)})$)" if out else "")
+            + ("" if taken is None else
+               f"(?:{'|'.join(taken) or NOTHING})$"))
 
 
 #: the long options an installed build really has, asked once per build
@@ -2070,29 +2671,89 @@ def _my_truncate_target(hop, db, log=None, spare=()):
 
     `spare` are tables a stopped load is going on with (`_shell_resumable`):
     what it loaded is kept, and it loads the rest.
+
+    Only what the move carries is emptied (`_my_carried`), under the name
+    the hop gives it there: every target table the hop did not exclude
+    was, so one the source does not have - the target's own - was emptied
+    and never refilled. A table under a row filter is not emptied whole:
+    the dump carries only the rows the filter selects, so only those are
+    deleted, and the rest - the target's own - stay, as the table copier
+    keeps them. Where the pair's copier carries it (`through_pair`), that
+    copier replaces the rows it selects itself.
     """
     from .engines.mysql import MySQLEngine
     eng = MySQLEngine(hop)
     names = eng._all_tables("dst", db)
     skip = set(excluded_tables(hop, db, names, qualifier=db))
-    keep = [n for n in names if f"{db}.{n}" not in skip
-            and n not in set(spare)]
-    if not keep:
+    carried = _my_carried(hop, db, eng)
+    from .config import OPS
+    keep, filtered, alone, some = [], {}, [], {}
+    for n in names:
+        src = carried.get(n)
+        if src is None:
+            if f"{db}.{n}" not in skip:
+                alone.append(n)
+            continue
+        if n in set(spare):
+            continue
+        rf = hop.row_filter(db, *_asked(hop, src))
+        if hop.carries(db, *_asked(hop, src)) != frozenset(OPS):
+            some[n] = rf
+        if rf:
+            if not eng.through_pair(db, src):
+                filtered[n] = rf
+            continue
+        keep.append(n)
+    if not keep and not filtered:
         return []
     ddb = eng._quote_ident(eng._d("dst", db))
+    _refuse_kept_rows([n for n in keep + sorted(filtered) if n in some and
+                       eng._q("dst", f"select 1 from {ddb}"
+                                     f".{eng._quote_ident(n)}"
+                              + (f" where {some[n]}" if some[n] else "")
+                              + " limit 1")])
     stmts = ["set foreign_key_checks = 0"] + [
-        f"truncate table {ddb}.{eng._quote_ident(n)}" for n in keep]
+        f"truncate table {ddb}.{eng._quote_ident(n)}" for n in keep] + [
+        f"delete from {ddb}.{eng._quote_ident(n)} where {rf}"
+        for n, rf in sorted(filtered.items())]
     if log:
         from .wording import phase
         log(phase("empty", tables=len(keep), left_out=len(skip)))
+        if alone:
+            log(f"{len(alone)} tables only the target has are not emptied:"
+                " the source has none of them, so nothing would refill"
+                " them: " + ", ".join(alone[:6])
+                + (" ..." if len(alone) > 6 else ""))
+        if filtered:
+            log(f"{len(filtered)} tables the hop filters keep their rows"
+                " outside the filter: only the rows it selects are removed")
     conn = eng._conn("dst")
     try:
         with conn.cursor() as cur:
             for stmt in stmts:
                 cur.execute(stmt)
+        # a delete is kept only once committed; a truncate commits itself
+        conn.commit()
     finally:
         conn.close()
     return keep
+
+
+def _my_carried(hop, db, eng=None):
+    """{table on the target: the source's} of every table of `db` the move
+    carries, under the name the hop gives it there (`mapping.tables`): what
+    the step that empties the target and the windows that take its indexes
+    and triggers off reach. They reached every target table the hop did
+    not exclude - one only the target has was emptied and never refilled,
+    a renamed one was looked for under its old name."""
+    from .engines.mysql import MySQLEngine
+    eng = eng or MySQLEngine(hop)
+    out = {}
+    for t in eng._all_tables("src", db):
+        if eng.in_scope(db, t):
+            out[str(hop.target_table_in(db, *_asked(hop, t))
+                    ).rpartition(".")[2]] = t
+    return out
 
 
 def _my_missing_tables(hop, db):
@@ -2101,8 +2762,9 @@ def _my_missing_tables(hop, db):
     from .engines.mysql import MySQLEngine
     eng = MySQLEngine(hop)
     have = set(eng._all_tables("dst", db))
-    # a table whose columns the hop maps is built by the pair's copier,
-    # under the names and without the columns the mapping says
+    # a table whose columns the hop maps, or that it renames, is built by
+    # the pair's copier, under the names and without the columns the
+    # mapping says - made here, it stood under the source's name
     want = [t for t in eng._tables("src", db)
             if t not in have and not eng.through_pair(db, t)]
     gone = not have and not eng._q(
@@ -2151,6 +2813,16 @@ def _my_create_missing(hop, db, log=None):
     keeps_history = eng._brands()[1].name == "mariadb"
     plain = []
     from . import tableengine
+    # a foreign key into a table the target is not given - one the hop
+    # leaves out that the target lacks, or one the pair's copier makes
+    # later under another name - points at nothing there, or at the wrong
+    # table: made with the checks off it was taken, and refused the
+    # application's first row after the move
+    have = set(eng._all_tables("dst", db))
+    gone = {t for t in eng._all_tables("src", db)
+            if (not eng.in_scope(db, t) and t not in have)
+            or eng.through_pair(db, t)}
+    unmade = []
     for t in want:
         got = eng._q("src", f"show create table {src}.{eng._quote_ident(t)}")
         # in the engine the table changes to, where it changes one
@@ -2160,6 +2832,8 @@ def _my_create_missing(hop, db, log=None):
             ddl = re.sub(r"\s+WITH(OUT)? SYSTEM VERSIONING\b", "", ddl,
                          flags=re.I)
             plain.append(t)
+        ddl, keys = _my_without_keys(ddl, gone)
+        unmade += [f"{k} on {t} -> {p}" for k, p in keys]
         stmts.append(ddl)
     if log:
         from .wording import phase
@@ -2167,6 +2841,18 @@ def _my_create_missing(hop, db, log=None):
         for t in plain:
             log(f"{t}: made without its history - the target keeps none;"
                 " its rows as they are now are carried")
+    if unmade:
+        if log:
+            log(f"{db}: {len(unmade)} foreign keys are not made on the target"
+                " - each refers to a table the hop does not take, or one the"
+                " table copier makes later under another name: "
+                + "; ".join(unmade[:8]) + (" ..." if len(unmade) > 8 else ""))
+        from . import decide
+        decide.record(hop, {"work": f"the schema of {db}",
+                            "left out": unmade},
+                      work=f"the schema of {db}",
+                      way="left out of the schema",
+                      reason="they depend on tables the target is not given")
     conn = eng._conn("dst")
     try:
         with conn.cursor() as cur:
@@ -2175,6 +2861,32 @@ def _my_create_missing(hop, db, log=None):
     finally:
         conn.close()
     return want
+
+
+#: one foreign key of a `SHOW CREATE TABLE`, a line of its own: its name and
+#: the table it references, in this database or named with another
+_MY_FOREIGN_KEY = re.compile(
+    r"^\s*CONSTRAINT\s+`(?P<name>(?:[^`]|``)+)`\s+FOREIGN KEY\b.*?"
+    r"\bREFERENCES\s+(?:`(?P<db>(?:[^`]|``)+)`\.)?`(?P<parent>(?:[^`]|``)+)`",
+    re.I)
+
+
+def _my_without_keys(ddl, gone):
+    """(the `CREATE TABLE` `ddl` without its foreign keys into the tables
+    `gone` of its own database, [(key, table it referenced)]). The element
+    before the closing parenthesis loses the comma the one after it took
+    away."""
+    out, keys = [], []
+    for line in str(ddl).split("\n"):
+        m = _MY_FOREIGN_KEY.match(line)
+        parent = m.group("parent").replace("``", "`") if m else None
+        if m and not m.group("db") and parent in gone:
+            keys.append((m.group("name").replace("``", "`"), parent))
+            continue
+        if keys and line.startswith(")") and out:
+            out[-1] = out[-1].rstrip().removesuffix(",")
+        out.append(line)
+    return ("\n".join(out) if keys else ddl), keys
 
 
 #: One row per column of every foreign key inside one database, in key
@@ -2284,7 +2996,7 @@ def _my_tls(ep, program):
 
 
 def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None,
-                       logs=None, compress=False):
+                       logs=None, compress=False, regex=None):
     """The dump and load command lines, built once for the plan and the run.
 
     Neither carries a password. It used to go on as `-p<secret>`, attached,
@@ -2316,6 +3028,11 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None,
     sizing says); `--rows` per table sits in the defaults file
     (`my_chunk_rows`). `logs` is whether the target writes a binlog
     (`_my_target_logs`), asked once by the caller.
+
+    `regex` is the hop's scope as the dump reads a pattern
+    (`_mydumper_regex`), given where the installed build takes one: the
+    omitted list is resolved before the dump starts, and a table made
+    under an excluded pattern while it ran was dumped.
     """
     from .engines.mysql import MySQLEngine
     from .sizing import split
@@ -2334,6 +3051,8 @@ def _mydumper_commands(hop, db, workers, outdir, cnf=None, omit=None,
         dump += ["--defaults-file", str(cnf)]
     if omit:
         dump += [tool_flag("mydumper", "--omit-from-file"), str(omit)]
+    if regex and "--regex" in _long_options("mydumper"):
+        dump += ["--regex", regex]
     load = (["myloader", "-h", t.host, "-P", str(t.port), "-u", t.user]
             + _my_tls(t, "myloader")
             + ["-B", MySQLEngine(hop)._d("dst", db), "-d", str(outdir),
@@ -2481,6 +3200,10 @@ tooluse.register("mydumper", options=_features({
                               " filter, chunk size and masking"),
     "--omit-from-file": (USED, "the tables the hop excludes and those"
                                " another rung carries"),
+    "--regex": (USED, "the hop's exclude and include as one pattern over"
+                      " database.table (`_mydumper_regex`), so a table made"
+                      " under one while the dump runs is taken or left out"
+                      " as the hop says"),
     "--tables-list": (
         UNUSED, "the tables other rungs carry are left out by name instead,"
                 " so a table made on the source during the move is still"
@@ -3223,12 +3946,18 @@ def _shell_dumped_at(folder):
 
 def _shell_resumable(hop, db, tables, folder):
     """The kept record of a dump whose load stopped, when the next move can
-    go on from it: the dump finished, the same tables, and the source not
-    written to since - its binlog where the dump's snapshot left it. None
-    otherwise: a dump older than the source's last write would load
-    yesterday's rows over today's."""
+    go on from it: the dump finished, the same tables under the same scope,
+    and the source not written to since - its binlog where the dump's
+    snapshot left it. None otherwise: a dump older than the source's last
+    write would load yesterday's rows over today's, and one taken under
+    another row filter, columns or names (`Hop.scope_changed`) or other
+    values masked as they are written (`mask_rules`) would load what the
+    rules of then took into tables this hop fills otherwise."""
     rec = _read_json(_shell_resume_record(hop, db))
     if not rec or sorted(rec.get("tables") or []) != sorted(tables):
+        return None
+    if hop.scope_changed(rec) or ("masked" in rec and rec["masked"] != (
+            json.loads(json.dumps(mask_rules(hop, db))))):
         return None
     if not (folder / "@.done.json").exists():
         return None
@@ -3351,7 +4080,8 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         spec = my_chunk_rows((facts or {}).get(t), read_rate, workers)
         if spec:
             sections.setdefault(t, []).append(f"rows = {spec}")
-    settings = mydumper_session(hop, db, sections)
+    # each dumped table's own filter, the one the check compares with
+    settings = mydumper_session(hop, db, sections, tables=dump_tables)
     size = sum(int(((facts or {}).get(t) or {}).get("bytes") or 0)
                for t in dump_tables or ())
     import shutil
@@ -3362,7 +4092,7 @@ def mydumper_move(hop, db, workers, go, log, only=None):
     dump, load = _mydumper_commands(
         hop, db, workers, outdir, cnf,
         omit if skip or routed or shell_tables else None, logs=bool(logs),
-        compress=compress)
+        compress=compress, regex=_mydumper_regex(hop, db))
     # each side as many threads as carry it (`sizing.fit`)
     from .sizing import split
     reads, writes = split(hop, workers)
@@ -3486,7 +4216,9 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                         took[STREAM_COPY] = time.monotonic() - began
                         _write_json(_shell_resume_record(hop, db), {
                             "tables": sorted(shell_tables),
-                            "position": _shell_dumped_at(shell_dir)})
+                            "position": _shell_dumped_at(shell_dir),
+                            "scope_fingerprint": hop.scope_fingerprint(),
+                            "masked": mask_rules(hop, db)})
                     else:
                         shell_tables = []
                 elif log:
@@ -3558,8 +4290,13 @@ def mydumper_move(hop, db, workers, go, log, only=None):
             # the load's own count, which an exit code of 0 does not rule
             # out
             raise RuntimeError(f"the load counted {int(errors):,} errors")
+        # a filtered table keeps the target's own rows outside its filter
+        # (`_my_truncate_target`), and the load sums the whole table: held
+        # by the digest that follows, which reads both sides through it
+        own = {t for t in sums if hop.row_filter(db, t)}
         differ = sorted(
-            [t for t, (a, b) in sums.items() if a != b and t not in rules]
+            [t for t, (a, b) in sums.items() if a != b and t not in rules
+             and t not in own]
             + list(shell_reader.sums if shell_reader else ()))
         if differ:
             raise SystemExit(
@@ -3760,15 +4497,20 @@ def mongodump_move(hop, db, workers, go, log):
     and out of the restore as well, so the drop cannot reach them. And the
     restore wrote to the source's database name whatever the hop's
     `db_map` said.
+
+    A collection the hop renames (`mapping.tables`) is restored under its
+    new name, its own pair of names ahead of the database's - the restore
+    takes the first pair a name matches: it was restored under the
+    source's name, and the one the hop names stayed empty.
     """
     from .wording import Step, phase
     s, t = hop.source, hop.target
-    skip, unresolved = [], ""
-    if getattr(hop, "exclude", None):
+    skip, renamed, unresolved = [], {}, ""
+    if _scoped(hop) or renames_any(hop):
         try:
-            from .engines.mongodb import MongoEngine
-            names = MongoEngine(hop)._client("src")[db].list_collection_names()
-            skip = sorted(n for n in names if hop.excluded(db, n))
+            names, skip = _mongo_left_out(hop, db)
+            renamed = {n: hop.target_table_in(db, n) for n in names
+                       if n not in skip and _renamed(hop, db, [n])}
         except Exception as e:
             unresolved = (str(e).strip().splitlines()[0][:100] if str(e)
                           else type(e).__name__)
@@ -3781,6 +4523,9 @@ def mongodump_move(hop, db, workers, go, log):
     restore = ["mongorestore", f"--uri={_mongo_uri(t)}", "--archive",
                "--drop", "--bypassDocumentValidation", f"--nsInclude={db}.*",
                *[f"--nsExclude={db}.{n}" for n in skip],
+               *[a for n, there in renamed.items()
+                 for a in (f"--nsFrom={_ns(db, n)}",
+                           f"--nsTo={_ns(tdb, there)}")],
                *([f"--nsFrom={db}.*", f"--nsTo={tdb}.*"] if tdb != db
                  else []),
                f"--numParallelCollections={workers}"]
@@ -3798,6 +4543,29 @@ def mongodump_move(hop, db, workers, go, log):
     with _MongoSecrets(s, t) as files:
         return _mongo_piped(db, dump + files["src"], restore + files["dst"],
                             log, steps, (s.password, t.password))
+
+
+def _ns(db, name):
+    """`db.name` as the restore reads a namespace it renames: its own
+    wildcard and variable characters (`*`, `$`) and its escape taken as
+    themselves."""
+    def bare(x):
+        return re.sub(r"([\\*$])", r"\\\1", str(x))
+    return f"{bare(db)}.{bare(name)}"
+
+
+def _mongo_left_out(hop, db):
+    """(the source database's collections, the ones the hop leaves out),
+    each asked the one scope question (`Engine.takes`): a collection by
+    its name, a view by its name and the hop's `objects` - a view the
+    hop's `objects` leaves out was dumped and restored, and synced."""
+    from .engines.mongodb import MongoEngine
+    eng = MongoEngine(hop)
+    got = list(eng._client("src")[db].list_collections())
+    names = sorted(str(c["name"]) for c in got)
+    views = {str(c["name"]) for c in got if c.get("type") == "view"}
+    return names, [n for n in names
+                   if not eng.takes(db, "view" if n in views else "table", n)]
 
 
 class _MongoSecrets:
@@ -3834,8 +4602,9 @@ class _MongoSecrets:
 def _mongosync_unfit(hop):
     """Why the online sync cannot carry this hop, or None.
 
-    It keeps each database's name, needs both sides to be a replica set
-    or sharded cluster of MongoDB 6.0 or later, and reads no row filter.
+    It keeps each database's name and each collection's, needs both sides
+    to be a replica set or sharded cluster of MongoDB 6.0 or later, and
+    reads no row filter.
     Asked of the servers, once; one that cannot be asked is a reason.
 
     And it is licensed for MongoDB Atlas and Enterprise Advanced
@@ -3849,6 +4618,11 @@ def _mongosync_unfit(hop):
     if any(hop.target_db(d) != d for d in (hop.databases or [])) or any(
             k != v for k, v in (hop.db_map or {}).items()):
         return "the online sync keeps each database's name, and the hop maps one"
+    if renames_any(hop):
+        # it wrote a renamed collection under the source's name, and the
+        # one the hop names on the target stayed empty
+        return ("the online sync keeps each collection's name, and the hop"
+                " renames one")
     from .engines.mongodb import MongoEngine
     eng = MongoEngine(hop)
     for side, label in (("src", "source"), ("dst", "target")):
@@ -3904,7 +4678,7 @@ def _riotx_unfit(hop):
                 " Redis Community Edition, Redis Cloud or Redis Software,"
                 " and the target is not known to be one (redis_product:"
                 " community, cloud or software on the target, where it is)")
-    if getattr(hop, "exclude", None):
+    if _scoped(hop):
         return ("the hop leaves keys out, and the Redis products' own copy"
                 " tool takes one pattern of keys to carry")
     from .engines.redis import RedisEngine
@@ -4001,20 +4775,16 @@ def mongosync_move(hop, db, workers, go, log):
     is readable by this user only and removed when it ends."""
     from .wording import Step, phase
     skip, unresolved = [], ""
-    if getattr(hop, "exclude", None):
+    if _scoped(hop):
         try:
-            from .engines.mongodb import MongoEngine
-            names = MongoEngine(hop)._client("src")[db].list_collection_names()
-            skip = sorted(n for n in names if hop.excluded(db, n))
+            skip = _mongo_left_out(hop, db)[1]
         except Exception as e:  # noqa: BLE001 - said, and refused below
             unresolved = (str(e).strip().splitlines()[0][:100] if str(e)
                           else type(e).__name__)
     port = _free_port()
     start = {"source": "cluster0", "destination": "cluster1",
-             "preExistingDestinationData": True,
-             "includeNamespaces": [{"database": db}]}
-    if skip:
-        start["excludeNamespaces"] = [{"database": db, "collections": skip}]
+             "preExistingDestinationData": True}
+    start.update(mongosync_filters(hop, db, skip))
     sync = Step(phase("sync", left_out=len(skip)),
                 ["mongosync", "--config", "<private file>", "--port", port])
     steps = [sync]
@@ -4069,6 +4839,53 @@ def mongosync_move(hop, db, workers, go, log):
                 # stopped part way, it is stopped with what it started
                 proc.stop(grace=30)
     return steps
+
+
+#: the online sync's first build that reads a pattern of collections
+#: (`collectionsRegex`); an older one is told the names resolved at its
+#: start
+MONGOSYNC_PATTERNS = "1.6"
+
+#: an expression that takes no name, in every dialect the programs read
+NOTHING = r"\b\B"
+
+
+def _taken_by(alternatives, name):
+    """Whether `name` is one the expressions `alternatives` take."""
+    return bool(alternatives) and re.fullmatch(
+        "(?s:" + "|".join(alternatives) + ")", name) is not None
+
+
+def mongosync_filters(hop, db, skip):
+    """The online sync's `includeNamespaces` and `excludeNamespaces` for
+    database `db`: the hop's patterns as the sync's own patterns of
+    collections (`scope_alternatives`), where the installed build reads
+    them, with the collections left out for another reason - migkit's
+    own, another tool's - named in them; the names resolved at its start
+    (`skip`) otherwise.
+
+    The sync runs online until it is committed, days on a large source.
+    Told only those names, it synced a collection made under an excluded
+    pattern after it started - into a target that may own one by that
+    name - and every collection made outside an included one."""
+    out = {"includeNamespaces": [{"database": db}]}
+    if not _scoped(hop) or toolversion.older(program_version("mongosync"),
+                                             MONGOSYNC_PATTERNS):
+        if skip:
+            out["excludeNamespaces"] = [{"database": db,
+                                         "collections": list(skip)}]
+        return out
+    left, taken = scope_alternatives(hop, db, False)
+    left = left + [re.escape(n) for n in skip if not _taken_by(left, n)
+                   and (taken is None or _taken_by(taken, n))]
+    if taken is not None:
+        out["includeNamespaces"] = [{"database": db, "collectionsRegex": {
+            "pattern": "^(?s:" + ("|".join(taken) or NOTHING) + ")$",
+            "options": ""}}]
+    if left:
+        out["excludeNamespaces"] = [{"database": db, "collectionsRegex": {
+            "pattern": "^(?s:" + "|".join(left) + ")$", "options": ""}}]
+    return out
 
 
 #: seconds a sync that can commit may go on not saying its lag before the
@@ -4664,8 +5481,11 @@ def pgcopydb_move(hop, db, workers, go, log):
         try:
             from .engines.postgres import PostgresEngine
             tables = PostgresEngine(hop)._all_tables("src", db)
-            routed = routed_to_copier(hop, db, "pgcopydb", tables)
-            text = pgcopydb_filters(hop, db, tables, also=routed)
+            roots = _pg_roots(hop, db)
+            routed = routed_to_copier(hop, db, "pgcopydb", tables,
+                                      roots=roots)
+            text = pgcopydb_filters(hop, db, tables, also=routed,
+                                    roots=roots)
         except Exception as e:
             text = None
             unresolved = (str(e).splitlines()[-1][:70] if str(e)
@@ -4679,7 +5499,7 @@ def pgcopydb_move(hop, db, workers, go, log):
                             " the source")
             if routed:
                 filters_note += "\n" + _routed_note(routed)
-    resume = stopped_split = False
+    resume = stopped_split = other_scope = False
     # the blocking questions first, so the ones asked beside them have had
     # as long as these took
     blocked = (_pg_references_into(hop, db, routed) if go else
@@ -4715,7 +5535,12 @@ def pgcopydb_move(hop, db, workers, go, log):
             # cut a table in parts does not go on at all (`_Split.keep`)
             kept = _Split.resumed(begun) or split
             stopped_split = kept.way == "split"
-            resume = not stopped_split
+            # nor one begun under another scope: what it finished was
+            # chosen, filtered and named by the scope of then, and going
+            # on skips emptying the tables now taken
+            from .decide import remembered
+            other_scope = hop.scope_changed(remembered(begun, "scope"))
+            resume = not stopped_split and not other_scope
             split = kept if resume else split
         args = ["copy", "table-data", "--dir", str(work), "--source", src,
                 "--target", dst,
@@ -4800,13 +5625,20 @@ def pgcopydb_move(hop, db, workers, go, log):
                 " way through a table it was copying in parts, and a"
                 " copy cut that way cannot be gone on from without"
                 " losing rows; it starts over")
+        elif other_scope and log:
+            log("an earlier streaming copy of this database stopped part"
+                " way under another scope than the hop's now, and what it"
+                " finished was taken under that one; it starts over")
         _pg_truncate_target(hop, db, log)
         if how == "local":
             import shutil
+            from .decide import remember
             shutil.rmtree(work, ignore_errors=True)
             work.mkdir(parents=True)
             begun.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
             split.keep(begun)
+            # the scope it begins under, beside the record that it began
+            remember(begun, "scope", hop.scope_fingerprint())
     with _IndexWindow(hop, db, workers, log):
         if log:
             log(copy)
@@ -5294,12 +6126,20 @@ def stream_ways():
         return Need(f"{way} measured, or the way before it unable to run",
                     lambda f: holds(f) or f["costs"].get(way) is not None,
                     why)
+    # what the hop asks of its tables that the servers' own replication,
+    # which applies whole rows under the source's names, cannot do: its
+    # tables are then followed by migkit's own tail (`by_pair`), which
+    # reads the mapping and the scope in one place
+    as_they_are = Need("the hop's tables carried as they are",
+                       lambda f: not f.get("own_refused"),
+                       lambda f: f["own_refused"])
     return (
         Rung("follow", "the change leg run from here",
              needs=(pg, Need("the target unable to dial the source",
                              lambda f: follow_selected() == "follow",
                              "the target can dial the source, so its own"
-                             " replication carries the changes")),
+                             " replication carries the changes"),
+                    as_they_are),
              because="the target cannot dial the source, and the leg"
                      " connects out to both from here",
              footprint=1),
@@ -5308,6 +6148,7 @@ def stream_ways():
                              lambda f: follow_selected() != "follow",
                              "the target cannot dial the source"
                              " (MIGKIT_CDC=follow)"),
+                    as_they_are,
                     # asked last: it reads the source's publication
                     Need("a source that takes tables into its publication"
                          " without losing their changes",
@@ -5315,15 +6156,18 @@ def stream_ways():
                          lambda f: f["publication_risk"])),
              because="the servers' own replication, nothing running here"),
         Rung("tail", "migkit's own change tail",
-             needs=(Need("a change tail", lambda f: f["tail"],
+             needs=(Need("a change tail",
+                         lambda f: f["tail"] or f.get("by_pair"),
                          "{rung} does not read this engine's log"),
-                    Need("its driver", lambda f: f["ready"],
+                    Need("its driver",
+                         lambda f: f["ready"] or f.get("by_pair"),
                          "the change tail needs a driver this machine does"
                          " not have"),
                     unless_measured(
                         "tail", lambda f: not (f["engine"] == "postgres"
                                                and f["repl"])
-                        or bool(f.get("publication_risk")),
+                        or bool(f.get("publication_risk"))
+                        or bool(f.get("by_pair")),
                         "a PostgreSQL source's changes go by its servers'"
                         " replication or the leg run from here")),
              because="read and applied by migkit, by key, with every batch"
@@ -5336,7 +6180,8 @@ def stream_ways():
                         "replica", lambda f: not f["ready"],
                         "the change tail runs here, and applies by key"
                         " where a replica stops on a row the copy already"
-                        " carried"))),
+                        " carried"),
+                    as_they_are)),
         # its log is a source-available broker: started only once its
         # terms are accepted on this machine, and taken down whatever
         # they are, since a pipeline already running is the operator's
@@ -5358,7 +6203,8 @@ def stream_ways():
 PIPELINE_SAID = "migkit's streaming pipeline"
 
 
-def stream_way(hop, engine, repl, tail, ready, drop=False, risk=None):
+def stream_way(hop, engine, repl, tail, ready, drop=False, risk=None,
+               refused=None, by_pair=None):
     """The `decide.Choice` of the way this hop's changes follow its source,
     from what the engine has (`repl`: its servers' replication, `tail`:
     migkit's change tail, `ready`: the tail's driver installed) and what
@@ -5366,13 +6212,17 @@ def stream_way(hop, engine, repl, tail, ready, drop=False, risk=None):
     being taken down rather than set up. `risk()`, where given, says why
     the servers' own replication would lose a table's changes here
     (`PostgresEngine.publication_add_risk`), read only if that way is
-    still in the running."""
+    still in the running; `refused()` why it would carry the hop's tables
+    wrongly, and `by_pair()` whether migkit's own tail then follows them
+    (`cli._own_refused`)."""
     from .decide import climb
-    facts = stream_facts(hop, engine, repl, tail, ready, drop, risk)
+    facts = stream_facts(hop, engine, repl, tail, ready, drop, risk,
+                         refused, by_pair)
     return climb(hop.name, stream_ways(), facts, costs=facts["costs"])
 
 
-def stream_facts(hop, engine, repl, tail, ready, drop=False, risk=None):
+def stream_facts(hop, engine, repl, tail, ready, drop=False, risk=None,
+                 refused=None, by_pair=None):
     """What `stream_ways`' needs read, as `stream_way` climbs them and as
     `decide.attempt` runs them (`cli._cdc`): one reading of the hop."""
     from .decide import Facts, HopCosts
@@ -5380,7 +6230,9 @@ def stream_facts(hop, engine, repl, tail, ready, drop=False, risk=None):
                   "ready": bool(ready), "costs": HopCosts(hop, "cdc/"),
                   "drop": bool(drop)},
                  broker=lambda: tooluse.allowed("redpanda", hop),
-                 publication_risk=risk or (lambda: ""))
+                 publication_risk=risk or (lambda: ""),
+                 own_refused=refused or (lambda: ""),
+                 by_pair=by_pair or (lambda: False))
 
 
 def _target_writes(hop, db):
@@ -5505,19 +6357,24 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
                     " again")
     # the tables the hop excludes are the target's own, and a stream that
     # carried their source's changes would overwrite what the move left
-    # alone; and a table the hop filters or renames cannot be carried by a
-    # stream that applies whole rows under their own names
-    if _routes_any(hop, db) or hop.table_map():
+    # alone; and a table the hop filters, renames or carries only some
+    # changes of cannot be carried by a stream that applies whole rows
+    # under their own names
+    if _routes_any(hop, db) or hop.table_map() or \
+            (hop.mapping or {}).get("ops"):
         tables = (eng._all_tables("src", db) if go else
                   _within(lambda: eng._all_tables("src", db)))
         if tables is None:
             steps.append("the tables the hop excludes are resolved against"
                          " the source when the leg starts")
         else:
-            refused = stream_cannot_carry(hop, db, tables)
+            # a partition goes as its table goes (`_pg_roots`)
+            roots = _pg_roots(hop, db, eng=eng)
+            refused = stream_cannot_carry(
+                hop, db, sorted({roots.get(t, t) for t in tables}))
             if refused:
                 raise SystemExit(cannot_carry_words(refused))
-            text = pgcopydb_filters(hop, db, tables)
+            text = pgcopydb_filters(hop, db, tables, roots=roots)
             if text:
                 ini = hop.report_dir(db) / "follow-filters.ini"
                 ini.write_text(text)
@@ -5594,12 +6451,13 @@ def _seed_origin(eng, db, origin, lsn):
     there, and advanced only where it holds no progress yet: a leg that
     ran before moved it on, and it is never set back."""
     name = origin.replace("'", "''")
-    tdb = eng._d("dst", db)
-    eng._psql("dst", tdb, f"select pg_replication_origin_create('{name}')"
+    # the engine maps the target's name for this database itself; mapping
+    # it here as well asked a database the hop's `db_map` never named
+    eng._psql("dst", db, f"select pg_replication_origin_create('{name}')"
                           " where not exists (select 1 from"
                           " pg_replication_origin where roname ="
                           f" '{name}')")
-    eng._psql("dst", tdb, f"select pg_replication_origin_advance('{name}',"
+    eng._psql("dst", db, f"select pg_replication_origin_advance('{name}',"
                           f" '{lsn}') where pg_replication_origin_progress("
                           f"'{name}', false) is null")
 
@@ -5671,16 +6529,19 @@ def _follow_runs(hop):
 def _follow_until_asked(hop, db, d, env, proc, log=None):
     """A leg left applying until someone asks it to end - ctrl-c, a
     service manager's stop, or `tail.stop` beside the hop's position
-    (`tailctl`) - and then ended as a catch-up is: its end named at the
-    source's position of that moment, so what was written before the
-    request reaches the target. Marked running while it waits, for
-    `/metrics` and for a repair to see it; returns once the end is
-    named, for the caller to wait for the leg to reach it."""
+    (`tailctl`), or the end of the schedule's slot it runs in (audit
+    K14: it held the slot until `max_duration` cut it off) - and then
+    ended as a catch-up is: its end named at the source's position of
+    that moment, so what was written before the request reaches the
+    target. Marked running while it waits, for `/metrics` and for a
+    repair to see it; returns once the end is named, for the caller to
+    wait for the leg to reach it."""
     import signal
     import time as _t
 
-    from . import tailctl
+    from . import schedule, tailctl
     where = hop.report_dir(db)
+    ends = schedule.slot_end()
     asked = []
 
     def ask(*_):
@@ -5690,21 +6551,25 @@ def _follow_until_asked(hop, db, d, env, proc, log=None):
     except ValueError:
         before = None
     try:
-        with tailctl.Running(where):
+        with tailctl.Running(where, hop):
             if log:
                 log("the change leg applies until it is asked to end:"
-                    f" ctrl-c, or `tail.stop` in {where}")
+                    f" ctrl-c, or `tail.stop` in {where}"
+                    + (", or the schedule's slot ends" if ends else ""))
             try:
                 while proc.poll() is None and not asked \
-                        and not tailctl.stop_asked(where):
+                        and not tailctl.stop_asked(where) \
+                        and (ends is None or _t.time() < ends):
                     _t.sleep(2)
             except KeyboardInterrupt:
                 asked.append(True)
             if proc.poll() is not None:
                 return
             if log:
-                log("asked to end: the leg applies up to the source's"
-                    " position of now, then stops")
+                log(("asked to end" if asked or ends is None
+                     or _t.time() < ends else "the schedule's slot ended")
+                    + ": the leg applies up to the source's position of"
+                    " now, then stops")
             _follow_end(d, env, log)
     finally:
         if before is not None:
@@ -5774,24 +6639,32 @@ def _sentinel_set(d, env, args, why, log=None):
         log(f"change stream {why} set")
 
 
-def stream_cannot_carry(hop, db, tables, columns_left_out=False):
+def stream_cannot_carry(hop, db, tables, columns_left_out=False,
+                        ops_alike=False):
     """[(table, why)] for the tables of `db` a change stream that applies
     whole rows under their own names would carry wrongly - every one the
-    hop does not exclude and filters, renames, or maps the columns of.
+    hop does not exclude and filters, renames, maps the columns of, or
+    carries only some changes of (`mapping.ops`).
 
     Such a stream used to carry them anyway, and the check could not see
     it: `check` applies a row filter to both sides, so every row outside
     it that the stream wrote onto the target went unread. `columns_left_out`
-    says the stream can leave a table's columns out (`column.exclude.list`
+    says the stream can leave a table's columns out (`column.include.list`
     on the pipeline), which answers a kept or dropped column and nothing
-    else."""
-    out = []
+    else; `ops_alike` that it can leave the same changes out of every
+    table (`skipped.operations`), which answers a hop whose tables all
+    carry the same ones."""
+    from .config import OPS
+    out, alike = [], None
     for ident in tables:
         parts = [p for p in str(ident).split(".") if p]
         if hop.excluded(db, *parts):
             continue
         name = ".".join(parts)
         cols = hop.column_rules(db, *parts)
+        carried = hop.carries(db, *parts)
+        if alike is None:
+            alike = carried
         if hop.row_filter(db, *parts):
             out.append((name, "its rows are filtered"))
         elif _renamed(hop, db, parts):
@@ -5800,15 +6673,38 @@ def stream_cannot_carry(hop, db, tables, columns_left_out=False):
             out.append((name, "its columns are renamed"))
         elif (cols.get("keep") or cols.get("drop")) and not columns_left_out:
             out.append((name, "its columns are kept or dropped"))
+        elif carried != frozenset(OPS) and not ops_alike:
+            out.append((name, "it carries only " + ", ".join(
+                f"{o}s" for o in OPS if o in carried)))
+        elif ops_alike and carried != alike:
+            out.append((name, "it carries other changes than the hop's"
+                              " other tables"))
     return out
+
+
+def renames_any(hop):
+    """Whether a rule of the hop's `mapping.tables` gives a table another
+    name: one naming a table by its own name (`orders: orders`, or the
+    last parts of it) renames nothing, and a hop with only such rules
+    goes every way it went without them."""
+    for k, v in ((getattr(hop, "mapping", None) or {}).get("tables")
+                 or {}).items():
+        to = str(v).split(".")
+        if to != str(k).split(".")[-len(to):]:
+            return True
+    return False
 
 
 def _renamed(hop, db, parts):
     """Whether the hop gives this table another name on the target: what
-    `target_table` answers, held against the same number of trailing parts
-    of its own name (a mapping of `orders` to `orders` renames nothing)."""
-    mapped = str(hop.target_table(db, *parts)).split(".")
-    return mapped != [db, *parts][-len(mapped):]
+    `target_table` answers, held against its own name and each of the
+    trailing names it answers to (a mapping of `orders` to `orders`
+    renames nothing). As whole names, not split at their dots: a table
+    `v1.orders` or a collection `fs.chunks` that no rule names read as
+    renamed, its parts counted against the dots of its own name."""
+    own = [str(p) for p in (db, *parts) if p not in (None, "")]
+    got = str(hop.target_table(db, *parts))
+    return all(got != ".".join(own[i:]) for i in range(len(own)))
 
 
 def cannot_carry_words(refused):
@@ -5894,7 +6790,7 @@ def _stream_facts(hop, dbs, src_is_mysql):
     tables, rows, size = {}, 0, 0
     # the names only where the hop has something to match against them;
     # the sizes only for as long as a plan waits for anything
-    named = bool(getattr(hop, "exclude", None) or hop.mapping)
+    named = bool(_scoped(hop) or hop.mapping)
     for one in dbs or ["postgres"]:
         try:
             tables[one] = eng._all_tables("src", one) if named else []
@@ -5902,7 +6798,7 @@ def _stream_facts(hop, dbs, src_is_mysql):
             tables[one] = None
         facts = _within(lambda one=one: eng.table_facts("src", one)) or {}
         for name, f in facts.items():
-            if hop.excluded(one, *str(name).split(".")):
+            if not hop.takes_table(one, name):
                 continue
             if f.get("rows") and f.get("bytes"):
                 rows += int(f["rows"])
@@ -5915,15 +6811,22 @@ def _stream_facts(hop, dbs, src_is_mysql):
     return tables, (size / rows if rows else None), rate
 
 
-def _stream_columns_left_out(hop, dbs, tables, src_is_mysql):
-    """`column.exclude.list` for the columns the hop keeps out, or None:
-    the ones it drops, and the ones outside what it keeps, as the
-    connector matches them - `schema.table.column` on PostgreSQL,
-    `database.table.column` on MySQL, dots escaped."""
+def _stream_columns_taken(hop, dbs, tables, src_is_mysql):
+    """`column.include.list` for a hop that keeps or drops columns, or
+    None: as the connector matches them - `schema.table.column` on
+    PostgreSQL, `database.table.column` on MySQL - a table it keeps
+    columns of takes those by name, one it drops columns of takes every
+    column but those, and every other table every column.
+
+    It was the columns left out, worked out once from the source's
+    columns of the moment: a column added later to a table the hop keeps
+    columns of was not on the list, and the stream carried it. The
+    connector takes one of the two lists; the kept ones are still matched
+    against the source's, a name it does not have refused."""
     from .engines.mysql import MySQLEngine
     from .engines.postgres import PostgresEngine
     eng = (MySQLEngine if src_is_mysql else PostgresEngine)(hop)
-    out = []
+    out, ruled = [], []
     for one in dbs or ["postgres"]:
         catalogue = None
         for ident in tables.get(one) or ():
@@ -5933,8 +6836,9 @@ def _stream_columns_left_out(hop, dbs, tables, src_is_mysql):
             rules = hop.column_rules(one, *parts)
             if not (rules.get("keep") or rules.get("drop")):
                 continue
-            qualified = ".".join([one] + parts if src_is_mysql else parts)
-            gone = list(rules.get("drop") or [])
+            table = _regex_name(".".join([one] + parts if src_is_mysql
+                                         else parts))
+            drop = list(rules.get("drop") or [])
             if rules.get("keep"):
                 if catalogue is None:
                     catalogue = eng.column_catalog("src", one)
@@ -5943,11 +6847,161 @@ def _stream_columns_left_out(hop, dbs, tables, src_is_mysql):
                     raise SystemExit(
                         f"{ident}: the columns the hop keeps could not be"
                         " matched against the source's, so the stream"
-                        " cannot be told which to leave out. Nothing has"
-                        " been started")
-                gone += [c for c in cols if c not in rules["keep"]]
-            out += [f"{qualified}.{c}".replace(".", "\\.") for c in gone]
-    return ",".join(sorted(set(out))) or None
+                        " cannot be told which to take. Nothing has been"
+                        " started")
+                keep = [c for c in rules["keep"] if c not in drop]
+                out.append(f"{table}\\.(?:"
+                           + "|".join(_regex_name(c) for c in keep) + ")")
+            else:
+                out.append(f"{table}\\.(?!(?:"
+                           + "|".join(_regex_name(c) for c in drop)
+                           + ")$)[^.]+")
+            ruled.append(table)
+    if not out:
+        return None
+    out.append("(?!(?:" + "|".join(ruled) + ")\\.[^.]+$).+")
+    return ",".join(out)
+
+
+def _regex_name(name):
+    """A name as a regular expression the connector reads that matches it
+    and nothing else: every character but a letter, a digit and `_`
+    escaped. A comma ends an entry of the connector's lists, so a name
+    holding one is refused."""
+    if "," in str(name):
+        raise SystemExit(f"{name}: a name holding a comma cannot be put on"
+                         f" {PIPELINE_SAID}'s lists, which a comma divides."
+                         " Nothing has been started")
+    return "".join(ch if ch.isalnum() or ch == "_" else "\\" + ch
+                   for ch in str(name))
+
+
+def _shell_regex(pattern):
+    """A hop's shell pattern (`config.name_matches`) as a regular
+    expression the connector reads: `*` any run, `?` one character, a
+    `[...]` class as itself, the rest as it is (`_regex_name`)."""
+    from .config import _shell_parts
+    out = []
+    for part in _shell_parts(pattern):
+        if part == "*":
+            out.append(".*")
+        elif part == "?":
+            out.append(".")
+        elif len(part) > 1:
+            body = part[1:-1]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out.append("[" + body.replace("\\", "\\\\") + "]")
+        else:
+            out.append(_regex_name(part))
+    return "".join(out)
+
+
+def _connector_takes(hop, db, patterns, mysql, include=False):
+    """A regular expression over the connector's name of a table -
+    `database.table` on MySQL, `schema.table` on PostgreSQL, whose
+    connector reads one database - for the tables of `db` that `patterns`
+    name as the hop reads them: right-anchored, so a pattern names a table
+    by its whole name or any end of it (`Hop.excluded`), and an `include`
+    pattern by its schema's or its database's too (`Hop.included`); one
+    written with the database is read after it (`config.pattern_after`).
+    None where they name none; `.*` where one names the whole database."""
+    from .config import has_wildcard, name_matches, pattern_after
+
+    def fits(r, dots):
+        # whether a pattern can name a name of that many dots
+        return has_wildcard(r) or r.count(".") == dots
+    alts = []
+    for p in patterns:
+        p = str(p)
+        if name_matches(db, p):
+            alts = [".*"]
+            break
+        after = [r for r in pattern_after(p, f"{db}.") if r]
+        if mysql:
+            # `table`, named with its database or without
+            alts += [_shell_regex(r) for r in after + [p] if fits(r, 0)]
+            continue
+        if include:
+            # its schema, named with the database or without
+            alts += [f"{_shell_regex(r)}\\..+" for r in after + [p]
+                     if fits(r, 0)]
+        # `schema.table`, with the database or without; `table`
+        alts += [_shell_regex(r) for r in after + [p] if fits(r, 1)]
+        if fits(p, 0):
+            alts.append(f"[^.]+\\.{_shell_regex(p)}")
+    if not alts:
+        return None
+    alts = list(dict.fromkeys(alts))
+    body = alts[0] if len(alts) == 1 else "(?:" + "|".join(alts) + ")"
+    return f"{_regex_name(db)}\\.{body}" if mysql else body
+
+
+def debezium_tables(hop, dbs, tables, mysql):
+    """The connector's table list for a hop that leaves anything out, by
+    the hop's own patterns, in every database it reads: where the hop
+    says what it takes, `table.include.list` of those, with what it
+    leaves out as a lookahead before each - the connector takes one of
+    the two lists; else `table.exclude.list` of what it leaves out. Both
+    hold, beside the patterns, the tables `hop.excluded` leaves out by a
+    rule of its own now (another tool's bookkeeping, migkit's own:
+    `debezium_exclude`) - by name, which is what they are known by.
+
+    It was the excluded tables of the first database alone, read once:
+    the second database's were streamed, and a table made later outside
+    what the hop takes, or under a pattern it leaves out, was streamed
+    and made on the target by the sink."""
+    out = []
+    taking = []
+    for one in dbs:
+        listed = tables.get(one)
+        gone = _connector_takes(hop, one, hop.exclude or [], mysql)
+        take = (_connector_takes(hop, one, hop.include, mysql, include=True)
+                if hop.include else ".*")
+        if take is None:
+            # a database the hop takes nothing of
+            continue
+        named = []
+        if listed is not None:
+            got = debezium_exclude(hop, one, listed,
+                                   one if mysql else "public")
+            # by name only those the patterns do not already leave out,
+            # and only among what they take
+            for n in got.split(",") if got else []:
+                plain = n.replace("\\.", ".")
+                if (gone and re.fullmatch(gone, plain)) or \
+                        not re.fullmatch(take, plain):
+                    continue
+                named.append(n)
+        leave = ([gone] if gone else []) + named
+        if not hop.include:
+            out += leave
+            continue
+        taking.append((f"(?!(?:{'|'.join(leave)})$)" if leave else "")
+                      + take)
+    if hop.include:
+        # a database it takes nothing of is left out whole
+        return {"table.include.list": ",".join(taking) or "(?!)"}
+    return {"table.exclude.list": ",".join(out)} if out else {}
+
+
+def _skipped_operations(hop, tables):
+    """`skipped.operations`: the changes the hop's `mapping.ops` leaves
+    out, where every table it carries leaves out the same
+    (`stream_cannot_carry` refuses a hop where not) - a delete left out
+    leaves a truncate out too, which takes away what a delete would -
+    else none."""
+    from .config import OPS
+    seen = {hop.carries(one, *hop.parts_of(t))
+            for one, listed in tables.items() for t in listed or ()
+            if hop.takes_table(one, t)}
+    if len(seen) != 1:
+        return "none"
+    carried = next(iter(seen))
+    out = [w for o, w in zip(OPS, "cud") if o not in carried]
+    if "delete" not in carried:
+        out.append("t")
+    return ",".join(out) or "none"
 
 
 def value_modes(mysql):
@@ -6016,11 +7070,28 @@ def stream_codegen(hop, dbs, engine):
       whose tables are quiet still lets the source's log go
     * snapshot progress on a notification topic, read back in migkit's
       words (`stream_progress`)
-    * the columns the hop keeps out left out at the source; a table the
-      hop filters or renames is refused (`stream_cannot_carry`) - the
-      pipeline would carry it whole under its own name
+    * the tables by the hop's own patterns (`debezium_tables`): what it
+      takes on the include list, what it leaves out as a lookahead before
+      it or on the exclude list - so a table made later is taken or left
+      by the rule that names it, in every database of the hop
+    * the columns the hop keeps taken by name (`column.include.list`), so
+      a column added later to a table it keeps columns of stays out; a
+      table the hop filters or renames is refused (`stream_cannot_carry`)
+      - the pipeline would carry it whole under its own name
+    * the changes the hop does not carry left out where every table
+      carries the same (`skipped.operations`), and refused where not
+    * one database, written into the hop's name for it on the target: the
+      sink writes into the one its address names, and every database's
+      tables went into the first's
     """
     from . import sizing
+    if len(dbs or ()) > 1:
+        raise SystemExit(
+            f"the hop moves {len(dbs)} databases ({', '.join(dbs[:4])}), and"
+            f" {PIPELINE_SAID} writes into the one database its sink is"
+            " given: every database's tables would land in the first's."
+            " Nothing has been started - follow one database a hop, or"
+            " with migkit's own change tail")
     out = hop.report_dir() / "stream"
     out.mkdir(parents=True, exist_ok=True)
     s, t = hop.source, hop.target
@@ -6038,7 +7109,8 @@ def stream_codegen(hop, dbs, engine):
                 " the hop maps cannot be matched against them. Nothing has"
                 " been started")
         refused += stream_cannot_carry(hop, one, listed or (),
-                                       columns_left_out=True)
+                                       columns_left_out=True,
+                                       ops_alike=True)
     if refused:
         raise SystemExit(cannot_carry_words(refused))
     buffers = sizing.stream_buffers(row_bytes, rate)
@@ -6069,7 +7141,7 @@ def stream_codegen(hop, dbs, engine):
             "notification.sink.topic.name": f"{name}-notifications",
             "provide.transaction.metadata": "true",
             "topic.transaction": TRANSACTION_TOPIC,
-            "skipped.operations": "none",
+            "skipped.operations": _skipped_operations(hop, tables),
             "event.processing.failure.handling.mode": "fail",
             "heartbeat.interval.ms": "60000",
             **value_modes(src_is_mysql),
@@ -6100,22 +7172,16 @@ def stream_codegen(hop, dbs, engine):
             # the same, from the source's own snapshot of transactions in
             # flight rather than from rows written into it
             source["config"]["read.only"] = "true"
-    # what the hop already excludes, kept out of the stream as well. The
-    # same resolution the bulk movers and `check` use, so a table nobody
-    # wants is not carried by the CDC leg either.
-    if getattr(hop, "exclude", None):
-        one = dbs[0] if dbs else "postgres"
-        listed = tables.get(one)
-        # a source that cannot be listed leaves the stream unfiltered
-        # rather than guessing at names; the README says so
-        skip = (debezium_exclude(hop, one, listed,
-                                 one if src_is_mysql else "public")
-                if listed is not None else None)
-        if skip:
-            source["config"]["table.exclude.list"] = skip
-    left_out = _stream_columns_left_out(hop, dbs, tables, src_is_mysql)
-    if left_out:
-        source["config"]["column.exclude.list"] = left_out
+    # what the hop takes and leaves out, by its own patterns: the same
+    # reading `check` makes (`Hop.included`, `Hop.excluded`), so a table
+    # nobody wants is not carried by the CDC leg either - one made later
+    # included
+    if _scoped(hop):
+        source["config"].update(debezium_tables(hop, dbs or ["postgres"],
+                                                tables, src_is_mysql))
+    taken = _stream_columns_taken(hop, dbs, tables, src_is_mysql)
+    if taken:
+        source["config"]["column.include.list"] = taken
     # the hop's TLS, as each connector takes it; the files it names are
     # given to the runtime read-only, at the same paths
     tls_src, files = _debezium_tls(s, src_is_mysql)
@@ -6132,7 +7198,9 @@ def stream_codegen(hop, dbs, engine):
             "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
             # every table's topic, and not the transactions' one beside them
             "topics.regex": f"{name}\\.(?!{TRANSACTION_TOPIC}$).*",
-            "connection.url": jdbc + (dbs[0] if dbs else "") + query,
+            # the database the hop maps the source's to on the target
+            "connection.url": jdbc + (hop.target_db(dbs[0]) if dbs else "")
+            + query,
             "connection.username": t.user,
             "connection.password": "${env:MIGKIT_TARGET_PASSWORD}",
             "insert.mode": "upsert",
@@ -6379,15 +7447,23 @@ def _debezium_account():
             " and the prefix the sink and the signals find its topics by")
     put(both, "tasks.max", UNUSED, _DEFAULT + " a source connector reads one"
         " change log in one task whatever this says")
-    put(both, "table.exclude.list", USED, "the tables the hop excludes, as"
-        " `hop.excluded` resolves them against the source, dots escaped")
-    put(both, "table.include.list", UNUSED, "the hop names what it leaves"
-        " out, not what it takes; one list is enough, and the connector"
-        " takes one of the two")
-    put(both, "column.exclude.list", USED, "the columns the hop keeps out -"
-        " the ones it drops and the ones outside what it keeps")
-    put(both, "column.include.list", UNUSED, "the columns the hop keeps out"
-        " go on the exclude list, which says the same with one list")
+    put(both, "table.exclude.list", USED, "a hop that says only what it"
+        " leaves out: its patterns as anchored expressions"
+        " (`debezium_tables`), so a table made later under one stays out,"
+        " and the tables another rule of `hop.excluded` leaves out now by"
+        " name")
+    put(both, "table.include.list", USED, "a hop that says what it takes:"
+        " its include patterns, in every database it reads, with what it"
+        " leaves out as a lookahead before them - the connector takes one"
+        " of the two lists, and the two are not the same list (a table made"
+        " later outside what the hop takes was streamed)")
+    put(both, "column.exclude.list", UNUSED, "the connector takes one of"
+        " the two lists, and a list of what is left out, read once, let a"
+        " column added later to a table the hop keeps columns of through;"
+        " the include list says it by name")
+    put(both, "column.include.list", USED, "the columns the hop carries:"
+        " the ones it keeps by name, every one but those it drops, every"
+        " column of the other tables (`_stream_columns_taken`)")
     put(both, "skip.messages.without.change", UNUSED, "a change to a column"
         " the hop keeps out still moves nothing on the target, applied or"
         " not; left at its default")
@@ -6459,9 +7535,10 @@ def _debezium_account():
         " can leave that topic out")
     put(both, "skipped.operations", USED, "`none`: its default leaves a"
         " source `TRUNCATE` out, and the target kept every row the source"
-        " had emptied. The hop has no filter of operations yet (a gap the"
-        " backlog lists); where it has one, what it leaves out goes"
-        " here")
+        " had emptied. Where every table the hop carries leaves the same"
+        " changes out (`mapping.ops`), those - and a truncate with a delete"
+        " (`_skipped_operations`); a hop whose tables leave out different"
+        " ones is refused (`stream_cannot_carry`)")
     put(both, "signal.enabled.channels", USED, "the log's own topic, so a"
         " table can be read again without a signalling table in the source")
     put(both, "signal.kafka.", USED, "the signal topic, the broker, and the"

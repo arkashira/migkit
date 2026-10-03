@@ -1,0 +1,110 @@
+{
+ "job": {
+  "id": "example-drs-job-0001",
+  "status": "INCRE_TRANSFER_STARTED",
+  "create_time": "2026-01-01T00:00:00Z",
+  "base_info": {
+   "name": "shop-to-cloud",
+   "job_type": "sync",
+   "engine_type": "mysql-to-mysql",
+   "job_direction": "up",
+   "task_type": "FULL_INCR_TRANS",
+   "net_type": "vpn",
+   "charging_mode": "on_demand"
+  },
+  "source_endpoint": [
+   {
+    "db_type": "mysql",
+    "endpoint_type": "offline",
+    "endpoint_role": "so",
+    "endpoint": {
+     "id": "example-endpoint-src",
+     "endpoint_name": "mysql",
+     "ip": "10.0.0.91",
+     "db_port": "3306",
+     "db_user": "drs_reader"
+    },
+    "ssl": {
+     "ssl_link": false
+    }
+   }
+  ],
+  "target_endpoint": [
+   {
+    "db_type": "mysql",
+    "endpoint_type": "cloud",
+    "endpoint_role": "ta",
+    "endpoint": {
+     "id": "example-endpoint-dst",
+     "endpoint_name": "cloud_mysql",
+     "instance_id": "example-rds-in01",
+     "db_user": "root"
+    },
+    "cloud": {
+     "region": "example-region-1"
+    },
+    "config": {
+     "is_target_readonly": false
+    }
+   }
+  ],
+  "policy_config": {
+   "conflict_policy": "ignore",
+   "dml_types": "i,u",
+   "ddl_trans": false,
+   "index_trans": true
+  },
+  "user_migration": {
+   "is_migrate_user": false
+  }
+ },
+ "db_object": {
+  "object_scope": "table",
+  "object_info": {
+   "billing": {
+    "name": "billing",
+    "all": true
+   },
+   "shop": {
+    "name": "shop_new",
+    "all": false,
+    "tables": {
+     "orders": {
+      "name": "orders",
+      "type": "table",
+      "all": true,
+      "filtered": true,
+      "filter_conditions": [
+       "id > 100"
+      ]
+     },
+     "users": {
+      "name": "members",
+      "type": "table",
+      "all": false,
+      "columns": {
+       "id": {
+        "name": "id",
+        "filtered": true
+       },
+       "mail": {
+        "name": "email",
+        "filtered": true
+       },
+       "secret": {
+        "name": "secret",
+        "filtered": false
+       }
+      }
+     },
+     "v_sales": {
+      "name": "v_sales",
+      "type": "view",
+      "all": true
+     }
+    }
+   }
+  },
+  "max_table_num": 500
+ }
+}

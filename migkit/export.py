@@ -309,10 +309,19 @@ def _route(hop):
         if hop.engine == "hetero" else hop.engine
     dst_e = opts.get("target_engine", "postgres") \
         if hop.engine == "hetero" else hop.engine
+    from . import verdict
+    # the hop's whole scope as it is now - its rows, columns, renames and
+    # the databases' names on the target too, not its include and exclude
+    # alone; what the verdict was taken under is the verdict's (`_verdict`)
     return {"source": side(hop.source, src_e),
             "target": side(hop.target, dst_e),
             "databases": [str(d) for d in hop.databases or []],
-            "left_alone": [str(x) for x in hop.exclude or []]}
+            "left_alone": [str(x) for x in hop.exclude or []],
+            "taken_only": [str(x) for x in getattr(hop, "include", None)
+                           or []],
+            "scope": _plain(verdict.hop_scope(hop), drop=False),
+            "databases_renamed": {str(k): str(v) for k, v in sorted(
+                (getattr(hop, "db_map", None) or {}).items())}}
 
 
 def _assessment(root):
@@ -325,7 +334,8 @@ def _assessment(root):
 def _moved(root, entries, session):
     dbs = {}
     for d in _dbs(root):
-        ck = _json(d / "move.json", {}) or {}
+        from . import checkpoint
+        ck = checkpoint.read_move(d / "move.json", "cache") or {}
         tables = {str(k): {"rows": v.get("moved"), "done": bool(
                   v.get("done"))} for k, v in ck.items()
                   if isinstance(v, dict) and ("moved" in v or "done" in v)}
@@ -364,9 +374,12 @@ def _verdict(root, session):
         return None
     if session and got.get("session") != session:
         return None
+    # the scope the verdict was taken under, as it recorded it: a `same`
+    # is about that, whatever the hop takes now
     keep = ("status", "why", "generated", "has_differences", "totals",
             "fingerprint", "coverage", "stale", "load", "session",
-            "tool_version", "by_category", "digests_unwritten")
+            "tool_version", "by_category", "digests_unwritten", "scope",
+            "scope_fingerprint")
     return {k: _plain(got[k], drop=False) for k in keep if k in got}
 
 
@@ -382,11 +395,13 @@ def _checks(root, verdict):
             for r in got if isinstance(r, dict)]
 
 
-def _tables(hop, session):
+def _tables(hop, session, left=None):
+    """Every table's digests of both sides, of the tables the hop takes
+    now (`digests.read`); `left` gets those it no longer takes."""
     from . import digests
     out = []
-    for (db, table, where), sides in sorted(digests.read(hop, session)
-                                            .items()):
+    for (db, table, where), sides in sorted(digests.read(hop, session,
+                                                         left).items()):
         src, dst = sides.get("src"), sides.get("dst")
         if src and dst:
             same = (src.get("rows") == dst.get("rows")
@@ -671,7 +686,12 @@ def gather(hop, session=None):
     root = hop.report_dir()
     entries, chain = _record(hop, session)
     verdict = _verdict(root, session)
-    tables = _tables(hop, session)
+    if verdict is not None and hasattr(hop, "scope_changed") \
+            and hop.scope_changed(verdict):
+        # said beside it: the route below is the hop's scope now
+        verdict["scope_changed_since"] = True
+    left = []
+    tables = _tables(hop, session, left)
     return {
         "format_version": FORMAT_VERSION, "what": WHAT, "tool": "migkit",
         "tool_version": __version__, "hop": hop.name,
@@ -703,6 +723,10 @@ def gather(hop, session=None):
         # fewer than the check compared by as many
         **({"digests_unwritten": digests.unwritten(session)}
            if session and digests.unwritten(session) else {}),
+        # tables digested once that the hop no longer takes: not listed
+        # with their old answers as if they were still its own
+        **({"tables_out_of_scope": [words(f"{d}.{t}") for d, t in left]}
+           if left else {}),
     }
 
 
@@ -753,6 +777,40 @@ def _md_table(head, rows):
     return "\n".join(out) + "\n"
 
 
+def _scope_rows(doc):
+    """(what, names) of the scope the verdict was taken under, as it
+    recorded it; where the hop takes another now, that beside it, said;
+    and the tables digested once that the hop no longer takes. The
+    evidence showed the hop's include and exclude as they are today
+    beside answers taken under another scope - none of its row filters,
+    columns or renames."""
+    from . import verdict as _v
+    got = doc.get("verdict")
+    if got is None:
+        return []
+    route = doc.get("route") or {}
+    # a verdict that kept no scope predates this: the hop's, as before
+    said = _v.scope_said(got.get("scope") if got.get("scope_fingerprint")
+                         else route.get("scope"))
+    rows = [(what, ", ".join(names)) for what, names in said] or \
+        [("takes", "everything, whole")]
+    if got.get("scope_changed_since"):
+        rows.append(("the hop now", "takes another scope than the verdict"
+                     " was taken under: the verdict is about the one above,"
+                     " and `migkit check` takes it under the one below"))
+        rows += [(f"now {what}", ", ".join(names)) for what, names in
+                 _v.scope_said(route.get("scope"))] or \
+            [("now takes", "everything, whole")]
+    renamed = route.get("databases_renamed") or {}
+    if any(k != v for k, v in renamed.items()):
+        rows.append(("databases on the target", ", ".join(
+            f"{k} -> {v}" for k, v in renamed.items() if k != v)))
+    if doc.get("tables_out_of_scope"):
+        rows.append(("digested once, no longer taken", ", ".join(
+            doc["tables_out_of_scope"])))
+    return rows
+
+
 def _sections(doc):
     """(title, head, rows) of every table both views show, in order."""
     moved = doc["moved"]
@@ -764,6 +822,8 @@ def _sections(doc):
                                  "at"],
                 [(r["way"], r["rows"], r["seconds"], r["rows_per_second"],
                   r["at"]) for r in moved["runs"]]))
+    out.append(("the scope the verdict covers", ["what", "names"],
+                _scope_rows(doc)))
     out.append(("checks", ["check", "scope", "status", "what was found"],
                 [(c["check"], c["scope"], c["status"], c["detail"])
                  for c in doc["checks"]]))
@@ -1092,8 +1152,10 @@ def write(hop, session=None, log=None):
               "files": {name: _raw_sha(out / name)[0] for name in FILES},
               "plain_sha256": hashlib.sha256(body.encode()).hexdigest(),
               "dir": str(out.relative_to(root))}
-    audit.append(root / "changelog.jsonl", anchor)
-    _anchor_remote(hop, out, anchor, say)
+    # the chain's head goes with the digests to where the record is
+    # anchored: a record rewritten from its start since does not end there
+    head = audit.append(root / "changelog.jsonl", anchor)
+    _anchor_remote(hop, out, {**anchor, "head": head}, say)
     return out
 
 

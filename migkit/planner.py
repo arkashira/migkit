@@ -36,10 +36,10 @@ class Decision:
         return f"{self.table}: {WORDS[self.path]} - {self.reason}"
 
 
-def _name(parts, qualifier):
+def _name(ident, parts, qualifier):
     if len(parts) > 1 or not qualifier:
-        return ".".join(parts)
-    return f"{qualifier}.{parts[0]}"
+        return str(ident)
+    return f"{qualifier}.{ident}"
 
 
 def _about(fact):
@@ -61,26 +61,32 @@ def ways(via):
     everything the table asks, the table copier where it does not, and
     nothing for a table the hop leaves out."""
     from .decide import Rung
-    from .movers import NEEDS_KEYS, ROW_FILTER_MOVERS
+    from .movers import NEEDS_KEYS, RENAMING_MOVERS, ROW_FILTER_MOVERS
     bulk = {"carried"} | ({"row filter"} if via in ROW_FILTER_MOVERS
                           else set()) | ({"keyless"} if via not in NEEDS_KEYS
-                                         else set())
+                                         else set()) | (
+        {"renamed"} if via in RENAMING_MOVERS else set())
     return (Rung(BULK, "the bulk copy", gives=frozenset(bulk),
                  because="the fastest path here"),
             Rung(COPIER, "the table copier",
                  gives=frozenset({"carried", "row filter",
-                                  "column mapping", "keyless"})),
+                                  "column mapping", "keyless", "renamed"})),
             Rung(LEFT, WORDS[LEFT], gives=frozenset({LEFT})))
 
 
-def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None):
+def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None,
+         roots=None):
     """One `Decision` per table, in name order.
 
     `via` is the bulk path the database goes by; a table it cannot carry
     correctly goes table by table instead. `facts` is `table_facts`'
     answer, keyed like `tables`, or None where the engine gives none.
     What a table asks - to be left alone, its row filter applied, its
-    columns mapped - is climbed against `ways(via)`.
+    columns mapped, a name of its own on the target - is climbed against
+    `ways(via)`. `roots` is {partition: its root} of a PostgreSQL source
+    (`movers._pg_roots`): a partition asks what its root asks, the name
+    the hop's rules are written in, where it used to ask with its own and
+    match none of them.
 
     Where the engine's table ladder has the bulk path's programs among its
     rungs (`tableway`), a table the bulk copy carries goes the way that
@@ -99,18 +105,21 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None):
     rungs = ways(via)
     out = []
     for ident in sorted(tables):
-        parts = [p for p in str(ident).split(".") if p]
-        name = _name(parts, qualifier)
+        parts = movers._asked(hop, ident)
+        # every question the hop answers is asked with the root's name
+        asked = movers._asked(hop, ident, roots)
+        name = _name(ident, parts, qualifier)
         fact = facts.get(ident) or facts.get(name) or {}
         about = _about(fact)
-        if hop.excluded(db, *parts):
+        if hop.excluded(db, *asked):
             need = (LEFT,)
         else:
             need = ("carried",) + (
-                ("row filter",) if filtered and hop.row_filter(db, *parts)
+                ("row filter",) if filtered and hop.row_filter(db, *asked)
                 else ()) + (("column mapping",)
-                            if hop.column_rules(db, *parts) else ()) + (
-                ("keyless",) if fact.get("key") is False else ())
+                            if hop.column_rules(db, *asked) else ()) + (
+                ("keyless",) if fact.get("key") is False else ()) + (
+                ("renamed",) if movers._renamed(hop, db, asked) else ())
         got = climb(name, rungs, need=need)
         mine = (choice.get(name) or choice.get(parts[-1])
                 if got.path == BULK else None)
@@ -165,16 +174,9 @@ def record_rate(hop, path, rows, seconds, size=None, cpu_seconds=None,
     this machine spent on it out of its `cpus`, which is what tells the
     next plan whether this machine or something beyond it held the copy
     back (`machine.stages_for`)."""
-    import json
     import time
     if not rows or seconds <= 0:
         return
-    f = _rates_path(hop)
-    try:
-        got = json.loads(f.read_text())
-    except (OSError, ValueError):
-        got = {}
-    runs = got.setdefault(path, [])
     run = {"rows": int(rows), "seconds": round(seconds, 3),
            "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": _kind(hop)}
     if size:
@@ -182,10 +184,20 @@ def record_rate(hop, path, rows, seconds, size=None, cpu_seconds=None,
     if cpu_seconds is not None and cpus:
         run["cpu_seconds"] = round(float(cpu_seconds), 3)
         run["cpus"] = int(cpus)
-    runs.append(run)
-    del runs[:-10]
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(got, indent=1))
+    _add_run(hop, path, run)
+
+
+def _add_run(hop, key, run):
+    """One run kept under `key` in the hop's throughput file, the last ten
+    of each: read, added to and written back under the file's lock, since
+    the databases of one move finish their copies side by side."""
+    from . import durable
+
+    def add(got):
+        runs = got.setdefault(key, [])
+        runs.append(run)
+        del runs[:-10]
+    durable.change_json(_rates_path(hop), add, indent=1)
 
 
 def _runs(path_file, path):
@@ -243,24 +255,14 @@ def record_variant(hop, path, way, carried, seconds, stream, tables=None):
     second one of its streams carried - with what each table took, as the
     copy's own catalogue says. What the next run chooses its way and sizes
     its parts from."""
-    import json
     import time
     if not carried or not seconds or seconds <= 0:
         return
-    f = _rates_path(hop)
-    try:
-        got = json.loads(f.read_text())
-    except (OSError, ValueError):
-        got = {}
-    runs = got.setdefault(f"{path}:{way}", [])
-    runs.append({"bytes": int(carried), "seconds": round(seconds, 3),
-                 "stream": round(stream, 1) if stream else None,
-                 "tables": tables or {},
-                 "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                 "kind": _kind(hop)})
-    del runs[:-10]
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(got, indent=1))
+    _add_run(hop, f"{path}:{way}", {
+        "bytes": int(carried), "seconds": round(seconds, 3),
+        "stream": round(stream, 1) if stream else None,
+        "tables": tables or {},
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": _kind(hop)})
 
 
 def variants(hop, path):
@@ -288,16 +290,27 @@ def _took(secs):
             f"{secs / 60:,.0f}min" if secs >= 60 else f"{secs:,.0f}s")
 
 
-def estimate(hop, path, rows):
+def estimate(hop, path, rows, narrowed=()):
     """The plan's line about time, in words.
 
     A range from every run kept on the path, and which runs those were -
     one run is one number and is called that. A hop that has run nothing
     yet is given the runs of other hops of the same engines on the same
     path - a rehearsal's, typically - and told whose they are. Nothing
-    measured, nothing estimated."""
+    measured, nothing estimated. `narrowed`: the tables of `rows` a row
+    filter narrows, counted whole - the rows and the time are then the
+    most, and said so."""
     if not rows:
         return "no row count to estimate from"
+    said = _estimate(hop, path, rows)
+    if not narrowed:
+        return said
+    return (f"at most - {len(narrowed)} tables a row filter narrows are"
+            f" counted whole: {said}")
+
+
+def _estimate(hop, path, rows):
+    """`estimate`'s words for `rows`, from the runs kept on `path`."""
     runs, whose = _runs(_rates_path(hop), path), None
     if not runs:
         runs, others = _elsewhere(hop, path)
@@ -335,7 +348,7 @@ def _size(n):
 
 
 def size_line(decisions, facts, engine, price_per_gb=None, free=None,
-              kept=None):
+              kept=None, narrowed=()):
     """The plan's line about size, from the source's catalogue: what the
     move carries and what the target needs for it. None where the
     catalogue gives no sizes.
@@ -348,7 +361,10 @@ def size_line(decisions, facts, engine, price_per_gb=None, free=None,
     `kept` is the target's own answer to how much of the log a load
     writes it holds at once: a callable from the bytes of log written to
     (bytes held, why), or None where the target cannot say. What it holds
-    needs room beside the tables."""
+    needs room beside the tables.
+
+    `narrowed` are the carried tables a row filter narrows
+    (`Engine.carried`): weighed whole, so the size said is the most."""
     carried = {d.table for d in decisions if d.path != LEFT}
     data = index = 0
     known = False
@@ -364,9 +380,14 @@ def size_line(decisions, facts, engine, price_per_gb=None, free=None,
         index += int(fact.get("index_bytes") or 0)
     if not known:
         return None
-    line = (f"about {_size(data + index)} to carry ({_size(data)} of"
-            f" tables, {_size(index)} of indexes built on the target); the"
-            " target needs that much room")
+    # a table a row filter narrows is weighed whole: what it carries of it
+    # is less, and the line says the most
+    line = (f"{'at most' if narrowed else 'about'} {_size(data + index)}"
+            f" to carry ({_size(data)} of tables, {_size(index)} of indexes"
+            " built on the target"
+            + (f"; {len(narrowed)} tables a row filter narrows are weighed"
+               " whole" if narrowed else "")
+            + "); the target needs that much room")
     log = LOG_PER_BYTE.get(engine)
     grows = held = 0
     if log:
@@ -791,7 +812,6 @@ def progress(where, pace, total_rows, model=None, done=False, ways=()):
     resource whose own limit holds it now, measured while the move runs,
     before the one the model named from its probes. `done` once the copy
     has ended: its whole rate then."""
-    import json
     import os
     import time
     rate, rows = pace.recent, pace.total
@@ -816,11 +836,8 @@ def progress(where, pace, total_rows, model=None, done=False, ways=()):
                      "way": w.get("chosen"),
                      "seconds_a_row": w.get("seconds_a_row")}
                     for w in ways or ()][:50]}
-    path = os.path.join(str(where), "progress.json")
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(got, f)
-    os.replace(tmp, path)
+    from . import durable
+    durable.write_json(os.path.join(str(where), "progress.json"), got)
 
 
 def read_progress(where):

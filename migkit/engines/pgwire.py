@@ -108,7 +108,7 @@ class PgWireEngine(DbapiRows, Engine):
                       " and table_name not like 'migkit%%' order by 1, 2")]
         working = drift.transient_among(got)
         return [t for t in got if t not in working
-                and not self.hop.excluded(db, *t.split(".", 1))]
+                and self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         """[(name, declared)] in the column's order, the type as

@@ -207,7 +207,8 @@ def run(ask, say, path, force=False, env=None):
     found = survey(hop, say, imported)
     if imported is not None and found.get("left_out"):
         left = found["left_out"]
-        raw["exclude"] = list(raw.get("exclude") or []) + left
+        from .config import scope_patterns
+        raw["exclude"] = scope_patterns(raw.get("exclude")) + left
         say(f"  the task took {len(found['tables']) - len(left)} of the"
             f" source's {len(found['tables'])} tables; left out:"
             f" {', '.join(left[:8])}{' ...' if len(left) > 8 else ''}")
@@ -790,7 +791,9 @@ def _write(path, name, small, force, replace=False):
             new = text + body
     else:
         new = HEADER + "hops:\n" + body
-    tmp = p.with_suffix(p.suffix + ".tmp")
+    # a name of its own: two guides writing beside one file each check
+    # their own before it goes in place
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
     tmp.write_text(new)
     tmp.chmod(0o600)
     # the file as written must load: a guide that wrote a configuration

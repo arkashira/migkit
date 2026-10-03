@@ -52,9 +52,11 @@ way does besides copying (`PRIOR`), its spread wide; a measurement always
 beats it. The decision's record says which numbers were measured and
 which predicted; the plan shows the outcome: what the target is to go
 through, about how long, and how a rollback puts it back. A decision a
-hop makes row by row (`on_conflict: keep-target`, `newer_wins`) and a
-row filter keep a table to rows by key: a span or a table copied whole
-would decide nothing and filter nothing.
+hop makes row by row (`on_conflict: keep-target`, `newer_wins`), a row
+filter and rows the hop keeps by the changes it does not carry
+(`mapping.ops`, `verdict.kept_kinds`) keep a table to rows by key: a span
+or a table copied whole would decide nothing, filter nothing and take
+back what the hop keeps.
 
 **One rule for the target's triggers and foreign keys.** The spans and
 the reload write inside the target engine's load window, the move's own
@@ -321,7 +323,7 @@ class Ladder:
              "replace": interlock.choice(hop) == "replace"},
             **{"int key": self._int_key,
                "filter": lambda: bool(hop.row_filter(
-                   self.db, *str(self.sides.src_t).split("."))),
+                   self.db, *hop.parts_of(self.sides.src_t))),
                "range": self._range_ready,
                "spans": lambda: self._spans()[0],
                "spans why": lambda: self._spans()[2],
@@ -342,6 +344,14 @@ class Ladder:
         if col:
             return (f"the hop keeps the newer row by {col} (newer_wins),"
                     " which only a repair row by row can tell apart")
+        from . import verdict
+        kept = [why for _, kind, _, why in verdict.LEFT_OUT
+                if kind in t._kept_by_hop(self.db, self.table)]
+        if kept:
+            # a span or a table copied again whole would take back the
+            # rows the hop keeps
+            return (f"the hop keeps rows on the target ({', '.join(kept)}),"
+                    " which only a repair row by row leaves as they are")
         return ""
 
     def _int_key(self):

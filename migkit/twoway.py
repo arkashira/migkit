@@ -488,19 +488,62 @@ def seen_of(text):
     return got if isinstance(got, dict) and "batch" in got else None
 
 
-def committed_ahead(dst, db, batch, rung="table", pending=None):
-    """(position, number) of a batch the target committed after the one
-    the tail saved last, or None: the target's mark is written in the
+#: how far ahead of a saved position a target's mark of the last batch it
+#: committed is believed where the mark names no run (one written before
+#: marks named theirs): a position read back from a copy another machine
+#: kept (`state.Mirror`) can be batches behind the target, not one. A
+#: run's batches are numbered from a random 48-bit number
+#: (`hetero._saved_batch`), so an earlier run's mark falls in the window
+#: by chance once in 2^32
+WINDOW = 1 << 16
+
+
+def committed_ahead(dst, db, batch, rung="table", pending=None, run=None):
+    """(position, number) of the last batch the target committed after the
+    one the tail saved last, or None: the target's mark is written in the
     batch's own transaction, so it is there exactly when the batch is.
-    The table's mark says where the batch ended too; a replication origin
-    or a GTID only says the batch was committed, and where it ended is
-    what the tail wrote down before applying it (`pending`)."""
+
+    The table's mark says where the batch ended, and which run numbered it
+    (`run`): the tail goes on after the last one, however many batches
+    ahead of the saved position it stands - a position a power loss rolled
+    back, or one another machine kept, is behind by as many (audit ST2;
+    only one batch ahead was known, and the ones between were applied
+    again, their counters twice). A replication origin or a GTID says only
+    that a batch was committed; where it ended is what the tail wrote down
+    before applying it (`pending`), for the one batch after the saved
+    position - one committed past that stops the tail, having applied
+    nothing."""
     if rung in (None, "table"):
         got = dst.origin_seen("dst", db)
-        if got and int(got.get("batch", -1)) == batch + 1:
-            return got["token"], batch + 1
+        if not got:
+            return None
+        try:
+            n = int(got.get("batch", -1))
+        except (TypeError, ValueError):
+            return None
+        if got.get("run") is not None and run is not None:
+            ours = got["run"] == run
+        else:
+            ours = n <= batch + WINDOW
+        if ours and n > batch:
+            return got["token"], n
         return None
+    past = (f"two_way: the target committed batches of this tail past the"
+            f" one after its saved position (batch {batch}), and where they"
+            " ended in the source's log is kept only for that one. Applying"
+            " them again would add their counters twice, and going on from"
+            " an older position would too; nothing was applied. Give this"
+            " tail back the position file it saved, or move again with"
+            " --mode full+cdc")
+    if dst.mark_committed("dst", db, rung, batch + 2):
+        raise SystemExit(past)
     if not dst.mark_committed("dst", db, rung, batch + 1):
+        # a rung whose mark is the last batch only (an origin's progress):
+        # neither this position's batch nor the next means further on -
+        # unless no batch of this run was committed yet
+        if run is not None and batch != run and \
+                not dst.mark_committed("dst", db, rung, batch):
+            raise SystemExit(past)
         return None
     if not pending or int(pending.get("batch", -1)) != batch + 1:
         raise SystemExit(
@@ -1037,12 +1080,22 @@ def resolve(pair, db, changes, log):
     what the source added to it, a row the rules keep left out, a parked
     row's changes held - and a conflict under `error` stops the tail
     before anything of the batch is applied. Every conflict is recorded
-    (`_Book`)."""
+    (`_Book`).
+
+    A row whose changes are all deletes migkit made of it leaving the
+    hop's row filter (`canon.FILTERED`) is applied as it is: the source
+    deleted nothing, so there is nothing of the target's for it to
+    conflict with - read as one, a row the target never had was a
+    `delete_missing` logged, and under `error` or `park` stopped or
+    parked the tail."""
     hop = pair.hop
     rules_ = rules(hop)
     ranks = rules_.ranks
     dst = pair.dst_engine
     rows, order = _touched(changes)
+    filtered = {ident for ident in order
+                if all(changes[i].get(canon.FILTERED)
+                       for i, _ in rows[ident][2])}
     tables = {}
     for ident in order:
         table = rows[ident][0]
@@ -1053,7 +1106,10 @@ def resolve(pair, db, changes, log):
     parked = _Parked.of(pair, db)
     heres = {}
     for table, (tr, columns, classes, hints) in tables.items():
-        idents = [i for i in order if rows[i][0] == table]
+        idents = [i for i in order if rows[i][0] == table
+                  and i not in filtered]
+        if not idents:
+            continue
         keynames = sorted(rows[idents[0]][1])
         keys = [tuple(rows[i][1][k] for k in keynames) for i in idents]
         got = dst.neutral_rows_by_key("dst", db, table, columns, keynames,
@@ -1064,6 +1120,9 @@ def resolve(pair, db, changes, log):
             heres[i] = dict(zip(names, row)) if row is not None else None
     fates, blind, stops, seen = {}, False, [], set()
     for ident in order:
+        if ident in filtered:
+            fates[ident] = Settled()
+            continue
         table, key, events = rows[ident]
         tr, columns, classes, hints = tables[table]
         keynames = sorted(key)
@@ -1255,11 +1314,11 @@ class _Parked:
     stop finds its rows parked as they were, and holds them again."""
 
     def __init__(self, path):
+        from . import durable
         self.path = path
-        try:
-            got = json.loads(path.read_text())
-        except (OSError, ValueError):
-            got = {}
+        # read as nothing, a row held for an operator's decision would go
+        # on applying: one that cannot be read whole stops (`durable`)
+        got = durable.read_state(path, "state") or {}
         self.rows = got.get("rows") if isinstance(got, dict) else None
         self.rows = self.rows if isinstance(self.rows, dict) else {}
         self.changed = False
@@ -1355,12 +1414,11 @@ class _Parked:
         return {t: len(e) for t, e in self.rows.items() if e}
 
     def save(self):
-        import os
+        from . import durable
         if not self.changed:
             return
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(json.dumps({"rows": self.rows}, default=str))
-        os.replace(tmp, self.path)
+        # sealed where the hop keeps its values encrypted (`evidence`)
+        durable.write_json(self.path, {"rows": self.rows})
         self.changed = False
 
 
@@ -1403,11 +1461,13 @@ class _Book:
         hop, db = self.pair.hop, self.db
         if not self.lines and not self.released:
             return
+        from . import durable
         where = hop.report_dir(db)
         text = "".join(line + "\n" for line in self.lines)
-        if text:
-            with (where / RECORD).open("a") as f:
-                f.write(text)
+        if self.lines:
+            # a torn tail cut first, each line sealed where the hop keeps
+            # its values encrypted, on the disk
+            durable.append_lines(where / RECORD, self.lines)
         self._count(where)
         if self.lines:
             audit.append(hop.report_dir() / "changelog.jsonl", {
@@ -1424,19 +1484,14 @@ class _Book:
         self.lines, self.kinds, self.counts = [], Counter(), Counter()
 
     def _count(self, where):
-        import os
+        from . import durable
         path = where / COUNTS
-        try:
-            got = json.loads(path.read_text())
-        except (OSError, ValueError):
-            got = {}
+        got = durable.read_state(path, "cache") or {}
         counts = Counter(got.get("counts") or {})
         counts.update(self.counts)
         parked = _Parked.of(self.pair, self.db)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps({"counts": dict(counts),
-                                   "parked": parked.counts()}))
-        os.replace(tmp, path)
+        durable.write_json(path, {"counts": dict(counts),
+                                  "parked": parked.counts()})
 
 
 # ---- the pair -------------------------------------------------------------------

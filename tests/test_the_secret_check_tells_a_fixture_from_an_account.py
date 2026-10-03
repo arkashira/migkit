@@ -33,3 +33,23 @@ def test_an_endpoint_passes_only_when_it_says_it_is_an_example():
     fake = "app.cluster-example.eu-west-1.rds." + "amazonaws.com"
     assert check.flagged(real) == "real RDS/DocDB endpoint"
     assert check.flagged(fake) is None
+
+
+def test_ones_own_names_are_caught_from_a_list_kept_off_the_repo(tmp_path,
+                                                                 monkeypatch):
+    """An organisation's own project, database and table names are not a
+    pattern anyone can write down in a public file - the list would be the
+    leak. They are read from a file on this machine, and match as whole
+    words, whatever the case, even on a line that says it is an example."""
+    words = tmp_path / "deny-words.txt"
+    words.write_text("# ours\nshopco\nshop_staging\n")
+    monkeypatch.setattr(check, "DENY_FILE", words)
+    deny = check.deny_pattern(check.deny_words())
+    said = "a name of one's own organisation"
+    assert check.flagged("exclude: [shop_staging.public.t]  # example",
+                         deny) == said
+    assert check.flagged("ShopCo moved it", deny) == said
+    assert check.flagged("shopcoffee", deny) is None
+    assert check.deny_pattern([]) is None
+    monkeypatch.setattr(check, "DENY_FILE", tmp_path / "none.txt")
+    assert check.deny_words() == []

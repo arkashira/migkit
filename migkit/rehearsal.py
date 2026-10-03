@@ -128,6 +128,8 @@ def path_of(hop):
         ways[k] = v
     return {"kind": planner._kind(hop),
             "exclude": sorted(_local(x, dbs) for x in hop.exclude or []),
+            "include": sorted(_local(x, dbs) for x in
+                              getattr(hop, "include", None) or []),
             "mapping": mapping, "options": ways}
 
 
@@ -140,6 +142,8 @@ def differences(was, now):
                    f" hop's {now.get('kind')}")
     if was.get("exclude") != now.get("exclude"):
         out.append("what is left out (exclude)")
+    if (was.get("include") or []) != (now.get("include") or []):
+        out.append("what is taken (include)")
     for part in sorted(set(was.get("mapping") or {})
                        | set(now.get("mapping") or {})):
         if (was.get("mapping") or {}).get(part) != \
@@ -306,8 +310,7 @@ def record_check(hop, eng, db, seconds):
         return
     rows = size = 0
     for name, f in (facts or {}).items():
-        if isinstance(f, dict) and not hop.excluded(
-                db, *str(name).split(".")):
+        if isinstance(f, dict) and hop.takes_table(db, name):
             rows += int(f.get("rows") or 0)
             size += int(f.get("bytes") or 0)
     if rows and seconds > 0:
@@ -323,10 +326,9 @@ def keep_forecast(hop, db, phases, via=""):
            "from": rec["name"] if rec else "", "via": via,
            "phases": [asdict(p) for p in phases or ()]}
     try:
-        path = hop.report_dir(db) / "forecast.json"
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(got, indent=1, default=str))
-        tmp.replace(path)
+        from . import durable
+        durable.write_json(hop.report_dir(db) / "forecast.json", got,
+                           indent=1)
     except OSError:
         pass
     return got
@@ -365,10 +367,9 @@ def held_to(hop, db, phase, took):
         return []
     got.setdefault("held", {})[phase] = round(took, 3)
     try:
-        path = hop.report_dir(db) / "forecast.json"
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(got, indent=1, default=str))
-        tmp.replace(path)
+        from . import durable
+        durable.write_json(hop.report_dir(db) / "forecast.json", got,
+                           indent=1)
     except OSError:
         pass
     p50, p90 = mine.get("p50"), mine.get("p90")

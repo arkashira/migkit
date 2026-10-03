@@ -108,15 +108,32 @@ class Store:
     last read, last touched, and whether it must be read again) and
     `last` (the last batch's additions, to take back out)."""
 
+    #: the file's layout (`pragma user_version`, audit ST20): 0 is a file
+    #: from before it was numbered, the same layout
+    VERSION = 1
+
     def __init__(self, path):
+        from . import durable
         self.path = str(path)
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        durable.private_dir(os.path.dirname(self.path) or ".")
+        if not os.path.exists(self.path):
+            try:
+                os.close(os.open(self.path,
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            except FileExistsError:
+                pass
         self.conn = sqlite3.connect(self.path, check_same_thread=False,
                                     isolation_level=None)
         self.lock = threading.Lock()
         c = self.conn
         c.execute("pragma journal_mode=wal")
         c.execute("pragma synchronous=full")
+        have = c.execute("pragma user_version").fetchone()[0]
+        if have > self.VERSION:
+            raise SystemExit(
+                f"{self.path} was written by a newer migkit (layout {have});"
+                f" this one reads layout {self.VERSION}. Run the newer"
+                " migkit")
         c.execute("create table if not exists meta (k text primary key,"
                   " v text)")
         c.execute("create table if not exists tables (name text primary"
@@ -125,6 +142,27 @@ class Store:
                   " v text, primary key (name, b))")
         c.execute("create table if not exists last (name text, b integer,"
                   " v text, primary key (name, b))")
+        if have < self.VERSION:
+            c.execute(f"pragma user_version = {self.VERSION}")
+
+    def stale(self):
+        """{table: True} of the tables every leaf of which is to be read
+        again, flagged once instead of each leaf rewritten (`Keeper`)."""
+        return self.get("stale", {}) or {}
+
+    def flag(self, names):
+        """`names` flagged: every leaf of theirs read again at the next
+        proof. Inside a transaction the caller holds."""
+        got = self.stale()
+        if all(n in got for n in names):
+            return
+        got.update({n: True for n in names})
+        self.put("stale", got)
+
+    def unflag(self, name):
+        got = self.stale()
+        if got.pop(name, None) is not None:
+            self.put("stale", got)
 
     def get(self, k, default=None):
         row = self.conn.execute("select v from meta where k = ?",
@@ -197,10 +235,23 @@ def _text(v):
     return json.dumps([str(x) for x in v[:6]] + list(v[6:]))
 
 
+#: classes a log may hand over as their text (`twoway._typed`); the rest
+#: pass as they are
+_TEXT_TYPED = frozenset({"timestamp", "date", "time", "decimal", "integer",
+                         "float", "boolean"})
+
+
 class Table:
-    """How one kept table's rows become leaves on each side."""
+    """How one kept table's rows become leaves on each side - its columns,
+    the value each is typed by and its key's renderers worked out once a
+    table, not once a value (audit SP7: an import inside the call, every
+    value typed, text included, two scans of the row, a renderer made for
+    each key value). Measured in-process on a 10-column image (an integer
+    key, text, a timestamp and a decimal as a log prints them), the same
+    hashes: 6.30 -> 4.95 us a row image, 1.83 -> 0.91 us a key's leaf."""
 
     def __init__(self, name, d):
+        from .twoway import _typed
         self.name = name
         self.src, self.dst = d["src"], d["dst"]
         self.spec = leaves.Spec.of(d["spec"])
@@ -221,6 +272,21 @@ class Table:
         self.hd = leaves.Hasher(self.spec, [c for _, c in self.dc],
                                 [[n for n, _ in self.dc].index(k)
                                  for k in self.dkey])
+        self._typed = _typed
+        # (names, typed or not) of each side's columns, and its key's
+        # (names, renderers)
+        self.cols = {False: ([n for n, _ in self.sc],
+                             [c if c in _TEXT_TYPED else None
+                              for _, c in self.sc]),
+                     True: ([n for n, _ in self.dc],
+                            [c if c in _TEXT_TYPED else None
+                             for _, c in self.dc])}
+        from . import render
+        cs, cd = dict(self.sc), dict(self.dc)
+        self.keys = {False: (self.key, [render.digest_renderer(cs[k])
+                                        for k in self.key]),
+                     True: (self.dkey, [render.digest_renderer(cd[k])
+                                        for k in self.dkey])}
 
     def sides(self, pair, db):
         scope = pair._row_scope(db, self.src)
@@ -231,27 +297,35 @@ class Table:
 
     def bucket(self, target, key):
         """The leaf of a row by its key's values (a dict)."""
-        names, hs = (self.dkey, self.hd) if target else (self.key, self.hs)
-        cols = self.dc if target else self.sc
-        cls = dict(cols)
+        from . import rowtext
+        names, fns = self.keys[bool(target)]
         vals = [key[k] for k in names]
-        kh = leaves.text_hash(self.spec.salt, _encoded(
-            [cls[k] for k in names], vals))
+        kh = leaves.text_hash(self.spec.salt, rowtext.encode(
+            [f(v) for f, v in zip(fns, vals)]))
         return self.spec.bucket(kh, vals[0])
 
     def hashed(self, target, image):
         """(row hash, key hash) of a whole row image, or None where the
         image lacks a column compared or holds a value the tail writes as
         what it added."""
-        cols = self.dc if target else self.sc
-        if image is None or any(n not in image for n, _ in cols):
+        if image is None:
             return None
-        # a slot's text as the class it is, as the two-way check reads
-        # it (`twoway._typed`): a timestamp printed by the log and one
-        # read by a driver are one value
-        from .twoway import _typed
-        values = [_typed(c, image[n]) for n, c in cols]
-        if any(isinstance(v, canon.Added) for v in values):
+        names, typed = self.cols[bool(target)]
+        typed_of = self._typed
+        values = []
+        try:
+            for n, c in zip(names, typed):
+                v = image[n]
+                if c is not None and isinstance(v, str):
+                    # a slot's text as the class it is, as the two-way
+                    # check reads it (`twoway._typed`): a timestamp
+                    # printed by the log and one read by a driver are one
+                    # value
+                    v = typed_of(c, v)
+                elif isinstance(v, canon.Added):
+                    return None
+                values.append(v)
+        except KeyError:
             return None
         try:
             _, rh, kh = (self.hd if target else self.hs).of(values)
@@ -260,12 +334,6 @@ class Table:
             # take as it takes the driver's: read again, never guessed
             return None
         return rh, kh
-
-
-def _encoded(classes, values):
-    from . import render, rowtext
-    return rowtext.encode([render.digest_renderer(c)(v)
-                           for c, v in zip(classes, values)])
 
 
 def _images(c, key_names):
@@ -331,11 +399,7 @@ class Keeper:
     def _all_stale(self, token, why):
         st = self.store
         st.begin()
-        for name in st.tables():
-            got = st.leaves(name)
-            for leaf in got.values():
-                leaf[STALE] = 1
-            st.write(name, got)
+        st.flag(list(st.tables()))
         st.conn.execute("delete from last")
         st.put("token", _tok(token))
         st.put("prev", None)
@@ -382,22 +446,40 @@ class Keeper:
             t = by_src.get(self.pair._leaf(name))
             if t is not None:
                 self.unplaced.add(t.name)
+        # the leaves the source's changes land in, read in one query a
+        # table for their marks, and kept for the commit - a query a new
+        # leaf, then read again, before (audit SP7)
+        placed = []
         for c in self.batch:
             t = by_src.get(self.pair._leaf(c["table"]))
             if t is not None:
-                self._move(t, c, False, moves, stale, marks, src)
+                placed += self._placed(t, c, False, stale)
         for c in applied:
             t = by_dst.get(c["table"])
             if t is not None:
-                self._move(t, c, True, moves, stale, marks, src)
-        self._commit(moves, stale, gen, token, before)
+                placed += self._placed(t, c, True, stale)
+        loaded = {}
+        wanted = {}
+        for t, target, sign, got, b, c in placed:
+            if not target and got is not None:
+                wanted.setdefault(t.name, set()).add(b)
+        for name, bs in wanted.items():
+            for b, leaf in self.store.leaves(name, bs).items():
+                loaded[(name, b)] = leaf
+        for t, target, sign, got, b, c in placed:
+            self._move(t, c, target, sign, got, b, moves, stale, marks,
+                       src, loaded)
+        self._commit(moves, stale, gen, token, before, loaded)
         self.batch, self.hashed = [], {}
         if time.monotonic() - self.cold_at >= _env(
                 "MIGKIT_PROOF_COLD_SECONDS", 300):
             self.cold()
 
-    def _move(self, t, c, target, moves, stale, marks, src):
+    def _placed(self, t, c, target, stale):
+        """[(table, target, sign, hashes or None, leaf, change)] of one
+        change's row images."""
         names = t.dkey if target else t.key
+        out = []
         for sign, image, key in _images(c, names):
             if t.filtered or t.opaque:
                 got = None
@@ -417,50 +499,62 @@ class Keeper:
                 # is read again, rather than one kept wrong
                 self.unplaced.add(t.name)
                 continue
-            at = (t.name, b)
-            if at in stale:
-                continue
-            if got is None:
-                stale.add(at)
-                continue
-            if not target:
-                if at not in marks:
-                    leaf = self.store.leaves(t.name, [b]).get(b)
-                    marks[at] = ((leaf[LO], leaf[HI]) if leaf is not None
-                                 else (t.lo, t.hi))
-                lo, hi = marks[at]
-                first = src.mark_covers("src", self.db, lo, c) \
-                    if lo is not None else None
-                if first is True:
-                    continue
-                last = src.mark_covers("src", self.db, hi, c) \
-                    if hi is not None else None
-                if last is not False:
-                    stale.add(at)
-                    continue
-            rh, kh = got
-            m = moves.setdefault(at, [0] * 6)
-            o = D if target else S
-            m[o] += sign
-            m[o + 1] += sign * rh
-            m[o + 2] += sign * kh
+            out.append((t, target, sign, got, b, c))
+        return out
 
-    def _commit(self, moves, stale, gen, token, before):
+    def _move(self, t, c, target, sign, got, b, moves, stale, marks, src,
+              loaded):
+        """One row image's hashes added to its leaf's move, where the
+        leaf's marks do not hold the change already."""
+        at = (t.name, b)
+        if at in stale:
+            return
+        if got is None:
+            stale.add(at)
+            return
+        if not target:
+            if at not in marks:
+                leaf = loaded.get(at)
+                marks[at] = ((leaf[LO], leaf[HI]) if leaf is not None
+                             else (t.lo, t.hi))
+            lo, hi = marks[at]
+            first = src.mark_covers("src", self.db, lo, c) \
+                if lo is not None else None
+            if first is True:
+                return
+            last = src.mark_covers("src", self.db, hi, c) \
+                if hi is not None else None
+            if last is not False:
+                stale.add(at)
+                return
+        rh, kh = got
+        m = moves.setdefault(at, [0] * 6)
+        o = D if target else S
+        m[o] += sign
+        m[o + 1] += sign * rh
+        m[o + 2] += sign * kh
+
+    def _commit(self, moves, stale, gen, token, before, loaded=None):
         st = self.store
         by = {}
         for (name, b) in set(moves) | stale:
             by.setdefault(name, set()).add(b)
+        loaded = loaded or {}
         with st.lock:
             st.begin()
             try:
                 st.conn.execute("delete from last")
-                for name in self.unplaced:
-                    got = st.leaves(name)
-                    for leaf in got.values():
-                        leaf[STALE] = 1
-                    st.write(name, got)
+                if self.unplaced:
+                    # a table copied or parked beside the tail: flagged,
+                    # not every leaf of it rewritten each batch - >= 173 ms
+                    # a batch at 65,536 leaves (audit SP7)
+                    st.flag(self.unplaced)
                 for name, bs in by.items():
-                    have = st.leaves(name, bs)
+                    have = {b: loaded[(name, b)] for b in bs
+                            if (name, b) in loaded}
+                    rest = [b for b in bs if b not in have]
+                    if rest:
+                        have.update(st.leaves(name, rest))
                     t = self.tables()[name]
                     for b in bs:
                         leaf = have.get(b) or _empty(t)
@@ -499,7 +593,7 @@ class Keeper:
         salt = st.get("salt") or pair.digest_salt()
         pairs, _, _, _ = pair.match_tables(
             pair.src_engine.neutral_tables("src", db),
-            pair.dst_engine.neutral_tables("dst", db), pair._rename)
+            pair.dst_engine.neutral_tables("dst", db), pair._renamer(db))
         made = {}
         for src_t, dst_t in pairs:
             try:
@@ -550,6 +644,7 @@ class Keeper:
                 st.conn.execute("delete from tables")
                 st.conn.execute("delete from leaves")
                 st.conn.execute("delete from last")
+                st.put("stale", {})
                 for name, d in made.items():
                     st.conn.execute("insert into tables values (?, ?)",
                                     (name, json.dumps(d)))
@@ -580,10 +675,11 @@ class Keeper:
         self.cold_at = time.monotonic()
         gen = next_generation(st)
         picked = []
+        flagged = st.stale()
         for t in self.tables().values():
             for b, leaf in st.leaves(t.name).items():
-                picked.append((0 if leaf[STALE] else 1, leaf[PROVED],
-                               t.name, b))
+                picked.append((0 if leaf[STALE] or t.name in flagged else 1,
+                               leaf[PROVED], t.name, b))
         picked.sort()
         by = {}
         for _, _, name, b in picked[:most]:
@@ -684,10 +780,17 @@ def reread(pair, db, st, t, buckets, gen):
         st.begin()
         try:
             have = st.leaves(t.name, buckets)
+            flagged = t.name in st.stale()
+            if flagged and set(buckets) >= set(
+                    b for (b,) in st.conn.execute(
+                        "select b from leaves where name = ?", (t.name,))):
+                # every leaf of a flagged table read: the flag is done
+                st.unflag(t.name)
             for x in buckets:
                 leaf = have.get(x) or _new()
                 fresh_d = tb.leaves.get(x, z)
-                if not leaf[STALE] and tuple(leaf[3:6]) != fresh_d:
+                if not leaf[STALE] and not flagged \
+                        and tuple(leaf[3:6]) != fresh_d:
                     moved.append(x)
                 leaf[0:3] = ta.leaves.get(x, z)
                 leaf[3:6] = fresh_d
@@ -737,7 +840,7 @@ def prove(pair, db, log=None, timeout=300, rounds=None):
     if st is None:
         return None
     where = pair.hop.report_dir(db)
-    if not tailctl.alive(where):
+    if not tailctl.alive(where, pair.hop):
         return None
     say = log or (lambda m: None)
     began = time.monotonic()
@@ -812,8 +915,9 @@ def _due(st, t, gen, oldest):
     at = {int(k): v for k, v in (st.get("gen_at") or {}).items()}
     now = time.time()
     why = {"differ": set(), "marked": set(), "touched": set(), "old": set()}
+    flagged = t.name in st.stale()
     for b, leaf in st.leaves(t.name).items():
-        if leaf[STALE]:
+        if leaf[STALE] or flagged:
             why["marked"].add(b)
         elif tuple(leaf[0:3]) != tuple(leaf[3:6]):
             why["differ"].add(b)
@@ -877,7 +981,7 @@ def proved_db(eng, db, stream=None, with_counts=False):
         return None
     pairs, _, _, _ = pair.match_tables(
         pair.src_engine.neutral_tables("src", db),
-        pair.dst_engine.neutral_tables("dst", db), pair._rename)
+        pair.dst_engine.neutral_tables("dst", db), pair._renamer(db))
     names = {pair._leaf(s_) for s_, _ in pairs}
     if not names or not names <= set(got) or any(
             got[n][0] != "ok" for n in names):

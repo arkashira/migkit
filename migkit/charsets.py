@@ -621,13 +621,13 @@ def plan(hop, eng, db):
     pair = _pair(eng)
     src, dst = pair.src_engine, pair.dst_engine
     tables = [t for t in src.neutral_tables("src", db)
-              if not hop.excluded(db, *str(t).split("."))]
+              if hop.takes_table(db, t)]
     try:
         there = [] if dst.target_missing(db) else dst.neutral_tables("dst",
                                                                       db)
     except Exception:  # noqa: BLE001 - a database not made yet has none
         there = []
-    pairs, _, _, _ = pair.match_tables(tables, there, pair._rename)
+    pairs, _, _, _ = pair.match_tables(tables, there, pair._renamer(db))
     have = dict(pairs)
     p = Plan(db, repair=bool(how and how["repair"]), declared=how)
     mysql_to = _mysql_declared(how) if _family(
@@ -713,7 +713,7 @@ def scan(hop, eng, db, p=None):
                    for n, typ in src.neutral_columns("src", db, t)}
         read = [(k, classes.get(k)) for k in key] + [
             (n, "text") for n in sorted(cols) if n not in key]
-        where = hop.row_filter(db, *str(t).split("."))
+        where = hop.row_filter(db, *hop.parts_of(t))
         for rows in src._every_row("src", db, t, read, where):
             for r in rows:
                 keytext = tuple(canon.render_value(classes.get(k), v)
@@ -1304,7 +1304,7 @@ def text_plan(eng, db):
     p = Plan(db, repair=True)
     none = Charset("")
     for t in dst.neutral_tables("dst", db):
-        if eng.hop.excluded(db, *str(t).split(".")):
+        if not dst.in_scope(db, t):
             continue
         for n, _ in _text_columns(dst, "dst", db, t):
             p.columns.append(Column(t, t, n, none, none))
@@ -1486,7 +1486,7 @@ def _proofs(hop, eng, db):
         key = [k for k in (src.neutral_key("src", db, t) or [])]
         keyed = bool(key) and set(key) <= set(names)
         at = [names.index(k) for k in key] if keyed else []
-        where = hop.row_filter(db, *str(t).split("."))
+        where = hop.row_filter(db, *hop.parts_of(t))
         a, b, unfit = ({} if keyed else Counter()), \
             ({} if keyed else Counter()), 0
         for rows in src._every_row("src", db, t, sc, where):

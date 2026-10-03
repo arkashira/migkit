@@ -69,6 +69,282 @@ MIGKIT_OWN = ("migkit_origin", "migkit_cutover_mark")
 KEYED_ENGINES = ("redis", "kafka")
 
 
+#: engines whose unquoted names fold to one case - Oracle, Db2 and
+#: Snowflake to upper, SQL Server, ASE and Teradata compare without case -
+#: so `orders` written in a hop names the table the server calls ORDERS
+FOLDS_CASE = ("oracle", "db2", "db2i", "db2zos", "snowflake", "mssql",
+              "ase", "teradata", "sapodp")
+
+
+def name_matches(name, pattern, fold=False):
+    """Whether a dotted name is one a hop's pattern names: a shell pattern
+    read the same on every machine (`fnmatchcase` - `fnmatch` folds case
+    on some systems and not on others, so one hop took a table on one
+    machine and left it on another), without case where the engine's
+    names have none (`FOLDS_CASE`)."""
+    from fnmatch import fnmatchcase
+    name, pattern = str(name), str(pattern)
+    if fnmatchcase(name, pattern):
+        return True
+    return fold and fnmatchcase(name.casefold(), pattern.casefold())
+
+
+def _shell_parts(pattern):
+    """A shell pattern as its parts: `*`, `?`, a `[...]` class whole, or
+    one plain character."""
+    out, i, text = [], 0, str(pattern)
+    while i < len(text):
+        if text[i] == "[":
+            end = text.find("]", i + 2)
+            if end > 0:
+                out.append(text[i:end + 1])
+                i = end + 1
+                continue
+        out.append(text[i])
+        i += 1
+    return out
+
+
+def pattern_after(pattern, prefix):
+    """The patterns that take what is left of a name once `prefix` has been
+    matched by `pattern`'s start - [] where no start of it matches the
+    prefix. What a program that names tables without their database is
+    handed of a hop's pattern written with it: `shop.orders` after `shop.`
+    is `orders`, `*.orders` is `*.orders` and `orders` (the star took the
+    database, or the database and more), `crm.orders` is nothing. A star
+    can take the dot as `name_matches` reads it, so each way it can is
+    one pattern."""
+    parts = _shell_parts(pattern)
+    out, seen = [], set()
+
+    def walk(i, j):
+        if (i, j) in seen:
+            return
+        seen.add((i, j))
+        if j == len(prefix):
+            got = "".join(parts[i:])
+            if got not in out:
+                out.append(got)
+            return
+        if i == len(parts):
+            return
+        p, ch = parts[i], prefix[j]
+        if p == "*":
+            walk(i + 1, j)
+            walk(i, j + 1)
+        elif p == "?" or p == ch or (len(p) > 1 and name_matches(ch, p)):
+            walk(i + 1, j + 1)
+    walk(0, 0)
+    return out
+
+
+def has_wildcard(pattern):
+    """Whether a hop's pattern holds a wildcard: one that does not names
+    exactly the name it is."""
+    return any(c in str(pattern) for c in "*?[")
+
+
+#: the changes a tail can carry, in the order they are said
+OPS = ("insert", "update", "delete")
+_OP_WORDS = {"i": "insert", "c": "insert", "insert": "insert",
+             "create": "insert", "u": "update", "update": "update",
+             "d": "delete", "delete": "delete"}
+
+
+def parse_ops(value):
+    """`mapping.ops`' value - a list or a comma-separated string of insert,
+    update and delete (or i, u, d) - as the set it names; SystemExit for
+    a word that is none of them."""
+    words = value if isinstance(value, (list, tuple, set, frozenset)) \
+        else str(value or "").replace(";", ",").split(",")
+    got = set()
+    for w in words:
+        w = str(w).strip().lower()
+        if not w:
+            continue
+        if w not in _OP_WORDS:
+            raise SystemExit(f"{w!r} is not a change a tail carries -"
+                             " insert, update or delete")
+        got.add(_OP_WORDS[w])
+    return frozenset(got)
+
+
+#: the kinds of object beside the tables a hop's `objects` says it
+#: carries, and the words each is written with
+OBJECT_KINDS = {"views": ("views", "view", "matviews"),
+                "functions": ("functions", "function"),
+                "procedures": ("procedures", "procedure"),
+                "triggers": ("triggers", "trigger"),
+                "events": ("events", "event"),
+                "sequences": ("sequences", "sequence"),
+                "roles": ("roles", "role", "users", "accounts", "grants")}
+#: words that name more than one kind at once
+OBJECT_GROUPS = {"routines": ("functions", "procedures"),
+                 "routine": ("functions", "procedures")}
+
+
+def object_kind(word):
+    """The kind of `objects` a word names - `view`, `materialized view`,
+    `function`, `trigger` as the inventories say them - or None for a
+    word that is not one (a table, an index: they follow the table)."""
+    w = str(word or "").strip().lower().replace("_", " ")
+    if w in ("materialized view", "matview", "mview"):
+        return "views"
+    for kind, words in OBJECT_KINDS.items():
+        if w in words:
+            return kind
+    return None
+
+
+def objects_of(hop):
+    """{kind: True | False | [names]} of the hop's `objects`, each kind
+    under its one name (`OBJECT_KINDS`; `routines` says functions and
+    procedures at once); a kind not said is True."""
+    raw = getattr(hop, "objects", None) or {}
+    words = {w: (k,) for k, ws in OBJECT_KINDS.items() for w in ws}
+    words.update(OBJECT_GROUPS)
+    out = {}
+    for k, v in raw.items():
+        kinds = words.get(str(k).lower())
+        if kinds is None:
+            raise SystemExit(f"objects: {k} is not a kind of object - "
+                             + ", ".join(list(OBJECT_KINDS) + ["routines"]))
+        if v in (True, None) or str(v).lower() in ("all", "true", "yes"):
+            got = True
+        elif v is False or str(v).lower() in ("none", "false", "no"):
+            got = False
+        else:
+            got = list(dict.fromkeys(scope_patterns(v)))
+        for kind in kinds:
+            out[kind] = got
+    return out
+
+
+def scope_patterns(value):
+    """A hop's `include` or `exclude` as the dotted patterns every reader
+    matches: a list as written, or the nested form that reads like the
+    databases it names -
+
+        include:
+          billing: all                  # the whole database
+          logistics: [orders, parcels]  # some of its tables
+          shop:
+            public: [orders, "lines_*"] # a schema's tables
+            audit: all                  # a whole schema
+
+    one shape for every reader, so the two forms cannot be read apart."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    if not isinstance(value, dict):
+        raise SystemExit(f"{value!r}: a list of names, or databases each"
+                         " with all, a list of tables, or its schemas")
+    out = []
+
+    def walk(prefix, got):
+        if got in (True, None, "all", "*"):
+            out.append(f"{prefix}.*")
+        elif isinstance(got, str):
+            out.append(f"{prefix}.{got}")
+        elif isinstance(got, (list, tuple)):
+            out.extend(f"{prefix}.{t}" for t in got)
+        elif isinstance(got, dict):
+            for k, v in got.items():
+                walk(f"{prefix}.{k}", v)
+        else:
+            raise SystemExit(f"{prefix}: {got!r} - all, a table, a list of"
+                             " tables, or its schemas")
+    for k, v in value.items():
+        if v is False:
+            continue
+        walk(str(k), v)
+    return out
+
+
+#: each way a hop takes other than every object whole, under its own
+#: name, with every change - in the order `narrowed_by` says them
+NARROWED_BY = ("include", "exclude", "objects_not_carried", "objects_named",
+             "row_filters", "column_rules", "values_masked", "renamed",
+             "names_ruled", "databases_renamed", "changes_carried")
+#: the parts of it that leave objects out by name
+BY_NAME = ("include", "exclude", "objects_not_carried", "objects_named")
+
+
+def narrowed_by(hop):
+    """{part: [what]} of every way the hop takes other than everything
+    whole (`NARROWED_BY`): objects left out by name, rows filtered, columns
+    chosen or masked, names changed on the target, changes not carried.
+    The one reading of it: a way that copies a whole database or server
+    (pages, a backup) asks which parts it cannot serve, the report says
+    them beside a `same`, and none of them reads the hop's keys apart.
+    Empty for a hop that takes everything whole."""
+    mapping = getattr(hop, "mapping", None) or {}
+    options = getattr(hop, "options", None) or {}
+    out = {k: [str(x) for x in getattr(hop, k, None) or []]
+           for k in ("include", "exclude")}
+    try:
+        said = objects_of(hop)
+    except SystemExit:
+        said = {}
+    out["objects_not_carried"] = sorted(k for k, v in said.items()
+                                        if v is False)
+    out["objects_named"] = [f"{k}: {', '.join(v)}" for k, v in
+                            sorted(said.items()) if isinstance(v, list)]
+    out["row_filters"] = sorted(str(k) for k in mapping.get("where") or {})
+    out["column_rules"] = sorted(str(k) for k in
+                                 mapping.get("columns") or {})
+    out["values_masked"] = sorted(str(k) for k in
+                                  options.get("mask_on_write") or {})
+    out["renamed"] = [f"{k} -> {v}" for k, v in
+                      sorted((mapping.get("tables") or {}).items(),
+                             key=lambda kv: str(kv[0]))]
+    out["names_ruled"] = [
+        f"{level}: " + ", ".join(f"{k} {v}" for k, v in sorted(
+            (rule or {}).items()))
+        for level, rule in sorted((mapping.get("names") or {}).items())
+        if rule]
+    out["databases_renamed"] = [
+        f"{k} -> {v}" for k, v in sorted((getattr(hop, "db_map", None)
+                                          or {}).items()) if k != v]
+    every = frozenset(OPS)
+    ops = mapping.get("ops") or {}
+    out["changes_carried"] = []
+    for k, v in sorted(ops.items(), key=lambda kv: str(kv[0])):
+        try:
+            fewer = parse_ops(v) != every
+        except SystemExit:
+            fewer = True
+        if fewer:
+            out["changes_carried"].append(str(k))
+    return {k: out[k] for k in NARROWED_BY if out.get(k)}
+
+
+def narrowed_said(hop, serves=()):
+    """The parts of `narrowed_by` a way does not serve (all but `serves`),
+    in the words a report says them - '' where there are none."""
+    from .verdict import SCOPE_WORDS
+    said = []
+    for k, v in narrowed_by(hop).items():
+        if k in serves:
+            continue
+        more = f" and {len(v) - 3} more" if len(v) > 3 else ""
+        said.append(f"{SCOPE_WORDS.get(k, k)} {', '.join(v[:3])}{more}")
+    return "; ".join(said)
+
+
+def scoped(hop):
+    """Whether the hop leaves anything out by name - an `exclude`, an
+    `include` that takes less than everything, objects not carried
+    (`narrowed_by`). A way that carries a whole database, a whole server or
+    a whole keyspace serves only a hop that is not; the one `excluded`
+    answers which objects."""
+    got = narrowed_by(hop)
+    return any(part in got for part in BY_NAME)
+
+
 @dataclass
 class Endpoint:
     host: str = ""
@@ -507,6 +783,11 @@ class Hop:
     target: Endpoint
     databases: list = field(default_factory=list)
     exclude: list = field(default_factory=list)
+    #: what the hop takes, where it takes less than everything - the same
+    #: patterns `exclude` reads; empty takes everything (`included`)
+    include: list = field(default_factory=list)
+    #: the kinds of object beside the tables it carries (`takes_object`)
+    objects: dict = field(default_factory=dict)
     service: str = ""
     big_rows: int = 5_000_000
     slice: int = 1_000_000
@@ -526,26 +807,194 @@ class Hop:
     goal: str = ""
 
     def reversed(self):
-        """The same hop run the other way: the target as the source, the
-        database names mapped back. Its name is its own, so its
+        """The same hop run the other way: the target as the source, every
+        name as the target has it - databases mapped back, tables renamed
+        back, the name rules turned round. Its name is its own, so its
         replication objects and reports are not the forward hop's. Used
         only where the hop asks for a stream back (`reverse`,
-        `topology`)."""
+        `topology`). A name rule that cannot be turned round - one that
+        strips a part some names never had, or folds case - is refused
+        here, before a change is written back under a name the old
+        source does not have."""
         import dataclasses
+        mapping = self._mapping_on_target()
         return dataclasses.replace(
             self, name=f"{self.name}-reverse", source=self.target,
             target=self.source,
             databases=[self.target_db(d) for d in (self.databases or [])],
-            db_map={v: k for k, v in (self.db_map or {}).items()},
+            db_map={self.target_db(k): k for k in (self.db_map or {})},
+            include=[self._on_target(p) for p in self.include or []],
+            exclude=[self._on_target(p) for p in self.exclude or []],
+            objects={k: ([self._on_target(p, tables=False) for p in v]
+                         if isinstance(v, list) else v)
+                     for k, v in objects_of(self).items()},
+            mapping=mapping,
             # never `physical`: the way back would empty the old source's
             # data directory to fill it with the new primary's pages
             options={k: v for k, v in (self.options or {}).items()
                      if k not in ("reverse", "topology", "protect_target",
                                   "physical")})
 
+    def _mapping_on_target(self):
+        """The mapping as the way back reads it: every rule keyed by the
+        table's name on the target (`_on_target`), a rename turned round,
+        a column renamed named as the target has it, the name rules
+        turned round (`_names_back`); a column the way there dropped is
+        not on the target to carry back, and a row filter is asked of the
+        target's rows under their target names."""
+        mapping = dict(self.mapping or {})
+        out = {}
+        renames = {str(k): str(v) for k, v in
+                   (mapping.get("tables") or {}).items()}
+        if renames:
+            back = {}
+            for k, v in renames.items():
+                head, tail = k.split("."), v.split(".")
+                back[self._on_target(k)] = ".".join(
+                    head[-len(tail):] if len(head) >= len(tail) else head)
+            out["tables"] = back
+        cols = {}
+        for k, rule in (mapping.get("columns") or {}).items():
+            rule = dict(rule or {})
+            ren = {str(a): str(b) for a, b in
+                   (rule.get("rename") or {}).items()}
+            back = {}
+            if rule.get("keep"):
+                back["keep"] = [ren.get(str(c), str(c))
+                                for c in rule["keep"]]
+            if ren:
+                back["rename"] = {b: a for a, b in ren.items()}
+            if back:
+                cols[self._on_target(k)] = back
+        if cols:
+            out["columns"] = cols
+        for part in ("where", "tolerance", "ops"):
+            if mapping.get(part):
+                out[part] = {self._on_target(k): v
+                             for k, v in mapping[part].items()}
+        names = self._names_back()
+        if names:
+            out["names"] = names
+        return out
+
+    #: the parts of a name rule the way back turns round: each one's
+    #: opposite, written to every name the way there wrote
+    _NAMES_TURNED = {"prefix": "strip_prefix", "suffix": "strip_suffix"}
+
+    def _names_back(self):
+        """`mapping.names` turned round for the way back: a prefix or a
+        suffix the way there added, stripped. SystemExit for a rule that
+        cannot be: one that strips (a name that never had the part is
+        not told apart from one that did) or folds case."""
+        out = {}
+        for level, rule in ((self.mapping or {}).get("names") or {}).items():
+            back = {}
+            for k, v in (rule or {}).items():
+                if not v:
+                    continue
+                if k not in self._NAMES_TURNED:
+                    raise SystemExit(
+                        f"{self.name}: mapping.names.{level}.{k} cannot be"
+                        " turned round for the way back - not every name"
+                        " it writes says what it was. Name those tables in"
+                        " mapping.tables, which is turned round exactly")
+                back[self._NAMES_TURNED[k]] = v
+            if back:
+                out[level] = back
+        return out
+
+    def _on_target(self, pattern, tables=True):
+        """A scope pattern as the target names what it names: a leading
+        database (one the pattern names whole: as many parts as a table's
+        whole name, or a database the hop maps) as the target's database,
+        and - `tables` - a table the hop renames by its new name, the
+        name rules written on the schema and the table as on every name
+        (`target_table`). A rename shorter than the name it renames keeps
+        the parts before it. So the way back takes what the way there
+        took, under the names it took them to."""
+        text = str(pattern)
+        parts = text.split(".")
+        whole = self.whole_name()
+        has_db = (len(parts) >= whole if whole else
+                  len(parts) >= 2 and parts[0] in (self.db_map or {}))
+        head = []
+        if has_db:
+            db, parts = parts[0], parts[1:]
+            head = [db if has_wildcard(db) else self.target_db(db)]
+            if not parts:
+                return head[0]
+        if not tables:
+            return ".".join(head + parts)
+        rules = self.table_map()
+        for ident in self._ids(*([text.split(".")[0]] if has_db else [])
+                               + parts):
+            if ident in rules:
+                got = str(rules[ident]).split(".")
+                kept = parts[:max(len(parts) - len(got), 0)]
+                return ".".join(head + kept + got)
+        named = list(parts)
+        named[-1] = self.named("tables", named[-1])
+        if whole == 3 and len(named) >= 2:
+            named[-2] = self.named("schemas", named[-2])
+        return ".".join(head + named)
+
+    def scope_fingerprint(self):
+        """One short digest of everything that decides what the hop takes
+        and how each table is read: its databases and their target names,
+        include, exclude and the whole mapping. Kept beside every answer,
+        position and checkpoint that is only good for the scope it was
+        taken under, so one taken under another scope is never reused as
+        if it were this one's (`scope_changed`)."""
+        import hashlib
+        import json
+        text = json.dumps(self.scope_record(), sort_keys=True, default=str)
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+    def scope_record(self):
+        """What `scope_fingerprint` digests, as plain values - kept beside
+        a record whose reader must know what that scope took, not only
+        that it was another (`under`)."""
+        return {"databases": sorted(str(d) for d in self.databases or []),
+                "db_map": {str(k): str(v) for k, v in
+                           sorted((self.db_map or {}).items())},
+                "include": sorted(str(p) for p in self.include or []),
+                "exclude": sorted(str(p) for p in self.exclude or []),
+                "objects": self.objects or {},
+                "mapping": self.mapping or {}}
+
+    def under(self, record):
+        """This hop under the scope `record` kept (`scope_record`, or a dict
+        holding one under `scope`) - to ask what that scope took. None
+        where it kept none."""
+        import dataclasses
+        if isinstance(record, dict) and isinstance(record.get("scope"),
+                                                   dict):
+            record = record["scope"]
+        if not isinstance(record, dict) or "mapping" not in record:
+            return None
+        return dataclasses.replace(
+            self, databases=list(record.get("databases") or []),
+            db_map=dict(record.get("db_map") or {}),
+            include=list(record.get("include") or []),
+            exclude=list(record.get("exclude") or []),
+            objects=dict(record.get("objects") or {}),
+            mapping=dict(record.get("mapping") or {}))
+
+    def scope_changed(self, recorded):
+        """Whether a record made under `recorded` (a fingerprint, or a dict
+        holding one under `scope_fingerprint`) was taken under another
+        scope than the hop's now. A record with none predates them and is
+        taken as it always was."""
+        if isinstance(recorded, dict):
+            recorded = recorded.get("scope_fingerprint")
+        return bool(recorded) and recorded != self.scope_fingerprint()
+
     def report_dir(self, db=""):
         d = REPORTS / self.name / db if db else REPORTS / self.name
-        d.mkdir(parents=True, exist_ok=True)
+        # this user's only: what migkit keeps there holds values and the
+        # position of every stream (audit SEC10)
+        from .durable import private_dir
+        private_dir(d)
         # the files under it that hold values encrypted, where the hop
         # names who may read them (`evidence`)
         from . import evidence
@@ -553,22 +1002,22 @@ class Hop:
 
     def target_db(self, db):
         """Target database name for a source db. Migrations often land in a
-        differently-named db (e.g. cart_uat -> cart), so every dst-side
+        differently-named db (e.g. shop_staging -> shop), so every dst-side
         connection resolves through this map (identity when unmapped).
         Local report paths stay keyed by the source name."""
-        return self.db_map.get(db, db)
+        got = (self.db_map or {}).get(db)
+        return got if got is not None else self.named("databases", db)
 
     def excluded(self, *parts):
         """True if an object matches any `exclude` pattern, so migkit neither
         verifies nor repairs it. Pass the dotted name parts, e.g. (db, schema,
         table) for postgres or (db, table) for mysql/mongo. A pattern matches
         the full dotted id or any right-anchored suffix of it, with shell
-        wildcards, so 'pick_dispatch_queue', 'public.pick_dispatch_queue' and
-        'oms_mkp_uat.public.pick_dispatch_queue' all exclude the same table,
-        and 'oms_mkp_uat.public.*' excludes a whole schema. This protects
+        wildcards, so 'job_queue', 'public.job_queue' and
+        'orders_db.public.job_queue' all exclude the same table,
+        and 'orders_db.public.*' excludes a whole schema. This protects
         target-owned tables (rows written on the target, not the source) from
         being deleted by a reconcile."""
-        from fnmatch import fnmatch
         parts = [str(p) for p in parts if p not in (None, "")]
         if parts and parts[-1] in MIGKIT_OWN:
             # migkit's own bookkeeping on a side, never the application's
@@ -581,7 +1030,138 @@ class Hop:
             if bookkeeping(*parts):
                 return True
         cands = {".".join(parts[i:]) for i in range(len(parts))}
-        return any(fnmatch(c, str(pat)) for pat in self.exclude for c in cands)
+        fold = self.folds_case()
+        if any(name_matches(c, pat, fold) for pat in self.exclude
+               for c in cands):
+            return True
+        return not self.included(*parts)
+
+    def takes_table(self, db, table, engine=None):
+        """Whether the hop takes a table named as a listing names it
+        (`public.orders`, `orders`, `public."v1.orders"`): split the one way
+        names are (`util.split_table`, by `engine`'s quoting - the
+        source's by default - and a bare name in the engine's default
+        schema, `DEFAULT_SCHEMA`), then asked of `excluded`. The one
+        question every reader holding a table's listed name asks;
+        `Engine.in_scope` asks it with its own engine. Splitting it by
+        hand split `public."v1.orders"` at the wrong dot and asked a
+        bare PostgreSQL name outside its schema."""
+        return not self.excluded(db, *self.parts_of(table, engine))
+
+    def parts_of(self, table, engine=None, bare_in=None):
+        """A table's listed name (`public.orders`, `orders`,
+        `public."v1.orders"`) as the parts every rule of the hop is asked
+        with: split the one way names are (`util.split_table`, by
+        `engine`'s quoting - the source's by default), a bare name in the
+        engine's default schema (`DEFAULT_SCHEMA`). Split at every dot by
+        hand, a quoted name broke at its own dot and a bare PostgreSQL name
+        missed a rule written with its schema. `bare_in`: the schema a bare
+        name is read in instead ("" - none, the name as it was given)."""
+        from .util import DEFAULT_SCHEMA, _canonical, split_table
+        eng = _canonical(engine) if engine else self._names_engine()
+        schema, name = split_table(
+            eng, str(table),
+            DEFAULT_SCHEMA.get(eng, "") if bare_in is None else bare_in)
+        return [schema, name] if schema else [name]
+
+    def folds_case(self):
+        """Whether the names the hop's patterns are matched against have
+        no case (`FOLDS_CASE`)."""
+        return self._names_engine() in FOLDS_CASE
+
+    def included(self, *parts):
+        """Whether the hop's `include` takes this object - True where it
+        has no `include`, which takes everything.
+
+        The same patterns `exclude` reads, matched the same way against
+        the object's own name and every name it sits in: `orders`,
+        `public.orders`, `appdb.public.orders`, `appdb.public.*` and
+        `appdb` each take `appdb.public.orders`. `exclude` wins where both
+        name it, so a task that took a schema but none of its log tables
+        is said as the two lists it is. Asked through `excluded`, so every
+        reader of the hop's scope - the check, the copy, the repair, the
+        tail - reads one answer and none can verify a table the move
+        left out, or leave out one it moved.
+
+        A single name is a database being listed: it is opened unless
+        every entry names another database first - `orders` and
+        `public.orders` may be in any of them, `crm.public.orders` and,
+        on MySQL, `crm.orders` only in `crm`. Where a name may hold a dot
+        of its own (a collection, a topic) every database is opened. A
+        database opened for nothing has no table taken, never a table
+        too many."""
+        if not self.include:
+            return True
+        names = self._names(*parts)
+        if not names:
+            return True
+        pats = [str(p) for p in self.include if str(p).strip()]
+        if not pats:
+            return True
+        fold = self.folds_case()
+        for k in range(1, len(names) + 1):
+            for ident in self._ids(*names[:k]):
+                if any(name_matches(ident, p, fold) for p in pats):
+                    return True
+        if len(names) > 1:
+            return False
+        db = names[0]
+        whole = self.whole_name()
+        if not whole:
+            return True
+        for p in pats:
+            head, _, rest = p.partition(".")
+            if name_matches(db, head, fold) or p.count(".") + 1 < whole:
+                return True
+        return False
+
+    def _names(self, *parts):
+        """An object's name as its parts, split the one way names are
+        (`util.split_table`): some callers pass a table as one part
+        (`public.orders`), and a bare `include` entry must take it either
+        way. A quoted name's dots are its own, and so are an unquoted
+        name's on an engine without schemas - a collection `fs.chunks`, a
+        topic `orders.created`."""
+        from .util import _parts
+        eng = self._names_engine()
+        return [x for p in parts if p not in (None, "")
+                for x in _parts(eng, str(p)) if x]
+
+    def whole_name(self):
+        """How many dotted parts name a table from its database down - 3
+        where there are schemas, 2 on an engine whose names hold no dot -
+        or 0 where a name may hold a dot of its own (a collection
+        `fs.chunks`, a topic `orders.created`), so no dotted name is sure
+        of the database it names."""
+        from .util import NO_SCHEMA
+        eng = self._names_engine()
+        if eng in ("mysql", "tidb", "clickhouse", "cassandra"):
+            return 2
+        return 0 if eng in NO_SCHEMA else 3
+
+    def _names_engine(self):
+        """The engine whose names the hop's objects carry: the source's,
+        a pair's own engine being neither side's."""
+        from .util import _canonical
+        eng = self.engine
+        if eng == "hetero":
+            eng = (self.options or {}).get("source_engine") or "mysql"
+        return _canonical(eng)
+
+    def unused_include(self, tables):
+        """`include` entries that take none of these source tables, each
+        `(database, table)` as the engine lists it: an entry that takes
+        nothing is a table the operator believes is moved and checked,
+        and nobody looks at it."""
+        known = set()
+        for db, table in tables:
+            names = self._names(db, table)
+            for k in range(1, len(names) + 1):
+                known.update(self._ids(*names[:k]))
+        fold = self.folds_case()
+        return [str(p) for p in self.include
+                if str(p).strip() and not any(name_matches(i, p, fold)
+                                              for i in known)]
 
     @staticmethod
     def _ids(*parts):
@@ -609,7 +1189,79 @@ class Hop:
         for ident in self._ids(*parts):
             if ident in rules:
                 return str(rules[ident])
-        return ".".join(str(p) for p in parts if p not in (None, ""))
+        parts = [str(p) for p in parts if p not in (None, "")]
+        if self.name_policy("tables") or self.name_policy("schemas"):
+            # the database a name opens with is the target's own
+            # (`target_db`); the schema and the table take the hop's rule
+            whole = self.whole_name() or 2
+            lead = 1 if len(parts) >= whole else 0
+            if parts:
+                parts[-1] = self.named("tables", parts[-1])
+            if len(parts) - lead >= 2:
+                parts[-2] = self.named("schemas", parts[-2])
+        return ".".join(parts)
+
+    def name_policy(self, level):
+        """The hop's rule for every name at one level (`databases`,
+        `schemas`, `tables`) on the target, from `mapping.names`: `case`
+        (lower or upper), `prefix`, `suffix`, `strip_prefix`,
+        `strip_suffix` - as DMS's and the DTS services' name rules
+        transform every name of a level at once. A rename the hop names
+        itself (`mapping.tables`, `db_map`) is taken as written."""
+        rules = ((self.mapping or {}).get("names") or {}).get(level)
+        return dict(rules) if isinstance(rules, dict) else {}
+
+    def named(self, level, name):
+        """A name at `level` as the hop's rule writes it on the target."""
+        rule = self.name_policy(level)
+        if not rule:
+            return name
+        name = str(name)
+        for key, cut in (("strip_prefix", lambda n, x: n[len(x):]
+                          if n.startswith(x) else n),
+                         ("strip_suffix", lambda n, x: n[:-len(x)]
+                          if x and n.endswith(x) else n)):
+            if rule.get(key):
+                name = cut(name, str(rule[key]))
+        case = str(rule.get("case") or "").lower()
+        if case == "lower":
+            name = name.lower()
+        elif case == "upper":
+            name = name.upper()
+        return f"{rule.get('prefix') or ''}{name}{rule.get('suffix') or ''}"
+
+    def target_table_in(self, db, *parts):
+        """`target_table` for a table of database `db`, named without it.
+
+        A rule may name the database - the only way to tell two
+        databases' `orders` apart - so the database is part of what is
+        matched; the answer is the rule's target, or the table's name as
+        the caller gave it (under the hop's name rule, `named`) where no
+        rule applies.
+        """
+        own = [str(p) for p in parts if p not in (None, "")]
+        rules = self.table_map()
+        for ident in self._ids(db, *own):
+            if ident in rules:
+                return str(rules[ident])
+        return ".".join(str(self.target_table(db, *own)).split(".")[1:])
+
+    def source_table_in(self, db, *parts):
+        """The parts of the source's name, within `db`, of the table the
+        target names `parts` in `db`'s target database: `target_table_in`
+        turned round (`reversed` - a rename, the name rules), a rename
+        shorter than the name keeping the parts before it. None where the
+        hop's name rules cannot be turned round."""
+        own = [str(p) for p in parts if p not in (None, "")]
+        try:
+            back = self.reversed()
+        except SystemExit:
+            return None
+        got = [p for p in back.target_table_in(self.target_db(db), *own)
+               .split(".") if p]
+        if len(got) < len(own):
+            got = own[:len(own) - len(got)] + got
+        return tuple(got)
 
     def column_rules(self, *parts):
         """What the hop's `mapping.columns` says about this table's columns:
@@ -635,11 +1287,78 @@ class Hop:
         half DMS leaves out, and the reason a filtered target reads as
         missing rows there.
         """
+        got = self._where_rule(*parts)
+        if got is None:
+            return None
+        return str(got.get("expr")) if isinstance(got, dict) else str(got)
+
+    def row_filter_zone(self, *parts):
+        """The time zone the row filter's times are read in - `where:
+        {table: {expr: ..., tz: "+07:00"}}` - or None, where each server
+        reads them in its own session's zone. A filter on a time column
+        read in two zones takes other rows on each side; said once, it is
+        read in that one zone by every reader."""
+        got = self._where_rule(*parts)
+        return str(got["tz"]) if isinstance(got, dict) and got.get("tz") \
+            else None
+
+    def _where_rule(self, *parts):
         rules = (self.mapping or {}).get("where") or {}
         for ident in self._ids(*parts):
             if ident in rules:
-                return str(rules[ident])
+                return rules[ident]
         return None
+
+    def takes_object(self, kind, *parts):
+        """Whether the hop carries this object of a kind beside the tables
+        - a view, a routine, a trigger, an event, a sequence, a role - by
+        its `objects`: all of a kind (the default), none of it, or the
+        ones named, matched as every other name in the hop. A kind the hop
+        does not carry is out of its scope as an excluded table is: not
+        moved, not compared, not repaired - and said, in the scope the
+        evidence carries and before the move, so nobody takes its absence
+        on the target for a pass. A table's own objects follow the table
+        too (`excluded`)."""
+        got = objects_of(self).get(object_kind(kind), True)
+        if got is True:
+            return True
+        if got is False:
+            return False
+        ids = self._ids(*self._names(*parts))
+        fold = self.folds_case()
+        return any(name_matches(i, p, fold) for p in got for i in ids)
+
+    def carries(self, *parts):
+        """The changes the hop carries for this table: insert, update and
+        delete, unless its `mapping.ops` says fewer - a move told to keep
+        what the source deletes (an archive kept on the target), as DTS
+        jobs and GoldenGate's IGNOREDELETES are. Keys are names or
+        patterns (`logistics.*`, `*` for every table); the most particular
+        one that names the table wins. The tail applies only these, and
+        the check holds the table to what they leave: kept deletes let
+        the target hold more rows, never fewer or other ones."""
+        rules = (self.mapping or {}).get("ops") or {}
+        if not rules:
+            return frozenset(OPS)
+        best = self.most_particular(rules, *parts)
+        if best is None:
+            return frozenset(OPS)
+        return parse_ops(rules[best])
+
+    def most_particular(self, rules, *parts):
+        """The key of `rules` - names or patterns (`logistics.*`, `*`) -
+        that names this table most particularly, or None: the one with the
+        most characters that are not wildcards, then the longest. How
+        `mapping.ops` and a `ddl` said per table (`tailtables.policy`)
+        pick the rule a table goes by."""
+        ids = self._ids(*parts)
+        fold = self.folds_case()
+        hits = [k for k in rules
+                if any(name_matches(i, k, fold) for i in ids)]
+        if not hits:
+            return None
+        return max(hits, key=lambda k: (sum(c not in "*?[]" for c in
+                                            str(k)), len(str(k))))
 
     def tolerance(self, *parts):
         """The percentage this table's aggregates may drift by when read a
@@ -719,7 +1438,7 @@ def _secret(val):
         p = Path(val[5:]).expanduser()
         if not p.exists():
             raise SystemExit(f"secret file '{p}' not found")
-        return p.read_text().strip()
+        return trusted_file(p, "the secret file").read_text().strip()
     if val.startswith("vault:"):
         return _vault_read(val[6:])
     if val.startswith("aws-sm:"):
@@ -731,6 +1450,32 @@ def _secret(val):
     if val.startswith("keyring:"):
         return keychain_read(val[8:])
     return val
+
+
+def trusted_file(path, what, owners=None):
+    """`path`, refused where a user other than its owner may change it:
+    writable by every user of the machine, or in a directory every user
+    may replace it in (writable, no sticky bit) - and, with `owners`, a
+    file belonging to a user outside them. A secret, or a list of who
+    may approve, that anyone could rewrite says nothing (audit SEC21)."""
+    import stat
+    p = Path(path)
+    st = p.stat()
+    if st.st_mode & stat.S_IWOTH:
+        raise SystemExit(f"{what} {p} may be changed by every user of this"
+                         " machine; make it writable by its owner alone"
+                         " (chmod o-w)")
+    d = p.resolve().parent.stat()
+    if d.st_mode & stat.S_IWOTH and not d.st_mode & stat.S_ISVTX:
+        raise SystemExit(f"{what} {p} is in a directory every user of this"
+                         " machine may write, where any of them may put"
+                         " another file in its place; keep it in one only"
+                         " its owner writes")
+    if owners is not None and st.st_uid not in owners:
+        raise SystemExit(f"{what} {p} belongs to another user of this"
+                         f" machine (uid {st.st_uid}), who may change it;"
+                         " it is taken only from this user or root")
+    return p
 
 
 def _aws_secret(ref):
@@ -902,7 +1647,9 @@ def build_hop(name, raw):
         source=ends["source"],
         target=ends["target"],
         databases=dbs,
-        exclude=raw.get("exclude") or [],
+        exclude=scope_patterns(raw.get("exclude")),
+        include=scope_patterns(raw.get("include")),
+        objects=dict(raw.get("objects") or {}),
         service=raw.get("service", ""),
         big_rows=int(raw.get("big_rows", 5_000_000)),
         slice=int(raw.get("slice", 1_000_000)),

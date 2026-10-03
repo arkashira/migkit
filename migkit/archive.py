@@ -84,9 +84,9 @@ def _pair(eng):
 def tables(hop, eng, db):
     """[(source table, its rule)] of the tables the hop archives."""
     src = _pair(eng).src_engine
-    return [(t, hop.row_filter(db, *str(t).split(".")))
+    return [(t, hop.row_filter(db, *hop.parts_of(t)))
             for t in src.neutral_tables("src", db)
-            if not hop.excluded(db, *str(t).split("."))]
+            if hop.takes_table(db, t)]
 
 
 def _source_as_target(hop, eng):
@@ -206,8 +206,8 @@ class Table:
 
 
 def _table(pair, db, t, rule, there):
-    got, _, _, _ = pair.match_tables([t], there, pair._rename)
-    target = got[0][1] if got else pair._leaf(pair._rename(t))
+    got, _, _, _ = pair.match_tables([t], there, pair._renamer(db))
+    target = got[0][1] if got else pair._leaf(pair._rename(t, db))
     key = list(pair.src_engine.neutral_key("src", db, t) or [])
     if not got:
         return Table(t, target, rule, key, [], [], [])

@@ -2,7 +2,7 @@ import time
 
 from .. import pieces
 from ..decide import Rung
-from .base import Engine, RepairAction, Result
+from .base import Engine, RepairAction, Result, clauses, rows_counted
 from ..verdict import difference_kind_from_counts
 
 SKIP_DBS = {"admin", "local", "config"}
@@ -88,7 +88,7 @@ class MongoEngine(Engine):
         c = self._client(side)[self._d(side, db)]
         return sorted(n for n in c.list_collection_names()
                       if not n.startswith("system.")
-                      and not self.hop.excluded(db, n))
+                      and self.in_scope(db, n))
 
     def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a collection")
@@ -215,11 +215,15 @@ class MongoEngine(Engine):
             name, codec_options=self._client("src").codec_options
             .with_options(document_class=RawBSONDocument))
         target = self._client("dst")[self._d("dst", db)]
-        dst = target[name]
+        # under the name the hop gives it there (`mapping.tables`): it was
+        # written under the source's, and the one the hop names stayed
+        # empty
+        there = self.hop.target_table_in(db, name)
+        dst = target[there]
         after = json_util.loads(st["last"]) if "last" in st else None
         started_here = after is None
         if started_here:
-            st["made"] = name not in target.list_collection_names()
+            st["made"] = there not in target.list_collection_names()
             # what the target already holds is not this copy's
             gone = dst.delete_many({}).deleted_count
             st["moved"] = 0
@@ -283,17 +287,21 @@ class MongoEngine(Engine):
         do. A collection the target does not have at all counts too - this
         engine creates collections on the first write, so a missing one is
         one nothing reached. Excluded collections are not listed, so a
-        collection left out on purpose is not reported.
+        collection left out on purpose is not reported. A renamed one is
+        looked for under the name the hop gives it on the target.
         """
         try:
-            dst = set(self.neutral_tables("dst", db))
+            dst = set(self._client("dst")[self._d("dst", db)]
+                      .list_collection_names())
             s = self._client("src")[db]
             t = self._client("dst")[self._d("dst", db)]
             empty = []
             for c in self.neutral_tables("src", db):
                 if s[c].find_one({}, {"_id": 1}) is None:
                     continue
-                if c not in dst or t[c].find_one({}, {"_id": 1}) is None:
+                there = self.hop.target_table_in(db, c)
+                if there not in dst or t[there].find_one(
+                        {}, {"_id": 1}) is None:
                     empty.append(c)
             return empty
         except Exception:
@@ -707,6 +715,28 @@ class MongoEngine(Engine):
                     " set")
         return None
 
+    def stream_match(self, db):
+        """The change stream's own filter for what the hop takes - [] where
+        it takes every collection: the server leaves out the events of a
+        collection the hop does not take, and they never cross the wire,
+        where every event of the database was read and dropped here. Read
+        from the hop's patterns (`movers.scope_alternatives`), so a
+        collection made later under a taken pattern is in it; an event
+        renaming one into what is taken passes by its new name; one about
+        the whole database always passes. Each event is still asked here
+        (`Hop.excluded`): the server's filter only saves the reading."""
+        from ..movers import NOTHING, scope_alternatives
+        out, taken = scope_alternatives(self.hop, db, False)
+        if not out and taken is None:
+            return []
+        rx = ("^" + (f"(?!(?:{'|'.join(out)})$)" if out else "")
+              + (".*$" if taken is None else
+                 f"(?:{'|'.join(taken) or NOTHING})$"))
+        return [{"$match": {"$or": [
+            {"ns.coll": {"$regex": rx}},
+            {"to.coll": {"$regex": rx}},
+            {"ns.coll": {"$exists": False}}]}}]
+
     def change_point(self, side, db):
         """A resume token for now, read without taking any event off the
         stream: the server answers an empty first batch with the position it
@@ -761,7 +791,7 @@ class MongoEngine(Engine):
         if token:
             args["resume_after"] = {"_data": token}
         try:
-            stream = client[target].watch([], **args)
+            stream = client[target].watch(self.stream_match(db), **args)
         except Exception as e:
             if "only supported on replica sets" in str(e):
                 raise SystemExit(
@@ -793,8 +823,13 @@ class MongoEngine(Engine):
                 after = (event.get("_id") or {}).get("_data")
                 ts = self._event_time(event)
                 # a collection the hop leaves alone, dropped or written,
-                # is the target's business and not the tail's
-                if table and self.hop.excluded(db, table):
+                # is the target's business and not the tail's - unless it
+                # is renamed into the hop's scope, which the tail must
+                # meet: dropped here, the collection joined with none of
+                # its documents under every `ddl` (as MySQL's `_ddl_of`
+                # keeps a rename whose either end is in scope)
+                if table and self.hop.excluded(db, table) and not (
+                        op == "rename" and self._renamed_in(db, event)):
                     continue
                 if op in self.STREAM_DDL:
                     got = self._ddl_event(db, op, event)
@@ -854,6 +889,13 @@ class MongoEngine(Engine):
                   "dropIndexes": "alter", "shardCollection": "alter",
                   "reshardCollection": "alter",
                   "refineCollectionShardKey": "alter"}
+
+    def _renamed_in(self, db, event):
+        """Whether a rename event's new name, in this database, is one the
+        hop takes."""
+        dest = event.get("to") or {}
+        return bool(dest.get("coll")) and dest.get("db") == self._d(
+            "src", db) and not self.hop.excluded(db, dest["coll"])
 
     def _ddl_event(self, db, op, event):
         """[canon.ddl] for a collection event, None where it is not one
@@ -992,7 +1034,10 @@ class MongoEngine(Engine):
     def _shape(self, side, db):
         d = self._client(side)[self._d(side, db)]
         shape = {}
-        for name in sorted(d.list_collection_names()):
+        # the collections and views the hop takes, with their indexes: one
+        # it leaves out, on one side only, was "extra on target" every check
+        for name in sorted(n for n in d.list_collection_names()
+                           if self.in_scope(db, n)):
             idx = {}
             for i in d[name].list_indexes():
                 spec = {k: (str(v) if k == "key" else v)
@@ -1276,7 +1321,7 @@ class MongoEngine(Engine):
                     if ca != cb:
                         bad.append(f"{name} src={ca} dst={cb}")
             if bad:
-                cres = Result("counts", db, "diff", "; ".join(bad[:10]))
+                cres = Result("counts", db, "diff", clauses(bad))
             else:
                 cres = Result("counts", db, "ok",
                               f"{len(names)} collections, equality implied"
@@ -1392,15 +1437,15 @@ class MongoEngine(Engine):
 
     def _tail_position(self, db):
         """How far migkit's own tail has applied, from the position it
-        saved - either tail's file - or None when no tail has saved one."""
-        import json as _json
-        path = self.hop.report_dir(db) / "tail-token.json"
+        saved - either tail's - or None when no tail has saved one."""
+        from .. import tailctl
         try:
-            saved = _json.loads(path.read_text())
-        except (OSError, ValueError):
+            token = tailctl.saved(tailctl.token_path(self.hop, db))
+        except SystemExit:
             return None
-        token = saved.get("token") if "token" in saved else saved.get("_data")
-        return self._token_time(token) if token else None
+        if isinstance(token, dict):
+            token = token.get("_data")
+        return self._token_time(token) if isinstance(token, str) else None
 
     def fence_wait(self, db, at, timeout=300):
         """Wait until migkit's tail has applied the source up to `at`.
@@ -1409,6 +1454,7 @@ class MongoEngine(Engine):
         wait on - no cluster time, or no tail of migkit's saving a
         position - so the caller falls back rather than waiting blind.
         """
+        from .. import tailctl
         if at is None or self._tail_position(db) is None:
             return None
         end = time.time() + timeout
@@ -1416,7 +1462,8 @@ class MongoEngine(Engine):
             got = self._tail_position(db)
             if got is not None and got >= at:
                 return True
-            time.sleep(1)
+            # looked at every 50 ms, not once a second (audit SP19)
+            time.sleep(tailctl.POLL)
         return False
 
     def _id_plan(self, coll, docs):
@@ -1672,7 +1719,10 @@ class MongoEngine(Engine):
                       + (" by their bytes" if exact else "")
                       + (f" kind={kind}" if kind else "")
                       + (f"; {whose}" if whose else ""), str(d),
-                      f"migkit sync {self.hop.name} --db {db} --kind rows --apply")
+                      f"migkit sync {self.hop.name} --db {db} --kind rows --apply",
+                      table=str(name), rows_apart=rows_counted(
+                          name, len(found["missing"]), len(found["extra"]),
+                          len(found["changed"])))
 
     #: stages that write, which a rule may not hold anywhere in it
     WRITING_STAGES = ("$out", "$merge")
@@ -1761,8 +1811,9 @@ class MongoEngine(Engine):
 
     def check_deep(self, db):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
-        names = sorted(set(s.list_collection_names())
-                       & set(t.list_collection_names()))
+        names = sorted(n for n in set(s.list_collection_names())
+                       & set(t.list_collection_names())
+                       if self.in_scope(db, n))
 
         def newest(coll):
             d = coll.find_one(sort=[("_id", -1)], projection={"_id": 1})
@@ -1944,29 +1995,33 @@ class MongoEngine(Engine):
         # merge/reshard with a non-_id shard key can duplicate _id across
         # shards, and a running balancer makes counts a moving target. On a
         # standalone / replica-set this is a clean skip, not a false OK.
-        def mongos(side):
-            try:
-                return self._client(side).admin.command(
+        # each read planned and said where it could not be made: a failed
+        # "is it sharded?" read as "not sharded", a failed balancer read as
+        # "idle", a failed duplicate-_id read as "no duplicates" - each an
+        # `ok` over nothing (audit LG2)
+        from ..util import Probes
+        asked = Probes("sharding reads")
+        sharded = {}
+        for side in ("src", "dst"):
+            with asked.reading(f"{side} topology"):
+                sharded[side] = self._client(side).admin.command(
                     "hello").get("msg") == "isdbgrid"
-            except Exception:
-                return False
-        if not mongos("src") and not mongos("dst"):
-            res.append(Result("deep", f"{db} sharding", "ok",
-                              "not a sharded cluster (standalone/replica-set)"))
+        if not any(sharded.values()):
+            status, detail = asked.verdict(
+                "ok", "not a sharded cluster (standalone/replica-set)")
+            res.append(Result("deep", f"{db} sharding", status, detail))
         else:
             sh = []
-            try:
+            with asked.reading("target balancer"):
                 if self._client("dst").admin.command(
                         "balancerStatus").get("inBalancerRound"):
                     sh.append("balancer running on target - counts/orphans are"
                               " a moving target; sh.stopBalancer() before"
                               " verify")
-            except Exception:
-                pass
             for name in names:
                 if name.startswith("system."):
                     continue
-                try:
+                with asked.reading(f"{name} duplicate _id"):
                     r = list(t[name].aggregate(
                         [{"$group": {"_id": "$_id", "n": {"$sum": 1}}},
                          {"$match": {"n": {"$gt": 1}}}, {"$count": "c"}],
@@ -1974,14 +2029,13 @@ class MongoEngine(Engine):
                     if r and r[0]["c"] > 0:
                         sh.append(f"{name}: {r[0]['c']} duplicate _id across"
                                   " shards (merge/reshard collision)")
-                except Exception:
-                    continue
-            res.append(Result("deep", f"{db} sharding",
-                              "diff" if sh else "ok",
-                              "; ".join(sh[:5]) if sh
-                              else "sharded: no dup _id, balancer idle", "",
-                              "cleanupOrphaned / dedupe and stop the balancer"
-                              " before cutover" if sh else ""))
+            status, detail = asked.verdict(
+                "diff" if sh else "ok",
+                "; ".join(sh[:5]) if sh
+                else "sharded: no dup _id, balancer idle")
+            res.append(Result("deep", f"{db} sharding", status, detail, "",
+                              "cleanupOrphaned / dedupe and stop the"
+                              " balancer before cutover" if sh else ""))
         return res
 
     # delta verify: re-check only _ids touched since the saved change-stream
@@ -2069,6 +2123,10 @@ class MongoEngine(Engine):
         clean = True
         for coll, ids in sorted(touched.items()):
             bad = []
+            # each document apart said as missing, only on the target or
+            # changed: a hop that keeps what the source deletes is held to
+            # which (`verdict.hold`)
+            apart = {"missing": [], "extra": [], "changed": []}
             # by the stored bytes: decoded, 5 == 5.0 == NumberLong(5) and
             # 1 == True in Python, and two dicts equal in any field order
             one, two = self._raw(src[coll]), self._raw(dst[coll])
@@ -2077,23 +2135,36 @@ class MongoEngine(Engine):
                 b = two.find_one({"_id": _id})
                 if (a and a.raw) != (b and b.raw):
                     bad.append(_id)
+                    apart["missing" if b is None else "extra" if a is None
+                          else "changed"].append(_id)
             if bad:
-                clean = False
                 d = self.hop.report_dir(db)
-                (d / f"data-{coll}.changed").write_text(
-                    "\n".join(dumps(i) for i in bad) + "\n")
-                res.append(Result(
+                for kind, got in apart.items():
+                    p = d / f"data-{coll}.{kind}"
+                    if got:
+                        p.write_text("\n".join(dumps(i) for i in got) + "\n")
+                    elif p.exists():
+                        p.unlink()
+                answer, held_back = self._delta_held(Result(
                     "delta", f"{db}.{coll}", "diff",
-                    f"of {len(ids)} touched docs, {len(bad)} differ",
+                    f"of {len(ids)} touched docs, {len(bad)} differ:"
+                    f" missing={len(apart['missing'])}"
+                    f" extra={len(apart['extra'])}"
+                    f" changed={len(apart['changed'])}",
                     str(d),
-                    f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                    f"migkit sync {self.hop.name} --db {db} --kind rows",
+                    table=str(coll), rows_apart=rows_counted(
+                        coll, len(apart["missing"]), len(apart["extra"]),
+                        len(apart["changed"]))))
+                clean = clean and not held_back
+                res.append(answer)
             else:
                 res.append(Result("delta", f"{db}.{coll}", "ok",
                                   f"{len(ids)} touched docs verified"
                                   " equal on both sides"))
             if log:
                 log(f"{coll}: {len(ids)} touched, "
-                    + ("clean" if not bad else "DIFF"))
+                    + self._delta_said(res[-1]))
         if clean:
             state.write_text(dumps(end_token))
             note = "token advanced"
@@ -2114,19 +2185,28 @@ class MongoEngine(Engine):
         names = sorted({f.name.split(".")[0][len("data-"):]
                         for k in ("missing", "extra", "changed")
                         for f in d.glob(f"data-*.{k}")})
-        actions = []
+        # a drilldown of a collection the hop has since left out is said,
+        # never acted on
+        names, said = self._drills_in_scope(db, names)
+        actions = [said] if said else []
         for name in names:
-            if self.hop.excluded(db, name):
-                continue
-            counts = []
+            counts, named = [], {}
             for k in ("missing", "extra", "changed"):
                 f = d / f"data-{name}.{k}"
                 if f.exists():
-                    counts.append(f"{k}={sum(1 for _ in f.open())}")
+                    named[k] = range(sum(1 for _ in f.open()))
+                    counts.append(f"{k}={len(named[k])}")
+            # the documents the hop keeps by the changes it does not carry
+            # are left as they are, and said
+            left = self._repairable(db, name, named)
+            kept = self._kept_said(named, left)
+            if kept and not any(left.values()):
+                continue
             actions.append(RepairAction(
                 db, "rows", [f"resync docs for {name} ({', '.join(counts)})"],
                 [], f"{name}: replace/insert from source per _id, deleted and"
-                    " overwritten target docs saved to undo first",
+                    " overwritten target docs saved to undo first"
+                    + (f"; {kept}" if kept else ""),
                 table=name))
         return actions
 
@@ -2135,9 +2215,11 @@ class MongoEngine(Engine):
     ROWS_PUT_BACK = False
 
     def repair_found(self, db, table):
-        """The `_id`s the last check named, each as its Extended JSON."""
-        return {kind: [(line,) for line in self._read_drill(db, table, kind)]
-                for kind in ("missing", "changed", "extra")}
+        """The `_id`s the last check named, each as its Extended JSON -
+        never the ones the hop keeps (`_repairable`)."""
+        return self._repairable(db, table, {
+            kind: [(line,) for line in self._read_drill(db, table, kind)]
+            for kind in ("missing", "changed", "extra")})
 
     def repair_sides(self, db, table):
         """None: a collection's documents are lined up by `_id` alone, the
@@ -2153,10 +2235,14 @@ class MongoEngine(Engine):
         undo = d / "undo"
         undo.mkdir(exist_ok=True)
 
+        kept = self._kept_by_hop(db, name)
+
         def read(kind):
+            # a document the hop keeps by a change it does not carry is
+            # never removed, added or overwritten here
             f = d / f"data-{name}.{kind}"
             return [loads(l) for l in f.read_text().splitlines()] \
-                if f.exists() else []
+                if f.exists() and kind not in kept else []
 
         from .. import repairlog
         extra, missing = read("extra"), read("missing")
@@ -2400,96 +2486,114 @@ class MongoEngine(Engine):
 
     def tail_seed(self, db, token_path, point):
         """Start the tail from `point`, a resume token taken earlier."""
-        from bson.json_util import dumps
-        token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(dumps({"_data": point}))
+        from .. import tailctl
+        tailctl.begin(self, db, token_path, {"_data": point})
+
+    #: events a look at the change stream carries at most before its
+    #: position is saved (`tail_apply`)
+    TAIL_BATCH = 1000
 
     def tail_apply(self, db, go, token_path, log):
-        """Same-engine change tail, carrying each document as BSON.
+        """Same-engine change tail, carrying each document as BSON, round
+        the loop every tail goes round (`tailctl.run_loop`): up to
+        `TAIL_BATCH` events read off the stream and applied by key, then
+        the position after them saved - so a stop, a crash or a lost
+        connection reads again from the last position saved, which the
+        writes by key converge on. It had no stop, no end once caught up,
+        no retry, took SIGTERM as a crash and beat never (audit ST14).
 
         Only an applying run moves the saved position: a count-only run that
         saved one sent the next `--go` past events nobody applied. The
         position is saved before the first event is read, so a tail stopped
         before anything arrived resumes there rather than at a later "now".
         """
+        import json
+        from types import SimpleNamespace
+
         from bson.json_util import dumps, loads
 
         from .. import tailctl
         src = self._client("src")[db]
         dst = self._client("dst")[self._d("dst", db)]
+        env = tailctl.position(token_path)
         resume = None
-        if token_path.exists():
-            try:
-                resume = loads(token_path.read_text())
-            except ValueError:
-                raise SystemExit(
-                    f"the saved position in {token_path} cannot be read, and"
-                    " a tail started from anywhere else either skips changes"
-                    " or cannot say it did not. Remove the file and move"
-                    " again")
+        if env is not None:
+            if env.get("token") is not None:
+                resume = loads(json.dumps(env["token"]))
             tailctl.same_source(self, db, token_path, resume)
             log("resuming from saved token")
         elif go:
-            resume = {"_data": self.change_point("src", db)}
-            token_path.parent.mkdir(parents=True, exist_ok=True)
-            token_path.write_text(dumps(resume))
-            tailctl.same_source(self, db, token_path, None)
-        kwargs = {"full_document": "updateLookup"}
-        if resume:
-            kwargs["resume_after"] = resume
-        from .. import tailctl
-        n, applied = 0, None
-        running = tailctl.Running(token_path.parent) if go else None
-        try:
-            if running:
-                running.__enter__()
-            with src.watch(**kwargs) as stream:
-                log("tailing change stream, ctrl-c to stop"
-                    + ("" if go else " (count-only, add --go to apply)"))
-                while True:
-                    if go and (token_path.parent / tailctl.PAUSE).exists():
-                        # hold still only with everything applied so far
-                        # saved, so the resume replays from here
-                        if applied is not None:
-                            token_path.write_text(dumps(applied))
-                        tailctl.hold_if_asked(token_path.parent, log)
-                    ev = stream.try_next()
-                    if ev is None:
-                        # nothing left before this point: the stream's own
-                        # position is how far the target is now, and saving
-                        # it is what lets `check` fence on this tail
-                        if go and stream.resume_token:
-                            applied = stream.resume_token
-                            token_path.write_text(dumps(applied))
-                        time.sleep(1)
-                        continue
-                    op = ev["operationType"]
-                    coll = (ev.get("ns") or {}).get("coll")
-                    if coll and self.hop.excluded(db, coll):
-                        continue
-                    if op not in self.STREAM_OPS:
-                        raise self._not_a_row_change(op, ev)
-                    n += 1
-                    key = ev.get("documentKey", {})
-                    if not go:
-                        continue
+            env = tailctl.begin(self, db, token_path,
+                                {"_data": self.change_point("src", db)})
+            resume = env["token"]
+        log("tailing change stream, ctrl-c to stop"
+            + ("" if go else " (count-only, add --go to apply)"))
+        s = SimpleNamespace(stream=None, n=0, env=env)
+
+        def close():
+            if s.stream is not None:
+                try:
+                    s.stream.close()
+                except Exception:  # noqa: BLE001 - gone with it
+                    pass
+                s.stream = None
+
+        def look(at):
+            if s.stream is None:
+                kwargs = {"full_document": "updateLookup"}
+                if at:
+                    kwargs["resume_after"] = at
+                # the server leaves out what the hop does not take
+                # (`stream_match`); each event is still asked below
+                s.stream = src.watch(self.stream_match(db), **kwargs)
+            read, n, after, settled = 0, 0, at, False
+            while read < self.TAIL_BATCH:
+                ev = s.stream.try_next()
+                if ev is None:
+                    # nothing left before this point: the stream's own
+                    # position is how far the target is now, and saving
+                    # it is what lets `check` fence on this tail
+                    settled = True
+                    if s.stream.resume_token:
+                        after = s.stream.resume_token
+                    break
+                read += 1
+                op = ev["operationType"]
+                coll = (ev.get("ns") or {}).get("coll")
+                if coll and self.hop.excluded(db, coll):
+                    after = ev["_id"]
+                    continue
+                if op not in self.STREAM_OPS:
+                    raise self._not_a_row_change(op, ev)
+                n += 1
+                key = ev.get("documentKey", {})
+                if go:
                     if op in ("insert", "update", "replace"):
                         doc = ev.get("fullDocument")
                         if doc is not None:
                             dst[coll].replace_one(key, doc, upsert=True)
                     else:
                         dst[coll].delete_one(key)
-                    applied = ev["_id"]
-                    if n % 100 == 0:
-                        token_path.write_text(dumps(applied))
-                        log(f"{n} events, token saved ({op} {coll})")
-        except KeyboardInterrupt:
-            log(f"stopped after {n} changes; rerun to resume")
-        finally:
-            if applied is not None:
-                token_path.write_text(dumps(applied))
-            if running:
-                running.__exit__(None, None, None)
+                after = ev["_id"]
+            if n:
+                s.n += n
+                log(f"{s.n} events, token saved")
+            return after, n, settled
+
+        def save(after):
+            s.env = tailctl.moved(token_path, s.env,
+                                  json.loads(dumps(after)))
+
+        def lost(e, at):
+            # the stream opened again from the last position saved
+            close()
+            got = tailctl.saved(token_path)
+            return loads(json.dumps(got)) if got is not None else at
+        tailctl.run_loop(token_path.parent, db, look, log, "changes",
+                         hop=self.hop, go=go, token=resume, save=save,
+                         lost=lost, on_end=close,
+                         secrets=(self.hop.source.password,
+                                  self.hop.target.password))
 
     def watch_sample(self, db):
         a = self._client("src")[db].command("dbStats")
