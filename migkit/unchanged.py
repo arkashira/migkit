@@ -73,12 +73,10 @@ def usable_brand(brand):
 
 
 def server_major(text):
-    """Major version from what the engine reported, or None."""
-    if not text:
-        return None
-    import re
-    m = re.match(r"\s*(\d+)", str(text))
-    return int(m.group(1)) if m else None
+    """Major version from what the engine reported, or None - read the one
+    way every version is (`toolversion.server_major`)."""
+    from .toolversion import server_major as major
+    return major(text)
 
 
 def usable_postgres(server_version):

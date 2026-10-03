@@ -180,8 +180,10 @@ def _list(value):
 
 
 def _names(hop, dst):
-    """Every name the target answers to: its address as the hop gives it
-    and what the server calls itself."""
+    """Every name the target answers to: its address as the hop gives it,
+    what the server calls itself, and - where the side names it - its
+    instance at its provider (`managed: {id: ...}`), which a managed
+    service's private address does not carry."""
     from urllib.parse import urlsplit
     ep = hop.target
     o = ep.options or {}
@@ -191,7 +193,11 @@ def _names(hop, dst):
     if o.get("url"):
         names.append(urlsplit(str(o["url"])).hostname or "")
     names += [str(o.get("path") or ""), str(dst.get("name") or "")]
-    return [n.strip() for n in dict.fromkeys(names) if n and n.strip()]
+    managed = o.get("managed")
+    if isinstance(managed, dict) and managed.get("id"):
+        names.append(str(managed["id"]))
+    return [n.strip().rstrip(".") for n in dict.fromkeys(names)
+            if n and n.strip()]
 
 
 def production(hop, dst):
@@ -281,17 +287,33 @@ def _once(hop, what):
     return True
 
 
+def identities(hop, eng, db):
+    """(the source's identity, the target's) for `db`, asked once a run of
+    the engine: a `move --go` asked both servers who they were, and the
+    cloud they run in, three times a database - its guard, its copy's
+    rows, its stream. Kept on the engine, which a run makes afresh."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import session
+    asked = eng.__dict__.setdefault("_interlock_asked", {})
+    key = (hop.name, db, session.current())
+    got = asked.get(key)
+    if got is None:
+        # both at once: a side nothing answers at costs one wait, not two
+        with ThreadPoolExecutor(2) as pool:
+            got = tuple(pool.map(lambda side: identity(hop, eng, side, db),
+                                 ("src", "dst")))
+        asked[key] = got
+    return got
+
+
 def before_write(hop, eng, db, go, log):
     """Every write step starts here: both sides' identities, said once per
     run; the target held to the source, to the hop's production list and
     to what the plan showed. With `go`, a step that must not write stops
     before it does; without, the plan says so and keeps what it showed.
     Returns the target's identity and its fingerprint."""
-    from concurrent.futures import ThreadPoolExecutor
-    # both at once: a side nothing answers at costs one wait, not two
-    with ThreadPoolExecutor(2) as pool:
-        src, dst = pool.map(lambda side: identity(hop, eng, side, db),
-                            ("src", "dst"))
+    src, dst = identities(hop, eng, db)
     where = db or hop.name
     if _once(hop, ("shown", db)):
         log(_line("source", src))
@@ -380,7 +402,7 @@ def refusals(hop, eng, d, tables=None):
     `tables`) rows it did not write that the hop does not say what to do
     with - asked the way `before_write` and `before_copy` ask, and
     nothing kept or said: what `ready` says before anything runs."""
-    src, dst = identity(hop, eng, "src", d), identity(hop, eng, "dst", d)
+    src, dst = identities(hop, eng, d)
     out = []
     same = itself(src, dst)
     if same:

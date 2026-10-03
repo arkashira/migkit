@@ -124,14 +124,69 @@ def _wait(describe, key, status, label, log):
         pause = min(pause * 2, POLL_MOST)
 
 
+#: beside the database's reports: the export each table's copy began, so a
+#: copy stopped while it ran goes on from it rather than paying for another
+EXPORTS = "table-exports.json"
+
+
+def _kept(eng, db):
+    path = eng.hop.report_dir(db) / EXPORTS
+    try:
+        return path, json.loads(path.read_text())
+    except (OSError, ValueError):
+        return path, {}
+
+
+def _keep(eng, db, table, rec):
+    """The table's export record kept (None: forgotten), written whole in
+    one step."""
+    from .durable import write_json
+    path, got = _kept(eng, db)
+    if rec is None:
+        got.pop(table, None)
+    else:
+        got[table] = rec
+    write_json(path, dict(sorted(got.items())), indent=1)
+
+
 def export(eng, db, table, log):
     """The source's export of `table` as of now, finished: (its
-    description, the S3 prefix everything of it is under)."""
+    description, the S3 prefix everything of it is under).
+
+    Kept beside the database's reports as it is asked for (`EXPORTS`):
+    its place, its ARN, and the token it was asked with - one of this
+    hop's, database's and table's own, drawn once a copy - so a copy
+    stopped while the export ran goes on waiting for that export, and a
+    request sent again (a dropped connection) is the same request to the
+    service (`ClientToken`), never a second paid export of the table."""
+    import hashlib
+    import secrets
     bucket, prefix = where(eng.hop)
-    stamp = time.strftime("%Y%m%dT%H%M%S")
-    place = "/".join(p for p in (prefix, f"migkit-{eng.hop.name}-{db}-"
-                                         f"{table}-{stamp}") if p)
     client = eng._client("src")
+    _, kept = _kept(eng, db)
+    rec = kept.get(table)
+    if rec and rec.get("arn"):
+        got = client.describe_export(ExportArn=rec["arn"])[
+            "ExportDescription"]
+        if got.get("ExportStatus") in ("IN_PROGRESS", "COMPLETED"):
+            if log:
+                log(f"{table}: the export an earlier run began is taken up"
+                    " again")
+            done = _wait(lambda: client.describe_export(
+                ExportArn=rec["arn"]), "ExportDescription", "ExportStatus",
+                table, log)
+            return _finished(eng, db, table, done, rec["place"])
+        _keep(eng, db, table, None)
+        rec = None
+    if not rec:
+        run = secrets.token_hex(8)
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        rec = {"place": "/".join(p for p in (prefix, f"migkit-{eng.hop.name}"
+                                             f"-{db}-{table}-{stamp}") if p),
+               "token": hashlib.sha256(
+                   f"{eng.hop.name}\0{db}\0{table}\0{run}".encode())
+               .hexdigest()[:36]}
+        _keep(eng, db, table, rec)
     arn = client.describe_table(TableName=eng._name("src", db, table))[
         "Table"]["TableArn"]
     if log:
@@ -139,18 +194,25 @@ def export(eng, db, table, log):
         log(f"{table}: exported as of now ({size / 2 ** 30:.2f} GB, about"
             f" ${size / 2 ** 30 * 0.10:.2f} at the service's price)")
     got = client.export_table_to_point_in_time(
-        TableArn=arn, S3Bucket=bucket, S3Prefix=place,
-        ExportFormat="DYNAMODB_JSON", ExportType="FULL_EXPORT")
-    ex_arn = got["ExportDescription"]["ExportArn"]
-    done = _wait(lambda: client.describe_export(ExportArn=ex_arn),
+        TableArn=arn, S3Bucket=bucket, S3Prefix=rec["place"],
+        ClientToken=rec["token"], ExportFormat="DYNAMODB_JSON",
+        ExportType="FULL_EXPORT")
+    rec["arn"] = got["ExportDescription"]["ExportArn"]
+    _keep(eng, db, table, rec)
+    done = _wait(lambda: client.describe_export(ExportArn=rec["arn"]),
                  "ExportDescription", "ExportStatus", table, log)
+    return _finished(eng, db, table, done, rec["place"])
+
+
+def _finished(eng, db, table, done, place):
     if done.get("ExportStatus") != "COMPLETED":
+        # nothing to go on from: its files, whatever it wrote, go
+        forget(eng, place)
+        _keep(eng, db, table, None)
         raise RuntimeError(f"{table}: the export ended"
                            f" {str(done.get('ExportStatus')).lower()}:"
                            f" {done.get('FailureMessage') or ''}".strip())
     return done, place
-
-
 def files(eng, bucket, place, done):
     """[(key, items, md5 or None)] of the export's data files: from its
     manifest where the service wrote one (`manifest-files.json`, a line a
@@ -286,7 +348,9 @@ def import_(eng, db, table, bucket, place, done, log):
 def carry(eng, db, table, by_import, log):
     """The table exported and taken into the target - by the service's
     import (`by_import`), or by migkit's writer into the table it made -
-    and the export's files removed however it ends. The items copied."""
+    and the export's files removed, and its record, however the taking
+    ends. The items copied. A copy stopped while the export ran keeps it
+    and its record, and the next run takes it up (`export`)."""
     done, place = export(eng, db, table, log)
     bucket, _ = where(eng.hop)
     try:
@@ -295,6 +359,7 @@ def carry(eng, db, table, by_import, log):
         return load(eng, db, table, bucket, place, done)
     finally:
         forget(eng, place)
+        _keep(eng, db, table, None)
 
 
 def forget(eng, place):
@@ -332,8 +397,10 @@ def _account():
     put(e, "TableArn", USED, "the source table, asked of the service")
     put(e, "ExportTime", UNUSED, "its default, now: the copy's position"
         " is taken just before it")
-    put(e, "ClientToken", UNUSED, "one export a table a copy: a copy run"
-        " again exports again, to a place of its own")
+    put(e, "ClientToken", USED, "one of the hop's, the database's and the"
+        " table's own, drawn once a copy and kept with the export's place"
+        " and ARN: a request sent again is the same export, never a second"
+        " paid one")
     put(e, "S3Bucket", USED, "the bucket the hop names in export_bucket")
     put(e, "S3BucketOwner", UNUSED, "not yet: a bucket of another account"
         " is reached by its own policy")

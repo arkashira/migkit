@@ -654,8 +654,10 @@ def test_the_batch_is_kept_where_the_hop_keeps_its_evidence(tmp_path,
                                                             monkeypatch):
     class Done:
         stdout = '{"ok": true, "results": [], "config": "validations: []"}'
+        stderr = ""
         returncode = 0
-    monkeypatch.setattr(sr.subprocess, "run", lambda *a, **k: Done)
+    from migkit import runner
+    monkeypatch.setattr(runner, "run", lambda *a, **k: Done)
     got = sr.run({"validations": []}, python="/x/python", keep=tmp_path)
     assert got["ok"] is True
     assert (tmp_path / sr.BATCH).read_text() == "validations: []"

@@ -255,6 +255,9 @@ def _pg_thaw(hop, eng, db, record, say, side):
         if entry.get("connect"):
             eng._psql(side, db, f"grant connect on database"
                                 f" {_q(dbname)} to {_q(role)}")
+        if entry.get("limit") is not None:
+            eng._psql(side, db, f"alter role {_q(role)} connection limit"
+                                f" {int(entry['limit'])}")
         say(f"{dbname}: {role} - writes given back"
             f" ({len(entry['revoked'])} grants)")
     _pg_connect_back(eng, db, dbname, record, side)
@@ -394,14 +397,75 @@ def _my_freeze(hop, eng, db, say, side="dst"):
     return record
 
 
+#: the procedure a managed MySQL gives its admin to end another account's
+#: session where it holds no CONNECTION_ADMIN (RDS and Aurora); the
+#: managed-service catalogue adds the others it names (`_kill_procedures`)
+KILL_PROCEDURES = ("mysql.rds_kill",)
+
+
+def _kill_procedures():
+    from . import managed
+    try:
+        more = [managed._procedure(s.admin.get("kill"))
+                for s in managed.services().values()
+                if s.family == "mysql"]
+    except Exception:  # noqa: BLE001 - the catalogue unread: ours stand
+        more = []
+    return tuple(dict.fromkeys(list(KILL_PROCEDURES)
+                               + [m for m in more if m]))
+
+
+def _my_kill_way(eng, side="src"):
+    """How migkit's account ends another account's session here: `kill`
+    where it holds CONNECTION_ADMIN or SUPER, else a procedure of the
+    service's that the server has and lists to it (`KILL_PROCEDURES`),
+    else None - read from the server, once a run."""
+    kept = eng.__dict__.setdefault("_migkit_kill_way", {})
+    if side in kept:
+        return kept[side]
+    grants = " ".join(str(r[0]).upper() for r in eng._q(
+        side, "show grants for current_user()"))
+    got = None
+    if any(p in grants for p in ("ALL PRIVILEGES ON *.*", "SUPER",
+                                 "CONNECTION_ADMIN")):
+        got = "kill"
+    else:
+        for proc in _kill_procedures():
+            schema, _, name = proc.rpartition(".")
+            n = eng._q(side, "select count(*) from information_schema"
+                             ".routines where routine_schema = %s and"
+                             " routine_name = %s", (schema or "mysql", name))
+            if n and int(n[0][0]):
+                got = proc
+                break
+    if got is None:
+        # a service whose admin ends another's session with KILL through a
+        # privilege of its own (the catalogue says which): taken at its
+        # word, and `_my_kill` refuses to go on past a session that stays
+        from . import managed
+        try:
+            svc = managed.side(eng.hop, eng, "source" if side == "src"
+                               else "target").service
+            if str(svc.admin.get("kill") or "").lower().startswith("kill"):
+                got = "kill"
+        except Exception:  # noqa: BLE001 - no service to take the word of
+            pass
+    kept[side] = got
+    return got
+
+
 def _my_kill(eng, side, sessions, wait=10):
     """End these sessions and wait until the server has let them go:
     `KILL` only marks a session, and one still rolling back holds its
-    transaction open where a proof looks for it."""
+    transaction open where a proof looks for it. Where migkit's account
+    may not kill another's session, the service's own procedure does
+    (`_my_kill_way`)."""
     ended = 0
+    how = _my_kill_way(eng, side) if sessions else None
     for pid, _ in sessions:
         try:
-            eng._q(side, f"kill {int(pid)}")
+            eng._q(side, f"call {how}({int(pid)})"
+                   if how and how != "kill" else f"kill {int(pid)}")
             ended += 1
         except Exception:  # noqa: BLE001 - it ended on its own
             pass
@@ -410,12 +474,20 @@ def _my_kill(eng, side, sessions, wait=10):
         return ended
     marks = ", ".join(["%s"] * len(ids))
     end = time.monotonic() + wait
+    left = 0
     while time.monotonic() < end:
         got = eng._q(side, "select count(*) from information_schema"
                            f".processlist where id in ({marks})", tuple(ids))
-        if not got or int(got[0][0]) == 0:
+        left = int(got[0][0]) if got else 0
+        if not left:
             break
         time.sleep(0.1)
+    if left and ended < len(ids):
+        # a session the server would not end goes on writing past a
+        # revoke that reaches it only when it next chooses the database:
+        # nothing after this could prove the source held
+        raise SystemExit(f"{left} of the application's sessions could not"
+                         " be ended - migkit's account may not end them")
     return ended
 
 
@@ -504,7 +576,9 @@ OURS = "migkit's own account writing through it"
 
 #: the scope each way is, as the hop's `freeze:` and the records name it
 SCOPE = {"pg_server": "server", "pg_database": "database",
-         "my_server": "server", "my_database": "database",
+         "pg_role_limit": "database",
+         "my_server": "server", "my_param_read_only": "server",
+         "my_database": "database",
          "mongo_block": "server", "mongo_fsync": "server",
          "mongo_database": "database",
          "redis_pause": "server", "redis_accounts": "database",
@@ -576,7 +650,7 @@ class Hold:
     writes(db)          the server's running count of writes, or None
     open(db, older)     what it cannot end cleanly: prepared and long
                         transactions, as lines
-    cannot(db)          what migkit's account lacks for it, as lines
+    cannot(db, way)     what migkit's account lacks for it, as lines
     """
 
     def __init__(self, hop, eng, side="src"):
@@ -625,7 +699,7 @@ class Hold:
     def open(self, db, older_than):
         return []
 
-    def cannot(self, db):
+    def cannot(self, db, way=None):
         return []
 
 
@@ -654,13 +728,30 @@ def choose(hop, eng, dbs, how="auto", need=(), side="src"):
     """The `decide.Choice` of the way a side is held: `how` is the hop's
     `freeze:` (auto, server, database), `need` what else the way must give
     (`OURS`, for a drain by a mark on the source)."""
-    from . import decide
+    from . import decide, sourcechange
     facts, rungs = ways(hop, eng, dbs, side)
+    # a way that needs a change on the source holds where the hop, or an
+    # operator at a terminal before, answered yes to it (`sourcechange`)
+    sourcechange.put_answers(hop, facts, rungs)
     want = tuple(need) + ((SERVER,) if how == "server" else
                           (DATABASE,) if how == "database" else ())
     kind = side_engine(hop, eng, side)[0]
     return decide.climb(f"holding the {kind} {'source' if side == 'src' else 'target'}'s"
                         " writes", rungs, facts, want)
+
+
+def offer(hop, eng, dbs, how="auto", need=(), side="src"):
+    """(the `decide.Offer` a change on the source would make in the way a
+    side is held, its facts), or (None, facts): said in the preflight
+    with what it buys, never made unasked (`sourcechange`)."""
+    from . import decide, sourcechange
+    facts, rungs = ways(hop, eng, dbs, side)
+    sourcechange.put_answers(hop, facts, rungs)
+    want = tuple(need) + ((SERVER,) if how == "server" else
+                          (DATABASE,) if how == "database" else ())
+    kind = side_engine(hop, eng, side)[0]
+    return decide.offered(f"holding the {kind} source's writes", rungs,
+                          facts, want), facts
 
 
 def scope(hop, eng, dbs):
@@ -745,13 +836,14 @@ def open_work(hop, eng, db, side, older_than):
     return hold_for(hop, eng, side).open(db, older_than)
 
 
-def cannot(hop, eng, db):
-    """What migkit's account on the source lacks to freeze it per
-    database and give it back, as lines; [] where it lacks nothing. Asked
-    before anything is written: a freeze that revokes half and cannot end
-    a session holds the application out and proves nothing."""
+def cannot(hop, eng, db, way=None):
+    """What migkit's account on the source lacks to freeze it the way
+    `way` does (per database, where None) and give it back, as lines; []
+    where it lacks nothing. Asked before anything is written: a freeze
+    that revokes half and cannot end a session holds the application out
+    and proves nothing."""
     try:
-        return hold_for(hop, eng, "src").cannot(db)
+        return hold_for(hop, eng, "src").cannot(db, way)
     except Exception as e:  # noqa: BLE001 - not readable: said as that
         return [f"what migkit's account may do on the source could not be"
                 f" read ({str(e).strip()[:120]})"]
@@ -796,9 +888,38 @@ def bypass(hop, eng, db, way=None):
 
 # PostgreSQL
 
+def _keeps_out():
+    """A way that takes the right to connect from a role that writes as
+    its tables' owner needs the database to be migkit's account's to take
+    it from (a superuser's, or its owner's)."""
+    from .decide import Need
+    return Need(
+        "migkit's account may keep a role that owns its tables out of the"
+        " database",
+        lambda f: f.get("owner roles") is not True
+        or f.get("connect revoke", True) is True,
+        lambda f: "a role of the application writes as the owner of its"
+        " tables whatever is revoked, and the database is not migkit's"
+        " account's to take the right to connect from"
+        if f.get("connect revoke") is not None else
+        "whether migkit's account may take the right to connect could not"
+        " be read")
+
+
+_KEEPS_OUT = _keeps_out()
+
+
 class PostgresHold(Hold):
+    # A managed server gives its admin no superuser: no ALTER SYSTEM, and
+    # a database its admin did not make is not its own, so the right to
+    # connect cannot be taken from a role that writes as the owner of its
+    # tables. What such an admin may do is change the application's roles
+    # (CREATEROLE; from 16, with the admin option the maker of a role
+    # holds): a connection limit of none keeps an owner out of every
+    # database at once, which is the hop's only where the role connects
+    # to nothing else. Each is read from the server, never from its name.
     def rungs(self):
-        from .decide import Rung
+        from .decide import Need, Rung
         return (
             Rung("pg_server", "the server's read-only default for every"
                  " new transaction, with the application's grants and"
@@ -806,15 +927,54 @@ class PostgresHold(Hold):
                  needs=(_alone(), _is(
                      "alter system", "migkit's account may change the"
                      " server's settings", "migkit's account may not change"
-                     " the server's settings (ALTER SYSTEM)")),
+                     " the server's settings (ALTER SYSTEM)"), _KEEPS_OUT),
                  because="every database on the server is the hop's"),
             Rung("pg_database", "the application's grants revoked and its"
                  " sessions ended, per database",
-                 gives=frozenset({DATABASE, OURS}), because="per database"))
+                 gives=frozenset({DATABASE, OURS}), needs=(_KEEPS_OUT,),
+                 because="per database"),
+            Rung("pg_role_limit", "the application's grants revoked, a role"
+                 " that owns its tables kept from connecting (a connection"
+                 " limit of none), its sessions ended",
+                 gives=frozenset({DATABASE, OURS}),
+                 needs=(Need("migkit's account may change the application's"
+                             " roles", lambda f: f.get("alter roles") is True,
+                             lambda f: "migkit's account may not change the"
+                             " application's roles (CREATEROLE, and from 16"
+                             " the admin option on each)"
+                             if f.get("alter roles") is not None else
+                             "whether migkit's account may change the"
+                             " application's roles could not be read"),
+                        Need("the application's roles in no other database",
+                             lambda f: f.get("roles elsewhere") == [],
+                             lambda f: "a connection limit keeps a role out"
+                             " of every database, and the application's"
+                             " roles are in "
+                             + ", ".join(f.get("roles elsewhere") or
+                                         ["databases that could not be"
+                                          " listed"])
+                             + " as well")),
+                 because="a role that writes as its tables' owner is kept"
+                         " out by its connection limit where the database"
+                         " is not migkit's account's to take the right to"
+                         " connect from"))
 
     def readers(self, dbs):
+        roles = lambda: [r for d in dbs for r in app_roles(  # noqa: E731
+            self.hop, self.eng, d, self.side)]
         return {"alter system": _read(lambda: _pg_may_alter(
-            self.eng, dbs[0], self.side))}
+                    self.eng, dbs[0], self.side)),
+                "owner roles": _read(lambda: any(
+                    _pg_writes_past_grants(self.eng, d, r, self.side)
+                    for d in dbs for r in app_roles(self.hop, self.eng, d,
+                                                    self.side))),
+                "connect revoke": _read(lambda: all(
+                    _pg_may_revoke_connect(self.eng, d, self.side)
+                    for d in dbs)),
+                "alter roles": _read(lambda: _pg_may_alter_roles(
+                    self.eng, dbs[0], sorted(set(roles())), self.side)),
+                "roles elsewhere": _read(lambda: _pg_roles_elsewhere(
+                    self.eng, dbs, sorted(set(roles())), self.side))}
 
     def others(self, dbs):
         mine = {self.eng._d(self.side, d) for d in dbs}
@@ -827,7 +987,8 @@ class PostgresHold(Hold):
         if SCOPE[way] == "server":
             _pg_server_freeze(self.hop, self.eng, dbs, say, self.side)
         for d in dbs:
-            _pg_source_freeze(self.hop, self.eng, d, say, self.side)
+            _pg_source_freeze(self.hop, self.eng, d, say, self.side,
+                              limit=way == "pg_role_limit")
 
     def release(self, db, record, say):
         _pg_thaw(self.hop, self.eng, db, record, say, self.side)
@@ -883,7 +1044,7 @@ class PostgresHold(Hold):
         return out + [f"write transaction {g}" for g in got.splitlines()
                       if g]
 
-    def cannot(self, db):
+    def cannot(self, db, way=None):
         eng, side = self.eng, self.side
         out = []
         sup, owner, signal = eng._psql(
@@ -899,10 +1060,30 @@ class PostgresHold(Hold):
             out.append("migkit's account on the source cannot end the"
                        " application's sessions (neither superuser nor"
                        " a member of pg_signal_backend)")
-        if owner != "true":
+        # another role's transaction is shown only to a member of it or
+        # of pg_read_all_stats: to anyone else an open one reads as none,
+        # and the proof would pass over it
+        stats = eng._psql(side, db, "select pg_has_role(current_user,"
+                                    " 'pg_read_all_stats', 'USAGE')::text"
+                          ).strip()
+        if stats != "true":
+            out.append("migkit's account on the source cannot see other"
+                       " roles' transactions (neither superuser nor a"
+                       " member of pg_read_all_stats or pg_monitor), so an"
+                       " open one would read as none")
+        # a connection limit keeps an owner out instead (`pg_role_limit`)
+        if owner != "true" and way != "pg_role_limit":
             out.append("migkit's account on the source does not own the"
                        " database, so it cannot take the right to"
                        " connect from a role that owns its tables")
+        # a managed admin that keeps the owners out by their connection
+        # limit revokes only the grants other roles hold: a table of an
+        # owner of its own, granted to nobody, is nothing it must give back
+        granted = (" and not pg_has_role(current_user, c.relowner, 'USAGE')"
+                   " and exists (select 1 from aclexplode(c.relacl) a where"
+                   " a.grantee not in (0, c.relowner) and a.privilege_type"
+                   " in ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'))"
+                   if way == "pg_role_limit" else "")
         n = eng._psql(
             side, db, "select count(*) from pg_class c join"
                       " pg_namespace n on n.oid = c.relnamespace where"
@@ -911,12 +1092,89 @@ class PostgresHold(Hold):
                       " c.relowner <> (select oid from pg_roles where"
                       " rolname = current_user) and not"
                       " has_table_privilege(c.oid, 'INSERT WITH GRANT"
-                      " OPTION')").strip()
+                      " OPTION')" + granted).strip()
         if n not in ("", "0"):
             out.append(f"migkit's account on the source can neither"
                        f" revoke nor give back the grants on {n} tables"
                        " it does not own")
         return out
+
+
+def _pg_names(roles):
+    return ", ".join(_lit(r) for r in roles) or "''"
+
+
+def _pg_writes_past_grants(eng, db, role, side="src"):
+    """Whether `role` writes a table here whatever its own grants: as the
+    owner (or a member of the owner), or through a grant to everyone or to
+    another role it is a member of - what revoking its grants leaves it."""
+    got = eng._psql(
+        side, db,
+        "select count(*) from pg_class c join pg_namespace n on n.oid ="
+        " c.relnamespace where c.relkind in ('r', 'p') and n.nspname not in"
+        " ('pg_catalog', 'information_schema') and"
+        f" (pg_has_role({_lit(role)}, c.relowner, 'USAGE') or exists"
+        " (select 1 from aclexplode(c.relacl) a where a.privilege_type in"
+        " ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE') and a.grantee <>"
+        f" {_lit(role)}::regrole and (a.grantee = 0 or pg_has_role("
+        f"{_lit(role)}, a.grantee, 'USAGE'))))").strip()
+    return got not in ("", "0")
+
+
+def _pg_may_revoke_connect(eng, db, side="src"):
+    """Whether migkit's account may take the right to connect to this
+    database from a role: a superuser, or its owner (or a member of it)."""
+    return eng._psql(side, db,
+                     "select r.rolsuper or pg_has_role(current_user,"
+                     " d.datdba, 'USAGE') from pg_roles r, pg_database d"
+                     " where r.rolname = current_user and d.datname ="
+                     " current_database()").strip() == "t"
+
+
+def _pg_may_alter_roles(eng, db, roles, side="src"):
+    """Whether migkit's account may change these roles' connection limit:
+    a superuser; a role that may create roles - which from 16 changes
+    only a role it holds the admin option on (its maker holds it)."""
+    sup, create, version = eng._psql(
+        side, db, "select rolsuper::text||' '||rolcreaterole::text||' '||"
+                  "current_setting('server_version_num') from pg_roles"
+                  " where rolname = current_user").split()
+    if sup == "true":
+        return True
+    if create != "true":
+        return False
+    supers = eng._psql(side, db, "select count(*) from pg_roles where"
+                                 f" rolsuper and rolname in ({_pg_names(roles)})"
+                       ).strip()
+    if supers not in ("", "0"):
+        return False
+    if int(version) < 160000 or not roles:
+        return True
+    return eng._psql(side, db,
+                     "select coalesce(bool_and(pg_has_role(current_user,"
+                     " r, 'MEMBER WITH ADMIN OPTION')), true) from unnest("
+                     f"array[{_pg_names(roles)}]::text[]) r").strip() == "t"
+
+
+def _pg_roles_elsewhere(eng, dbs, roles, side="src"):
+    """The server's other databases the application's roles are in - one
+    they own, hold the right to connect to by name, or have a session in
+    now: where a connection limit on them would reach as well."""
+    if not roles:
+        return []
+    mine = ", ".join(_lit(eng._d(side, d)) for d in dbs)
+    names = _pg_names(roles)
+    got = eng._psql(
+        side, dbs[0],
+        "select coalesce(string_agg(d.datname, ' ' order by d.datname), '')"
+        " from pg_database d where d.datallowconn and not d.datistemplate"
+        f" and d.datname not in ({mine}) and (pg_get_userbyid(d.datdba) in"
+        f" ({names}) or exists (select 1 from pg_stat_activity s where"
+        f" s.datname = d.datname and s.usename in ({names})) or exists"
+        " (select 1 from aclexplode(d.datacl) a where a.privilege_type ="
+        " 'CONNECT' and a.grantee <> 0 and pg_get_userbyid(a.grantee) in"
+        f" ({names})))").strip()
+    return got.split()
 
 
 def _pg_may_alter(eng, db, side="src"):
@@ -938,9 +1196,11 @@ def _pg_version(eng, db, side="src"):
         return 0
 
 
-def _pg_source_freeze(hop, eng, db, say, side="src"):
-    """`freeze` on this side, then the right to connect taken from
-    whatever role can still write, and every application session ended."""
+def _pg_source_freeze(hop, eng, db, say, side="src", limit=False):
+    """`freeze` on this side, then whatever role can still write kept out
+    - the right to connect taken from it, or with `limit` its connection
+    limit set to none (recorded first) - and every application session
+    ended."""
     dbname = eng._d(side, db)
     # the server's clock, not this machine's: the proof asks the server
     # which sessions it opened before this
@@ -950,7 +1210,20 @@ def _pg_source_freeze(hop, eng, db, say, side="src"):
     connect = record.setdefault("connect", {})
     roles = list(record["roles"])
     owners = [r for r in roles if _still_writes(eng, db, r, side)]
-    if owners:
+    if owners and limit:
+        for r in owners:
+            entry = record["roles"][r]
+            if "limit" not in entry:
+                entry["limit"] = int(eng._psql(
+                    side, db, "select rolconnlimit from pg_roles where"
+                              f" rolname = {_lit(r)}").strip())
+                _save(hop, db, record, side)
+            eng._psql(side, db, f"alter role {_q(r)} connection limit 0")
+            say(f"{dbname}: {r} - kept from connecting (a connection limit"
+                " of none, it was"
+                f" {'none set' if entry['limit'] < 0 else entry['limit']}):"
+                " it can write as the owner whatever is revoked")
+    elif owners:
         # a role that owns its tables writes whatever is revoked, and the
         # read-only default is one `begin read write` away: kept out of the
         # database instead. Where everyone may connect, that is PUBLIC's
@@ -1108,8 +1381,13 @@ def _pg_proof(hop, eng, db, how, side="src"):
     out.append((left == "0", f"{left} sessions of the application's roles"
                               " left from before the freeze"))
     for r in roles:
+        # kept out by the right to connect, or by a connection limit of
+        # none (`pg_role_limit`)
         can = eng._psql(side, db, f"select has_database_privilege({_lit(r)},"
-                                  " current_database(), 'CONNECT')").strip()
+                                  " current_database(), 'CONNECT') and"
+                                  " (select rolconnlimit from pg_roles"
+                                  f" where rolname = {_lit(r)}) <> 0"
+                        ).strip()
         writes = _still_writes(eng, db, r, side)
         out.append((can != "t" or not writes,
                     f"{r}: " + ("cannot connect" if can != "t" else
@@ -1140,25 +1418,224 @@ def _pg_proof(hop, eng, db, how, side="src"):
 
 
 # MySQL
+# A managed server gives its admin no SUPER and no SYSTEM_VARIABLES_ADMIN:
+# the whole server is not switched read-only by migkit's account, and on
+# some another account's session is ended only through the service's own
+# procedure (`mysql.rds_kill`). Its provider's parameter group can switch
+# `read_only`, which stops every account without SUPER - the admin, the
+# application, migkit's own - and not the server's replication: offered
+# as a change on the source (`sourcechange`, `param_read_only`), made
+# through the provider's API behind the hop's approvals and taken off at
+# the thaw, never assumed. Each is read from the server or the provider's
+# API, never from the address.
+
+def _ends_sessions():
+    from .decide import Need
+    return Need(
+        "a way to end the application's sessions",
+        lambda f: f.get("kill", "kill") is not None,
+        "migkit's account may not end other accounts' sessions: it holds"
+        " no CONNECTION_ADMIN, and the server has no procedure of its"
+        " service's that does it")
+
+
+_ENDS = _ends_sessions()
+
+
+def _param_ctx(f):
+    from . import sourcechange as sc
+    got = f.get("param read_only")
+    before = (got.get("before") if isinstance(got, dict) else None) or "0"
+    return sc.Ctx(where=f.get("where"), label="the source",
+                  before=str(before))
+
+
+def _param_stand(f):
+    """Where the source's `read_only` stands through its provider's API
+    (`_my_param`), as a change on the source."""
+    from .decide import BY_DBA, IMPOSSIBLE, POSSIBLE, PRESENT, Stand
+    got = f.get("param read_only")
+    if not isinstance(got, dict):
+        return Stand(IMPOSSIBLE, "the provider's API could not be asked")
+    return Stand({"present": PRESENT, "possible": POSSIBLE,
+                  "dba": BY_DBA}.get(got.get("state"), IMPOSSIBLE),
+                 got.get("why", ""))
+
+
+def _param_change():
+    from . import sourcechange
+    got = globals().get("_PARAM_CHANGE")
+    if got is None:
+        got = globals()["_PARAM_CHANGE"] = sourcechange.change(
+            "param_read_only", _param_stand, _param_ctx,
+            after="when the cutover gives the source back")
+    return got
+
+
+def _my_param(hop, eng, side="src"):
+    """{"state", "why", "before"} of the source's `read_only` as its
+    provider's API says it: modifiable on its own parameter group
+    ("possible"), on one other instances share ("dba": a DBA gives it a
+    group of its own first), not at all ("impossible"), or on already
+    ("present")."""
+    from . import managed
+    if side != "src":
+        return {"state": "impossible", "why": "only the source is frozen"
+                                              " through its provider"}
+    api, conf = managed.api_conf(hop, eng, "source")
+    if api is None:
+        return {"state": "impossible", "why": conf}
+    inst = managed.adapter(hop, eng, "source").instance(names=("read_only",))
+    p = inst.parameters.get("read_only")
+    if p is None:
+        return {"state": "impossible", "why": "its parameters list no"
+                                              " read_only"}
+    before = str(p.value if p.value is not None else "0")
+    if before.upper() in ("1", "ON", "TRUE"):
+        return {"state": "present", "why": "read_only is on already",
+                "before": before}
+    if p.modifiable is False:
+        return {"state": "impossible", "why": "its provider does not let"
+                                              " read_only be changed"}
+    if inst.group_shared:
+        return {"state": "dba", "why": f"its parameter group {inst.group} is"
+                " shared with other instances, which would be made"
+                " read-only too: a DBA gives it a group of its own",
+                "before": before}
+    return {"state": "possible", "before": before,
+            "why": f"read_only in its own parameter group"
+                   f" {inst.group or ''}".rstrip()}
+
+
+def _my_param_read(hop, eng, side="src"):
+    """`_my_param`, a provider that cannot be asked said as the reason."""
+    try:
+        return _my_param(hop, eng, side)
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - said, not guessed
+        text = (str(e).strip().splitlines() or [type(e).__name__])[-1]
+        return {"state": "impossible", "why": "the provider's API could not"
+                                              f" be asked: {text[:160]}"}
+
+
+def _my_param_runner(eng, side, adapter, make, undo, before, say):
+    """`run(statement)` for the change `param_read_only`: its make and
+    undo lines carried out through the provider's API; any other
+    statement - one of an earlier change a killed run left
+    (`sourcechange.undo_left`) - run on the server."""
+    calls = {s: (lambda: adapter.set_parameters({"read_only": "1"}, say))
+             for s in make}
+    calls.update({s: (lambda: adapter.set_parameters(
+        {"read_only": before}, say)) for s in undo})
+
+    def run(statement):
+        fn = calls.get(statement)
+        return fn() if fn is not None else eng._q(side, statement)
+    return run
+
+
+def _my_param_freeze(hop, eng, say, side="src", wait=None):
+    """`read_only` on through the source's provider's parameter group:
+    recorded first, made as a change on the source behind the hop's
+    approvals (`sourcechange.put_on`), and waited for until the server
+    reads it back on - the provider applies it in its own time, which the
+    cutover's clock counts."""
+    from . import managed, sourcechange
+    rec = server_state(hop, side) or {}
+    adapter = managed.adapter(hop, eng, "source")
+    if "before" not in rec:
+        got = _my_param(hop, eng, side)
+        rec.update({"engine": "mysql", "way": "my_param_read_only",
+                    "before": {"read_only": str(got.get("before") or "0")}})
+        _server_save(hop, rec, side)
+    before = rec["before"]["read_only"]
+    change = _param_change()
+    facts = {"where": managed.side(hop, eng, "source").where,
+             "param read_only": {"before": before}}
+    run = _my_param_runner(eng, side, adapter, change.statements(facts),
+                           change.statements(facts, "undo"), before, say)
+    if not rec.get("entry"):
+        entry = sourcechange.put_on(hop, change, facts, run, None, say)
+        rec["entry"] = entry["id"]
+        _server_save(hop, rec, side)
+    end = time.monotonic() + float(wait if wait is not None else
+                                   (_budget(hop) or 60))
+    while True:
+        on = str(eng._q(side, "select @@global.read_only")[0][0])
+        if on in ("1", "ON"):
+            break
+        if time.monotonic() > end:
+            raise SystemExit("the provider made read_only 1, and the server"
+                             " still reads it off")
+        time.sleep(0.5)
+    rec["on"] = True
+    _server_save(hop, rec, side)
+    say(f"{'source' if side == 'src' else 'target'}: the whole server is"
+        " read-only through its provider's parameter group (read_only), its"
+        " own replication excepted")
+
+
+def _my_param_thaw(hop, eng, rec, say, side="src"):
+    """`read_only` given back as it was, through the provider, from the
+    change's own record (`sourcechange.take_off`)."""
+    from . import managed, sourcechange
+    entry = sourcechange.entry(hop, rec.get("entry"))
+    if entry is None:
+        return
+    before = str((rec.get("before") or {}).get("read_only") or "0")
+    run = _my_param_runner(eng, side, managed.adapter(hop, eng, "source"),
+                           entry.get("make") or [], entry.get("undo") or [],
+                           before, say)
+    if not sourcechange.take_off(hop, entry, run, say):
+        raise SystemExit("read_only could not be given back through the"
+                         " provider; it is recorded, and the next run takes"
+                         " it off")
+    say(f"{'source' if side == 'src' else 'target'}: writable again, its"
+        " parameter group as it was before the freeze")
+
 
 class MySQLHold(Hold):
     def rungs(self):
-        from .decide import Rung
+        from .decide import Need, Rung
         return (
             Rung("my_server", "the server read-only for every account, its"
                  " administrators too", gives=frozenset({SERVER}),
                  needs=(_alone(), _is(
                      "read only switch", "migkit's account may switch the"
                      " server read-only", "migkit's account may not change"
-                     " the server's read_only")),
+                     " the server's read_only"), _ENDS),
                  because="every database on the server is the hop's"),
+            Rung("my_param_read_only", "the server read-only through its"
+                 " provider's parameter group for every account without"
+                 " SUPER - its admin too - the application's sessions"
+                 " ended", gives=frozenset({SERVER}),
+                 needs=(_alone(), _ENDS), changes=(_param_change(),),
+                 because="every database on the server is the hop's, and"
+                         " its account may not switch it read-only itself:"
+                         " its provider's parameter group does, where the"
+                         " operator answers yes"),
             Rung("my_database", "the application's grants revoked and its"
                  " sessions ended, per database",
-                 gives=frozenset({DATABASE, OURS}), because="per database"))
+                 gives=frozenset({DATABASE, OURS}),
+                 needs=(_ENDS, Need(
+                     "the right to revoke and give back grants",
+                     lambda f: f.get("grant option", True) is not False,
+                     "migkit's account may not revoke or give back the"
+                     " application's grants (it holds no GRANT OPTION)")),
+                 because="per database"))
 
     def readers(self, dbs):
+        from . import managed
+        which = "source" if self.side == "src" else "target"
         return {"read only switch": _read(lambda: _my_may_switch(
-            self.eng, self.side))}
+                    self.eng, self.side)),
+                "kill": _read(lambda: _my_kill_way(self.eng, self.side)),
+                "grant option": _read(lambda: "WITH GRANT OPTION" in " ".join(
+                    str(r[0]).upper() for r in self.eng._q(
+                        self.side, "show grants for current_user()"))),
+                "where": _read(lambda: managed.side(self.hop, self.eng,
+                                                    which).where),
+                "param read_only": lambda: _my_param_read(
+                    self.hop, self.eng, self.side)}
 
     def others(self, dbs):
         have = {r[0] for r in self.eng._q(
@@ -1168,7 +1645,9 @@ class MySQLHold(Hold):
                          "performance_schema"})
 
     def hold(self, dbs, way, say):
-        if SCOPE[way] == "server":
+        if way == "my_param_read_only":
+            _my_param_freeze(self.hop, self.eng, say, self.side)
+        elif SCOPE[way] == "server":
             _my_server_freeze(self.hop, self.eng, say, self.side)
         for d in dbs:
             if SCOPE[way] == "server":
@@ -1184,6 +1663,9 @@ class MySQLHold(Hold):
         _my_thaw(self.hop, self.eng, db, record, say, self.side)
 
     def release_server(self, rec, say):
+        if rec.get("way") == "my_param_read_only":
+            _my_param_thaw(self.hop, self.eng, rec, say, self.side)
+            return
         _my_server_thaw(self.hop, self.eng, rec, say, self.side)
 
     def held(self, db, way):
@@ -1230,15 +1712,16 @@ class MySQLHold(Hold):
         return out + [f"write transaction {u} thread {i}, open {s}s"
                       for u, i, s in got]
 
-    def cannot(self, db):
+    def cannot(self, db, way=None):
         out = []
         grants = " ".join(str(r[0]).upper() for r in self.eng._q(
             self.side, "show grants for current_user()"))
-        wide = "ALL PRIVILEGES ON *.*" in grants
-        if not (wide or "SUPER" in grants or "CONNECTION_ADMIN" in grants):
+        if _my_kill_way(self.eng, self.side) is None:
             out.append("migkit's account on the source cannot end other"
-                       " accounts' sessions (CONNECTION_ADMIN)")
-        if "WITH GRANT OPTION" not in grants:
+                       " accounts' sessions (CONNECTION_ADMIN, or a"
+                       " procedure of its service's that does it)")
+        # a server made read-only revokes nothing
+        if "WITH GRANT OPTION" not in grants and SCOPE.get(way) != "server":
             out.append("migkit's account on the source cannot revoke or"
                        " give back the application's grants (GRANT"
                        " OPTION)")
@@ -1331,7 +1814,10 @@ def _my_proof(hop, eng, db, how, side="src"):
     rec = state(hop, db, side) or {"roles": {}}
     users = list(rec["roles"])
     if how == "server":
-        var = ("read_only" if _my_brand(eng, side) == "mariadb"
+        # read_only where the provider's parameter group set it: an
+        # account without SUPER is what it stops (`my_param_read_only`)
+        var = ("read_only" if (server_state(hop, side) or {}).get("way")
+               == "my_param_read_only" or _my_brand(eng, side) == "mariadb"
                else "super_read_only")
         got = eng._q(side, f"select @@global.{var}")
         on = bool(got and int(got[0][0]))
@@ -1360,9 +1846,30 @@ def _my_proof(hop, eng, db, how, side="src"):
 # account with `readWrite` was refused (371, `User writes blocked`), `root`
 # wrote, and a transaction the application had opened before could not
 # commit - it was aborted.
+#
+# A MongoDB-compatible service keeps some of these commands from its admin
+# or does not have them at all - a write block, a lock, ending a session
+# by its id - so the commands the server lists (`listCommands`) decide
+# the way as well as the account's rights: a service that lists no write
+# block and no lock is held per database, its operations ended one by one
+# where it ends no session. A server that does not answer the list is
+# asked as before.
 
 MONGO_SYSTEM = ("admin", "local", "config")
 _MONGO_WRITE_ROLES = ("readWrite", "dbOwner")
+
+
+def _lists(*names):
+    """A need that the server lists every one of `names` - or listed
+    nothing to ask (`commands` None), as before the list was read."""
+    from .decide import Need
+    return Need(f"the server's {' and '.join(names)}",
+                lambda f: f.get("commands") is None
+                or set(names) <= set(f.get("commands") or ()),
+                lambda f: "the server has no "
+                + ", ".join(n for n in names
+                            if n not in set(f.get("commands") or ()))
+                + " (its service keeps it from every account)")
 
 
 class MongoHold(Hold):
@@ -1373,7 +1880,7 @@ class MongoHold(Hold):
                  gives=frozenset({SERVER}),
                  needs=(_alone(), _at_least(
                      "version", (6, 0), "a block on users' writes needs"
-                     " 6.0"), Need(
+                     " 6.0"), _lists("setUserWriteBlockMode"), Need(
                      "the right to block users' writes",
                      lambda f: "setUserWriteBlockMode" in (f["actions"]
                                                            or ()),
@@ -1382,7 +1889,7 @@ class MongoHold(Hold):
                  because="every database on the server is the hop's"),
             Rung("mongo_fsync", "the server locked, its own writes too",
                  gives=frozenset({SERVER}),
-                 needs=(_alone(), Need(
+                 needs=(_alone(), _lists("fsync", "fsyncUnlock"), Need(
                      "the right to lock the server",
                      lambda f: {"fsync", "unlock"} <= set(f["actions"]
                                                           or ()),
@@ -1393,13 +1900,16 @@ class MongoHold(Hold):
                          " locked (fsyncLock)"),
             Rung("mongo_database", "the application's accounts given read"
                  " for the roles that write here, their sessions ended",
-                 gives=frozenset({DATABASE, OURS}), because="per database"))
+                 gives=frozenset({DATABASE, OURS}),
+                 needs=(_lists("grantRolesToUser", "revokeRolesFromUser"),),
+                 because="per database"))
 
     def readers(self, dbs):
         c = self.eng._client(self.side)
         return {"version": _read(lambda: tuple(c.admin.command(
                     "buildInfo").get("versionArray", [0, 0])[:2])),
-                "actions": _read(lambda: _mongo_actions(c))}
+                "actions": _read(lambda: _mongo_actions(c)),
+                "commands": _read(lambda: _mongo_commands(c))}
 
     def others(self, dbs):
         return sorted(set(self.eng._client(self.side).list_database_names())
@@ -1464,23 +1974,40 @@ def _mongo_actions(c):
         for a in p.get("actions", [])})
 
 
+def _mongo_commands(c):
+    """The commands the server lists, or None where it lists none."""
+    got = c.admin.command("listCommands").get("commands")
+    return sorted(got) if got else None
+
+
 def _mongo_users(hop, eng, side="src"):
     """[(user, its database, roles, whether it may write through a
     blocked server)] of every account on the side, but migkit's and the
     server's own. The privileges are asked one account at a time: the
     server gives them only to a query naming the account (measured on 7.0,
-    `usersInfo: {forAllDBs: true}` with `showPrivileges` is refused)."""
+    `usersInfo: {forAllDBs: true}` with `showPrivileges` is refused). A
+    service that keeps every account in `admin` and refuses `forAllDBs`
+    is asked there; one that shows no privileges gives no account a
+    bypass."""
+    from pymongo.errors import OperationFailure
     c = eng._client(side)
     me = (hop.source if side == "src" else hop.target).user
-    got = c.admin.command({"usersInfo": {"forAllDBs": True}})
+    try:
+        got = c.admin.command({"usersInfo": {"forAllDBs": True}})
+    except OperationFailure:
+        got = c.admin.command({"usersInfo": 1})
     out = []
     for u in got.get("users", []):
-        if u["user"] == me or u["db"] in ("local", "config") \
+        if u["user"] == me or u.get("db", "admin") in ("local", "config") \
                 or u["user"].startswith("__"):
             continue
-        one = c[u["db"]].command({"usersInfo": u["user"],
+        udb = u.get("db", "admin")
+        try:
+            one = c[udb].command({"usersInfo": u["user"],
                                   "showPrivileges": True})["users"][0]
-        out.append((u["user"], u["db"], u.get("roles", []),
+        except OperationFailure:
+            one = {}
+        out.append((u["user"], udb, u.get("roles", []),
                     any("bypassWriteBlockingMode" in p.get("actions", [])
                         for p in one.get("inheritedPrivileges", []))))
     return out
@@ -1495,16 +2022,28 @@ def _mongo_end_sessions(eng, users, side="src"):
     impersonate`)."""
     if not users:
         return
+    from pymongo.errors import OperationFailure
     names = {(u, d) for u, d in users}
     c = eng._client(side)
+    try:
+        listed = _mongo_commands(c)
+    except OperationFailure:
+        listed = None
+    # a service without the aggregation stage answers the command, and one
+    # that ends no session by its id has its operations ended one by one
+    by_session = listed is None or "killSessions" in listed
+    try:
+        seen = list(c.admin.aggregate([{"$currentOp": {
+            "allUsers": True, "idleSessions": True}}]))
+    except OperationFailure:
+        seen = c.admin.command("currentOp", {"$all": True}).get("inprog")
     lsids, ops = [], []
-    for op in c.admin.aggregate([{"$currentOp": {
-            "allUsers": True, "idleSessions": True}}]):
+    for op in seen or []:
         who = {(x.get("user"), x.get("db"))
                for x in op.get("effectiveUsers") or []}
         if not who & names:
             continue
-        if (op.get("lsid") or {}).get("id") is not None:
+        if by_session and (op.get("lsid") or {}).get("id") is not None:
             lsids.append({"id": op["lsid"]["id"]})
         elif op.get("opid") is not None:
             ops.append(op["opid"])

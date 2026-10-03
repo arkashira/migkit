@@ -51,7 +51,7 @@ def pg_hop(pg_pair, tmp_path, monkeypatch):
 
 def test_postgres_leaves_the_excluded_table_alone(pg_hop, pg_pair):
     got, said = _run("check", "ex", "--only", "schema")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     # and a difference on a table it does compare is still one
     psql(pg_pair["dst"], "alter table public.orders add column w int")
     got, said = _run("check", "ex", "--only", "schema")
@@ -112,7 +112,7 @@ def test_mysql_leaves_the_excluded_table_alone(mysql_server, tmp_path,
     monkeypatch.setattr(cfg, "CONF", str(conf))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
     got, said = _run("check", "mx", "--only", "schema")
-    assert got.exit_code == 0, said
+    assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
     my("alter table cy.orders add column w int")
     got, said = _run("check", "mx", "--only", "schema")
     assert got.exit_code != 0 and "`w` int" in said, said

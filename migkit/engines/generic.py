@@ -4,7 +4,7 @@ import json
 import re
 
 from ..util import run, which
-from .base import Engine, RepairAction, Result
+from .base import Engine, RepairAction, Result, clauses
 
 
 class GenericEngine(Engine):
@@ -497,7 +497,7 @@ class GenericEngine(Engine):
                               + " - a table nobody could count is not a table"
                                 " whose counts match"))
         if bad:
-            res.append(Result("counts", db, "diff", "; ".join(bad[:10]), "",
+            res.append(Result("counts", db, "diff", clauses(bad), "",
                               "counted from the keys on one side only, which"
                               " is the part of the comparison that holds"
                               " still between runs"))
@@ -875,8 +875,10 @@ class GenericEngine(Engine):
         """
         from sqeleton.queries import and_, or_, table, this
         name = action.scope.split(".", 1)[1]
-        found = self._drill_tables(db).get(name, {})
-        if not found:
+        # never the rows the hop keeps by the changes it does not carry
+        found = self._repairable(db, name,
+                                 self._drill_tables(db).get(name, {}))
+        if not any(found.values()):
             return
         src, dst = self._connect("src"), self._connect("dst")
         key = self._key()

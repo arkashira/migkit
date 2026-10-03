@@ -278,6 +278,16 @@ class Tunnel:
         prefix = self._ssh_prefix()
         return prefix + ["--", command] if prefix else None
 
+    def kind(self):
+        """"ssh" where the tunnel is ssh's own, which encrypts the leg to
+        its machine; "command" for any other forwarder, whose leg migkit
+        cannot vouch for (`tls.local`)."""
+        spec = self.spec
+        if isinstance(spec, str):
+            spec = ({"command": spec} if not spec.startswith("ssh://")
+                    else _ssh_url(spec))
+        return "ssh" if spec.get("ssh") else "command"
+
     def _ssh_spec(self):
         spec = self.spec
         if isinstance(spec, str):
@@ -319,7 +329,8 @@ class Tunnel:
         # endpoint as it is now, and must not open a tunnel from there
         self.options = self.ep.options
         self.ep.options = {**self.ep.options, "tunnel": None,
-                           "tunnel_to": f"{self.far[0]}:{self.far[1]}"}
+                           "tunnel_to": f"{self.far[0]}:{self.far[1]}",
+                           "tunnel_by": self.kind()}
         threading.Thread(target=self._keep, daemon=True).start()
         return self
 

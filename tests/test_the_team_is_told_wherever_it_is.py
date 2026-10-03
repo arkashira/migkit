@@ -28,7 +28,7 @@ from click.testing import CliRunner
 
 from migkit.config import Endpoint, Hop
 
-TEXT = "n is different"
+TEXT = "n - different"
 #: what a stubbed service answers, enough for every channel's own check
 ANSWER = {"ok": True, "code": 0, "errcode": 0, "errmsg": "ok",
           "StatusCode": 0, "status": 1, "success": 1,
@@ -408,8 +408,11 @@ def test_a_command_that_stops_is_told_and_one_that_wrote_is_done(
     assert got.exit_code != 0 and "check first" in got.output + str(
         got.exception), got.output
     assert hook.events() == ["failure"], hook.got
-    assert "sync on lite stopped: run migkit check first" in \
-        hook.got[0]["text"], hook.got
+    # the refusal's words stay on this machine unless the hop's notify
+    # asks for them (`detail`): an error's words can quote a row
+    said = hook.got[0]["text"]
+    assert said.startswith("migkit: sync on lite stopped: a refusal;") \
+        and "check first" not in said, hook.got
     # a difference found is a verdict, not a failure
     got = CliRunner().invoke(cli.main, ["check", "lite"])
     assert got.exit_code == 1, got.output

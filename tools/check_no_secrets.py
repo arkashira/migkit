@@ -21,6 +21,30 @@ PATTERNS = [
     (r"(?i)password\s*[:=]\s*[\"'][^\"'<>{}\s]{6,}[\"']", "hardcoded password"),
 ]
 SKIP_FILES = {"check_no_secrets.py"}
+#: the names of one's own organisation - its projects, databases, tables,
+#: services - one word or phrase a line, kept on this machine only (never
+#: in the repo, where the list would itself be the leak); a word matches
+#: case-insensitively as a whole word
+DENY_FILE = pathlib.Path(
+    __import__("os").environ.get("MIGKIT_DENY_WORDS_FILE")
+    or pathlib.Path.home() / ".config" / "migkit" / "deny-words.txt")
+
+
+def deny_words():
+    try:
+        lines = DENY_FILE.read_text().splitlines()
+    except OSError:
+        return []
+    return [w.strip() for w in lines
+            if w.strip() and not w.strip().startswith("#")]
+
+
+def deny_pattern(words):
+    if not words:
+        return None
+    return re.compile(r"(?i)(?<![A-Za-z0-9])(?:"
+                      + "|".join(re.escape(w) for w in words)
+                      + r")(?![A-Za-z0-9])")
 # deliberately fake values used in docs and examples
 ALLOW = re.compile(
     r"xxxx|example|placeholder|<[a-z_-]+>|CHANGE_ME|your-|my-|dummy|sample"
@@ -45,7 +69,10 @@ def is_binary(p):
         return True
 
 
-def flagged(line):
+def flagged(line, deny=None):
+    if deny is not None and deny.search(line):
+        # one's own names are never an example
+        return "a name of one's own organisation"
     if ALLOW.search(line):
         return None
     return next((what for pat, what in PATTERNS if re.search(pat, line)), None)
@@ -53,6 +80,7 @@ def flagged(line):
 
 def main(staged):
     hits = []
+    deny = deny_pattern(deny_words())
     for p in files(staged):
         if p.name in SKIP_FILES or is_binary(p):
             continue
@@ -61,7 +89,7 @@ def main(staged):
         except Exception:
             continue
         for i, line in enumerate(text.splitlines(), 1):
-            what = flagged(line)
+            what = flagged(line, deny)
             if what:
                 hits.append((p, i, what, line.strip()[:70]))
     for p, i, what, line in hits:

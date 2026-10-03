@@ -299,7 +299,7 @@ def _read_whole(eng, db, plans, across):
     hop = eng.hop
 
     def there(t):
-        return str(hop.target_table(db, str(t).split(".")[-1])) \
+        return str(hop.target_table(db, *str(t).split("."))) \
             .split(".")[-1].lower()
     mine = {there(t): how for t, how in src_plan.items()}
     return sorted(t for t, how in dst_plan.items()

@@ -9,7 +9,8 @@ PLAYBOOKS = {
                 "create a migration user with replication privileges only",
             ]),
             ("2. prepare target (migkit does this part)", [
-                "migkit setup-target <hop>: create db + full schema natively (pg_dump/mysqldump)",
+                "migkit schema <hop>: create db + full schema with the engine's own"
+                " definitions (migkit move creates what is missing itself)",
                 "never let DMS create tables: it makes bare tables, no secondary index/FK/default",
                 "drop or disable FK constraints and triggers on target, keep PKs",
                 "migkit check <hop> --only schema: confirm structure identical before load",
@@ -114,32 +115,31 @@ PLAYBOOKS = {
         ],
     },
     "native": {
-        "title": "Native tools, no managed service (small data or good network)",
+        "title": "migkit on its own, no managed service",
         "phases": [
-            ("postgres", [
-                "pg_dump -Fc + pg_restore -j N (parallel), or logical replication"
-                " pub/sub for near-zero downtime",
+            ("copy", [
+                "migkit move <hop> --mode full: migkit picks the fastest way"
+                " this machine and the two servers allow, measures it, and"
+                " holds every table it copies to the source",
+                "migkit move <hop> --mode full+cdc: the copy, then the"
+                " source's changes followed from a position taken before it,"
+                " for near-zero downtime",
             ]),
-            ("mysql", [
-                "mydumper/myloader (parallel), or xtrabackup for physical copy",
-                "schema change on a big live table: gh-ost (binlog based,"
-                " throttlable) or pt-online-schema-change (--resume support),"
-                " never a plain ALTER TABLE under load",
+            ("schema changes on a big live table", [
+                "not a plain ALTER TABLE under load: an online schema change"
+                " that copies the table in the background and can be"
+                " throttled and resumed",
             ]),
-            ("mongodb", [
-                "mongodump --oplog + mongorestore --oplogReplay, or mongosync",
-                "mongosync 1.9+ has an embedded verifier, enable it",
-                "for live verification during sync run mongodb-labs"
-                " migration-verifier (doc level, works while syncing)",
+            ("verify", [
+                "migkit check <hop>: every table compared, exit 0 only when"
+                " the two are the same",
+                "migkit watch <hop> --verify --delta: only what changed,"
+                " verified each cycle, while the stream runs; it says when a"
+                " flip is safe",
             ]),
-            ("redis", [
-                "RIOT riot replicate (live + compare mode), or redis-shake",
-            ]),
-            ("kafka", [
-                "MirrorMaker2 for topics + consumer offsets",
-                "verify before cutover: heartbeat topic lag ~0, checkpoint"
-                " connector current in mm2-offset-syncs, then migkit check"
-                " (message counts + tail content hash)",
+            ("cutover", [
+                "migkit move <hop> --mode cdc --drop: the stream torn down as"
+                " the hop's cutover says, behind its approvals",
             ]),
         ],
     },

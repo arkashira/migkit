@@ -60,10 +60,6 @@ SOURCE, TARGET = "source", "target"
 #: status
 OWN = re.compile(r"^(mm2-(offset-syncs|configs|offsets|status)\.[^.]+"
                  r"\.internal|[^.]+\.checkpoints\.internal)$")
-#: seconds without a partition moving after which a copy that has not
-#: reached its end is stopped and said
-STALL = 300
-
 _RUNNER = None
 
 
@@ -80,15 +76,16 @@ def runner():
     global _RUNNER
     if _RUNNER is not None:
         return _RUNNER
+    from . import runner as programs
     from .tools import _java_home
-    from .util import run, which
+    from .util import which
     how = ""
     if which(PROGRAM) and _java_home():
         how = "local"
     elif which("docker"):
         try:
-            if run(["docker", "image", "inspect", IMAGE], check=False,
-                   timeout=20).returncode == 0:
+            if programs.run(["docker", "image", "inspect", IMAGE],
+                            check=False, timeout=20).returncode == 0:
                 how = "image"
         except Exception:  # noqa: BLE001 - no docker to ask
             how = ""
@@ -338,19 +335,30 @@ def _replicas(eng):
         dst.close()
 
 
-def _command(how, props_path, name, env_name):
+def _start(how, text, path):
+    """The mirror started - its release here, or Kafka's image in a
+    container of the run's own name (`runner.start_container`) - with its
+    output read as it comes (`runner._Reader`), so a full pipe never holds
+    it up: (the `Proc`, the reader). The properties hold passwords: in a
+    file of this user's for the release; for the image, handed in through
+    the docker client's environment (`-e NAME`: they are more than one
+    line, which an environment file cannot hold), written inside the
+    container, never on a command line anyone can list or in a file its
+    user may not read."""
+    import subprocess
+
+    from . import envkeys
+    from . import runner as programs
     if how == "local":
-        return [PROGRAM, props_path]
-    import os
-    net = os.environ.get("MIGKIT_MIRROR_NETWORK", "host")
-    # the properties hold passwords: handed in through the environment
-    # (`-e NAME`, valued from this process's), written inside the
-    # container, never on a command line anyone can list or in a file its
-    # user may not read
-    script = (f'printf "%s" "${env_name}" > /tmp/mirror.properties && exec'
-              f" /opt/kafka/bin/{PROGRAM} /tmp/mirror.properties")
-    return ["docker", "run", "--rm", "--name", name, "--network", net,
-            "-e", env_name, IMAGE, "sh", "-c", script]
+        proc = programs.start([PROGRAM, path], stdin=subprocess.DEVNULL)
+    else:
+        env_name = "MIGKIT_MIRROR_PROPERTIES"
+        script = (f'printf "%s" "${env_name}" > /tmp/mirror.properties &&'
+                  f" exec /opt/kafka/bin/{PROGRAM} /tmp/mirror.properties")
+        proc = programs.start_container(
+            IMAGE, ["sh", "-c", script], passthrough={env_name: text},
+            network=envkeys.text("MIGKIT_MIRROR_NETWORK"))
+    return proc, programs._Reader(proc.popen.stdout, None, False)
 
 
 def move(hop, db, workers, go, log):
@@ -358,14 +366,11 @@ def move(hop, db, workers, go, log):
     the source stood when it began; then each partition's position kept
     where migkit's copier keeps it. Raises where it fails; the caller holds
     the result to the source."""
-    import secrets
-    import subprocess
-
     from kafka import TopicPartition
 
-    from . import movers
+    from . import runner as programs
     from .engines.kafka import KafkaEngine
-    from .util import PrivateFile, tool_env
+    from .util import PrivateFile
     from .wording import Step, phase, progress
     eng = KafkaEngine(hop)
     how = runner()
@@ -415,57 +420,40 @@ def move(hop, db, workers, go, log):
     total = sum(e - b for b, e, _ in fence.values())
     props = properties(hop, topics, workers, _replicas(eng))
     text = properties_text(props)
-    name = f"migkit-mirror-{secrets.token_hex(4)}"
-    env_name = "MIGKIT_MIRROR_PROPERTIES"
     if log:
         log(step)
     began = time.monotonic()
     with PrivateFile(text, ".properties") as path:
-        cmd = _command(how, path, name, env_name)
-        env = tool_env({env_name: text} if how == "image" else None)
-        movers._debug(cmd)
-        proc = subprocess.Popen(cmd, env=env, text=True,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT)
-        tail = []
-
-        def drain():
-            for line in proc.stdout:
-                tail.append(line)
-                del tail[:-60]
-        import threading
-        threading.Thread(target=drain, daemon=True).start()
-        try:
-            with movers._spawned(proc, cmd[0]):
-                saved = _wait(eng, proc, fence, began, total, log, tail,
+        proc, said = _start(how, text, path)
+        with programs.stopping(), proc:
+            try:
+                saved = _wait(eng, proc, fence, began, total, log, said,
                               progress)
-        finally:
-            if how == "image":
-                subprocess.run(["docker", "rm", "-f", name],
-                               capture_output=True)
-            elif proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+            finally:
+                # it never ends of itself: ended here, done or not
+                proc.stop(grace=30)
     _keep_positions(eng, db, fence, before, saved)
     return [step]
 
 
-def _wait(eng, proc, fence, began, total, log, tail, progress):
+def _wait(eng, proc, fence, began, total, log, said, progress):
     """The mirror's saved positions once every partition's last message
-    at the start has been handed on; stops the copy with the mirror's own
-    words where it ends first, or with the partitions that did not move
-    for `STALL` seconds."""
-    from .wording import without_programs
+    at the start has been handed on. Where the mirror ends first, what it
+    said is raised as the runner says any program's end
+    (`runner.classify`); where no partition moves for the stall limit
+    (`stall.seconds()`, `MIGKIT_STALL_SECONDS`), the copy is ended as any
+    copy whose link passes nothing is (`stall.Stalled`) - both ways that
+    could not run, which the next way or the next run goes on from."""
+    from . import runner as programs
+    from . import stall
+    limit = stall.seconds()
     last_move, last_done = time.monotonic(), -1
     while True:
         if proc.poll() is not None:
-            said = without_programs("".join(tail)[-400:],
-                                    (PROGRAM, "MirrorMaker"))
-            raise RuntimeError(f"the cluster mirror stopped before the copy"
-                               f" was done: {said.strip()[-300:]}")
+            said.thread.join(5)
+            raise programs.classify(
+                proc.returncode or 1, "".join(said.lines),
+                "the cluster mirror stopped before the copy was done")
         saved = read_table(eng, "positions")
         waiting = [k for k, (_, _, last) in fence.items()
                    if last is not None and saved.get(k, -1) < last]
@@ -478,12 +466,14 @@ def _wait(eng, proc, fence, began, total, log, tail, progress):
             last_move, last_done = time.monotonic(), done
         if not waiting:
             return saved
-        if time.monotonic() - last_move > STALL:
-            raise SystemExit(
-                f"the cluster mirror carried nothing for {STALL}s with"
+        if time.monotonic() - last_move > limit:
+            raise stall.Stalled(
+                f"the cluster mirror carried nothing for {limit:.0f}s with"
                 f" {len(waiting)} partitions still short of where the"
                 " source stood: " + ", ".join(
-                    f"{t}[{p}]" for t, p in sorted(waiting)[:6]))
+                    f"{t}[{p}]" for t, p in sorted(waiting)[:6])
+                + "; the copy was ended, and the next run goes on from"
+                " where it stood")
         time.sleep(2)
 
 

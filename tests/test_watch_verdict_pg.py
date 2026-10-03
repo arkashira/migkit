@@ -1,5 +1,7 @@
-"""End-to-end: watch on a quiesced, caught-up pair reaches the SAFE TO CUT
-OVER verdict on its own - the operator does not have to reason about it."""
+"""End-to-end: on a quiesced, caught-up pair the counts `watch` samples say
+they converge - estimates, never "safe" (audit V14) - and a verifying
+cycle of `watch --verify --delta` says SAFE TO CUT OVER on its own, the
+operator not having to reason about it."""
 import os
 import subprocess
 import textwrap
@@ -33,4 +35,10 @@ def test_watch_reaches_safe_verdict_on_quiesced_pair(pg_pair, tmp_path):
                 " analyze orders")  # n_live_tup needs stats to be populated
 
     r = _migkit(conf, "watch", "t", "--count", "3", "--interval", "1")
-    assert "safe to cut over" in r.stdout.lower(), r.stdout
+    assert "counts converging (estimates)" in r.stdout, r.stdout
+    assert "safe to cut over" not in r.stdout.lower(), r.stdout
+    r = _migkit(conf, "watch", "t", "--verify", "--delta", "--count", "3",
+                "--interval", "2")
+    assert "SAFE TO CUT OVER" in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
+    _migkit(conf, "watch", "t", "--teardown")

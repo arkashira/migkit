@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Admin - migkit{% endblock %}
+{% block main %}
+<section class="card">
+  <h1>People</h1>
+  {% if people.provisioned %}
+  <p class="muted">Provisioned by the identity provider; only these people
+  sign in, with the groups it gives them.</p>
+  {% elif people.local %}
+  <p>One operator: <b>{{ people.local }}</b>, the admin of every hop.</p>
+  {% else %}
+  <p class="muted">The identity provider does not provision people here:
+  anyone it signs in may sign in, and sees the hops the hops file's
+  <code>access</code> gives them.</p>
+  {% endif %}
+  {% if people.users %}
+  <table>
+    <thead><tr><th>Name</th><th>Shown as</th><th>E-mail</th><th>Active</th><th>Changed</th></tr></thead>
+    <tbody>{% for u in people.users %}<tr><td>{{ u.user_name }}</td><td>{{ u.display_name or "" }}</td><td>{{ u.email or "" }}</td><td>{{ "yes" if u.active else "no" }}</td><td>{{ u.modified }}</td></tr>{% endfor %}</tbody>
+  </table>
+  {% endif %}
+  {% if people.groups %}
+  <h2>Groups</h2>
+  <table>
+    <thead><tr><th>Group</th><th>Members</th></tr></thead>
+    <tbody>{% for g in people.groups %}<tr><td>{{ g.display_name }}</td><td>{{ g.members }}</td></tr>{% endfor %}</tbody>
+  </table>
+  {% endif %}
+</section>
+<section class="card">
+  <h2>Sessions open</h2>
+  <table>
+    <thead><tr><th>Who</th><th>How</th><th>Since</th><th>Last seen</th><th>Ends</th></tr></thead>
+    <tbody>{% for x in sessions %}<tr><td>{{ x.principal }}</td><td>{{ x.via }}</td><td>{{ x.created|when }}</td><td>{{ x.seen|when }}</td><td>{{ x.expires|when }}</td></tr>{% endfor %}</tbody>
+  </table>
+</section>
+<section class="card">
+  <h2>The view's record</h2>
+  <p>{{ record.chain.entries }} entries, {% if record.chain.whole %}<span class="pill same">whole</span>{% else %}<span class="pill error">broken: {{ record.chain.broken }}</span>{% endif %}</p>
+  <table>
+    <thead><tr><th>When</th><th>What</th><th>Who</th><th></th></tr></thead>
+    <tbody>{% for e in record.entries[:200] %}<tr><td>{{ e.at }}</td><td>{{ e.op }}</td><td>{{ e.by or "" }}</td><td>{{ e.why or e.path or "" }}</td></tr>{% endfor %}</tbody>
+  </table>
+</section>
+{% endblock %}

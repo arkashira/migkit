@@ -164,7 +164,7 @@ def test_the_check_and_the_repair_catch_what_the_tail_wrote(
               "    databases: [cx]\n    db_map: {cx: postgres}\n"
               "    options: {source_engine: mysql, target_engine: postgres}\n")
         got, said = _run("check", "mp", "--only", "autoinc")
-        assert got.exit_code == 0, said
+        assert got.exit_code == 3 and "the run was narrowed to" in got.output, said
         # what a tail does: the source's key, written as it is
         psql(pg_pair["dst"], "insert into public.t values (7, 'from the"
                              " tail')")

@@ -59,7 +59,7 @@ def localizer(pair, db):
                 if t.text("db") == here or \
                         f"{t.text('db')}.{t.name}" in carried:
                     t.set("db", None)
-            new = pair._leaf(pair._rename(t.name))
+            new = pair._leaf(pair._rename(t.name, db))
             if new != t.name and not t.alias:
                 renamed[t.name] = new
             t.set("this", exp.to_identifier(new))
@@ -303,7 +303,7 @@ class Conversion:
                     keys[pair._leaf(t)] = ks
             else:
                 for t, ks in pair.src_engine.unique_keys("src", db).items():
-                    keys[pair._leaf(pair._rename(t))] = ks
+                    keys[pair._leaf(pair._rename(t, db))] = ks
         except Exception:  # noqa: BLE001 - converted without them
             pass
         emulations, emulated = set(), set()
@@ -400,7 +400,8 @@ class Conversion:
             except Exception:  # noqa: BLE001 - no definition, no proposal
                 definition = None
             made = assist.propose(self.pair.src_name, self.pair.dst_name,
-                                  r.kind, r.name, definition)
+                                  r.kind, r.name, definition,
+                                  hop=self.pair.hop)
             if made:
                 self._record(r, "converted, not proved", "model")
                 return (r.name, f"{made.rstrip().rstrip(';')}; {PROPOSED}",

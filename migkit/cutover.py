@@ -22,6 +22,7 @@ with a clock on it:
         keys: exact           # exact | apart:<margin>
         jobs: move            # move | leave
         no_return: later      # later | at_flip
+        restore_points: [source, target]   # through each side's provider
 
 1. preflight, nothing written: the stream's own position reachable and
    the stream less than `start_below` behind it - or, where the stream
@@ -31,9 +32,12 @@ with a clock on it:
    write through the freeze named; the jobs on each side; the counters;
    the stream back possible; the outage the last run of this hop
    measured against the budget; approvals signed
-2. prepared, before the clock: the stream back made and proven where it
-   can wait idle (`reverse: at_cutover`), so the flip only starts it;
-   the mark's table made, and a first mark proven to arrive
+2. prepared, before the clock: a restore point of each side the hop
+   names taken through its provider's API and waited for
+   (`restore_points`, `managed`) - a way back the provider keeps; the
+   stream back made and proven where it can wait idle (`reverse:
+   at_cutover`), so the flip only starts it; the mark's table made, and a
+   first mark proven to arrive
 3. jobs the source runs switched off there (a frozen MySQL server refuses
    the statement afterwards)
 4. the pooler paused, where the hop names one: writes wait instead of
@@ -96,7 +100,9 @@ NO_RETURN = ("tail_off", "thaw", "back_off", "left", "origin")
 
 DEFAULTS = {"budget": 30, "start_below": 1, "freeze": "auto",
             "keys": "exact", "jobs": "move", "flip": "", "flip_undo": "",
-            "pooler": None, "no_return": "later"}
+            "pooler": None, "no_return": "later", "restore_points": []}
+#: the sides a restore point is taken of before the clock
+RESTORE_SIDES = ("source", "target")
 
 FREEZES = ("auto", "server", "database", "operator")
 POOLERS = ("pgbouncer", "pgcat")
@@ -138,6 +144,13 @@ def settings(hop):
     if str(got["no_return"]) not in NO_RETURNS:
         raise SystemExit("cutover: no_return is later (its own run of the"
                          " command, once the flip is done) or at_flip")
+    points = got["restore_points"]
+    points = [points] if isinstance(points, str) else list(points or [])
+    if any(str(p) not in RESTORE_SIDES for p in points):
+        raise SystemExit("cutover: restore_points lists the sides a restore"
+                         " point is taken of through their provider's API"
+                         f" before the clock: {', '.join(RESTORE_SIDES)}")
+    got["restore_points"] = [str(p) for p in points]
     pooler = got["pooler"]
     if pooler is not None:
         if not isinstance(pooler, dict) or \
@@ -477,6 +490,35 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         else:
             chosen = got.rung.name
             add("ok", f"the freeze: {got.rung.said} ({got.reason})")
+        try:
+            offer, _ = freeze.offer(hop, eng, dbs, how,
+                                    (freeze.OURS,) if marked else ())
+        except Exception:  # noqa: BLE001 - nothing offered where unread
+            offer = None
+        if offer is not None:
+            names = ", ".join(c.name for c in offer.changes)
+            add("warn", f"offered: {offer.rung.said} - it needs "
+                        + "; ".join(c.said for c in offer.changes)
+                        + " on the source, made and taken off by migkit"
+                          " behind the hop's approvals; answer it ahead"
+                          f" (source_changes: {{{names}: yes | no | dba}})"
+                        + (f"; without it: {offer.instead.said}"
+                           if offer.instead and offer.instead.rung else ""))
+    if conf:
+        from . import managed
+        try:
+            src = managed.side(hop, eng, "source")
+            dst = managed.side(hop, eng, "target")
+            add("ok", "the pair: " + managed.pair_said(src.service,
+                                                       dst.service))
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - said
+            add("warn", "which service each side is could not be read"
+                        f" ({str(e).strip()[:120]})")
+        for which in conf.get("restore_points") or ():
+            why = managed.restore_ready(hop, eng, which)
+            add("fail" if why else "ok",
+                f"a restore point of the {which} before the clock: "
+                + (why or "its provider's API reaches it"))
     if chose is not None:
         chose.update(drain=drain.rung.name if drain.rung else None,
                      freeze=chosen, choices=choices)
@@ -504,7 +546,7 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
                     + (f" - open longer than the {budget:g}s budget"
                        if conf else " - still being written"))
         if chosen:
-            for line in freeze.cannot(hop, eng, d):
+            for line in freeze.cannot(hop, eng, d, chosen):
                 add("fail", f"{d}: {line}")
             try:
                 for line in freeze.bypass(hop, eng, d, chosen):
@@ -748,6 +790,11 @@ def _job_rows(hop, eng, d, conf):
         out.append(("warn", f"{d}: jobs already running on the target:"
                             f" {', '.join(on_dst[:5])} - they write there"
                             " before the flip"))
+    alone = jobs.left_alone(hop, eng, d, "src")
+    if alone:
+        out.append(("ok", f"{d}: jobs left as they are on both sides:"
+                          f" {', '.join(alone[:5])} - they write only"
+                          " tables the hop does not take"))
     return out
 
 
@@ -860,9 +907,13 @@ def plan(hop, dbs, conf, drain="position"):
     marked = drain == "mark"
     steps = [f"the cutover, within {conf['budget']:g}s of write outage"
              " (undone past it):"]
-    if back or marked:
+    points = conf.get("restore_points") or []
+    if back or marked or points:
         steps.append("  before the clock: "
                      + "; ".join(w for w in (
+                         f"a restore point of the {' and the '.join(points)}"
+                         " taken through its provider's API and waited for"
+                         if points else "",
                          "the stream back to the old source made and proven"
                          " idle where its engine lets it wait, so the flip"
                          " only starts it" if back else "",
@@ -1164,16 +1215,26 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
     before = {d: drift.shape(watch, "src", d) if watch else None
               for d in dbs}
     try:
-        if drain == "mark" or (leg.back_up is not None
-                               and leg.back_arm is not None):
+        points = conf.get("restore_points") or []
+        if drain == "mark" or points or (leg.back_up is not None
+                                         and leg.back_arm is not None):
             # before the clock: what the flip would otherwise make inside
             # the outage, made and proven now, and undone as any step is
             phase("prepare")
+            if points:
+                # a way back the provider keeps, taken while the source
+                # still writes: kept whatever the path does after, as a
+                # restore point is - nothing to undo
+                from . import managed
+                rec["restore_points"] = managed.restore_points(
+                    hop, eng, points, lambda m: say(f"  {m}"))
+                _save(hop, rec)
             if drain == "mark":
                 _mark_ready(hop, eng, dbs, leg, rec, say)
             if leg.back_up is not None:
                 rec["back"] = _arm_back(hop, dbs, leg, rec, say)
-            done("prepare", back=rec.get("back"), drain=drain)
+            done("prepare", back=rec.get("back"), drain=drain,
+                 restore_points=rec.get("restore_points"))
         elif leg.back_up is not None:
             rec["back"] = "at_flip"
         if conf["jobs"] == "move":
@@ -1702,10 +1763,16 @@ def _final_check(hop, eng, d, before, left, say):
             else:
                 got = eng.check_data(d)
                 result["how"] = "every table"
-            # anything but a clean answer stops it: a flip on a check that
-            # did not say "same" is the one mistake here with no undo
-            result["bad"] = [r for r in got
-                             if r.status not in ("ok", "skip")]
+            # anything but "same" by the one verdict stops it - a flip on
+            # a check that compared nothing (every answer skipped, or no
+            # answer at all) is the one mistake here with no undo
+            from . import verdict
+            # every field of each answer: the check it is, the rows it
+            # counted - what holds a hop that keeps some changes off the
+            # target to them (`verdict.hold`); without them such a hop's
+            # kept rows read as a difference and it never cut over
+            result["decision"] = verdict.decide(
+                [dict(vars(r)) for r in got], hop)
             result["skipped"] = [r.scope for r in got if r.status == "skip"]
         except Exception as e:  # noqa: BLE001 - a check that fails is a stop
             result["error"] = str(e).strip()[:300]
@@ -1717,10 +1784,10 @@ def _final_check(hop, eng, d, before, left, say):
                     " budget ran out")
     if "error" in result:
         raise _Undo(f"{d}: the final check failed - {result['error']}")
-    if result["bad"]:
-        r = result["bad"][0]
-        raise _Undo(f"{d}: the final check found a difference - {r.scope}:"
-                    f" {r.detail}")
+    decision = result["decision"]
+    if decision.status != "same":
+        raise _Undo(f"{d}: the final check did not find the two the same"
+                    f" ({decision.word}) - {decision.why}")
     watch = drift.reader(eng)
     if watch is not None and before is not None:
         moved = drift.changes(before, drift.shape(watch, "src", d))
@@ -1735,9 +1802,21 @@ def _final_check(hop, eng, d, before, left, say):
 def _has_delta(hop, eng, d):
     """Whether a verified pass of `watch --verify --delta` stands to start
     from: only then does the delta check compare what changed, rather
-    than record a starting point and compare nothing."""
+    than record a starting point and compare nothing. A position taken
+    under another scope than the hop's now, or taken again after the
+    scope changed and no whole check since, does not stand: the tables
+    the scope took in were never compared whole (`Engine.delta_covers`),
+    and every table is compared instead."""
     if not hasattr(eng, "delta_verify"):
         return False
+    covers = getattr(eng, "delta_covers", None)
+    if callable(covers):
+        try:
+            if not covers(d):
+                return False
+        except (Exception, SystemExit):  # noqa: BLE001 - not known (a
+            # record cut short too): every table, then
+            return False
     if hasattr(eng, "_delta_slot"):
         try:
             return eng._psql("src", d, "select count(*) from"

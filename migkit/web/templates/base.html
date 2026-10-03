@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% if csrf %}<meta name="csrf-token" content="{{ csrf }}">{% endif %}
+<title>{% block title %}migkit{% endblock %}</title>
+<link rel="stylesheet" href="/static/web.css">
+<script src="/static/web.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">migkit</a>
+  {% if me %}
+  <nav>
+    <a href="/">Hops</a>
+    <a href="/api">API</a>
+    <a href="/account">Account</a>
+    {% if admin %}<a href="/admin">Admin</a>{% endif %}
+  </nav>
+  <div class="who">
+    <span title="signed in {{ me.via }}">{{ me.name or me.id }}</span>
+    <form method="post" action="/signout" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="link">Sign out</button>
+    </form>
+  </div>
+  {% endif %}
+</header>
+<main>
+<p class="note error" id="said" hidden></p>
+{% block main %}{% endblock %}
+</main>
+</body>
+</html>

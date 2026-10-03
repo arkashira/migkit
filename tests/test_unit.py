@@ -88,7 +88,8 @@ def test_report_renders_without_findings():
     hop = _fake_hop("postgres")
     html = render(hop, [{"check": "counts", "scope": "db1", "status": "ok",
                          "detail": "rows 5==5"}])
-    assert "PASS" in html
+    # the verdict's own word (`verdict.VERDICTS`), not a second vocabulary
+    assert "SAME" in html
     assert "db1" in html
 
 
@@ -97,7 +98,7 @@ def test_report_flags_diff():
     hop = _fake_hop("postgres")
     html = render(hop, [{"check": "data", "scope": "db1", "status": "diff",
                          "detail": "missing=3"}])
-    assert "FAIL" in html
+    assert "DIFFERENT" in html and "SAME" not in html
     assert "missing=3" in html
 
 
@@ -170,7 +171,14 @@ def test_prometheus_metrics_format(tmp_path, monkeypatch):
     (tmp_path / "h" / "summary.json").write_text(_json.dumps([
         {"check": "data", "scope": "db1", "status": "ok"},
         {"check": "data", "scope": "db2", "status": "diff"}]))
+    # the hop's status is its verdict's, not a count of the answers
+    (tmp_path / "h" / "verdict.json").write_text(_json.dumps(
+        {"status": "different"}))
     out = ui.prometheus({"h": hop})
+    assert ('migkit_verdict{hop="h",engine="postgres",status="different"}'
+            ' 1') in out
+    assert 'migkit_verdict{hop="h",engine="postgres",status="same"} 0' \
+        in out
     assert 'migkit_hop_status{hop="h",engine="postgres"} 1' in out
     assert 'migkit_check_pass{hop="h",engine="postgres",check="data"} 1' in out
     assert 'migkit_check_total{hop="h",engine="postgres",check="data"} 2' in out

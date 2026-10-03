@@ -400,11 +400,17 @@ def _down(hop, eng, dbs, c):
 def checks(hop, eng, dbs, quick=False):
     """assess rows of the case: the case named, what a fork change, a
     version down or an edition change adds, and what the source uses that
-    the target has not. `quick` is the gate's: the rows the engine's own
-    `assess` gives it besides (`lacks.gate_only`) are asked here too."""
+    the target has not - and the scenarios of the move itself, between
+    any two engines (`scenario_rows`). `quick` is the gate's: the rows the
+    engine's own `assess` gives it besides (`lacks.gate_only`) are asked
+    here too."""
+    return _servers(hop, eng, list(dbs or []), quick) + scenario_rows(
+        hop, eng, list(dbs or []), quick)
+
+
+def _servers(hop, eng, dbs, quick):
     if not applies(hop, eng):
         return []
-    dbs = list(dbs or [])
     c = recognise(hop, eng, dbs[0] if dbs else None)
     out = [_row("pass", "what the two servers are", c.words())]
     if c.fork:
@@ -443,6 +449,86 @@ def checks(hop, eng, dbs, quick=False):
     return out
 
 
+# --- the scenarios of the move itself -----------------------------------------------
+
+#: what a move may change beside the servers, between any two engines: a
+#: character set or a collation (`charsets`), a table's storage engine
+#: (`tableengine`) - and the goals that place rows by rule: many sources
+#: into one (`consolidate`), one into many (`split`), old rows to an
+#: archive (`archive`)
+SCENARIOS = ("charsets", "tableengine", "consolidate", "split", "archive")
+
+
+def _scenario(name):
+    import importlib
+    return importlib.import_module(f"migkit.{name}")
+
+
+def _wanted(hop, eng):
+    """[(name, module, the hop's words for it or None)] of the scenarios
+    that may be this move - asked of the hop and the engines alone, so a
+    hop none of them is asks no server; then [] where a side does not
+    answer (the step says why, soon)."""
+    from . import interlock
+    out = []
+    for name in SCENARIOS:
+        m = _scenario(name)
+        try:
+            if name in ("charsets", "tableengine"):
+                if m.applies(hop, eng):
+                    out.append((name, m, None))
+            elif m.settings(hop) is not None:
+                out.append((name, m, None))
+        except SystemExit as e:
+            out.append((name, m, str(e)))
+    if not out:
+        return []
+    try:
+        return out if interlock.reached(hop) else []
+    except Exception:  # noqa: BLE001 - not known to answer: not asked
+        return []
+
+
+def scenario_rows(hop, eng, dbs, quick=False):
+    """assess rows of the scenarios the move is, each with its fix: what a
+    character set or engine change does, and what stops a consolidation,
+    a split or an archive before anything is written."""
+    out = []
+    for name, m, said in _wanted(hop, eng):
+        if said:
+            out.append(_row("fail", f"options: {name}", said))
+            continue
+        if name in ("charsets", "tableengine"):
+            try:
+                out += [dict(r, scope=SCOPE) for r in m.checks(
+                    hop, eng, dbs, quick)]
+            except Exception as e:  # noqa: BLE001 - unknown, said so
+                out.append(_row("warn", m.SCOPE, f"could not be read:"
+                                                 f" {_last(e)} - unknown,"
+                                                 " not clean"))
+            continue
+        for d in dbs:
+            for why in m.problems(hop, eng, d):
+                out.append(_row("fail", f"{d}: {name}", why))
+            if name == "split" and not quick:
+                out += [dict(r, scope=SCOPE) for r in m.rows(hop, eng, d)]
+    return out
+
+
+def scenario_lines(hop, eng, db):
+    """The plan's lines of the scenarios the move is."""
+    out = []
+    for name, m, said in _wanted(hop, eng):
+        if said:
+            out.append(f"  {name}: {said}")
+            continue
+        try:
+            out += m.plan_lines(hop, eng, db)
+        except Exception as e:  # noqa: BLE001 - said, the plan goes on
+            out.append(f"  {name}: could not be worked out: {_last(e)}")
+    return out
+
+
 # --- the plan ----------------------------------------------------------------------
 
 def _way_lines(hop, eng, db, c):
@@ -478,10 +564,16 @@ def _way_lines(hop, eng, db, c):
 
 
 def plan_lines(hop, eng, db):
-    """The plan's lines of the case: what the two servers are, and the way
-    where the case decides it."""
+    """The plan's lines of the case: what the two servers are, the way
+    where the case decides it, and the scenarios the move is."""
+    more = scenario_lines(hop, eng, db)
     if not applies(hop, eng):
-        return []
+        return (["the case: " + "; ".join(x.strip() for x in more)]
+                if more else [])
+    return _server_lines(hop, eng, db) + more
+
+
+def _server_lines(hop, eng, db):
     c = recognise(hop, eng, db)
     out = [f"the case: {c.words()}"]
     if c.version == "down" and physical_allowed(hop):
