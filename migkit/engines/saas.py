@@ -1041,10 +1041,8 @@ class SaasEngine(Engine):
             return {}
 
     def _keep_follow(self, db, got):
-        path = self.hop.report_dir(db) / FOLLOW
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(got, indent=1, default=str))
-        tmp.replace(path)
+        from .. import durable
+        durable.write_json(self.hop.report_dir(db) / FOLLOW, got, indent=1)
 
     def _seen(self, db):
         return Seen(self.hop.report_dir(db) / ROWS)

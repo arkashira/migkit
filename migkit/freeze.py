@@ -66,19 +66,16 @@ def _state_path(hop, db, side="dst"):
 
 
 def state(hop, db, side="dst"):
-    """What a freeze on this database recorded, or None."""
-    try:
-        return json.loads(_state_path(hop, db, side).read_text())
-    except (OSError, ValueError):
-        return None
+    """What a freeze on this database recorded, or None. One that cannot
+    be read whole stops, naming it: read as nothing, a thaw thaws nothing
+    (`durable`)."""
+    from . import durable
+    return durable.read_state(_state_path(hop, db, side), "journal")
 
 
 def _save(hop, db, record, side="dst"):
-    path = _state_path(hop, db, side)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(record, indent=1))
-    tmp.replace(path)
+    from . import durable
+    durable.write_json(_state_path(hop, db, side), record, indent=1)
 
 
 def app_roles(hop, eng, db, side="dst"):
@@ -574,17 +571,13 @@ def _server_path(hop, side="src"):
 
 
 def server_state(hop, side="src"):
-    try:
-        return json.loads(_server_path(hop, side).read_text())
-    except (OSError, ValueError):
-        return None
+    from . import durable
+    return durable.read_state(_server_path(hop, side), "journal")
 
 
 def _server_save(hop, record, side="src"):
-    path = _server_path(hop, side)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(record, indent=1))
-    tmp.replace(path)
+    from . import durable
+    durable.write_json(_server_path(hop, side), record, indent=1)
 
 
 def source_frozen(hop, dbs):
@@ -1050,16 +1043,14 @@ def answered(hop):
 def _answered_at_a_terminal(hop, answer):
     import getpass
 
-    from . import audit
+    from . import audit, durable
     try:
         who = getpass.getuser()
     except Exception:  # noqa: BLE001 - nobody to name
         who = ""
-    path = hop.report_dir() / ACCESS_FILE
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"answer": answer, "by": who,
-                               "at": time.strftime("%Y-%m-%d %H:%M:%S")}))
-    tmp.replace(path)
+    durable.write_json(hop.report_dir() / ACCESS_FILE,
+                       {"answer": answer, "by": who,
+                        "at": time.strftime("%Y-%m-%d %H:%M:%S")})
     audit.append(hop.report_dir() / "changelog.jsonl",
                  {"op": "target-access-answer", "answer": answer})
 

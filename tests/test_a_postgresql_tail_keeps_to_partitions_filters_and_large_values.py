@@ -11,11 +11,9 @@ replication held to the hop (backlog P0-SCOPE.6e), on real servers:
 * a hop that filters rows sets up no subscription, which would carry
   every row.
 """
-import json
-
 import pytest
 
-from migkit import cli
+from migkit import cli, tailtables
 from migkit.config import Endpoint, Hop
 from migkit.engines.hetero import _Accounts
 from tests.conftest import needs_docker, psql
@@ -85,7 +83,7 @@ def test_a_partition_s_changes_go_by_its_root(pg_pair, tmp_path):
         # the row outside the filter, and the table the hop leaves out
         assert _on(pg_pair["dst"], "select count(*) from"
                                    " public.items") == "0"
-        accounts = json.loads((where / "tail-accounts.json").read_text())
+        accounts = tailtables.accounts(where)
         assert "public.porders" in accounts, accounts
         assert "public.porders_th" not in accounts, accounts
     finally:
@@ -132,7 +130,7 @@ def test_an_unchanged_large_value_keeps_the_target_s(pg_pair, tmp_path):
                               " where id = 1") == "1", "the update carried")
         body = "select md5(body) from public.docs where id = 1"
         assert _on(pg_pair["dst"], body) == _on(pg_pair["src"], body)
-        accounts = json.loads((where / "tail-accounts.json").read_text())
+        accounts = tailtables.accounts(where)
         assert accounts["public.docs"][_Accounts.UNCHANGED] >= 1, accounts
     finally:
         tail.stop()

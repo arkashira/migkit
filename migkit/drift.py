@@ -246,10 +246,9 @@ def kept_at_move(hop, engine, db):
         return
     if hasattr(hop, "scope_fingerprint"):
         got["scope_fingerprint"] = hop.scope_fingerprint()
-    path = hop.report_dir(db) / AT_MOVE
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(got, default=list))
-    tmp.replace(path)
+    from . import durable
+    durable.write_atomic(hop.report_dir(db) / AT_MOVE,
+                         json.dumps(got, default=list))
 
 
 def since_the_move(hop, engine, db):

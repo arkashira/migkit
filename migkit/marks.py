@@ -270,11 +270,18 @@ def choose_rung(side_engine, facts):
 
 
 def saved(token_path):
-    try:
-        got = json.loads(token_path.read_text())
-    except (OSError, ValueError):
-        return {}
-    return got if isinstance(got, dict) else {}
+    """The tail's envelope (`tailctl.position`), {} where none is saved. A
+    file that cannot be read whole stops, as it stops the tail: read as
+    empty, a rung the batches were numbered on was chosen afresh."""
+    from . import tailctl
+    return tailctl.position(token_path) or {}
+
+
+def _keep_rung(token_path, name):
+    """`name` kept in the tail's envelope as the rung it stands on."""
+    from . import tailctl
+    tailctl.keep(token_path, {**(saved(token_path) or {"token": None}),
+                              "rung": name})
 
 
 def kept_rung(token_path):
@@ -321,10 +328,7 @@ def settle(pair, db, token_path, exact, log):
                 name = None
     if name is None:
         name = climb(dst, db, exact, log)
-        got = saved(token_path)
-        got["rung"] = name
-        token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(json.dumps(got, default=str))
+        _keep_rung(token_path, name)
     dst._mark_rung = name
     return name
 
@@ -392,10 +396,7 @@ def settle_exact(pair, db, token_path, log):
             " stop the tail reads again from its saved position, as it"
             " always did")
         return None
-    got = saved(token_path)
-    got["rung"] = "table"
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(json.dumps(got, default=str))
+    _keep_rung(token_path, "table")
     log("batches are numbered on the target (a row of migkit_origin): a"
         " stop goes on after the last batch the target committed, not"
         " from before it")
