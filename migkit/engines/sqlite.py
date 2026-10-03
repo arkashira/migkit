@@ -735,7 +735,7 @@ class SQLiteEngine(NeutralCopier, Engine):
             # a table the hop filters is counted through its filter on both
             # sides, as it is copied and compared: counted whole, a filtered
             # move read as rows missing on the target
-            pred = self.hop.row_filter(db, t)
+            pred = self.row_filter(db, t)
             where = f" where ({pred})" if pred else ""
             a = self._q("src", f'select count(*) from "{t}"{where}')[0][0]
             b = self._q("dst", f'select count(*) from "{t}"{where}')[0][0]

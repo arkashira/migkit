@@ -1298,8 +1298,11 @@ class Hop:
             else None
 
     def _where_rule(self, *parts):
+        """The rule that names this table, its name split the one way names
+        are (`_names`): `public.orders` given as one part is asked as
+        `orders` too, where it was asked only whole."""
         rules = (self.mapping or {}).get("where") or {}
-        for ident in self._ids(*parts):
+        for ident in self._ids(*self._names(*parts)):
             if ident in rules:
                 return rules[ident]
         return None

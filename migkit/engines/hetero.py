@@ -308,6 +308,12 @@ class HeteroEngine(Engine):
         """The pair's copier writes through the hop's transforms (`_Masks`)."""
         return True
 
+    def copier_filters(self):
+        """The pair's copier reads the filter in each side's SQL
+        (`_row_scope`), where both sides take one."""
+        return bool(self.src_engine.filter_dialect()
+                    and self.dst_engine.filter_dialect())
+
     def _masks(self, db, src_t):
         """Whether the hop masks a column of this source table: a way the
         servers take between them, reading the values as they are, is not
@@ -2727,12 +2733,20 @@ class HeteroEngine(Engine):
         the check has always read both sides through the filter, and on a
         pair the two sides do not speak the same SQL or use the same
         names. One that cannot be translated stops everything that would
-        read through it, before anything is read."""
-        pred = self.hop.row_filter(db, *str(src_table).split("."))
+        read through it, before anything is read.
+
+        Said in the target's words by the one translation
+        (`rowfilter.to_sql`); a document store takes it in SQL and reads it
+        as its own query (`Engine.filter_dialect`, `rowfilter.to_mongo`).
+        Where the hop says the zone the filter's times are read in, each
+        side's is made zone-free by that side's own column types
+        (`rowfilter.zone_free`)."""
+        from .. import rowfilter
+        pred = self.hop.row_filter(db, src_table)
         if not pred:
             return None, None
-        src = self.src_engine.SQL_DIALECT
-        dst = self.dst_engine.SQL_DIALECT
+        src = self.src_engine.filter_dialect()
+        dst = self.dst_engine.filter_dialect()
         if not (src and dst):
             raise SystemExit(
                 f"{src_table} moves under a row filter, which is SQL, and"
@@ -2743,20 +2757,23 @@ class HeteroEngine(Engine):
         _, back = self._mapped_types(db, src_table, {n: None for n in names})
         forward = {v: k for k, v in back.items()}
         try:
-            import sqlglot
-            from sqlglot import exp
-            tree = sqlglot.parse_one(pred, read=src)
-            for col in tree.find_all(exp.Column):
-                if col.name in forward and forward[col.name] != col.name:
-                    col.set("this", exp.to_identifier(forward[col.name]))
-            there = tree.sql(dialect=dst,
-                             unsupported_level=sqlglot.ErrorLevel.RAISE)
-        except Exception as e:
+            there = rowfilter.to_sql(pred, src, dst, renames=forward)
+        except SystemExit as e:
             raise SystemExit(
                 f"the row filter on {src_table} ({pred}) has no translation"
                 f" into {self.dst_name}'s SQL"
-                f" ({str(e).splitlines()[0][:80]}), so the target cannot be"
+                f" ({str(e).splitlines()[-1][:80]}), so the target cannot be"
                 " read through it. Write it so both engines accept it")
+        tz = self.hop.row_filter_zone(db, src_table)
+        if tz:
+            mine = self.src_engine.time_kinds("src", db, src_table)
+            try:
+                theirs = self.dst_engine.time_kinds(
+                    "dst", db, self._rename(src_table, db))
+            except Exception:  # noqa: BLE001 - not made yet: as it will be
+                theirs = {forward.get(k, k): v for k, v in mine.items()}
+            pred = rowfilter.zone_free(pred, src, tz, mine)
+            there = rowfilter.zone_free(there, dst, tz, theirs)
         return pred, there
 
     def _default_here(self, db, expr):

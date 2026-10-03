@@ -409,8 +409,8 @@ def _orphans(hop, src, db, key):
     """(rows the key would refuse, [their key values]) on the source,
     through each table's row filter."""
     ct, cc, pt, pc, _ = key
-    cf = hop.row_filter(db, ct)
-    pf = hop.row_filter(db, pt)
+    cf = src.row_filter(db, ct)
+    pf = src.row_filter(db, pt)
     child = f"(select * from {_q(db)}.{_q(ct)}" + (f" where {cf}" if cf
                                                    else "") + ")"
     parent = f"(select * from {_q(db)}.{_q(pt)}" + (f" where {pf}" if pf

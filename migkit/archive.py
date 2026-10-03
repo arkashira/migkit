@@ -84,7 +84,7 @@ def _pair(eng):
 def tables(hop, eng, db):
     """[(source table, its rule)] of the tables the hop archives."""
     src = _pair(eng).src_engine
-    return [(t, hop.row_filter(db, *str(t).split(".")))
+    return [(t, src.row_filter(db, t))
             for t in src.neutral_tables("src", db)
             if hop.takes_table(db, t)]
 

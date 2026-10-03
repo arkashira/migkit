@@ -1872,12 +1872,15 @@ select json_build_object(
         return (rows, tuple(rows[-1][i] for i in idx))
 
     def column_facts(self, side, db, table):
-        """Whether each column takes NULL. A table migkit builds here takes
-        NULL outside its key."""
+        """Whether each column takes NULL, and its collation where the
+        catalogue names one. A table migkit builds here takes NULL outside
+        its key."""
         if table is None:
             return {None: {"null": True}}
         got, name = self._shape_of(side, db, table)
-        return {c.name: {"null": c.nullable}
+        return {c.name: {"null": c.nullable,
+                         **({"collation": c.collation} if c.collation
+                            else {})}
                 for c in (got["catalog"].columns.get(name) or [])}
 
     def key_merges(self, side, db, columns, batches, examples=3):
@@ -4851,7 +4854,7 @@ select json_build_object(
         source's name.
         """
         sch, tbl = self._split(t)
-        pred = (self.hop.row_filter(db, *self._ruled(db, t))
+        pred = (self.row_filter(db, *self._ruled(db, t))
                 if hasattr(self.hop, "row_filter") else None)
         if side == "dst" and hasattr(self.hop, "target_table_in"):
             sch, tbl = split_table("postgres", self.hop.target_table_in(
@@ -4870,7 +4873,7 @@ select json_build_object(
         where the predicate is NULL is counted too.
         """
         sch, tbl = self._split(t)
-        pred = (self.hop.row_filter(db, *self._ruled(db, t))
+        pred = (self.row_filter(db, *self._ruled(db, t))
                 if hasattr(self.hop, "row_filter") else None)
         if not pred:
             return None
@@ -5068,7 +5071,7 @@ select json_build_object(
             expr = self._row_hash_expr("src", db, t)
             # the ranges' sums are of the rows the hop's row filter takes:
             # partials taken under another filter are not added in
-            pred = self.hop.row_filter(db, sch, tbl)
+            pred = self.row_filter(db, sch, tbl)
             todo = cp.begin(t, expr + (f" where {pred}" if pred else ""),
                             ranges)
             done_before = cp.resumed(t)
@@ -6420,7 +6423,7 @@ select json_build_object(
                     "postgres", self.hop.target_table_in(db, sch, tbl), sch))
             # through the same scope as every other check read: a table
             # whose row filter selects nothing is correctly empty
-            pred = self.hop.row_filter(db, sch, tbl)
+            pred = self.row_filter(db, sch, tbl)
             where = f" where {pred}" if pred else ""
             try:
                 has_src = bool(self._psql(
@@ -8667,7 +8670,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             if notes:
                 unread.append(f"{t}: {'; '.join(notes)}")
             sch, tbl = self._split(t)
-            where = (self.hop.row_filter(db, sch, tbl)
+            where = (self.row_filter(db, sch, tbl)
                      if hasattr(self.hop, "row_filter") else None)
             tables[t] = (self._partition_leaves("src", db, t, sc, where),
                          self._partition_leaves("dst", db, t, dc, where))
@@ -12222,7 +12225,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         # check reports it separately (`_outside_filter`). A partition's is
         # its table's (`_ruled`): asked with its own name, it had none, and
         # its rows were carried unfiltered
-        rf = (self.hop.row_filter(db, *self._ruled(db, f"{sch}.{tbl}"))
+        rf = (self.row_filter(db, *self._ruled(db, f"{sch}.{tbl}"))
               if hasattr(self.hop, "row_filter") else None)
         if st.get("done") and self.recheck_done(db, key, st, log, rf):
             ck.save()

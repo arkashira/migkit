@@ -270,7 +270,8 @@ ROW_FILTER_MOVERS = ("mydumper", "mysqlsh")
 
 #: Bulk paths that can leave a table out, so a table with a row filter can
 #: be carried by the table copier instead.
-ROUTING_MOVERS = ("pgdump", "pgcopydb", "native", "pgpull", "pgsubscribe")
+ROUTING_MOVERS = ("pgdump", "pgcopydb", "native", "pgpull", "pgsubscribe",
+                  "mongodump")
 
 #: Bulk paths that mask a column themselves, the transforms they say
 #: (`DUMP_MASKS`); a table with another is the table copier's
@@ -291,14 +292,6 @@ NEEDS_KEYS = ("pgsubscribe",)
 #: Bulk paths that write a local copy of the source and load it back: the
 #: disk of the machine they run on writes every byte and reads it again
 LOCAL_COPY = ("pgdump", "mydumper", "mongodump")
-
-#: Engines whose table copier (`move_table`) applies the row filter on
-#: both ends - reading only what it selects, replacing only what it
-#: selects on the target. The pair's copier does it in each side's own
-#: SQL, for a hop between engines and for every engine that copies
-#: through the pair; a side that speaks no SQL is refused by it.
-FILTERING_COPIERS = ("postgres", "mysql", "hetero", "sqlite")
-
 
 def _routes_any(hop, db):
     """Whether a table of `db` may leave the bulk path: excluded, under a
@@ -394,8 +387,10 @@ def refuse_unpushable_filters(hop, db, via, engine=None):
     mine = _filtered_here(hop, db)
     if not mine or via in ROW_FILTER_MOVERS:
         return
-    if engine in FILTERING_COPIERS and via in ROUTING_MOVERS + ("builtin",):
-        return
+    if via in ROUTING_MOVERS + ("builtin",):
+        from .engines import get_engine
+        if get_engine(hop).copier_filters():
+            return
     raise SystemExit(
         f"the hop maps row filters onto {', '.join(mine)}, and nothing on"
         f" this {engine or 'engine'} path can apply one: neither its bulk"
@@ -790,7 +785,7 @@ def _pg_truncate_target(hop, db, log=None):
         if asked is None:
             spared[quoted] = None
             continue
-        rf = hop.row_filter(db, *asked)
+        rf = eng.row_filter(db, *asked)
         if hop.carries(db, *asked) != frozenset(OPS):
             some[quoted] = rf
         if rf:
@@ -2587,8 +2582,11 @@ def mydumper_defaults(hop, db, sections=None, tables=None):
             if len(parts) == 1 or parts[0] == db:
                 tables.add(parts[-1])
     per = {}
+    from .engines.mysql import MySQLEngine
+    eng = MySQLEngine(hop) if (getattr(hop, "mapping", None) or {}).get(
+        "where") else None
     for table in sorted(tables):
-        predicate = hop.row_filter(db, table)
+        predicate = eng.row_filter(db, table) if eng else None
         if predicate:
             per.setdefault(table, []).append(f"where = {predicate}")
     for table, more in (sections or {}).items():
@@ -2722,7 +2720,7 @@ def _my_truncate_target(hop, db, log=None, spare=()):
             continue
         if n in set(spare):
             continue
-        rf = hop.row_filter(db, *_asked(hop, src))
+        rf = eng.row_filter(db, *_asked(hop, src))
         if hop.carries(db, *_asked(hop, src)) != frozenset(OPS):
             some[n] = rf
         if rf:
@@ -4144,7 +4142,7 @@ def mydumper_move(hop, db, workers, go, log, only=None):
     # to go on from - measured faster than reading and writing at once too
     # (MY_BENCH); at once only where this machine cannot hold the dump
     resumable = not _shell_direct(hop, db, facts)
-    where = {t: hop.row_filter(db, t) for t in shell_tables
+    where = {t: eng.row_filter(db, t) for t in shell_tables
              if hop.row_filter(db, t)}
     largest = max([int(((facts or {}).get(t) or {}).get("bytes") or 0)
                    for t in shell_tables] or [0])
@@ -4547,6 +4545,20 @@ def mongodump_move(hop, db, workers, go, log):
             names, skip = _mongo_left_out(hop, db)
             renamed = {n: hop.target_table_in(db, n) for n in names
                        if n not in skip and _renamed(hop, db, [n])}
+        except Exception as e:
+            unresolved = (str(e).strip().splitlines()[0][:100] if str(e)
+                          else type(e).__name__)
+    if _filtered_here(hop, db):
+        # a collection under a row filter is the collection copier's, which
+        # reads and empties only what the filter takes (`routed_to_copier`,
+        # `cli._copy_routed`): left out of the dump, and of the restore's
+        # drop
+        try:
+            from .engines.mongodb import MongoEngine
+            names = MongoEngine(hop).neutral_tables("src", db)
+            skip = sorted(set(skip) | {
+                n for n in routed_to_copier(hop, db, "mongodump", names,
+                                            None)})
         except Exception as e:
             unresolved = (str(e).strip().splitlines()[0][:100] if str(e)
                           else type(e).__name__)

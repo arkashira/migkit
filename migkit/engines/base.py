@@ -225,6 +225,54 @@ class Engine:
         return self.hop.takes_table(
             db, table, self.CANON_ENGINE or getattr(self.hop, "engine", ""))
 
+    #: the SQL a row filter handed to this engine's readers is written in,
+    #: for an engine that speaks none and reads a filter as a query of its
+    #: own (`rowfilter.to_mongo`); an engine with SQL reads its own
+    FILTER_DIALECT = None
+
+    def filter_dialect(self):
+        """The SQL this engine's readers take a row filter in: its own, or
+        the one it reads as a query of its own (`FILTER_DIALECT`); None
+        where it takes none."""
+        return getattr(self, "SQL_DIALECT", None) or self.FILTER_DIALECT
+
+    def row_filter(self, db, *parts, side="src"):
+        """The hop's row filter of this table as this engine's SQL reads it:
+        as written (`Hop.row_filter`) - or, where the hop says the zone its
+        times are read in (`where: {expr, tz}`), with every time it compares
+        a column holding a point in time written as that point
+        (`rowfilter.zone_free`, each column's meaning read off this
+        engine's catalogue, `time_kinds`). So every reader - the copy, the
+        check, the tail, a program handed the predicate - takes the same
+        rows whatever zone its session is in. None without a filter; a
+        filter that cannot be made exact is refused (SystemExit)."""
+        pred = self.hop.row_filter(db, *parts)
+        tz = self.hop.row_filter_zone(db, *parts) if pred else None
+        if not tz:
+            return pred
+        from .. import rowfilter
+        table = ".".join(str(p) for p in parts if p not in (None, ""))
+        return rowfilter.zone_free(
+            pred, rowfilter.dialect_of(self.CANON_ENGINE or self.hop.engine),
+            tz, self.time_kinds(side, db, table))
+
+    def time_kinds(self, side, db, table):
+        """{column: rowfilter.INSTANT | WALL | UNKNOWN} of a table's time
+        columns, by what this engine means by each one's type
+        (`canon.time_meaning`): what a filter's time is read against."""
+        from .. import canon, rowfilter
+        out = {}
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        for name, typ in self.neutral_columns(side, db, table):
+            if canon.type_class(eng, typ) not in ("timestamp", "date",
+                                                  "time"):
+                continue
+            got = canon.time_meaning(eng, typ)
+            out[name] = (rowfilter.INSTANT if got == canon.INSTANT else
+                         rowfilter.WALL if got == canon.WALL else
+                         rowfilter.UNKNOWN)
+        return out
+
     def _scoped_rows(self, db, rows, at=0):
         """The rows of a catalogue listing whose `at`th value is a table
         the hop takes (`in_scope`). Every deep check, inventory and repair
@@ -3462,6 +3510,7 @@ class Engine:
                         " source - that table is not renamed, not filtered,"
                         " and will move exactly as it is"
                         "  [fix] correct the name or drop the rule"})
+        items += self._filter_collation_items()
         if not items:
             items.append({
                 "level": "pass", "scope": "before the move",
@@ -3470,6 +3519,78 @@ class Engine:
                     f" {len((hop.mapping or {}).get('where') or {})} row"
                     " filters, every rule matching a table that exists"})
         return items
+
+    def _filter_collation_items(self):
+        """A row filter that compares text the two sides compare otherwise:
+        the columns it compares as text (`rowfilter.text_compared`), each
+        side's collation of them (`column_facts`). Two collations that
+        differ take other rows through the one filter - `name = 'abc'`
+        takes `ABC` under one without case - so the copy carries one set
+        and the check compares another: said before the move, as a failure
+        where both are known and differ, and a warning where a side does
+        not say its collation and the two engines differ. The collation
+        proof asks those columns first (`storedcode.collations`)."""
+        from .. import rowfilter
+        from ..util import _canonical
+        if not (self.hop.mapping or {}).get("where"):
+            return []
+        src = getattr(self, "src_engine", None) or self
+        dst = getattr(self, "dst_engine", None) or self
+        apart, unread = [], []
+        try:
+            for db in self.databases():
+                for t in src.neutral_tables("src", db):
+                    pred = self.hop.row_filter(db, t)
+                    if not pred:
+                        continue
+                    cols = rowfilter.text_compared(pred,
+                                                   src.filter_dialect())
+                    if not cols:
+                        continue
+                    there = self.hop.target_table_in(db, t)
+                    rename = self.hop.column_rules(db, t).get("rename") or {}
+                    a = src.column_facts("src", db, t) or {}
+                    try:
+                        b = dst.column_facts("dst", db, there) or {}
+                    except Exception:  # noqa: BLE001 - not made yet
+                        b = {}
+                    for c in cols:
+                        ca = (a.get(c) or {}).get("collation")
+                        cb = (b.get(rename.get(c, c)) or {}).get("collation")
+                        if ca and cb and ca != cb:
+                            apart.append(f"{t}.{c} ({ca} / {cb})")
+                        elif not (ca and cb) and _canonical(
+                                src.CANON_ENGINE or "") != _canonical(
+                                    dst.CANON_ENGINE or ""):
+                            unread.append(f"{t}.{c}")
+        except Exception as e:  # noqa: BLE001 - said, never passed
+            return [{"level": "warn", "scope": "before the move",
+                     "item": "row filter", "detail":
+                         "whether the two sides compare the text the row"
+                         " filters read alike could not be asked:"
+                         f" {str(e).splitlines()[-1][:90]}"}]
+        out = []
+        if apart:
+            out.append({
+                "level": "fail", "scope": "before the move",
+                "item": "row filter", "detail":
+                    "the row filter compares text the two sides collate"
+                    " differently, so it takes other rows on each: "
+                    + ", ".join(apart[:6])
+                    + "  [fix] write the filter so it does not hang on"
+                      " case or accents (compare upper() of both, or the"
+                      " key), or give the target column the source's"
+                      " collation"})
+        if unread:
+            out.append({
+                "level": "warn", "scope": "before the move",
+                "item": "row filter", "detail":
+                    "the row filter compares text, and whether the two"
+                    " engines compare it alike is not known: "
+                    + ", ".join(unread[:6])
+                    + "  [fix] the collation proof asks these first"
+                      " (migkit check --deep)"})
+        return out
 
     def _preflight_items(self):
         """The predictive deep checks, as `assess` rows.
@@ -3882,7 +4003,7 @@ class Engine:
 
     def _reader_where(self, db, src_t):
         """The hop's row filter on each side, in each side's SQL."""
-        pred = self.hop.row_filter(db, *str(src_t).split("."))
+        pred = self.row_filter(db, src_t)
         return pred, pred
 
     def _can_read_twice(self):
@@ -5479,6 +5600,18 @@ class Engine:
         anything is written (`movers.refuse_unmasked`)."""
         return not self.OWN_PATHS_READ_COLUMN_MAPPING
 
+    def copier_filters(self):
+        """Whether this engine's table copier applies the hop's row filter
+        on both ends - reading only what it takes, replacing only that on
+        the target: the same-engine copiers that read it in their own SQL,
+        and a document store that reads it as its own query
+        (`FILTER_DIALECT`). A bulk path that cannot filter hands such a
+        table to it (`movers.routed_to_copier`); one this says no to is
+        refused before anything is copied
+        (`movers.refuse_unpushable_filters`)."""
+        return not self.OWN_PATHS_READ_COLUMN_MAPPING or bool(
+            self.FILTER_DIALECT)
+
     #: whether this engine's change tail is the pair's, run as a pair of
     #: itself (`tail_apply` handing over to `_as_pair()`)
     TAILS_THROUGH_PAIR = False
@@ -6611,6 +6744,11 @@ class NeutralCopier:
     def copier_masks(self):
         """The pair's copier, which writes through the hop's transforms."""
         return True
+
+    def copier_filters(self):
+        """The pair's copier, which reads the filter in this engine's own
+        SQL on both ends (`HeteroEngine._row_scope`) - where it has one."""
+        return bool(self.filter_dialect())
 
     def moved_nothing(self, db):
         return self._as_pair().moved_nothing(db)

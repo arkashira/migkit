@@ -2711,7 +2711,7 @@ class MySQLEngine(Engine):
                 if renamed and side == "dst"
                 and hasattr(self.hop, "target_table_in") else t)
         qt = f"`{self._d(side, db)}`.`{name}`"
-        pred = (self.hop.row_filter(db, t)
+        pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         return f"(select * from {qt} where {pred}) t" if pred else f"{qt} t"
 
@@ -2719,7 +2719,7 @@ class MySQLEngine(Engine):
         """Target rows the hop's row filter excludes, or None without one.
         The move puts no row outside the filter on the target, so any count
         above zero is said; `is not true` counts a NULL predicate too."""
-        pred = (self.hop.row_filter(db, t)
+        pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         if not pred:
             return None
@@ -2795,7 +2795,7 @@ class MySQLEngine(Engine):
                "--bisection-threshold", str(rung["bisection_threshold"])]
         for k in pks:
             cmd += ["-k", k]
-        pred = (self.hop.row_filter(db, t)
+        pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         if pred:
             cmd += ["--where", pred]
@@ -2865,7 +2865,7 @@ class MySQLEngine(Engine):
         # folded by XOR, recorded are not mixed in; a resumed run hashes
         # with the salt its partials were taken with; and partials taken
         # under another row filter are not added in
-        pred = self.hop.row_filter(db, t) if col else None
+        pred = self.row_filter(db, t) if col else None
         todo = cp.begin(scope, "md5-64:" + expr + (f" where {pred}" if pred
                                                    else ""),
                         pk_ranges) if col else pk_ranges
@@ -3623,7 +3623,7 @@ class MySQLEngine(Engine):
         empty = []
         for t in names:
             mine = str(self.hop.target_table_in(db, t)).rpartition(".")[2]
-            pred = self.hop.row_filter(db, t)
+            pred = self.row_filter(db, t)
             try:
                 has_src = bool(self._q("src", "select 1 from"
                                        f" {self._scope('src', db, t)} limit 1"))
@@ -4918,7 +4918,7 @@ class MySQLEngine(Engine):
 
     def _partition_read(self, side, db, t, parts, expr):
         dbn = self._d(side, db)
-        pred = (self.hop.row_filter(db, t)
+        pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         names = list(parts)
         out = {}
@@ -7006,7 +7006,7 @@ class MySQLEngine(Engine):
         t = tbl if tbl else sch
         key = self.move_key(db, sch, tbl)
         st = ck.setdefault(key, {})
-        rf = (self.hop.row_filter(db, t)
+        rf = (self.row_filter(db, t)
               if hasattr(self.hop, "row_filter") else None)
         if st.get("done") and self.recheck_done(db, t, st, log, rf,
                                                 label=key):

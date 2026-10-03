@@ -713,7 +713,7 @@ def scan(hop, eng, db, p=None):
                    for n, typ in src.neutral_columns("src", db, t)}
         read = [(k, classes.get(k)) for k in key] + [
             (n, "text") for n in sorted(cols) if n not in key]
-        where = hop.row_filter(db, *str(t).split("."))
+        where = src.row_filter(db, t)
         for rows in src._every_row("src", db, t, read, where):
             for r in rows:
                 keytext = tuple(canon.render_value(classes.get(k), v)
@@ -1486,7 +1486,7 @@ def _proofs(hop, eng, db):
         key = [k for k in (src.neutral_key("src", db, t) or [])]
         keyed = bool(key) and set(key) <= set(names)
         at = [names.index(k) for k in key] if keyed else []
-        where = hop.row_filter(db, *str(t).split("."))
+        where = src.row_filter(db, t)
         a, b, unfit = ({} if keyed else Counter()), \
             ({} if keyed else Counter()), 0
         for rows in src._every_row("src", db, t, sc, where):

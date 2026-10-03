@@ -53,6 +53,25 @@ class MongoEngine(Engine):
 
     CANON_ENGINE = "mongodb"
     ENGINE_FAMILY = "mongodb"
+    #: a row filter is written in SQL (`rowfilter.DIALECTS`) and read here
+    #: as the store's own query (`_filtered`)
+    FILTER_DIALECT = "postgres"
+
+    def _filtered(self, where, flt=None):
+        """The store's query for a row filter handed over in SQL
+        (`rowfilter.to_mongo`, SQL's NULL kept), with `flt` beside it -
+        `flt` alone where there is none."""
+        if not where:
+            return flt or {}
+        from .. import rowfilter
+        got = rowfilter.to_mongo(where, self.FILTER_DIALECT)
+        return {"$and": [flt, got]} if flt else got
+
+    def row_query(self, db, table):
+        """The hop's row filter of a collection as the store's own query
+        (`Engine.row_filter`, `rowfilter.to_mongo`), {} without one: what
+        the collection copier, the check and the delta read through."""
+        return self._filtered(self.row_filter(db, table))
 
     def _brand_probes(self):
         """`buildInfo` from each side, which is where MongoDB names itself.
@@ -92,11 +111,8 @@ class MongoEngine(Engine):
 
     def neutral_empty(self, side, db, table, where=None):
         self._target_only(side, "empty a collection")
-        if where:
-            raise SystemExit("a row filter is SQL, and MongoDB takes none;"
-                             " narrow this collection another way")
         return self._client(side)[self._d(side, db)][table].delete_many(
-            {}).deleted_count
+            self._filtered(where)).deleted_count
 
     def text_encodings(self, side, db):
         # BSON strings are UTF-8 by the format's own definition
@@ -191,7 +207,13 @@ class MongoEngine(Engine):
         `_id`s are numbers and strings would have lost every string after
         the last number. Each batch replaces the documents with the same
         `_id`, so a restart converges. A collection this copy made gets the
-        source's indexes once its documents are in."""
+        source's indexes once its documents are in.
+
+        Under the hop's row filter (`row_query`) only the documents it takes
+        are read, and only those are emptied on the target first - the
+        rest there are the target's own; where the hop keeps what the
+        source deletes (`mapping.ops`), nothing is emptied, and each
+        document replaces its namesake."""
         from bson import json_util
         from bson.raw_bson import RawBSONDocument
         from pymongo import ReplaceOne
@@ -220,12 +242,15 @@ class MongoEngine(Engine):
         # empty
         there = self.hop.target_table_in(db, name)
         dst = target[there]
+        scope = self.row_query(db, name)
         after = json_util.loads(st["last"]) if "last" in st else None
         started_here = after is None
         if started_here:
             st["made"] = there not in target.list_collection_names()
-            # what the target already holds is not this copy's
-            gone = dst.delete_many({}).deleted_count
+            # what the target already holds is not this copy's - under the
+            # filter only what it takes, and none where deletes are kept
+            gone = 0 if "delete" not in self.hop.carries(db, name) else \
+                dst.delete_many(scope).deleted_count
             st["moved"] = 0
             if gone:
                 log(f"{key}: emptied {gone:,} documents the target held"
@@ -237,7 +262,7 @@ class MongoEngine(Engine):
         # `_id`s of one BSON type from the first to the last are all of
         # that type - BSON orders by type first - and then a plain `$gt`
         # is exact and takes the index
-        ends = [next(iter(src.find({}, {"_id": 1}).sort("_id", o)
+        ends = [next(iter(src.find(scope, {"_id": 1}).sort("_id", o)
                           .limit(1)), None) for o in (1, -1)]
         one_type = all(ends) and type(ends[0]["_id"]) is \
             type(ends[1]["_id"])
@@ -245,6 +270,8 @@ class MongoEngine(Engine):
             flt = {} if after is None else (
                 {"_id": {"$gt": after}} if one_type else
                 {"$expr": {"$gt": ["$_id", {"$literal": after}]}})
+            if scope:
+                flt = {"$and": [flt, scope]} if flt else scope
             docs = self._docs_until(src, flt, None, batch, raw=True)
             if not docs:
                 break
@@ -416,9 +443,6 @@ class MongoEngine(Engine):
         would destroy the distinction before the mover could count what the
         target does to it.
         """
-        if where:
-            raise SystemExit("a row filter is SQL, and MongoDB takes none;"
-                             " narrow this collection another way")
         from .. import canon
         coll = self._client(side)[self._d(side, db)][table]
         names = [n for n, _ in columns]
@@ -430,7 +454,8 @@ class MongoEngine(Engine):
         # ObjectIds stopped after the three numbers, and a copy through it
         # moved three of seven without a word. An expression compares in
         # the order the sort uses, across types.
-        flt = ({"$expr": {"$gt": ["$_id", after[0]]}} if after else {})
+        flt = self._filtered(where, {"$expr": {"$gt": ["$_id", after[0]]}}
+                             if after else {})
         rows, last = [], None
         # ending at `pieces.BATCH_BYTES` of BSON, and going on from the last
         # `_id` the next time (`_docs_until`)
@@ -451,9 +476,6 @@ class MongoEngine(Engine):
         than None, for the same reason the ordered read does: the two mean
         different things here and only one of them is a value.
         """
-        if where:
-            raise SystemExit("a row filter is SQL, and MongoDB takes none;"
-                             " narrow this collection another way")
         from .. import canon
         if not key or not keys:
             return {}
@@ -464,6 +486,7 @@ class MongoEngine(Engine):
             flt = {key[0]: {"$in": [k[0] for k in keys]}}
         else:
             flt = {"$or": [dict(zip(key, values)) for values in keys]}
+        flt = self._filtered(where, flt)
         rows = []
         for doc in self._client(side)[self._d(side, db)][table].find(
                 flt, projection):
@@ -972,11 +995,9 @@ class MongoEngine(Engine):
         rendering and the same arithmetic the SQL engines use in-server. The
         answer is identical; what differs is that the collection crosses the
         network to produce it, and `check` says so rather than letting the
-        number imply otherwise.
+        number imply otherwise. A row filter handed over in SQL is read as
+        the store's own query (`_filtered`).
         """
-        if where:
-            raise SystemExit("a row filter is SQL, and MongoDB takes none;"
-                             " narrow this collection another way")
         from .. import canon
         coll = self._client(side)[self._d(side, db)][table]
         fields = [name for name, _ in columns]
@@ -992,7 +1013,8 @@ class MongoEngine(Engine):
         # that fails on the way is read again rather than ending the pass.
         after, started = None, False
         while True:
-            flt = {"$expr": {"$gt": ["$_id", after]}} if started else {}
+            flt = self._filtered(where, {"$expr": {"$gt": ["$_id", after]}}
+                                 if started else {})
             # a chunk ends at `pieces.BATCH_BYTES` of BSON as well
             docs = with_retry(lambda: self._docs_until(
                 coll, flt, projection, self.DIGEST_CHUNK),
@@ -1113,23 +1135,30 @@ class MongoEngine(Engine):
                     if not c.startswith("system.")
                     and not self.hop.excluded(db, c)}
 
-        src_names, dst_names = collections(s), collections(t)
+        src_names = collections(s)
+        # each under the name the hop gives it on the target
+        there = {n: self.hop.target_table_in(db, n) for n in src_names}
+        dst_names = {c for c in t.list_collection_names()
+                     if not c.startswith("system.")
+                     and (c in there.values() or not self.hop.excluded(db, c))}
         res = []
-        if src_names - dst_names:
+        missing = sorted(n for n in src_names if there[n] not in dst_names)
+        extra = sorted(dst_names - set(there.values()))
+        if missing:
             res.append(Result("counts", db, "diff",
-                              "missing collections on target:"
-                              f" {sorted(src_names - dst_names)}", "",
-                              "create and load them before cutover"))
-        if dst_names - src_names:
+                              f"missing collections on target: {missing}",
+                              "", "create and load them before cutover"))
+        if extra:
             res.append(Result("counts", db, "diff",
-                              "extra collections on target:"
-                              f" {sorted(dst_names - src_names)}"))
+                              f"extra collections on target: {extra}"))
         bad = []
-        names = sorted(src_names & dst_names)
+        names = sorted(n for n in src_names if there[n] in dst_names)
         total_a = total_b = 0
         for name in names:
-            a = s[name].count_documents({})
-            b = t[name].count_documents({})
+            # through the hop's row filter on both sides (`row_query`)
+            q = self.row_query(db, name)
+            a = s[name].count_documents(q)
+            b = t[there[name]].count_documents(q)
             total_a += a
             total_b += b
             if a != b:
@@ -1238,8 +1267,9 @@ class MongoEngine(Engine):
         a, b = self._db_hashes(db)
         sn = set(s.list_collection_names())
         tn = set(t.list_collection_names())
-        names = [table] if table else sorted(c for c in sn & tn
-                                             if not self.hop.excluded(db, c))
+        names = [table] if table else sorted(
+            c for c in sn if not self.hop.excluded(db, c)
+            and self.hop.target_table_in(db, c) in tn)
         # dbHash and the id drilldown are both full scans, so the same rule
         # as the other engines applies: stop adding load to a deployment that
         # is already struggling.
@@ -1249,6 +1279,13 @@ class MongoEngine(Engine):
         told = {}
         for name in names:
             if name.startswith("system."):
+                continue
+            if self.hop.target_table_in(db, name) != name or \
+                    self.hop.row_filter(db, name):
+                # `dbHash` hashes a collection whole under one name: one the
+                # hop renames or filters is compared through the pair, which
+                # reads the target's name and the filter on both sides
+                res += self._as_pair().check_data(db, name, stream)
                 continue
             ha, hb = self._server_hash(a, name), self._server_hash(b, name)
             if ha and ha == hb:
@@ -1315,12 +1352,17 @@ class MongoEngine(Engine):
         from bson.json_util import dumps, loads
         ids = [loads(k) for k in keys]
         src = self._raw(self._client("src")[db][table])
-        dst = self._raw(self._client("dst")[self._d("dst", db)][table])
+        # under the name the hop gives it there, through its row filter
+        dst = self._raw(self._client("dst")[self._d("dst", db)][
+            self.hop.target_table_in(db, table)])
+        scope = self.row_query(db, table)
 
         def read(coll):
             out = {}
             for i in range(0, len(ids), 1000):
-                for doc in coll.find({"_id": {"$in": ids[i:i + 1000]}}):
+                by = {"_id": {"$in": ids[i:i + 1000]}}
+                for doc in coll.find({"$and": [by, scope]} if scope
+                                     else by):
                     out[dumps(self._plain_id(doc))] = doc.raw
             return out
         a, b = read(src), read(dst)
@@ -2095,17 +2137,26 @@ class MongoEngine(Engine):
         res = []
         clean = True
         for coll, ids in sorted(touched.items()):
+            if not self.in_scope(db, coll):
+                # a collection the hop leaves out: its changes are not the
+                # move's, and its documents are the target's own
+                continue
             bad = []
             # each document apart said as missing, only on the target or
             # changed: a hop that keeps what the source deletes is held to
             # which (`verdict.hold`)
             apart = {"missing": [], "extra": [], "changed": []}
             # by the stored bytes: decoded, 5 == 5.0 == NumberLong(5) and
-            # 1 == True in Python, and two dicts equal in any field order
-            one, two = self._raw(src[coll]), self._raw(dst[coll])
+            # 1 == True in Python, and two dicts equal in any field order;
+            # on the target under the name the hop gives it, both through
+            # the hop's row filter (`row_query`)
+            one = self._raw(src[coll])
+            two = self._raw(dst[self.hop.target_table_in(db, coll)])
+            scope = self.row_query(db, coll)
             for _id in ids.values():
-                a = one.find_one({"_id": _id})
-                b = two.find_one({"_id": _id})
+                by = ({"_id": _id} if not scope else
+                      {"$and": [{"_id": _id}, scope]})
+                a, b = one.find_one(by), two.find_one(by)
                 if (a and a.raw) != (b and b.raw):
                     bad.append(_id)
                     apart["missing" if b is None else "extra" if a is None
@@ -2532,12 +2583,27 @@ class MongoEngine(Engine):
                     key = ev.get("documentKey", {})
                     if not go:
                         continue
-                    if op in ("insert", "update", "replace"):
+                    # under the name the hop gives it there, only the
+                    # changes it carries (`Hop.carries`), and a document
+                    # that left the hop's row filter out of the target as
+                    # the copy leaves it (`row_query`)
+                    there = self.hop.target_table_in(db, coll)
+                    carried = self.hop.carries(db, coll)
+                    said = {"insert": "insert", "delete": "delete"}.get(
+                        op, "update")
+                    scope = self.row_query(db, coll)
+                    if said not in carried:
+                        pass
+                    elif op in ("insert", "update", "replace"):
                         doc = ev.get("fullDocument")
-                        if doc is not None:
-                            dst[coll].replace_one(key, doc, upsert=True)
+                        if doc is not None and scope and src[coll].find_one(
+                                {"$and": [key, scope]}, {"_id": 1}) is None:
+                            if "delete" in carried:
+                                dst[there].delete_one(key)
+                        elif doc is not None:
+                            dst[there].replace_one(key, doc, upsert=True)
                     else:
-                        dst[coll].delete_one(key)
+                        dst[there].delete_one(key)
                     applied = ev["_id"]
                     if n % 100 == 0:
                         token_path.write_text(dumps(applied))

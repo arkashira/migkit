@@ -224,3 +224,220 @@ def test_a_filter_says_the_zone_its_times_are_read_in():
         "hops.h.mapping.where.orders.tz"
     assert _hop_problems({"orders": {"tz": "UTC"}})
     assert rowfilter.zone_offset("Asia/Bangkok") == "Asia/Bangkok"
+
+
+# ---- one owner, read by every reader (backlog P0-SCOPE 7, item 2) ----------
+
+def _hop(engine="postgres", where=None, **options):
+    from migkit.config import Endpoint, Hop
+    return Hop(name="f", engine=engine, source=Endpoint(host="10.0.0.1"),
+               target=Endpoint(host="10.0.0.2"), databases=["appdb"],
+               options=dict(options),
+               mapping={"where": where} if where else {})
+
+
+def test_a_table_named_whole_finds_the_rule_its_leaf_answers():
+    """`public.orders` given as one part is asked as `orders` too: asked
+    only whole, the pair's own name for a table missed a rule written for
+    its leaf."""
+    hop = _hop(where={"orders": "id > 5"})
+    assert hop.row_filter("appdb", "public.orders") == "id > 5"
+    assert hop.row_filter("appdb", "public", "orders") == "id > 5"
+    assert hop.row_filter("appdb", "public.people") is None
+
+
+def test_the_pair_says_the_filter_in_the_targets_words_one_way():
+    from migkit.engines.hetero import HeteroEngine
+    hop = _hop("hetero", where={"orders": "region = 'apac' and qty > 2"},
+               source_engine="postgres", target_engine="mysql")
+    hop.mapping["columns"] = {"orders": {"rename": {"region": "area"}}}
+    eng = HeteroEngine(hop)
+    eng.src_engine.neutral_columns = lambda side, db, t: [
+        ("region", "text"), ("qty", "integer")]
+    here, there = eng._row_scope("appdb", "public.orders")
+    assert here == "region = 'apac' and qty > 2"
+    assert there == rowfilter.to_sql(here, "postgres", "mysql",
+                                     renames={"region": "area"})
+    assert "area" in there and "region" not in there
+
+
+def test_a_document_store_takes_the_filter_as_its_own_query():
+    from migkit.engines.hetero import HeteroEngine
+    from migkit.engines.mongodb import MongoEngine
+    hop = _hop("mongodb", where={"orders": "status <> 'gone'"})
+    eng = MongoEngine(hop)
+    assert eng.filter_dialect() == "postgres"
+    assert eng.row_query("appdb", "orders") == rowfilter.to_mongo(
+        "status <> 'gone'", "postgres")
+    assert eng.row_query("appdb", "people") == {}
+    assert eng._filtered("a = 'x'", {"_id": {"$gt": 1}}) == {
+        "$and": [{"_id": {"$gt": 1}}, {"a": {"$eq": "x"}}]}
+    assert eng._filtered(None, {"_id": 1}) == {"_id": 1}
+    # a pair with a document store on one side reads the filter there
+    pair = HeteroEngine(_hop("hetero", where={"orders": "qty > 2"},
+                             source_engine="postgres",
+                             target_engine="mongodb"))
+    pair.src_engine.neutral_columns = lambda side, db, t: [("qty",
+                                                            "integer")]
+    here, there = pair._row_scope("appdb", "public.orders")
+    assert rowfilter.to_mongo(there, "postgres") == {"qty": {"$gt": 2}}
+
+
+def test_what_lies_outside_a_filter_is_one_query_too():
+    """The pair asks a target for the rows outside the filter as
+    `(filter) IS NOT TRUE`: a document store says it as the documents the
+    filter's own query leaves, NULLs among them."""
+    q = rowfilter.to_mongo("(a = 'x') is not true", "postgres")
+    assert q == {"$nor": [{"a": {"$eq": "x"}}]}
+    for row in ({"a": "x"}, {"a": "y"}, {"a": None}, {}):
+        assert rowfilter.evaluate("(a = 'x') is not true", "postgres",
+                                  row) == (row.get("a") != "x")
+    assert rowfilter.evaluate("(a = 'x') is true", "postgres", {"a": "x"})
+    assert not rowfilter.evaluate("(a = 'x') is false", "postgres", {})
+
+
+def test_every_copier_that_reads_the_filter_says_so():
+    from migkit.engines.cassandra import CassandraEngine
+    from migkit.engines.hetero import HeteroEngine
+    from migkit.engines.mongodb import MongoEngine
+    from migkit.engines.mssql import MSSQLEngine
+    from migkit.engines.mysql import MySQLEngine
+    from migkit.engines.postgres import PostgresEngine
+    for cls, engine in ((PostgresEngine, "postgres"), (MySQLEngine, "mysql"),
+                        (MSSQLEngine, "mssql"), (MongoEngine, "mongodb")):
+        assert cls(_hop(engine)).copier_filters(), engine
+    assert not CassandraEngine(_hop("cassandra")).copier_filters()
+    assert HeteroEngine(_hop("hetero", source_engine="postgres",
+                             target_engine="mongodb")).copier_filters()
+
+
+def test_a_filtered_collection_goes_by_the_copier_not_the_dump():
+    from migkit import movers, planner
+    hop = _hop("mongodb", where={"orders": "qty > 2"})
+    movers.refuse_unpushable_filters(hop, "appdb", "mongodump", "mongodb")
+    got = {d.table: d.path for d in planner.plan(
+        hop, "appdb", "mongodump", ["orders", "people"], None, choice={})}
+    assert got == {"orders": planner.COPIER, "people": planner.BULK}, got
+    with pytest.raises(SystemExit, match="row filters"):
+        movers.refuse_unpushable_filters(hop, "appdb", "mongosync",
+                                         "mongodb")
+    with pytest.raises(SystemExit, match="row filters"):
+        movers.refuse_unpushable_filters(
+            _hop("cassandra", where={"orders": "qty > 2"}), "appdb",
+            "builtin", "cassandra")
+
+
+# ---- the zone a filter's times are read in ------------------------------------
+
+KINDS = {"ts": rowfilter.INSTANT, "d": rowfilter.WALL,
+         "u": rowfilter.UNKNOWN}
+PRED = "ts >= '2026-01-01 00:00:00' and d < '2026-01-02' and name = 'x'"
+
+
+def test_a_time_compared_with_a_point_in_time_is_written_as_that_point():
+    got = rowfilter.zone_free(PRED, "postgres", "+07:00", KINDS)
+    assert "CAST('2025-12-31 17:00:00.000000+00:00' AS TIMESTAMPTZ)" in got
+    # a wall clock's digits mean no zone, and text is text
+    assert "d < '2026-01-02'" in got and "name = 'x'" in got
+    got = rowfilter.zone_free(PRED, "mysql", "+07:00", KINDS)
+    assert "UNIX_TIMESTAMP(ts) >= 1767200400.000000" in got
+    assert "DATETIMEOFFSET" in rowfilter.zone_free(PRED, "tsql", "+07:00",
+                                                   KINDS)
+    assert "TO_TIMESTAMP_TZ" in rowfilter.zone_free(PRED, "oracle", "+07:00",
+                                                    KINDS)
+    got = rowfilter.zone_free("ts between '2026-01-01' and '2026-02-01' or"
+                              " ts is null", "mysql", "Asia/Bangkok", KINDS)
+    assert got == ("UNIX_TIMESTAMP(ts) BETWEEN 1767200400.000000 AND"
+                   " 1769878800.000000 OR ts IS NULL"), got
+    # one that says its own offset is that moment, whatever tz says
+    assert "2026-01-01 10:00:00.000000+00:00" in rowfilter.zone_free(
+        "ts in ('2026-01-01 10:00:00+00:00')", "postgres", "+07:00", KINDS)
+
+
+def test_what_cannot_be_made_exact_is_refused_with_its_reason():
+    for pred, why in (("date(ts) = '2026-01-01'", "session's zone"),
+                      ("ts > now()", "session's zone"),
+                      ("u > '2026-01-01'", "not measured"),
+                      ("ts > 'soon'", "not a time")):
+        with pytest.raises(SystemExit, match=why):
+            rowfilter.zone_free(pred, "postgres", "+07:00", KINDS)
+    with pytest.raises(SystemExit, match="no way"):
+        rowfilter.zone_free("ts > '2026-01-01'", "sqlite", "+07:00", KINDS)
+    with pytest.raises(SystemExit, match="never happens"):
+        rowfilter.instant("2026-03-08 02:30:00", "America/New_York")
+    with pytest.raises(SystemExit, match="happens twice"):
+        rowfilter.instant("2026-11-01 01:30:00", "America/New_York")
+    assert str(rowfilter.instant("2026-07-01 12:00:00",
+                                 "America/New_York")) == \
+        "2026-07-01 16:00:00+00:00"
+
+
+def test_every_reader_reads_the_filter_through_its_engine():
+    """`Engine.row_filter`: as written without a zone - a hop that says
+    none reads as it always did - and zone-free by the engine's own column
+    types with one."""
+    from migkit.engines.postgres import PostgresEngine
+    plain = PostgresEngine(_hop(where={"orders": "ts >= '2026-01-01'"}))
+    assert plain.row_filter("appdb", "public", "orders") == \
+        "ts >= '2026-01-01'"
+    zoned = PostgresEngine(_hop(where={"orders": {
+        "expr": "ts >= '2026-01-01' and d >= '2026-01-01'",
+        "tz": "+07:00"}}))
+    zoned.neutral_columns = lambda side, db, t: [
+        ("ts", "timestamp with time zone"), ("d", "date"), ("n", "text")]
+    assert zoned.time_kinds("src", "appdb", "public.orders") == {
+        "ts": rowfilter.INSTANT, "d": rowfilter.WALL}
+    got = zoned.row_filter("appdb", "public", "orders")
+    assert "2025-12-31 17:00:00" in got and "d >= '2026-01-01'" in got
+
+
+def test_text_the_two_sides_collate_otherwise_is_said_before_the_move():
+    from migkit.engines.mysql import MySQLEngine
+    eng = MySQLEngine(_hop("mysql", where={"orders": "name = 'abc'"}))
+    eng.databases = lambda: ["appdb"]
+    eng.neutral_tables = lambda side, db: ["orders"]
+    facts = {"src": {"name": {"collation": "utf8mb4_bin"}},
+             "dst": {"name": {"collation": "utf8mb4_0900_ai_ci"}}}
+    eng.column_facts = lambda side, db, t: facts[side]
+    got = eng._filter_collation_items()
+    assert got and got[0]["level"] == "fail", got
+    assert "orders.name" in got[0]["detail"]
+    facts["dst"] = facts["src"]
+    assert eng._filter_collation_items() == []
+    assert MySQLEngine(_hop("mysql"))._filter_collation_items() == []
+
+
+# ---- the document store, on its server ----------------------------------------
+
+@needs_docker
+def test_the_document_store_copies_and_checks_through_the_filter(mongo,
+                                                                 tmp_path):
+    from migkit.config import Hop
+    from migkit.engines.mongodb import MongoEngine
+    src = mongo.src.client()[mongo.name]["orders"]
+    dst = mongo.dst.client()[mongo.name]["orders"]
+    src.insert_many([{"_id": i, "qty": i} for i in range(1, 11)])
+    # the target's own document, outside the filter: never emptied
+    dst.insert_one({"_id": 100, "qty": 0})
+    hop = Hop(name="f", engine="mongodb", source=mongo.src.endpoint(),
+              target=mongo.dst.endpoint(), databases=[mongo.name],
+              mapping={"where": {"orders": "qty > 6"}})
+    hop.report_dir = lambda db=None, _p=tmp_path: _p
+
+    class _Ck(dict):
+        def save(self):
+            pass
+    eng = MongoEngine(hop)
+    eng.move_table(mongo.name, "", "orders", 100, _Ck(), lambda m: None)
+    assert sorted(d["_id"] for d in dst.find()) == [7, 8, 9, 10, 100]
+    got = eng.check_counts(mongo.name)
+    assert all(r.status == "ok" for r in got), \
+        [(r.scope, r.status, r.detail) for r in got]
+    got = eng.check_data(mongo.name)
+    assert all(r.status == "ok" for r in got), \
+        [(r.scope, r.status, r.detail) for r in got]
+    # a document inside the filter gone from the target is found
+    dst.delete_one({"_id": 8})
+    got = eng.check_counts(mongo.name)
+    assert any(r.status == "diff" for r in got), \
+        [(r.scope, r.status, r.detail) for r in got]

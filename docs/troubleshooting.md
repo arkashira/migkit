@@ -817,8 +817,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * pip install 'migkit[mongo]' for mongodb support
 
-* a row filter is SQL, and MongoDB takes none; narrow this collection another way
-
 * <...>: migkit will not write documents without _id - there would be no way to write the same row twice without duplicating it
 
 * the server opened a change stream without saying where it stands, so there is no position to start the tail from before the copy
@@ -1596,6 +1594,20 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the row filter <...> is not SQL the source reads: <...>
 
 * the row filter <...> has no translation into the target's SQL: <...>
+
+* <...> never happens in <...> (its clock goes forward over it): write the time with its offset
+
+* <...> happens twice in <...> (its clock goes back over it): write the time with its offset
+
+* <...> is compared with a column holding a point in time, and is not a time
+
+* <...> holds a point in time, and the filter reads it through <...>, which each server reads in its own session's zone: compare the column itself with a time
+
+* <...> holds a point in time, and this engine's SQL has no way migkit writes one exactly: write the times with their offset, or drop tz
+
+* <...> holds a time whose meaning on this engine is not measured, so a time read in <...> has no exact match: write it with its offset, or drop tz
+
+* <...> holds a time whose meaning on this engine is not measured
 
 * <...> is not a column - a document store is asked of its fields only
 
