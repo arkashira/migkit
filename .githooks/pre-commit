@@ -30,3 +30,26 @@ case $? in
     echo "the manual could not be checked against the code here"
     echo "(run: python tools/gen_docs.py --check); the commit goes on." ;;
 esac
+
+# where everything is (tools/gen_codemap.py): the map kept in the repo is
+# written again and the commit stopped when it is behind, as the manual's
+# pages are; every symbol's file:line is written on this machine for the
+# next session to read instead of searching (.codemap/, gitignored), and so
+# is a tags index where universal-ctags is installed
+"$docs" tools/gen_codemap.py --check >/dev/null 2>&1
+case $? in
+  0) "$docs" tools/gen_codemap.py --symbols >/dev/null 2>&1 ;;
+  3)
+    "$docs" tools/gen_codemap.py >/dev/null
+    echo
+    echo "commit stopped: the code map was behind the code and is written"
+    echo "again. Add it (git add docs/agents/CODEMAP.md) and commit again."
+    exit 1 ;;
+  *) echo "the code map could not be checked here; the commit goes on." ;;
+esac
+for ct in ctags /opt/homebrew/bin/ctags /usr/local/bin/ctags; do
+  if "$ct" --version 2>/dev/null | grep -q "Universal Ctags"; then
+    "$ct" -R --languages=Python -f tags migkit tools tests 2>/dev/null || true
+    break
+  fi
+done
