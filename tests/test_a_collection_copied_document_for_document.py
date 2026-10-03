@@ -160,3 +160,19 @@ def test_a_finished_collection_is_asked_again_before_it_is_skipped(
     assert said[0] == ("app.again: done earlier, and the two sides no longer"
                        " hold the same rows - copying it again"), said
     assert t.app.again.find_one({"_id": 2})["v"] == 20
+
+
+def test_a_renamed_collection_is_written_under_its_new_name(pair, tmp_path):
+    """It was written under the source's name, and the collection the hop
+    names on the target stayed empty (backlog P0-SCOPE.6d)."""
+    from migkit.cli import _Checkpoint
+    s, t = pair
+    for c in (s.app.renamed, t.app.renamed, t.app.renamed_v2):
+        c.drop()
+    s.app.renamed.insert_many([{"_id": i} for i in range(4)])
+    eng = _engine(tmp_path)
+    eng.hop.mapping = {"tables": {"renamed": "renamed_v2"}}
+    eng.move_table("app", "", "renamed", 3,
+                   _Checkpoint(tmp_path / "renamed.json"), [].append)
+    assert t.app.renamed_v2.count_documents({}) == 4
+    assert "renamed" not in t.app.list_collection_names()

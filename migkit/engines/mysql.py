@@ -3589,7 +3589,9 @@ class MySQLEngine(Engine):
         return got
 
     def moved_nothing(self, db):
-        """Which tables the source has rows in and the target does not."""
+        """Which tables the source has rows in and the target does not - a
+        renamed one asked under the name the hop gives it on the target,
+        where it was looked for under the name it no longer has."""
         ddb = self._d("dst", db)
         try:
             names = [r[0] for r in self._q(
@@ -3601,14 +3603,17 @@ class MySQLEngine(Engine):
             return None
         empty = []
         for t in names:
+            mine = str(self.hop.target_table_in(db, t)).rpartition(".")[2]
+            pred = self.hop.row_filter(db, t)
             try:
                 has_src = bool(self._q("src", "select 1 from"
                                        f" {self._scope('src', db, t)} limit 1"))
                 # a table the target does not have received nothing: asking
                 # it anyway failed, and the guard gave up on the whole move
-                has_dst = t in there and bool(self._q(
-                    "dst", "select 1 from"
-                           f" {self._scope('dst', db, t)} limit 1"))
+                has_dst = mine in there and bool(self._q(
+                    "dst", f"select 1 from {self._my_ident(ddb)}"
+                           f".{self._my_ident(mine)}"
+                           + (f" where {pred}" if pred else "") + " limit 1"))
             except Exception:
                 return None
             if has_src and not has_dst:

@@ -137,6 +137,12 @@ def _glob_re(glob):
     matched the hop's pattern and not the program's filter (measured),
     and were copied though the check left them out; and a set that starts
     with `^` or `[` holds that character, where it began a negated set."""
+    return "^(?s:" + glob_body(glob) + ")$"
+
+
+def glob_body(glob):
+    """`_glob_re` without its anchors and flag: the pattern as a part of a
+    larger expression (`movers.scope_alternatives`), read the same way."""
     out, i, n = [], 0, len(glob)
     while i < n:
         c = glob[i]
@@ -165,7 +171,7 @@ def _glob_re(glob):
                 i = j + 1
         else:
             out.append(re.escape(c))
-    return "^(?s:" + "".join(out) + ")$"
+    return "".join(out)
 
 
 def key_filters(hop, db):
