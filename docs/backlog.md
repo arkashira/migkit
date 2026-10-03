@@ -2676,8 +2676,18 @@ documentation, and says what migkit took from each:
 
 HVR, Qlik, Striim and Bytebase are learned from and not wrapped. They
 are commercial or bring a platform of their own. Trino is a candidate
-second reader, to measure first. sqlpipe and schemachange are not read
-yet.
+second reader, to measure first. *Read (2026-10-04):* sqlpipe (CSV
+through each target's bulk client, no comparison) has nothing to wrap;
+schemachange's history table, with Flyway's, Liquibase's, Alembic's,
+Django's, Rails' and Entity Framework's, is the application's record of
+its schema version, which migkit should read (26.versions):
+
+* **26.versions** - the schema version each side stands on, from the
+  application's migration history table, said by `check` and the
+  cutover's gate; a migration run on one side and not the other found;
+  where migkit changes the target's schema itself (the schema fix, a DDL
+  the tail applies), said that the application's tool does not know of
+  it.
 
 **27. SQL Server depth.** Closed as untestable on this arm64 machine. Either
 find an x86 runner, or list it plainly in section H of

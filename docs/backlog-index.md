@@ -172,7 +172,8 @@ their own names, and `LADDER.table` (a WAVE queue item).
 | 91 | 24 | A target that is correct and slow: the source's reads replayed and planned on both sides | DONE (in text) | M | verify | L2605-2638 |
 | 92 | 25 | Long reads over unstable links: MongoDB read in resumable chunks across key types | DONE (in text) | S | verify | L2640-2659 |
 | 93 | 26 | Research of HVR, Qlik, Striim, Airbyte, Bytebase, Trino; the 2026-09-27/28 research passes with scorecards | DONE (docs/research-other-tools.md; 0b64ddb, 6d2675d, 6d5ebe5) | M | tools used whole | L2663-2680, L8120-8147 |
-| 94 | 26.rest | sqlpipe and schemachange read | OPEN | S | tools used whole | L2679-2680 |
+| 94 | 26.rest | sqlpipe and schemachange read | DONE 2026-10-04 (read: `docs/research-other-tools.md` - sqlpipe nothing to wrap; schemachange's and every migration tool's history table read as the schema version: 26.versions) | S | tools used whole | L2679-2680 |
+| 445 | 26.versions | The schema version each side stands on, from the application's migration history table (Flyway, Liquibase, Alembic, Django, Rails, Entity Framework, schemachange), said by check and the cutover gate; a migration on one side only found; migkit's own schema changes said as unknown to the application's tool | OPEN | M | verify | 26 |
 | 95 | 26.trino | Trino measured as a candidate second reader | OPEN | S | verify | L2678-2679 |
 | 96 | 26.striim | Striim-style interval validation | OPEN | S | verify | L2674-2675 |
 | 97 | 26.bytebase | Bytebase-style schema snapshot at each change | OPEN | S | change follow | L2675 |

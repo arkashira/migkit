@@ -192,9 +192,44 @@ connector's rendering of a value agree with the other's? migkit's
 report data that is the same as different. So it is a candidate to
 measure, as the second reader was, before it is wrapped.
 
-## Not read yet
+## Moving and changing schemas the simple way
 
-* **sqlpipe** and **schemachange**.
+### sqlpipe
+
+Moves a whole table or a query's result between PostgreSQL, SQL Server,
+MySQL, Oracle and Snowflake: the rows are written out as CSV files in a
+working directory, then each target's own bulk client loads them (`psql`'s
+`COPY`, `bcp`, SQL*Loader). Incremental loads are in its paid edition;
+nothing in it compares the two sides after the load.
+
+What migkit takes: nothing to wrap. Every pair it serves is served by a
+way migkit already ranks (server-side bulk loads, migkit's own copier
+through Arrow batches, the dump and load programs), each proved by a
+digest of every row, and a CSV round trip is one more place a value's
+text can change on the way (a timestamp's zone, a float's last digit, an
+empty string against NULL).
+
+### schemachange
+
+Applies a folder of SQL scripts to Snowflake in order: versioned scripts
+(`V1.2__name.sql`) once each, in version order, skipping any at or below
+the highest applied; repeatable ones (`R__name.sql`) again whenever their
+checksum changes; "always" ones (`A__name.sql`) on every run. What ran is
+a row each in its history table (`METADATA.SCHEMACHANGE.CHANGE_HISTORY`:
+version, description, script, type, checksum, status, who, when).
+
+What migkit takes: the history table is the application's own record of
+which schema it stands on, and every migration tool keeps one (Flyway's
+`flyway_schema_history`, Liquibase's `DATABASECHANGELOG`, Alembic's
+`alembic_version`, Django's `django_migrations`, Rails' and
+golang-migrate's `schema_migrations`, Entity Framework's
+`__EFMigrationsHistory`, schemachange's). Those rows are moved and proved
+like any others; what migkit can add is to read them - say the schema
+version each side stands on, find a migration that ran on the source
+during the move and not on the target (or the reverse), and say, where
+migkit itself changes the target's schema (the schema fix, a DDL the tail
+applies), that the application's tool does not know of it. Backlog
+26.versions.
 
 ## Sources
 
@@ -210,3 +245,5 @@ measure, as the second reader was, before it is wrapped.
 * [Bytebase: how schema sync works](https://www.bytebase.com/blog/how-schema-sync-work/)
 * [Trino concepts](https://trino.io/docs/current/overview/concepts.html)
 * [Trino aggregate functions (checksum)](https://trino.io/docs/current/functions/aggregate.html)
+* [sqlpipe](https://github.com/sqlpipe/sqlpipe)
+* [schemachange](https://github.com/Snowflake-Labs/schemachange)
