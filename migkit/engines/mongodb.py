@@ -2,7 +2,7 @@ import time
 
 from .. import pieces
 from ..decide import Rung
-from .base import Engine, RepairAction, Result
+from .base import Engine, RepairAction, Result, clauses
 from ..verdict import difference_kind_from_counts
 
 SKIP_DBS = {"admin", "local", "config"}
@@ -1279,7 +1279,7 @@ class MongoEngine(Engine):
                     if ca != cb:
                         bad.append(f"{name} src={ca} dst={cb}")
             if bad:
-                cres = Result("counts", db, "diff", "; ".join(bad[:10]))
+                cres = Result("counts", db, "diff", clauses(bad))
             else:
                 cres = Result("counts", db, "ok",
                               f"{len(names)} collections, equality implied"
@@ -2073,6 +2073,10 @@ class MongoEngine(Engine):
         clean = True
         for coll, ids in sorted(touched.items()):
             bad = []
+            # each document apart said as missing, only on the target or
+            # changed: a hop that keeps what the source deletes is held to
+            # which (`verdict.hold`)
+            apart = {"missing": [], "extra": [], "changed": []}
             # by the stored bytes: decoded, 5 == 5.0 == NumberLong(5) and
             # 1 == True in Python, and two dicts equal in any field order
             one, two = self._raw(src[coll]), self._raw(dst[coll])
@@ -2081,23 +2085,33 @@ class MongoEngine(Engine):
                 b = two.find_one({"_id": _id})
                 if (a and a.raw) != (b and b.raw):
                     bad.append(_id)
+                    apart["missing" if b is None else "extra" if a is None
+                          else "changed"].append(_id)
             if bad:
-                clean = False
                 d = self.hop.report_dir(db)
-                (d / f"data-{coll}.changed").write_text(
-                    "\n".join(dumps(i) for i in bad) + "\n")
-                res.append(Result(
+                for kind, got in apart.items():
+                    p = d / f"data-{coll}.{kind}"
+                    if got:
+                        p.write_text("\n".join(dumps(i) for i in got) + "\n")
+                    elif p.exists():
+                        p.unlink()
+                answer, held_back = self._delta_held(Result(
                     "delta", f"{db}.{coll}", "diff",
-                    f"of {len(ids)} touched docs, {len(bad)} differ",
+                    f"of {len(ids)} touched docs, {len(bad)} differ:"
+                    f" missing={len(apart['missing'])}"
+                    f" extra={len(apart['extra'])}"
+                    f" changed={len(apart['changed'])}",
                     str(d),
                     f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                clean = clean and not held_back
+                res.append(answer)
             else:
                 res.append(Result("delta", f"{db}.{coll}", "ok",
                                   f"{len(ids)} touched docs verified"
                                   " equal on both sides"))
             if log:
                 log(f"{coll}: {len(ids)} touched, "
-                    + ("clean" if not bad else "DIFF"))
+                    + self._delta_said(res[-1]))
         if clean:
             state.write_text(dumps(end_token))
             note = "token advanced"
@@ -2123,15 +2137,23 @@ class MongoEngine(Engine):
         names, said = self._drills_in_scope(db, names)
         actions = [said] if said else []
         for name in names:
-            counts = []
+            counts, named = [], {}
             for k in ("missing", "extra", "changed"):
                 f = d / f"data-{name}.{k}"
                 if f.exists():
-                    counts.append(f"{k}={sum(1 for _ in f.open())}")
+                    named[k] = range(sum(1 for _ in f.open()))
+                    counts.append(f"{k}={len(named[k])}")
+            # the documents the hop keeps by the changes it does not carry
+            # are left as they are, and said
+            left = self._repairable(db, name, named)
+            kept = self._kept_said(named, left)
+            if kept and not any(left.values()):
+                continue
             actions.append(RepairAction(
                 db, "rows", [f"resync docs for {name} ({', '.join(counts)})"],
                 [], f"{name}: replace/insert from source per _id, deleted and"
-                    " overwritten target docs saved to undo first",
+                    " overwritten target docs saved to undo first"
+                    + (f"; {kept}" if kept else ""),
                 table=name))
         return actions
 
@@ -2140,9 +2162,11 @@ class MongoEngine(Engine):
     ROWS_PUT_BACK = False
 
     def repair_found(self, db, table):
-        """The `_id`s the last check named, each as its Extended JSON."""
-        return {kind: [(line,) for line in self._read_drill(db, table, kind)]
-                for kind in ("missing", "changed", "extra")}
+        """The `_id`s the last check named, each as its Extended JSON -
+        never the ones the hop keeps (`_repairable`)."""
+        return self._repairable(db, table, {
+            kind: [(line,) for line in self._read_drill(db, table, kind)]
+            for kind in ("missing", "changed", "extra")})
 
     def repair_sides(self, db, table):
         """None: a collection's documents are lined up by `_id` alone, the
@@ -2158,10 +2182,14 @@ class MongoEngine(Engine):
         undo = d / "undo"
         undo.mkdir(exist_ok=True)
 
+        kept = self._kept_by_hop(db, name)
+
         def read(kind):
+            # a document the hop keeps by a change it does not carry is
+            # never removed, added or overwritten here
             f = d / f"data-{name}.{kind}"
             return [loads(l) for l in f.read_text().splitlines()] \
-                if f.exists() else []
+                if f.exists() and kind not in kept else []
 
         from .. import repairlog
         extra, missing = read("extra"), read("missing")

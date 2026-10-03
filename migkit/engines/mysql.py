@@ -2888,7 +2888,8 @@ class MySQLEngine(Engine):
                           "checksum differs, no pk for row drilldown", "",
                           "recopy whole table with dump/load"), rows_a, rows_b
         r, ra, rb = self._drilldown(db, t, pks, expr, bad_ranges, whole)
-        if kinds and r.status != "ok":
+        if kinds and r.status != "ok" and " kind=" not in r.detail:
+            # inferred from the sums only where the rows were not counted
             r.detail += " kind=" + ",".join(sorted(kinds))
         return r, ra, rb
 
@@ -3055,8 +3056,13 @@ class MySQLEngine(Engine):
                           "the checksum that differed is equal asked again"
                           " (a write was between the reads), 0 rows"
                           " differ"), len(src), len(dst)
+        # every row of the differing ranges compared by key: the shape is
+        # counted, not inferred from the sums (`verdict.hold`)
+        from ..verdict import difference_kind_from_counts
         detail = (f"missing={len(missing)} extra={len(extra)}"
-                  f" changed={len(changed)}")
+                  f" changed={len(changed)} kind="
+                  + difference_kind_from_counts(len(missing), len(extra),
+                                                len(changed)))
         fp = self._column_fingerprint(db, t)
         if fp:
             detail += f"; drift localized to columns: {', '.join(fp[:6])}"
@@ -3277,23 +3283,23 @@ class MySQLEngine(Engine):
                 continue
             missing, extra, changed = cmp
             if missing or extra or changed:
-                clean = False
                 if not pair:
                     self._write_pk_files(db, t, missing, extra, changed)
-                res.append(Result(
+                got, held_back = self._delta_held(Result(
                     "delta", f"{db}.{t}", "diff",
                     f"of {len(keys)} touched rows: missing={len(missing)}"
                     f" extra={len(extra)} changed={len(changed)}",
                     str(self.hop.report_dir(db)),
                     f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                clean = clean and not held_back
+                res.append(got)
             else:
                 res.append(Result("delta", f"{db}.{t}", "ok",
                                   f"{len(keys)} touched rows verified"
                                   " equal on both sides"))
             if log:
                 log(f"{t}: {len(keys)} touched, "
-                    + ("clean" if not (missing or extra or changed)
-                       else "DIFF"))
+                    + self._delta_said(res[-1]))
         for t in sorted(nopk):
             res.append(Result("delta", f"{db}.{t}", "skip",
                               "no pk, cannot delta-verify"))
@@ -4249,6 +4255,50 @@ class MySQLEngine(Engine):
             one[0].append(str(col))
             one[1].append(str(pcol))
         return [(str(c), a, str(p), b) for (_, c, p), (a, b) in got.items()]
+
+    #: a sequence and a partition are listed and none ever crosses a
+    #: scope here: an AUTO_INCREMENT is its table's own, and a partition
+    #: is part of its table, never a table of its own
+    DEPENDENCY_KINDS = ("view", "routine", "trigger", "sequence",
+                        "partition")
+
+    def dependencies(self, side, db, tables=()):
+        """What the database's objects need of its tables
+        (`Engine.dependencies`): a view's tables from
+        `information_schema.view_table_usage` (8.0.13 on), or from its
+        text where the server has no such table (older, MariaDB); a
+        routine's and a trigger's from the text of the body, which the
+        server records nowhere else."""
+        name = self._d(side, db)
+        out = []
+        try:
+            used = self._q(side, "select view_name, table_name from"
+                                 " information_schema.view_table_usage"
+                                 " where view_schema = %s and table_schema"
+                                 " = %s", (name, name))
+        except Exception:  # noqa: BLE001 - read from the view's text
+            used = [(view, t) for view, body in self._q(
+                        side, "select table_name, view_definition from"
+                              " information_schema.views where"
+                              " table_schema = %s", (name,))
+                    for t in self._tables_named(body, tables, own=view)]
+        out += [("view", str(view), str(view), str(t)) for view, t in used
+                if str(view) != str(t)]
+        for fn, body in self._q(side, "select routine_name,"
+                                      " routine_definition from"
+                                      " information_schema.routines where"
+                                      " routine_schema = %s", (name,)):
+            out += [("routine", str(fn), str(fn), t)
+                    for t in self._tables_named(body, tables)]
+        for trig, table, body in self._q(side, "select trigger_name,"
+                                               " event_object_table,"
+                                               " action_statement from"
+                                               " information_schema.triggers"
+                                               " where trigger_schema = %s",
+                                         (name,)):
+            out += [("trigger", str(trig), str(table), t)
+                    for t in self._tables_named(body, tables, own=table)]
+        return out
 
     def code_definition(self, side, db, kind, name):
         what = {"view": "view", "function": "function",
@@ -5489,16 +5539,27 @@ class MySQLEngine(Engine):
             if said:
                 actions.append(said)
             for t in tables:
-                counts = []
+                counts, named = [], {}
                 for k in ("missing", "extra", "changed"):
                     f = d / f"data-{t}.{k}"
                     if f.exists():
                         # counted as keys, not as lines: a key holding a
                         # newline is one row to repair, and counting the
                         # lines reported five where there were four
-                        counts.append(f"{k}={len(self._drill_keys(f))}")
+                        named[k] = self._drill_keys(f)
+                        counts.append(f"{k}={len(named[k])}")
+                # the rows the hop keeps by the changes it does not carry
+                # are left as they are, and said
+                left = self._repairable(db, t, named)
+                kept = self._kept_said(named, left)
+                if kept and not any(left.values()):
+                    continue
                 stmts = [f"resync pks for {t} ({', '.join(counts)})"]
-                if which("pt-table-sync"):
+                if kept:
+                    stmts.append(f"  {kept}")
+                # the program's own plan is of the whole table, which would
+                # take back what the hop keeps
+                if which("pt-table-sync") and not kept:
                     s, tg = self.hop.source, self.hop.target
                     from ..movers import client_defaults
                     with client_defaults(s, tg) as (fs, ft):
@@ -5763,7 +5824,12 @@ class MySQLEngine(Engine):
             """
             return self._drill_keys(d / f"data-{t}.{kind}")
 
-        missing, extra, changed = read("missing"), read("extra"), read("changed")
+        # a row the hop keeps by a change it does not carry is never
+        # removed, added or overwritten here (`_repairable`)
+        got = self._repairable(db, t, {k: read(k) for k in
+                                       ("missing", "extra", "changed")})
+        missing, extra, changed = (got["missing"], got["extra"],
+                                   got["changed"])
         only = self.__dict__.get("_repair_only")
         if only is not None:
             # the keys a repair by spans leaves to be repaired by key
@@ -5898,9 +5964,10 @@ class MySQLEngine(Engine):
         except SystemExit:
             return None
         d = self.hop.report_dir(db)
-        return {kind: [list(k) for k in canon_of(
-                    self._drill_keys(d / f"data-{table}.{kind}"))]
-                for kind in ("missing", "changed", "extra")}
+        return self._repairable(db, table, {
+            kind: [list(k) for k in canon_of(
+                self._drill_keys(d / f"data-{table}.{kind}"))]
+            for kind in ("missing", "changed", "extra")})
 
     #: a span of a table replaced under one transaction (`repair_range`)
     ONE_TRANSACTION_A_RANGE = True

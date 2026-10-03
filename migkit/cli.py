@@ -1752,7 +1752,10 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
             # check phase of the next plan, this hop's or the one it
             # rehearses (`rehearsal.record_check`)
             rehearsal.record_check(hop, eng, d, time.time() - began)
-        return _scenario_checks(hop, eng, d, out, table, checks)
+        # held to the changes the hop carries before they are said or
+        # kept: rows it keeps are a note (`verdict.hold`)
+        return _verdict.hold(hop, _scenario_checks(hop, eng, d, out, table,
+                                                   checks))
 
     results = []
     pool = ThreadPoolExecutor(max_workers=max(1, int(workers or 1)))
@@ -1840,6 +1843,9 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                       + (f" and leaves out {len(hop.exclude)}"
                          if hop.exclude else "")
                       + " (the report lists them)")
+    for line in _verdict.hop_scope(hop).get("changes_carried", []):
+        # a target that keeps what the source deletes is held to that
+        console.print(f"  changes carried: {_esc(line)}")
     results, timings = run_checks(
         hop, eng, dbs, checks, table, consistent, workers, prev, prev_at,
         whole=not table and not only, show=_said_row, timer=timer)
@@ -1913,7 +1919,15 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
             console.print(said, markup=False)
     from .report import write_report
     report_path = write_report(hop, results, decided=decided)
-    notes = [r for r, s in zip(results, decided.severity) if s == "note"]
+    notes = [r for r, s in zip(results, decided.severity)
+             if s == "note" and not r.get("kept_by_hop")]
+    kept = [r for r in results if r.get("kept_by_hop")]
+    if kept:
+        # the rows a hop keeps by the changes it does not carry: said as
+        # kept, never as the same
+        console.print(f"[yellow]{len(kept)} answers hold only what the hop"
+                      " keeps by the changes it does not carry"
+                      " (mapping.ops) - said as kept in the report[/yellow]")
     if notes:
         # a slow target holds the same data: said, and it stops the check
         # only where the hop asks for that (`performance: gate`)
@@ -5108,7 +5122,7 @@ def _monitor(hop_name, db, interval, only, cycles):
                       and _verdict.db_of(r.get("scope", "")) == d]
                 bad = [r for r in rs if r.get("status") == "error"]
                 odd = [r for r in rs if r.get("status") not in
-                       ("ok", "skip", "error")]
+                       ("ok", "skip", "error") and not r.get("kept_by_hop")]
                 if bad:
                     statuses.append(f"[red]{c}:ERR[/red]"
                                     f" {_esc(str(bad[0].get('detail'))[:60])}")

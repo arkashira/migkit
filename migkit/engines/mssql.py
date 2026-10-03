@@ -1,7 +1,7 @@
 import time
 
 from .. import canon, decide, pieces
-from .base import Engine, RepairAction, Result
+from .base import Engine, RepairAction, Result, clauses
 from .dbapi import MARK, DbapiRows
 
 #: the server's own databases, and the one a managed server keeps
@@ -392,7 +392,7 @@ class MSSQLEngine(DbapiRows, Engine):
         bad = [f"{t} src={src.get(t)} dst={dst.get(t)}"
                for t in sorted(set(src) | set(dst)) if src.get(t) != dst.get(t)]
         if bad:
-            return [Result("counts", db, "diff", "; ".join(bad[:10]))]
+            return [Result("counts", db, "diff", clauses(bad))]
         total = sum(int(v or 0) for v in src.values())
         return [Result("counts", db, "ok",
                        f"{len(src)} tables, rows {total:,} both sides")]
@@ -633,7 +633,7 @@ class MSSQLEngine(DbapiRows, Engine):
         if note and stream:
             stream(f"# {note}")
         if bad:
-            res.append(Result("data", db, "diff", "; ".join(bad[:10]) + said,
+            res.append(Result("data", db, "diff", clauses(bad) + said,
                               "", "pk-level diffs in data-*.missing/extra/"
                               f"changed; migkit sync {self.hop.name} --db"
                               f" {db} --kind rows shows the repair, --apply"
