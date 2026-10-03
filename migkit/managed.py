@@ -56,7 +56,18 @@ KINDS = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
          "clickhouse": "ClickHouse", "cockroachdb": "CockroachDB",
          "tidb": "TiDB", "dsql": "Aurora DSQL", "cosmosdb": "Cosmos DB",
          "snowflake": "Snowflake", "kinesis": "a Kinesis stream",
-         "pubsub": "a Pub/Sub topic"}
+         "pubsub": "a Pub/Sub topic",
+         # the cloud-native services' own engines
+         "spanner": "Spanner", "bigtable": "Bigtable",
+         "firestore": "Firestore", "datastore": "Firestore in Datastore mode",
+         "gaussdb": "GaussDB", "oceanbase": "OceanBase (MySQL mode)",
+         "oceanbase-oracle": "OceanBase (Oracle mode)",
+         "polardbx": "PolarDB-X", "dcdb": "TDSQL (distributed)",
+         "keyspaces": "Keyspaces", "neptune": "Neptune",
+         "timestream": "Timestream", "lindorm": "Lindorm",
+         "geminidb-cassandra": "GeminiDB's Cassandra API",
+         "geminidb-redis": "GeminiDB's Redis API",
+         "geminidb-mongo": "GeminiDB's MongoDB API"}
 
 #: what `clouds` calls an endpoint of a service, and the service it is
 ENDPOINTS = {"aurora-reader": "aurora", "rds-proxy": "rds"}
@@ -240,7 +251,10 @@ def _side_opts(ep):
 
 def _family(e, hop):
     from .engines import ALIASES
-    got = getattr(e, "CANON_ENGINE", "") or hop.engine
+    # a service on another's API (Keyspaces on Cassandra's) is its own
+    # family, whose values are read as that one's
+    got = getattr(e, "PAIR_ENGINE", "") or getattr(e, "CANON_ENGINE", "") \
+        or hop.engine
     return ALIASES.get(got, got)
 
 
@@ -418,6 +432,16 @@ def _procedure(template):
     return m.group(1).replace("`", "") if m else None
 
 
+def _held_as(family):
+    """The family whose freeze ladder holds `family`'s writes - itself, or
+    the one whose API it speaks (`freeze.HOLDS`: GaussDB's roles are read
+    as PostgreSQL's)."""
+    from . import freeze
+    cls = freeze.HOLDS.get(family)
+    return next((f for f, c in freeze.HOLDS.items() if c is cls), family) \
+        if cls is not None else family
+
+
 def stand_in(service):
     """The facts a server with this service's admin would answer, as the
     freeze ladder of its family reads them (`freeze.Hold.readers`): what
@@ -425,7 +449,7 @@ def stand_in(service):
     from .decide import IMPOSSIBLE, POSSIBLE, Stand
     a = service.admin or {}
     sup = bool(a.get("superuser"))
-    f = service.family
+    f = _held_as(service.family)
     if f == "postgres":
         return {"others": [], "alter system": sup or bool(a.get(
                     "alter_system")),

@@ -20,8 +20,21 @@ from migkit.engines import NAMES
 PROVIDERS = ("aws", "gcp", "azure", "tencent", "alibaba", "huawei", "oracle",
              "ibm")
 #: the services that are engines migkit lacks, by a word of their name
-DISTINCT = ("spanner", "bigtable", "firestore", "gaussdb", "oceanbase",
-            "keyspaces", "neptune", "timestream", "lindorm", "geminidb")
+DISTINCT = ("influxdb", "synapse", "analyticdb", "geminidb", "yugabyte",
+            "singlestore")
+#: the cloud-native services moved by engines of their own (P0-CLOUDS),
+#: each entry's family the engine it is moved as
+NATIVE = {"aws-keyspaces": "keyspaces", "aws-neptune": "neptune",
+          "aws-timestream": "timestream", "gcp-spanner": "spanner",
+          "gcp-bigtable": "bigtable", "gcp-firestore": "firestore",
+          "gcp-datastore": "datastore", "tencent-tdsql": "dcdb",
+          "alibaba-polardb-x": "polardbx", "alibaba-lindorm": "lindorm",
+          "alibaba-oceanbase": "oceanbase",
+          "alibaba-oceanbase-oracle": "oceanbase-oracle",
+          "huawei-gaussdb": "gaussdb",
+          "huawei-geminidb-cassandra": "geminidb-cassandra",
+          "huawei-geminidb-redis": "geminidb-redis",
+          "huawei-geminidb-mongo": "geminidb-mongo"}
 #: the admin's facts each family's ladder reads (`managed.stand_in`)
 ADMIN = {"postgres": ("superuser", "role", "alter_system", "createrole",
                       "signal_backend", "owns_databases", "subscribe",
@@ -115,6 +128,39 @@ def test_the_engines_migkit_lacks_are_listed_not_planned():
         assert word in lacking, word
     planned = {k for pair in managed.matrix() for k in pair}
     assert not planned & {s.id for s in managed.distinct()}
+
+
+def test_the_cloud_native_services_are_moved_by_their_own_engines():
+    import types
+
+    from migkit.config import Endpoint, Hop
+    from migkit.engines import _class_for
+    planned = {k for pair in managed.matrix() for k in pair}
+    for sid, family in NATIVE.items():
+        s = managed.get(sid)
+        assert (s.family, s.distinct) == (family, ""), sid
+        assert _class_for(family) is not None, family
+        assert managed.find(s.provider, s.where, family).id == sid
+        assert sid in planned
+        p = managed.plan(s, s)
+        assert (p.route, p.lacks) == (family, []), (sid, p.route, p.lacks)
+        assert managed.KINDS[family] in p.pair, (sid, p.pair)
+        # what following it needs is the catalogue's word, never a
+        # family's guess
+        assert p.source == list(s.cdc) and s.cdc, sid
+    # a service on another's API is found as itself, not as the engine
+    # whose values it shares
+    hop = Hop(name="h", engine="keyspaces", source=Endpoint(),
+              target=Endpoint())
+    side = types.SimpleNamespace(PAIR_ENGINE="keyspaces",
+                                 CANON_ENGINE="cassandra")
+    assert managed._family(side, hop) == "keyspaces"
+    assert managed._held_as("gaussdb") == "postgres"
+    assert managed._held_as("geminidb-redis") == "redis"
+    assert managed._held_as("spanner") == "spanner"
+    # GaussDB's admin is read as PostgreSQL's: a ladder of facts, not an
+    # empty one
+    assert "alter system" in managed.stand_in(managed.get("huawei-gaussdb"))
 
 
 def test_the_clouds_own_signs_name_their_service():

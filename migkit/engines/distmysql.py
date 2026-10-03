@@ -108,6 +108,15 @@ class OnMySQLWire(ProvedDigest, MySQLEngine):
         ep = self.hop.source if side == "src" else self.hop.target
         return f"{ep.host}:{ep.port}"
 
+    def _is_it(self, side, version, comment):
+        """Whether the server says it is this engine's: True, False, or
+        None where it cannot tell. Its version or version comment carry
+        `BRAND`, where it names one."""
+        if not self.BRAND:
+            return None
+        said = f"{version} {comment}".lower()
+        return any(b in said for b in self.BRAND)
+
     def server_identity(self, side, db):
         name = self._d(side, db)
         got = self._q(side, "select @@hostname, version(),"
@@ -118,8 +127,7 @@ class OnMySQLWire(ProvedDigest, MySQLEngine):
                             " information_schema.schemata where schema_name"
                             " = %s)", (name, name))
         host, version, comment, size, there = got[0]
-        said = f"{version} {comment}".lower()
-        if self.BRAND and not any(b in said for b in self.BRAND):
+        if self._is_it(side, version, comment) is False:
             raise SystemExit(
                 f"the {'source' if side == 'src' else 'target'} is not"
                 f" {self.SAID} ({version}, {comment}): name its engine mysql")
@@ -299,16 +307,65 @@ class PolarDBXEngine(OnMySQLWire):
         return items
 
 
+#: what TDSQL's proxy is asked of itself; a MySQL server reads the hint as
+#: a comment and answers its own status
+PROXY_STATUS = "/*proxy*/show status"
+
+
+def proxy_status(eng, side):
+    """{name: value} a TDSQL proxy answers of itself, on a connection of
+    its own asked once."""
+    conn = eng._conn(side, retry=False)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(PROXY_STATUS)
+            return {str(r[0]): r[-1] for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def sets_of(status):
+    """The sets a proxy's status names (`set_<id>:<what>` rows)."""
+    return sorted({k.split(":", 1)[0] for k in status
+                   if k.startswith("set_") and ":" in k})
+
+
+def spread(status):
+    """Whether the proxy spreads tables over sets: it names a set's hash
+    range, or more than one set. A MySQL server - TDSQL-C's, a server of
+    one set - names none."""
+    return any(k.endswith(":hash_range") for k in status) \
+        or len(sets_of(status)) > 1
+
+
 class TdsqlEngine(OnMySQLWire):
     CANON_ENGINE = "dcdb"
-    BRAND = ("tdsql",)
     SAID = "TDSQL (distributed)"
     #: the proxy keeps no binlog: a source is followed set by set
     READ_ENDS_INSIDE_TRANSACTIONS = False
     REREADS_FROM_A_POSITION = False
 
-    def _identity_probes(self):
-        return ("/*proxy*/show status", "select @@server_uuid")
+    @classmethod
+    def server_says_so(cls, hop, side):
+        """Whether a side of a hop that names its engine `tdsql` is a
+        distributed TDSQL instance (`engines.BY_SERVER`): its proxy says
+        it spreads tables over sets."""
+        return spread(proxy_status(MySQLEngine(hop), side))
+
+    def _is_it(self, side, version, comment):
+        """Its proxy says so - its version carries no word of TDSQL's
+        that is documented; None where the proxy cannot be asked."""
+        try:
+            return spread(proxy_status(self, side))
+        except Exception:  # noqa: BLE001 - it cannot tell
+            return None
+
+    def _cluster(self, side):
+        try:
+            got = proxy_status(self, side).get("cluster")
+        except Exception:  # noqa: BLE001 - the server's own id, then
+            got = None
+        return str(got) if got not in (None, "") else super()._cluster(side)
 
     # ---- a table made here ---------------------------------------------------
 

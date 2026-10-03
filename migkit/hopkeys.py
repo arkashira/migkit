@@ -1283,10 +1283,11 @@ def refuse_writes(hop, what):
 
 def endpoint_keys_for(engine):
     """The option keys a side of this engine reads - an engine on another's
-    wire (`engines.WIRE`) reads that one's connection keys too."""
-    from .engines import ALIASES, WIRE
-    e = ALIASES.get(engine, engine)
+    wire (`engines.WIRE`) reads that one's connection keys too, and a name
+    its server decides between (`engines.may_be`) every one's."""
+    from .engines import WIRE, may_be
     return {k for k, key in ENDPOINT_OPTIONS.items()
+            for e in may_be(engine)
             if not key.engines or e in key.engines
             or WIRE.get(e) in key.engines}
 
@@ -1850,14 +1851,14 @@ def _source_changes(where, opts, goal):
 def said_by_doctor(hop, raw):
     """(key, sentence) for every key of this hop that does nothing here,
     or sets what migkit would otherwise decide."""
-    from .engines import ALIASES
+    from .engines import ALIASES, may_be
     engine = ALIASES.get(hop.engine, hop.engine)
     opts = hop.options or {}
     if engine == "hetero":
-        on = {ALIASES.get(s, s) for s in (opts.get("source_engine", "mysql"),
-              opts.get("target_engine", "postgres"))} | {"hetero"}
+        on = may_be(opts.get("source_engine", "mysql")) | may_be(
+            opts.get("target_engine", "postgres")) | {"hetero"}
     else:
-        on = {engine}
+        on = may_be(hop.engine)
     out = []
     for k in HOP_KEYS:
         key = HOP_KEYS[k]
@@ -1899,9 +1900,11 @@ def said_by_doctor(hop, raw):
         named = opts.get(f"{side}_engine") or (
             "mysql" if side == "source" else "postgres")
         e = ALIASES.get(named, named) if engine == "hetero" else engine
+        could = may_be(named if engine == "hetero" else hop.engine)
         for k in (ep.options or {}):
             key = ENDPOINT_OPTIONS.get(k)
-            if key is not None and key.engines and e not in key.engines:
+            if key is not None and key.engines and not could & set(
+                    key.engines):
                 out.append((f"{side}.{k}",
                             f"{side}.{k} - read only by"
                             f" {' and '.join(key.engines)} sides, so it"

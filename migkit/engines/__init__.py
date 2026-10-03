@@ -329,8 +329,58 @@ def engine_named(name, hop):
     return cls(hop)
 
 
+#: a name that stands for more than one engine, the server saying which:
+#: name -> the engine it is where its server says so (the engine's
+#: `server_says_so`); where the server says not, or cannot be asked, the
+#: name's alias's. `tdsql` names TDSQL-C, a TDSQL instance of one set and
+#: a distributed one alike
+BY_SERVER = {"tdsql": "dcdb"}
+
+
+def may_be(name):
+    """Every engine `name` may be moved as: its alias's, and the one its
+    server may say it is (`BY_SERVER`)."""
+    got = {ALIASES.get(name, name)}
+    if name in BY_SERVER:
+        got.add(BY_SERVER[name])
+    return got
+
+
+def said_by_server(hop):
+    """Puts the engine the server says it is in place of a name that
+    stands for more than one (`BY_SERVER`) - the hop's engine, or a
+    cross-engine hop's side's - asked once a hop, of the sides the name
+    is. A server that cannot be asked leaves the name: its alias's
+    engine."""
+    asked = hop.__dict__.setdefault("_said_by_server", set())
+    opts = hop.options if hop.options is not None else {}
+    wanted = []
+    if hop.engine in BY_SERVER:
+        wanted.append((None, hop.engine, ("src", "tgt")))
+    elif hop.engine == "hetero":
+        for key, side in (("source_engine", "src"),
+                          ("target_engine", "tgt")):
+            if opts.get(key) in BY_SERVER:
+                wanted.append((key, opts[key], (side,)))
+    for key, name, sides in wanted:
+        if (key, name) in asked:
+            continue
+        asked.add((key, name))
+        cls = _class_for(BY_SERVER[name])
+        try:
+            yes = any(cls.server_says_so(hop, side) for side in sides)
+        except Exception:  # noqa: BLE001 - not asked: the alias stands
+            continue
+        got = BY_SERVER[name] if yes else ALIASES.get(name, name)
+        if key is None:
+            hop.engine = got
+        else:
+            opts[key] = got
+
+
 def get_engine(hop):
     # a server reached through a tunnel is reached through its open end
     from ..tunnel import through
     through(hop)
+    said_by_server(hop)
     return engine_named(hop.engine, hop)

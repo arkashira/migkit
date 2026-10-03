@@ -665,11 +665,11 @@ services:
     provider: aws
     where: keyspaces
     label: Amazon Keyspaces (for Apache Cassandra)
-    family: none
-    distinct: "a serverless service that answers the Cassandra Query Language over its own storage"
+    family: keyspaces
+    distinct: null
     hosts: ['^cassandra\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$']
     signs: {}
-    api: {product: null, restore_point: point in time, clone: true}
+    api: {product: keyspaces, restore_point: point in time, clone: true}
     admin:
       role: "IAM policies, or service-specific credentials"
       superuser: false
@@ -689,11 +689,11 @@ services:
     provider: aws
     where: neptune
     label: Amazon Neptune
-    family: none
-    distinct: "a graph database of its own, queried with Gremlin, openCypher or SPARQL"
+    family: neptune
+    distinct: null
     hosts: ['\.neptune\.amazonaws\.com(\.cn)?$']
     signs: {}
-    api: {product: null, restore_point: snapshot, clone: true}
+    api: {product: neptune, restore_point: snapshot, clone: true}
     admin:
       role: "IAM database authentication, where it is on"
       superuser: false
@@ -711,9 +711,9 @@ services:
   aws-timestream:
     provider: aws
     where: timestream
-    label: Amazon Timestream
-    family: none
-    distinct: "a time-series database (Timestream for LiveAnalytics; Timestream for InfluxDB runs InfluxDB)"
+    label: Amazon Timestream for LiveAnalytics
+    family: timestream
+    distinct: null
     hosts: ['\.timestream\.[a-z0-9-]+\.amazonaws\.com$']
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -723,6 +723,30 @@ services:
     change:
       how: not changeable
       words: "Timestream for LiveAnalytics has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc:
+      - "it has no change stream: its records are not followed, and a copy is compared once its writes have stopped"
+    limits: {}
+    defaults: {}
+    notes:
+      - "a record is kept in its memory store for the table's memory_hours and its magnetic store for magnetic_days; a record older than the memory store's window is refused unless magnetic store writes are on"
+
+  aws-timestream-influxdb:
+    provider: aws
+    where: timestream
+    label: Amazon Timestream for InfluxDB
+    family: none
+    distinct: "InfluxDB, run by the service: a time-series database migkit has no engine for"
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: ""
+      superuser: false
+    change:
+      how: console
+      words: "the instance's parameters in the console: {name} = {value}{after}"
       cli: null
       names: {}
     cdc: []
@@ -1386,11 +1410,11 @@ services:
     provider: gcp
     where: spanner
     label: Spanner
-    family: none
-    distinct: "a globally distributed SQL database of its own (GoogleSQL or PostgreSQL dialect)"
+    family: spanner
+    distinct: null
     hosts: ['(^|\.)spanner(\.[a-z0-9-]+\.rep)?\.googleapis\.com$']
     signs: {}
-    api: {product: null, restore_point: backup, clone: true}
+    api: {product: spanner, restore_point: backup, clone: true}
     admin:
       role: "IAM"
       superuser: false
@@ -1412,8 +1436,8 @@ services:
     provider: gcp
     where: bigtable
     label: Bigtable
-    family: none
-    distinct: "a wide-column key-value store of its own, with an HBase-compatible API"
+    family: bigtable
+    distinct: null
     hosts: ['(^|\.)bigtable(admin)?(\.[a-z0-9-]+\.rep)?\.googleapis\.com$']
     signs: {}
     api: {product: null, restore_point: backup, clone: true}
@@ -1433,16 +1457,17 @@ services:
     defaults: {}
     notes:
       - "a backup is restored into a new table"
+      - "a backup is one table's, taken at its own moment: an instance's tables have no one restore point together, so none is taken through the API"
 
   gcp-firestore:
     provider: gcp
     where: firestore
     label: Firestore
-    family: none
-    distinct: "a document database of its own (its MongoDB-compatible edition answers the MongoDB wire protocol)"
+    family: firestore
+    distinct: null
     hosts: ['(^|\.)firestore\.googleapis\.com$', '\.firestore\.goog$']
     signs: {}
-    api: {product: null, restore_point: backup, clone: true}
+    api: {product: firestore, restore_point: point in time, clone: true}
     admin:
       role: "IAM (roles/datastore.user for data)"
       superuser: false
@@ -1459,6 +1484,32 @@ services:
     defaults: {}
     notes:
       - "point-in-time recovery keeps 7 days where it is on (1 hour otherwise); a backup is restored into a new database"
+      - "its MongoDB-compatible edition answers the MongoDB wire protocol; what its admin may do there is not catalogued"
+
+  gcp-datastore:
+    provider: gcp
+    where: firestore
+    label: Firestore in Datastore mode
+    family: datastore
+    distinct: null
+    hosts: ['(^|\.)datastore\.googleapis\.com$']
+    signs: {}
+    api: {product: firestore, restore_point: point in time, clone: true}
+    admin:
+      role: "IAM (roles/datastore.user for data)"
+      superuser: false
+    change:
+      how: not changeable
+      words: "Firestore in Datastore mode has no server settings: {name} = {value} is not one of its settings"
+      cli: null
+      names: {}
+    cdc:
+      - "Datastore mode has no change stream and no real-time listener: its changes are not followed, and a copy is compared once its writes have stopped"
+    limits:
+      entity: "1 MiB"
+    defaults: {}
+    notes:
+      - "point-in-time recovery keeps 7 days where it is on (1 hour otherwise); a database is copied to a point in time into a new database"
 
   gcp-memorystore-redis:
     provider: gcp
@@ -1857,8 +1908,8 @@ services:
     provider: tencent
     where: tdsql
     label: TDSQL (distributed)
-    family: none
-    distinct: "a distributed database of its own that speaks MySQL's protocol (TDSQL for MySQL; TDSQL Boundless)"
+    family: dcdb
+    distinct: null
     hosts: []
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -1873,9 +1924,12 @@ services:
     cdc:
       - "TDSQL for MySQL: Tencent's migration guide asks binlog_format ROW, binlog_row_image FULL and gtid_mode ON of it"
       - "TDSQL Boundless: the binary log is turned on by hand (no restart, 1 to 2 minutes), kept 7 days by default, read over the binlog dump protocol or into CKafka with REPLICATION SLAVE and REPLICATION CLIENT"
+      - "migkit follows TDSQL for MySQL set by set, each set's primary named on the source (sets: [host:port, ...]): its proxy keeps no binary log of its own"
     limits: {}
     defaults: {}
-    notes: []
+    notes:
+      - "a hop that names its engine tdsql is moved as this one where the server's proxy says it spreads tables over sets, and as MySQL otherwise"
+      - "TDSQL Boundless's one binary log is not followed yet: only its copy and comparison are"
 
   tencent-ckafka:
     provider: tencent
@@ -2134,8 +2188,8 @@ services:
     provider: alibaba
     where: polardb-x
     label: PolarDB-X
-    family: none
-    distinct: "a distributed database of its own that speaks MySQL's protocol and merges its nodes' binary logs into one MySQL-format global binary log"
+    family: polardbx
+    distinct: null
     hosts: ['\.polarx\.rds\.aliyuncs\.com$']
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -2262,8 +2316,8 @@ services:
     provider: alibaba
     where: lindorm
     label: Lindorm
-    family: none
-    distinct: "a multi-model database of its own (wide table, time series, search), answering SQL over MySQL's protocol, the HBase API and CQL"
+    family: lindorm
+    distinct: null
     hosts: ['\.lindorm\.rds\.aliyuncs\.com$']
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -2285,9 +2339,9 @@ services:
   alibaba-oceanbase:
     provider: alibaba
     where: oceanbase
-    label: ApsaraDB for OceanBase
-    family: none
-    distinct: "a distributed database of its own whose tenants run in MySQL mode or Oracle mode"
+    label: ApsaraDB for OceanBase (MySQL mode)
+    family: oceanbase
+    distinct: null
     hosts: []
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -2305,6 +2359,29 @@ services:
     defaults: {}
     notes:
       - "several of its binary log pages are marked deprecated"
+
+  alibaba-oceanbase-oracle:
+    provider: alibaba
+    where: oceanbase
+    label: ApsaraDB for OceanBase (Oracle mode)
+    family: oceanbase-oracle
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: ""
+      superuser: false
+    change:
+      how: console
+      words: "the tenant's parameters in the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "an Oracle-mode tenant has no binary log service: its changes are not followed, and a copy is compared once its writes have stopped"
+    limits: {}
+    defaults: {}
+    notes: []
 
   alibaba-elasticsearch:
     provider: alibaba
@@ -2457,8 +2534,8 @@ services:
     provider: huawei
     where: gaussdb
     label: Huawei Cloud GaussDB
-    family: none
-    distinct: "a relational database of its own, in distributed and centralized editions"
+    family: gaussdb
+    distinct: null
     hosts: []
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -2566,9 +2643,9 @@ services:
   huawei-geminidb:
     provider: huawei
     where: geminidb
-    label: Huawei Cloud GeminiDB
+    label: Huawei Cloud GeminiDB (DynamoDB, HBase and InfluxDB APIs)
     family: none
-    distinct: "a multi-model NoSQL database of its own answering the Redis, DynamoDB, Cassandra, HBase and InfluxDB APIs over its own storage"
+    distinct: "a multi-model NoSQL database of its own answering the Redis, DynamoDB, Cassandra, HBase and InfluxDB APIs over its own storage; its DynamoDB, HBase and InfluxDB APIs have no engine of migkit's"
     hosts: []
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -2583,8 +2660,78 @@ services:
     cdc: []
     limits: {}
     defaults: {}
+    notes: []
+
+  huawei-geminidb-cassandra:
+    provider: huawei
+    where: geminidb
+    label: Huawei Cloud GeminiDB (Cassandra API)
+    family: geminidb-cassandra
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: ""
+      superuser: false
+    change:
+      how: console
+      words: "the instance's parameters on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "it keeps no change log a client can read - neither Cassandra's commit log nor a CDC table: its changes are not followed, and a copy is compared once its writes have stopped"
+    limits: {}
+    defaults: {}
+    notes: []
+
+  huawei-geminidb-redis:
+    provider: huawei
+    where: geminidb
+    label: Huawei Cloud GeminiDB (Redis API)
+    family: geminidb-redis
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: ""
+      superuser: false
+    change:
+      how: console
+      words: "the instance's parameters on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "it takes no REPLICAOF and answers no PSYNC: nothing replicates it, and a key written while it is moved is found by the comparison"
+    limits: {}
+    defaults: {}
     notes:
-      - "its Redis API is documented as compatible with Redis 6.2 and earlier, partly with 7.0; its MongoDB API has reached end of support"
+      - "its Redis API is documented as compatible with Redis 6.2 and earlier, partly with 7.0"
+
+  huawei-geminidb-mongo:
+    provider: huawei
+    where: geminidb
+    label: Huawei Cloud GeminiDB (MongoDB API)
+    family: geminidb-mongo
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: ""
+      superuser: false
+    change:
+      how: console
+      words: "the instance's parameters on the console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc:
+      - "its change streams where the instance serves them: the follow asks, and says so where it does not"
+    limits: {}
+    defaults: {}
+    notes:
+      - "its MongoDB API has reached end of support"
 
   huawei-kafka:
     provider: huawei
