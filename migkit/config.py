@@ -1043,11 +1043,23 @@ class Hop:
         `Engine.in_scope` asks it with its own engine. Splitting it by
         hand split `public."v1.orders"` at the wrong dot and asked a
         bare PostgreSQL name outside its schema."""
+        return not self.excluded(db, *self.parts_of(table, engine))
+
+    def parts_of(self, table, engine=None, bare_in=None):
+        """A table's listed name (`public.orders`, `orders`,
+        `public."v1.orders"`) as the parts every rule of the hop is asked
+        with: split the one way names are (`util.split_table`, by
+        `engine`'s quoting - the source's by default), a bare name in the
+        engine's default schema (`DEFAULT_SCHEMA`). Split at every dot by
+        hand, a quoted name broke at its own dot and a bare PostgreSQL name
+        missed a rule written with its schema. `bare_in`: the schema a bare
+        name is read in instead ("" - none, the name as it was given)."""
         from .util import DEFAULT_SCHEMA, _canonical, split_table
         eng = _canonical(engine) if engine else self._names_engine()
-        schema, name = split_table(eng, str(table),
-                                   DEFAULT_SCHEMA.get(eng, ""))
-        return not self.excluded(db, *([schema] if schema else []), name)
+        schema, name = split_table(
+            eng, str(table),
+            DEFAULT_SCHEMA.get(eng, "") if bare_in is None else bare_in)
+        return [schema, name] if schema else [name]
 
     def folds_case(self):
         """Whether the names the hop's patterns are matched against have

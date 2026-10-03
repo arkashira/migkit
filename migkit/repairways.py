@@ -323,7 +323,7 @@ class Ladder:
              "replace": interlock.choice(hop) == "replace"},
             **{"int key": self._int_key,
                "filter": lambda: bool(hop.row_filter(
-                   self.db, *str(self.sides.src_t).split("."))),
+                   self.db, *hop.parts_of(self.sides.src_t))),
                "range": self._range_ready,
                "spans": lambda: self._spans()[0],
                "spans why": lambda: self._spans()[2],

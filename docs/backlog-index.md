@@ -483,7 +483,7 @@ their own names, and `LADDER.table` (a WAVE queue item).
 | 401 | R21.8 | A setup page in the view | OPEN (grep: the web view has the operator's account setup and a hop's validation, no form doing what `init` does) | M | ease of use | L7479-7481 |
 | 402 | R21.9 | Every message says what to do next | OPEN | M | ease of use | L7482-7483 |
 | 403 | R21.M | Ease measured: time to a verified move scripted per pair, config lines, questions asked | OPEN | S | ease of use | L7485-7489 |
-| 404 | DTS.ops | Operation filters (skip inserts, updates or deletes) | OPEN | S | change follow | L8163 |
+| 404 | DTS.ops | Operation filters (skip inserts, updates or deletes) | DONE 33df035 (`mapping.ops`, `Hop.carries`: the tail applies only the changes a table carries, the check holds it to them - P0-SCOPE.6e/6f) | S | change follow | L8163 |
 | 405 | DTS.sample | Sampled check | PARTLY 5713daf (done: random rows read first and apart through the second reading's `two_readings.sample`, where a second reader is installed; missing: a sampled check by migkit's own reader) | S | verify | L8163 |
 | 406 | DTS.gtid | GTID-set compare | OPEN (grep: none) | S | verify | L8163-8164 |
 | 407 | DTS.csfilter | Change-stream filter | OPEN | S | change follow | L8164 |

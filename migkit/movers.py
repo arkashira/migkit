@@ -6985,7 +6985,7 @@ def _skipped_operations(hop, tables):
     leaves a truncate out too, which takes away what a delete would -
     else none."""
     from .config import OPS
-    seen = {hop.carries(one, *[p for p in str(t).split(".") if p])
+    seen = {hop.carries(one, *hop.parts_of(t))
             for one, listed in tables.items() for t in listed or ()
             if hop.takes_table(one, t)}
     if len(seen) != 1:

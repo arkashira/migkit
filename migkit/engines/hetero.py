@@ -2462,7 +2462,7 @@ class HeteroEngine(Engine):
         pair the two sides do not speak the same SQL or use the same
         names. One that cannot be translated stops everything that would
         read through it, before anything is read."""
-        pred = self.hop.row_filter(db, *str(src_table).split("."))
+        pred = self.hop.row_filter(db, *self.hop.parts_of(src_table))
         if not pred:
             return None, None
         src = self.src_engine.SQL_DIALECT
@@ -3641,7 +3641,7 @@ class HeteroEngine(Engine):
         for c in changes:
             t = c["table"]
             if t not in known:
-                known[t] = self.hop.carries(db, *str(t).split("."))
+                known[t] = self.hop.carries(db, *self.hop.parts_of(t))
             if c.get("op") in known[t]:
                 out.append(c)
         return out
@@ -3656,7 +3656,7 @@ class HeteroEngine(Engine):
         from .. import canon
         return [c for c in changes if not (
             c.get(canon.FILTERED) and "delete" not in self.hop.carries(
-                db, *str(c["table"]).split(".")))]
+                db, *self.hop.parts_of(c["table"])))]
 
     def _typed_change(self, db, change, target):
         """A change with each value of a class that has a form of its own
@@ -4567,7 +4567,7 @@ class HeteroEngine(Engine):
         kind, src_t = act
         if kind != "truncate":
             return
-        if "delete" not in self.hop.carries(db, *str(src_t).split(".")):
+        if "delete" not in self.hop.carries(db, *self.hop.parts_of(src_t)):
             log(f"{src_t}: emptied on the source; the hop does not carry its"
                 " deletes, so the target keeps its rows")
             return
