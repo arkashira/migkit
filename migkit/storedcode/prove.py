@@ -428,7 +428,10 @@ class Proof:
             if self.sandbox is not None:
                 if schema is not None:
                     schema += self.schema_proofs()
-                if runnable or wanted:
+                from . import partitions
+                if runnable or wanted or (schema is not None and
+                                          partitions.turned_on(
+                                              self.pair.hop)):
                     verdicts += self._in_sandbox(runnable, wanted, schema)
             else:
                 for r, t in runnable:
@@ -975,6 +978,9 @@ class Proof:
             self.in_sequences(runnable, out)
             if wanted:
                 self.statement_proofs(wanted, schema)
+            from . import partitions
+            if schema is not None and partitions.turned_on(self.pair.hop):
+                partitions.advise(self, schema)
         finally:
             self.end()
         return out

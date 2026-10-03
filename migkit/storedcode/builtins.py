@@ -437,14 +437,27 @@ def refusal(tree, parting, dialect):
 
 def constants(mined, text, dialect):
     """(numbers, strings) of the mined cases of every function `text`
-    calls - more inputs for the proof."""
-    from . import inputs
+    calls - more inputs for the proof, a negative number as the negative
+    the case writes."""
+    from decimal import Decimal, InvalidOperation
+
+    from .translate import Refused, parse
     nums, strs = set(), set()
     for fn in called([text]):
         for case, _ in mined.get(fn, []):
-            n, s = inputs.constants(case, dialect)
-            nums |= n
-            strs |= s
+            try:
+                tree = parse(f"SELECT {case}", dialect)
+            except Refused:
+                continue
+            for lit in tree.find_all(exp.Literal):
+                if lit.is_string:
+                    strs.add(str(lit.this))
+                    continue
+                try:
+                    n = Decimal(str(lit.this))
+                except InvalidOperation:
+                    continue
+                nums.add(-n if isinstance(lit.parent, exp.Neg) else n)
     return nums, strs
 
 

@@ -40,10 +40,11 @@ database's line weighs them by how often the application runs each.
 Restructuring (P21) is proved here and nowhere else: a statement reading
 a renamed column reads it by its new name on the target, one reading a
 column the hop leaves out is refused by name, and both sides' answers are
-held to each other over the restructured fixture. What the hop cannot
-say - a table split in two, two merged, a column computed from others -
-is not restructuring migkit carries, and nothing here pretends to prove
-it.
+held to each other over the restructured fixture. A statement reading a
+column the hop writes transformed (`mask_on_write`) answers otherwise by
+design: it is said, not compared. What the hop cannot say - a table split
+in two, two merged, a column computed from others - is not restructuring
+migkit carries, and nothing here pretends to prove it.
 """
 import re
 import time
@@ -292,6 +293,12 @@ def tree_of(text, dialect):
         return None
     if isinstance(tree, exp.Select) and not tree.expressions:
         return None
+    if isinstance(tree, exp.Select) and not (tree.args.get("from_") or
+                                             tree.args.get("from")) and \
+            tree.find(exp.Column) is not None:
+        # "Select an option" reads as a column with an alias: a column
+        # read from no table is no statement an application sends
+        return None
     return tree if isinstance(tree, (exp.Query, exp.Insert, exp.Update,
                                      exp.Delete, exp.Merge)) else None
 
@@ -400,6 +407,43 @@ def restructured(tree, hop, db, columns_of):
                     ident.replace(exp.to_identifier(new) if isinstance(
                         ident, exp.Identifier) else exp.column(new))
     return tree
+
+
+def transformed(tree, hop, db, columns_of):
+    """[(table, column, rule)] the statement reads that the hop writes
+    transformed on the target (`mask_on_write`: null, a constant, a
+    digest, the first characters): its answer there differs from the
+    source's by design, so it is not held to it. A column the statement
+    only writes is not one of them - the application's value lands as it
+    is on both sides."""
+    from ..movers import mask_rules
+    rules = {_leaf(t): cols for t, cols in mask_rules(hop, db).items()}
+    if not rules:
+        return []
+    tables = {str(t.alias_or_name).lower(): t.name
+              for t in tree.find_all(exp.Table)}
+    named = list(dict.fromkeys(tables.values()))
+    written = set()
+    for node in tree.find_all(exp.Update):
+        for eq in node.expressions:
+            if isinstance(eq, exp.EQ) and isinstance(eq.this, exp.Column):
+                written.add(id(eq.this))
+    out = []
+    for col in tree.find_all(exp.Column):
+        if id(col) in written or isinstance(col.this, exp.Star):
+            continue
+        if col.table:
+            owners = [tables.get(str(col.table).lower())]
+        else:
+            owners = [t for t in named if col.name.lower() in
+                      {str(c).lower() for c in columns_of(t)}]
+        for t in owners:
+            got = rules.get(_leaf(t), {})
+            rule = next((r for c, r in got.items()
+                         if c.lower() == col.name.lower()), None)
+            if rule is not None:
+                out.append((t, col.name, " ".join(x for x in rule if x)))
+    return list(dict.fromkeys(out))
 
 
 def localized(pair, db, columns_of=None):
@@ -727,6 +771,14 @@ def prove_one(proof, stmt, local):
                        stmt.runs)
     target_said = unmarked(there, holes)[0] if stmt.shown else ""
     a, b = proof.a, proof.b
+    masked = transformed(source, proof.pair.hop, proof.db,
+                         getattr(local, "columns_of", lambda t: []))
+    if masked:
+        t, c, rule = masked[0]
+        return Verdict(stmt.origin, shown, "not proved", f"it reads"
+                       f" {_leaf(t)}.{c}, which the hop writes transformed"
+                       f" on the target ({rule}): its answer there differs"
+                       " by design", stmt.runs, target=target_said)
     missing = _tables_missing(source, a)
     if missing:
         return Verdict(stmt.origin, shown, "not proved", "it reads "
@@ -787,6 +839,7 @@ def prove(proof, stmts, budget=BUDGET_SECONDS):
                 return [c for c, _ in w.columns]
         return []
     local = localized(proof.pair, proof.db, columns_of)
+    local.columns_of = columns_of
     # the calls the engines' own tests show answering apart are refused
     local.parting = getattr(proof, "parting", None)
     began = time.monotonic()

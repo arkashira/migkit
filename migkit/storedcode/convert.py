@@ -194,6 +194,87 @@ def _listed(value):
     return value if isinstance(value, list) else [value]
 
 
+#: the targets that run another engine's own code, by what they are: the
+#: source's SQL each runs, and the settings its session runs it under -
+#: (before the CREATE, after it), the latter putting the session back
+EMULATORS = {
+    "mariadb": ("oracle", ["set session sql_mode = 'ORACLE'"],
+                ["set session sql_mode = default"]),
+    "ivorysql": ("oracle", ["set ivorysql.compatible_mode to oracle"],
+                 ["set ivorysql.compatible_mode to pg"]),
+    "opengauss-a": ("oracle", [], []),
+    "opengauss-b": ("mysql", [], []),
+    "babelfish": ("tsql", ["set babelfishpg_tsql.sql_dialect = 'tsql'"],
+                  ["reset babelfishpg_tsql.sql_dialect"]),
+    "openhalo": ("mysql", ["set database_compat_mode = 'mysql'"],
+                 ["set database_compat_mode = 'postgresql'"]),
+}
+
+
+def emulating(eng, side, db):
+    """{emulator} the server is, of `EMULATORS`: MariaDB (its Oracle
+    mode), IvorySQL, openGauss (by its database's compatibility: A is
+    Oracle's, B MySQL's), PostgreSQL with Babelfish, openHalo - asked of
+    the server itself, read-only. Empty where it is none, or cannot be
+    asked."""
+    engine = getattr(eng, "CANON_ENGINE", "")
+    out = set()
+    try:
+        if engine == "mysql":
+            got = eng._q(side, "select version()")
+            if "mariadb" in str(got[0][0]).lower():
+                out.add("mariadb")
+        elif engine == "postgres":
+            version = eng._psql(side, db, "select version()").lower()
+            if "ivorysql" in version:
+                out.add("ivorysql")
+            if "opengauss" in version:
+                mode = eng._psql(side, db, "select datcompatibility from"
+                                           " pg_database where datname ="
+                                           " current_database()").strip()
+                out.add({"A": "opengauss-a", "B": "opengauss-b"}.get(
+                    mode.upper(), "opengauss-a"))
+            if eng._psql(side, db, "select count(*) from pg_extension"
+                                   " where extname = 'babelfishpg_tsql'"
+                         ).strip() == "1":
+                out.add("babelfish")
+            if eng._psql(side, db, "select count(*) from pg_settings where"
+                                   " name = 'database_compat_mode'"
+                         ).strip() == "1":
+                out.add("openhalo")
+    except Exception:  # noqa: BLE001 - none known
+        return set()
+    return out
+
+
+def as_written(pair, ctx, r):
+    """The source's own statement, made on a target that runs the source's
+    engine's code (`EMULATORS`): MariaDB in its Oracle mode, IvorySQL and
+    openGauss for Oracle's, Babelfish for SQL Server's, openGauss and
+    openHalo for MySQL's - in the session settings that read it, put back
+    after. The proof holds it to the source like any other version: an
+    emulation is no promise, and what it leaves out shows there."""
+    src = pair.src_engine.SQL_DIALECT
+    modes = sorted(m for m in ctx.get("emulating") or ()
+                   if EMULATORS.get(m, (None,))[0] == src)
+    if not modes:
+        raise Refused("the target runs no emulation of the source's"
+                      " engine")
+    if r.settings.get("package"):
+        raise Refused("a package's member is made with its package, which"
+                      " the emulation keeps whole and lists apart")
+    if not r.definition:
+        raise Refused("its definition could not be read")
+    text = r.definition.strip().rstrip("/").rstrip()
+    if src == "oracle" and not re.match(r"(?is)\s*create\b", text):
+        text = "create or replace " + text
+    _, before, after = EMULATORS[modes[0]]
+    return Converted(list(before) + [text] + list(after),
+                     residue=[f"runs in the target's emulation of the"
+                              f" source's engine ({modes[0]}): the target"
+                              " keeps it"])
+
+
 def rules(pair, ctx, r):
     """migkit's own rules: MySQL's and SQL Server's procedural code into
     PL/pgSQL, MySQL's meaning kept in a view or an expression, and
@@ -323,6 +404,7 @@ class Conversion:
         from . import builtins
         self.ctx = {"local": self.local, "dst": self.dst,
                     "emulations": emulations, "emulated": emulated,
+                    "emulating": emulating(pair.dst_engine, "dst", db),
                     "parting": builtins.load(pair.hop, db)
                     if builtins.turned_on(pair.hop) else {},
                     "dir": code_dir(pair.hop),
@@ -442,6 +524,7 @@ class Conversion:
         one = r.settings.get("expression") if r.kind != "view" else r.body
         return {"src": self.src, "dst": self.dst, "kind": r.kind,
                 "emulations": self.ctx.get("emulations"),
+                "emulating": self.ctx.get("emulating"),
                 "one": one, "file": (self.ctx["dir"] / f"{r.name}.sql")
                 if (self.ctx["dir"] / f"{r.name}.sql").exists() else None}
 
@@ -690,7 +773,8 @@ class Conversion:
     #: the candidates whose version of a cut copy is made the same way as
     #: of the whole routine: the operator's file is written for the whole
     #: one, and a model is asked, not run
-    CUT_BY = ("rules", "emulate", "plsql-converter", "dialect-converter")
+    CUT_BY = ("rules", "emulate", "emulator", "plsql-converter",
+              "dialect-converter")
 
     def _smallest(self, proof, c, r, verdict):
         """The few source statements a failing candidate's version still

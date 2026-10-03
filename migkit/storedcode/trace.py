@@ -36,7 +36,8 @@ A copy is held to its routine before its report is read: called with the
 same input, it must answer as the routine does, else its report is not
 the routine's and nothing is said from it. Only functions and
 procedures: a trigger fires by itself, and a copy cannot be fired
-beside it.
+beside it; not a T-SQL function, which may not PRINT; not a package's
+member, which is made with its package.
 """
 import collections
 import json
