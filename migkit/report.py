@@ -151,7 +151,9 @@ def _scope_section(hop):
     words = {"include": "takes only", "exclude": "leaves out",
              "row_filters": "rows filtered in",
              "column_rules": "columns chosen in",
-             "renamed": "renamed", "changes_carried": "changes carried"}
+             "renamed": "renamed", "changes_carried": "changes carried",
+             "objects_not_carried": "objects not carried",
+             "objects_named": "only these objects"}
     rows = "".join(
         f'<tr><td class="db">{words[k]}</td>'
         f'<td>{html.escape(", ".join(v[:40]))}'

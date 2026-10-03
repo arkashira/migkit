@@ -33,6 +33,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> is not a change a tail carries - insert, update or delete
 
+* objects: <...> is not a kind of object - <...>
+
 * <...>: a list of names, or databases each with all, a list of tables, or its schemas
 
 * <...>: <...> - all, a table, a list of tables, or its schemas

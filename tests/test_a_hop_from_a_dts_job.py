@@ -294,3 +294,26 @@ def test_the_dml_an_alibaba_job_carries_becomes_the_contract():
     got = imports.read(SAMPLES / "alibaba-dts-job.json")
     assert got.raw["mapping"]["ops"] == {"shop.orders": ["insert",
                                                          "update"]}
+
+
+def test_the_objects_a_job_names_one_by_one_and_what_it_does_not_carry():
+    job = {"MigrateOption": {"DatabaseTable": {
+        "ObjectMode": "partial", "AdvancedObjects": ["function"],
+        "Databases": [
+            {"DbName": "a", "DBMode": "partial", "TableMode": "all",
+             "ViewMode": "partial", "Views": [{"ViewName": "v1"}],
+             "FunctionMode": "partial", "Functions": ["f1"]},
+            {"DbName": "b", "DBMode": "all", "ViewMode": "all"}]}},
+        "SrcInfo": {"DatabaseType": "mysql",
+                    "Info": [{"Host": "10.0.0.5", "User": "u",
+                              "Port": 3306}]}}
+    got = imports.from_tencent_dts(job)
+    assert got.raw["objects"] == {"views": ["a.v1", "b.*"],
+                                  "functions": ["a.f1", "b.*"]}
+    # a kind the job does not take at all is a finding, not left out
+    said = " | ".join(got.notes)
+    assert "carries no events, procedures, triggers" in said
+    hop = _hop(got, "mysql://app@10.0.0.6")
+    assert not hop.takes_object("views", "a", "v2")
+    assert hop.takes_object("procedures", "a", "p1")
+    assert hop.takes_object("triggers", "a", "t1")

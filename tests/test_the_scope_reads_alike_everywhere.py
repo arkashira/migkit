@@ -119,3 +119,38 @@ def test_the_way_back_takes_what_the_way_there_took():
         new = there.target_table_in("appdb", "public", table).split(".")[-1]
         assert there.excluded("appdb", "public", table) == \
             back.excluded("app", "public", new)
+
+
+def test_the_objects_beside_the_tables_a_hop_carries():
+    h = _hop("mysql", objects={"views": ["shop.v_orders", "crm.*"],
+                               "routines": False, "triggers": "all"})
+    assert h.takes_object("views", "shop", "v_orders")
+    assert not h.takes_object("views", "shop", "v_other")
+    assert h.takes_object("views", "crm", "anything")
+    assert not h.takes_object("functions", "shop", "f")
+    assert not h.takes_object("procedures", "shop", "p")
+    assert h.takes_object("triggers", "shop", "t")
+    # a kind not said is all of it
+    assert h.takes_object("events", "shop", "e")
+    assert _hop().takes_object("roles", "x")
+
+
+def test_objects_said_wrong_are_refused_and_said_right_reach_the_hop():
+    raw = {"engine": "mysql", "source": {"host": "10.0.0.1", "user": "a"},
+           "target": {"host": "10.0.0.2", "user": "a"},
+           "objects": {"views": ["shop.v1"], "users": False}}
+    assert not [p for p in hopkeys.check({"hops": {"h": raw}})
+                if p.level == "error"]
+    hop = build_hop("h", raw)
+    assert not hop.takes_object("roles", "x")
+    bad = dict(raw, objects={"widgets": False})
+    assert [p.where for p in hopkeys.check({"hops": {"h": bad}})
+            if p.level == "error"] == ["hops.h.objects"]
+
+
+def test_the_way_back_names_the_objects_in_the_targets_database():
+    there = _hop("mysql", databases=["shop"], db_map={"shop": "shop2"},
+                 objects={"views": ["shop.v1"]})
+    back = there.reversed()
+    assert back.takes_object("views", "shop2", "v1")
+    assert not back.takes_object("views", "shop2", "v2")
