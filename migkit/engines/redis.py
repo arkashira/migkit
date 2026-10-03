@@ -1098,10 +1098,18 @@ class RedisEngine(Engine):
                           **{kind: [json.dumps(k) for k in sorted(keys)]
                              for kind, keys in kinds.items()})
 
-    def _read_drilldown(self, db, kind):
+    def in_scope(self, db, table):
+        """A key as `_kept` reads it, the one scope answer here."""
+        return bool(self._kept(db, [table]))
+
+    def _read_drilldown(self, db, kind, kept=True):
+        """The keys the last check named, of the ones the hop takes
+        (`_kept`): a key it named under another scope - an `exclude` added
+        since - is the target's own now, and the repair deleted it."""
         import json
-        return [json.loads(line) for line in
+        keys = [json.loads(line) for line in
                 self._read_drill(db, f"db{db}", kind)]
+        return self._kept(db, keys) if kept else keys
 
     def repair_plan(self, db, kind):
         """What `migkit sync --kind rows` would do to this database.
@@ -1112,11 +1120,15 @@ class RedisEngine(Engine):
         """
         if kind not in ("rows", "all"):
             return []
+        _, said = self._drills_in_scope(db, sorted({
+            k for found in ("missing", "changed", "extra")
+            for k in self._read_drilldown(db, found, kept=False)}), "keys")
+        out = [said] if said else []
         missing = self._read_drilldown(db, "missing")
         changed = self._read_drilldown(db, "changed")
         extra = self._read_drilldown(db, "extra")
         if not (missing or changed or extra):
-            return []
+            return out
         statements = []
         if missing or changed:
             names = ", ".join((missing + changed)[:6])
@@ -1129,7 +1141,7 @@ class RedisEngine(Engine):
                 f"DEL {len(extra)} keys the source does not have:"
                 f" {', '.join(extra[:6])}"
                 + (" ..." if len(extra) > 6 else ""))
-        return [RepairAction(
+        return out + [RepairAction(
             f"db{db}", "rows", statements, [],
             f"{len(missing)} missing, {len(changed)} changed,"
             f" {len(extra)} extra; every key the repair overwrites or removes"

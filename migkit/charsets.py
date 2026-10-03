@@ -1304,7 +1304,7 @@ def text_plan(eng, db):
     p = Plan(db, repair=True)
     none = Charset("")
     for t in dst.neutral_tables("dst", db):
-        if eng.hop.excluded(db, *str(t).split(".")):
+        if not dst.in_scope(db, t):
             continue
         for n, _ in _text_columns(dst, "dst", db, t):
             p.columns.append(Column(t, t, n, none, none))
