@@ -151,3 +151,13 @@ def test_a_role_in_another_account_is_assumed_for_the_token(
     assert "ASIAEXAMPLEROLEXYZ" in token and "AKIDEXAMPLE" not in token, token
     assert "X-Amz-Security-Token=" in token, token
     stub.assert_no_pending_responses()
+
+
+def test_a_secret_file_anyone_may_change_is_refused(tmp_path):
+    """`file:` was read whoever could write it (audit SEC21)."""
+    f = tmp_path / "password"
+    f.write_text("CHANGE_ME\n")
+    assert cfg._secret(f"file:{f}") == "CHANGE_ME"
+    f.chmod(0o646)
+    with pytest.raises(SystemExit, match="every user of this machine"):
+        cfg._secret(f"file:{f}")

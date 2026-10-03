@@ -266,6 +266,6 @@ class Bank:
     def save(self):
         if not self.path:
             return
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=1, sort_keys=True))
-        tmp.replace(self.path)
+        from .. import durable
+        durable.write_atomic(self.path, json.dumps(self.data, indent=1,
+                                                   sort_keys=True))

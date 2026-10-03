@@ -3226,6 +3226,29 @@ owner's rule); every verdict touched is proved able to say "different".
 * Running work: `twoway.py` (conflict resolution), `repairlog.py` (repair
   ladder).
 
+*Done (2026-10-01), with ST17's journal (`checkpoint.read_move`) handed
+over from AUD-A.* The tail's own state is one SQLite store set down a
+batch at a time before the target commits it and taken back out where
+the position never passed it (`tailtables.Store`); the target's batch
+mark decides the rest (`twoway.committed_ahead`, `hetero._committed_
+ahead`). A cutover holds a lease of its own while it acts, so the next
+run is refused instead of undoing it in flight (`cutover._held`); every
+lease a process holds is asked between a copy's ranges and a tail's
+batches (`lease.check_held`); every read-modify-write of a kept file goes
+through `durable.change_json` under the file's lock, and no file is
+written through a temporary name another writer shares (ST23).
+PostgreSQL's catalogue is digested by the server (`shape_mark`) and read
+whole only where the digest moved (SP8). A restore point's copy under
+the reports is sealed file by file to the hop's `at_rest` recipients and
+opened into a directory of the run's own to read (ST15). Spool frames
+are still pickled: read back only into the classes a change log's values
+come as, and a frame that would not read back is refused before the
+batch is kept; `file:` secrets and the approvals' signers list are
+refused where another user may change them (SEC21). `schedule` was
+already lease-based (ST10, AUD-A); the PostgreSQL undo's `\copy` (SEC9)
+and its fence on one kept connection (SP10) were done in `postgres.py`
+by the groups that hold it.
+
 **AUD-C. The dashboard, metrics, the run log and what leaves the machine
 (P0/P1, L).** Files: `migkit/ui.py`, `migkit/notify.py`, `migkit/traces.py`,
 `migkit/digests.py`, `migkit/export.py`, `migkit/diagnostics.py`,
@@ -3791,6 +3814,37 @@ they are three cross-cutting gaps, not 26 engine problems:
   the application while migkit moves into it, or its writes named - the
   same hold-writes primitives the cutover's freezes use on the source
   (one primitive per engine, used for both).
+  **Built (2026-10-04): `freeze.protect` on `freeze.Hold`**, the target's
+  ladder the ways that leave migkit's own account writing per database
+  (`Hold.keep_rungs`, `KEEPS`), taken before the copy and again after it,
+  read back in the cutover's preflight (`kept_rows`), given back at the
+  flip, by `rollback --apply` and put on again by a cutover undone. Held by
+  rights: PostgreSQL and MySQL as before, TiDB (MySQL's way, `KILL
+  TIDB`), MongoDB (roles swapped for read; a server checking nobody has no
+  way), SQL Server (deny), Redis (every account's writes but migkit's own,
+  which must be an account of its own; one server, not a cluster), Kafka
+  (a deny for every principal where migkit's is a super user, else each
+  allowed principal denied by name on a cluster that refuses the
+  unnamed), Cassandra/ScyllaDB (revoke, the cache waited out), CockroachDB
+  and Aurora DSQL (revoke), ClickHouse (revoke on `db.*` with partial
+  revokes, a user still writing through migkit's role made `readonly`),
+  Oracle (table, view and definer's-rights code grants revoked, the
+  schema's owner locked), Db2 (tables, CONTROL, and EXECUTE on the
+  packages and routines that write the schema; z/OS and i by their own
+  catalogues), SAP ASE, Teradata, Redshift, Snowflake (and its future
+  grants), Couchbase (roles swapped for read, the user put back whole).
+  Offered as a change of an access policy (`target_access`, asked at a
+  terminal under --go): DynamoDB (a deny in each table's own policy) and
+  BigQuery (the dataset's writing entries made reading ones). Named:
+  OpenSearch (each index's own count of operations less migkit's,
+  `freeze.counted`), drift at the cutover's gate. Not applicable with the
+  reason: files, lakes, Cosmos DB, the read-only sources, the generic
+  engine. The source's freeze at cutover (F2.freeze) stands on the same
+  holds for TiDB (`tidb_super_read_only` or per database), CockroachDB,
+  ClickHouse, Oracle, Db2, ASE, Teradata, Redshift, Snowflake and
+  Couchbase, each ending the application's sessions and reading back
+  what is held open; Db2 for i and z/OS, DSQL, BigQuery, DynamoDB, Cosmos
+  DB, the lakes and the SaaS/SAP sources not applicable, with the reason.
 * Smaller: missing grant on MongoDB and pairs; capability gaps on
   warehouses, ASE, Db2 and lakes (6-11 cells each); the generic engine
   is not yet on every shape (decide whether it deepens or is declared

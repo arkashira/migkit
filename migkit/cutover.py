@@ -63,7 +63,10 @@ Every step is written down before it acts. A failure anywhere, or the
 clock passing the budget, undoes every step from the record, the last
 first, and the source is where it was: writable, with nothing written
 to it that it did not have. A run killed half way is undone by the next
-one, which then stops and says so - never left half flipped. After the
+one, which then stops and says so - never left half flipped. A run
+holds the cutover's lease while it acts (`_held`), so the next one is
+refused while it runs: a record of a run under way was read as a run
+that had stopped, and undone in flight. After the
 flip the old source stays frozen, so an application still pointed at it
 fails rather than writing where nobody reads; `rollback --apply` gives it
 back, and so does the point of no return.
@@ -251,17 +254,45 @@ def _path(hop):
 
 
 def record(hop):
-    """The cutover under way, or None."""
-    try:
-        return json.loads(_path(hop).read_text())
-    except (OSError, ValueError):
-        return None
+    """The cutover under way, or None. One that cannot be read whole
+    stops, naming it: read as none, a half-done cutover is not undone
+    (`durable`)."""
+    from . import durable
+    return durable.read_state(_path(hop), "journal")
 
 
 def _save(hop, rec):
-    tmp = _path(hop).with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=1, default=str))
-    tmp.replace(_path(hop))
+    from . import durable
+    durable.write_json(_path(hop), rec, indent=1)
+
+
+def _lease_path(hop):
+    return hop.report_dir() / "cutover-lease.json"
+
+
+def _held(hop, say):
+    """The cutover's lease, taken for a run that acts (audit ST8): kept
+    in the hop's run state where it has one, so a run on another machine
+    of the hop is refused as well. Its own, not the hop's: a hop with a
+    standby has its change stream's machine hold that one while the
+    cutover drains it."""
+    from . import lease
+    from .state import run_state
+    got = lease.Lease(_lease_path(hop), "cutover",
+                      remote=run_state(hop)).acquire()
+    if got.took_over:
+        was = got.took_over
+        say(f"[yellow]the cutover run of {was.get('host')} process"
+            f" {was.get('pid')} stopped without letting go of its lease"
+            "[/yellow]")
+    return got
+
+
+def running(hop):
+    """The lease record of a cutover run that is acting now, or None."""
+    from . import lease
+    from .state import run_state
+    return lease.holder(_lease_path(hop), run_state(hop))
 
 
 def _audit(hop, rec, entry):
@@ -317,10 +348,10 @@ def past_flip(hop):
 def _ended(hop, state, run, **more):
     """A cutover's flip ended by `state` (`AFTER`), kept in the runs'
     log."""
-    with _runs_path(hop).open("a") as f:
-        f.write(json.dumps({"state": state, "run": (run or {}).get("id"),
-                            "ended": time.time(), **more}, default=str)
-                + "\n")
+    from . import durable
+    durable.append_line(_runs_path(hop), json.dumps(
+        {"state": state, "run": (run or {}).get("id"),
+         "ended": time.time(), **more}, default=str))
 
 
 def _close(hop, rec, how):
@@ -333,9 +364,12 @@ def _close(hop, rec, how):
     rec["took"] = {p: round(v["ended"] - v["began"], 3)
                    for p, v in (rec.get("phases") or {}).items()
                    if v.get("ended") and v.get("began")}
-    with _runs_path(hop).open("a") as f:
-        f.write(json.dumps(rec, default=str) + "\n")
+    # on the disk before the record goes: a flip the runs' log lost with
+    # the power, its record gone, would be cut over again
+    from . import durable
+    durable.append_line(_runs_path(hop), json.dumps(rec, default=str))
     _path(hop).unlink(missing_ok=True)
+    durable.sync_dir(_path(hop).parent)
 
 
 # --- running a command at the flip --------------------------------------------
@@ -563,15 +597,9 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
                             f" not be read ({e})")
         out += _shape_rows(hop, eng, d, gate)
         out += _set_aside_rows(hop, d, gate)
-        if (hop.options or {}).get("protect_target"):
-            if not freeze.state(hop, d):
-                add("warn", f"{d}: protect_target is set and nothing holds"
-                            " the target: the application may have written"
-                            " there")
-        else:
-            add("warn", f"{d}: the target is not held from the"
-                        " application's writes (protect_target); the final"
-                        " check is what catches a row written there")
+        # the target's hold read back, or the writes that are not migkit's
+        # named - drift, at the gate's level
+        out += freeze.kept_rows(hop, eng, d, gate)
         out += _job_rows(hop, eng, d, conf)
         out += _counter_rows(hop, eng, d, conf, gate)
         out += _slot_rows(hop, eng, d)
@@ -989,7 +1017,19 @@ def run(hop, eng, dbs, go, leg, say, approve):
     """The cutover: the phased path for a hop with `cutover:`, the proved
     manual one without - and, once a cutover of it has flipped, its point
     of no return (`no_return`). `approve(detail, step)` asks for the hop's
-    approvals of this plan and returns who approved."""
+    approvals of this plan and returns who approved. A run that acts
+    holds the cutover's lease from its first read of the record to its
+    end (`_held`)."""
+    if not go:
+        return _run(hop, eng, dbs, go, leg, say, approve)
+    held = _held(hop, say)
+    try:
+        return _run(hop, eng, dbs, go, leg, say, approve)
+    finally:
+        held.release()
+
+
+def _run(hop, eng, dbs, go, leg, say, approve):
     conf = settings(hop)
     rec = record(hop)
     if rec and rec.get("state") == "flipped":
@@ -1009,6 +1049,12 @@ def run(hop, eng, dbs, go, leg, say, approve):
         return None
     if rec and rec.get("state") in ("running", "undoing"):
         if not go:
+            now = running(hop)
+            if now:
+                say(f"a cutover of {hop.name} is running"
+                    f" ({now.get('host')}, process {now.get('pid')}), at"
+                    f" {_where(rec)}")
+                return None
             say(f"[yellow]a cutover of {hop.name} stopped at {_where(rec)}"
                 " and was not undone; --go undoes it[/yellow]")
             return None
@@ -2170,6 +2216,12 @@ def said_by_doctor(hop):
     from . import freeze
     out = []
     rec = record(hop)
+    now = running(hop) if rec and rec.get("state") in (
+        "running", "undoing", "no-return") else None
+    if now:
+        out.append(f"a cutover is running ({now.get('host')}, process"
+                   f" {now.get('pid')}), at {_where(rec)}")
+        rec = None
     if rec and rec.get("state") in ("running", "undoing"):
         out.append(f"a cutover stopped at {_where(rec)}"
                    + (f" and could not be undone ({rec.get('undo_error')})"

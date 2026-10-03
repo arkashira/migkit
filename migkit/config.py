@@ -1226,11 +1226,23 @@ class Hop:
         `Engine.in_scope` asks it with its own engine. Splitting it by
         hand split `public."v1.orders"` at the wrong dot and asked a
         bare PostgreSQL name outside its schema."""
+        return not self.excluded(db, *self.parts_of(table, engine))
+
+    def parts_of(self, table, engine=None, bare_in=None):
+        """A table's listed name (`public.orders`, `orders`,
+        `public."v1.orders"`) as the parts every rule of the hop is asked
+        with: split the one way names are (`util.split_table`, by
+        `engine`'s quoting - the source's by default), a bare name in the
+        engine's default schema (`DEFAULT_SCHEMA`). Split at every dot by
+        hand, a quoted name broke at its own dot and a bare PostgreSQL name
+        missed a rule written with its schema. `bare_in`: the schema a bare
+        name is read in instead ("" - none, the name as it was given)."""
         from .util import DEFAULT_SCHEMA, _canonical, split_table
         eng = _canonical(engine) if engine else self._names_engine()
-        schema, name = split_table(eng, str(table),
-                                   DEFAULT_SCHEMA.get(eng, ""))
-        return not self.excluded(db, *([schema] if schema else []), name)
+        schema, name = split_table(
+            eng, str(table),
+            DEFAULT_SCHEMA.get(eng, "") if bare_in is None else bare_in)
+        return [schema, name] if schema else [name]
 
     def folds_case(self):
         """Whether the names the hop's patterns are matched against have
@@ -1645,7 +1657,7 @@ def _secret(val):
     if val.startswith("file:"):
         p = Path(val[5:]).expanduser()
         try:
-            return p.read_text().strip()
+            return trusted_file(p, "the secret file").read_text().strip()
         except OSError as e:
             raise _unread(val, f"{p}: {e.strerror or e}") from None
     if val.startswith("vault:"):
@@ -1659,6 +1671,32 @@ def _secret(val):
     if val.startswith("keyring:"):
         return keychain_read(val[8:])
     return val
+
+
+def trusted_file(path, what, owners=None):
+    """`path`, refused where a user other than its owner may change it:
+    writable by every user of the machine, or in a directory every user
+    may replace it in (writable, no sticky bit) - and, with `owners`, a
+    file belonging to a user outside them. A secret, or a list of who
+    may approve, that anyone could rewrite says nothing (audit SEC21)."""
+    import stat
+    p = Path(path)
+    st = p.stat()
+    if st.st_mode & stat.S_IWOTH:
+        raise SystemExit(f"{what} {p} may be changed by every user of this"
+                         " machine; make it writable by its owner alone"
+                         " (chmod o-w)")
+    d = p.resolve().parent.stat()
+    if d.st_mode & stat.S_IWOTH and not d.st_mode & stat.S_ISVTX:
+        raise SystemExit(f"{what} {p} is in a directory every user of this"
+                         " machine may write, where any of them may put"
+                         " another file in its place; keep it in one only"
+                         " its owner writes")
+    if owners is not None and st.st_uid not in owners:
+        raise SystemExit(f"{what} {p} belongs to another user of this"
+                         f" machine (uid {st.st_uid}), who may change it;"
+                         " it is taken only from this user or root")
+    return p
 
 
 def _aws_secret(ref):

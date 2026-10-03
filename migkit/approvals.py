@@ -280,7 +280,14 @@ def _signers(rule):
     if not signers:
         return None
     signers = os.path.expanduser(str(signers))
-    return signers if os.path.exists(signers) else None
+    if not os.path.exists(signers):
+        return None
+    # whoever may change the list may approve: refused where anyone but
+    # this user or root may (audit SEC21)
+    from .config import trusted_file
+    trusted_file(signers, "the approvals' signers list",
+                 owners=(os.getuid(), 0))
+    return signers
 
 
 def _approvers(hop, rule, path, req, key=None):

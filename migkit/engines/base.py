@@ -2138,8 +2138,10 @@ class Engine:
         dst = list(self.neutral_tables("dst", db))
 
         def rename(t):
+            # as listed, a bare name kept bare: its rename is said in the
+            # parts it was given, and told from it by them
             return self.hop.target_table_in(
-                db, *[p for p in str(t).split(".") if p])
+                db, *self.hop.parts_of(t, bare_in=""))
         moved = [t for t in src if str(rename(t)) != str(t)]
         pairs, _, _, _ = HeteroEngine.match_tables(moved, dst, rename)
         taken = {d for _, d in pairs}
@@ -3660,7 +3662,7 @@ class Engine:
         known = self.__dict__.setdefault("_column_rules_of", {})
         at = (db, str(table))
         if at not in known:
-            rules = self.hop.column_rules(db, *str(table).split(".")) or {}
+            rules = self.hop.column_rules(db, *self.hop.parts_of(table)) or {}
             known[at] = rules if (rules.get("keep") or rules.get("drop")
                                   or rules.get("rename")) else {}
         return known[at]
@@ -3868,7 +3870,7 @@ class Engine:
 
     def _reader_where(self, db, src_t):
         """The hop's row filter on each side, in each side's SQL."""
-        pred = self.hop.row_filter(db, *str(src_t).split("."))
+        pred = self.hop.row_filter(db, *self.hop.parts_of(src_t))
         return pred, pred
 
     def _can_read_twice(self):

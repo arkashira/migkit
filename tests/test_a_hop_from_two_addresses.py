@@ -324,14 +324,30 @@ def test_a_goal_stands_for_options_and_the_hop_wins(tmp_path):
             source: postgres://app@db1/shop
             target: postgres://app@db2/shop
             goal: two-way
+          e:
+            source: dynamodb://us-east-1/shop
+            target: dynamodb://us-east-1/shop2
+            goal: keep-in-sync
+          f:
+            source: sqlite:///tmp/a.db
+            target: sqlite:///tmp/b.db
+            goal: keep-in-sync
     """)
     assert hops["a"].options == {"reverse": "at_cutover",
                                  "protect_target": True}
     assert hops["b"].options == {"reverse": "at_cutover",
                                  "protect_target": False}
-    # a target migkit cannot keep the application off: not set at all
-    assert hops["c"].options == {}
+    # a target migkit keeps itself - MongoDB's roles - set by the goal, and
+    # said to have come from it
+    assert hops["c"].options == {"protect_target": True}
+    assert vars(hops["c"])["_from_goal"] == ["protect_target"]
+    assert vars(hops["a"])["_from_goal"] == ["protect_target", "reverse"]
+    assert vars(hops["b"])["_from_goal"] == ["reverse"]
     assert hops["d"].options == {"topology": "two_way", "two_way": True}
+    # one kept only by a change of its access policy, which waits on an
+    # answer no goal gives, and one migkit cannot keep: not set at all
+    assert hops["e"].options == {}
+    assert hops["f"].options == {}
 
 
 def test_a_verify_hop_writes_nothing(tmp_path):

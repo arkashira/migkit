@@ -71,7 +71,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
 - `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
 - `migkit/fencing.py` - A mover's token, carried into every transaction it writes, so that a mover which lost its hold is refused by the target itself (backlog W1). Classes: Fenced, Token.
-- `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, PostgresHold, MySQLHold, MongoHold, RedisHold, MSSQLHold.
+- `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, PostgresHold, MySQLHold, TiDBHold, MongoHold, RedisHold.
 - `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog
 - `migkit/geo.py` - A shape - a geometry or a geography - as its SRID and its well-known binary, with x the longitude and y the latitude. Classes: Shape.
 - `migkit/guarantees.py` - What a way guarantees, and what a whole strategy of ways does (backlog P0-SMART, the owner's note C of 2026-09-30: "guarantees never traded" Classes: Lift.
@@ -139,13 +139,13 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/split.py` - One database into many (backlog P0-SCENARIOS): a service extracted, a database split by region or by customer - every row placed by rule, ea Classes: Part, Placed.
 - `migkit/stall.py` - A copy whose link holds and passes nothing is given up on. Classes: Stalled, Guard, Watch.
 - `migkit/standby.py` - Reading a side that is a replica, and what that does to the answer.
-- `migkit/state.py` - Pluggable state backend, terraform-style. Classes: LocalStore, S3Store, Taken, S3RunState, Mirror.
+- `migkit/state.py` - Pluggable state backend, terraform-style. Classes: LocalStore, S3Store, Taken, S3RunState, Mirror, TailMirror.
 - `migkit/streamout.py` - Changes delivered as messages into a stream, in the shapes consumers expect (backlog 35): what a message is, whatever carries it - a Kafka t
 - `migkit/subset.py` - Copies for testing (backlog R23, 5): the rows chosen and every row they refer to, masked where the hop says, into a staging or developer dat Classes: Rule, Plan.
 - `migkit/tableengine.py` - A change of storage engine, made in the schema step and held to (backlog P0-SCENARIOS): MyISAM, Aria, MEMORY, ARCHIVE, CSV and MariaDB's own Classes: Traits, Change, Plan.
 - `migkit/tableway.py` - How each table gets to the target: one ladder an engine, one cost model a database, one climb a table. Classes: Way, Pick, Failed.
-- `migkit/tailctl.py` - A running change tail as the rest of migkit sees it. Classes: Running.
-- `migkit/tailtables.py` - A running tail's tables, each in a state of its own (backlog L1, L4, L5, L6; research: leapfrog live tail 2026-09-28, section 1.3). Classes: Spool, TableSet.
+- `migkit/tailctl.py` - A running change tail as the rest of migkit sees it, and the one loop every tail runs. Classes: Running.
+- `migkit/tailtables.py` - A running tail's tables, each in a state of its own (backlog L1, L4, L5, L6; research: leapfrog live tail 2026-09-28, section 1.3). Classes: Store, Spool, TableSet.
 - `migkit/tally.py` - Rows counted and fingerprinted as they pass through a copy. Classes: Tally.
 - `migkit/throttle.py` - Keep verification from becoming the outage it went looking for. Classes: Health, Throttle.
 - `migkit/tls.py` - Whether a connection to a server can be verified, asked of the server.

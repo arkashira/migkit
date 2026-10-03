@@ -495,23 +495,15 @@ def terms_accepted(program):
 def _record(program, how):
     import datetime
     import getpass
-    import json
-    import os
     home = _home()
     home.mkdir(parents=True, exist_ok=True)
-    path = home / TERMS_FILE
-    try:
-        got = json.loads(path.read_text())
-    except (OSError, ValueError):
-        got = {}
-    got[program] = {"licence": TERMS[program].licence,
-                    "url": TERMS[program].url, "how": how,
-                    "by": getpass.getuser(),
-                    "at": datetime.datetime.now(datetime.timezone.utc)
-                    .isoformat(timespec="seconds")}
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(got, indent=1))
-    os.replace(tmp, path)
+    from . import durable
+    durable.change_json(home / TERMS_FILE, lambda got: got.__setitem__(
+        program, {"licence": TERMS[program].licence,
+                  "url": TERMS[program].url, "how": how,
+                  "by": getpass.getuser(),
+                  "at": datetime.datetime.now(datetime.timezone.utc)
+                  .isoformat(timespec="seconds")}), indent=1)
 
 
 def accept_terms(programs, ask=None, log=print):

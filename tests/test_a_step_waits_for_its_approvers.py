@@ -120,3 +120,28 @@ def test_the_record_shows_an_entry_changed_or_taken_out(tmp_path):
     assert audit.verify(path)[2].startswith("entry 3 does not follow")
     path.write_text("\n".join(lines) + "\n")
     assert audit.verify(path)[2] == ""
+
+
+def test_a_signers_list_anyone_may_change_is_refused(hop):
+    """Whoever may change the signers list may approve: one every user
+    could rewrite was read as it stood (audit SEC21)."""
+    import os
+
+    from migkit import approvals
+    h, _ = hop
+    rule = h.options["approvals"]
+    signers = rule["signers"]
+    assert approvals._signers(rule) == signers
+    os.chmod(signers, 0o666)
+    with pytest.raises(SystemExit, match="every user of this machine"):
+        approvals._signers(rule)
+    os.chmod(signers, 0o644)
+    # or replaced in a directory every user writes, without a sticky bit
+    keys = os.path.dirname(signers)
+    os.chmod(keys, 0o777)
+    try:
+        with pytest.raises(SystemExit, match="a directory every user"):
+            approvals._signers(rule)
+    finally:
+        os.chmod(keys, 0o755)
+    assert approvals._signers(rule) == signers
