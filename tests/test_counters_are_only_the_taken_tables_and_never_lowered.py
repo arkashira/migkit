@@ -2,7 +2,7 @@
 takes, and never set back (backlog P0-SCOPE.6a).
 
 Found by the audit of scope: PostgreSQL's sequence repair listed every
-sequence the source has. With `exclude: [pick_dispatch_queue]` - a table
+sequence the source has. With `exclude: [job_queue]` - a table
 the target writes itself, its keys at 9,000 there and its source's
 sequence at 100 - the plan said REFUSED, and the cutover's counter gate,
 which reads that plan, failed the cutover over a table the hop does not
@@ -51,20 +51,20 @@ def _value(port, seq):
 
 @pytest.fixture
 def target_owned(pg_pair):
-    """`pick_dispatch_queue` is the target's own: its keys reach 9,000
+    """`job_queue` is the target's own: its keys reach 9,000
     there and its counter 12,000, the source's 100. `orders` is moved."""
     for port in (pg_pair["src"], pg_pair["dst"]):
-        psql(port, "create table public.pick_dispatch_queue (id serial"
+        psql(port, "create table public.job_queue (id serial"
                    " primary key, v text);"
                    " create table public.orders (id serial primary key,"
                    " v text)")
-    psql(pg_pair["src"], "insert into public.pick_dispatch_queue (v) select"
+    psql(pg_pair["src"], "insert into public.job_queue (v) select"
                          " 's' from generate_series(1, 100);"
                          " insert into public.orders (v) select 'o' from"
                          " generate_series(1, 50)")
-    psql(pg_pair["dst"], "insert into public.pick_dispatch_queue select g,"
+    psql(pg_pair["dst"], "insert into public.job_queue select g,"
                          " 't' from generate_series(1, 9000) g;"
-                         " select setval('public.pick_dispatch_queue_id_seq',"
+                         " select setval('public.job_queue_id_seq',"
                          " 12000);"
                          " insert into public.orders select g, 'o' from"
                          " generate_series(1, 50) g")
@@ -73,30 +73,30 @@ def target_owned(pg_pair):
 
 def test_postgres_an_excluded_tables_sequence_is_not_planned(
         pg_pair, tmp_path, target_owned):
-    eng = _pg(pg_pair, tmp_path, exclude=["pick_dispatch_queue"])
+    eng = _pg(pg_pair, tmp_path, exclude=["job_queue"])
     plan = eng.repair_plan("postgres", "sequences")
     said = " ".join(a.note for a in plan)
     stmts = [s for a in plan for s in a.statements]
     assert "REFUSED" not in said, said
-    assert not [s for s in stmts if "pick_dispatch_queue" in s], stmts
+    assert not [s for s in stmts if "job_queue" in s], stmts
     assert [s for s in stmts if "orders_id_seq', 50," in s], stmts
     # set, the target's own counter stays where its writer left it
     for a in plan:
         eng.apply("postgres", a)
-    assert _value(pg_pair["dst"], "public.pick_dispatch_queue_id_seq") \
+    assert _value(pg_pair["dst"], "public.job_queue_id_seq") \
         == 12000
     assert _value(pg_pair["dst"], "public.orders_id_seq") == 50
     # and the check reads the moved table's counter only
     got = eng.check_autoinc("postgres")
     assert [r.status for r in got] == ["ok", "ok"], \
         [(r.scope, r.status, r.detail) for r in got]
-    assert "pick_dispatch_queue" not in " ".join(r.detail for r in got)
+    assert "job_queue" not in " ".join(r.detail for r in got)
 
 
 def test_postgres_the_cutovers_counter_gate_passes_an_excluded_table(
         pg_pair, tmp_path, target_owned):
     from migkit import cutover
-    eng = _pg(pg_pair, tmp_path, exclude=["pick_dispatch_queue"])
+    eng = _pg(pg_pair, tmp_path, exclude=["job_queue"])
     rows = cutover._counter_rows(eng.hop, eng, "postgres", None, "fail")
     assert not [r for r in rows if r[0] == "fail"], rows
     # the gate still refuses where a table the hop takes is ahead
@@ -153,13 +153,13 @@ def test_postgres_a_sequence_no_table_owns_goes_with_what_draws_from_it(
 def test_postgres_the_dump_leaves_an_excluded_tables_sequence_out(
         pg_pair, tmp_path, target_owned):
     from migkit import movers
-    eng = _pg(pg_pair, tmp_path, exclude=["pick_dispatch_queue"])
+    eng = _pg(pg_pair, tmp_path, exclude=["job_queue"])
     assert movers._pg_sequences_left_out(eng.hop, "postgres") == \
-        ["public.pick_dispatch_queue_id_seq"]
+        ["public.job_queue_id_seq"]
     steps = movers.pgdump_move(eng.hop, "postgres", 1, False, None)
     argv = next(s.argv for s in steps if getattr(s, "argv", None)
                 and s.argv[0] == "pg_dump")
-    at = argv.index('"public"."pick_dispatch_queue_id_seq"')
+    at = argv.index('"public"."job_queue_id_seq"')
     assert argv[at - 1] == "-T", argv
     assert '"public"."orders_id_seq"' not in argv, argv
     # a hop that leaves nothing out dumps every sequence, as before
@@ -184,7 +184,7 @@ def test_postgres_a_move_by_the_dump_keeps_the_targets_own_counter(
         f"    target: {{host: 127.0.0.1, port: {pg_pair['dst']},"
         " user: postgres, password: test}\n"
         "    databases: [postgres]\n"
-        "    exclude: [pick_dispatch_queue]\n")
+        "    exclude: [job_queue]\n")
     monkeypatch.setattr(cfg, "CONF", str(conf))
     monkeypatch.setattr(cfg, "REPORTS", tmp_path / "reports")
     monkeypatch.setenv("MIGKIT_MOVER", "pgdump")
@@ -193,10 +193,10 @@ def test_postgres_a_move_by_the_dump_keeps_the_targets_own_counter(
     got = CliRunner().invoke(cli.main, ["move", "ctr", "--go"])
     said = " ".join((got.output + str(got.exception or "")).split())
     assert got.exit_code == 0, said
-    assert _value(pg_pair["dst"], "public.pick_dispatch_queue_id_seq") \
+    assert _value(pg_pair["dst"], "public.job_queue_id_seq") \
         == 12000
     assert psql(pg_pair["dst"], "select count(*) from"
-                                " public.pick_dispatch_queue").stdout.strip() \
+                                " public.job_queue").stdout.strip() \
         == "9000"
     assert _value(pg_pair["dst"], "public.orders_id_seq") == 50
 
@@ -212,16 +212,16 @@ def _my(exclude=()):
 @pytest.fixture
 def my_target_owned(my_pair):
     ddl = ("drop database if exists ctr; create database ctr; use ctr;"
-           " create table pick_dispatch_queue (id int auto_increment"
+           " create table job_queue (id int auto_increment"
            " primary key, v int);"
            " create table orders (id int auto_increment primary key, v int);")
     rows = ("insert into {t} (v) select 1 from (with recursive g(i) as"
             " (select 1 union all select i + 1 from g where i < {n})"
             " select i from g) x;")
-    my("src", ddl + rows.format(t="pick_dispatch_queue", n=100)
+    my("src", ddl + rows.format(t="job_queue", n=100)
        + rows.format(t="orders", n=50))
     # the target's own table, its counter at 41; the moved one behind
-    my("dst", ddl + rows.format(t="pick_dispatch_queue", n=40)
+    my("dst", ddl + rows.format(t="job_queue", n=40)
        + rows.format(t="orders", n=10))
     yield
     for side in ("src", "dst"):
@@ -230,23 +230,23 @@ def my_target_owned(my_pair):
 
 def test_mysql_an_excluded_tables_counter_is_neither_read_nor_raised(
         my_target_owned):
-    eng = _my(exclude=["pick_dispatch_queue"])
+    eng = _my(exclude=["job_queue"])
     plan = eng.repair_plan("ctr", "sequences")
     stmts = [s for a in plan for s in a.statements]
     said = " ".join(a.note for a in plan)
-    assert not [s for s in stmts if "pick_dispatch_queue" in s], stmts
-    assert "pick_dispatch_queue" not in said, said
+    assert not [s for s in stmts if "job_queue" in s], stmts
+    assert "job_queue" not in said, said
     assert [s for s in stmts if "`orders` auto_increment = 51" in s], stmts
     for a in plan:
         eng.apply("ctr", a)
     assert my("dst", "set session information_schema_stats_expiry = 0;"
                      " select auto_increment from information_schema.tables"
                      " where table_schema = 'ctr' and table_name ="
-                     " 'pick_dispatch_queue'") == "41"
+                     " 'job_queue'") == "41"
     got = eng.check_autoinc("ctr")
     assert [r.status for r in got] == ["ok", "ok"], \
         [(r.scope, r.status, r.detail) for r in got]
-    assert "pick_dispatch_queue" not in " ".join(r.detail for r in got)
+    assert "job_queue" not in " ".join(r.detail for r in got)
 
 
 def test_mysql_without_the_exclude_the_table_is_read_as_before(
@@ -254,11 +254,11 @@ def test_mysql_without_the_exclude_the_table_is_read_as_before(
     eng = _my()
     stmts = [s for a in eng.repair_plan("ctr", "sequences")
              for s in a.statements]
-    assert [s for s in stmts if "pick_dispatch_queue" in s], stmts
+    assert [s for s in stmts if "job_queue" in s], stmts
     parity = [r for r in eng.check_autoinc("ctr")
               if r.scope == "ctr parity"]
     assert parity[0].status == "diff" and \
-        "pick_dispatch_queue" in parity[0].detail, parity
+        "job_queue" in parity[0].detail, parity
 
 
 # -- SQL Server, its catalogue's answers given ---------------------------------
@@ -273,27 +273,27 @@ def _ms(answers, exclude=()):
 
 
 def test_sql_server_reseeds_only_the_taken_tables_and_never_back():
-    seeds = {"src": [["dbo.orders", "50"], ["dbo.pick_dispatch_queue", "100"],
+    seeds = {"src": [["dbo.orders", "50"], ["dbo.job_queue", "100"],
                      ["dbo.lines", "20"]],
              "dst": [["dbo.orders", "10"],
-                     ["dbo.pick_dispatch_queue", "12000"],
+                     ["dbo.job_queue", "12000"],
                      ["dbo.lines", "500"]]}
     eng = _ms(lambda side, db, sql: seeds[side],
-              exclude=["dbo.pick_dispatch_queue"])
+              exclude=["dbo.job_queue"])
     plan = eng.repair_plan("app", "sequences")
     stmts = [s for a in plan for s in a.statements]
     assert stmts == ["dbcc checkident ('[dbo].[orders]', reseed, 50);"
                      "  -- dst now 10"], stmts
     said = " ".join(a.note for a in plan)
     assert "never lowered" in said and "dbo.lines" in said, said
-    assert "pick_dispatch_queue" not in said, said
+    assert "job_queue" not in said, said
 
 
 def test_sql_server_checks_the_identities_of_the_taken_tables_only():
     ident = {"src": [["dbo.orders", "id", "50"],
-                     ["dbo.pick_dispatch_queue", "id", "100"]],
+                     ["dbo.job_queue", "id", "100"]],
              "dst": [["dbo.orders", "id", "50"],
-                     ["dbo.pick_dispatch_queue", "id", "12000"]]}
+                     ["dbo.job_queue", "id", "12000"]]}
     read = []
 
     def answers(side, db, sql):
@@ -301,6 +301,6 @@ def test_sql_server_checks_the_identities_of_the_taken_tables_only():
             return ident[side]
         read.append(sql)
         return [["50"]]
-    got = _ms(answers, exclude=["pick_dispatch_queue"]).check_autoinc("app")
+    got = _ms(answers, exclude=["job_queue"]).check_autoinc("app")
     assert [r.status for r in got] == ["ok", "ok"], got
-    assert not [q for q in read if "pick_dispatch_queue" in q], read
+    assert not [q for q in read if "job_queue" in q], read

@@ -4138,11 +4138,12 @@ select json_build_object(
 
         def out(kind, name):
             name = str(name)
+            by = name
             if kind.lower() in ("function", "procedure", "routine"):
-                name = name.split("(", 1)[0]
+                name = by = name.split("(", 1)[0]
             elif name in owned:
-                name = ".".join(owned[name][:2])
-            return not self.in_scope(db, name)
+                by = ".".join(owned[name][:2])
+            return not self.takes(db, kind, name, by)
         return out
 
     def _objects_not_taken(self, side, db):
@@ -4299,7 +4300,7 @@ select json_build_object(
         them is; one nothing owns or draws from is judged by its own name.
 
         Found by the audit of scope (backlog P0-SCOPE.6a): with `exclude:
-        [pick_dispatch_queue]`, a table the target writes itself, its
+        [job_queue]`, a table the target writes itself, its
         sequence was planned from the source's last value - below the keys
         the target had handed out, so the cutover's counter gate refused,
         and set, the target's next insert would have taken a key it holds.

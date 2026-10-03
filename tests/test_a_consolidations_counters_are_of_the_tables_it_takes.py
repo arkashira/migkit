@@ -32,7 +32,7 @@ class _Target(Engine):
     def _q(self, side, sql, args=None):
         self.read.append(sql)
         if "information_schema.columns" in sql:
-            return [("orders", "id", 51), ("pick_dispatch_queue", "id", 41)]
+            return [("orders", "id", 51), ("job_queue", "id", 41)]
         return [(51,)] if "`orders`" in sql else [(41,)]
 
 
@@ -42,11 +42,11 @@ def _hop(exclude=()):
 
 
 def test_a_table_the_hop_leaves_out_is_not_asked():
-    dst = _Target(_hop(exclude=["pick_dispatch_queue"]))
+    dst = _Target(_hop(exclude=["job_queue"]))
     got = consolidate._mysql_counters(dst, "shop")
     assert got.status == "diff" and "orders.id" in got.detail, got
-    assert "pick_dispatch_queue" not in got.detail, got
-    assert not [q for q in dst.read if "`pick_dispatch_queue`" in q], \
+    assert "job_queue" not in got.detail, got
+    assert not [q for q in dst.read if "`job_queue`" in q], \
         dst.read
 
 
@@ -55,4 +55,4 @@ def test_a_hop_that_takes_every_table_asks_every_counter():
     got = consolidate._mysql_counters(dst, "shop")
     assert got.status == "diff", got
     assert "orders.id" in got.detail and \
-        "pick_dispatch_queue.id" in got.detail, got
+        "job_queue.id" in got.detail, got

@@ -128,6 +128,19 @@ OBJECT_GROUPS = {"routines": ("functions", "procedures"),
                  "routine": ("functions", "procedures")}
 
 
+def object_kind(word):
+    """The kind of `objects` a word names - `view`, `materialized view`,
+    `function`, `trigger` as the inventories say them - or None for a
+    word that is not one (a table, an index: they follow the table)."""
+    w = str(word or "").strip().lower().replace("_", " ")
+    if w in ("materialized view", "matview", "mview"):
+        return "views"
+    for kind, words in OBJECT_KINDS.items():
+        if w in words:
+            return kind
+    return None
+
+
 def objects_of(hop):
     """{kind: True | False | [names]} of the hop's `objects`, each kind
     under its one name (`OBJECT_KINDS`; `routines` says functions and
@@ -201,8 +214,12 @@ def scoped(hop):
     `include` that takes less than everything. A way that carries a whole
     database, a whole server or a whole keyspace serves only a hop that
     is not; the one `excluded` answers which objects."""
-    return bool(getattr(hop, "exclude", None) or getattr(hop, "include",
-                                                         None))
+    if getattr(hop, "exclude", None) or getattr(hop, "include", None):
+        return True
+    try:
+        return any(v is not True for v in objects_of(hop).values())
+    except SystemExit:
+        return False
 
 
 @dataclass
@@ -1054,7 +1071,7 @@ class Hop:
         evidence carries and before the move, so nobody takes its absence
         on the target for a pass. A table's own objects follow the table
         too (`excluded`)."""
-        got = objects_of(self).get(kind, True)
+        got = objects_of(self).get(object_kind(kind), True)
         if got is True:
             return True
         if got is False:
