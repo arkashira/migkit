@@ -132,6 +132,24 @@ def _both_ways():
                 gives=frozenset({"apart"}), needs=tuple(needs))
 
 
+def _like(pattern):
+    """A hop's shell pattern as a replica filter's: `*` as `%`, `?` as
+    `_`, and a `%`, `_` or backslash of the name's own escaped - `_` in a
+    name is common (`order_items`), and unescaped it took `orderXitems`
+    too."""
+    out = []
+    for ch in str(pattern):
+        if ch == "*":
+            out.append("%")
+        elif ch == "?":
+            out.append("_")
+        elif ch in "%_\\":
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 class MySQLEngine(Engine):
     ENGINE_FAMILY = "mysql"
     checks = ("schema", "counts", "autoinc", "data")
@@ -1161,12 +1179,15 @@ class MySQLEngine(Engine):
             if isinstance(ev.query, bytes) else str(ev.query)
         out = []
         for d, t, kind, to in logddl.mysql(ev.query, ev.schema):
+            came = None
             if to is not None and to[0] != here:
                 # renamed into another database: gone from this one
                 kind, to = ("drop", None)
             if d != here:
                 if kind == "rename" and to is not None:
-                    # renamed into this one from another: a table made here
+                    # renamed into this one from another: a table made here,
+                    # with the rows it had there (`canon.CAME_FROM`)
+                    came = f"{d}.{t}"
                     d, t, kind, to = here, to[1], "create", None
                 else:
                     continue
@@ -1176,9 +1197,11 @@ class MySQLEngine(Engine):
             if self.hop.excluded(db, t) and not (
                     to is not None and not self.hop.excluded(db, to[1])):
                 continue
-            out.append(canon.ddl(t, kind, sql=sql[:4000],
-                                 to=to[1] if to is not None else None,
-                                 txn=gtid))
+            got = canon.ddl(t, kind, sql=sql[:4000],
+                            to=to[1] if to is not None else None, txn=gtid)
+            if came:
+                got[canon.CAME_FROM] = came
+            out.append(got)
         return out
 
     @staticmethod
@@ -7903,34 +7926,124 @@ class MySQLEngine(Engine):
         hop excludes - which stopped the replica on a key the target
         already had. With them the first was not applied, and neither was
         a DROP of the excluded table. Rules name the target's databases:
-        a rewrite is applied before them."""
-        rewrite, do, ignore = [], [], []
+        a rewrite is applied before them.
+
+        (rewrites, wildcard takes, exact ignores, exact takes, the hop's
+        patterns the filters cannot hold). The hop's patterns become the
+        replica's own, so a table made later is taken or left by the rule
+        that names it, not by a list read once (`_scope_rules`); the tables
+        `hop.excluded` leaves out now - another tool's bookkeeping, migkit's
+        own - are ignored by name besides."""
+        rewrite, do, ignore, exact, cannot = [], [], [], [], []
         for d in self.databases():
             tdb = self._d("dst", d)
             if tdb != d:
                 rewrite.append((d, tdb))
-            do.append(f"{tdb}.%")
             if not scoped(self.hop):
+                do.append(f"{tdb}.%")
                 continue
-            # the tables it excludes as they are named now; a table created
-            # later under an excluded pattern is not in the list
+            got = self._scope_rules(d, tdb)
+            do += got[0]
+            ignore += got[1]
+            exact += got[2]
+            cannot += [c for c in got[3] if c not in cannot]
+        if scoped(self.hop) and not (do or exact):
+            cannot.append("the hop takes no table of its databases, and a"
+                          " replica with no rule that takes writes every"
+                          " table")
+        return rewrite, do, ignore, exact, cannot
+
+    def _scope_rules(self, d, tdb):
+        """([wildcard takes], [exact ignores], [exact takes], [what cannot
+        be held]) for database `d` of a hop that leaves anything out, in
+        `tdb`'s names. The server reads a table's rules in a fixed order -
+        an exact take, an exact ignore, a wildcard take, a wildcard ignore,
+        and with any take there, nothing else (the 8.4 reference manual's
+        order) - so an exact ignore holds against a wildcard take and a
+        wildcard ignore never does: a table matching both is taken. A
+        wildcard exclude beside a wildcard take is therefore not held, and
+        said, as is a `[...]` class, which a filter's pattern has no form
+        for; the replica is then not used for the hop (`native_scope_unsafe`)
+        and migkit's own tail carries it."""
+        from ..config import has_wildcard
+        whole, takes = self._table_patterns(d, self.hop.include) \
+            if self.hop.include else (True, [])
+        dropped, leaves = self._table_patterns(d, self.hop.exclude)
+        if dropped:
+            # the whole database left out: no rule takes any of it
+            return [], [], [], []
+        wild, exact, cannot = [], [], []
+        if whole:
+            wild.append(f"{tdb}.%")
+        for p in takes:
+            if "[" in p:
+                cannot.append(f"include {p} (a [...] class)")
+            elif has_wildcard(p):
+                wild.append(f"{tdb}.{_like(p)}")
+            elif not self.hop.excluded(d, p):
+                exact.append(f"{tdb}.{p}")
+        ignore = []
+        for p in leaves:
+            if not has_wildcard(p):
+                ignore.append(f"{tdb}.{p}")
+            elif wild:
+                cannot.append(f"exclude {p} (a pattern the server reads only"
+                              " after the patterns that take, which take"
+                              " whatever both name)")
+        if wild:
             ignore += [f"{tdb}.{t}" for t in self._all_tables("src", d)
-                       if self.hop.excluded(d, t)]
-        return rewrite, do, ignore
+                       if self.hop.excluded(d, t)
+                       and f"{tdb}.{t}" not in ignore]
+        return wild, ignore, exact, cannot
+
+    def _table_patterns(self, d, patterns):
+        """(whether `patterns` name database `d` whole, the patterns its
+        tables are named by): each pattern as it names a table alone, and
+        as it does after `d.` (`config.pattern_after`) - `shop.orders` is
+        `orders` in shop and nothing in crm, `*_log` is `*_log` in each."""
+        from ..config import name_matches, pattern_after
+        whole, out = False, []
+        for p in patterns or ():
+            p = str(p)
+            if name_matches(d, p):
+                whole = True
+                continue
+            for q in [p] + pattern_after(p, f"{d}."):
+                # a MySQL table's name holds no dot
+                if q and "." not in q and q not in out:
+                    out.append(q)
+        return whole, out
+
+    def native_scope_unsafe(self):
+        """The hop's patterns the replica's filters cannot hold
+        (`_scope_rules`), in words, or None - asked of a hop that leaves
+        anything out only."""
+        if not scoped(self.hop):
+            return None
+        cannot = self._replica_filters()[4]
+        if not cannot:
+            return None
+        return ("the server's own replica cannot hold the hop's scope as it"
+                f" says it - {'; '.join(cannot[:4])} - and a table made later"
+                " under it would be written by the replica")
 
     def _replica_filter_sql(self, brand):
         """The filters as the target takes them, and the lines its
         configuration needs for them to outlive a restart. Measured: after
         the target restarted, the replica started again by itself with no
         filters at all - set for the channel or not."""
-        rewrite, do, ignore = self._replica_filters()
+        rewrite, do, ignore, exact = self._replica_filters()[:4]
         conf = ([f"replicate-rewrite-db = {a}->{b}" for a, b in rewrite]
+                + [f"replicate-do-table = {r}" for r in exact]
                 + [f"replicate-wild-do-table = {r}" for r in do]
                 + [f"replicate-ignore-table = {r}" for r in ignore])
         if brand == "mariadb":
             stmts = [f"set global replicate_rewrite_db ="
                      f" '{','.join(f'{a}->{b}' for a, b in rewrite)}';"
                      ] if rewrite else []
+            if exact:
+                stmts.append(f"set global replicate_do_table ="
+                             f" '{','.join(exact)}';")
             stmts += [f"set global replicate_wild_do_table ="
                       f" '{','.join(do)}';"]
             if ignore:
@@ -7942,6 +8055,8 @@ class MySQLEngine(Engine):
             parts.append("REPLICATE_REWRITE_DB = ("
                          + ", ".join(f"({a}, {b})" for a, b in rewrite)
                          + ")")
+        if exact:
+            parts.append("REPLICATE_DO_TABLE = (" + ", ".join(exact) + ")")
         parts.append("REPLICATE_WILD_DO_TABLE = ("
                      + ", ".join(f"'{r}'" for r in do) + ")")
         if ignore:
@@ -8280,7 +8395,7 @@ class MySQLEngine(Engine):
             out.append("NOT replicating")
         # the filters are gone after a restart of the target, and the
         # replica starts again without them
-        _, do, _ = self._replica_filters()
+        do = self._replica_filters()[1]
         have = str(r.get("Replicate_Wild_Do_Table") or "")
         missing = [x for x in do if x not in have.split(",")]
         if missing:

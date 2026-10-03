@@ -1860,6 +1860,14 @@ class Engine:
         in words, or None."""
         return None
 
+    def native_scope_unsafe(self):
+        """Why the server's own replication cannot hold to the hop's scope
+        as the hop says it - a pattern its filters have no form for - in
+        words, or None. Asked of a hop that leaves anything out, by the
+        ladder of change ways too (`movers.stream_ways`), which then takes
+        migkit's own tail."""
+        return None
+
     def pooler(self, side):
         """{"name", "mode", "version"} for a connection pooler the side is
         reached through, or None where none is known of. `mode` is how it
@@ -5677,8 +5685,12 @@ class Engine:
 
     #: the DDLs of this engine's log that stop a tail whose hop's `ddl` is
     #: stop (`tailtables`): those the tail stopped on before there was a
-    #: `ddl` - and a table emptied, which was carried by nothing
-    DDL_STOPS = ("truncate",)
+    #: `ddl` - a table emptied, which was carried by nothing, and a table
+    #: renamed: `RENAME TABLE products TO products_old, products_new TO
+    #: products` left the target's products holding the old rows under the
+    #: new table's changes, and a table renamed into the hop's scope joined
+    #: it with none of its rows
+    DDL_STOPS = ("truncate", "rename")
 
     #: the caches of this engine's own that hold a table's columns, taken
     #: away once a DDL has changed the table under them (`forget_shapes`)

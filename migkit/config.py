@@ -89,6 +89,61 @@ def name_matches(name, pattern, fold=False):
     return fold and fnmatchcase(name.casefold(), pattern.casefold())
 
 
+def _shell_parts(pattern):
+    """A shell pattern as its parts: `*`, `?`, a `[...]` class whole, or
+    one plain character."""
+    out, i, text = [], 0, str(pattern)
+    while i < len(text):
+        if text[i] == "[":
+            end = text.find("]", i + 2)
+            if end > 0:
+                out.append(text[i:end + 1])
+                i = end + 1
+                continue
+        out.append(text[i])
+        i += 1
+    return out
+
+
+def pattern_after(pattern, prefix):
+    """The patterns that take what is left of a name once `prefix` has been
+    matched by `pattern`'s start - [] where no start of it matches the
+    prefix. What a program that names tables without their database is
+    handed of a hop's pattern written with it: `shop.orders` after `shop.`
+    is `orders`, `*.orders` is `*.orders` and `orders` (the star took the
+    database, or the database and more), `crm.orders` is nothing. A star
+    can take the dot as `name_matches` reads it, so each way it can is
+    one pattern."""
+    parts = _shell_parts(pattern)
+    out, seen = [], set()
+
+    def walk(i, j):
+        if (i, j) in seen:
+            return
+        seen.add((i, j))
+        if j == len(prefix):
+            got = "".join(parts[i:])
+            if got not in out:
+                out.append(got)
+            return
+        if i == len(parts):
+            return
+        p, ch = parts[i], prefix[j]
+        if p == "*":
+            walk(i + 1, j)
+            walk(i, j + 1)
+        elif p == "?" or p == ch or (len(p) > 1 and name_matches(ch, p)):
+            walk(i + 1, j + 1)
+    walk(0, 0)
+    return out
+
+
+def has_wildcard(pattern):
+    """Whether a hop's pattern holds a wildcard: one that does not names
+    exactly the name it is."""
+    return any(c in str(pattern) for c in "*?[")
+
+
 #: the changes a tail can carry, in the order they are said
 OPS = ("insert", "update", "delete")
 _OP_WORDS = {"i": "insert", "c": "insert", "insert": "insert",
@@ -1115,15 +1170,25 @@ class Hop:
         rules = (self.mapping or {}).get("ops") or {}
         if not rules:
             return frozenset(OPS)
+        best = self.most_particular(rules, *parts)
+        if best is None:
+            return frozenset(OPS)
+        return parse_ops(rules[best])
+
+    def most_particular(self, rules, *parts):
+        """The key of `rules` - names or patterns (`logistics.*`, `*`) -
+        that names this table most particularly, or None: the one with the
+        most characters that are not wildcards, then the longest. How
+        `mapping.ops` and a `ddl` said per table (`tailtables.policy`)
+        pick the rule a table goes by."""
         ids = self._ids(*parts)
         fold = self.folds_case()
         hits = [k for k in rules
                 if any(name_matches(i, k, fold) for i in ids)]
         if not hits:
-            return frozenset(OPS)
-        best = max(hits, key=lambda k: (sum(c not in "*?[]" for c in
+            return None
+        return max(hits, key=lambda k: (sum(c not in "*?[]" for c in
                                             str(k)), len(str(k))))
-        return parse_ops(rules[best])
 
     def tolerance(self, *parts):
         """The percentage this table's aggregates may drift by when read a

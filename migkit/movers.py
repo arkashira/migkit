@@ -5335,12 +5335,20 @@ def stream_ways():
         return Need(f"{way} measured, or the way before it unable to run",
                     lambda f: holds(f) or f["costs"].get(way) is not None,
                     why)
+    # what the hop asks of its tables that the servers' own replication,
+    # which applies whole rows under the source's names, cannot do: its
+    # tables are then followed by migkit's own tail (`by_pair`), which
+    # reads the mapping and the scope in one place
+    as_they_are = Need("the hop's tables carried as they are",
+                       lambda f: not f.get("own_refused"),
+                       lambda f: f["own_refused"])
     return (
         Rung("follow", "the change leg run from here",
              needs=(pg, Need("the target unable to dial the source",
                              lambda f: follow_selected() == "follow",
                              "the target can dial the source, so its own"
-                             " replication carries the changes")),
+                             " replication carries the changes"),
+                    as_they_are),
              because="the target cannot dial the source, and the leg"
                      " connects out to both from here",
              footprint=1),
@@ -5349,6 +5357,7 @@ def stream_ways():
                              lambda f: follow_selected() != "follow",
                              "the target cannot dial the source"
                              " (MIGKIT_CDC=follow)"),
+                    as_they_are,
                     # asked last: it reads the source's publication
                     Need("a source that takes tables into its publication"
                          " without losing their changes",
@@ -5356,15 +5365,18 @@ def stream_ways():
                          lambda f: f["publication_risk"])),
              because="the servers' own replication, nothing running here"),
         Rung("tail", "migkit's own change tail",
-             needs=(Need("a change tail", lambda f: f["tail"],
+             needs=(Need("a change tail",
+                         lambda f: f["tail"] or f.get("by_pair"),
                          "{rung} does not read this engine's log"),
-                    Need("its driver", lambda f: f["ready"],
+                    Need("its driver",
+                         lambda f: f["ready"] or f.get("by_pair"),
                          "the change tail needs a driver this machine does"
                          " not have"),
                     unless_measured(
                         "tail", lambda f: not (f["engine"] == "postgres"
                                                and f["repl"])
-                        or bool(f.get("publication_risk")),
+                        or bool(f.get("publication_risk"))
+                        or bool(f.get("by_pair")),
                         "a PostgreSQL source's changes go by its servers'"
                         " replication or the leg run from here")),
              because="read and applied by migkit, by key, with every batch"
@@ -5377,7 +5389,8 @@ def stream_ways():
                         "replica", lambda f: not f["ready"],
                         "the change tail runs here, and applies by key"
                         " where a replica stops on a row the copy already"
-                        " carried"))),
+                        " carried"),
+                    as_they_are)),
         # its log is a source-available broker: started only once its
         # terms are accepted on this machine, and taken down whatever
         # they are, since a pipeline already running is the operator's
@@ -5399,7 +5412,8 @@ def stream_ways():
 PIPELINE_SAID = "migkit's streaming pipeline"
 
 
-def stream_way(hop, engine, repl, tail, ready, drop=False, risk=None):
+def stream_way(hop, engine, repl, tail, ready, drop=False, risk=None,
+               refused=None, by_pair=None):
     """The `decide.Choice` of the way this hop's changes follow its source,
     from what the engine has (`repl`: its servers' replication, `tail`:
     migkit's change tail, `ready`: the tail's driver installed) and what
@@ -5407,13 +5421,17 @@ def stream_way(hop, engine, repl, tail, ready, drop=False, risk=None):
     being taken down rather than set up. `risk()`, where given, says why
     the servers' own replication would lose a table's changes here
     (`PostgresEngine.publication_add_risk`), read only if that way is
-    still in the running."""
+    still in the running; `refused()` why it would carry the hop's tables
+    wrongly, and `by_pair()` whether migkit's own tail then follows them
+    (`cli._own_refused`)."""
     from .decide import climb
-    facts = stream_facts(hop, engine, repl, tail, ready, drop, risk)
+    facts = stream_facts(hop, engine, repl, tail, ready, drop, risk,
+                         refused, by_pair)
     return climb(hop.name, stream_ways(), facts, costs=facts["costs"])
 
 
-def stream_facts(hop, engine, repl, tail, ready, drop=False, risk=None):
+def stream_facts(hop, engine, repl, tail, ready, drop=False, risk=None,
+                 refused=None, by_pair=None):
     """What `stream_ways`' needs read, as `stream_way` climbs them and as
     `decide.attempt` runs them (`cli._cdc`): one reading of the hop."""
     from .decide import Facts, HopCosts
@@ -5421,7 +5439,9 @@ def stream_facts(hop, engine, repl, tail, ready, drop=False, risk=None):
                   "ready": bool(ready), "costs": HopCosts(hop, "cdc/"),
                   "drop": bool(drop)},
                  broker=lambda: tooluse.allowed("redpanda", hop),
-                 publication_risk=risk or (lambda: ""))
+                 publication_risk=risk or (lambda: ""),
+                 own_refused=refused or (lambda: ""),
+                 by_pair=by_pair or (lambda: False))
 
 
 def _target_writes(hop, db):
@@ -5546,9 +5566,11 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
                     " again")
     # the tables the hop excludes are the target's own, and a stream that
     # carried their source's changes would overwrite what the move left
-    # alone; and a table the hop filters or renames cannot be carried by a
-    # stream that applies whole rows under their own names
-    if _routes_any(hop, db) or hop.table_map():
+    # alone; and a table the hop filters, renames or carries only some
+    # changes of cannot be carried by a stream that applies whole rows
+    # under their own names
+    if _routes_any(hop, db) or hop.table_map() or \
+            (hop.mapping or {}).get("ops"):
         tables = (eng._all_tables("src", db) if go else
                   _within(lambda: eng._all_tables("src", db)))
         if tables is None:
@@ -5816,24 +5838,32 @@ def _sentinel_set(d, env, args, why, log=None):
         log(f"change stream {why} set")
 
 
-def stream_cannot_carry(hop, db, tables, columns_left_out=False):
+def stream_cannot_carry(hop, db, tables, columns_left_out=False,
+                        ops_alike=False):
     """[(table, why)] for the tables of `db` a change stream that applies
     whole rows under their own names would carry wrongly - every one the
-    hop does not exclude and filters, renames, or maps the columns of.
+    hop does not exclude and filters, renames, maps the columns of, or
+    carries only some changes of (`mapping.ops`).
 
     Such a stream used to carry them anyway, and the check could not see
     it: `check` applies a row filter to both sides, so every row outside
     it that the stream wrote onto the target went unread. `columns_left_out`
-    says the stream can leave a table's columns out (`column.exclude.list`
+    says the stream can leave a table's columns out (`column.include.list`
     on the pipeline), which answers a kept or dropped column and nothing
-    else."""
-    out = []
+    else; `ops_alike` that it can leave the same changes out of every
+    table (`skipped.operations`), which answers a hop whose tables all
+    carry the same ones."""
+    from .config import OPS
+    out, alike = [], None
     for ident in tables:
         parts = [p for p in str(ident).split(".") if p]
         if hop.excluded(db, *parts):
             continue
         name = ".".join(parts)
         cols = hop.column_rules(db, *parts)
+        carried = hop.carries(db, *parts)
+        if alike is None:
+            alike = carried
         if hop.row_filter(db, *parts):
             out.append((name, "its rows are filtered"))
         elif _renamed(hop, db, parts):
@@ -5842,6 +5872,12 @@ def stream_cannot_carry(hop, db, tables, columns_left_out=False):
             out.append((name, "its columns are renamed"))
         elif (cols.get("keep") or cols.get("drop")) and not columns_left_out:
             out.append((name, "its columns are kept or dropped"))
+        elif carried != frozenset(OPS) and not ops_alike:
+            out.append((name, "it carries only " + ", ".join(
+                f"{o}s" for o in OPS if o in carried)))
+        elif ops_alike and carried != alike:
+            out.append((name, "it carries other changes than the hop's"
+                              " other tables"))
     return out
 
 
@@ -5957,15 +5993,22 @@ def _stream_facts(hop, dbs, src_is_mysql):
     return tables, (size / rows if rows else None), rate
 
 
-def _stream_columns_left_out(hop, dbs, tables, src_is_mysql):
-    """`column.exclude.list` for the columns the hop keeps out, or None:
-    the ones it drops, and the ones outside what it keeps, as the
-    connector matches them - `schema.table.column` on PostgreSQL,
-    `database.table.column` on MySQL, dots escaped."""
+def _stream_columns_taken(hop, dbs, tables, src_is_mysql):
+    """`column.include.list` for a hop that keeps or drops columns, or
+    None: as the connector matches them - `schema.table.column` on
+    PostgreSQL, `database.table.column` on MySQL - a table it keeps
+    columns of takes those by name, one it drops columns of takes every
+    column but those, and every other table every column.
+
+    It was the columns left out, worked out once from the source's
+    columns of the moment: a column added later to a table the hop keeps
+    columns of was not on the list, and the stream carried it. The
+    connector takes one of the two lists; the kept ones are still matched
+    against the source's, a name it does not have refused."""
     from .engines.mysql import MySQLEngine
     from .engines.postgres import PostgresEngine
     eng = (MySQLEngine if src_is_mysql else PostgresEngine)(hop)
-    out = []
+    out, ruled = [], []
     for one in dbs or ["postgres"]:
         catalogue = None
         for ident in tables.get(one) or ():
@@ -5975,8 +6018,9 @@ def _stream_columns_left_out(hop, dbs, tables, src_is_mysql):
             rules = hop.column_rules(one, *parts)
             if not (rules.get("keep") or rules.get("drop")):
                 continue
-            qualified = ".".join([one] + parts if src_is_mysql else parts)
-            gone = list(rules.get("drop") or [])
+            table = _regex_name(".".join([one] + parts if src_is_mysql
+                                         else parts))
+            drop = list(rules.get("drop") or [])
             if rules.get("keep"):
                 if catalogue is None:
                     catalogue = eng.column_catalog("src", one)
@@ -5985,11 +6029,161 @@ def _stream_columns_left_out(hop, dbs, tables, src_is_mysql):
                     raise SystemExit(
                         f"{ident}: the columns the hop keeps could not be"
                         " matched against the source's, so the stream"
-                        " cannot be told which to leave out. Nothing has"
-                        " been started")
-                gone += [c for c in cols if c not in rules["keep"]]
-            out += [f"{qualified}.{c}".replace(".", "\\.") for c in gone]
-    return ",".join(sorted(set(out))) or None
+                        " cannot be told which to take. Nothing has been"
+                        " started")
+                keep = [c for c in rules["keep"] if c not in drop]
+                out.append(f"{table}\\.(?:"
+                           + "|".join(_regex_name(c) for c in keep) + ")")
+            else:
+                out.append(f"{table}\\.(?!(?:"
+                           + "|".join(_regex_name(c) for c in drop)
+                           + ")$)[^.]+")
+            ruled.append(table)
+    if not out:
+        return None
+    out.append("(?!(?:" + "|".join(ruled) + ")\\.[^.]+$).+")
+    return ",".join(out)
+
+
+def _regex_name(name):
+    """A name as a regular expression the connector reads that matches it
+    and nothing else: every character but a letter, a digit and `_`
+    escaped. A comma ends an entry of the connector's lists, so a name
+    holding one is refused."""
+    if "," in str(name):
+        raise SystemExit(f"{name}: a name holding a comma cannot be put on"
+                         f" {PIPELINE_SAID}'s lists, which a comma divides."
+                         " Nothing has been started")
+    return "".join(ch if ch.isalnum() or ch == "_" else "\\" + ch
+                   for ch in str(name))
+
+
+def _shell_regex(pattern):
+    """A hop's shell pattern (`config.name_matches`) as a regular
+    expression the connector reads: `*` any run, `?` one character, a
+    `[...]` class as itself, the rest as it is (`_regex_name`)."""
+    from .config import _shell_parts
+    out = []
+    for part in _shell_parts(pattern):
+        if part == "*":
+            out.append(".*")
+        elif part == "?":
+            out.append(".")
+        elif len(part) > 1:
+            body = part[1:-1]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out.append("[" + body.replace("\\", "\\\\") + "]")
+        else:
+            out.append(_regex_name(part))
+    return "".join(out)
+
+
+def _connector_takes(hop, db, patterns, mysql, include=False):
+    """A regular expression over the connector's name of a table -
+    `database.table` on MySQL, `schema.table` on PostgreSQL, whose
+    connector reads one database - for the tables of `db` that `patterns`
+    name as the hop reads them: right-anchored, so a pattern names a table
+    by its whole name or any end of it (`Hop.excluded`), and an `include`
+    pattern by its schema's or its database's too (`Hop.included`); one
+    written with the database is read after it (`config.pattern_after`).
+    None where they name none; `.*` where one names the whole database."""
+    from .config import has_wildcard, name_matches, pattern_after
+
+    def fits(r, dots):
+        # whether a pattern can name a name of that many dots
+        return has_wildcard(r) or r.count(".") == dots
+    alts = []
+    for p in patterns:
+        p = str(p)
+        if name_matches(db, p):
+            alts = [".*"]
+            break
+        after = [r for r in pattern_after(p, f"{db}.") if r]
+        if mysql:
+            # `table`, named with its database or without
+            alts += [_shell_regex(r) for r in after + [p] if fits(r, 0)]
+            continue
+        if include:
+            # its schema, named with the database or without
+            alts += [f"{_shell_regex(r)}\\..+" for r in after + [p]
+                     if fits(r, 0)]
+        # `schema.table`, with the database or without; `table`
+        alts += [_shell_regex(r) for r in after + [p] if fits(r, 1)]
+        if fits(p, 0):
+            alts.append(f"[^.]+\\.{_shell_regex(p)}")
+    if not alts:
+        return None
+    alts = list(dict.fromkeys(alts))
+    body = alts[0] if len(alts) == 1 else "(?:" + "|".join(alts) + ")"
+    return f"{_regex_name(db)}\\.{body}" if mysql else body
+
+
+def debezium_tables(hop, dbs, tables, mysql):
+    """The connector's table list for a hop that leaves anything out, by
+    the hop's own patterns, in every database it reads: where the hop
+    says what it takes, `table.include.list` of those, with what it
+    leaves out as a lookahead before each - the connector takes one of
+    the two lists; else `table.exclude.list` of what it leaves out. Both
+    hold, beside the patterns, the tables `hop.excluded` leaves out by a
+    rule of its own now (another tool's bookkeeping, migkit's own:
+    `debezium_exclude`) - by name, which is what they are known by.
+
+    It was the excluded tables of the first database alone, read once:
+    the second database's were streamed, and a table made later outside
+    what the hop takes, or under a pattern it leaves out, was streamed
+    and made on the target by the sink."""
+    out = []
+    taking = []
+    for one in dbs:
+        listed = tables.get(one)
+        gone = _connector_takes(hop, one, hop.exclude or [], mysql)
+        take = (_connector_takes(hop, one, hop.include, mysql, include=True)
+                if hop.include else ".*")
+        if take is None:
+            # a database the hop takes nothing of
+            continue
+        named = []
+        if listed is not None:
+            got = debezium_exclude(hop, one, listed,
+                                   one if mysql else "public")
+            # by name only those the patterns do not already leave out,
+            # and only among what they take
+            for n in got.split(",") if got else []:
+                plain = n.replace("\\.", ".")
+                if (gone and re.fullmatch(gone, plain)) or \
+                        not re.fullmatch(take, plain):
+                    continue
+                named.append(n)
+        leave = ([gone] if gone else []) + named
+        if not hop.include:
+            out += leave
+            continue
+        taking.append((f"(?!(?:{'|'.join(leave)})$)" if leave else "")
+                      + take)
+    if hop.include:
+        # a database it takes nothing of is left out whole
+        return {"table.include.list": ",".join(taking) or "(?!)"}
+    return {"table.exclude.list": ",".join(out)} if out else {}
+
+
+def _skipped_operations(hop, tables):
+    """`skipped.operations`: the changes the hop's `mapping.ops` leaves
+    out, where every table it carries leaves out the same
+    (`stream_cannot_carry` refuses a hop where not) - a delete left out
+    leaves a truncate out too, which takes away what a delete would -
+    else none."""
+    from .config import OPS
+    seen = {hop.carries(one, *[p for p in str(t).split(".") if p])
+            for one, listed in tables.items() for t in listed or ()
+            if not hop.excluded(one, *[p for p in str(t).split(".") if p])}
+    if len(seen) != 1:
+        return "none"
+    carried = next(iter(seen))
+    out = [w for o, w in zip(OPS, "cud") if o not in carried]
+    if "delete" not in carried:
+        out.append("t")
+    return ",".join(out) or "none"
 
 
 def value_modes(mysql):
@@ -6058,11 +6252,28 @@ def stream_codegen(hop, dbs, engine):
       whose tables are quiet still lets the source's log go
     * snapshot progress on a notification topic, read back in migkit's
       words (`stream_progress`)
-    * the columns the hop keeps out left out at the source; a table the
-      hop filters or renames is refused (`stream_cannot_carry`) - the
-      pipeline would carry it whole under its own name
+    * the tables by the hop's own patterns (`debezium_tables`): what it
+      takes on the include list, what it leaves out as a lookahead before
+      it or on the exclude list - so a table made later is taken or left
+      by the rule that names it, in every database of the hop
+    * the columns the hop keeps taken by name (`column.include.list`), so
+      a column added later to a table it keeps columns of stays out; a
+      table the hop filters or renames is refused (`stream_cannot_carry`)
+      - the pipeline would carry it whole under its own name
+    * the changes the hop does not carry left out where every table
+      carries the same (`skipped.operations`), and refused where not
+    * one database, written into the hop's name for it on the target: the
+      sink writes into the one its address names, and every database's
+      tables went into the first's
     """
     from . import sizing
+    if len(dbs or ()) > 1:
+        raise SystemExit(
+            f"the hop moves {len(dbs)} databases ({', '.join(dbs[:4])}), and"
+            f" {PIPELINE_SAID} writes into the one database its sink is"
+            " given: every database's tables would land in the first's."
+            " Nothing has been started - follow one database a hop, or"
+            " with migkit's own change tail")
     out = hop.report_dir() / "stream"
     out.mkdir(parents=True, exist_ok=True)
     s, t = hop.source, hop.target
@@ -6080,7 +6291,8 @@ def stream_codegen(hop, dbs, engine):
                 " the hop maps cannot be matched against them. Nothing has"
                 " been started")
         refused += stream_cannot_carry(hop, one, listed or (),
-                                       columns_left_out=True)
+                                       columns_left_out=True,
+                                       ops_alike=True)
     if refused:
         raise SystemExit(cannot_carry_words(refused))
     buffers = sizing.stream_buffers(row_bytes, rate)
@@ -6111,7 +6323,7 @@ def stream_codegen(hop, dbs, engine):
             "notification.sink.topic.name": f"{name}-notifications",
             "provide.transaction.metadata": "true",
             "topic.transaction": TRANSACTION_TOPIC,
-            "skipped.operations": "none",
+            "skipped.operations": _skipped_operations(hop, tables),
             "event.processing.failure.handling.mode": "fail",
             "heartbeat.interval.ms": "60000",
             **value_modes(src_is_mysql),
@@ -6142,22 +6354,16 @@ def stream_codegen(hop, dbs, engine):
             # the same, from the source's own snapshot of transactions in
             # flight rather than from rows written into it
             source["config"]["read.only"] = "true"
-    # what the hop already excludes, kept out of the stream as well. The
-    # same resolution the bulk movers and `check` use, so a table nobody
-    # wants is not carried by the CDC leg either.
+    # what the hop takes and leaves out, by its own patterns: the same
+    # reading `check` makes (`Hop.included`, `Hop.excluded`), so a table
+    # nobody wants is not carried by the CDC leg either - one made later
+    # included
     if _scoped(hop):
-        one = dbs[0] if dbs else "postgres"
-        listed = tables.get(one)
-        # a source that cannot be listed leaves the stream unfiltered
-        # rather than guessing at names; the README says so
-        skip = (debezium_exclude(hop, one, listed,
-                                 one if src_is_mysql else "public")
-                if listed is not None else None)
-        if skip:
-            source["config"]["table.exclude.list"] = skip
-    left_out = _stream_columns_left_out(hop, dbs, tables, src_is_mysql)
-    if left_out:
-        source["config"]["column.exclude.list"] = left_out
+        source["config"].update(debezium_tables(hop, dbs or ["postgres"],
+                                                tables, src_is_mysql))
+    taken = _stream_columns_taken(hop, dbs, tables, src_is_mysql)
+    if taken:
+        source["config"]["column.include.list"] = taken
     # the hop's TLS, as each connector takes it; the files it names are
     # given to the runtime read-only, at the same paths
     tls_src, files = _debezium_tls(s, src_is_mysql)
@@ -6174,7 +6380,9 @@ def stream_codegen(hop, dbs, engine):
             "connector.class": "io.debezium.connector.jdbc.JdbcSinkConnector",
             # every table's topic, and not the transactions' one beside them
             "topics.regex": f"{name}\\.(?!{TRANSACTION_TOPIC}$).*",
-            "connection.url": jdbc + (dbs[0] if dbs else "") + query,
+            # the database the hop maps the source's to on the target
+            "connection.url": jdbc + (hop.target_db(dbs[0]) if dbs else "")
+            + query,
             "connection.username": t.user,
             "connection.password": "${env:MIGKIT_TARGET_PASSWORD}",
             "insert.mode": "upsert",
@@ -6421,15 +6629,23 @@ def _debezium_account():
             " and the prefix the sink and the signals find its topics by")
     put(both, "tasks.max", UNUSED, _DEFAULT + " a source connector reads one"
         " change log in one task whatever this says")
-    put(both, "table.exclude.list", USED, "the tables the hop excludes, as"
-        " `hop.excluded` resolves them against the source, dots escaped")
-    put(both, "table.include.list", UNUSED, "the hop names what it leaves"
-        " out, not what it takes; one list is enough, and the connector"
-        " takes one of the two")
-    put(both, "column.exclude.list", USED, "the columns the hop keeps out -"
-        " the ones it drops and the ones outside what it keeps")
-    put(both, "column.include.list", UNUSED, "the columns the hop keeps out"
-        " go on the exclude list, which says the same with one list")
+    put(both, "table.exclude.list", USED, "a hop that says only what it"
+        " leaves out: its patterns as anchored expressions"
+        " (`debezium_tables`), so a table made later under one stays out,"
+        " and the tables another rule of `hop.excluded` leaves out now by"
+        " name")
+    put(both, "table.include.list", USED, "a hop that says what it takes:"
+        " its include patterns, in every database it reads, with what it"
+        " leaves out as a lookahead before them - the connector takes one"
+        " of the two lists, and the two are not the same list (a table made"
+        " later outside what the hop takes was streamed)")
+    put(both, "column.exclude.list", UNUSED, "the connector takes one of"
+        " the two lists, and a list of what is left out, read once, let a"
+        " column added later to a table the hop keeps columns of through;"
+        " the include list says it by name")
+    put(both, "column.include.list", USED, "the columns the hop carries:"
+        " the ones it keeps by name, every one but those it drops, every"
+        " column of the other tables (`_stream_columns_taken`)")
     put(both, "skip.messages.without.change", UNUSED, "a change to a column"
         " the hop keeps out still moves nothing on the target, applied or"
         " not; left at its default")
@@ -6501,9 +6717,10 @@ def _debezium_account():
         " can leave that topic out")
     put(both, "skipped.operations", USED, "`none`: its default leaves a"
         " source `TRUNCATE` out, and the target kept every row the source"
-        " had emptied. The hop has no filter of operations yet (a gap the"
-        " backlog lists); where it has one, what it leaves out goes"
-        " here")
+        " had emptied. Where every table the hop carries leaves the same"
+        " changes out (`mapping.ops`), those - and a truncate with a delete"
+        " (`_skipped_operations`); a hop whose tables leave out different"
+        " ones is refused (`stream_cannot_carry`)")
     put(both, "signal.enabled.channels", USED, "the log's own topic, so a"
         " table can be read again without a signalling table in the source")
     put(both, "signal.kafka.", USED, "the signal topic, the broker, and the"

@@ -50,7 +50,14 @@ def test_postgres_stream_leaves_the_excluded_table_out(tmp_path,
                                                 "public.audit_log"])
     out = movers.stream_codegen(_hop("postgres", tmp_path, monkeypatch),
                                 ["shop"], "postgres")
-    assert _excluded_by_the_connector(out) == "public\\.audit_log"
+    # the hop's own pattern: `audit_log` in any schema, as `check` reads it
+    # - one made later included
+    got = _excluded_by_the_connector(out)
+    assert got == "[^.]+\\.audit_log"
+    import re
+    assert re.fullmatch(got, "public.audit_log")
+    assert re.fullmatch(got, "later.audit_log")
+    assert not re.fullmatch(got, "public.orders")
 
 
 def test_the_postgres_table_list_drops_what_the_hop_excludes(tmp_path,

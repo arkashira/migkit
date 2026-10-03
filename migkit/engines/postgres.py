@@ -3308,6 +3308,9 @@ select json_build_object(
         from .. import canon, pgslot
         out, keys, marked, begun = [], {}, None, 0
         seen = self.__dict__.setdefault("_marks_seen", [])
+        # a partition's changes are its root's: the hop takes, filters and
+        # renames a partitioned table by the name the application knows
+        root_of, leaves_of = self._root_reader(side, db, ask)
         for lsn, xid, data in rows:
             last = lsn or last
             if data.startswith("BEGIN"):
@@ -3333,10 +3336,8 @@ select json_build_object(
                 # at its place among the rows, for the tail to cut the
                 # table's changes there (`canon.ddl`)
                 if not marked:
-                    out += [canon.ddl(t, "truncate", txn=int(xid)
-                                      if str(xid or "").isdigit() else None)
-                            for t in parsed["tables"]
-                            if not self.hop.excluded(db, *self._split(t))]
+                    out += self._truncated(db, parsed["tables"], xid,
+                                           root_of, leaves_of)
                 continue
             if two_way and str(table).split(".")[-1] == "migkit_origin":
                 if marked is None:
@@ -3348,10 +3349,15 @@ select json_build_object(
                          if n == "origin"), None)
             if marked:
                 continue
+            leaf, table = table, root_of(table)
             if self.hop.excluded(db, *self._split(table)):
                 continue
+            if table != leaf:
+                parsed = dict(parsed, table=table)
             if table not in keys:
-                keys[table] = self.neutral_key(side, db, table, ask=ask)
+                keys[table] = (self.neutral_key(side, db, table, ask=ask)
+                               or (self.neutral_key(side, db, leaf, ask=ask)
+                                   if leaf != table else []))
                 if not keys[table]:
                     raise SystemExit(
                         f"no primary key on {table} - a change to a keyless"
@@ -3369,6 +3375,134 @@ select json_build_object(
                                      int(xid) if str(xid or "").isdigit()
                                      else None))
         return out, last
+
+    def _truncated(self, db, tables, xid, root_of, leaves_of):
+        """[canon.ddl] of one TRUNCATE the slot read, under each table's
+        root: `truncate` where the table is emptied whole - a partitioned
+        one where every partition it has was - and `reload` where only
+        some of its partitions were, which the tail copies again and never
+        empties in place (the rest of the table's rows are the source's
+        still)."""
+        from .. import canon
+        txn = int(xid) if str(xid or "").isdigit() else None
+        by = {}
+        for t in tables:
+            by.setdefault(root_of(t), []).append(t)
+        out = []
+        for root, got in by.items():
+            if self.hop.excluded(db, *self._split(root)):
+                continue
+            whole = got == [root] or set(got) >= leaves_of(root)
+            out.append(canon.ddl(root, "truncate" if whole else "reload",
+                                 txn=txn))
+        return out
+
+    #: seconds the partitions' roots are taken as read (`partition_roots`)
+    ROOTS_SECONDS = 60
+
+    def partition_roots(self, side, db, ask=None):
+        """{table: the table at the top of its partitions} for every table
+        of the side, named as the change log names them (`schema.table`,
+        each part quoted where it must be) - a table that is no partition
+        is its own. The one reading of partitions by their root: a hop
+        takes, filters and renames a partition through its root, the tail
+        carries a partition's changes under its root's name (`_slot_lines`)
+        and the publication publishes the roots (`published_tables`).
+        `ask(sql)`, where given, asks on that connection."""
+        return self._roots(side, db, ask)[0]
+
+    def _roots(self, side, db, ask=None):
+        """({table: root}, {root: its partitions that hold rows}), read
+        once a side for `ROOTS_SECONDS`."""
+        held = self.__dict__.setdefault("_roots_of", {})
+        at = (side, self._d(side, db))
+        got = held.get(at)
+        if got is not None and time.monotonic() - got[0] < \
+                self.ROOTS_SECONDS:
+            return got[1]
+        name = ("format('%I.%I', {n}.nspname, {c}.relname)")
+        if (self._server_version(side, db) or 0) >= 120000:
+            sql = ("select " + name.format(n="n", c="c") + " || chr(31) ||"
+                   " coalesce((select " + name.format(n="rn", c="r")
+                   + " from pg_class r join pg_namespace rn on rn.oid ="
+                   " r.relnamespace where r.oid = pg_partition_root(c.oid)),"
+                   " " + name.format(n="n", c="c") + ") || chr(31) ||"
+                   " c.relkind from pg_class c join pg_namespace n on n.oid"
+                   " = c.relnamespace where c.relkind in ('r', 'p') and"
+                   " n.nspname not in ('pg_catalog', 'information_schema')")
+        else:
+            # before 12, the top of each table's partitions by its parents
+            sql = ("with recursive up(rel, top) as (select c.oid, c.oid"
+                   " from pg_class c where c.relkind in ('r', 'p') union all"
+                   " select up.rel, i.inhparent from up join pg_inherits i"
+                   " on i.inhrelid = up.top join pg_class p on p.oid ="
+                   " i.inhparent and p.relkind = 'p') select "
+                   + name.format(n="n", c="c") + " || chr(31) || "
+                   + name.format(n="rn", c="r") + " || chr(31) || c.relkind"
+                   " from up join pg_class c on c.oid = up.rel join"
+                   " pg_namespace n on n.oid = c.relnamespace join pg_class"
+                   " r on r.oid = up.top join pg_namespace rn on rn.oid ="
+                   " r.relnamespace where not exists (select 1 from"
+                   " pg_inherits i join pg_class p on p.oid = i.inhparent"
+                   " and p.relkind = 'p' where i.inhrelid = up.top) and"
+                   " n.nspname not in ('pg_catalog', 'information_schema')")
+        text = ask(sql) if ask is not None else self._psql(side, db, sql)
+        roots, leaves = {}, {}
+        for line in text.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 3:
+                continue
+            table, root, kind = parts
+            roots[table] = root
+            if kind == "r":
+                leaves.setdefault(root, set()).add(table)
+        held[at] = (time.monotonic(), (roots, leaves))
+        return roots, leaves
+
+    def _root_reader(self, side, db, ask=None):
+        """(root_of(table), leaves_of(root)) over `_roots`, read again once
+        where a table not among them is met - one made since they were
+        read - and that table its own root where it is still not."""
+        state = {"again": True}
+
+        def got():
+            return self._roots(side, db, ask)
+
+        def root_of(table):
+            roots = got()[0]
+            if table not in roots and state.pop("again", False):
+                self.__dict__.get("_roots_of", {}).pop(
+                    (side, self._d(side, db)), None)
+                roots = got()[0]
+            return roots.get(table, table)
+
+        def leaves_of(root):
+            return got()[1].get(root, {root})
+        return root_of, leaves_of
+
+    #: a table made with its rows in one statement (CREATE TABLE AS,
+    #: SELECT INTO) has those rows in no change the slot decodes, and the
+    #: log says nothing of the table's making: a table a tail meets that
+    #: it did not see made is copied, never taken live (`tailtables`)
+    CREATES_UNSEEN = True
+
+    def table_oids(self, side, db):
+        """{schema.table: its pg_class oid} of the application's tables, as
+        `neutral_tables` names them. The log carries no DDL, and a shape is
+        keyed by name: a table swapped for another under its name (two
+        renames) keeps its name and columns and changes only this - which
+        the tail holds each table to (`tailtables`)."""
+        out = self._psql(side, db, "select n.nspname||'.'||c.relname||"
+                                   "chr(31)||c.oid from pg_class c join"
+                                   " pg_namespace n on n.oid ="
+                                   " c.relnamespace where "
+                                   + user_tables_where())
+        got = {}
+        for line in out.splitlines():
+            name, _, oid = line.rpartition("\x1f")
+            if name:
+                got[name] = oid
+        return got
 
     def snapshot_mark(self, side, db):
         """The server's snapshot now, `xmin:xmax:xip,...` (PostgreSQL 13's
@@ -12127,7 +12261,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                             " copies under the subscription"}
         try:
             tables = self.published_tables(db)
-            publish = self._publication_sql(name, tables)
+            publish = self._publication_sql(name, tables, self._via_root_of(
+                db))
         except RuntimeError as e:
             # a plan shown while the source cannot be reached: the list is
             # read from the source when the plan runs (`LISTED_WHEN_RUN`)
@@ -12219,13 +12354,57 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
 
     def published_tables(self, db):
         """The source's tables the hop moves, as a publication of its
-        lists them: every table but the ones the hop excludes."""
-        return [t for (t,) in self._plan_rows(
+        lists them: every table but the ones the hop excludes.
+
+        A partition is the hop's where its root is (`partition_roots`):
+        `include: [public.orders]` took no partition of it, whose changes
+        the publication then left out, and `exclude: [public.orders]`
+        published every partition. Where the source has partitions, from
+        13 on the publication lists the roots and publishes each
+        partition's changes under its root's name (`_via_root`), as the
+        hop names the table and the target may hold it unpartitioned; a
+        publication made earlier without it keeps the partitions it lists,
+        and so does a server before 13, which takes no partitioned table
+        into a publication."""
+        listed = [t for (t,) in self._plan_rows(
             "src", db, "select schemaname||'.'||tablename from pg_tables"
             " where schemaname not in ('pg_catalog','information_schema')"
-            " order by 1") if not self.hop.excluded(db, *self._split(t))]
+            " order by 1")]
+        via = self.__dict__.setdefault("_via_root", {})
+        via[db] = False
+        roots = {".".join(self._split(a)): ".".join(self._split(b))
+                 for a, b in self.partition_roots("src", db).items()}
+        if all(roots.get(t, t) == t for t in listed):
+            return [t for t in listed
+                    if not self.hop.excluded(db, *self._split(t))]
+        taken = [t for t in listed
+                 if not self.hop.excluded(db, *self._split(roots.get(t, t)))]
+        if (self._server_version("src", db) or 0) >= 130000 and \
+                self._publishes_via_root(db) is not False:
+            via[db] = True
+            return [t for t in taken if roots.get(t, t) == t]
+        parents = {r for t, r in roots.items() if r != t} | {
+            t for (t,) in self._plan_rows(
+                "src", db, "select n.nspname||'.'||c.relname from pg_class"
+                " c join pg_namespace n on n.oid = c.relnamespace where"
+                " c.relkind = 'p'")}
+        return [t for t in taken if t not in parents]
 
-    def _publication_sql(self, name, tables):
+    def _via_root_of(self, db):
+        """Whether the list `published_tables` last made for `db` is of
+        roots, published under their own names."""
+        return bool(self.__dict__.get("_via_root", {}).get(db))
+
+    def _publishes_via_root(self, db):
+        """Whether the hop's publication, where there is one, publishes its
+        partitions' changes under their root's name - None where there is
+        none yet."""
+        got = self._plan_rows("src", db, "select pubviaroot from"
+                                         " pg_publication where pubname ="
+                                         f" {_literal(self._repl_name().lower())}")
+        return bool(got[0][0]) if got else None
+
+    def _publication_sql(self, name, tables, via_root=False):
         """The publication of exactly the hop's tables: `FOR TABLE` every
         table the hop moves, made once and set to that list again on every
         run after.
@@ -12249,11 +12428,18 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         later run finds - on both sides by then; `check` names it until it
         is - is added here by `SET TABLE` and taken on by the refresh that
         run asks of the subscription (`_refresh_sql`): the same step either
-        way, with no superuser and nothing the hop leaves out."""
+        way, with no superuser and nothing the hop leaves out.
+
+        `via_root` lists partitioned tables by their roots, whose
+        partitions' changes are published under the root's name
+        (`published_tables`); a publication made so keeps it, and the list
+        set again on it is the roots' again."""
         listed = [".".join(self._quote_ident(p) for p in self._split(t))
                   for t in tables]
         made = (f"create publication {name}"
-                + (f" for table {', '.join(listed)}" if listed else ""))
+                + (f" for table {', '.join(listed)}" if listed else "")
+                + (" with (publish_via_partition_root = true)" if via_root
+                   else ""))
         # a second `--mode cdc` found the first one's publication and
         # stopped on `already exists`; now it sets the list again
         again = (f" else alter publication {name} set table"
@@ -12266,8 +12452,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         """`REFRESH PUBLICATION` where the hop's subscription is already on
         the target and lacks some of the hop's tables - a run after tables
         were made on both sides - so their rows are copied and their
-        changes follow. Nothing on a first run, where the subscription is
-        made with every table the publication lists."""
+        changes follow; or holds tables the publication no longer lists -
+        a run after tables left the hop's scope - which it lets go of only
+        at a refresh, and until then the stream made ahead read as knowing
+        tables its publication does not (`armed_status`). Nothing on a
+        first run, where the subscription is made with every table the
+        publication lists."""
         if not tables:
             return []
         try:
@@ -12282,7 +12472,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                                                f" subname = {_literal(name)}")
         except RuntimeError:
             return []
-        if not there or not set(tables) - has:
+        if not there or set(tables) == has:
             return []
         return [f"alter subscription {name} refresh publication with"
                 " (copy_data = true);"]
@@ -12328,10 +12518,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             has = {t for (t,) in self._plan_rows(
                 "src", db, "select schemaname||'.'||tablename from"
                 f" pg_publication_tables where pubname = {_literal(name)}")}
-            tables = [t for (t,) in self._plan_rows(
-                "src", db, "select schemaname||'.'||tablename from pg_tables"
-                " where schemaname not in ('pg_catalog','information_schema')"
-                " order by 1") if not self.hop.excluded(db, *self._split(t))]
+            # what the publication would be set to list, as it lists it
+            tables = self.published_tables(db)
         except RuntimeError:
             return ""
         new = [t for t in tables if t not in has]
@@ -12476,8 +12664,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
     def apply_replication_stmt(self, side, db, stmt):
         from .. import envkeys
         if stmt.startswith(self.LISTED_WHEN_RUN):
-            stmt = self._publication_sql(self._repl_name(),
-                                         self.neutral_tables("src", db))
+            # the list as `published_tables` makes it: the tables the
+            # application names were listed, which published every
+            # partition of a partitioned one under its own name
+            tables = self.published_tables(db)
+            stmt = self._publication_sql(self._repl_name(), tables,
+                                         self._via_root_of(db))
         head = stmt.strip().lower()
         if not any(head.startswith(p) for p in self.DIALS_ACROSS):
             return self._psql(side, db, stmt)
