@@ -2919,14 +2919,37 @@ though the job never took it.
       (foreign keys, views, routines, triggers, owned sequences,
       partitions) offered or accepted, and every source object explained
       by the rule that decided it.
-7. **Next (P1):** one row filter compiled to every engine's reading with
-   its time zone and collation, proved alike; object-kind selectors
-   (views, routines, triggers, events, sequences, roles); column
-   transforms the check understands (mask, keyed hash, expression,
-   type change, key override); name policies (case, prefix, suffix);
-   a check scope narrower than the move's said as incomplete, never
-   same; partitions carried by root or leaf; every scope change logged
-   with its source position.
+7. **P1, the cores done 2026-10-03, each read in one place:**
+   - one row filter (`rowfilter`): parsed once in the source's SQL,
+     said in another engine's SQL with its column names, as a document
+     store's query with SQL's NULL kept (`NOT` cannot take a NULL row
+     back in), a filter that moves with the clock or reads another table
+     named before anything is read, its text comparisons named for the
+     collation check; `evaluate`, SQL's three-valued logic, the
+     reference every translation is held to on the same rows (17
+     predicates x 25 rows with NULLs and missing fields, and on
+     PostgreSQL, MySQL and a document store in the suite);
+   - column transforms a check can prove (`transforms`): null, constant,
+     a keyed hash (`mask_key`; the same value, the same digest on every
+     run and machine), truncate - one function in Python and in each
+     engine's SQL, held alike by tests;
+   - objects beside the tables (`objects`): views, functions,
+     procedures, triggers, events, sequences, roles - all, none or by
+     name (`Hop.takes_object`); a DTS job's choices by name read into it,
+     a kind it does not carry said as a finding, never left out;
+   - name rules (`mapping.names`): case, prefix, suffix, a prefix or
+     suffix taken off, per level, read where every target name is
+     (`target_table`, `target_db`); DMS's name rules read into them.
+   Still to wire where they are read (after the part merges): the row
+   filter's translations into the pair engine, the document store and
+   the hop's validation (clock and subquery refused there), its time
+   zone (`where: {expr, tz}`) and the collation check; the transforms
+   into `mask_on_write`, the copier and the check's digests (the source
+   side computing the target's value); `takes_object` into the objects
+   inventory, schema creation and repairs; a name rule's collisions
+   (two names one after the rule) refused. Also: a check scope narrower
+   than the move's said as incomplete, never same; partitions carried
+   by root or leaf; every scope change logged with its source position.
 8. **Still open:**
    a. the Alibaba job's top level for a source with schemas (PostgreSQL,
       SQL Server) is read as its schemas inside the endpoint's database,
@@ -2934,7 +2957,8 @@ though the job never took it.
       job's detail - confirm against one;
    b. the change-capture connector and LOAD-file imports still turn a
       regex or search include into a one-time `exclude`;
-   c. a Huawei DRS / GCP DMS / Azure DMS job read the same way;
+   c. a Huawei DRS / GCP DMS / Azure DMS job read the same way (in
+      progress 2026-10-03, from the providers' documented shapes);
    d. `include` read by a live tail's filter (Debezium `table.include.list`
       instead of a resolved exclude list) so a table made later under a
       taken pattern joins the stream without a restart.
