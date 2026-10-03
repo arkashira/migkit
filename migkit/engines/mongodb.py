@@ -215,11 +215,15 @@ class MongoEngine(Engine):
             name, codec_options=self._client("src").codec_options
             .with_options(document_class=RawBSONDocument))
         target = self._client("dst")[self._d("dst", db)]
-        dst = target[name]
+        # under the name the hop gives it there (`mapping.tables`): it was
+        # written under the source's, and the one the hop names stayed
+        # empty
+        there = self.hop.target_table_in(db, name)
+        dst = target[there]
         after = json_util.loads(st["last"]) if "last" in st else None
         started_here = after is None
         if started_here:
-            st["made"] = name not in target.list_collection_names()
+            st["made"] = there not in target.list_collection_names()
             # what the target already holds is not this copy's
             gone = dst.delete_many({}).deleted_count
             st["moved"] = 0
@@ -283,17 +287,21 @@ class MongoEngine(Engine):
         do. A collection the target does not have at all counts too - this
         engine creates collections on the first write, so a missing one is
         one nothing reached. Excluded collections are not listed, so a
-        collection left out on purpose is not reported.
+        collection left out on purpose is not reported. A renamed one is
+        looked for under the name the hop gives it on the target.
         """
         try:
-            dst = set(self.neutral_tables("dst", db))
+            dst = set(self._client("dst")[self._d("dst", db)]
+                      .list_collection_names())
             s = self._client("src")[db]
             t = self._client("dst")[self._d("dst", db)]
             empty = []
             for c in self.neutral_tables("src", db):
                 if s[c].find_one({}, {"_id": 1}) is None:
                     continue
-                if c not in dst or t[c].find_one({}, {"_id": 1}) is None:
+                there = self.hop.target_table_in(db, c)
+                if there not in dst or t[there].find_one(
+                        {}, {"_id": 1}) is None:
                     empty.append(c)
             return empty
         except Exception:

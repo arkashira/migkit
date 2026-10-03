@@ -36,10 +36,10 @@ class Decision:
         return f"{self.table}: {WORDS[self.path]} - {self.reason}"
 
 
-def _name(parts, qualifier):
+def _name(ident, parts, qualifier):
     if len(parts) > 1 or not qualifier:
-        return ".".join(parts)
-    return f"{qualifier}.{parts[0]}"
+        return str(ident)
+    return f"{qualifier}.{ident}"
 
 
 def _about(fact):
@@ -61,26 +61,32 @@ def ways(via):
     everything the table asks, the table copier where it does not, and
     nothing for a table the hop leaves out."""
     from .decide import Rung
-    from .movers import NEEDS_KEYS, ROW_FILTER_MOVERS
+    from .movers import NEEDS_KEYS, RENAMING_MOVERS, ROW_FILTER_MOVERS
     bulk = {"carried"} | ({"row filter"} if via in ROW_FILTER_MOVERS
                           else set()) | ({"keyless"} if via not in NEEDS_KEYS
-                                         else set())
+                                         else set()) | (
+        {"renamed"} if via in RENAMING_MOVERS else set())
     return (Rung(BULK, "the bulk copy", gives=frozenset(bulk),
                  because="the fastest path here"),
             Rung(COPIER, "the table copier",
                  gives=frozenset({"carried", "row filter",
-                                  "column mapping", "keyless"})),
+                                  "column mapping", "keyless", "renamed"})),
             Rung(LEFT, WORDS[LEFT], gives=frozenset({LEFT})))
 
 
-def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None):
+def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None,
+         roots=None):
     """One `Decision` per table, in name order.
 
     `via` is the bulk path the database goes by; a table it cannot carry
     correctly goes table by table instead. `facts` is `table_facts`'
     answer, keyed like `tables`, or None where the engine gives none.
     What a table asks - to be left alone, its row filter applied, its
-    columns mapped - is climbed against `ways(via)`.
+    columns mapped, a name of its own on the target - is climbed against
+    `ways(via)`. `roots` is {partition: its root} of a PostgreSQL source
+    (`movers._pg_roots`): a partition asks what its root asks, the name
+    the hop's rules are written in, where it used to ask with its own and
+    match none of them.
 
     Where the engine's table ladder has the bulk path's programs among its
     rungs (`tableway`), a table the bulk copy carries goes the way that
@@ -99,18 +105,21 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None):
     rungs = ways(via)
     out = []
     for ident in sorted(tables):
-        parts = [p for p in str(ident).split(".") if p]
-        name = _name(parts, qualifier)
+        parts = movers._asked(hop, ident)
+        # every question the hop answers is asked with the root's name
+        asked = movers._asked(hop, ident, roots)
+        name = _name(ident, parts, qualifier)
         fact = facts.get(ident) or facts.get(name) or {}
         about = _about(fact)
-        if hop.excluded(db, *parts):
+        if hop.excluded(db, *asked):
             need = (LEFT,)
         else:
             need = ("carried",) + (
-                ("row filter",) if filtered and hop.row_filter(db, *parts)
+                ("row filter",) if filtered and hop.row_filter(db, *asked)
                 else ()) + (("column mapping",)
-                            if hop.column_rules(db, *parts) else ()) + (
-                ("keyless",) if fact.get("key") is False else ())
+                            if hop.column_rules(db, *asked) else ()) + (
+                ("keyless",) if fact.get("key") is False else ()) + (
+                ("renamed",) if movers._renamed(hop, db, asked) else ())
         got = climb(name, rungs, need=need)
         mine = (choice.get(name) or choice.get(parts[-1])
                 if got.path == BULK else None)
