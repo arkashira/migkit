@@ -46,6 +46,7 @@ import calendar
 import concurrent.futures
 import datetime
 import json
+import re
 import threading
 import time
 from decimal import Decimal
@@ -103,7 +104,6 @@ def at_ns(ns):
 def seconds_of(text):
     """Seconds of a duration as Spanner writes one - `1d`, `36h`, `90m`,
     `3600s` - or None where it is not one."""
-    import re
     m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([dhms])\s*", str(text or ""))
     if not m:
         return None
@@ -426,7 +426,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
 
     def neutral_tables(self, side, db):
         return sorted(t for t in self._tables_named(side, db)
-                      if not self.hop.excluded(db, *str(t).split(".", 1)))
+                      if self.in_scope(db, str(t)))
 
     def target_missing(self, db):
         return not self._database("dst", db).exists()
@@ -893,7 +893,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
             names = re.findall(r'(?i)(?:create\s+table|\bon|\binterleave\s+in'
                                r'(?:\s+parent)?|alter\s+table|references)'
                                r'\s+[`"]?([\w.]+)[`"]?', stmt)
-            if any(self.hop.excluded(db, *n.split(".", 1)) for n in names):
+            if any(not self.in_scope(db, n) for n in names):
                 continue
             out.append(stmt)
         return out
@@ -993,7 +993,63 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         return self._as_pair().repair_plan(db, kind)
 
     def apply(self, db, action):
+        """A sequence's counter is the target's own, set by its own DDL;
+        rows go through the pair."""
+        if action.kind == "sequences":
+            for statement in action.statements:
+                self.execute_ddl("dst", db, statement.rstrip(";"))
+            return None
         return self._as_pair().apply(db, action)
+
+    #: how long a backup taken before a repair is kept
+    BACKUP_DAYS = 7
+    #: how long its making is waited for
+    BACKUP_WAIT = 6 * 3600
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """What the target held before a repair: each sequence's counter,
+        which a rollback sets back (`restore_sequences`), and a backup of
+        the database at this moment, taken by the service and kept a week,
+        where the instance takes one (the emulator takes none: the reason
+        is kept instead)."""
+        out = {}
+        try:
+            out["sequences"] = {k: None if v is None else int(v) for k, v in
+                                self._sequences("dst", db).items()}
+        except Exception as e:  # noqa: BLE001 - kept as the reason
+            out["no_sequences"] = str(e).strip().splitlines()[0][:160]
+        now = datetime.datetime.now(datetime.timezone.utc)
+        name = re.sub(r"[^a-z0-9-]+", "-",
+                      f"migkit-{state_dir.name}".lower()).strip("-")[:60]
+        try:
+            backup = self._instance("dst").backup(
+                name, database=self._database("dst", db),
+                expire_time=now + datetime.timedelta(days=self.BACKUP_DAYS),
+                version_time=now)
+            backup.create().result(self.BACKUP_WAIT)
+            out["backup"] = backup.name
+        except Exception as e:  # noqa: BLE001 - kept as the reason
+            out["no_backup"] = str(e).strip().splitlines()[0][:160]
+        (state_dir / "dst-spanner.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True))
+
+    def restore_sequences(self, db, state_dir):
+        """The statements that put each sequence's counter back where the
+        snapshot found it."""
+        path = state_dir / "dst-spanner.json"
+        if not path.exists():
+            return []
+        pg = self._pg("dst", db)
+        out = []
+        for seq, counter in sorted((json.loads(path.read_text()).get(
+                "sequences") or {}).items()):
+            if counter is None:
+                continue
+            out.append(f"alter sequence {self._qd('dst', db, seq)} restart"
+                       f" counter with {int(counter) + 1}" if pg else
+                       f"alter sequence {self._q(seq)} set options"
+                       f" (start_with_counter = {int(counter) + 1})")
+        return out
 
     def _sequences(self, side, db):
         """{sequence: its counter} - the internal state a bit-reversed
@@ -1059,6 +1115,8 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
     def _settings(self, side, db):
         out = {}
         for t, row in self._tables_named(side, db).items():
+            if not self.in_scope(db, t):
+                continue
             for k in ("parent_table_name", "on_delete_action",
                       "row_deletion_policy_expression", "interleave_type"):
                 if k in row:
@@ -1095,17 +1153,20 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         out = []
         lacking, building = [], []
         for t in self.neutral_tables("src", db):
+            if not self.in_scope(db, t):
+                continue
             have = {(u, tuple(c)) for _, u, c, _ in
                     self.neutral_indexes("dst", db, t)}
             for name, u, c, _ in self.neutral_indexes("src", db, t):
                 if (u, tuple(c)) not in have:
                     lacking.append(f"{t}.{name}")
-        for name, state in self._execute(
-                "dst", db, "select index_name, index_state from"
-                           " information_schema.indexes where index_type ="
-                           " 'INDEX'"):
+        for table, name, state in self._scoped_rows(db, [
+                (t, n, s) for n, t, s in self._execute(
+                    "dst", db, "select index_name, table_name, index_state"
+                               " from information_schema.indexes where"
+                               " index_type = 'INDEX'")]):
             if state and str(state).upper() != "READ_WRITE":
-                building.append(f"{name} ({state})")
+                building.append(f"{table}.{name} ({state})")
         out.append(Result(
             "deep", f"{db} indexes", "diff" if lacking or building else "ok",
             (f"{len(lacking)} of the source's indexes are not on the target"

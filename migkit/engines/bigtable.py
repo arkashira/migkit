@@ -37,6 +37,7 @@ import base64
 import concurrent.futures
 import datetime
 import json
+import re
 import time
 
 from .base import Engine, NeutralCopier, Result
@@ -118,7 +119,7 @@ class BigtableEngine(NeutralCopier, Engine):
 
     def neutral_tables(self, side, db):
         return sorted(t.table_id for t in self._instance(side, db)
-                      .list_tables() if not self.hop.excluded(db, t.table_id))
+                      .list_tables() if self.in_scope(db, t.table_id))
 
     def target_missing(self, db):
         return not self._instance("dst", db).exists()
@@ -455,6 +456,97 @@ class BigtableEngine(NeutralCopier, Engine):
         return self._param_result(db, src, dst, tuple(set(src) | set(dst)),
                                   "give the target's families the source's"
                                   " garbage collection rules")
+
+    def _replication(self, side, db):
+        """{table: [cluster whose copy of it is not ready, with its state]}
+        of the tables in scope."""
+        from google.cloud.bigtable.enums import Table as T
+        names = {v: k.lower().replace("_", " ") for k, v in
+                 vars(T.ReplicationState).items() if k.isupper()}
+        out = {}
+        for t in self.neutral_tables(side, db):
+            behind = [f"{c} {names.get(s.replication_state, s)}"
+                      for c, s in sorted(self._table(side, db, t)
+                                         .get_cluster_states().items())
+                      if s.replication_state != T.ReplicationState.READY]
+            if behind:
+                out[t] = behind
+        return out
+
+    def check_deep(self, db):
+        """Every cluster of the target holding its copy of each table, ready
+        - a cluster whose copy is still initializing answers reads from
+        part of it - and on the source, each table's change stream on,
+        which a follow reads."""
+        out = []
+        try:
+            behind = self._replication("dst", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            out.append(Result("deep", f"{db} target", "error",
+                              "could not read the tables' clusters:"
+                              f" {str(e).strip().splitlines()[0][:90]}"))
+        else:
+            out.append(Result(
+                "deep", f"{db} target replication",
+                "diff" if behind else "ok",
+                ("copies not ready: " + "; ".join(
+                    f"{t} ({', '.join(c)})" for t, c in
+                    sorted(behind.items())[:4])) if behind else
+                "every cluster holds every table, ready", "",
+                "wait until every cluster's copy is ready" if behind
+                else ""))
+        try:
+            off = [t for t in self.neutral_tables("src", db)
+                   if self._described("src", db, t) is None
+                   and self._retention_s(db, t) is None]
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            out.append(Result("deep", f"{db} source", "error",
+                              "could not read the tables' change streams:"
+                              f" {str(e).strip().splitlines()[0][:90]}"))
+        else:
+            if off:
+                out.append(Result(
+                    "deep", f"{db} source change streams", "warn",
+                    f"{len(off)} tables keep no change stream"
+                    f" ({', '.join(off[:4])}): their changes cannot be"
+                    " followed", "",
+                    "turn each table's change stream on, with a retention"
+                    " longer than the copy takes"))
+        return out
+
+    #: how long a backup taken before a repair is kept
+    BACKUP_DAYS = 7
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """A backup of every target table in scope, taken by the service on
+        the instance's first cluster and kept a week, its name kept - each
+        table's own, at its own moment; where the instance takes none (the
+        emulator), the reason is kept instead."""
+        out, now = {}, datetime.datetime.now(datetime.timezone.utc)
+        try:
+            clusters, _ = self._instance("dst", db).list_clusters()
+            cluster = sorted(c.cluster_id for c in clusters)[0]
+        except Exception as e:  # noqa: BLE001 - kept as the reason
+            cluster, out["no_backup"] = None, str(e).strip().splitlines()[
+                0][:160]
+        for t in self.neutral_tables("dst", db):
+            if cluster is None:
+                break
+            name = re.sub(r"[^a-zA-Z0-9_.-]+", "-",
+                          f"migkit-{state_dir.name}-{t}")[:50]
+            try:
+                backup = self._table("dst", db, t).backup(
+                    name, cluster_id=cluster,
+                    expire_time=now + datetime.timedelta(
+                        days=self.BACKUP_DAYS))
+                backup.create(cluster).result(3600)
+                out[t] = {"backup": f"{cluster}/{name}"}
+            except Exception as e:  # noqa: BLE001 - kept as the reason
+                out[t] = {"no_backup": str(e).strip().splitlines()[0][:160]}
+            out[t]["families"] = {f: repr(g.gc_rule) for f, g in sorted(
+                self._families("dst", db, t).items())}
+        (state_dir / "dst-bigtable.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True))
 
     # ---- who it is -----------------------------------------------------------
 

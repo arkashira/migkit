@@ -127,6 +127,8 @@ class GaussEngine(ProvedDigest, PgWireEngine):
         already has."""
         out = []
         for t in self.neutral_tables("src", db):
+            if not self.in_scope(db, t):
+                continue
             rules = self.neutral_column_rules("src", db, t)
             sch, tbl = self._split(t)
             for col, _ in self.neutral_columns("src", db, t):
@@ -166,6 +168,162 @@ class GaussEngine(ProvedDigest, PgWireEngine):
                         f"select setval('{seq}', {int(hi)});"))
         return out or [Result("autoinc", db, "ok",
                               "no column numbered by a sequence in scope")]
+
+    # ---- settings, the deep check and statistics -----------------------------
+
+    #: what changes what a value means or how a statement reads: the
+    #: database's compatibility (an A-compatible database stores '' as
+    #: NULL), its text, its times and its numbers
+    CRITICAL_PARAMS = ("datcompatibility", "sql_compatibility",
+                       "server_encoding", "lc_collate", "lc_ctype",
+                       "timezone", "datestyle", "intervalstyle",
+                       "behavior_compat_options", "a_format_version",
+                       "a_format_dev_version", "standard_conforming_strings",
+                       "nls_timestamp_format", "max_identifier_length")
+
+    def _settings(self, side, db):
+        try:
+            got = {str(n): str(v) for n, v in self._rows(
+                side, db, "select name, setting from pg_settings")}
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return {self.UNREADABLE: str(e).strip().splitlines()[0][:120]}
+        try:
+            got["datcompatibility"] = str(self._rows(
+                side, db, "select datcompatibility from pg_database where"
+                          " datname = current_database()")[0][0])
+        except Exception:  # noqa: BLE001 - a release without the column
+            pass
+        return got
+
+    def check_params(self, db):
+        """The server's settings and the database's own compatibility, both
+        sides, through the report every engine's settings go through: a
+        source made A-compatible keeps '' as NULL, and a target that is not
+        keeps them apart."""
+        return self._param_result(
+            db, self._settings("src", db), self._settings("dst", db),
+            self.CRITICAL_PARAMS,
+            "make the target's database as the source's (its"
+            " dbcompatibility) and set its settings as the source's")
+
+    def _invalid_indexes(self, side, db):
+        return self._scoped_rows(db, [
+            (f"{s}.{t}", i) for s, t, i in self._rows(
+                side, db, "select n.nspname, c.relname, ic.relname from"
+                          " pg_index x join pg_class c on c.oid ="
+                          " x.indrelid join pg_class ic on ic.oid ="
+                          " x.indexrelid join pg_namespace n on n.oid ="
+                          " c.relnamespace where not x.indisvalid")])
+
+    def check_deep(self, db):
+        """The source's indexes on the target, each over the same columns
+        and as unique, none of the target's left invalid by a build that
+        failed; and on the source, the log carrying rows a follow reads."""
+        out, lacking = [], []
+        try:
+            for t in self.neutral_tables("src", db):
+                if not self.in_scope(db, t):
+                    continue
+                have = {(u, tuple(c)) for _, u, c, _ in
+                        self.neutral_indexes("dst", db, t)}
+                lacking += [f"{t}.{name}" for name, u, c, _ in
+                            self.neutral_indexes("src", db, t)
+                            if (u, tuple(c)) not in have]
+            bad = self._invalid_indexes("dst", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [self._deep_error(db, "target", e)]
+        out.append(Result(
+            "deep", f"{db} indexes", "diff" if lacking or bad else "ok",
+            (f"{len(lacking)} of the source's indexes are not on the target"
+             f" ({', '.join(lacking[:4])})" if lacking else
+             f"indexes left invalid on the target: "
+             f"{', '.join(f'{t}.{i}' for t, i in bad[:4])}" if bad else
+             "every index of the source's is on the target, valid"), "",
+            "create them on the target before the cutover" if lacking
+            else "rebuild them (REINDEX)" if bad else ""))
+        try:
+            level = str(self._rows("src", db, "show wal_level")[0][0])
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            out.append(self._deep_error(db, "source", e))
+        else:
+            if level != "logical":
+                out.append(Result(
+                    "deep", f"{db} source log", "warn",
+                    f"the source's log carries no rows (wal_level is"
+                    f" {level}): its changes cannot be followed", "",
+                    "wal_level = logical in the instance's parameters (the"
+                    " instance restarts to take it)"))
+        return out
+
+    def settle_target(self, db, from_source=True):
+        """Every table the load wrote analysed, so the planner reads it as
+        it now is rather than as an empty table."""
+        tables = [t for t in self.neutral_tables("dst", db)
+                  if self.in_scope(db, t)]
+        if not tables:
+            return None
+        conn = self._connect("dst", db)
+        try:
+            cur = conn.cursor()
+            for t in tables:
+                cur.execute(f"analyze {self._qualified('dst', db, t)}")
+            conn.commit()
+        finally:
+            conn.close()
+        return f"statistics gathered on {len(tables)} tables (ANALYZE)"
+
+    # ---- the target's state before a repair ----------------------------------
+
+    def _sequence_values(self, side, db):
+        """{schema.sequence: (last value, called)} of the sequences in the
+        schemas of the tables the hop takes."""
+        schemas = {self._split(t)[0] for t in self.neutral_tables(side, db)
+                   if self.in_scope(db, t)}
+        out = {}
+        for sch, seq in self._rows(
+                side, db, "select n.nspname, c.relname from pg_class c join"
+                          " pg_namespace n on n.oid = c.relnamespace where"
+                          " c.relkind = 'S'"):
+            if sch not in schemas:
+                continue
+            last, called = self._rows(
+                side, db, f"select last_value, is_called from"
+                          f" {self._q(sch)}.{self._q(seq)}")[0]
+            out[f"{sch}.{seq}"] = (int(last), bool(called))
+        return out
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """Each sequence of the target where it stands, which a rollback
+        sets back (`restore_sequences`); the rows a repair writes are kept
+        by the repair's own record."""
+        lines = [f"{name}|{last}|{'t' if called else 'f'}" for name,
+                 (last, called) in sorted(self._sequence_values(
+                     "dst", db).items())]
+        (state_dir / "dst-gauss-sequences.txt").write_text(
+            "\n".join(lines) + ("\n" if lines else ""))
+
+    def restore_sequences(self, db, state_dir):
+        path = state_dir / "dst-gauss-sequences.txt"
+        if not path.exists():
+            return []
+        out = []
+        for line in path.read_text().splitlines():
+            if line:
+                name, last, called = line.rsplit("|", 2)
+                sch, _, seq = name.partition(".")
+                literal = f"{self._q(sch)}.{self._q(seq)}".replace("'", "''")
+                out.append(f"select setval('{literal}', {int(last)},"
+                           f" {'true' if called == 't' else 'false'});")
+        return out
+
+    def apply(self, db, action):
+        """A sequence is the target's own, set here; rows go through the
+        pair."""
+        if action.kind == "sequences":
+            for statement in action.statements:
+                self._psql("dst", db, statement)
+            return None
+        return super().apply(db, action)
 
     # ---- logical decoding ---------------------------------------------------
 

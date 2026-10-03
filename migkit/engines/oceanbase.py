@@ -24,7 +24,7 @@ only through OceanBase's own change-data library, which has no reader
 here. The community edition has no Oracle mode, so this side has not been
 run against a server: what it does is OceanBase's documented SQL.
 """
-from .base import Engine
+from .base import Engine, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 from .distmysql import OnMySQLWire
 
@@ -71,7 +71,7 @@ class OceanBaseEngine(OnMySQLWire):
 
 
 class OceanBaseOracleEngine(FoldsToCapitals, DbapiRows, Engine):
-    checks = ("schema", "counts", "data")
+    checks = ("schema", "counts", "autoinc", "data")
     CANON_ENGINE = "oceanbase-oracle"
     SQL_DIALECT = "oracle"
     FOLDED_BECAUSE = ("has no hash of its own proved to render its rows as"
@@ -104,7 +104,7 @@ class OceanBaseOracleEngine(FoldsToCapitals, DbapiRows, Engine):
         return [t for t in (self._said(n) for (n,) in self._rows(
             side, db, "select table_name from all_tables where owner ="
                       f" {MARK} order by 1", (self._owner(side, db),)))
-            if not self.hop.excluded(db, t)]
+            if self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         from .oracle import DECLARED
@@ -151,7 +151,163 @@ class OceanBaseOracleEngine(FoldsToCapitals, DbapiRows, Engine):
         return self._as_pair().repair_plan(db, kind)
 
     def apply(self, db, action):
+        """A sequence is the target's own, set by its own statements; rows
+        go through the pair."""
+        if action.kind == "sequences":
+            conn = self._connect("dst", db)
+            try:
+                for statement in action.statements:
+                    conn.cursor().execute(statement.rstrip(";"))
+                conn.commit()
+            finally:
+                conn.close()
+            return None
         return self._as_pair().apply(db, action)
+
+    # ---- sequences ----------------------------------------------------------
+    #
+    # `last_number` is where a sequence starts its next cache, past every
+    # value it handed out: the target's at or past the source's hands out
+    # nothing the source did.
+
+    def _sequences(self, side, db):
+        """{sequence: its next cache's start} of the schema's sequences the
+        hop carries (`Engine.takes`)."""
+        return {self._said(n): int(last) for n, last in self._rows(
+            side, db, "select sequence_name, last_number from all_sequences"
+                      f" where sequence_owner = {MARK}",
+            (self._owner(side, db),))
+            if self.takes(db, "sequence", self._said(n))}
+
+    def _restart_sql(self, db, name, value):
+        return (f"alter sequence {self._qualified('dst', db, name)} restart"
+                f" start with {int(value)}")
+
+    def check_autoinc(self, db):
+        """Every sequence of the source's on the target, at or past where
+        the source's next cache begins."""
+        try:
+            src, dst = self._sequences("src", db), self._sequences("dst", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [Result("autoinc", db, "error", "could not read the"
+                           f" sequences: {str(e).splitlines()[0][:90]}")]
+        short = [n for n, v in sorted(src.items())
+                 if dst.get(n) is None or dst[n] < v]
+        if not short:
+            return [Result("autoinc", f"{db} parity", "ok",
+                           f"{len(src)} sequences at or past the source's")]
+        return [Result(
+            "autoinc", f"{db} parity", "diff",
+            "; ".join(f"{n} source next {src[n]} target"
+                      f" {dst.get(n, 'missing')}" for n in short[:8]), "",
+            "; ".join(self._restart_sql(db, n, src[n]) for n in short[:4]
+                      if n in dst))]
+
+    # ---- settings, the deep check and statistics -------------------------
+
+    #: what changes what a value becomes or how text compares
+    CRITICAL_PARAMS = ("nls_characterset", "nls_nchar_characterset",
+                       "nls_length_semantics", "nls_comp", "nls_sort",
+                       "nls_date_format", "nls_timestamp_format",
+                       "nls_timestamp_tz_format", "nls_numeric_characters",
+                       "dbtimezone", "ob_compatibility_mode",
+                       "lower_case_table_names")
+
+    def _settings(self, side, db):
+        """The database's language settings and the tenant's own
+        parameters, as OceanBase keeps them."""
+        try:
+            out = {str(n).lower(): str(v) for n, v in self._rows(
+                side, db, "select parameter, value from"
+                          " nls_database_parameters")}
+            out["dbtimezone"] = str(self._rows(
+                side, db, "select dbtimezone from dual")[0][0])
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return {self.UNREADABLE: str(e).strip().splitlines()[0][:120]}
+        try:
+            for n, v in self._rows(side, db, "select name, value from"
+                                             " gv$ob_parameters"):
+                out.setdefault(str(n).lower(), str(v))
+        except Exception as e:  # noqa: BLE001 - half a reading, said
+            out[self.UNREADABLE] = ("the tenant's parameters could not be"
+                                    f" read: {str(e).splitlines()[0][:60]}")
+        return out
+
+    def check_params(self, db):
+        return self._param_result(
+            db, self._settings("src", db), self._settings("dst", db),
+            self.CRITICAL_PARAMS,
+            "set the target tenant's parameters as the source's (its"
+            " character set needs the tenant made again)")
+
+    def check_deep(self, db):
+        """Objects a load left invalid, and constraints left disabled or
+        not validated, on the target: the tenant uses a table under them
+        without a word."""
+        owner = self._owner("dst", db)
+        try:
+            invalid = [r for r in self._rows(
+                "dst", db, "select object_type || ' ' || object_name,"
+                           " object_name, object_type from all_objects"
+                           f" where owner = {MARK} and status = 'INVALID'"
+                           " order by 1", (owner,))
+                if self.takes(db, str(r[2]), self._said(r[1]))]
+            loose = [r for r in self._rows(
+                "dst", db, "select constraint_name || ' on ' || table_name"
+                           " || ' (' || status || ')', table_name from"
+                           f" all_constraints where owner = {MARK} and"
+                           " (status = 'DISABLED' or validated ="
+                           " 'NOT VALIDATED') order by 1", (owner,))
+                if self.in_scope(db, self._said(r[1]))]
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [Result("deep", f"{db} target objects", "error",
+                           "could not read the target's objects:"
+                           f" {str(e).splitlines()[0][:90]}")]
+        return [Result("deep", f"{db} target objects",
+                       "diff" if invalid else "ok",
+                       f"{len(invalid)} invalid:"
+                       f" {', '.join(r[0] for r in invalid[:6])}"
+                       if invalid else "no invalid object on the target",
+                       "", "compile them again" if invalid else ""),
+                Result("deep", f"{db} target constraints",
+                       "diff" if loose else "ok",
+                       f"{len(loose)} not enforced:"
+                       f" {', '.join(r[0] for r in loose[:6])}"
+                       if loose else "every constraint enabled and validated",
+                       "", "alter table ... enable validate constraint ..."
+                       if loose else "")]
+
+    def settle_target(self, db, from_source=True):
+        """Statistics gathered for the schema the load wrote, as the
+        tenant's own package gathers them."""
+        conn = self._connect("dst", db)
+        try:
+            self._run(conn.cursor(), "begin dbms_stats.gather_schema_stats("
+                                     f"{MARK}); end;",
+                      (self._owner("dst", db),))
+            conn.commit()
+        finally:
+            conn.close()
+        return "statistics gathered for the target's schema"
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """Each sequence's next cache start where the target stands, which
+        a rollback puts back (`restore_sequences`); the rows a repair
+        writes are kept by the repair's own record."""
+        (state_dir / "dst-ob-sequences.txt").write_text("".join(
+            f"{n}|{v}\n" for n, v in sorted(self._sequences("dst",
+                                                            db).items())))
+
+    def restore_sequences(self, db, state_dir):
+        path = state_dir / "dst-ob-sequences.txt"
+        if not path.exists():
+            return []
+        out = []
+        for line in path.read_text().splitlines():
+            if line:
+                name, value = line.rsplit("|", 1)
+                out.append(self._restart_sql(db, name, int(value)) + ";")
+        return out
 
     def reach_items(self, side):
         items = [{"level": "warn", "scope": "reach",

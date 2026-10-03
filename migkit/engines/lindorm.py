@@ -15,7 +15,7 @@ by check. The time-series, search and file engines Lindorm also has are
 not this side. None of it has been run against a Lindorm instance: what
 it does is LindormTable's documented SQL, over a wire that has been.
 """
-from .base import Engine
+from .base import Engine, Result
 from .dbapi import MARK, DbapiRows
 
 
@@ -77,7 +77,7 @@ class LindormEngine(DbapiRows, Engine):
             got = sorted(str(r[0]) for r in cur.fetchall())
         finally:
             conn.close()
-        return [t for t in got if not self.hop.excluded(db, t)]
+        return [t for t in got if self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         return [(c["column"], c["type"].lower())
@@ -150,6 +150,109 @@ class LindormEngine(DbapiRows, Engine):
 
     def apply(self, db, action):
         return self._as_pair().apply(db, action)
+
+    # ---- a table's attributes, its indexes ---------------------------------
+
+    def _answered(self, side, db, sql):
+        """Rows of a statement, each by the names its answer gives, in small
+        letters."""
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute(sql)
+            names = [str(d[0]).lower() for d in cur.description or ()]
+            return [dict(zip(names, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    #: what deletes a row, or changes what a write does
+    CRITICAL_PARAMS = ("TTL", "MUTABILITY", "CONSISTENCY", "DYNAMIC_COLUMNS",
+                       "CHS", "CHS_L2", "CHS_COLUMN")
+
+    def _settings(self, side, db):
+        """{table attribute: value} of every table in scope, as `SHOW TABLE
+        VARIABLES` says them - its CREATE statement leaves them out."""
+        out = {}
+        try:
+            for t in self.neutral_tables(side, db):
+                for r in self._answered(
+                        side, db, f"show table variables from"
+                                  f" {self._qualified(side, db, t)}"):
+                    name = r.get("variable_name") or r.get("name") or next(
+                        iter(r.values()), "")
+                    value = r.get("value") or r.get("variable_value") or ""
+                    out[f"{t} {name}"] = str(value)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return {self.UNREADABLE: str(e).strip().splitlines()[0][:120]}
+        return out
+
+    def check_params(self, db):
+        """Each table's attributes both sides: its time to live, which
+        deletes what the other side keeps, its mutability and consistency,
+        whether it takes columns it was not made with, and its cold
+        storage."""
+        src, dst = self._settings("src", db), self._settings("dst", db)
+        critical = tuple(k for k in set(src) | set(dst)
+                         if k.rsplit(" ", 1)[-1].upper()
+                         in self.CRITICAL_PARAMS)
+        return self._param_result(db, src, dst, critical,
+                                  "give the target's tables the source's"
+                                  " attributes (ALTER TABLE ... SET ...)")
+
+    def _indexes(self, side, db):
+        """{(table, index, its type): (state, progress)} as `SHOW INDEX`
+        says them."""
+        out = {}
+        for t in self.neutral_tables(side, db):
+            for r in self._answered(
+                    side, db, f"show index from"
+                              f" {self._qualified(side, db, t)}"):
+                name = r.get("index_name") or r.get("key_name")
+                if not name or str(name).upper() == "PRIMARY":
+                    continue
+                out[(t, str(name), str(r.get("index_type") or ""))] = (
+                    str(r.get("index_state") or ""),
+                    str(r.get("index_progress") or ""))
+        return out
+
+    def check_deep(self, db):
+        """Every secondary, search and column-store index of the source's on
+        the target, of the same kind, active and built whole: a query the
+        source answers from one reads the whole table on a target
+        without it, or one still building."""
+        try:
+            src, dst = self._indexes("src", db), self._indexes("dst", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [Result("deep", f"{db} indexes", "error",
+                           "could not read the indexes:"
+                           f" {str(e).strip().splitlines()[0][:90]}")]
+        lacking = [k for k in src if k not in dst]
+        idle = [(k, dst[k]) for k in src if k in dst
+                and dst[k][0].upper() != "ACTIVE"]
+        return [Result(
+            "deep", f"{db} indexes", "diff" if lacking or idle else "ok",
+            (f"{len(lacking)} of the source's indexes are not on the target:"
+             f" {', '.join(f'{t}.{i}' for t, i, _ in lacking[:4])}"
+             if lacking else "indexes not active on the target: " + ", ".join(
+                 f"{t}.{i} {s} {p}" for (t, i, _), (s, p) in idle[:4])
+             if idle else f"every one of the source's {len(src)} indexes is"
+                          " on the target, active"), "",
+            "create them on the target (CREATE INDEX) and build them"
+            if lacking else "build them (BUILD INDEX), or enable them"
+            if idle else "")]
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """What the target held before a repair: each table's attributes and
+        rows counted - the rows a repair writes are kept by the repair's
+        own record."""
+        import json
+        out = {"settings": self._settings("dst", db), "rows": {}}
+        for t in self.neutral_tables("dst", db):
+            out["rows"][t] = self._rows(
+                "dst", db, f"select count(*) from"
+                           f" {self._qualified('dst', db, t)}")[0][0]
+        (state_dir / "dst-lindorm.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True, default=str))
 
     def reach_items(self, side):
         items = [{"level": "warn", "scope": "reach",

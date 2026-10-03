@@ -520,6 +520,132 @@ class _Documents(NeutralCopier, Engine):
     def apply(self, db, action):
         return self._as_pair().apply(db, action)
 
+    # ---- the database's settings, indexes and time to live -----------------
+    #
+    # Both modes keep them in the one admin API: a database's settings, its
+    # composite indexes and the fields a time-to-live policy deletes
+    # documents by. The emulator serves none of it, and says so.
+
+    def _admin(self, side):
+        held = self.__dict__.setdefault("_admins", {})
+        if side not in held:
+            from google.cloud import firestore_admin_v1
+
+            from . import gcp
+            held[side] = firestore_admin_v1.FirestoreAdminClient(
+                credentials=gcp.credentials(self._ep(side)))
+        return held[side]
+
+    def _db_name(self, side, db):
+        from . import gcp
+        return (f"projects/{gcp.project(self._ep(side))}/databases/"
+                f"{self._d(side, db) or '(default)'}")
+
+    def _indexes(self, side, db):
+        """{(group, scope, its fields): state} of the composite indexes of
+        the collection groups in scope."""
+        out = {}
+        for ix in self._admin(side).list_indexes(
+                parent=f"{self._db_name(side, db)}/collectionGroups/-"):
+            group = ix.name.split("/collectionGroups/", 1)[1].split("/")[0]
+            if not self.in_scope(db, group):
+                continue
+            fields = tuple(
+                (f.field_path, f.order.name if f.order else
+                 f.array_config.name if f.array_config else "vector")
+                for f in ix.fields)
+            out[(group, ix.query_scope.name, fields)] = ix.state.name
+        return out
+
+    def _ttl_fields(self, side, db):
+        """{group.field: its time-to-live policy's state} of the fields a
+        policy deletes documents by, in scope."""
+        out = {}
+        for f in self._admin(side).list_fields(
+                parent=f"{self._db_name(side, db)}/collectionGroups/-",
+                filter="ttlConfig:*"):
+            group, _, field = f.name.split("/collectionGroups/", 1)[1] \
+                .partition("/fields/")
+            if self.in_scope(db, group):
+                out[f"{group}.{field}"] = f.ttl_config.state.name
+        return out
+
+    #: what changes what is kept, how it is read and what deletes it
+    CRITICAL_PARAMS = ("type", "concurrency_mode",
+                       "point_in_time_recovery_enablement")
+
+    def _settings(self, side, db):
+        try:
+            d = self._admin(side).get_database(name=self._db_name(side, db))
+            out = {k: getattr(getattr(d, k), "name", str(getattr(d, k)))
+                   for k in ("type", "concurrency_mode",
+                             "point_in_time_recovery_enablement",
+                             "app_engine_integration_mode",
+                             "delete_protection_state", "location_id")}
+            out.update({f"{k} ttl": v for k, v in
+                        self._ttl_fields(side, db).items()})
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return {self.UNREADABLE: str(e).strip().splitlines()[0][:120]}
+        return out
+
+    def check_params(self, db):
+        """The database's own settings - its mode, how it holds
+        transactions, its point-in-time recovery - and every field a
+        time-to-live policy deletes documents by, both sides: a target
+        without the source's policy keeps what the source deletes, and one
+        with a policy the source lacks deletes what it keeps."""
+        src, dst = self._settings("src", db), self._settings("dst", db)
+        critical = self.CRITICAL_PARAMS + tuple(
+            k for k in set(src) | set(dst) if k.endswith(" ttl"))
+        return self._param_result(db, src, dst, critical,
+                                  "give the target the source's settings and"
+                                  " time-to-live policies")
+
+    def check_deep(self, db):
+        """Every composite index of the source's on the target, over the
+        same fields in the same order, and ready: a query the source
+        answers from one is refused by a target without it."""
+        try:
+            src, dst = self._indexes("src", db), self._indexes("dst", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [Result("deep", f"{db} indexes", "error",
+                           "could not read the indexes:"
+                           f" {str(e).strip().splitlines()[0][:90]}")]
+        lacking = [k for k in src if k not in dst]
+        building = [k for k, state in dst.items()
+                    if k in src and state != "READY"]
+
+        def said(k):
+            return f"{k[0]}({', '.join(f for f, _ in k[2])})"
+        return [Result(
+            "deep", f"{db} indexes", "diff" if lacking or building else "ok",
+            (f"{len(lacking)} of the source's indexes are not on the target:"
+             f" {', '.join(said(k) for k in lacking[:4])}" if lacking else
+             "indexes not ready on the target: " + ", ".join(
+                 f"{said(k)} {dst[k]}" for k in building[:4]) if building
+             else f"every one of the source's {len(src)} indexes is on the"
+                  " target, ready"), "",
+            "create them on the target before the cutover" if lacking
+            else "wait for them to be built" if building else "")]
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """The moment the target stood at before a repair, with whether
+        point-in-time recovery keeps it seven days - a copy can be made of
+        the database as of then (`cloudapi`) - or only an hour, which is
+        said."""
+        out = {"at": datetime.datetime.now(datetime.timezone.utc)
+               .strftime("%Y-%m-%dT%H:%M:%SZ")}
+        try:
+            d = self._admin("dst").get_database(
+                name=self._db_name("dst", db))
+            pitr = d.point_in_time_recovery_enablement.name
+            out["kept"] = ("seven days" if pitr.endswith("_ENABLED")
+                           else "an hour")
+        except Exception as e:  # noqa: BLE001 - kept as the reason
+            out["no_point"] = str(e).strip().splitlines()[0][:160]
+        (state_dir / "dst-firestore.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True))
+
 
 class FirestoreEngine(_Documents):
     CANON_ENGINE = "firestore"
@@ -549,7 +675,7 @@ class FirestoreEngine(_Documents):
 
     def neutral_tables(self, side, db):
         return [t for t in self._groups(side, db)
-                if not self.hop.excluded(db, t)]
+                if self.in_scope(db, t)]
 
     def _makers(self, side, db):
         client = self._client(side, db)
@@ -955,7 +1081,7 @@ class DatastoreEngine(_Documents):
         q.keys_only()
         return sorted(e.key.name for e in q.fetch()
                       if e.key.name and not e.key.name.startswith("__")
-                      and not self.hop.excluded(db, e.key.name))
+                      and self.in_scope(db, e.key.name))
 
     def _makers(self, side, db):
         client = self._client(side, db)
@@ -1084,7 +1210,14 @@ def _register():
          ("Client", "bulk_writer"): "bulk_writer",
          ("BulkWriter", "on_write_error"): "on_write_error",
          ("BulkWriter", "set"): "set",
-         ("BulkWriter", "delete"): "delete"}), options={
+         ("BulkWriter", "delete"): "delete",
+         ("FirestoreAdminClient", "get_database"): "get_database",
+         ("FirestoreAdminClient", "list_indexes"): "list_indexes",
+         ("FirestoreAdminClient", "list_fields"): "list_fields"}),
+        options={
+        ("FirestoreAdminClient", "export_documents"): (
+            unused, "an export is files in a bucket, read by the service's"
+                    " own import only"),
         ("Client", "recursive_delete"): (
             unused, "it deletes the documents under each document too, where"
                     " a table is one collection group"),

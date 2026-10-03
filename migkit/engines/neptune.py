@@ -46,7 +46,7 @@ import time
 import uuid
 from decimal import Decimal
 
-from .base import Engine, NeutralCopier
+from .base import Engine, NeutralCopier, Result
 
 TABLES = {"graph": ("edges", "vertices"), "rdf": ("quads",)}
 COLUMNS = {
@@ -392,7 +392,7 @@ class NeptuneEngine(NeutralCopier, Engine):
 
     def neutral_tables(self, side, db):
         return [t for t in TABLES[self._model(side, db)]
-                if not self.hop.excluded(db, t)]
+                if self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         return list(COLUMNS[table])
@@ -637,6 +637,107 @@ class NeptuneEngine(NeutralCopier, Engine):
             return ("the target's statistics were not refreshed:"
                     f" {str(e).splitlines()[0][:100]}")
         return "the target's query statistics refreshed"
+
+    # ---- settings and the deep check --------------------------------------
+
+    def _neptune(self, side):
+        return "neptune.amazonaws.com" in str(self._ep(side).host or "")
+
+    #: what changes how a query runs or what a follow can read
+    CRITICAL_PARAMS = ("clusterQueryTimeoutInMs", "lab ObjectIndex",
+                       "lab ReadWriteConflictDetection", "lab Streams",
+                       "feature Streams", "dfeQueryEngine")
+
+    def _settings(self, side, db):
+        """The engine's status as it says it: its settings, its lab mode's
+        features, its query languages' versions."""
+        if not self._neptune(side):
+            return {self.UNREADABLE: "a Gremlin or SPARQL server keeps no"
+                                     " settings of Neptune's to read"}
+        try:
+            got = self._data(side).get_engine_status()
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return {self.UNREADABLE: str(e).strip().splitlines()[0][:120]}
+        out = {str(k): str(v) for k, v in (got.get("settings") or {}).items()}
+        out.update({f"lab {k}": str(v) for k, v in
+                    (got.get("labMode") or {}).items()})
+        out.update({f"feature {k}": json.dumps(v, sort_keys=True)
+                    if isinstance(v, dict) else str(v)
+                    for k, v in (got.get("features") or {}).items()})
+        for lang in ("gremlin", "sparql", "opencypher"):
+            if isinstance(got.get(lang), dict):
+                out[f"{lang} version"] = str(got[lang].get("version", ""))
+        for k in ("dfeQueryEngine", "dbEngineVersion"):
+            if got.get(k) is not None:
+                out[k] = str(got[k])
+        return out
+
+    def check_params(self, db):
+        """Neptune's settings both sides, as its engine status says them:
+        a query's timeout, the lab mode's features a query or a stream
+        depends on, and the query engine's."""
+        return self._param_result(
+            db, self._settings("src", db), self._settings("dst", db),
+            self.CRITICAL_PARAMS,
+            "set the target cluster's parameter group (neptune_query_timeout,"
+            " neptune_lab_mode, neptune_streams) as the source's")
+
+    def check_deep(self, db):
+        """The target's query statistics computed and on, which its query
+        engine plans by, and on the source its stream on, which a follow
+        reads; both read from the engine itself."""
+        out = []
+        if self._neptune("dst"):
+            try:
+                client = self._data("dst")
+                got = (client.get_propertygraph_statistics()
+                       if self._model("dst", db) == "graph"
+                       else client.get_sparql_statistics())
+                stats = (got.get("payload") or {})
+            except Exception as e:  # noqa: BLE001 - said, as the error
+                out.append(Result("deep", f"{db} target statistics", "error",
+                                  "could not read the statistics:"
+                                  f" {str(e).strip().splitlines()[0][:90]}"))
+            else:
+                on = bool(stats.get("active"))
+                out.append(Result(
+                    "deep", f"{db} target statistics", "ok" if on else "warn",
+                    f"statistics {'on' if on else 'off'}, computed"
+                    f" {stats.get('date') or 'never'}", "",
+                    "" if on else "turn statistics on (manage statistics"
+                                  " with mode enableAutoCompute) and refresh"
+                                  " them"))
+        if self._neptune("src"):
+            got = self._settings("src", db)
+            streams = got.get("feature Streams") or got.get("lab Streams")
+            if self.UNREADABLE in got:
+                out.append(Result("deep", f"{db} source stream", "error",
+                                  f"could not read the source's status:"
+                                  f" {got[self.UNREADABLE]}"))
+            elif not streams or "disabled" in str(streams).lower():
+                out.append(Result(
+                    "deep", f"{db} source stream", "warn",
+                    "Neptune Streams is off on the source: its changes"
+                    " cannot be followed", "",
+                    "neptune_streams = 1 in the source cluster's parameter"
+                    " group, every instance rebooted"))
+        return out or [Result("deep", db, "ok",
+                              "a Gremlin or SPARQL server keeps no statistics"
+                              " or stream of Neptune's to check")]
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """What the target held before a repair: how many vertices and
+        edges, or quads, it held - the elements a repair writes are kept by
+        the repair's own record - and, on Neptune, its cluster snapshot is
+        the provider's (`cloudapi`), taken before a cutover."""
+        out = {}
+        for t in self.neutral_tables("dst", db):
+            try:
+                out[t] = sum(1 for _ in self._rows("dst", db, t))
+            except Exception as e:  # noqa: BLE001 - kept as the reason
+                out[t] = str(e).strip().splitlines()[0][:160]
+        (state_dir / "dst-neptune.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True))
 
     # ---- who it is -----------------------------------------------------------
 
@@ -897,7 +998,11 @@ def _register():
          ("statistics", "manage_propertygraph_statistics"):
              "manage_propertygraph_statistics",
          ("statistics", "manage_sparql_statistics"):
-             "manage_sparql_statistics"}), options={
+             "manage_sparql_statistics",
+         ("statistics", "get_propertygraph_statistics"):
+             "get_propertygraph_statistics",
+         ("statistics", "get_sparql_statistics"):
+             "get_sparql_statistics"}), options={
         ("loader", "start_loader_job"): (
             unused, "the bulk loader reads files from S3 the cluster's role"
                     " can reach, which a copy from another server has none"

@@ -984,3 +984,448 @@ def test_lindorm_writes_by_upsert_and_reads_its_columns_off_describe(
     assert rows == [(1, "a")]
     with pytest.raises(SystemExit, match="primary key"):
         eng.neutral_create_sql("dst", "shop", "t", [("id", "integer", ())])
+
+
+# ---- their settings, deep checks, statistics and state before a repair ------
+
+def _reported(eng, tmp_path):
+    eng.hop.report_dir = lambda db=None: tmp_path
+    return eng
+
+
+def _by(results):
+    return {r.scope: r for r in results}
+
+
+class _Said:
+    """A connection whose statements are answered by `answer(sql)` -
+    (column names, rows) - each statement kept."""
+
+    def __init__(self, answer, log):
+        self.answer, self.log = answer, log
+
+    def cursor(self):
+        conn = self
+
+        class Cur:
+            description, rows = None, []
+
+            def execute(self, sql, args=None):
+                conn.log.append(sql)
+                names, self.rows = conn.answer(sql)
+                self.description = [(n,) for n in names] or None
+
+            def fetchall(self):
+                return list(self.rows)
+        return Cur()
+
+    def commit(self):
+        self.log.append("commit")
+
+    def close(self):
+        pass
+
+
+def test_a_gaussdb_database_made_with_another_compatibility_is_a_diff(
+        monkeypatch, tmp_path):
+    """An A-compatible database keeps '' as NULL and a PG-compatible one
+    keeps them apart: the same rows mean other things."""
+    from migkit.engines.gaussdb import GaussEngine
+    eng = _reported(GaussEngine(_hop("gaussdb")), tmp_path)
+    compat = {"src": "A", "dst": "PG"}
+
+    def rows(side, db, sql, args=None):
+        if "pg_settings" in sql:
+            return [("timezone", "UTC"), ("shared_buffers", "1GB" if side
+                                          == "src" else "4GB")]
+        if "datcompatibility" in sql:
+            return [(compat[side],)]
+        raise AssertionError(sql)
+    monkeypatch.setattr(eng, "_rows", rows)
+    got = eng.check_params("shop")
+    assert got[0].status == "diff" and "datcompatibility" in got[0].detail
+    compat["dst"] = "A"
+    got = eng.check_params("shop")
+    assert got[0].status == "ok" and "none behavior-critical" in got[0].detail
+
+    def refused(side, db, sql, args=None):
+        raise PermissionError("permission denied for pg_settings")
+    monkeypatch.setattr(eng, "_rows", refused)
+    assert eng.check_params("shop")[0].status == "error"
+
+
+def test_a_gaussdb_deep_check_finds_an_index_lacking_or_left_invalid(
+        monkeypatch, tmp_path):
+    from migkit.engines.gaussdb import GaussEngine
+    eng = _reported(GaussEngine(_hop("gaussdb")), tmp_path)
+    monkeypatch.setattr(eng, "neutral_tables",
+                        lambda side, db: ["public.t", "public.u"])
+    indexes = {"src": [("t_n", False, ["n"], True)], "dst": []}
+    monkeypatch.setattr(eng, "neutral_indexes",
+                        lambda side, db, t: indexes[side] if t == "public.t"
+                        else [])
+    state = {"invalid": [], "wal": "logical"}
+
+    def rows(side, db, sql, args=None):
+        if "indisvalid" in sql:
+            return state["invalid"]
+        if sql == "show wal_level":
+            return [(state["wal"],)]
+        raise AssertionError(sql)
+    monkeypatch.setattr(eng, "_rows", rows)
+    got = _by(eng.check_deep("shop"))
+    assert got["shop indexes"].status == "diff"
+    assert "public.t.t_n" in got["shop indexes"].detail
+    indexes["dst"] = [("t_n", False, ["n"], True)]
+    state["invalid"] = [("public", "u", "u_x")]
+    got = _by(eng.check_deep("shop"))
+    assert got["shop indexes"].status == "diff"
+    assert "public.u.u_x" in got["shop indexes"].detail
+    # an index of a table the hop leaves out is the target's own
+    eng.hop.exclude = ["shop.public.u"]
+    got = _by(eng.check_deep("shop"))
+    assert got["shop indexes"].status == "ok"
+    state["wal"] = "hot_standby"
+    got = _by(eng.check_deep("shop"))
+    assert got["shop source log"].status == "warn"
+
+
+def test_gaussdb_statistics_and_sequences_kept_and_put_back(monkeypatch,
+                                                            tmp_path):
+    from migkit.engines.base import RepairAction
+    from migkit.engines.gaussdb import GaussEngine
+    eng = _reported(GaussEngine(_hop("gaussdb")), tmp_path)
+    monkeypatch.setattr(eng, "neutral_tables", lambda side, db: ["public.t"])
+    log = []
+    monkeypatch.setattr(eng, "_connect", lambda side, db: _Said(
+        lambda sql: ([], []), log))
+    assert "1 tables" in eng.settle_target("shop")
+    assert log == ['analyze "public"."t"', "commit"]
+
+    def rows(side, db, sql, args=None):
+        if "relkind = 'S'" in sql:
+            return [("public", "t_id_seq"), ("other", "x_seq")]
+        assert sql.endswith('"public"."t_id_seq"'), sql
+        return [(41, True)]
+    monkeypatch.setattr(eng, "_rows", rows)
+    eng.snapshot_state("shop", tmp_path)
+    assert (tmp_path / "dst-gauss-sequences.txt").read_text() == \
+        "public.t_id_seq|41|t\n"
+    back = eng.restore_sequences("shop", tmp_path)
+    assert back == ["""select setval('"public"."t_id_seq"', 41, true);"""]
+    ran = []
+    monkeypatch.setattr(eng, "_psql", lambda side, db, sql: ran.append(
+        (side, sql)))
+    monkeypatch.setattr(eng, "_as_pair", lambda: (_ for _ in ()).throw(
+        AssertionError("a sequence goes through no pair")))
+    eng.apply("shop", RepairAction("shop", "sequences", back, []))
+    assert ran == [("dst", back[0])]
+
+
+def test_a_spanner_snapshot_keeps_its_counters_and_says_why_no_backup(
+        monkeypatch, tmp_path):
+    from migkit.engines.base import RepairAction
+    from migkit.engines.spanner import SpannerEngine
+    eng = SpannerEngine(_hop("spanner"))
+    monkeypatch.setattr(eng, "_sequences", lambda side, db: {"seq_a": 7})
+    monkeypatch.setattr(eng, "_pg", lambda side, db: False)
+
+    class NoBackups:
+        def backup(self, *a, **kw):
+            raise NotImplementedError("backups are not supported by the"
+                                      " emulator")
+    monkeypatch.setattr(eng, "_instance", lambda side: NoBackups())
+    monkeypatch.setattr(eng, "_database", lambda side, db: object())
+    eng.snapshot_state("shop", tmp_path)
+    kept = json.loads((tmp_path / "dst-spanner.json").read_text())
+    assert kept["sequences"] == {"seq_a": 7}
+    assert "emulator" in kept["no_backup"]
+    back = eng.restore_sequences("shop", tmp_path)
+    assert back == ["alter sequence `seq_a` set options"
+                    " (start_with_counter = 8)"]
+    ran = []
+    monkeypatch.setattr(eng, "execute_ddl", lambda side, db, sql: ran.append(
+        (side, sql)))
+    eng.apply("shop", RepairAction("shop", "sequences", back, []))
+    assert ran == [("dst", back[0])]
+
+
+def test_a_bigtable_copy_not_ready_on_a_cluster_is_a_diff(monkeypatch,
+                                                         tmp_path):
+    import types
+
+    from google.cloud.bigtable.enums import Table as T
+
+    from migkit.engines.bigtable import BigtableEngine
+    eng = BigtableEngine(_hop("bigtable"))
+    states = {"c1": T.ReplicationState.READY,
+              "c2": T.ReplicationState.INITIALIZING}
+
+    class Table:
+        def get_cluster_states(self):
+            return {c: types.SimpleNamespace(replication_state=s)
+                    for c, s in states.items()}
+    monkeypatch.setattr(eng, "neutral_tables", lambda side, db: ["t"])
+    monkeypatch.setattr(eng, "_table", lambda side, db, t: Table())
+    monkeypatch.setattr(eng, "_described", lambda side, db, t: None)
+    retention = {"t": None}
+    monkeypatch.setattr(eng, "_retention_s", lambda db, t: retention[t])
+    got = _by(eng.check_deep("shop"))
+    assert got["shop target replication"].status == "diff"
+    assert "c2 initializing" in got["shop target replication"].detail
+    assert got["shop source change streams"].status == "warn"
+    states["c2"] = T.ReplicationState.READY
+    retention["t"] = 86400.0
+    got = _by(eng.check_deep("shop"))
+    assert got["shop target replication"].status == "ok"
+    assert "shop source change streams" not in got
+
+
+def test_firestore_indexes_and_time_to_live_both_sides(monkeypatch,
+                                                       tmp_path):
+    import enum
+    import types
+
+    from migkit.engines.firestore import FirestoreEngine
+
+    class E(enum.IntEnum):
+        UNSET = 0
+        ASCENDING = 1
+        COLLECTION = 2
+        READY = 3
+        CREATING = 4
+        ACTIVE = 5
+        FIRESTORE_NATIVE = 6
+        OPTIMISTIC = 7
+        POINT_IN_TIME_RECOVERY_ENABLED = 8
+
+    def index(group, field, state):
+        f = types.SimpleNamespace(field_path=field, order=E.ASCENDING,
+                                  array_config=E.UNSET)
+        return types.SimpleNamespace(
+            name=f"projects/p/databases/(default)/collectionGroups/{group}"
+                 "/indexes/i1", fields=[f], query_scope=E.COLLECTION,
+            state=state)
+    have = {"src": [index("users", "age", E.READY),
+                    index("audit", "at", E.READY)],
+            "dst": [index("users", "age", E.CREATING)]}
+    ttl = {"src": ["users/fields/expires"], "dst": []}
+
+    class Admin:
+        def __init__(self, side):
+            self.side = side
+
+        def list_indexes(self, parent):
+            assert parent.endswith("/collectionGroups/-")
+            return have[self.side]
+
+        def list_fields(self, parent, filter):
+            assert filter == "ttlConfig:*"
+            return [types.SimpleNamespace(
+                name=f"projects/p/databases/(default)/collectionGroups/{f}",
+                ttl_config=types.SimpleNamespace(state=E.ACTIVE))
+                for f in ttl[self.side]]
+
+        def get_database(self, name):
+            return types.SimpleNamespace(
+                type=E.FIRESTORE_NATIVE, concurrency_mode=E.OPTIMISTIC,
+                point_in_time_recovery_enablement=E
+                .POINT_IN_TIME_RECOVERY_ENABLED,
+                app_engine_integration_mode=E.UNSET,
+                delete_protection_state=E.UNSET, location_id="eur3")
+    eng = _reported(FirestoreEngine(_hop("firestore")), tmp_path)
+    monkeypatch.setattr(eng, "_admin", lambda side: Admin(side))
+    monkeypatch.setattr(eng, "_db_name",
+                        lambda side, db: "projects/p/databases/(default)")
+    eng.hop.exclude = ["shop.audit"]
+    deep = eng.check_deep("shop")[0]
+    assert deep.status == "diff" and "users(age) CREATING" in deep.detail
+    have["dst"] = [index("users", "age", E.READY)]
+    deep = eng.check_deep("shop")[0]
+    assert deep.status == "ok", deep.detail
+    # a field the source deletes documents by, and the target does not
+    params = eng.check_params("shop")[0]
+    assert params.status == "diff" and "users.expires ttl" in params.detail
+    ttl["dst"] = ["users/fields/expires"]
+    assert eng.check_params("shop")[0].status == "ok"
+    eng.snapshot_state("shop", tmp_path)
+    kept = json.loads((tmp_path / "dst-firestore.json").read_text())
+    assert kept["kept"] == "seven days" and kept["at"].endswith("Z")
+
+
+def test_neptune_settings_and_its_stream_read_off_its_engine_status(
+        monkeypatch, tmp_path):
+    from migkit.engines.neptune import NeptuneEngine
+    hop = _hop("neptune")
+    hop.source.host = "src.cluster-abc.us-east-1.neptune.amazonaws.com"
+    hop.target.host = "dst.cluster-abc.us-east-1.neptune.amazonaws.com"
+    eng = _reported(NeptuneEngine(hop), tmp_path)
+    status = {
+        side: {"status": "healthy", "dbEngineVersion": "1.3.2.0",
+               "dfeQueryEngine": "viaQueryHint",
+               "settings": {"clusterQueryTimeoutInMs": timeout},
+               "labMode": {"ObjectIndex": "disabled"},
+               "features": {"Streams": "disabled"},
+               "gremlin": {"version": "tinkerpop-3.7.2"}}
+        for side, timeout in (("src", "120000"), ("dst", "60000"))}
+
+    class Data:
+        def __init__(self, side):
+            self.side = side
+
+        def get_engine_status(self):
+            return status[self.side]
+
+        def get_propertygraph_statistics(self):
+            return {"status": "200", "payload": {"active": False}}
+    monkeypatch.setattr(eng, "_data", lambda side: Data(side))
+    monkeypatch.setattr(eng, "_model", lambda side, db: "graph")
+    got = eng.check_params("shop")[0]
+    assert got.status == "diff" and "clusterQueryTimeoutInMs" in got.detail
+    deep = _by(eng.check_deep("shop"))
+    assert deep["shop target statistics"].status == "warn"
+    assert deep["shop source stream"].status == "warn"
+    status["src"]["features"]["Streams"] = {"enabled": True}
+    deep = _by(eng.check_deep("shop"))
+    assert "shop source stream" not in deep
+    # a Gremlin server keeps none of Neptune's settings: said, not passed
+    hop.source.host = hop.target.host = "127.0.0.1"
+    assert eng.check_params("shop")[0].status == "error"
+
+
+def test_lindorm_table_attributes_and_indexes_both_sides(monkeypatch,
+                                                         tmp_path):
+    from migkit.engines.lindorm import LindormEngine
+    eng = _reported(LindormEngine(_hop("lindorm")), tmp_path)
+    monkeypatch.setattr(eng, "neutral_tables", lambda side, db: ["t"])
+    state = {"src ttl": "2592000", "dst ttl": "", "dst index": "BUILDING"}
+
+    def answer_for(side):
+        def answer(sql):
+            if sql.startswith("show table variables"):
+                return (["VARIABLE_NAME", "VALUE"],
+                        [("TTL", state[f"{side} ttl"]),
+                         ("COMPRESSION", "ZSTD")])
+            if sql.startswith("show index"):
+                return (["TABLE_NAME", "INDEX_NAME", "INDEX_TYPE",
+                         "INDEX_STATE", "INDEX_PROGRESS"],
+                        [("t", "idx_n", "SECONDARY",
+                          "ACTIVE" if side == "src" else state["dst index"],
+                          "100%" if side == "src" else "N/A")])
+            raise AssertionError(sql)
+        return answer
+    monkeypatch.setattr(eng, "_connect", lambda side, db: _Said(
+        answer_for(side), []))
+    got = eng.check_params("shop")[0]
+    assert got.status == "diff" and "t TTL" in got.detail
+    state["dst ttl"] = "2592000"
+    assert eng.check_params("shop")[0].status == "ok"
+    deep = eng.check_deep("shop")[0]
+    assert deep.status == "diff" and "t.idx_n BUILDING" in deep.detail
+    state["dst index"] = "ACTIVE"
+    assert eng.check_deep("shop")[0].status == "ok"
+
+
+def test_oceanbase_oracle_mode_sequences_kept_compared_and_put_back(
+        monkeypatch, tmp_path):
+    from migkit.engines.oceanbase import OceanBaseOracleEngine
+    eng = _reported(OceanBaseOracleEngine(_hop("oceanbase-oracle")),
+                    tmp_path)
+    last = {"src": [("ORDERS_SEQ", 1020), ("AUDIT_SEQ", 5)],
+            "dst": [("ORDERS_SEQ", 1000)]}
+    monkeypatch.setattr(eng, "_rows", lambda side, db, sql, args=None:
+                        last[side] if "all_sequences" in sql else [])
+    got = eng.check_autoinc("shop")[0]
+    assert got.status == "diff"
+    # a name in capitals is said in small letters, written in capitals
+    assert "orders_seq source next 1020 target 1000" in got.detail
+    assert "audit_seq source next 5 target missing" in got.detail
+    assert got.fix_hint == ('alter sequence "SHOP"."ORDERS_SEQ" restart'
+                            ' start with 1020')
+    last["dst"] = [("ORDERS_SEQ", 1040), ("AUDIT_SEQ", 5)]
+    assert eng.check_autoinc("shop")[0].status == "ok"
+    eng.snapshot_state("shop", tmp_path)
+    back = eng.restore_sequences("shop", tmp_path)
+    assert back == [eng._restart_sql("shop", "AUDIT_SEQ", 5) + ";",
+                    eng._restart_sql("shop", "ORDERS_SEQ", 1040) + ";"]
+    assert back[1].startswith("alter sequence ") and back[1].endswith(
+        "ORDERS_SEQ\" restart start with 1040;")
+
+
+def test_a_distributed_mysql_targets_counters_kept_and_put_back(
+        monkeypatch, tmp_path):
+    from migkit.engines.base import RepairAction
+    from migkit.engines.distmysql import PolarDBXEngine, TdsqlEngine
+    eng = TdsqlEngine(_hop("dcdb"))
+    ran = []
+
+    def q(side, sql, args=None, fresh=False):
+        ran.append(sql)
+        if "auto_increment" in sql and "information_schema" in sql:
+            return [("orders", 501), ("left_out", 9)]
+        if sql.startswith("show create table"):
+            return [("orders", "CREATE TABLE `orders` (`id` int)"
+                               " shardkey=id")]
+        return []
+    monkeypatch.setattr(eng, "_q", q)
+    monkeypatch.setattr(eng, "neutral_tables", lambda side, db: ["orders"])
+    eng.hop.exclude = ["shop.left_out"]
+    eng.snapshot_state("shop", tmp_path)
+    assert (tmp_path / "dst-wire-counters.txt").read_text() == "orders|501\n"
+    assert "shardkey=id" in (tmp_path / "dst-schema.sql").read_text()
+    back = eng.restore_sequences("shop", tmp_path)
+    assert back == ["alter table `shop`.`orders` auto_increment = 501;"]
+    ran.clear()
+    monkeypatch.setattr(eng, "_as_pair", lambda: (_ for _ in ()).throw(
+        AssertionError("a counter goes through no pair")))
+    eng.apply("shop", RepairAction("shop", "sequences", back, []))
+    assert ran == ["alter table `shop`.`orders` auto_increment = 501"]
+    pxc = PolarDBXEngine(_hop("polardbx"))
+    monkeypatch.setattr(pxc, "_sequences", lambda side: {
+        "AUTO_SEQ_ORDERS": 77})
+    monkeypatch.setattr(pxc, "neutral_tables", lambda side, db: ["orders"])
+    assert pxc._counters("dst", "shop") == {"orders": 77}
+    assert pxc._restart_sql("shop", "orders", 77) == \
+        "alter sequence AUTO_SEQ_orders start with 77"
+
+
+def test_a_timestream_snapshot_counts_each_tables_records(monkeypatch,
+                                                         tmp_path):
+    from migkit.engines.timestream import TimestreamEngine
+    eng = TimestreamEngine(_hop("timestream"))
+    monkeypatch.setattr(eng, "neutral_tables", lambda side, db: ["cpu"])
+    monkeypatch.setattr(eng, "_settings", lambda side, db: {
+        "cpu memory hours": "24"})
+    monkeypatch.setattr(eng, "_query", lambda side, sql: (
+        [("_col0", "BIGINT")], [[1234]]))
+    eng.snapshot_state("shop", tmp_path)
+    kept = json.loads((tmp_path / "dst-timestream.json").read_text())
+    assert kept == {"records": {"cpu": 1234},
+                    "settings": {"cpu memory hours": "24"}}
+
+
+def test_a_name_on_another_engines_wire_is_read_as_that_ones():
+    from migkit.util import split_table
+    assert split_table("oceanbase", "orders.v1") == ("", "orders.v1")
+    assert split_table("gaussdb", "public.orders") == ("public", "orders")
+    assert split_table("keyspaces", "orders.v1") == ("", "orders.v1")
+    assert split_table("bigtable", "events.2026") == ("", "events.2026")
+    assert _hop("oceanbase").whole_name() == 2
+    assert _hop("keyspaces").whole_name() == 2
+    assert _hop("bigtable").whole_name() == 0
+    assert _hop("gaussdb").whole_name() == 3
+
+
+def test_a_cloud_native_listing_takes_only_what_the_hop_takes(monkeypatch):
+    import types
+
+    from migkit.engines.bigtable import BigtableEngine
+    eng = BigtableEngine(_hop("bigtable"))
+    eng.hop.include = ["shop.orders"]
+
+    class Instance:
+        def list_tables(self):
+            return [types.SimpleNamespace(table_id=t)
+                    for t in ("orders", "audit")]
+    monkeypatch.setattr(eng, "_instance", lambda side, db: Instance())
+    assert eng.neutral_tables("src", "shop") == ["orders"]

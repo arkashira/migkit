@@ -361,12 +361,17 @@ QUOTES = {"mysql": ("`", "`"), "tidb": ("`", "`"), "clickhouse": ("`", "`"),
 #: `system.profile`, a topic `orders.v1`)
 NO_SCHEMA = ("mysql", "tidb", "clickhouse", "mongodb", "cosmosdb", "redis",
              "kafka", "kinesis", "pubsub", "dynamodb", "cassandra",
-             "opensearch")
+             "opensearch", "bigtable", "firestore", "datastore",
+             "timestream", "lindorm", "neptune")
 
 
 def _canonical(engine):
-    from .engines import ALIASES
-    return ALIASES.get(engine, engine)
+    """The engine whose names `engine`'s are: its alias's, and of an
+    engine on another's wire (`engines.WIRE`), that one's - OceanBase's
+    tables are named as MySQL's, Keyspaces' as Cassandra's."""
+    from .engines import ALIASES, WIRE
+    got = ALIASES.get(engine, engine)
+    return WIRE.get(got, got)
 
 
 def _parts(engine, name):

@@ -67,7 +67,6 @@ class OnMySQLWire(ProvedDigest, MySQLEngine):
     mark_committed = NotHere()
     mark_prove = NotHere()
     mark_teardown = NotHere()
-    snapshot_state = NotHere()
     native_replica_unsafe = Engine.native_replica_unsafe
     stream_writers = Engine.stream_writers
     pause_writer = Engine.pause_writer
@@ -166,7 +165,51 @@ class OnMySQLWire(ProvedDigest, MySQLEngine):
         return self._as_pair().repair_plan(db, kind)
 
     def apply(self, db, action):
+        """A counter is the target's own, set by its own statements; rows
+        go through the pair."""
+        if action.kind == "sequences":
+            for statement in action.statements:
+                self._q("dst", statement.rstrip(";"))
+            return None
         return self._as_pair().apply(db, action)
+
+    # ---- the target's state before a repair ---------------------------------
+
+    def _counters(self, side, db):
+        """{table: its next AUTO_INCREMENT value} of the tables in scope."""
+        return {str(t): int(v) for t, v in self._q(
+            side, "select table_name, auto_increment from"
+                  " information_schema.tables where table_schema = %s and"
+                  " auto_increment is not null", (self._d(side, db),),
+            fresh=True) if self.in_scope(db, str(t))}
+
+    def _restart_sql(self, db, table, value):
+        return (f"alter table `{self._d('dst', db)}`.`{table}`"
+                f" auto_increment = {int(value)}")
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """Each table's counter where the target stands, which a rollback
+        puts back (`restore_sequences`), and - unless only those are
+        repaired - each table's definition as the server says it; the rows
+        a repair writes are kept by the repair's own record."""
+        (state_dir / "dst-wire-counters.txt").write_text("".join(
+            f"{t}|{v}\n" for t, v in sorted(self._counters("dst",
+                                                           db).items())))
+        if kind == "sequences":
+            return
+        defs = []
+        for t in self.neutral_tables("dst", db):
+            got = self._q("dst", f"show create table `{self._d('dst', db)}`"
+                                 f".`{t}`")
+            defs.append(f"{got[0][-1]};" if got else f"-- {t}: not shown")
+        (state_dir / "dst-schema.sql").write_text("\n\n".join(defs) + "\n")
+
+    def restore_sequences(self, db, state_dir):
+        path = state_dir / "dst-wire-counters.txt"
+        if not path.exists():
+            return []
+        return [self._restart_sql(db, *line.rsplit("|", 1)) + ";"
+                for line in path.read_text().splitlines() if line]
 
     def tail_start(self, db, token_path):
         return self._as_pair().tail_start(db, token_path)
@@ -269,6 +312,17 @@ class PolarDBXEngine(OnMySQLWire):
                     f"alter sequence {name} start with {int(hi) + 1}"))
         return out or [Result("autoinc", db, "ok",
                               "no AUTO_INCREMENT column in scope")]
+
+    def _counters(self, side, db):
+        """{table: its sequence's next value} of the tables in scope: a
+        table's counter is its `AUTO_SEQ_<table>`."""
+        seqs = self._sequences(side)
+        return {t: int(seqs[f"AUTO_SEQ_{t}".upper()])
+                for t in self.neutral_tables(side, db)
+                if seqs.get(f"AUTO_SEQ_{t}".upper()) is not None}
+
+    def _restart_sql(self, db, table, value):
+        return f"alter sequence AUTO_SEQ_{table} start with {int(value)}"
 
     def check_deep(self, db):
         """Every target table's shards and global indexes agreeing with it

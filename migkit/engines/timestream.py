@@ -137,7 +137,7 @@ class TimestreamEngine(NeutralCopier, Engine):
             token = got.get("NextToken")
             if not token:
                 break
-        return sorted(t for t in out if not self.hop.excluded(db, t))
+        return sorted(t for t in out if self.in_scope(db, t))
 
     def _described(self, side, db, table):
         """[(column, type, what it is of a record)]."""
@@ -437,6 +437,20 @@ class TimestreamEngine(NeutralCopier, Engine):
         return self._param_result(db, src, dst, tuple(set(src) | set(dst)),
                                   "give the target's tables the source's"
                                   " retention and partition key")
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """What the target held before a repair: each table's retention and
+        partition key, and its records counted - the records a repair
+        writes are kept by the repair's own record; Timestream's own API
+        keeps no restore point of a table."""
+        import json
+        out = {"settings": self._settings("dst", db), "records": {}}
+        for t in self.neutral_tables("dst", db):
+            _, rows = self._query("dst", "select count(*) from"
+                                         f" {self._qualified('dst', db, t)}")
+            out["records"][t] = rows[0][0] if rows else None
+        (state_dir / "dst-timestream.json").write_text(
+            json.dumps(out, indent=2, sort_keys=True, default=str))
 
     def server_identity(self, side, db):
         ep = self._ep(side)

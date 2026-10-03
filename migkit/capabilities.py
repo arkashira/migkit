@@ -343,70 +343,50 @@ GAPS = {
         "snapshot": (NOT_YET, "ER5"),
     },
     # the cloud-native services (P0-CLOUDS part 2): their own bulk paths
-    # (CN1), accounts (CN2), restore points (CN3), follows not built (CN4)
-    # and deep checks and settings (CN5) are not yet migkit's
+    # (CN1), accounts (CN2) and the follows not built (CN4)
     "spanner": {
         "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_YET, "CN2"),
-        "snapshot": (NOT_YET, "CN3"),
     },
     "bigtable": {
-        "deep": (NOT_YET, "CN5"),
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("row")),
         "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_APPLICABLE, _IAM.format("a table")),
         "statistics": (NOT_APPLICABLE, "a Bigtable table is read by its row"
                                        " keys and keeps no optimiser"
                                        " statistics"),
-        "snapshot": (NOT_YET, "CN3"),
     },
     "firestore": {
-        "deep": (NOT_YET, "CN5"),
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("document")),
-        "params": (NOT_YET, "CN5"),
         "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_APPLICABLE, "who may read a database is IAM's and its"
                                   " security rules', not the collection's"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "CN3"),
     },
     "datastore": {
-        "deep": (NOT_YET, "CN5"),
         "sequences": (NOT_APPLICABLE, "an entity's numeric id is allocated by"
                                       " the service and carried as it is:"
                                       " there is no sequence to carry"),
-        "params": (NOT_YET, "CN5"),
         "bulk-move": (NOT_YET, "CN1"),
         **{cap: (NOT_APPLICABLE, "Datastore mode has no change feed and no"
                                  " listener: nothing a client can follow")
            for cap in ("stream", "fence", "confirm", "delta")},
         "users": (NOT_APPLICABLE, _IAM.format("a kind")),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "CN3"),
     },
     "gaussdb": {
-        "deep": (NOT_YET, "CN5"),
-        "params": (NOT_YET, "CN5"),
         "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_YET, "CN2"),
-        "statistics": (NOT_YET, "CN5"),
-        "snapshot": (NOT_YET, "CN3"),
     },
     **{name: {
         "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_YET, "CN2"),
-        "snapshot": (NOT_YET, "CN3"),
     } for name in ("oceanbase", "polardbx", "dcdb")},
     "oceanbase-oracle": {
-        "deep": (NOT_YET, "CN5"),
-        "sequences": (NOT_YET, "CN5"),
-        "params": (NOT_YET, "CN5"),
         "bulk-move": (NOT_YET, "CN1"),
         **{cap: (NOT_YET, "CN4")
            for cap in ("stream", "fence", "confirm", "delta")},
         "users": (NOT_YET, "CN2"),
-        "statistics": (NOT_YET, "CN5"),
-        "snapshot": (NOT_YET, "CN3"),
     },
     "keyspaces": {
         "sequences": (NOT_APPLICABLE, "Cassandra has no sequences or"
@@ -415,12 +395,9 @@ GAPS = {
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "neptune": {
-        "deep": (NOT_YET, "CN5"),
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("vertex or edge")),
-        "params": (NOT_YET, "CN5"),
         "bulk-move": (NOT_YET, "CN1"),
         "users": (NOT_APPLICABLE, _IAM.format("the graph")),
-        "snapshot": (NOT_YET, "CN3"),
     },
     "timestream": {
         "deep": (NOT_APPLICABLE, "a record is its dimensions, time and"
@@ -438,18 +415,14 @@ GAPS = {
            for cap in ("stream", "fence", "confirm", "delta")},
         "users": (NOT_APPLICABLE, _IAM.format("a table")),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "CN3"),
     },
     "lindorm": {
-        "deep": (NOT_YET, "CN5"),
         "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("row")),
-        "params": (NOT_YET, "CN5"),
         "bulk-move": (NOT_YET, "CN1"),
         **{cap: (NOT_YET, "CN4")
            for cap in ("stream", "fence", "confirm", "delta")},
         "users": (NOT_YET, "CN2"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "CN3"),
     },
     "geminidb-cassandra": {
         "sequences": (NOT_APPLICABLE, "Cassandra has no sequences or"
