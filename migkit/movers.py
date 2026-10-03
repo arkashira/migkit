@@ -272,6 +272,10 @@ ROW_FILTER_MOVERS = ("mydumper", "mysqlsh")
 #: be carried by the table copier instead.
 ROUTING_MOVERS = ("pgdump", "pgcopydb", "native", "pgpull", "pgsubscribe")
 
+#: Bulk paths that mask a column themselves, the transforms they say
+#: (`DUMP_MASKS`); a table with another is the table copier's
+MASKING_MOVERS = ("mydumper",)
+
 #: Bulk paths that write a table under the name the hop gives it on the
 #: target (`mapping.tables`); on every other one a renamed table is left
 #: out of the bulk copy and carried by the copier that renames it - the
@@ -298,13 +302,21 @@ FILTERING_COPIERS = ("postgres", "mysql", "hetero", "sqlite")
 
 def _routes_any(hop, db):
     """Whether a table of `db` may leave the bulk path: excluded, under a
-    row filter, with its columns mapped, or renamed (`hop.table_map()`) -
-    a rename was not asked, so a bulk path never listed its tables and
-    loaded the renamed one under the source's name. The table list is
-    asked for only then; `routed_to_copier` decides table by table."""
+    row filter, with its columns mapped or masked, or renamed
+    (`hop.table_map()`) - a rename was not asked, so a bulk path never
+    listed its tables and loaded the renamed one under the source's name.
+    The table list is asked for only then; `routed_to_copier` decides
+    table by table."""
     return bool(_scoped(hop) or _filtered_here(hop, db)
                 or (getattr(hop, "mapping", None) or {}).get("columns")
-                or renames_any(hop))
+                or renames_any(hop) or _masks_here(hop, db))
+
+
+def _masks_here(hop, db):
+    """Whether the hop's `mask_on_write` may name a table of `db`
+    (`Hop.masks_in`)."""
+    said = getattr(hop, "masks_in", None)
+    return bool(callable(said) and said(db))
 
 
 def _filtered_here(hop, db):
@@ -374,17 +386,11 @@ def refuse_unpushable_filters(hop, db, via, engine=None):
     row and leaves the check comparing a filtered source against a full
     target for good.
 
-    Masking on the way is held to the same rule: only the parallel dump
-    masks (`mask_plan`), so any other path would copy the very values the
-    hop asks to hide, and stops here instead.
+    Masking on the way is held to the same rule (`refuse_unmasked`): a
+    masked table goes by a way that applies the hop's transforms, or the
+    move stops here, before anything is copied.
     """
-    masks = mask_rules(hop, db)
-    if masks and via != "mydumper":
-        raise SystemExit(
-            f"the hop masks {', '.join(sorted(masks))} on the way, and only"
-            " the parallel dump of a MySQL hop can: this path would copy the"
-            " values as they are. Nothing has been copied. Install it with"
-            " migkit doctor --install, or drop the masking rule")
+    refuse_unmasked(hop, db, via)
     mine = _filtered_here(hop, db)
     if not mine or via in ROW_FILTER_MOVERS:
         return
@@ -397,6 +403,45 @@ def refuse_unpushable_filters(hop, db, via, engine=None):
         " would copy every row and leave `check` comparing a filtered"
         " source against a full target for good. Drop the filters, or"
         " narrow the source with a view the hop points at instead.")
+
+
+#: bulk paths that hand a masked table to the table copier, table by table
+#: (`planner`), or mask it themselves where they can (`DUMP_MASKS`) - and
+#: the copier itself
+MASKING_PATHS = ROW_FILTER_MOVERS + ROUTING_MOVERS + ("builtin",)
+
+
+def refuse_unmasked(hop, db, via):
+    """Stop a move that would carry a table the hop masks
+    (`mask_on_write`) as the source holds it: its engine's table copier
+    does not write through the hop's transforms (`Engine.copier_masks`),
+    or `via` is a bulk path that carries whole tables and cannot leave a
+    masked one to it (`MASKING_PATHS`). Before anything is copied; a hop
+    that masks nothing in `db` passes as it always did."""
+    if not _masks_here(hop, db):
+        return
+    from .engines import get_engine
+    keys = ", ".join(sorted(_mask_said(hop)))
+    eng = get_engine(hop)
+    if not eng.copier_masks():
+        raise SystemExit(
+            f"the hop masks {keys} on the way, and this engine's copy writes"
+            " what it reads, as it reads it - no way of it takes the hop's"
+            " transforms. Nothing has been copied. Drop the masking rule to"
+            " copy the values as they are")
+    if via not in MASKING_PATHS:
+        raise SystemExit(
+            f"the hop masks {keys} on the way, and this path carries whole"
+            " tables as they are and cannot leave a masked one to the table"
+            " copier, which masks it. Nothing has been copied. Move by"
+            " another way, or drop the masking rule")
+    refused = eng.masks_refused(db)
+    if refused:
+        raise SystemExit(
+            f"{db}: the hop asks to mask "
+            + "; ".join(f"{n} ({why})" for n, why in refused)
+            + ". Nothing has been copied: fix the rule, or drop it to copy"
+              " the values as they are")
 
 
 def supported(engine, via):
@@ -1547,7 +1592,7 @@ def _pg_missing_tables(hop, db):
     # mapping says - made here, it stood under the source's name; and a
     # partition goes as its table goes (`in_scope`, `_ruled`)
     want = [t for t in eng._all_tables("src", db) if eng.in_scope(db, t)
-            and not eng.through_pair(db, ".".join(eng._ruled(db, t)))]
+            and not eng.made_by_pair(db, ".".join(eng._ruled(db, t)))]
     return [t for t in want if t not in have], not have
 
 
@@ -1568,7 +1613,7 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
     (`_pg_depending`): the tables the hop leaves out - a partition as its
     table is (`partition_roots`) - and, where the target has tables, only
     those it lacks; and the tables the pair's copier makes later under
-    the name the hop gives them (`through_pair`). A view over one made
+    the name the hop gives them (`made_by_pair`). A view over one made
     the restore refuse the whole schema; a foreign key into one stopped
     the move once the rows were in. So are the views, routines and
     triggers the hop's `objects` does not take (`objects_left_out`), and
@@ -1582,9 +1627,9 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
     roots = _pg_roots(hop, db, eng=eng)
     skip = excluded_tables(hop, db, every, roots=roots)
     # built by the pair's copier after the load, under the name the hop
-    # gives them (`through_pair`)
+    # gives them (`made_by_pair`)
     paired = [n for n in every if n not in skip
-              and eng.through_pair(db, roots.get(n, n))]
+              and eng.made_by_pair(db, roots.get(n, n))]
     if whole:
         gone = skip + paired
     else:
@@ -2349,11 +2394,12 @@ def _asked(hop, name, roots=None):
 def rules_by_name(hop):
     """Whether the hop has a rule a partition's table's name answers and
     its own may not: a scope (`config.scoped`), a row filter, a column
-    rule or a rename. Without one, a partition goes as itself, and its
-    root is never asked for."""
+    rule, a masked column or a rename. Without one, a partition goes as
+    itself, and its root is never asked for."""
     mapping = getattr(hop, "mapping", None) or {}
     return bool(_scoped(hop) or mapping.get("where")
-                or mapping.get("columns") or renames_any(hop))
+                or mapping.get("columns") or renames_any(hop)
+                or _mask_said(hop))
 
 
 def _pg_roots(hop, db, side="src", eng=None):
@@ -2746,7 +2792,7 @@ def _my_missing_tables(hop, db):
     # the pair's copier, under the names and without the columns the
     # mapping says - made here, it stood under the source's name
     want = [t for t in eng._tables("src", db)
-            if t not in have and not eng.through_pair(db, t)]
+            if t not in have and not eng.made_by_pair(db, t)]
     gone = not have and not eng._q(
         "dst", "select 1 from information_schema.schemata"
                " where schema_name = %s", (eng._d("dst", db),))
@@ -2801,7 +2847,7 @@ def _my_create_missing(hop, db, log=None):
     have = set(eng._all_tables("dst", db))
     gone = {t for t in eng._all_tables("src", db)
             if (not eng.in_scope(db, t) and t not in have)
-            or eng.through_pair(db, t)}
+            or eng.made_by_pair(db, t)}
     unmade = []
     for t in want:
         got = eng._q("src", f"show create table {src}.{eng._quote_ident(t)}")
@@ -3173,9 +3219,16 @@ tooluse.register("mydumper", options=_features({
                          " 5.60 s (MY_BENCH)"),
     "masking (per column)": (
         USED, "null and constant, from the hop's mask_on_write, on columns"
-              " outside every key, on a hop that sends nothing back; the"
-              " masked columns are held to the rule after the load"
-              " (`mask_plan`)"),
+              " outside every key, on a hop that sends nothing back - the two"
+              " of its column functions whose text writes what the hop's"
+              " transforms write (`DUMP_MASKS`); a hash or a cut is the"
+              " table copier's. The masked tables are compared after the"
+              " load through the hop's transforms (`masked_held`)"),
+    "random_* and apply (per column)": (
+        UNUSED, "a random value can be held to nothing after the load, and"
+                " what apply reads of its argument was not measured: a hash"
+                " and a cut go by the table copier, which applies the hop's"
+                " own transforms and is proved by them"),
     "--defaults-file": (USED, "the session's sql_mode, and per table its"
                               " filter, chunk size and masking"),
     "--omit-from-file": (USED, "the tables the hop excludes and those"
@@ -3405,32 +3458,84 @@ def my_chunk_rows(fact, read_rate, workers):
 
 # --- masking on the way ----------------------------------------------------
 
-#: what a write-side masking rule may ask for, and whether each is exact:
-#: every value it writes is known, so the target can be held to it after
-#: the load. A random value is known to nobody - it cannot be checked, and
-#: a second run writes another
-MASKS = {"null": True, "constant": True, "random": False}
+#: the transforms the parallel dump's defaults file says itself, in a
+#: table's section, one line a column. Read off the program (1.0.5, its
+#: own strings): its column functions are null, constant, apply and four
+#: that write random values, and a name it does not know is passed over -
+#: the column keeps its own value ("Function not found: Using default").
+#: Only the two whose text writes what `transforms.apply` writes are handed
+#: to it; a table with a hash or a cut goes to the table copier, which
+#: applies every transform. What `apply` reads of its argument was not
+#: measured, and nothing here depends on it.
+DUMP_MASKS = frozenset({"null", "constant"})
 
 
-def mask_rules(hop, db):
-    """{table: {column: (kind, value)}} from the hop's `mask_on_write`,
-    for `db`: `table.column` or `db.table.column` to `null`, `constant
-    <text>` or `random`. The display option `mask` is not one of them: it
-    hides values where a person reads them and leaves what is written as
-    it is."""
-    raw = (getattr(hop, "options", None) or {}).get("mask_on_write") or {}
+def mask_rules(hop, db, tables):
+    """{table: {column: (kind, argument)}} of the hop's masking for the
+    tables of `db`, each named as the source lists it (`Hop.masks`, the one
+    reading of `mask_on_write`). The display option `mask` is not one of
+    them: it hides values where a person reads them and leaves what is
+    written as it is."""
     out = {}
-    for key, rule in sorted(raw.items()):
-        parts = [p for p in str(key).split(".") if p]
-        if len(parts) == 3 and parts[0] != db or len(parts) < 2:
-            continue
-        table, column = parts[-2], parts[-1]
-        text = "" if rule is None else str(rule).strip()
-        kind, _, value = text.partition(" ")
-        if ":" in kind:
-            kind, _, rest = kind.partition(":")
-            value = (rest + " " + value).strip()
-        out.setdefault(table, {})[column] = (kind.lower(), value.strip())
+    for t in tables or ():
+        got = hop.masks(db, *_asked(hop, t))
+        if got:
+            out[t] = got
+    return out
+
+
+def _mask_said(hop):
+    """The hop's `mask_on_write` as written, kept beside a record whose
+    reader must not take a copy masked otherwise for this hop's."""
+    raw = (getattr(hop, "options", None) or {}).get("mask_on_write") or {}
+    return {str(k): str(v) for k, v in sorted(raw.items(), key=str)} \
+        if isinstance(raw, dict) else {}
+
+
+def dump_masks(rules):
+    """Whether the parallel dump says every transform of a table's
+    `rules` itself (`DUMP_MASKS`)."""
+    return all(kind in DUMP_MASKS for kind, _ in (rules or {}).values())
+
+
+def mask_refused(hop, rules, keys=None, columns=None, text=None):
+    """[(table.column, why)] for every rule of `rules` ({table: {column:
+    (kind, argument)}}) that cannot be applied as asked, whichever way
+    carries the table: on a key - a masked key is not the row's key any
+    more, and a second run, the check and every table that references it
+    line rows up by it; on a hop that streams the target's changes back,
+    which would write masked values over the source's real ones; on a
+    column the source does not have (`columns`, {table: {column}}, where
+    known) - a typo there hides nothing and says it did; a hash with no
+    `mask_key`; and a constant, a hash or a cut of a column that is not
+    text (`text`, {table: {column}} of the text columns, where known),
+    whose value another engine reads back as another text."""
+    out = []
+    back = _streams_back(hop)
+    for table, cols in sorted(rules.items()):
+        for column, (kind, _) in sorted(cols.items()):
+            name = f"{table}.{column}"
+            if column in (keys or {}).get(table, ()):
+                out.append((name, "it is part of a key: a masked key is not"
+                            " the row's key any more, and a second run, the"
+                            " check and every table that references it line"
+                            " rows up by it"))
+            elif back:
+                out.append((name, "the hop streams the target's changes"
+                            " back to the source, which would write masked"
+                            " values over the real ones"))
+            elif columns is not None and column not in columns.get(table,
+                                                                   ()):
+                out.append((name, "the source has no such column"))
+            elif kind == "hash" and not hop.mask_key():
+                out.append((name, "hash needs the hop's mask_key (a secret"
+                            " reference): a digest without a key is a"
+                            " dictionary away from the value"))
+            elif kind != "null" and text is not None and \
+                    column not in text.get(table, ()):
+                out.append((name, f"{kind} writes text, and the column is"
+                            " not text: the value written would read back"
+                            " as another one"))
     return out
 
 
@@ -3446,18 +3551,28 @@ MY_KEY_COLUMNS_SQL = """
      where referenced_table_schema = %s and referenced_table_name is not null"""
 
 
+#: MySQL's column types whose value is text, which a constant, a hash or a
+#: cut may be written into (`mask_refused`)
+MY_TEXT_TYPES = ("char", "varchar", "tinytext", "text", "mediumtext",
+                 "longtext")
+
+
 def _my_mask_facts(hop, db):
     """({table: {column}} of every column in a primary or unique key, or in
-    a foreign key on either end, and {table: {column}} of every column) on
-    the source: what `mask_plan` holds a rule to."""
-    keys, columns = {}, {}
+    a foreign key on either end, {table: {column}} of every column, and
+    {table: {column}} of the text ones) on the source: what `mask_plan`
+    holds a rule to."""
+    keys, columns, text = {}, {}, {}
     for t, c in _my_ask(hop, "src", MY_KEY_COLUMNS_SQL, (db, db, db)):
         keys.setdefault(str(t), set()).add(str(c))
-    for t, c in _my_ask(hop, "src", "select table_name, column_name from"
-                                    " information_schema.columns"
-                                    " where table_schema = %s", (db,)):
+    for t, c, k in _my_ask(hop, "src", "select table_name, column_name,"
+                                       " data_type from"
+                                       " information_schema.columns"
+                                       " where table_schema = %s", (db,)):
         columns.setdefault(str(t), set()).add(str(c))
-    return keys, columns
+        if str(k).lower() in MY_TEXT_TYPES:
+            text.setdefault(str(t), set()).add(str(c))
+    return keys, columns, text
 
 
 def _streams_back(hop):
@@ -3467,101 +3582,41 @@ def _streams_back(hop):
                 or topo in ("two-way", "two_way", "bidirectional"))
 
 
-def mask_plan(hop, db, keys, columns=None):
-    """(sections, refused) for the hop's masking rules on `db`: the dump's
-    defaults-file lines per table, and [(table.column, why)] for every rule
-    that cannot be applied as asked.
-
-    A rule is applied only where it is exact (`MASKS`) and safe to run
-    again and to undo: not on a key - a masked key is not the row's key
-    any more, and a second run, the check and every table that references
-    it line rows up by it - and not on a hop that streams the target's
-    changes back, which would write masked values over the source's real
-    ones. `keys` and `columns` are `_my_mask_facts`' ({table: {column}});
-    with `columns` known, a rule naming a column the source does not have
-    is refused rather than left to mask nothing - a typo there hides
-    nothing and says it did. `columns` is None where a plan could not
-    ask."""
-    sections, refused = {}, []
-    back = _streams_back(hop)
-    for table, rules in mask_rules(hop, db).items():
-        for column, (kind, value) in sorted(rules.items()):
-            name = f"{table}.{column}"
-            if kind not in MASKS:
-                refused.append((name, f"`{kind or '(nothing)'}` is not a"
-                                " masking rule: null, constant <text> or"
-                                " random"))
-            elif not MASKS[kind]:
-                refused.append((name, "a random value cannot be held to"
-                                " anything after the load, and a second run"
-                                " writes another"))
-            elif kind == "constant" and ("'" in value or "\n" in value
-                                         or not value):
-                refused.append((name, "a constant must be text without"
-                                " quotes or line breaks"))
-            elif column in (keys or {}).get(table, set()):
-                refused.append((name, "it is part of a key: a masked key is"
-                                " not the row's key any more, and a second"
-                                " run, the check and every table that"
-                                " references it line rows up by it"))
-            elif back:
-                refused.append((name, "the hop streams the target's changes"
-                                " back to the source, which would write"
-                                " masked values over the real ones"))
-            elif columns is not None and column not in columns.get(table,
-                                                                   ()):
-                refused.append((name, "the source has no such column"))
-            else:
-                line = (f"`{column}` = null" if kind == "null"
-                        else f"`{column}` = constant '{value}'")
-                sections.setdefault(table, []).append(line)
+def mask_plan(hop, db, rules, keys, columns=None, text=None):
+    """(sections, refused) for the hop's masking of `db`'s tables `rules`
+    (`mask_rules`): the dump's defaults-file lines for each table whose
+    every transform the dump says itself (`DUMP_MASKS`), and
+    [(table.column, why)] for every rule that cannot be applied as asked by
+    any way (`mask_refused`). A table with a hash or a cut has no section:
+    the table copier carries it (`planner`), applying the transforms.
+    `keys`, `columns` and `text` are {table: {column}} of the source's key
+    columns, every column and the text ones, where known."""
+    sections = {}
+    refused = mask_refused(hop, rules, keys, columns, text)
+    bad = {n.rpartition(".")[0] for n, _ in refused}
+    for table, cols in sorted(rules.items()):
+        if table in bad or not dump_masks(cols):
+            continue
+        sections[table] = [
+            f"`{column}` = null" if kind == "null"
+            else f"`{column}` = constant '{arg}'"
+            for column, (kind, arg) in sorted(cols.items())]
     return sections, refused
 
 
-def _masked_record(hop, db):
-    return hop.report_dir(db) / "bulk-masked.json"
-
-
-def masked_tables(hop, db):
-    """`db.table` of every table the move in progress masked on the way
-    and held to the rule (`_my_masked_held`): not a copy of its source, so
-    not compared whole. Read from what the move wrote once it had held
-    them, never from the rules alone - a table a rule names and nothing
-    masked is compared like any other."""
-    got = _read_json(_masked_record(hop, db)) or {}
-    began = _read_json(hop.report_dir(db) / "move-began.json") or {}
-    if not got or float(got.get("at") or 0) < float(began.get("epoch")
-                                                     or 0):
-        return set()
-    return {f"{db}.{t}" for t in got.get("tables") or ()}
-
-
-def _my_masked_held(hop, db, rules):
-    """[problem] for the masked tables: each holds as many rows as its
-    source does (through the row filter), and every masked column holds
-    exactly what the rule writes. Asked of the servers, so it can say a
-    table is not what the rule makes it - a column left unmasked, a row
-    missing."""
-    from .engines.mysql import MySQLEngine
-    eng = MySQLEngine(hop)
-    q = eng._quote_ident
-    ddb = eng._d("dst", db)
+def masked_held(eng, db, tables):
+    """[problem] for the tables of `db` a move masked on the way: each
+    compared with its source through the hop's transforms - the source's
+    value taken as the target is to hold it, by the one comparison every
+    engine's masked tables go through (`Engine.through_pair`) - so a column
+    left unmasked, a value masked another way and a row missing are each
+    said. A masked table used to be held to its rule by counts on one
+    engine and then left out of every comparison."""
     out = []
-    for table, cols in sorted(rules.items()):
-        where = hop.row_filter(db, table)
-        src = eng._q("src", f"select count(*) from {q(db)}.{q(table)}"
-                            + (f" where {where}" if where else ""))[0][0]
-        dst = eng._q("dst", f"select count(*) from {q(ddb)}.{q(table)}")[0][0]
-        if int(src) != int(dst):
-            out.append(f"{table}: {int(dst):,} rows where the source has"
-                       f" {int(src):,}")
-        for column, (kind, value) in sorted(cols.items()):
-            n = eng._q("dst", f"select count(*) from {q(ddb)}.{q(table)}"
-                              f" where not ({q(column)} <=> %s)",
-                       (None if kind == "null" else value,))[0][0]
-            if int(n):
-                out.append(f"{table}.{column}: {int(n):,} rows not masked"
-                           " as the hop asks")
+    for t in sorted(tables):
+        for r in eng.check_data(db, t):
+            if r.check == "data" and r.status in ("diff", "error"):
+                out.append(f"{t}: {str(r.detail)[:160]}")
     return out
 
 
@@ -3931,13 +3986,13 @@ def _shell_resumable(hop, db, tables, folder):
     snapshot left it. None otherwise: a dump older than the source's last
     write would load yesterday's rows over today's, and one taken under
     another row filter, columns or names (`Hop.scope_changed`) or other
-    values masked as they are written (`mask_rules`) would load what the
+    values masked as they are written (`mask_on_write`) would load what the
     rules of then took into tables this hop fills otherwise."""
     rec = _read_json(_shell_resume_record(hop, db))
     if not rec or sorted(rec.get("tables") or []) != sorted(tables):
         return None
     if hop.scope_changed(rec) or ("masked" in rec and rec["masked"] != (
-            json.loads(json.dumps(mask_rules(hop, db))))):
+            json.loads(json.dumps(_mask_said(hop))))):
         return None
     if not (folder / "@.done.json").exists():
         return None
@@ -3997,7 +4052,7 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         except Exception as e:
             why = (str(e).strip().splitlines()[0][:100] if str(e).strip()
                    else type(e).__name__)
-            if _routes_any(hop, db) or mask_rules(hop, db):
+            if _routes_any(hop, db):
                 raise _unresolved_exclusion(db, why)
             raise RuntimeError(f"the source's tables could not be read:"
                                f" {why}. Nothing has been changed on the"
@@ -4027,7 +4082,7 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         routed = [n for n in routed_to_copier(hop, db, via, every,
                                               qualifier=db, choice=choice)
                   if n not in skip]
-    elif _routes_any(hop, db) or mask_rules(hop, db):
+    elif _routes_any(hop, db):
         unresolved = "no answer in time"
     leaf = {f"{db}.{t}": t for t in (every or [])}
     elsewhere = {leaf.get(n, n.rsplit(".", 1)[-1]) for n in skip + routed}
@@ -4037,24 +4092,28 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                    [t for t in every if t not in elsewhere
                     and t not in shell_tables])
     rates = {w.name: w.rates for w in eng.TABLE_WAYS}
-    # masking on the way: exact rules on columns outside every key, on a
-    # hop that sends nothing back; anything else stops the move before it
-    # writes, rather than copy the values the hop asked to hide
-    sections, refused, rules = {}, [], mask_rules(hop, db)
+    # masking on the way: a table whose every transform the dump says
+    # itself is masked in its section; one with a hash or a cut is the
+    # table copier's (`routed`), which applies every transform; a rule no
+    # way can apply stops the move before it writes, rather than copy the
+    # values the hop asked to hide
+    sections, refused = {}, []
+    rules = mask_rules(hop, db, every or ())
     if rules:
-        keys, columns = (_within(lambda: _my_mask_facts(hop, db))
-                         or ({}, None)) if not go else _my_mask_facts(hop, db)
-        sections, refused = mask_plan(hop, db, keys, columns)
-        for t in rules:
-            c = choice.get(t)
-            if every is not None and t not in every:
-                # a rule on a name the source does not have masks nothing,
-                # and the operator believes something is hidden
-                refused.append((t, "the source has no such table"))
-            elif c is not None and c.rung != DUMP_LOAD \
-                    or f"{db}.{t}" in routed:
-                refused.append((t, "only the parallel dump masks on the way,"
-                                " and this table cannot go by it"))
+        keys, columns, text = (_within(lambda: _my_mask_facts(hop, db))
+                               or ({}, None, None)) if not go \
+            else _my_mask_facts(hop, db)
+        sections, refused = mask_plan(hop, db, rules, keys, columns, text)
+        sections = {t: v for t, v in sections.items()
+                    if t in (dump_tables or ())}
+        for t, cols in sorted(rules.items()):
+            if t in shell_tables or (t in (dump_tables or ())
+                                     and not dump_masks(cols)):
+                # the planner hands such a table to the copier; one left on
+                # a program that cannot mask it is never copied as it is
+                refused.append((t, "the way this table goes cannot mask"
+                                " it, and the table copier was not given"
+                                " it"))
     read_rate = rates[DUMP_LOAD].get("read") or rates[DUMP_LOAD][PLAIN]
     for t in dump_tables or ():
         spec = my_chunk_rows((facts or {}).get(t), read_rate, workers)
@@ -4117,11 +4176,10 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                         f" asks - {why}. The move stops before it writes")
     if rules and not refused:
         steps.insert(1, f"# {len(rules)} tables are masked on the way: the"
-                        " target is not a copy of the source in those"
-                        " columns, so the move holds them to the masking"
-                        " rule and counts their rows instead of comparing"
-                        " them; the check compares whole rows and shows"
-                        " them as different")
+                        " target holds in those columns what the hop's"
+                        " transforms write, and the move and the check"
+                        " compare each with its source taken through the"
+                        " same transforms")
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
@@ -4136,7 +4194,6 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         raise SystemExit(
             f"{db}: " + "; ".join(f"{t}: {c.reason}" for t, c in
                                   sorted(choice.items()) if not c.rung))
-    _masked_record(hop, db).unlink(missing_ok=True)
     cnf.write_text(settings)
     cnf.chmod(0o600)
     if skip or routed or shell_tables:
@@ -4198,7 +4255,7 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                             "tables": sorted(shell_tables),
                             "position": _shell_dumped_at(shell_dir),
                             "scope_fingerprint": hop.scope_fingerprint(),
-                            "masked": mask_rules(hop, db)})
+                            "masked": _mask_said(hop)})
                     else:
                         shell_tables = []
                 elif log:
@@ -4295,16 +4352,15 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         if dump_tables and not_compared and log:
             log(f"{len(not_compared)} tables had no checksum from the copy"
                 " to compare; the digest that follows compares them")
-        if rules:
-            held = {t: c for t, c in rules.items()
-                    if t in (dump_tables or ())}
-            wrong = _my_masked_held(hop, db, held)
+        held = [t for t in rules if t in (dump_tables or ())]
+        if held:
+            # held whatever `verify_batches` says: a table the dump masked
+            # is compared through the hop's transforms (`masked_held`)
+            wrong = masked_held(eng, db, held)
             if wrong:
                 raise SystemExit(f"{db}: the tables masked on the way are not"
-                                 " what the hop's rule makes them: "
+                                 " what the hop's transforms make them: "
                                  + "; ".join(wrong[:6]))
-            _write_json(_masked_record(hop, db),
-                        {"at": time.time(), "tables": sorted(held)})
         if skip:
             _my_orphans_left(hop, db, log)
         # the position the copy is a snapshot at, for a replica that follows
@@ -6616,8 +6672,8 @@ def stream_cannot_carry(hop, db, tables, columns_left_out=False,
                         ops_alike=False):
     """[(table, why)] for the tables of `db` a change stream that applies
     whole rows under their own names would carry wrongly - every one the
-    hop does not exclude and filters, renames, maps the columns of, or
-    carries only some changes of (`mapping.ops`).
+    hop does not exclude and filters, masks (`Hop.masks`), renames, maps
+    the columns of, or carries only some changes of (`mapping.ops`).
 
     Such a stream used to carry them anyway, and the check could not see
     it: `check` applies a row filter to both sides, so every row outside
@@ -6640,6 +6696,11 @@ def stream_cannot_carry(hop, db, tables, columns_left_out=False,
             alike = carried
         if hop.row_filter(db, *parts):
             out.append((name, "its rows are filtered"))
+        elif hop.masks(db, *parts):
+            # a stream that applies whole rows writes the source's values;
+            # migkit's own tail writes each change through the hop's
+            # transforms (`transforms.apply`)
+            out.append((name, "its columns are masked"))
         elif _renamed(hop, db, parts):
             out.append((name, "it is renamed on the target"))
         elif cols.get("rename"):
@@ -6659,7 +6720,14 @@ def renames_any(hop):
     """Whether a rule of the hop's `mapping.tables` gives a table another
     name: one naming a table by its own name (`orders: orders`, or the
     last parts of it) renames nothing, and a hop with only such rules
-    goes every way it went without them."""
+    goes every way it went without them. A name rule for every schema or
+    table (`mapping.names`) renames too: read as none, a PostgreSQL hop
+    with only `names` sent the tables it renames to the pair
+    (`through_pair`) and then compared none of them (`mapped_tables`)."""
+    names = (getattr(hop, "mapping", None) or {}).get("names") or {}
+    if any(isinstance(names.get(level), dict) and any(
+            names[level].values()) for level in ("schemas", "tables")):
+        return True
     for k, v in ((getattr(hop, "mapping", None) or {}).get("tables")
                  or {}).items():
         to = str(v).split(".")

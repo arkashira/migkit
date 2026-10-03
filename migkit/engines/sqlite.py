@@ -951,11 +951,12 @@ class SQLiteEngine(NeutralCopier, Engine):
                                   "create and copy the table, sqlite files"
                                   " are cheap"))
                 continue
-            if self.hop.column_rules(db, t) or self.hop.row_filter(db, t):
+            if self.hop.column_rules(db, t) or self.hop.row_filter(db, t) \
+                    or self.hop.masks(db, t):
                 # the whole-row hash cannot know a column was dropped or
-                # renamed on purpose, or that a row is outside the hop's
-                # filter; the pair's comparison reads both, as the copier
-                # that moved the rows did
+                # renamed on purpose, that a row is outside the hop's
+                # filter, or that a value was masked; the pair's comparison
+                # reads them all, as the copier that moved the rows did
                 res += [r for r in self._as_pair().check_data(db, t, stream)
                         if r.check == "data"]
                 continue

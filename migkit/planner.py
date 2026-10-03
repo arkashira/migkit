@@ -61,17 +61,39 @@ def ways(via):
     everything the table asks, the table copier where it does not, and
     nothing for a table the hop leaves out."""
     from .decide import Rung
-    from .movers import NEEDS_KEYS, RENAMING_MOVERS, ROW_FILTER_MOVERS
+    from .movers import (MASKING_MOVERS, NEEDS_KEYS, RENAMING_MOVERS,
+                         ROW_FILTER_MOVERS)
     bulk = {"carried"} | ({"row filter"} if via in ROW_FILTER_MOVERS
                           else set()) | ({"keyless"} if via not in NEEDS_KEYS
                                          else set()) | (
-        {"renamed"} if via in RENAMING_MOVERS else set())
+        {"renamed"} if via in RENAMING_MOVERS else set()) | (
+        {MASKED} if via in MASKING_MOVERS else set())
+    # the table copier writes a masked table through the hop's transforms,
+    # every one of them (`Engine.through_pair`); the dump only those it
+    # says itself (`movers.DUMP_MASKS`)
     return (Rung(BULK, "the bulk copy", gives=frozenset(bulk),
                  because="the fastest path here"),
             Rung(COPIER, "the table copier",
                  gives=frozenset({"carried", "row filter",
-                                  "column mapping", "keyless", "renamed"})),
+                                  "column mapping", "keyless", "renamed",
+                                  MASKED, HASHED})),
             Rung(LEFT, WORDS[LEFT], gives=frozenset({LEFT})))
+
+
+#: what a masked table asks of its way: masked on the way, and - where a
+#: transform is a hash or a cut - one that takes those too
+MASKED, HASHED = "masked on the way", "hashed or cut on the way"
+
+
+def masking_needs(hop, db, parts):
+    """What the hop's transforms of this table (`Hop.masks`) ask of the way
+    it goes."""
+    from .movers import dump_masks
+    got = hop.masks(db, *parts) if callable(getattr(hop, "masks", None)) \
+        else {}
+    if not got:
+        return ()
+    return (MASKED,) if dump_masks(got) else (MASKED, HASHED)
 
 
 def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None,
@@ -119,7 +141,8 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None,
                 else ()) + (("column mapping",)
                             if hop.column_rules(db, *asked) else ()) + (
                 ("keyless",) if fact.get("key") is False else ()) + (
-                ("renamed",) if movers._renamed(hop, db, asked) else ())
+                ("renamed",) if movers._renamed(hop, db, asked) else ()) + (
+                masking_needs(hop, db, asked))
         got = climb(name, rungs, need=need)
         mine = (choice.get(name) or choice.get(parts[-1])
                 if got.path == BULK else None)

@@ -2015,16 +2015,29 @@ class MySQLEngine(Engine):
             if first:
                 time.sleep(0.05)
 
-    def neutral_digest(self, side, db, table, columns, where=None):
+    #: `neutral_digest` takes columns computed in the server's SQL in place
+    #: of the table's own (`computed`: a masked column as its transform)
+    DIGESTS_COMPUTED = True
+
+    def neutral_digest(self, side, db, table, columns, where=None,
+                       computed=None):
+        """(rows, digest) of a table as canon renders its rows, summed by the
+        server; `computed` is {column: SQL} read in place of a column - a
+        masked one as its transform makes it (`transforms.sql`)."""
         from .. import canon
         if any(canon.folded_here(c) for _, c in columns):
             return canon.fold_batches(columns, self.neutral_batches(
                 side, db, table, columns, 5000, where=where))
         row = canon.row_expr("mysql", columns)
+        source = f"`{self._d(side, db)}`.`{table}`" + self._where(where)
+        if computed:
+            q = self._quote_ident
+            inner = ", ".join(f"{computed[n]} as {q(n)}" if n in computed
+                              else q(n) for n, _ in columns)
+            source = f"(select {inner} from {source}) s"
         r = self._q(side, f"select count(*),"
                           f" {canon.digest_expr('mysql', row)}"
-                          f" from `{self._d(side, db)}`.`{table}`"
-                          + self._where(where))
+                          f" from {source}")
         return (int(r[0][0]), str(r[0][1]))
 
     def purge_backlog(self, side):
@@ -7337,9 +7350,12 @@ class MySQLEngine(Engine):
             run="_copy_ranges", start="copier",
             startup=PASS_BENCH["startup"],
             rates={PLAIN: PASS_BENCH[PLAIN], BINARY: PASS_BENCH[BINARY]}),
+        # a masked table the copier takes is carried by the pair, which
+        # writes it through the hop's transforms (`through_pair`)
         Way("rows", "the table copier's rows", short="the table copier's rows",
             gives=frozenset({"row filter", "resume by chunk", "keyless",
-                             "large values", "resume by key"}),
+                             "large values", "resume by key",
+                             "masked on the way"}),
             needs=(Need("a move not asked to copy straight across",
                         lambda f: not f["straight_only"],
                         "the move is asked to copy straight across"),),
@@ -7350,9 +7366,13 @@ class MySQLEngine(Engine):
     def way_name(self, table):
         return str(table).rsplit(".", 1)[-1]
 
-    def masked_on_the_way(self, db):
-        from ..movers import mask_rules
-        return set(mask_rules(self.hop, db))
+    def masked_on_the_way(self, db, tables):
+        """The tables of `tables` the parallel dump masks itself
+        (`movers.DUMP_MASKS`); one with a hash or a cut is the table
+        copier's (`planner`)."""
+        from ..movers import dump_masks, mask_rules
+        return {t for t, r in mask_rules(self.hop, db, tables).items()
+                if dump_masks(r)}
 
     def table_way_facts(self, db, via, quick=False, known=None, sizes=None):
         """What `TABLE_WAYS`' needs read, for a move of `db` by `via`: the
@@ -7382,8 +7402,7 @@ class MySQLEngine(Engine):
                 lambda: movers._my_target_loads_files(self.hop)),
             direct=lambda: batch and movers._shell_direct(self.hop, db,
                                                           sizes or {}),
-            columns=columns if batch else (lambda: None),
-            masks=lambda: self.masked_on_the_way(db))
+            columns=columns if batch else (lambda: None))
         shared["straight_only"] = lambda: (
             via == "mysqlsh" and shared["shell"]
             and shared["local_infile"] is True)
@@ -7417,7 +7436,7 @@ class MySQLEngine(Engine):
                                    and shared["local_infile"]
                                    and getattr(self, "_loads_ok", None)
                                    is not False),
-                masked=lambda: t in shared["masks"],
+                masked=lambda: t in self.masked_on_the_way(db, [t]),
                 unfit=lambda: unfit(t))
         return facts_for
 

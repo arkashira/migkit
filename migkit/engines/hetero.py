@@ -50,6 +50,185 @@ def _batch_gc():
     return back
 
 
+class _Masks:
+    """A source read as the target is to hold it: every row it hands the
+    pair - a batch the copier writes, a row a check, a repair or a delta
+    reads by key, the fold its digest stands for - with each column the hop
+    masks taken through its transform (`Hop.masks`, `transforms.apply`).
+    So the copier writes masked values, and every comparison holds the
+    target to the source's values as masked rather than calling each such
+    row different or leaving the column out. Mixed into the source
+    engine's own class by `masking`; a table the hop does not mask reads
+    as it always did, and nothing is changed on the target side.
+
+    The four readers call one another in some engines (a batch read as
+    reads), so a value is taken through its transform once: by the
+    outermost of them (`_held`)."""
+
+    def _held(self):
+        import threading
+        local = self.__dict__.get("_mask_local")
+        if local is None:
+            local = self.__dict__.setdefault("_mask_local", threading.local())
+        return local
+
+    def _inside(self):
+        return getattr(self._held(), "depth", 0) > 0
+
+    def _enter(self):
+        held = self._held()
+        held.depth = getattr(held, "depth", 0) + 1
+
+    def _leave(self):
+        held = self._held()
+        held.depth -= 1
+
+    def _mask_at(self, db, table, columns):
+        """[(position, rule)] of the masked columns among `columns`
+        ([(name, class)] or names), [] where none is masked."""
+        names = [str(c[0] if isinstance(c, (tuple, list)) else c)
+                 for c in columns]
+        rules = self.hop.masks(db, str(table), columns=names)
+        return [(i, rules[n]) for i, n in enumerate(names) if n in rules]
+
+    def _mask_sql(self, columns, at):
+        """{column: SQL} of each masked column as its transform makes it,
+        in this engine's SQL - or None where its digest takes no computed
+        column (`DIGESTS_COMPUTED`) or its SQL cannot compute one of them
+        alike (`transforms.sql`)."""
+        from .. import rowfilter, transforms
+        if not getattr(self, "DIGESTS_COMPUTED", False):
+            return None
+        dialect = rowfilter.dialect_of(self.CANON_ENGINE)
+        key = self.hop.mask_key()
+        out = {}
+        for i, rule in at:
+            c = columns[i]
+            name = str(c[0] if isinstance(c, (tuple, list)) else c)
+            got = transforms.sql(rule, self._quote_ident(name), dialect, key)
+            if got is None:
+                return None
+            out[name] = got
+        return out
+
+    def _masked_rows(self, at, rows):
+        from .. import transforms
+        if not at:
+            return rows
+        key = self.hop.mask_key()
+        out = []
+        for row in rows:
+            got = list(row)
+            for i, rule in at:
+                got[i] = transforms.apply(rule, got[i], key)
+            out.append(got if isinstance(row, list) else tuple(got))
+        return out
+
+    def neutral_read(self, side, db, table, columns, *args, **kw):
+        if side != "src" or self._inside():
+            return super().neutral_read(side, db, table, columns, *args, **kw)
+        self._enter()
+        try:
+            rows, last = super().neutral_read(side, db, table, columns,
+                                              *args, **kw)
+        finally:
+            self._leave()
+        return self._masked_rows(self._mask_at(db, table, columns),
+                                 rows), last
+
+    def neutral_rows_by_key(self, side, db, table, columns, *args, **kw):
+        if side != "src" or self._inside():
+            return super().neutral_rows_by_key(side, db, table, columns,
+                                               *args, **kw)
+        self._enter()
+        try:
+            got = super().neutral_rows_by_key(side, db, table, columns,
+                                              *args, **kw)
+        finally:
+            self._leave()
+        at = self._mask_at(db, table, columns)
+        if not at:
+            return got
+        return {k: self._masked_rows(at, [v])[0] for k, v in got.items()}
+
+    def neutral_batches(self, side, db, table, columns, *args, **kw):
+        if side != "src" or self._inside():
+            yield from super().neutral_batches(side, db, table, columns,
+                                               *args, **kw)
+            return
+        at = self._mask_at(db, table, columns)
+        batches = super().neutral_batches(side, db, table, columns, *args,
+                                          **kw)
+        while True:
+            self._enter()
+            try:
+                batch = next(batches, None)
+            finally:
+                self._leave()
+            if batch is None:
+                return
+            yield self._masked_rows(at, batch)
+
+    def neutral_digest(self, side, db, table, columns, where=None):
+        """A masked table's digest as the target's would be: summed by the
+        server over each masked column as its transform makes it, in the
+        server's own SQL (`transforms.sql`, where the engine's digest takes
+        a computed column and its SQL computes every transform alike);
+        else its rows, masked, folded here as every engine that digests in
+        this process folds them (`canon.fold_rows`). Never the server's
+        digest of the values as they are."""
+        at = self._mask_at(db, table, columns) \
+            if side == "src" and not self._inside() else []
+        if not at:
+            return super().neutral_digest(side, db, table, columns,
+                                          where=where)
+        computed = self._mask_sql(columns, at)
+        if computed is not None:
+            return super().neutral_digest(side, db, table, columns,
+                                          where=where, computed=computed)
+        from .. import canon
+        n, total = 0, 0
+        classes = [c for _, c in columns]
+        for batch in self.neutral_batches(
+                "src", db, table, columns, 5000,
+                **({"where": where} if where else {})):
+            k, total = canon.fold_rows(classes, batch, total)
+            n += k
+        return n, total
+
+    def masks_table(self, db, table):
+        """Whether the hop masks a column of this table of the source:
+        what a reading in the server's own SQL - a tree of digests, a copy
+        the servers pass between them, buckets of rows' hashes - is not
+        taken for, the server reading the values as they are."""
+        return bool(self.hop.masks(db, str(table)))
+
+
+#: {an engine's class: its class reading as the target is to hold it}
+_MASKING = {}
+
+
+def _own_class(engine):
+    """The engine's own class, under the one `masking` gives it."""
+    cls = type(engine)
+    return cls.__mro__[2] if issubclass(cls, _Masks) else cls
+
+
+def masking(engine, hop):
+    """`engine` - a pair's source - reading as the target is to hold it
+    where `hop` masks columns (`_Masks`), else as it is."""
+    from ..movers import _mask_said
+    if not _mask_said(hop) or isinstance(engine, _Masks):
+        return engine
+    base = type(engine)
+    cls = _MASKING.get(base)
+    if cls is None:
+        cls = _MASKING[base] = type(base.__name__, (_Masks, base),
+                                    {"__module__": base.__module__})
+    engine.__class__ = cls
+    return engine
+
+
 class HeteroEngine(Engine):
     """A hop whose two sides are different database engines.
 
@@ -101,7 +280,8 @@ class HeteroEngine(Engine):
             if name == "hetero":
                 raise SystemExit(f"{role} cannot be 'hetero'")
         from . import engine_named
-        self.src_engine = engine_named(self.src_name, hop)
+        # read as the target is to hold it, where the hop masks columns
+        self.src_engine = masking(engine_named(self.src_name, hop), hop)
         self.dst_engine = engine_named(self.dst_name, hop)
         # the mover, the DDL conversion and the binlog tail below are still
         # written for this one pair; they are reached through these names and
@@ -117,6 +297,72 @@ class HeteroEngine(Engine):
         # the CLI down its fallback path for pairs that never wanted it
         if self.src_engine.CANON_ENGINE != "mysql":
             self.tail_requires = ""
+
+    #: its tail writes each change through the hop's transforms
+    #: (`_masked_change`), and its repair of rows reads its source as
+    #: masked (`_Masks`)
+    TAILS_THROUGH_PAIR = True
+    REPAIRS_MASKED = True
+
+    def copier_masks(self):
+        """The pair's copier writes through the hop's transforms (`_Masks`)."""
+        return True
+
+    def _masks(self, db, src_t):
+        """Whether the hop masks a column of this source table: a way the
+        servers take between them, reading the values as they are, is not
+        taken for it (`_Masks.masks_table`)."""
+        said = getattr(self.src_engine, "masks_table", None)
+        return bool(said and said(db, src_t))
+
+    #: the classes whose value is text, which a constant, a hash or a cut
+    #: may be written into (`movers.mask_refused`)
+    TEXT_CLASSES = ("text", "own text", "uuid")
+
+    def masks_refused(self, db):
+        """[(table.column, why)] of the hop's masking of `db` that no way
+        can apply as asked (`movers.mask_refused`), held to the source's own
+        listing: its keys and the columns of a foreign key on either end,
+        its columns, and the text ones. Asked before anything is written,
+        by the move, the tail and a repair alike."""
+        from .. import canon, movers
+        rules, keys, columns, text = {}, {}, {}, {}
+        src = self.src_engine
+        for t in src.neutral_tables("src", db):
+            got = self.hop.masks(db, t)
+            if not got:
+                continue
+            rules[t] = got
+            cols = dict(src.neutral_columns("src", db, t))
+            columns[t] = set(cols)
+            text[t] = {n for n, typ in cols.items() if canon.type_class(
+                src.CANON_ENGINE, typ) in self.TEXT_CLASSES}
+            keys[t] = set(src.neutral_key("src", db, t) or ())
+        if rules:
+            for child, cc, parent, pc in src.foreign_keys("src", db) or ():
+                for t, cs in ((child, cc), (parent, pc)):
+                    if t in rules:
+                        keys[t].update(cs)
+        return movers.mask_refused(self.hop, rules, keys, columns, text)
+
+    def _masked_change(self, db, change):
+        """A change with each column the hop masks taken through its
+        transform (`transforms.apply`), as the copy writes the rows: the
+        values written, and the image before it, which the target holds
+        masked. A key is never masked (`masks_refused`)."""
+        if not self.hop.masks(db, change["table"]):
+            return change
+        from .. import transforms
+        key = self.hop.mask_key()
+        out = dict(change)
+        for part in ("values", "before"):
+            if change.get(part):
+                rules = self.hop.masks(db, change["table"],
+                                       columns=list(change[part]))
+                out[part] = {n: transforms.apply(rules[n], v, key)
+                             if n in rules else v
+                             for n, v in change[part].items()}
+        return out
 
     def lend_log(self, log):
         """Lent to both sides too: their ways switch as they write and
@@ -640,6 +886,11 @@ class HeteroEngine(Engine):
                                     self.src_engine, src_t, src_cols,
                                     self.dst_engine, dst_t, dst_cols, scope)
 
+        if self._masks(db, src_t):
+            # the leaves are hashed by each server from the values as they
+            # are; the walk reads the source's rows as masked
+            return walk()
+
         def run(choice):
             if choice.path == "walk":
                 return walk()
@@ -678,9 +929,13 @@ class HeteroEngine(Engine):
         """(the source's, the target's) digest of a table: where both
         sides are one engine with a salted digest of its own
         (`same_engine_digest` - Oracle's SHA-256 sum), that, both behind
-        this run's salt; the digest every engine sums otherwise."""
+        this run's salt; the digest every engine sums otherwise. A table
+        the hop masks is summed from the source's rows as masked
+        (`_Masks.neutral_digest`), never by the server over the values as
+        they are."""
         src, dst = self.src_engine, self.dst_engine
-        own = (type(src) is type(dst)
+        masked = self._masks(db, src_t)
+        own = (_own_class(src) is _own_class(dst) and not masked
                and callable(getattr(src, "same_engine_digest", None)))
         salt = {"salt": self.digest_salt()} if own else {}
 
@@ -692,7 +947,8 @@ class HeteroEngine(Engine):
             # and their classes, the engine, the filter (`digests`)
             from .. import digests
             digests.record(self.hop, db, table, side, got[0], got[1],
-                           method=digests.OWN if own else digests.NEUTRAL,
+                           method=digests.OWN if own else digests.READ
+                           if masked and side == "src" else digests.NEUTRAL,
                            salt=salt.get("salt"),
                            engine=getattr(eng, "CANON_ENGINE", None),
                            columns=cols, where=where)
@@ -873,8 +1129,13 @@ class HeteroEngine(Engine):
                 except ValueError:
                     continue
         checks, classes = [], {}
+        # a masked column is written as its transform makes it, not as the
+        # source holds it: the target takes or refuses that on the write
+        masked = self.hop.masks(db, src_t, columns=list(back.values()))
         for name, typ in sorted(mapped.items()):
             if dst_t is not None and name not in dst_types:
+                continue
+            if back[name] in masked:
                 continue
             got = canon.unfit(self.src_engine.CANON_ENGINE, typ,
                               self.dst_engine.CANON_ENGINE,
@@ -1486,7 +1747,10 @@ class HeteroEngine(Engine):
             return int(got[0]), str(got[1])
 
         def ours():
-            if src_t and _digests_ranges(self.src_engine):
+            # a masked table's batch is folded here, as written: the
+            # source's server would sum the values as they are
+            if src_t and _digests_ranges(self.src_engine) \
+                    and not self._masks(db, src_t):
                 got = self.src_engine.neutral_digest(
                     "src", db, src_t, sc, where=rng(self.src_engine, key[0],
                                                     src_where))
@@ -1641,7 +1905,9 @@ class HeteroEngine(Engine):
                      else None)
             # in parts where it can go on from them: where the source
             # stores its rows, or buckets of the rows' hash
-            # (`ranges.keyless`, backlog P0-KEYLESS)
+            # (`ranges.keyless`, backlog P0-KEYLESS) - never for a table
+            # the hop masks, whose buckets the servers would hash from the
+            # values as they are on one side and masked on the other
             from .. import decide, ranges
             way = ranges.keyless(
                 f"{db}.{leaf}", st, self.src_engine, self.dst_engine, db,
@@ -1649,7 +1915,7 @@ class HeteroEngine(Engine):
                 lambda: self.src_engine.position_spans("src", db, src_t,
                                                        chunk),
                 self.digest_salt(), decide.HopCosts(self.hop, "keyless/")
-            ) if whole else None
+            ) if whole and not self._masks(db, src_t) else None
             if way is not None and way.restart:
                 gone = self.dst_engine.neutral_empty(
                     "dst", db, dst_t, **({"where": dst_where} if dst_where
@@ -3713,7 +3979,8 @@ class HeteroEngine(Engine):
     def _to_target(self, db, changes, targets, accounts=None):
         """(the source's changes as the target takes them, how many values
         landed as NULL): out of the hop's row filter turned into deletes
-        (`_in_scope`), under the target's table and column names, each
+        (`_in_scope`), each masked column through the hop's transform
+        (`_masked_change`), under the target's table and column names, each
         value in the form the target keeps (`_typed_change`,
         `_mapped_change`) - the one way the tail and a reader beside it
         (`carry`) put a change on the target. Only the operations the
@@ -3741,7 +4008,8 @@ class HeteroEngine(Engine):
             if accounts is not None:
                 accounts.named(c["table"], to)
             mapped.append(dict(self._mapped_change(
-                db, self._typed_change(db, c, to)), table=to))
+                db, self._typed_change(db, self._masked_change(db, c), to)),
+                table=to))
         return self._flatten_changes(mapped)
 
     def carry(self, db, changes):

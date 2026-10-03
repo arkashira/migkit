@@ -554,7 +554,13 @@ class MSSQLEngine(DbapiRows, Engine):
         st = [r[0] for r in self._cmd("src", db, q)
               if self.in_scope(db, r[0])]
         dt = {r[0] for r in self._cmd("dst", db, q)}
+        if table and self.hop.masks(db, table):
+            # its row hash reads the values as they are on both sides: the
+            # pair takes the source through the hop's transforms
+            return self.columns_pair().check_data(db, table, stream)
         tables = [table] if table else [t for t in st if t in dt]
+        masked = [t for t in tables if self.hop.masks(db, t)]
+        tables = [t for t in tables if t not in masked]
         bad, left = [], []
         outcomes = {} if table else {t: "diff" for t in st if t not in dt}
         apart = {}
@@ -660,6 +666,8 @@ class MSSQLEngine(DbapiRows, Engine):
                               f"{len(tables)} tables, counts and every"
                               " row's hash equal both sides" + again + said,
                               tables=outcomes))
+        for t in masked:
+            res += self.columns_pair().check_data(db, t, stream)
         return res
 
     #: CLR types a row hash reads through their own rendering: `FOR JSON`
@@ -2525,6 +2533,9 @@ class MSSQLEngine(DbapiRows, Engine):
 
     def tail_seed(self, db, token_path, point):
         return self._as_pair().tail_seed(db, token_path, point)
+
+    #: its change tail is the pair's (`Engine.tail_masks`)
+    TAILS_THROUGH_PAIR = True
 
     def tail_apply(self, db, go, token_path, log):
         return self._as_pair().tail_apply(db, go, token_path, log)

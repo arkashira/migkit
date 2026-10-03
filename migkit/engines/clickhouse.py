@@ -640,6 +640,11 @@ class ClickHouseEngine(NeutralCopier, Engine):
         tables = [table] if table else self.neutral_tables("src", db)
         same, rest = [], []
         for t in tables:
+            if self.hop.masks(db, t):
+                # each server fingerprints the values as they are: the
+                # pair takes the source through the hop's transforms
+                rest.append(t)
+                continue
             try:
                 s, d = self._fingerprints(db, t)
             except Exception:  # noqa: BLE001 - the rows will say

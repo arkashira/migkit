@@ -131,6 +131,14 @@ def problems(hop, eng, db):
         if not src.neutral_key("src", db, t):
             wrong.append(f"{t}: no key, and an archived row is written,"
                          " proved and removed by its key")
+        if (got["remove"] or got["restore"]) and hop.masks(db, t):
+            # the archive holds the masked values: removed from the source,
+            # the real ones would be held nowhere, and put back they would
+            # come back masked
+            wrong.append(f"{t}: the hop masks its columns, and the archive"
+                         " holds them masked - removing the rows would"
+                         " leave their values nowhere: archive it without"
+                         " masking, or keep the rows on the source")
     if got["remove"] or got["restore"]:
         try:
             _source_as_target(hop, eng)

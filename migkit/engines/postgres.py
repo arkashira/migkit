@@ -3697,22 +3697,31 @@ select json_build_object(
             codes[at] = self._psql(side, db, "show server_encoding").strip()
         return wanted if codes[at].upper() in ("UTF8", "UTF-8") else None
 
-    def neutral_digest(self, side, db, table, columns, where=None):
+    #: `neutral_digest` takes columns computed in the server's SQL in place
+    #: of the table's own (`computed`: a masked column as its transform)
+    DIGESTS_COMPUTED = True
+
+    def neutral_digest(self, side, db, table, columns, where=None,
+                       computed=None):
         """(rows, digest) of a table as canon renders its rows, summed by the
         server. A JSON column is rendered as canon's text by the server too
         (`_json_text_sql`) - a document was folded in this process on every
         cross-engine proof, the proof taking three times the copy's time at
         a million rows (backlog P0-DEPTH 7) - and a table the server cannot
         render whole, or holding a number the fold here rounds
-        (`JSON_DIGITS`), is folded here: the same digest either way."""
+        (`JSON_DIGITS`), is folded here: the same digest either way.
+        `computed` is {column: SQL} read in place of a column - a masked
+        one as its transform makes it (`transforms.sql`)."""
         from .. import canon, rowtext
         jsons = self._json_in_sql(side, db, table, columns)
         if jsons is None:
             return self._folded_digest(side, db, table, columns, where)
+        computed = computed or {}
         sch, tbl = self._split(table)
         source = f"{_ident(sch)}.{_ident(tbl)}" + self._where(where)
-        if jsons:
+        if jsons or computed:
             inner = ", ".join(
+                f"{computed[n]} as {_ident(n)}" if n in computed else
                 f"{self._json_text_sql(_ident(n))} as {_ident(n)}"
                 if n in jsons else _ident(n) for n, _ in columns)
             source = f"(select {inner} from {source}) s"

@@ -277,22 +277,32 @@ def _interlock(hop, eng, d, go):
                                           f"  {_esc(m)}"))
 
 
-def _refuse_unmasked(hop, stream):
-    """What a write that carries rows as the source holds them does to a
-    hop that masks columns on the way: refused, in its words."""
+def _refuse_unmasked(hop, eng, dbs, stream):
+    """What a write that carries rows - a change stream (`stream`) or a
+    repair of rows - asks of a hop that masks columns on the way: a stream
+    only where migkit's own tail writes each change through the hop's
+    transforms (`Engine.tail_masks`), a repair only where it writes the
+    rows so (`Engine.copier_masks` - the pair reads the source as masked),
+    and every rule one any way can apply (`masks_refused`). Refused in its
+    words otherwise."""
     from .verdict import Refused
-    if stream:
-        # the masking is the dump's; a change read after it is the
-        # source's own row, and would land unmasked
-        raise Refused(f"{hop.name} masks columns on the way, and a change"
-                      " stream would carry their real values into the"
-                      " target: a hop that masks is copied (--mode full),"
-                      " not followed. Nothing has been started")
-    raise Refused(f"{hop.name} masks columns on the way, and a repair of"
-                  " rows writes the source's values as they are, unmasked:"
-                  " move those tables again with --mode full, which masks"
-                  " them; --kind sequences or --kind schema repairs the"
-                  " rest. Nothing has been started")
+    if stream and not eng.tail_masks():
+        raise Refused(f"{hop.name} masks columns on the way, and this"
+                      " engine's change stream would carry their real"
+                      " values into the target: a hop that masks is copied"
+                      " here (--mode full), not followed. Nothing has been"
+                      " started")
+    if not stream and not eng.copier_masks():
+        raise Refused(f"{hop.name} masks columns on the way, and a repair of"
+                      " rows on this engine writes the source's values as"
+                      " they are, unmasked: --kind sequences or --kind"
+                      " schema repairs the rest. Nothing has been started")
+    for d in dbs:
+        refused = eng.masks_refused(d)
+        if refused:
+            raise Refused(f"{hop.name}: {d}: the hop asks to mask "
+                          + "; ".join(f"{n} ({why})" for n, why in refused)
+                          + ". Nothing has been started")
 
 
 def _guard_write(hop, eng, what, dbs, go, mode="", drop=False, step=None,
@@ -332,7 +342,8 @@ def _guard_write(hop, eng, what, dbs, go, mode="", drop=False, step=None,
     stream = mode in ("cdc", "full+cdc") and not drop
     if (hop.options or {}).get("mask_on_write") and (stream or carries_rows):
         try:
-            _refuse_unmasked(hop, stream)
+            _refuse_unmasked(hop, eng, dbs or ([db] if db else
+                                               eng.databases()), stream)
         except Refused as e:
             stop(str(e.code))
     if preflight is not None:
@@ -3029,17 +3040,15 @@ def _held_to_the_source(hop, eng, d, log):
     called complete: a program that loads a database can say it did and
     leave rows out or change them, and the table copier checks every range
     as it writes where a program copying on its own cannot be asked to.
-    Skipped where the hop says `verify_batches: false`."""
+    Skipped where the hop says `verify_batches: false`. A table the hop
+    masks on the way is compared too, with its source taken through the
+    hop's transforms (`Engine.through_pair`): it is not left out as a
+    table that is not a copy of its source."""
     if not (hop.options or {}).get("verify_batches", True):
         return
     log("comparing what arrived with the source")
-    from .movers import masked_tables
-    # a table the hop masks on the way is not a copy of its source: the
-    # move held it to the masking rule and counted its rows already
-    masked = masked_tables(hop, d)
     bad = [r for r in eng.check_data(d)
-           if r.check == "data" and r.status in ("diff", "error")
-           and r.scope not in masked]
+           if r.check == "data" and r.status in ("diff", "error")]
     if not bad:
         return
     raise SystemExit(
@@ -3499,9 +3508,10 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
         # column the target does not have, or lands in the wrong one - and
         # a renamed table's in the table it was renamed from
         raise SystemExit(
-            "the hop maps columns or renames tables (mapping.columns,"
-            " mapping.tables), and the server's own replication carries"
-            " whole rows under the source's names."
+            "the hop maps or masks columns or renames tables"
+            " (mapping.columns, mask_on_write, mapping.tables), and the"
+            " server's own replication carries whole rows under the"
+            " source's names, as the source holds them."
             " Nothing was set up. `migkit move --mode cdc` follows this hop"
             " with migkit's own change tail, which applies the mapping.")
     refused = "" if do_drop else _own_refused(hop, eng, db)

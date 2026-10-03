@@ -242,19 +242,37 @@ class Engine:
         left one for a table that is now the target's own: a repair read
         from it deleted the rows the target keeps there. A table the hop
         no longer takes is never acted on, and the plan says so
-        (`LEFT_OUT`)."""
-        tables = list(tables)
+        (`LEFT_OUT`). Nor is one the pair carries now (`through_pair` - a
+        table the hop masks, renames or maps the columns of since): this
+        engine's own repair would write the source's rows as they are,
+        and the pair repairs it from its own drilldown
+        (`_mapped_repairs`). An engine whose rows repair is its own, not
+        the pair's (`REPAIRS_MASKED`), leaves a table the hop masks as it
+        is and says so: it would write the values the hop hides."""
+        tables = [t for t in tables if not self.through_pair(db, t)]
+        masked = [] if self.REPAIRS_MASKED else sorted(
+            t for t in tables if self.hop.masks(db, t))
         gone = sorted(t for t in tables if not self.in_scope(db, t))
-        if not gone:
+        if not gone and not masked:
             return tables, None
-        left = set(gone)
+        left = set(gone) | set(masked)
+        said = ([f"{len(gone)} {what} the last check found different are"
+                 f" ones the hop no longer takes: {', '.join(gone[:5])}"
+                 + (" ..." if len(gone) > 5 else "")
+                 + " - left as the target has them; the check that named"
+                   " them ran under another scope"] if gone else []) + (
+            [f"{len(masked)} {what} the hop masks are not repaired by rows"
+             f" here: {', '.join(masked[:5])}"
+             + (" ..." if len(masked) > 5 else "")
+             + " - this engine's repair writes the source's values as they"
+               " are; a move of the table copies it again, masked"]
+            if masked else [])
         return [t for t in tables if t not in left], RepairAction(
-            db, LEFT_OUT, [], [],
-            f"{len(gone)} {what} the last check found different are ones"
-            f" the hop no longer takes: {', '.join(gone[:5])}"
-            + (" ..." if len(gone) > 5 else "")
-            + " - left as the target has them; the check that named them"
-              " ran under another scope")
+            db, LEFT_OUT, [], [], "; ".join(said))
+
+    #: whether this engine's repair of rows writes them through the hop's
+    #: transforms: the pair's does, reading its source as masked
+    REPAIRS_MASKED = False
 
     def check_schema(self, db):
         raise NotImplementedError
@@ -2193,6 +2211,11 @@ class Engine:
                                                       or {})
             if rules.get("keep"):
                 drop |= {n for n, _ in cols} - set(rules["keep"])
+            # a masked column is the target's own text: the second reading
+            # reads both sides as they are, and the first proves it through
+            # the hop's transforms
+            drop |= set(self.hop.masks(db, *parts,
+                                       columns=[n for n, _ in cols]))
             drop = sorted(drop)
             where = self._reader_where(db, s_)
             validations += sr.aggregates(
@@ -5415,7 +5438,23 @@ class Engine:
         tables made for a load - and the check then compared it under that
         name on both sides, so the table it was renamed to was never filled
         and nothing said so. The pair renames it (`HeteroEngine._rename`)
-        in its copy, comparison, repair and tail alike."""
+        in its copy, comparison, repair and tail alike.
+
+        A table whose columns the hop masks (`Hop.masks`) goes through the
+        pair too: it writes each masked value through the hop's transforms
+        and compares the source taken through them, where this engine's
+        own paths copy and hash the values as they are."""
+        if self.OWN_PATHS_READ_COLUMN_MAPPING:
+            return False
+        parts = [p for p in str(table).split(".") if p]
+        return self.made_by_pair(db, table) or bool(self.hop.masks(db,
+                                                                   *parts))
+
+    def made_by_pair(self, db, table):
+        """Whether the pair's copier makes this table on the target, under
+        the names the hop's mapping gives it: a table it renames or maps
+        the columns of. One it only masks keeps the source's own
+        definition, made as every other table is."""
         if self.OWN_PATHS_READ_COLUMN_MAPPING:
             return False
         from ..movers import _renamed
@@ -5425,11 +5464,40 @@ class Engine:
 
     def maps_columns(self):
         """Whether any table of this hop goes through the pair machinery:
-        it maps columns or renames tables (`through_pair`)."""
-        from ..movers import renames_any
+        it maps or masks columns, or renames tables (`through_pair`)."""
+        from ..movers import _mask_said, renames_any
         return (not self.OWN_PATHS_READ_COLUMN_MAPPING
                 and bool((self.hop.mapping or {}).get("columns")
-                         or renames_any(self.hop)))
+                         or renames_any(self.hop) or _mask_said(self.hop)))
+
+    def copier_masks(self):
+        """Whether this engine's table copier writes a masked table through
+        the hop's transforms: the pair's copier does, so every engine that
+        copies through it does, and one that hands it its masked tables
+        (`through_pair`). An engine whose own copy writes what it reads
+        does not, and a move of a hop that masks is refused on it before
+        anything is written (`movers.refuse_unmasked`)."""
+        return not self.OWN_PATHS_READ_COLUMN_MAPPING
+
+    #: whether this engine's change tail is the pair's, run as a pair of
+    #: itself (`tail_apply` handing over to `_as_pair()`)
+    TAILS_THROUGH_PAIR = False
+
+    def tail_masks(self):
+        """Whether migkit's own change tail of this engine writes each
+        change through the hop's transforms: the pair's does
+        (`HeteroEngine._masked_change`), so an engine whose tail is the
+        pair's does, and one that hands it a hop's masked tables
+        (`maps_columns`). The servers' own replication never does
+        (`movers.stream_cannot_carry`)."""
+        return bool(self.TAILS_THROUGH_PAIR
+                    or not self.OWN_PATHS_READ_COLUMN_MAPPING)
+
+    def masks_refused(self, db):
+        """[(table.column, why)] of the hop's masking of `db` no way can
+        apply as asked, asked of the pair every masked table goes through
+        (`HeteroEngine.masks_refused`)."""
+        return self._as_pair().masks_refused(db)
 
     def _as_pair(self, within=None):
         """This hop seen as a pair of the same engine, so the machinery
@@ -6074,9 +6142,10 @@ class Engine:
     def _sized(self, db):
         return self.table_facts("src", db)
 
-    def masked_on_the_way(self, db):
-        """The tables the hop masks on the way, which only a way that masks
-        may carry."""
+    def masked_on_the_way(self, db, tables):
+        """The tables of `tables` the hop masks on the way that this
+        engine's own ways must mask: none here, where a masked table goes
+        through the pair (`through_pair`)."""
         return set()
 
     def table_way_facts(self, db, via, quick=False, known=None, sizes=None):
@@ -6538,6 +6607,10 @@ class NeutralCopier:
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
         return self._as_pair().move_table(db, sch, tbl, chunk, ck, log)
+
+    def copier_masks(self):
+        """The pair's copier, which writes through the hop's transforms."""
+        return True
 
     def moved_nothing(self, db):
         return self._as_pair().moved_nothing(db)

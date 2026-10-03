@@ -953,14 +953,20 @@ class Hop:
     def scope_record(self):
         """What `scope_fingerprint` digests, as plain values - kept beside
         a record whose reader must know what that scope took, not only
-        that it was another (`under`)."""
+        that it was another (`under`). The values the hop masks
+        (`mask_on_write`) are part of it where it masks any: an answer
+        taken over values masked one way is not one over values masked
+        another, and a hop that masks nothing keeps the record it had."""
+        masks = (self.options or {}).get("mask_on_write")
         return {"databases": sorted(str(d) for d in self.databases or []),
                 "db_map": {str(k): str(v) for k, v in
                            sorted((self.db_map or {}).items())},
                 "include": sorted(str(p) for p in self.include or []),
                 "exclude": sorted(str(p) for p in self.exclude or []),
                 "objects": self.objects or {},
-                "mapping": self.mapping or {}}
+                "mapping": self.mapping or {},
+                **({"masks": {str(k): str(v) for k, v in masks.items()}}
+                   if isinstance(masks, dict) and masks else {})}
 
     def under(self, record):
         """This hop under the scope `record` kept (`scope_record`, or a dict
@@ -972,13 +978,17 @@ class Hop:
             record = record["scope"]
         if not isinstance(record, dict) or "mapping" not in record:
             return None
+        options = {k: v for k, v in (self.options or {}).items()
+                   if k != "mask_on_write"}
+        if record.get("masks"):
+            options["mask_on_write"] = dict(record["masks"])
         return dataclasses.replace(
             self, databases=list(record.get("databases") or []),
             db_map=dict(record.get("db_map") or {}),
             include=list(record.get("include") or []),
             exclude=list(record.get("exclude") or []),
             objects=dict(record.get("objects") or {}),
-            mapping=dict(record.get("mapping") or {}))
+            mapping=dict(record.get("mapping") or {}), options=options)
 
     def scope_changed(self, recorded):
         """Whether a record made under `recorded` (a fingerprint, or a dict
@@ -1294,6 +1304,81 @@ class Hop:
                 return rules[ident]
         return None
 
+    def masks(self, db, *parts, columns=None):
+        """{column: (kind, argument)} of the columns this table is written
+        other than as read (`options.mask_on_write`, each rule a
+        `transforms` rule): keys `[db.][schema.]table.column`, the part
+        before the column matched by the same right-anchored suffix and
+        pattern rule as every other name in the hop (`_ids`,
+        `name_matches`, without case where the engine's names have none),
+        so `public.orders.email` names PostgreSQL's `appdb.public.orders`
+        as `orders.email` and `appdb.public.orders.email` do. Where two
+        keys name one column the most particular wins (`most_particular`).
+        With `columns` (the table's own column names) each rule is keyed by
+        the column it names there, matched the same way. Empty where
+        nothing is masked; SystemExit for a rule that is not a transform
+        (`transforms.parse`), never a rule passed over."""
+        raw = (self.options or {}).get("mask_on_write") or {}
+        if not isinstance(raw, dict) or not raw:
+            return {}
+        from . import transforms
+        fold = self.folds_case()
+        by_column = {}
+        for key, rule in raw.items():
+            table, _, column = str(key).rpartition(".")
+            if not table or not column:
+                continue
+            name = column.casefold() if fold else column
+            by_column.setdefault(name, {})[table] = (column, rule)
+        names = self._names(db, *parts)
+        out = {}
+        for rules in by_column.values():
+            best = self.most_particular(rules, *names)
+            if best is None:
+                continue
+            column, rule = rules[best]
+            out[column] = transforms.parse(rule)
+        if columns is None or not out:
+            return out
+        said = {(c.casefold() if fold else c): r for c, r in out.items()}
+        return {c: said[str(c).casefold() if fold else str(c)]
+                for c in columns
+                if (str(c).casefold() if fold else str(c)) in said}
+
+    def masks_in(self, db):
+        """Whether a `mask_on_write` key may name a table of `db`: one that
+        names no database (a pattern, or fewer parts than a table's whole
+        name), or one whose database is `db`. What a way that carries a
+        database whole asks before it is taken, the source's tables not
+        yet listed."""
+        raw = (self.options or {}).get("mask_on_write") or {}
+        if not isinstance(raw, dict):
+            return False
+        whole = self.whole_name()
+        fold = self.folds_case()
+        for key in raw:
+            table = str(key).rpartition(".")[0]
+            if not table:
+                continue
+            parts = table.split(".")
+            if not whole or len(parts) < whole or name_matches(
+                    db, parts[0], fold):
+                return True
+        return False
+
+    def mask_key(self):
+        """The hop's `mask_key` resolved (a secret reference, read as every
+        other is - `_secret`), kept on the hop for this run so the
+        redactor hides it wherever a statement holding it is said; None
+        where the hop has none."""
+        got = getattr(self, "_mask_key", None)
+        if got is not None:
+            return got or None
+        ref = (self.options or {}).get("mask_key")
+        got = str(_secret(ref)) if ref not in (None, "") else ""
+        self._mask_key = got
+        return got or None
+
     def takes_object(self, kind, *parts):
         """Whether the hop carries this object of a kind beside the tables
         - a view, a routine, a trigger, an event, a sequence, a role - by
@@ -1386,7 +1471,13 @@ class Hop:
         keys = set(self.table_map()) | set(
             ((self.mapping or {}).get("where") or {})) | set(
             ((self.mapping or {}).get("tolerance") or {}))
-        return sorted(k for k in keys if k not in known)
+        # a masking rule names its table before its column; a pattern
+        # takes what it takes
+        masks = (self.options or {}).get("mask_on_write") or {}
+        masked = {str(k) for k in masks if isinstance(masks, dict)
+                  and not has_wildcard(str(k).rpartition(".")[0])
+                  and str(k).rpartition(".")[0] not in known}
+        return sorted({k for k in keys if k not in known} | masked)
 
 
 DEFAULT_PORTS = {
