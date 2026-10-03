@@ -231,3 +231,23 @@ Open from the two-axis review of `f3cb404...HEAD` (fix before the full suite):
 - `Hop.reversed`: schema lost from reversed renames, `mapping.names` dropped, `_on_target` maps the database only.
 - hand-written `hop.excluded(...split("."))` beside `in_scope` (model.py, mysql.py, postgres.py, cli.py, ship.py, base.py); `digests.py` rename lookup without the database; two PostgreSQL sequence-scope readings; `objects: {roles: [names]}` read as all roles; Oracle counters unscoped; broad excepts; counts parsed back from finding text (fields on `Result` instead).
 - item 7 still to wire: transforms, the row filter's translations and zone, `takes_object` beyond the PostgreSQL/MySQL inventories, "a check scope narrower than the move's is incomplete".
+
+## 2026-10-04 - resumed (the owner: "finish everything first, I want it complete")
+
+Release waits for the whole backlog, the suite run once and the gate. Merged since the pause: the review's findings (`8650feb`), 6d (`dfd78df`).
+
+Running (each on its own `worktree-agent-<id>` branch; I merge, run compileall and the guards, scan the tree):
+- a0fb2973757acdcf0 - conversion breadth (CV.P5, P9-P11, P15, P17, P19-P21, W3)
+- a629ecb2da1a93623 - P0-CLOUDS.native, then P0-CLOUDS.more
+- a4acdb02ff0191804 - AUD-B (durable tail state, dirty tracking)
+- a3d309a6543a96c68 - read-only target and writes held on every engine (BAR-3)
+- a36a1e64cac22cbfd - P0-PARITY.matrix and .guard (the depth matrix read off the code, each cell proved by a test on its engine or declared, the red guard; STATE.md shows it)
+- a83dabd5f6b0ea12e - P0-SCOPE 7 and 8 wired (transforms as the one masking language on every engine, the row filter's translations and zone, objects beyond PostgreSQL/MySQL, name collisions, narrower check incomplete, partitions on the check side, scope-change log, 6d's leftovers)
+
+Next waves, in order, as agents free up:
+- B: AUD-D (a88f190644bf5cea1), AUD-G2 (a2602d2c2bffb1f1b), W7 (a76b06af6ac782986), W6 (af3ae769cfcef053c), P0-PARITY.part, W4.a, W4.b
+- C: P0-PARITY.matrix + .guard first (the generated depth matrix and its red test), then .scope / .verify / .tail / .all / .small / .lv.new split by engine family so no two agents share an engine file: SQL (ase, db2, db2i, db2zos, snowflake, redshift, bigquery, teradata, cockroachdb, dsql, tidb, generic), documents and keys (mongodb, couchbase, cosmosdb, dynamodb, cassandra, redis), streams, files and lakes (kafka, kinesis, pubsub, iceberg, delta, parquet, duckdb, sqlite, clickhouse, opensearch, saas, sapodp, copybook), the pair (hetero)
+- D: AUD-H, P0-DEPTH.*, P0-DE.*, BAR-1/2, the LT.*, R*, DTS.*, F*, S*, 26.*, AUD.* items, ER4-6, W1, W2, W5, W8, W9, P0-SMART.route, P0-SCENARIOS.*, DEC*
+- last: AUD-T2, AUD-Z, DOCS, then the full suite once (`tools/final_suite.py`), fixes, REL.gate, the rename, 1.0.0
+
+Merged and to delete once the owner agrees: worktree-agent-a63f9cda75a39b26c, a77c01f557923ecec, a48385fdc8d55e9fb, abc1934894b9f57a5, a8e86fe046716b281.

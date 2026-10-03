@@ -2358,6 +2358,13 @@ class Engine:
     AUTHORITY_SCOPE = "(fix DDL)"
     OBJECT_SCOPE = "(object changes)"
 
+    #: `options.schema_authority`: the schema-aware reading has the last
+    #: word (the default), or every reading counts. Named for what decides,
+    #: not for the program behind it - an older hop's word for the default
+    #: (`LEGACY_AUTHORITY`) is read as it
+    AUTHORITIES = ("schema-aware", "every-reading")
+    LEGACY_AUTHORITY = "atlas"
+
     def _atlas_authoritative(self, res):
         """When the schema-aware reading says clean, demote the noisier
         textual opinions - the native dump diff and the object-change list -
@@ -2365,8 +2372,10 @@ class Engine:
         understands what a schema *is* rather than how it is spelled. The
         object inventory still stands, and so does the structural diff: that
         one compares objects rather than text and is never demoted. Opt out
-        with `options.schema_authority` set to anything but `atlas`."""
-        if self.hop.options.get("schema_authority", "atlas") != "atlas":
+        with `options.schema_authority: every-reading`."""
+        said = str(self.hop.options.get("schema_authority")
+                   or "schema-aware").strip().lower()
+        if said not in ("schema-aware", self.LEGACY_AUTHORITY):
             return res
         if not any(r.scope.endswith(self.AUTHORITY_SCOPE) and r.status == "ok"
                    for r in res):
