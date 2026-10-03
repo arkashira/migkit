@@ -133,8 +133,10 @@ def _walk(node, got, path):
     if not isinstance(node, dict):
         return
     db, table = _pick(node, _DB), _pick(node, _TABLE)
-    if db and table and table != db:
-        schema = _pick(node, _SCHEMA)
+    schema = _pick(node, _SCHEMA)
+    if table and (db or schema) and table != db:
+        # a report that names a schema and no database (AWS DMS's table
+        # statistics) is of the endpoint's database, whichever it is
         said, why = _judge(node, path)
         if said:
             key = (db, schema, table)
@@ -189,8 +191,16 @@ def _parts(scope):
 
 
 def _matches(key, parts):
+    """Whether a table the service named is one migkit answered for:
+    database and table alike, the schema too where both name one. A
+    service that named no database (its endpoint's) names the schema,
+    which is the database on an engine without schemas."""
     db, schema, table = key
-    if not parts or parts[0] != db or parts[-1] != table:
+    if not parts or parts[-1] != table:
+        return False
+    if not db:
+        return len(parts) >= 2 and parts[-2] == schema
+    if parts[0] != db:
         return False
     return not (schema and len(parts) == 3 and parts[1] != schema)
 

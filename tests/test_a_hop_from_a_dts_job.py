@@ -191,3 +191,106 @@ def test_an_alibaba_job_whose_source_has_schemas():
     assert got.raw["source"] == "postgres://dts@10.0.0.51/appdb"
     assert got.raw["db_map"] == {"appdb": "appdb2"}
     assert got.raw["include"] == ["appdb.public.orders", "appdb.audit.*"]
+
+
+def test_a_migration_job_of_the_older_api():
+    """The 2018 API keeps a job's objects in `DatabaseInfo`, a JSON
+    string, and says a whole instance with `MigrateObject` 1."""
+    job = {"Response": {"JobList": [{
+        "JobId": "dts-old1", "JobName": "legacy", "SrcDatabaseType": "mysql",
+        "SrcInfo": {"Ip": "10.0.0.71", "Port": 3306, "User": "u"},
+        "DstDatabaseType": "mysql", "DstInfo": {"InstanceId": "cdb-x"},
+        "MigrateOption": {"MigrateType": 3, "MigrateObject": 2},
+        "DatabaseInfo": json.dumps([{"Database": "a",
+                                     "Table": ["t1", "t2"]},
+                                    {"Database": "b"}])}]}}
+    got = imports.from_tencent_dts(job)
+    assert got.raw["source"] == "mysql://u@10.0.0.71/a,b"
+    assert got.raw["include"] == ["a.t1", "a.t2", "b.*"]
+    whole = json.loads(json.dumps(job))
+    whole["Response"]["JobList"][0]["MigrateOption"]["MigrateObject"] = 1
+    assert "include" not in imports.from_tencent_dts(whole).raw
+
+
+def test_a_subscription_names_what_it_takes_and_asks_for_a_target():
+    sub = {"Response": {
+        "SubscribeId": "subs-1", "SubscribeName": "orders-feed",
+        "Product": "mysql", "AccessType": "cdb", "SubscribeMode": "dml",
+        "Endpoints": [{"HostName": "10.0.0.81", "Port": 3306, "User": "s"}],
+        "SubscribeObjects": [{"ObjectType": "table", "Database": "shop",
+                              "Tables": ["orders"]}]}}
+    assert imports._is_tencent_dts(sub)
+    got = imports.from_tencent_dts(sub)
+    assert got.raw["source"] == "mysql://s@10.0.0.81/shop"
+    assert got.raw["include"] == ["shop.orders"]
+    assert "target" not in got.raw
+    assert "a subscription carries the changes to a topic" in \
+        " | ".join(got.notes)
+
+
+def test_a_data_check_task_and_what_it_concluded():
+    task = {"Response": {"Items": [{
+        "JobId": "dts-1", "CompareTaskId": "dts-1-cmp-1", "TaskName": "c1",
+        "Method": "sampleDataCheck", "Options": {"SampleRate": 20},
+        "Conclusion": "same",
+        "Config": {"ObjectMode": "partial", "ObjectItems": [
+            {"DbName": "shop", "TableMode": "partial",
+             "Tables": [{"TableName": "orders"}]}]}}]}}
+    got = imports.from_tencent_dts(task)
+    assert got.raw["include"] == ["shop.orders"]
+    said = " | ".join(got.notes)
+    assert "reads 20% of the rows" in said and "concluded same" in said
+
+
+def test_a_list_of_migration_jobs_says_which_detail_to_save():
+    jobs = {"Response": {"JobList": [{"JobId": "dts-abc", "JobName": "x",
+                                      "SrcInfo": {"DatabaseType": "mysql"}}]}}
+    with pytest.raises(SystemExit, match="DescribeMigrationDetail --JobId"
+                                         " dts-abc"):
+        imports.from_tencent_dts(jobs)
+
+
+def test_the_changes_a_sync_job_carries_become_the_hops_contract():
+    got = imports.from_tencent_dts(_sync(
+        Options={"OpTypes": ["Insert", "Update", "DDL"]},
+        Objects={"Mode": "Partial",
+                 "Databases": [{"DbName": "a", "DbMode": "All"}],
+                 "DatabasesOpFilter": [{"DbName": "a", "Tables": [
+                     {"TableName": "t", "OpFilter": {"OpTypes":
+                                                     ["Insert"]}}]}]}))
+    assert got.raw["mapping"]["ops"] == {"*": ["insert", "update"],
+                                         "a.*.t": ["insert"]}
+    hop = _hop(got, "postgres://app@10.0.0.32")
+    assert hop.carries("a", "public", "t") == {"insert"}
+    assert hop.carries("a", "public", "other") == {"insert", "update"}
+
+
+def test_an_alibaba_job_of_the_older_api_with_its_left_out_tables():
+    job = {"MigrationJobId": "dtsx", "MigrationJobName": "old-one",
+           "SourceEndpoint": {"EngineName": "MySQL", "IP": "10.0.0.61",
+                              "Port": "3306", "UserName": "u"},
+           "DestinationEndpoint": {"EngineName": "MySQL",
+                                   "InstanceId": "rm-example"},
+           "MigrationObject": json.dumps([
+               {"DBName": "shop", "NewDBName": "shop2", "TableIncludes": [
+                   {"TableName": "orders", "FilterCondition": "id>1",
+                    "ColumnIncludes": [{"ColumnName": "id"},
+                                       {"ColumnName": "st",
+                                        "NewColumnName": "status"}]}]},
+               {"DBName": "crm", "AllTable": True,
+                "TableExcludes": [{"TableName": "audit_log"}]}])}
+    assert imports._is_alibaba_dts(job)
+    got = imports.from_alibaba_dts(job)
+    assert got.raw["include"] == ["shop.orders", "crm.*"]
+    assert got.raw["exclude"] == ["crm.audit_log"]
+    assert got.raw["db_map"] == {"shop": "shop2"}
+    assert got.raw["mapping"]["columns"] == {
+        "shop.orders": {"keep": ["id", "st"], "rename": {"st": "status"}}}
+    hop = _hop(got, "mysql://app@10.0.0.62")
+    assert hop.excluded("crm", "audit_log") and not hop.excluded("crm", "x")
+
+
+def test_the_dml_an_alibaba_job_carries_becomes_the_contract():
+    got = imports.read(SAMPLES / "alibaba-dts-job.json")
+    assert got.raw["mapping"]["ops"] == {"shop.orders": ["insert",
+                                                         "update"]}
