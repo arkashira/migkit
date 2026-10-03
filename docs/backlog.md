@@ -3836,7 +3836,7 @@ cell is "not yet" without either a backlog row naming it or a written
 "not applicable" reason - so an engine left thinner than PostgreSQL and
 MySQL is a red test, never a silent gap.
 
-*Built 2026-10-04 (P0-PARITY.matrix, P0-PARITY.guard):*
+*Built 2026-10-04, 9fd2442 (P0-PARITY.matrix, P0-PARITY.guard):*
 `capabilities.depth()`, beside the capability table it extends - 86 items
 in 10 areas, each read off the code an engine runs: its own methods, a
 mixin's or another engine's it inherits, the base's helpers they call, and
@@ -3884,7 +3884,7 @@ way the code does not show, a "not yet" whose row is not in
 shows the matrix: per engine the ways proved of the items that apply, area
 by area, and per item the engines in each state.
 
-Measured at the commit that built it: 3,096 cells - yes 435, test owed
+Measured at 9fd2442: 3,096 cells - yes 435, test owed
 252, not applicable 869, not yet 1,540. By area (yes / owed / n/a / not
 yet): scope 37/92/50/181, verify 124/74/499/707, tail 26/18/59/113,
 assess 32/16/26/178, schema 37/20/74/85, move 83/20/52/97, cutover
