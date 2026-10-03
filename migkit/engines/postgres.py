@@ -14,7 +14,7 @@ from ..tableway import Way
 from ..util import (CommandFailed, quote_name, run, split_table,
                     tool_env, which)
 from .base import Counted as _Counted
-from .base import Engine, Enough as _Enough, RepairAction, Result
+from .base import Engine, Enough as _Enough, RepairAction, Result, clauses
 
 
 def _ident(name):
@@ -1073,6 +1073,17 @@ class PostgresEngine(Engine):
         got = self.user_tables(side, db)
         working = drift.transient_among(got)
         return [t for t in got if t not in working and self.in_scope(db, t)]
+
+    def scope_tables(self, side, db):
+        """The tables as the application names them and every partition
+        (`user_tables` `all`): a move copies each partition as a table of
+        its own, so an include or exclude entry naming one takes it or
+        leaves it."""
+        from .. import drift
+        got = self.user_tables(side, db, "all")
+        working = drift.transient_among(got)
+        return [t for t in got if t not in working
+                and not self.hop.excluded(db, *self._split(t))]
 
     def column_catalog(self, side, db):
         """{schema.table: [(column, declared type), ...]} of every relation,
@@ -4465,7 +4476,7 @@ select json_build_object(
                                " filter excludes - the move does not put"
                                " them there")
         if bad:
-            return [Result("counts", db, "diff", "; ".join(bad[:10]), "",
+            return [Result("counts", db, "diff", clauses(bad), "",
                            "missing rows show up in check data, fix there")]
         return [Result("counts", db, "ok",
                        f"{len(common)} tables, {total:,} rows both sides")]
@@ -5399,7 +5410,7 @@ select json_build_object(
         bad += [f"{t} missing on target" for t in sorted(st - dt)]
         bad += [f"{t} extra on target" for t in sorted(dt - st)]
         if bad:
-            return Result("counts", db, "diff", "; ".join(bad[:10]), "",
+            return Result("counts", db, "diff", clauses(bad), "",
                           "missing rows show up in check data, fix there")
         failed = self._failed_tables(out)
         if failed:
@@ -5550,8 +5561,7 @@ select json_build_object(
                        str(ev)), db)]
         bad = [l.split(":")[0] for l in out.splitlines() if ": DIFF" in l]
         err = self._failed_tables(out)
-        for t in bad:
-            self._drilldown_native(db, t)
+        drilled = {t: self._drilldown_native(db, t) for t in bad}
         if bad:
             still, healed, how = self._resolve_inflight(db, bad, stream)
             if not still and not err:
@@ -5563,6 +5573,16 @@ select json_build_object(
         detail = ""
         if bad:
             detail = f"tables differ: {', '.join(bad)} (pk-level files written)"
+            # each table's rows counted key by key, as its files hold them
+            # now - after the fence took back what was still arriving: the
+            # shape a hop that keeps some changes off the target is held
+            # to (`verdict.hold`)
+            counted = [f"{t} " + " ".join(
+                f"{k}={len(self._drill_keys(db, t, k))}"
+                for k in ("missing", "extra", "changed"))
+                for t in bad if drilled.get(t) is not None]
+            if counted:
+                detail += "; rows counted: " + ", ".join(counted)
             fps = []
             for t in bad[:5]:
                 cols = self._column_fingerprint(db, t)
@@ -7010,6 +7030,93 @@ select json_build_object(
                    and cn.nspname not in ('pg_catalog',
                                           'information_schema')"""):
             out.append((child, list(cols), parent, list(pcols)))
+        return out
+
+    DEPENDENCY_KINDS = ("view", "routine", "trigger", "sequence",
+                        "partition")
+
+    def dependencies(self, side, db, tables=()):
+        """What the database's objects need of its tables
+        (`Engine.dependencies`), from the catalogue: a view's relations by
+        its rewrite rule's own dependencies (`pg_depend` on `pg_rewrite`);
+        a function's, a procedure's and a trigger function's tables by
+        the text of the body, which no catalogue records; a sequence a
+        default draws from by the default's dependency and its owner by
+        the sequence's; a partition by `pg_inherits`. Not an extension's
+        objects, which the target gets from the extension."""
+        out = []
+        for view, needs in self._catalog(side, db, """
+                select distinct vn.nspname || '.' || v.relname,
+                       tn.nspname || '.' || t.relname
+                  from pg_rewrite r
+                  join pg_class v on v.oid = r.ev_class
+                  join pg_namespace vn on vn.oid = v.relnamespace
+                  join pg_depend d on d.classid = 'pg_rewrite'::regclass
+                                  and d.objid = r.oid
+                                  and d.refclassid = 'pg_class'::regclass
+                  join pg_class t on t.oid = d.refobjid
+                  join pg_namespace tn on tn.oid = t.relnamespace
+                 where v.relkind in ('v', 'm') and t.oid <> v.oid
+                   and vn.nspname not in ('pg_catalog', 'information_schema')
+                   and tn.nspname not in ('pg_catalog',
+                                          'information_schema')"""):
+            out.append(("view", view, view, needs))
+        for name, body in self._catalog(side, db, """
+                select n.nspname || '.' || p.proname, coalesce(p.prosrc, '')
+                  from pg_proc p
+                  join pg_namespace n on n.oid = p.pronamespace
+                 where n.nspname not in ('pg_catalog', 'information_schema')
+                   and n.nspname not like 'pg_toast%'
+                   and p.prokind in ('f', 'p')
+                   and p.prorettype <> 'trigger'::regtype
+                   and not exists (select 1 from pg_depend d
+                                    where d.classid = 'pg_proc'::regclass
+                                      and d.objid = p.oid
+                                      and d.deptype = 'e')"""):
+            out += [("routine", name, name, t)
+                    for t in self._tables_named(body, tables)]
+        for name, table, body in self._catalog(side, db, """
+                select t.tgname, n.nspname || '.' || c.relname,
+                       coalesce(p.prosrc, '')
+                  from pg_trigger t
+                  join pg_class c on c.oid = t.tgrelid
+                  join pg_namespace n on n.oid = c.relnamespace
+                  join pg_proc p on p.oid = t.tgfoid
+                 where not t.tgisinternal
+                   and n.nspname not in ('pg_catalog',
+                                         'information_schema')"""):
+            out += [("trigger", name, table, t)
+                    for t in self._tables_named(body, tables, own=table)]
+        for table, seq, owner in self._catalog(side, db, """
+                select distinct tn.nspname || '.' || t.relname,
+                       sn.nspname || '.' || s.relname,
+                       wn.nspname || '.' || w.relname
+                  from pg_attrdef a
+                  join pg_depend d on d.classid = 'pg_attrdef'::regclass
+                                  and d.objid = a.oid
+                                  and d.refclassid = 'pg_class'::regclass
+                  join pg_class s on s.oid = d.refobjid and s.relkind = 'S'
+                  join pg_namespace sn on sn.oid = s.relnamespace
+                  join pg_class t on t.oid = a.adrelid
+                  join pg_namespace tn on tn.oid = t.relnamespace
+                  join pg_depend o on o.classid = 'pg_class'::regclass
+                                  and o.objid = s.oid
+                                  and o.refclassid = 'pg_class'::regclass
+                                  and o.deptype in ('a', 'i')
+                  join pg_class w on w.oid = o.refobjid
+                  join pg_namespace wn on wn.oid = w.relnamespace
+                 where w.oid <> t.oid"""):
+            out.append(("sequence", seq, table, owner))
+        for root, part in self._catalog(side, db, """
+                select pn.nspname || '.' || p.relname,
+                       cn.nspname || '.' || c.relname
+                  from pg_inherits i
+                  join pg_class p on p.oid = i.inhparent
+                  join pg_namespace pn on pn.oid = p.relnamespace
+                  join pg_class c on c.oid = i.inhrelid
+                  join pg_namespace cn on cn.oid = c.relnamespace
+                 where p.relkind = 'p'"""):
+            out.append(("partition", part, root, part))
         return out
 
     def code_definition(self, side, db, kind, name):
@@ -8525,16 +8632,24 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             for t in taken:
                 if not self._keep_tbl(db, t):
                     continue
-                counts = []
+                counts, named = [], {}
                 for kind_ in ("missing", "extra", "changed"):
                     f = rpt / f"data-{t}.{kind_}"
                     n = sum(1 for _ in f.open()) if f.exists() else 0
+                    named[kind_] = range(n)
                     if n:
                         counts.append(f"{kind_}={n}")
+                # the rows the hop keeps by the changes it does not carry
+                # are left as they are, and said
+                left = self._repairable(db, t, named)
+                kept = self._kept_said(named, left)
+                if kept and not any(left.values()):
+                    continue
                 actions.append(RepairAction(
                     db, "rows", [f"resync-rows {t}"], [],
                     f"{t}: {', '.join(counts) or 'no pk files'},"
-                    " deleted rows saved to undo before recopy", table=t))
+                    " deleted rows saved to undo before recopy"
+                    + (f"; {kept}" if kept else ""), table=t))
             # after the resync, never before it: a recopy takes its rows from
             # the source, which is where the broken text lives, so a text
             # repair applied first would be undone by the action next to it
@@ -8824,7 +8939,13 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         only = self.__dict__.get("_repair_only")
         canon_of = self._key_canon(db, t, pks) if only is not None else None
 
+        kept = self._kept_by_hop(db, t)
+
         def read(kind):
+            if kind in kept:
+                # a row the hop keeps by a change it does not carry: never
+                # removed, added or overwritten here
+                return ""
             f = d / f"data-{t}.{kind}"
             text = f.read_text() if f.exists() else ""
             if only is None:
@@ -8978,9 +9099,10 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             canon_of = self._key_canon(db, table, pks)
         except SystemExit:
             return None
-        return {kind: [list(k) for k in canon_of(
-                    self._drill_keys(db, table, kind))]
-                for kind in ("missing", "changed", "extra")}
+        return self._repairable(db, table, {
+            kind: [list(k) for k in canon_of(
+                self._drill_keys(db, table, kind))]
+            for kind in ("missing", "changed", "extra")})
 
     #: a span of a table replaced under one transaction (`repair_range`)
     ONE_TRANSACTION_A_RANGE = True
@@ -10608,23 +10730,23 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 continue
             missing, extra, changed = cmp
             if missing or extra or changed:
-                clean = False
                 if not pair:
                     self._write_pk_files(db, t, missing, extra, changed)
-                res.append(Result(
+                got, held_back = self._delta_held(Result(
                     "delta", f"{db}.{t}", "diff",
                     f"of {len(keys)} touched rows: missing={len(missing)}"
                     f" extra={len(extra)} changed={len(changed)}",
                     str(self._report(db)),
                     f"migkit sync {self.hop.name} --db {db} --kind rows"))
+                clean = clean and not held_back
+                res.append(got)
             else:
                 res.append(Result("delta", f"{db}.{t}", "ok",
                                   f"{len(keys)} touched rows verified"
                                   " equal on both sides"))
             if log:
                 log(f"{t}: {len(keys)} touched, "
-                    + ("clean" if not (missing or extra or changed)
-                       else "DIFF"))
+                    + self._delta_said(res[-1]))
         for t in sorted(nopk):
             if not self._keep_tbl(db, t):
                 continue

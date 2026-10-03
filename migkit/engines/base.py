@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -73,6 +74,17 @@ CATEGORY_BY_CHECK = {
 # statuses, narrowest to widest. `warn` sits between ok and diff: something
 # worth reading that is not itself a mismatch.
 STATUSES = ("ok", "skip", "warn", "diff", "error")
+
+
+def clauses(parts, most=10):
+    """At most `most` of a finding's clauses, and how many more there are
+    as one clause more: a list cut short in silence read as every
+    difference there was, to a reader holding each to a hop's carried
+    changes (`verdict.hold`) as well as to a person."""
+    parts = list(parts)
+    more = len(parts) - most
+    return "; ".join(parts[:most]) + (f"; and {more} more" if more > 0
+                                      else "")
 
 
 def categorize(check, scope):
@@ -2473,13 +2485,20 @@ class Engine:
         if said:
             actions.append(said)
         tables = {name: tables[name] for name in taken}
-        for name, found in sorted(tables.items()):
+        for name, named in sorted(tables.items()):
+            # the rows the hop keeps by the changes it does not carry are
+            # left as they are, and said
+            found = self._repairable(db, name, named)
+            kept = self._kept_said(named, found)
+            if kept and not any(found.get(k) for k in
+                                ("missing", "changed", "extra")):
+                continue
             if stream:
                 actions.append(self._resnapshot_action(db, name, found))
                 continue
             send = found.get("missing", []) + found.get("changed", [])
             drop = found.get("extra", [])
-            statements = []
+            statements = [kept] if kept else []
             if not send and not drop:
                 kept = self.repair_leaves(db, name) or {}
                 parts = kept.get("leaves") or []
@@ -2940,50 +2959,405 @@ class Engine:
     #: every time and teach people to ignore the section.
     PREFLIGHT = ()
 
+    #: left-out tables a database's line names before it counts the rest;
+    #: the run's decision record keeps every one
+    SCOPE_NAMED = 10
+    #: the closest real names an entry that matches nothing is offered
+    NEAREST = 3
+    #: a child's rows counted at most, for a foreign key whose parent the
+    #: hop leaves out - a large child costs no more than these rows read
+    ORPHANS_COUNTED = 100_000
+    #: foreign keys across the scope whose child rows are counted, a
+    #: database
+    ORPHAN_COUNTS = 20
+    #: what this engine lists of what a database's objects need of its
+    #: tables (`dependencies`), beside its foreign keys
+    DEPENDENCY_KINDS = ()
+
     def _include_items(self):
-        """What the hop's `include` takes, read before the move: an entry
-        that takes no table, a database it takes nothing of. Either is a
-        table the operator believes is moved and checked that nothing
-        looks at, and the check, comparing only what is taken, would
-        call the rest the same. Nothing is said for a hop without one."""
+        """What the hop's scope takes, read before the move and said so it
+        can be checked at a glance: for each database how many of the
+        source's tables the hop takes and leaves, the first it leaves
+        named; for each include and exclude entry what it matched, a
+        pattern said to take the tables made later as well, and one that
+        matches nothing offered the closest real names; then what the
+        tables it takes need of the ones it leaves (`_closure_items`).
+        Every name goes to the run's decision record, and to the console
+        where MIGKIT_EXPLAIN=1. An entry that takes nothing, a database
+        include takes nothing of, is a table the operator believes is
+        moved and checked that nothing looks at - the check, comparing
+        only what is taken, would call the rest the same. Nothing is said
+        for a hop that takes everything.
+
+        The source's every table is listed once, by a twin of the hop
+        that takes everything and has no target (`_unscoped`): what the
+        hop takes is that list read through the one scope answer
+        (`in_scope`), not a second listing."""
+        from ..config import scoped
         hop = self.hop
-        if not getattr(hop, "include", None):
+        if not scoped(hop):
             return []
-        items, taken, why = [], [], None
+        # a pair's source is listed by the source's own engine
+        lister = getattr(self, "src_engine", None) or self
         try:
-            for db in self.databases():
-                got = [(db, t) for t in self.neutral_tables("src", db)]
-                taken += got
-                if not got:
-                    items.append({
-                        "level": "warn", "scope": "before the move",
-                        "item": "scope", "detail":
-                            f"include takes no table of database {db} -"
-                            " it is opened and nothing in it is moved or"
-                            " checked  [fix] name its tables in include,"
-                            " or leave it out of databases"})
+            dbs = self.databases()
+            whole = self._unscoped(lister)
+            every = {db: [str(t) for t in whole.scope_tables("src", db)]
+                     for db in dbs}
         except Exception as e:
             why = str(e).splitlines()[-1][:90] if str(e) else \
                 type(e).__name__
-        if why is not None:
             return [{"level": "warn", "scope": "before the move",
                      "item": "scope", "detail":
                          "could not list the source's tables, so what"
-                         f" include takes is unknown: {why}"}]
-        for entry in hop.unused_include(taken):
+                         f" the hop's scope takes is unknown: {why}"}]
+        try:
+            others = [d for d in whole.databases() if d not in dbs]
+        except Exception:  # noqa: BLE001 - the databases it opens stand
+            others = []
+        taken = {db: [t for t in got if lister.in_scope(db, t)]
+                 for db, got in every.items()}
+        return (self._scope_said(lister, every, taken, others)
+                + self._closure_items(lister, every, taken))
+
+    def _unscoped(self, lister):
+        """`lister`'s engine on a twin of the hop that takes everything
+        and has no target: what lists the source's every table, so the
+        scope can say what it leaves. Its target is no server at all, so
+        nothing it does can reach the hop's."""
+        import dataclasses
+
+        from ..config import Endpoint
+        twin = dataclasses.replace(self.hop, include=[], exclude=[],
+                                   target=Endpoint())
+        return type(lister)(twin)
+
+    def _table_parts(self, lister, table):
+        """A table's name as the parts the hop's patterns are matched
+        against, split the one way (`util.split_table`)."""
+        from ..util import split_table
+        schema, name = split_table(lister.CANON_ENGINE
+                                   or getattr(self.hop, "engine", ""),
+                                   str(table))
+        return [schema, name] if schema else [name]
+
+    def _first(self, names):
+        """The first `SCOPE_NAMED` names, and how many more there are."""
+        names = list(names)
+        more = len(names) - self.SCOPE_NAMED
+        return ", ".join(names[:self.SCOPE_NAMED]) + (
+            f" and {more} more" if more > 0 else "")
+
+    def _nearest(self, entry, lister, pairs, dbs):
+        """' - did you mean ...?' with the closest names the source has
+        for an entry that matches nothing - first the ones it names but
+        for case, then the nearest by spelling (`difflib`) - or ''."""
+        import difflib
+
+        from ..config import name_matches
+        known = set(dbs)
+        for db, t in pairs:
+            parts = [db, *self._table_parts(lister, t)]
+            known.update(".".join(parts[i:]) for i in range(len(parts)))
+            known.update(".".join(parts[:i]) for i in range(1, len(parts)))
+        depth = len(str(entry).split("."))
+        alike = sorted(n for n in known if len(n.split(".")) == depth) \
+            or sorted(known)
+        got = [n for n in alike if name_matches(n, entry, True)]
+        if not got:
+            # spelled near: the last part held to the last parts of the
+            # names under the same database and schema, where there are
+            # any - a long shared head makes every name look near
+            head, _, leaf = str(entry).rpartition(".")
+            pool = [n for n in alike if n.rpartition(".")[0].casefold()
+                    == head.casefold()] or alike
+            by_leaf = {}
+            for n in pool:
+                by_leaf.setdefault(n.rpartition(".")[2], []).append(n)
+            got = [n for near in difflib.get_close_matches(
+                       leaf, sorted(by_leaf), n=self.NEAREST, cutoff=0.6)
+                   for n in by_leaf[near]]
+        got = got[:self.NEAREST]
+        return f" - did you mean {', '.join(got)}?" if got else ""
+
+    def _scope_said(self, lister, every, taken, others=()):
+        """The scope's rows (`_include_items`): each database, each entry,
+        and the decision record holding every name."""
+        import dataclasses
+
+        from .. import decide
+        from ..config import name_matches
+        hop = self.hop
+        before = "before the move"
+        items = []
+        record = {"work": "the hop's scope", "databases": {},
+                  "left out whole": list(others), "entries": {}}
+        for db, got in every.items():
+            took = set(taken[db])
+            left = [t for t in got if t not in took]
+            record["databases"][db] = {"takes": [t for t in got
+                                                 if t in took],
+                                       "leaves": left}
+            if hop.include and not took:
+                items.append({
+                    "level": "warn", "scope": before, "item": "scope",
+                    "detail": f"include takes no table of database {db} -"
+                              " it is opened and nothing in it is moved or"
+                              " checked  [fix] name its tables in include,"
+                              " or leave it out of databases"})
+                continue
             items.append({
-                "level": "warn", "scope": "before the move",
-                "item": "scope", "detail":
-                    f"include names {entry!r}, which takes no table on the"
-                    " source - nothing under that name is moved or"
-                    " checked  [fix] correct the name or drop it"})
-        if not items:
+                "level": "pass", "scope": before, "item": "scope",
+                "detail": f"{db}: takes {len(took)} of the source's"
+                          f" {len(got)} tables"
+                          + (f", leaves {len(left)} out: {self._first(left)}"
+                             if left else ", leaves none out")})
+        if others:
             items.append({
-                "level": "pass", "scope": "before the move",
-                "item": "scope", "detail":
-                    f"include takes {len(taken)} tables, every entry"
-                    " taking one"})
+                "level": "pass", "scope": before, "item": "scope",
+                "detail": "the source's databases left out whole: "
+                          + self._first(others)})
+        pairs = [(db, t) for db, got in every.items() for t in got]
+        kept = {(db, t) for db, got in taken.items() for t in got}
+        fold = hop.folds_case()
+        for kind in ("include", "exclude"):
+            for entry in [str(e) for e in getattr(hop, kind, None) or []
+                          if str(e).strip()]:
+                probe = dataclasses.replace(
+                    hop, include=[entry] if kind == "include" else [],
+                    exclude=[entry] if kind == "exclude" else [])
+                hit = [(db, t) for db, t in pairs if (
+                    probe.included if kind == "include" else probe.excluded)(
+                        db, *self._table_parts(lister, t))]
+                whole_dbs = [d for d in others
+                             if name_matches(d, entry, fold)]
+                named = [f"{db}.{t}" for db, t in hit] + [
+                    f"{d} (the whole database)" for d in whole_dbs]
+                record["entries"][f"{kind} {entry}"] = named
+                pattern = any(c in entry for c in "*?[")
+                later = (", and tables made later that it names: a pattern"
+                         " is read again every run" if pattern else "")
+                if not named:
+                    near = self._nearest(entry, lister, pairs,
+                                         list(every) + list(others))
+                    items.append({
+                        "level": "warn", "scope": before, "item": "scope",
+                        "detail": (f"include names {entry!r}, which takes no"
+                                   " table on the source - nothing under that"
+                                   " name is moved or checked"
+                                   if kind == "include" else
+                                   f"exclude names {entry!r}, which leaves"
+                                   " out no table on the source - a table"
+                                   " it was meant to keep off the target"
+                                   " would be moved")
+                                  + f"{near}  [fix] correct the name or"
+                                    " drop it"})
+                    continue
+                if kind == "include" and hit and not any(
+                        x in kept for x in hit):
+                    items.append({
+                        "level": "warn", "scope": before, "item": "scope",
+                        "detail": f"include {entry!r} takes {len(hit)}"
+                                  f" tables and exclude takes every one"
+                                  f" back: {self._first(named)} - nothing"
+                                  " under it is moved or checked  [fix]"
+                                  " drop the exclude entry, or this one"})
+                    continue
+                items.append({
+                    "level": "pass", "scope": before, "item": "scope",
+                    "detail": f"{kind} {entry!r} "
+                              + ("takes" if kind == "include"
+                                 else "leaves out")
+                              + f" {len(named)}: {self._first(named)}"
+                              + later})
+
+        def explained(line):
+            items.append({"level": "pass", "scope": before,
+                          "item": "scope, in full", "detail": line})
+        took = sum(len(v) for v in taken.values())
+        decide.record(hop, record, explained, work="the hop's scope",
+                      way=f"takes {took} of {len(pairs)} tables",
+                      reason="the source's every table read through the"
+                             " hop's include and exclude")
         return items
+
+    #: each way a table the hop takes may need one it leaves out: what it
+    #: is called, and what accepting it leaves on the target
+    CLOSURE = {
+        "foreign key": ("foreign keys", "the target holds rows pointing at"
+                        " parents it does not have, and the key cannot be"
+                        " made or checked there"),
+        "view": ("views", "the views are not made on the target, or read"
+                 " nothing there"),
+        "routine": ("routines", "the routines fail on the target when they"
+                    " run"),
+        "trigger": ("triggers", "the triggers fail on the target when they"
+                    " fire"),
+        "sequence": ("sequences", "the defaults draw from a sequence the"
+                     " target is not given"),
+        "partition": ("partitions", "a partitioned table and its"
+                      " partitions are taken apart"),
+    }
+
+    def _closure_items(self, lister, every, taken):
+        """What the tables the hop takes need of the ones it leaves out,
+        before the move, where this engine can list it: a foreign key from
+        a taken table to a parent it leaves (with the child's rows that
+        hold a key into it, counted up to `ORPHANS_COUNTED` - each points
+        at nothing on the target), and a view, routine or trigger over a
+        table it leaves, a default drawing from a sequence another table
+        owns, a partitioned table taken apart from a partition
+        (`dependencies`). Each kind a `warn` naming them, its `[fix]` both
+        ways out - the tables to take, or `closure: accept` - and a pass
+        saying they were accepted where the hop says so. What this engine
+        cannot list is said as not checked, never as clear."""
+        import dataclasses
+
+        from .. import decide
+        hop = self.hop
+        before = "before the move"
+        accept = str((hop.options or {}).get("closure") or "").lower() \
+            == "accept"
+        fks = type(lister).foreign_keys is not Engine.foreign_keys
+        kinds = tuple(lister.DEPENDENCY_KINDS)
+        unlisted = [self.CLOSURE[k][0] for k in self.CLOSURE
+                    if k != "foreign key" and k not in kinds]
+        if not fks and not kinds:
+            return [{"level": "warn", "scope": before,
+                     "item": "dependencies",
+                     "detail": "what the tables the hop takes need of the"
+                               " ones it leaves out - foreign keys, views,"
+                               " routines, triggers, sequences, partitions"
+                               " - not checked on this engine"}]
+        leaver = dataclasses.replace(hop, include=[])
+        out = []
+        for db, got in every.items():
+            took = set(taken[db])
+
+            def inside(name, db=db):
+                return lister.in_scope(db, name)
+            crossing = {}
+            try:
+                for child, cols, parent, _ in (
+                        lister.foreign_keys("src", db) if fks else []):
+                    if str(child) in took and str(parent) != str(child) \
+                            and not inside(parent):
+                        crossing.setdefault("foreign key", []).append(
+                            (str(parent), str(child), list(cols)))
+                for kind, name, holder, needs in (
+                        lister.dependencies("src", db, got) if kinds
+                        else []):
+                    if kind == "partition":
+                        if inside(holder) != inside(needs):
+                            crossing.setdefault(kind, []).append(
+                                (needs if inside(holder) else holder, name,
+                                 holder))
+                    elif str(needs) != str(holder) and inside(holder) \
+                            and not inside(needs):
+                        crossing.setdefault(kind, []).append(
+                            (str(needs), str(name), str(holder)))
+            except Exception as e:  # noqa: BLE001 - said, never as clear
+                out.append({"level": "warn", "scope": before,
+                            "item": "dependencies",
+                            "detail": f"{db}: what the tables the hop takes"
+                                      " need of the ones it leaves out could"
+                                      " not be listed: "
+                                      + (str(e).strip().splitlines()
+                                         or [type(e).__name__])[-1][:90]})
+                continue
+            said = {kind: [self._crossing_said(lister, db, kind, x, i)
+                           for i, x in enumerate(found)]
+                    for kind, found in crossing.items()}
+
+            def explained(line):
+                out.append({"level": "pass", "scope": before,
+                            "item": "dependencies, in full",
+                            "detail": line})
+            for kind, lines in said.items():
+                needed = sorted({x[0] for x in crossing[kind]})
+                what, then = self.CLOSURE[kind]
+                if accept:
+                    out.append({"level": "pass", "scope": before,
+                                "item": "dependencies",
+                                "detail": f"{db}: {what} across the scope,"
+                                          " accepted (closure: accept): "
+                                          + self._first(lines)})
+                    continue
+                out.append({
+                    "level": "warn", "scope": before, "item": "dependencies",
+                    "detail": f"{db}: {what} across the scope: "
+                              + self._first(lines)
+                              + "  [fix] take the closure: "
+                              + self._closure_fix(lister, leaver, db, needed)
+                              + f"; or accept it: closure: accept in the"
+                                f" hop's options - {then}"})
+            if not crossing:
+                checked = ["foreign keys"] if fks else []
+                checked += [self.CLOSURE[k][0] for k in kinds]
+                out.append({"level": "pass", "scope": before,
+                            "item": "dependencies",
+                            "detail": f"{db}: nothing the hop takes needs a"
+                                      " table it leaves out ("
+                                      + ", ".join(checked) + ")"})
+            decide.record(hop, {"work": f"the closure of {db}",
+                                "crossing": said}, explained,
+                          work=f"the closure of {db}",
+                          way="accepted" if accept and crossing else "",
+                          reason=f"{sum(map(len, said.values()))} across"
+                                 " the scope")
+        if unlisted:
+            out.append({"level": "warn", "scope": before,
+                        "item": "dependencies",
+                        "detail": f"{', '.join(unlisted)} that need a table"
+                                  " the hop leaves out - not checked on"
+                                  " this engine"})
+        return out
+
+    def _crossing_said(self, lister, db, kind, found, i):
+        """One dependency across the scope in words: what needs what - a
+        foreign key with the child's rows that hold a key into the parent
+        left out, counted for the first `ORPHAN_COUNTS`."""
+        needs, name, holder = found
+        if kind == "foreign key":
+            said = f"{name} ({', '.join(holder)}) -> {needs}"
+            if i >= self.ORPHAN_COUNTS:
+                return said
+            try:
+                n = lister.rows_holding("src", db, name, holder,
+                                        self.ORPHANS_COUNTED)
+            except Exception:  # noqa: BLE001 - the key is named, uncounted
+                return said + " (its rows could not be counted)"
+            if n is None:
+                return said
+            most = n >= self.ORPHANS_COUNTED
+            return (said + f" - {'at least ' if most else ''}{n:,} of its"
+                    " rows hold a key into it, each pointing at nothing on"
+                    " the target")
+        return {"view": f"view {name} reads {needs}",
+                "routine": f"{name} names {needs}",
+                "trigger": f"trigger {name} on {holder} names {needs}",
+                "sequence": f"{holder} draws from {name}, which {needs}"
+                            " owns",
+                "partition": (f"{holder} is taken and its partition"
+                              f" {needs} is not" if needs != holder else
+                              f"partition {name} is taken and its table"
+                              f" {holder} is not")}[kind]
+
+    def _closure_fix(self, lister, leaver, db, needed):
+        """The tables a scope must take for its closure, said as the
+        change to make: added to include, or taken out of exclude where
+        exclude is what leaves them."""
+        dropped = [n for n in needed
+                   if leaver.excluded(db, *self._table_parts(lister, n))]
+        added = [n for n in needed if n not in dropped]
+        parts = []
+        if added and self.hop.include:
+            parts.append(f"add {', '.join(f'{db}.{n}' for n in added)}"
+                         " to include")
+        if dropped:
+            parts.append(f"take {', '.join(f'{db}.{n}' for n in dropped)}"
+                         " out of exclude")
+        return " and ".join(parts) or "take " + ", ".join(needed)
 
     def _mapping_items(self):
         """What the hop's mapping would do, read before the move.
@@ -3126,6 +3500,13 @@ class Engine:
     def neutral_tables(self, side, db):
         """Table identifiers this engine's other neutral methods accept."""
         raise self._no_canon("list tables")
+
+    def scope_tables(self, side, db):
+        """Every table a hop's include and exclude entries may name:
+        `neutral_tables`, and - where a table holds its rows in tables of
+        its own that a move copies one by one (PostgreSQL's partitions) -
+        those too, so an entry naming one is said to take it."""
+        return self.neutral_tables(side, db)
 
     def neutral_columns(self, side, db, table):
         """[(column name, declared type)] in the order the server reports."""
@@ -3769,6 +4150,12 @@ class Engine:
                                   for k in found[:4])
                 parts.append(f"{len(found)} {label} ({shown}"
                              + (" ..." if len(found) > 4 else "") + ")")
+        if parts and not capped:
+            # every row walked: the counts are exact, which is what a hop
+            # that keeps some changes off the target is held to
+            # (`verdict.hold`)
+            parts.append(f"missing={len(missing)} extra={len(extra)}"
+                         f" changed={len(changed)}")
         blind = sum(1 for group in (missing, changed, extra)
                     for k in group if any(part is None for part in k))
         if blind:
@@ -3827,7 +4214,7 @@ class Engine:
         from .. import canon
         if found is None:
             found = self._drill_tables(db).get(name, {})
-        found = self._only_named(found)
+        found = self._repairable(db, src_t, self._only_named(found))
         if not any(found.get(k) for k in ("missing", "changed", "extra")):
             return
         key = list(src_engine.neutral_key("src", db, src_t))
@@ -3949,6 +4336,38 @@ class Engine:
                     for k, v in zip(key, values(key_text))})
                 record.applied(first_delete + i)
 
+    def _kept_by_hop(self, db, table):
+        """The kinds of row (`missing`, `extra`, `changed`) the hop keeps
+        on the target for this table by the changes it does not carry
+        (`verdict.kept_kinds`): a repair never removes a row the source
+        deleted where deletes are not carried, never adds one it inserted
+        where inserts are not, and never overwrites one it updated where
+        updates are not."""
+        from .. import verdict
+        return verdict.kept_kinds(self.hop, db, table)
+
+    def _repairable(self, db, table, found):
+        """`found` ({kind: [keys]}) without the kinds the hop keeps
+        (`_kept_by_hop`); as it is for a hop that carries every change."""
+        kept = self._kept_by_hop(db, table)
+        if not kept or not found:
+            return found
+        return {k: ([] if k in kept else v) for k, v in found.items()}
+
+    @staticmethod
+    def _kept_said(found, kept_found):
+        """What a repair plan says of the rows it leaves because the hop
+        keeps them, or ''."""
+        from .. import verdict
+        left = [(kind, len(found.get(kind) or ()))
+                for _, kind, _, _ in verdict.LEFT_OUT
+                if len(found.get(kind) or ()) and
+                not (kept_found.get(kind) or ())]
+        return "; ".join(
+            f"{verdict._rows(n)} {words} left as they are - {why}"
+            for kind, n in left for _, k, words, why in verdict.LEFT_OUT
+            if k == kind)
+
     def _only_named(self, found):
         """`found` ({kind: [key as canonical text]}) narrowed to the keys a
         repair by spans leaves to be repaired by key (`repairways`); as it
@@ -4029,8 +4448,10 @@ class Engine:
     def repair_found(self, db, table):
         """{missing, changed, extra: [key as canonical text]} the last check
         named for `table` - {} where it named none - or None where this
-        engine's drilldown cannot be read so."""
-        return self._drill_tables(db).get(table, {})
+        engine's drilldown cannot be read so. Never the rows the hop keeps
+        by the changes it does not carry (`_repairable`)."""
+        return self._repairable(db, table,
+                                self._drill_tables(db).get(table, {}))
 
     def _leaves_kept(self, db):
         """The tables the last check kept differing leaves for
@@ -4588,6 +5009,23 @@ class Engine:
     def _write_pk_files(self, db, table, missing, extra, changed):
         return None
 
+    def _delta_held(self, result):
+        """A delta verify's answer for one table's differing rows, held to
+        the changes the hop carries (`verdict.hold`): rows it keeps - the
+        ones the source deleted, where deletes are not carried - are a
+        note, not a difference, and do not hold the verified position
+        back. Returns (the answer, whether it holds the position back)."""
+        from .. import verdict
+        verdict.hold(self.hop, [result.__dict__])
+        return result, not getattr(result, "kept_by_hop", "")
+
+    @staticmethod
+    def _delta_said(result):
+        """What a delta cycle's log says of one table's answer."""
+        if getattr(result, "kept_by_hop", ""):
+            return "kept by the hop"
+        return "clean" if result.status == "ok" else "DIFF"
+
     def settle_recheck(self, db, table):
         keys = self._suspect_keys(db, table)
         if not keys or len(keys) > 20000:
@@ -4714,6 +5152,67 @@ class Engine:
     def foreign_keys(self, side, db):
         """[(child, [columns], parent, [parent's columns])]."""
         return []
+
+    def dependencies(self, side, db, tables=()):
+        """[(kind, name, holder, needs)] - what in the database cannot
+        stand without one of its tables, each name as `neutral_tables`
+        gives it, of the kinds this engine lists (`DEPENDENCY_KINDS`):
+        `view` - a view (holder, itself) and a table or view it reads;
+        `routine` - a function or procedure and a table its body names;
+        `trigger` - a trigger, the table it is on and a table its body
+        names; `sequence` - a sequence, the table whose default draws from
+        it and the table that owns it; `partition` - a partition, its
+        partitioned table and itself. `tables` are the source's every
+        table, what a body is read for. [] where this engine lists none."""
+        return []
+
+    def rows_holding(self, side, db, table, columns, most):
+        """How many of `table`'s rows hold a value in every one of
+        `columns`, counted up to `most` and no further - so a large table
+        costs at most `most` rows read - or None where this engine answers
+        no SQL of its own. Read in a transaction that cannot write
+        (`run_rule`)."""
+        if self.SQL_DIALECT not in ("postgres", "mysql"):
+            return None
+        held = " and ".join(f"{self._quote_ident(c)} is not null"
+                            for c in columns) or "1 = 1"
+        got = self.run_rule(
+            side, db, f"select count(*) from (select 1 from"
+                      f" {self._qualified(side, db, table)} where {held}"
+                      f" limit {int(most)}) held")
+        return int(got[0][0]) if got else 0
+
+    #: the words a statement names a table after, and the name: parts
+    #: quoted any way an engine quotes them, joined by dots
+    _NAMES_A_TABLE = re.compile(
+        r"\b(?:from|join|into|update|table|references)\s+"
+        r"((?:[`\"\[]?[\w$]+[`\"\]]?\s*\.\s*)*[`\"\[]?[\w$]+[`\"\]]?)",
+        re.I)
+
+    @classmethod
+    def _tables_named(cls, body, tables, own=""):
+        """The tables of `tables` a routine's or a view's text reads or
+        writes: each name after from, join, into, update, table or
+        references, matched by its own name without case - and by its
+        schema too, where the text gives one and the table has one. A
+        name in a comment or a string is taken all the same: a dependency
+        said that is not one costs a look, one missed a broken target."""
+        by_leaf = {}
+        for t in tables:
+            leaf = str(t).split(".")[-1].strip('`"[]').casefold()
+            by_leaf.setdefault(leaf, []).append(str(t))
+        found = set()
+        for m in cls._NAMES_A_TABLE.finditer(str(body or "")):
+            parts = [p.strip().strip('`"[]').casefold()
+                     for p in m.group(1).split(".")]
+            for t in by_leaf.get(parts[-1], []):
+                mine = [p.strip('`"[]').casefold()
+                        for p in str(t).split(".")]
+                if len(parts) == 1 or len(mine) == 1 or \
+                        mine[-2:] == parts[-2:]:
+                    found.add(t)
+        found.discard(str(own))
+        return sorted(found)
 
     def unique_keys(self, side, db):
         """{table: [[columns of one unique key], ...]}, the primary key

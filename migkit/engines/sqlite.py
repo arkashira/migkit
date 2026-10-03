@@ -3,7 +3,7 @@ import hashlib
 import time
 
 from .. import pieces
-from .base import Engine, NeutralCopier, RepairAction, Result
+from .base import Engine, NeutralCopier, RepairAction, Result, clauses
 
 
 class SQLiteEngine(NeutralCopier, Engine):
@@ -744,7 +744,7 @@ class SQLiteEngine(NeutralCopier, Engine):
             if a != b:
                 bad.append(f"{t} src={a} dst={b}")
         if bad:
-            return [Result("counts", db, "diff", "; ".join(bad[:10]))]
+            return [Result("counts", db, "diff", clauses(bad))]
         return [Result("counts", db, "ok",
                        f"{len(common)} tables, rows {ta:,}=={tb:,}")]
 
