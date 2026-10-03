@@ -94,6 +94,7 @@ import threading
 import time
 
 from . import failpoint
+from .hopkeys import opt
 
 #: in the order they run; each is a failpoint `cutover.<phase>`
 PHASES = ("prepare", "jobs_off", "pause", "freeze", "drain", "verify",
@@ -181,8 +182,8 @@ def _engine(hop):
 
 
 def _reverse(hop):
-    return str((hop.options or {}).get("reverse", "") or "").lower() \
-        == "at_cutover"
+    from .hopkeys import reverse
+    return reverse(hop) == "at_cutover"
 
 
 # --- the stream, as the cutover sees it -----------------------------------
@@ -485,8 +486,8 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out.append((level, what))
 
     budget = conf["budget"] if conf else None
-    top = str((hop.options or {}).get("topology", "") or "").lower()
-    if top == "two_way" or (hop.options or {}).get("two_way"):
+    from .hopkeys import topology
+    if topology(hop) == "two_way" or (hop.options or {}).get("two_way"):
         add("fail", "the hop streams both ways (two_way), and a"
                     " cutover freezes one side: there is no one side to"
                     " move from")
@@ -1160,8 +1161,7 @@ def _manual(hop, eng, dbs, leg, say, approvers, failed, unproven):
                                  " this again")
             pos = leg.fence.src_lsn(d)
             got = leg.fence.fence_wait(d, pos, timeout=float(
-                (hop.options or {}).get("fence_timeout", 300))) \
-                if pos is not None else None
+                opt(hop, "fence_timeout"))) if pos is not None else None
             if got is False and unproven is not None:
                 unproven.append(f"{d}: the stream short of {pos}")
             elif got is False:
@@ -1505,7 +1505,7 @@ def _mark_ready(hop, eng, dbs, leg, rec, say):
     a stream that does not carry a table made now is found here, with
     nothing frozen yet."""
     from . import drainmark
-    wait = float((hop.options or {}).get("fence_timeout", 300))
+    wait = float(opt(hop, "fence_timeout"))
     for i, d in enumerate(dbs):
         rec.setdefault("mark", {})[d] = {"made": True}
         _save(hop, rec)
@@ -2114,7 +2114,7 @@ def back_apply(hop, eng, db, back, apply, say):
         return stmts
     pos = rev.src_lsn(tdb) if hasattr(rev, "src_lsn") else None
     got = rev.fence_wait(tdb, pos, timeout=float(
-        (hop.options or {}).get("fence_timeout", 300))) \
+        opt(hop, "fence_timeout"))) \
         if pos is not None and hasattr(rev, "fence_wait") else None
     say("  the stream back " + (
         f"has carried everything the target has ({pos})" if got else

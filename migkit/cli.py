@@ -2184,7 +2184,8 @@ def _make_room_for_rows(hop, eng, db, actions):
             " row repair beside it would race it - the row that survives is"
             " whichever lands last. Nothing was applied. Stop it, repair,"
             " and start it again, or let it catch up and check again.")
-    window = int((hop.options or {}).get("repair_window", 300))
+    from .hopkeys import opt
+    window = opt(hop, "repair_window")
     paused = []
     for what in [w for w, _ in writers]:
         console.print(f"  {_esc(what)} is running; asking it to pause for"
@@ -3474,15 +3475,10 @@ def _topology(hop):
         reverse: at_cutover    tearing the stream down starts one back
         topology: two_way      both ways, all the time
     """
-    opts = hop.options or {}
-    rev = str(opts.get("reverse", "") or "").lower()
-    top = str(opts.get("topology", "") or "").lower()
-    if rev not in ("", "at_cutover"):
-        raise SystemExit(f"reverse: {rev} - the one there is, is"
-                         " at_cutover")
-    if top not in ("", "one_way", "two_way"):
-        raise SystemExit(f"topology: {top} - one_way or two_way")
-    return rev == "at_cutover", top == "two_way"
+    from . import hopkeys
+    # the one reading of both words, every spelling of them (K20)
+    return (hopkeys.reverse(hop) == "at_cutover",
+            hopkeys.topology(hop) == "two_way")
 
 
 def _the_other_way(hop, eng):

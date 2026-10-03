@@ -69,8 +69,7 @@ DYNAMIC = {
     # `topology`, `reverse`)
     ("hopkeys.py", "_option"): ("hop", ("topology", "reverse",
                                         "fence_timeout", "repair_window",
-                                        "on_conflict", "origin_table",
-                                        "checksum")),
+                                        "settle")),
     # a side's secret options, read once where used
     # (`Endpoint.option_secret`)
     ("config.py", "option_secret"): ("endpoint", (
