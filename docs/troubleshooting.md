@@ -1637,4 +1637,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the offline bundle's <...> is not in its sums
 
+* `<...>` is not a transform: null, constant <text>, hash or truncate <n>
+
+* a random value cannot be held to anything after the load, and a second run writes another
+
+* a constant must be text without quotes or line breaks
+
+* <...> takes nothing after it
+
+* truncate takes how many characters to keep, a whole number above 0
+
+* hash needs the hop's mask_key (a secret reference): a digest without a key is a dictionary away from the value
+
 * MIGKIT_UI_USER_HEADER names the header a signing-in proxy puts who it let in into, and anything that reaches the view can send that header: set MIGKIT_UI_PROXY_SECRET too - the value the proxy sends in <...> - and the view believes only the proxy
