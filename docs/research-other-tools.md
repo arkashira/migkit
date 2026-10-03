@@ -163,8 +163,9 @@ What migkit does the same:
 What migkit takes from it:
 * **The snapshot at each change as the baseline for drift.** migkit's
   `unchanged_since` and the verdict fingerprint say that nothing moved
-  between checks. A saved schema snapshot per move would let a later
-  check say what drifted since the move.
+  between checks. *Taken (2026-10-04):* each move keeps both sides'
+  shapes, and a later check says what changed on each side since the
+  move left it (`drift.kept_at_move`, `drift.since_the_move`).
 
 Bytebase is a platform with its own approval workflow: learned from.
 

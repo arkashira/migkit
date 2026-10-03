@@ -176,7 +176,7 @@ their own names, and `LADDER.table` (a WAVE queue item).
 | 445 | 26.versions | The schema version each side stands on, from the application's migration history table (Flyway, Liquibase, Alembic, Django, Rails, Entity Framework, schemachange), said by check and the cutover gate; a migration on one side only found; migkit's own schema changes said as unknown to the application's tool | OPEN | M | verify | 26 |
 | 95 | 26.trino | Trino measured as a candidate second reader | OPEN | S | verify | L2678-2679 |
 | 96 | 26.striim | Striim-style interval validation | OPEN | S | verify | L2674-2675 |
-| 97 | 26.bytebase | Bytebase-style schema snapshot at each change | OPEN | S | change follow | L2675 |
+| 97 | 26.bytebase | Bytebase-style schema snapshot at each change | DONE 2026-10-04 (each move keeps both sides' shapes, `drift.kept_at_move`; a check says what changed on each side since the move left it, `drift.since_the_move` - said, not judged) | S | change follow | L2675 |
 | 98 | MSSQL-x86 | SQL Server at full depth on a real server: T-SQL paths run, CDC proper, Agent jobs, row-level security (item 27) | BLOCKED (full SQL Server is x86-only; the x86 CI workflow is merged in fed3f89 and runs once pushed) | L | engines | L753-759, L2552-2553, L2682-2689, L5382-5383, L5656-5658, L6528-6533 |
 | 99 | AUD.part | Every partition held to its own count and digest (PostgreSQL, MySQL); A5 | DONE 659b54f | M | verify | L2704-2721 |
 | 100 | AUD.slot | Slot made with its snapshot; MySQL position taken after commits in flight; property-tested | DONE 659b54f | M | change follow | L2722-2752 |
