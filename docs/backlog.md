@@ -2863,7 +2863,71 @@ though the job never took it.
    pair engine, the PostgreSQL schema check and the parallel copier,
    which asked without the database; the table was compared against the
    name it no longer has. `Hop.target_table_in(db, ...)`, one place.
-4. **Still open:**
+5. **Every variant of the services, and their own checks** (done
+   2026-10-03): Tencent DTS migration jobs of both APIs (2021, 2018's
+   `DatabaseInfo`), sync jobs, data checks' objects and tasks,
+   subscriptions, and the requests that made any of them; Alibaba DTS
+   `DbList`/`DbObject` and the older `MigrationObject` /
+   `SynchronizationObjects` (`TableExcludes` become `exclude`); the
+   changes a job carries become `mapping.ops`. A service's own check
+   report - Tencent's compare report, AWS DMS's table statistics,
+   Alibaba's data check - given as `compare_with` is held table by table
+   against migkit's answers (`servicecheck`): what it called the same
+   and migkit found different, what it skipped, what it never checked.
+6. **One scope through every part** (owner 2026-10-03: "move, watch,
+   verify, CDC, DDL and everything; deepest, most consistent and
+   idempotent, smartest, easiest; every variant and every engine").
+   Audited 2026-10-03 (three read-only audits and a market survey);
+   shared pieces done: `Engine.in_scope`, `Hop.scope_fingerprint` /
+   `scope_changed`, `Hop.reversed()` reading scope and mapping in the
+   target's names, the nested `include`/`exclude` form, case read the
+   same on every machine and without case where the engine folds it,
+   `mapping.ops` (`Hop.carries`). In progress, by part:
+   a. **counters, orphans, accounts**: sequences and AUTO_INCREMENT only
+      of tables in scope, never lowered (the cutover's counter gate
+      refused on an excluded table's sequence); pg_dump's serial
+      sequences of excluded tables; an orphan whose parent the hop does
+      not take is a warn that says so; a job that moves no accounts is
+      not checked for them; the cutover's jobs and consolidation
+      counters in scope; the second reading pairs renamed tables;
+   b. **deep checks, inventories, repairs**: every listing a deep check,
+      the objects inventory (views, routines, triggers, events,
+      sequences) and every repair builds goes through `in_scope`;
+   c. **reuse, watch, delta, evidence, resume**: the fingerprint beside
+      every answer, position and checkpoint (delta slot, resume records,
+      a seed's manifest), reuse only under the same scope; watch reads
+      the scope every cycle and sums only what is taken; delta reads
+      through the row filter and the renames; the evidence renders the
+      scope it was taken under; sizing counts only what is carried;
+   d. **the bulk paths**: a partition is scoped by its root; renames
+      honoured by every same-engine path (or routed to the copier); a
+      filtered table never emptied whole; a target-only table never
+      emptied; mixed-case names; schema creation leaving out objects
+      that depend on what is not taken; patterns rather than lists where
+      the tool reads them;
+   e. **the change tail and DDL**: the servers' own replication refused
+      or narrowed where a hop filters or renames; partitions by root;
+      renames and swaps into or out of scope under every policy; a
+      scope changed while the tail was stopped; Debezium per database
+      and by pattern; `mapping.ops` applied; a DDL policy per object and
+      kind; online schema change shadow tables; an unchanged large value
+      never written as the decoder's placeholder;
+   f. **contracts and closure**: the check judges a table against the
+      changes its hop carries (deletes kept: the target may hold more,
+      never fewer or other rows), repair never undoes what the contract
+      allows; before the move, the dependency closure of what is taken
+      (foreign keys, views, routines, triggers, owned sequences,
+      partitions) offered or accepted, and every source object explained
+      by the rule that decided it.
+7. **Next (P1):** one row filter compiled to every engine's reading with
+   its time zone and collation, proved alike; object-kind selectors
+   (views, routines, triggers, events, sequences, roles); column
+   transforms the check understands (mask, keyed hash, expression,
+   type change, key override); name policies (case, prefix, suffix);
+   a check scope narrower than the move's said as incomplete, never
+   same; partitions carried by root or leaf; every scope change logged
+   with its source position.
+8. **Still open:**
    a. the Alibaba job's top level for a source with schemas (PostgreSQL,
       SQL Server) is read as its schemas inside the endpoint's database,
       from the service's documentation and its errors, not from a real
