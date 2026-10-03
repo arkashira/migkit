@@ -375,9 +375,11 @@ def _written(tmp_path, monkeypatch):
     """{connector: keys written} over the shapes the pipeline takes."""
     got = {"postgres": set(), "mysql": set(), "jdbc-sink": set()}
     for engine, name in (("postgres", "postgres"), ("mysql", "mysql")):
+        # a hop that says what it takes is given the include list, one
+        # that says only what it leaves out the exclude list
         for kw in ({}, {"exclude": ["audit"],
                         "mapping": {"columns": {"t": {"drop": ["b"]}}}},
-                   {"tls": True}):
+                   {"include": ["t"]}, {"tls": True}):
             src, sink = _configs(tmp_path / f"{engine}{len(kw)}",
                                  monkeypatch, engine, **kw)
             got[name] |= set(src)

@@ -1037,12 +1037,22 @@ def resolve(pair, db, changes, log):
     what the source added to it, a row the rules keep left out, a parked
     row's changes held - and a conflict under `error` stops the tail
     before anything of the batch is applied. Every conflict is recorded
-    (`_Book`)."""
+    (`_Book`).
+
+    A row whose changes are all deletes migkit made of it leaving the
+    hop's row filter (`canon.FILTERED`) is applied as it is: the source
+    deleted nothing, so there is nothing of the target's for it to
+    conflict with - read as one, a row the target never had was a
+    `delete_missing` logged, and under `error` or `park` stopped or
+    parked the tail."""
     hop = pair.hop
     rules_ = rules(hop)
     ranks = rules_.ranks
     dst = pair.dst_engine
     rows, order = _touched(changes)
+    filtered = {ident for ident in order
+                if all(changes[i].get(canon.FILTERED)
+                       for i, _ in rows[ident][2])}
     tables = {}
     for ident in order:
         table = rows[ident][0]
@@ -1053,7 +1063,10 @@ def resolve(pair, db, changes, log):
     parked = _Parked.of(pair, db)
     heres = {}
     for table, (tr, columns, classes, hints) in tables.items():
-        idents = [i for i in order if rows[i][0] == table]
+        idents = [i for i in order if rows[i][0] == table
+                  and i not in filtered]
+        if not idents:
+            continue
         keynames = sorted(rows[idents[0]][1])
         keys = [tuple(rows[i][1][k] for k in keynames) for i in idents]
         got = dst.neutral_rows_by_key("dst", db, table, columns, keynames,
@@ -1064,6 +1077,9 @@ def resolve(pair, db, changes, log):
             heres[i] = dict(zip(names, row)) if row is not None else None
     fates, blind, stops, seen = {}, False, [], set()
     for ident in order:
+        if ident in filtered:
+            fates[ident] = Settled()
+            continue
         table, key, events = rows[ident]
         tr, columns, classes, hints = tables[table]
         keynames = sorted(key)

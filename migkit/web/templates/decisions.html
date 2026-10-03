@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Decision record of {{ hop.name }} - migkit{% endblock %}
+{% block main %}
+<p><a href="/hops/{{ hop.name|urlencode }}#decisions">&larr; {{ hop.name }}</a></p>
+<section class="card">
+  <h1>Why each way was chosen</h1>
+  <p class="muted">Each work, the way taken and why, and every way passed
+  over and why - newest first.</p>
+  {% for d in decisions %}
+  <div class="decision">
+    <p><b>{{ d.work }}</b>: {{ d.way }}{% if d.reason %} - {{ d.reason }}{% endif %} <span class="muted">{{ d.at }}, run {{ d.run }}</span></p>
+    {% if d.passed %}<ul>{% for p in d.passed %}<li>not {{ p.way }}: {{ p.why }}</li>{% endfor %}</ul>{% endif %}
+    {% if d.detail %}<details><summary>In full</summary><pre class="detail">{{ d.detail|join("\n") }}</pre></details>{% endif %}
+  </div>
+  {% else %}<p class="muted">Nothing decided yet.</p>
+  {% endfor %}
+</section>
+{% endblock %}

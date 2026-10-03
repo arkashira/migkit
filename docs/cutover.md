@@ -53,6 +53,7 @@ Every command takes the hop's name; `--db` narrows one to a database.
        keys: exact               # exact | apart:<margin>
        jobs: move                # move | leave
        no_return: later          # later | at_flip
+       restore_points: [source, target]   # through each side's provider
      origin_table: keep          # keep | drop, at the point of no return
      approvals: {steps: [cutover, rollback, point-of-no-return], count: 2,
                  signers: /etc/migkit/allowed_signers}
@@ -71,9 +72,9 @@ Every command takes the hop's name; `--db` narrows one to a database.
 
    | Source | The whole server (where every database on it is the hop's) | The hop's databases alone | Read back |
    |---|---|---|---|
-   | PostgreSQL | `default_transaction_read_only` (ALTER SYSTEM), migkit's role excepted | grants revoked, the right to connect taken from owners, sessions ended | no session from before, no role that writes, nothing prepared |
-   | MySQL | `super_read_only` (`read_only` on MariaDB), persisted | grants revoked, sessions ended | the switch on, no grant left, no XA or open write |
-   | MongoDB | users' writes blocked (6.0), or the server locked | write roles swapped for read, sessions ended | the block on, no account that writes, no open transaction |
+   | PostgreSQL | `default_transaction_read_only` (ALTER SYSTEM), migkit's role excepted | grants revoked, the right to connect taken from owners, sessions ended; on a managed server whose databases are not its admin's own, owners kept out by a connection limit of none | no session from before, no role that writes or connects, nothing prepared |
+   | MySQL | `super_read_only` (`read_only` on MariaDB), persisted; on a managed server, `read_only` through its provider's parameter group where the operator answers yes (`source_changes: {param_read_only: yes}`) | grants revoked, sessions ended - through the service's own procedure where its admin may not kill (`mysql.rds_kill`) | the switch on, no grant left, no XA or open write |
+   | MongoDB | users' writes blocked (6.0), or the server locked - where the server has the command | write roles swapped for read, sessions ended (operation by operation where the service ends no session by its id) | the block on, no account that writes, no open transaction |
    | Redis | every client's writes held (`CLIENT PAUSE WRITE`, 6.2), not with a stream back | every account's writes refused (ACL), from 7.0 | each account refused a write (`ACL DRYRUN`), no connection from before, the count of writes still |
    | SQL Server | - | the database read-only (`WITH ROLLBACK IMMEDIATE`), or the application's users denied writes and their sessions ended | read-only on, or every write denied; no prepared or open write |
    | Cassandra, ScyllaDB | - | MODIFY revoked from the application's roles, the permission cache waited out | no role that writes the keyspace, the cache's time past |
@@ -82,6 +83,17 @@ Every command takes the hop's name; `--db` narrows one to a database.
 
    Another source is frozen by its operator (`freeze: operator`); where
    migkit holds no writes of an engine, the preflight says why.
+
+   A managed side - any provider's, either end - is read one way
+   (`migkit.managed`, its catalogue `migkit/data/managed.yaml`): which
+   service it is (the server's own word, the side's `managed: {service:
+   ...}`, its address last), what its admin may do, how a setting is
+   changed on it in its provider's words, and its restore points. With
+   `restore_points` a restore point of each side named is taken through
+   its provider's API before the clock and waited for - the side names
+   its instance where its address does not find it (`managed: {id,
+   region, profile, role}`), its credentials found the way the
+   provider's own CLI finds them.
 
 ## Moving and following
 
@@ -141,12 +153,12 @@ Every command takes the hop's name; `--db` narrows one to a database.
    | Step | What happens | Proof |
    |---|---|---|
    | prepare | before the clock: the stream back made ahead and left idle where its engine lets it wait (a subscription made disabled on a slot of its own; a replica whose receiver runs and whose applier waits), and, for a drain by a mark, the mark's table made on the source | the stream back read back as ready (its subscription knows every published table, its slot held; its receiver signed in); a first mark found on the target - otherwise the stream back is made at the flip, or the cutover stops with nothing frozen |
-   | jobs off | the jobs the source runs switched off there (pg_cron jobs, MySQL events) | recorded, to be switched on on the target |
+   | jobs off | the jobs the source runs switched off there (pg_cron jobs, MySQL events); one whose text writes only tables the hop leaves out is left as it is on both sides | recorded, to be switched on on the target |
    | pause | the pooler paused: the application's writes wait instead of failing | PAUSE returned within the budget |
    | freeze | chosen from what the source allows: the whole server where the hop's databases are all of it and migkit may change its settings (PostgreSQL `default_transaction_read_only` through ALTER SYSTEM, migkit's own role excepted; MySQL `super_read_only`, persisted); always, per database, the application's write grants revoked, the right to connect taken from a role that owns its tables, and every open session of the application ended, so what it had not committed is rolled back rather than committed late | read back: no application session left from before the freeze, no role that can still write, nothing holding a write transaction, nothing prepared, the server switch on |
    | drain | the source's position taken **after** the freeze - on PostgreSQL the WAL insert position, which is where every acknowledged commit is; where the stream keeps no position, a mark written on the source after the freeze; the leg run from here asked to end at the source's position of that moment | the hop's own stream (its slot by name, active or not; the target's executed GTIDs; migkit's tail's saved position) past it; or the mark on the target (in the pipeline's own topic), and then the stream's own offsets: the pipeline's sink applied to the end of every topic, the leg ended |
    | verify | the rows changed since the last verified pass compared, fenced - every table where no pass has run | the two the same, and the source's schema unchanged since the checks |
-   | counters | the target's sequences and auto-increments past the source's (`keys: apart:<n>` adds a margin); a restore point `pre-cutover` kept first | the plan's undo recorded |
+   | counters | the target's sequences and auto-increments of the tables the hop takes past the source's, never set back (`keys: apart:<n>` adds a margin); a restore point `pre-cutover` kept first | the plan's undo recorded |
    | stream | the stream torn down (a pipeline's connectors paused, taken down once the flip is done); with `reverse: at_cutover` the stream back started from the new primary to the old source - made ahead, only started: its slot moved on to the new primary's position and the subscription enabled, or the replica's applier started | a statement a frozen MySQL source refuses (its replication account) is kept for when it is written again |
    | reverse | - | the stream back has reached the old source: its position on the new primary passed |
    | jobs on | the jobs the source ran switched on on the target | recorded |

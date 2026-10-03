@@ -11,7 +11,10 @@ administrator a role of their own (`rds_superuser`), Aurora answers
 from `/rdsdbbin/`, Aurora MySQL has `aurora_version`, Cloud SQL MySQL
 `cloudsql_*` variables. Only what a service says of itself names it - a
 server that says nothing recognisable is "run by its owner", which is
-also what the scripts below are written for.
+also what the scripts below are written for. The managed-service
+catalogue (`managed`) adds the addresses and the signs of every other
+service it lists - a vendor's role, a variable only one service has -
+after these, so what was named here before is named the same.
 
 What it is for is the second half: a setting a DBA must change is
 changed differently on each - a parameter group on RDS (a cluster
@@ -87,13 +90,27 @@ class Where:
     evidence: list = field(default_factory=list)
     #: the region, where the address carries one (AWS's names do)
     region: str = ""
+    #: other clouds the server's own signs name as well (a role two
+    #: services create): the address decides between them
+    alike: tuple = ()
 
     @property
     def label(self):
         if not self.cloud:
             return "run by its owner (no managed service names it)"
-        return LABELS.get((self.cloud, self.service),
-                          f"{self.cloud} {self.service}".strip())
+        if (self.cloud, self.service) in LABELS:
+            return LABELS[(self.cloud, self.service)]
+        from . import managed
+        try:
+            got = [s.label for s in managed.services().values()
+                   if (s.provider, s.where) == (self.cloud, self.service)]
+        except Exception:  # noqa: BLE001 - the catalogue unread
+            got = []
+        # several engines under one word: the provider's name for them all
+        return (got[0] if len(got) == 1 else
+                f"{managed.providers().get(self.cloud, {}).get('label', self.cloud)}"
+                f" {self.service}" if got else
+                f"{self.cloud} {self.service}".strip())
 
     def as_dict(self):
         return {"cloud": self.cloud, "service": self.service,
@@ -105,10 +122,37 @@ class Where:
 AWS_REGION = re.compile(r"\.([a-z]{2}(?:-gov|-iso[a-z]?)?-[a-z]+-\d)\.")
 
 
+#: a provider's pattern that takes every address of its own: its other
+#: services' names, from the catalogue, are asked before it
+CATCH_ALL = (r"\.tencentcdb\.com$", r"\.aliyuncs\.com$")
+
+
+def _hosts():
+    """`HOSTS`, with the managed-service catalogue's address names for the
+    services these do not name (`managed.host_patterns`) - a provider's
+    before its catch-all, the rest after."""
+    from . import managed
+    try:
+        more = managed.host_patterns()
+    except Exception:  # noqa: BLE001 - the catalogue unread: these stand
+        more = []
+    known = {p for p, _, _ in HOSTS}
+    more = [h for h in more if h[0] not in known]
+    out, placed = [], set()
+    for entry in HOSTS:
+        if entry[0] in CATCH_ALL:
+            for h in more:
+                if h[1] == entry[1] and h[0] not in placed:
+                    out.append(h)
+                    placed.add(h[0])
+        out.append(entry)
+    return out + [h for h in more if h[0] not in placed]
+
+
 def from_host(host):
     """`Where` from the name a side is reached at, or an empty one."""
     name = str(host or "").strip().lower().rstrip(".")
-    for pattern, cloud, service in HOSTS:
+    for pattern, cloud, service in _hosts():
         if re.search(pattern, name):
             m = AWS_REGION.search(name) if cloud == "aws" else None
             return Where(cloud, service, [f"the address ({name})"],
@@ -129,23 +173,49 @@ PG_PROBE = ("select coalesce((select string_agg(rolname, ',') from pg_roles"
             " 'aurora_version')::text")
 
 
+def _signs(kind):
+    """The managed-service catalogue's signs of one kind
+    (`managed.signs`); none where the catalogue cannot be read."""
+    from . import managed
+    try:
+        return managed.signs(kind)
+    except Exception:  # noqa: BLE001 - the catalogue unread: ours stand
+        return {}
+
+
+def _listed(names):
+    return ", ".join("'" + str(n).replace("'", "''") + "'" for n in names)
+
+
 def _pg(eng, side):
-    roles, _, aurora = eng._psql(side, "postgres", PG_PROBE).strip(
+    signs = {**_signs("pg_roles"), **PG_SIGNS}
+    probe = PG_PROBE.replace(_listed(PG_SIGNS), _listed(sorted(signs)))
+    roles, _, aurora = eng._psql(side, "postgres", probe).strip(
         ).partition("\x1f")
     roles = [r for r in roles.split(",") if r]
     aurora = aurora.strip() == "true"
     if aurora:
         return Where("aws", "aurora", ["the server (aurora_version())"])
-    for role in roles:
-        cloud, service = PG_SIGNS[role]
-        return Where(cloud, service, [f"the server (role {role})"])
+    # the clouds' own roles first, as `PG_SIGNS` has them; where the roles
+    # name more than one cloud, each is kept for the address to decide
+    named = [(r, signs[r]) for r in sorted(roles, key=lambda r: (
+        r not in PG_SIGNS, r)) if r in signs]
+    if named:
+        role, (cloud, service) = named[0]
+        return Where(cloud, service, [f"the server (role {role})"],
+                     alike=tuple(dict.fromkeys(
+                         c for _, (c, _) in named if c != cloud)))
     return None
 
 
 def _mysql(eng, side):
+    variables = _signs("my_variables")
+    comments = _signs("my_version_comment")
+    asked = _listed(sorted({"aurora_version", "basedir", "version_comment",
+                            *variables}))
     rows = dict(eng._q(side, "show global variables where variable_name in"
-                             " ('aurora_version', 'basedir') or"
-                             " variable_name like 'cloudsql%'"))
+                             f" ({asked}) or variable_name like"
+                             " 'cloudsql%'"))
     if rows.get("aurora_version"):
         return Where("aws", "aurora", ["the server (aurora_version "
                                        f"{rows['aurora_version']})"])
@@ -154,11 +224,32 @@ def _mysql(eng, side):
     named = sorted(k for k in rows if k.startswith("cloudsql"))
     if named:
         return Where("gcp", "cloud-sql", [f"the server ({named[0]})"])
+    for name, (cloud, service) in sorted(variables.items()):
+        if rows.get(name) not in (None, ""):
+            return Where(cloud, service, [f"the server ({name})"])
+    said = str(rows.get("version_comment") or "").lower()
+    for text, (cloud, service) in sorted(comments.items()):
+        if text.lower() in said:
+            return Where(cloud, service, ["the server (its version says"
+                                          f" {text})"])
+    return None
+
+
+def _mongo(eng, side):
+    """A service's own field in `buildInfo`, where the catalogue names
+    one; nothing is named by a field's absence (`variants`)."""
+    fields = _signs("mongo_build_info")
+    if not fields:
+        return None
+    got = eng._client(side).admin.command("buildInfo")
+    for name, (cloud, service) in sorted(fields.items()):
+        if name in got:
+            return Where(cloud, service, [f"the server (buildInfo {name})"])
     return None
 
 
 #: engine family -> how its server is asked
-PROBES = {"postgres": _pg, "mysql": _mysql}
+PROBES = {"postgres": _pg, "mysql": _mysql, "mongodb": _mongo}
 
 
 def of(eng, side, ep):
@@ -177,6 +268,10 @@ def of(eng, side, ep):
             by_server = None
     if by_server is None:
         return by_host
+    if by_host.cloud and by_host.cloud in by_server.alike:
+        # the server's roles name two clouds, and the address one of them
+        return Where(by_host.cloud, by_host.service,
+                     by_host.evidence + by_server.evidence, by_host.region)
     if by_host.cloud == by_server.cloud:
         # the address can be more exact (a reader endpoint), the server
         # surer; keep the address's service where it is the same cloud's

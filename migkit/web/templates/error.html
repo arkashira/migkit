@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block main %}
+<section class="card narrow">
+  <h1>{{ code or "Refused" }}</h1>
+  <p>{{ detail or "That is not here, or not yours to see." }}</p>
+  <p><a href="/">The hops</a></p>
+</section>
+{% endblock %}

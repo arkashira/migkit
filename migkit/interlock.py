@@ -180,8 +180,10 @@ def _list(value):
 
 
 def _names(hop, dst):
-    """Every name the target answers to: its address as the hop gives it
-    and what the server calls itself."""
+    """Every name the target answers to: its address as the hop gives it,
+    what the server calls itself, and - where the side names it - its
+    instance at its provider (`managed: {id: ...}`), which a managed
+    service's private address does not carry."""
     from urllib.parse import urlsplit
     ep = hop.target
     o = ep.options or {}
@@ -191,7 +193,11 @@ def _names(hop, dst):
     if o.get("url"):
         names.append(urlsplit(str(o["url"])).hostname or "")
     names += [str(o.get("path") or ""), str(dst.get("name") or "")]
-    return [n.strip() for n in dict.fromkeys(names) if n and n.strip()]
+    managed = o.get("managed")
+    if isinstance(managed, dict) and managed.get("id"):
+        names.append(str(managed["id"]))
+    return [n.strip().rstrip(".") for n in dict.fromkeys(names)
+            if n and n.strip()]
 
 
 def production(hop, dst):

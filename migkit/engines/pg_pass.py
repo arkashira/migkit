@@ -30,21 +30,22 @@ its log on disk past the range's commit (`TableCopy.durable`): a target
 that crashes loses at most what it had not flushed, which was never
 recorded, and the next run copies it again.
 """
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from .postgres import _ident, _literal
+
 #: every digest session, on both sides alike: a value's text depends on
 #: these, and two servers configured apart would render one value two ways
-DIGEST_OPTIONS = ("-c TimeZone=UTC -c DateStyle=ISO -c IntervalStyle=postgres"
-                  " -c extra_float_digits=3 -c bytea_output=hex"
-                  " -c lc_monetary=C -c statement_timeout=0")
+#: - on top of what every session of migkit's is pinned to
+#: (`postgres.SESSION`: UTC, ISO dates, the interval style, every digit)
+DIGEST_OPTIONS = "-c lc_monetary=C"
 
 #: a loading or snapshot-holding session is never ended by a server's
-#: default timeout while it works or waits for the next range
-LOAD_OPTIONS = ("-c statement_timeout=0"
-                " -c idle_in_transaction_session_timeout=0")
+#: default timeout while it works or waits for the next range (the
+#: statement's own is off in every session, `postgres.SESSION`)
+LOAD_OPTIONS = "-c idle_in_transaction_session_timeout=0"
 
 #: what a source's refusal of a snapshot a read asked for reads like
 _SNAPSHOT_GONE = ("invalid snapshot identifier", "could not import the"
@@ -61,15 +62,13 @@ class SnapshotLost(RuntimeError):
 
 def connect(eng, side, db, options=""):
     """A psycopg connection to one side of the hop, in autocommit: every
-    transaction here is begun and ended where it is written."""
-    import psycopg
-    ep = eng.hop.source if side == "src" else eng.hop.target
-    return psycopg.connect(
-        host=ep.host, port=ep.port, user=ep.user, password=ep.password,
-        dbname=eng._d(side, db), connect_timeout=15, autocommit=True,
-        options=options, keepalives=1,
-        keepalives_idle=int(os.environ.get("MIGKIT_KEEPALIVE_IDLE", "60")),
-        keepalives_interval=10, keepalives_count=5, **ep.libpq_tls())
+    transaction here is begun and ended where it is written - made the one
+    way every PostgreSQL connection of migkit's is (`postgres.connect`:
+    the side's TLS, keepalives, UTC and the rest of `SESSION`), `options`
+    after that."""
+    from .postgres import connect as made
+    return made(eng._ep(side), eng._d(side, db), "psycopg", options,
+                autocommit=True)
 
 
 class _Export:
@@ -184,8 +183,7 @@ class TableCopy:
         self.options = options
         self.snapshot = Snapshot(eng, db,
                                  (eng.hop.options or {}).get("snapshot_limit"))
-        self.collist = ", ".join('"' + c.replace('"', '""') + '"'
-                                 for c in cols)
+        self.collist = ", ".join(_ident(c) for c in cols)
         self._local = threading.local()
         self._opened, self._lock = [], threading.Lock()
         n = max(1, int(workers or 1))
@@ -226,7 +224,7 @@ class TableCopy:
         select = eng._copy_select(self.qt, self.cols, where)
         proc, stream, relayed = eng._source_copy(self.db, [
             "begin transaction isolation level repeatable read read only",
-            f"set transaction snapshot '{export.id}'",
+            f"set transaction snapshot {_literal(export.id)}",
             f"\\copy ({select}) to stdout with (format binary)",
             "commit"])
         conn = self._target()
@@ -315,7 +313,7 @@ class TableCopy:
                      " read only")
         try:
             try:
-                conn.execute(f"set transaction snapshot '{export.id}'")
+                conn.execute(f"set transaction snapshot {_literal(export.id)}")
             except Exception as e:
                 if any(s in str(e) for s in _SNAPSHOT_GONE):
                     raise SnapshotLost(str(e)) from e

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Sign in - migkit{% endblock %}
+{% block main %}
+<section class="card narrow">
+  <h1>Sign in</h1>
+  {% if error %}<p class="note error">{{ error }}</p>{% endif %}
+  {% if oidc %}
+  <p><a class="button" href="/auth/oidc/start?next={{ next|urlencode }}">Sign in with your organisation (OpenID Connect)</a></p>
+  {% endif %}
+  {% if saml %}
+  <p><a class="button" href="/auth/saml/start?next={{ next|urlencode }}">Sign in with your organisation (SAML)</a></p>
+  {% endif %}
+  {% if local %}
+    {% if setup %}
+    <p>No operator account is set yet. Open the address this view printed
+    when it started; it sets the account's password once.</p>
+    {% else %}
+    <form method="post" action="/auth/local">
+      <input type="hidden" name="form" value="{{ form }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label>Name <input name="name" autocomplete="username" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
+    </form>
+    <p class="muted">An install without an identity provider has one
+    operator. Lost the password? Start the view again with
+    MIGKIT_WEB_RESET=1 and open the address it prints.</p>
+    {% endif %}
+  {% endif %}
+  {% if not oidc and not saml and not local %}
+  <p>No way to sign in is set up here.</p>
+  {% endif %}
+</section>
+{% endblock %}

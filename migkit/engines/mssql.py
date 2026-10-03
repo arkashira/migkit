@@ -1,7 +1,7 @@
 import time
 
 from .. import canon, decide, pieces
-from .base import Engine, RepairAction, Result
+from .base import Engine, RepairAction, Result, clauses, rows_counted
 from .dbapi import MARK, DbapiRows
 
 #: the server's own databases, and the one a managed server keeps
@@ -51,6 +51,7 @@ def _without_parameters(text):
 
 class MSSQLEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
+    CHARSETS = True
     #: a change tracking version only says where a read begins: one of its
     #: own reads from an older one again, while the retention keeps it
     REREADS_FROM_A_POSITION = True
@@ -384,12 +385,14 @@ class MSSQLEngine(DbapiRows, Engine):
              " join sys.schemas s on s.schema_id=t.schema_id"
              " join sys.partitions p on p.object_id=t.object_id and p.index_id in (0,1)"
              " group by s.name, t.name order by 1")
-        src = {r[0]: r[1] for r in self._cmd("src", db, q)}
-        dst = {r[0]: r[1] for r in self._cmd("dst", db, q)}
+        src = {r[0]: r[1] for r in
+               self._scoped_rows(db, self._cmd("src", db, q))}
+        dst = {r[0]: r[1] for r in
+               self._scoped_rows(db, self._cmd("dst", db, q))}
         bad = [f"{t} src={src.get(t)} dst={dst.get(t)}"
                for t in sorted(set(src) | set(dst)) if src.get(t) != dst.get(t)]
         if bad:
-            return [Result("counts", db, "diff", "; ".join(bad[:10]))]
+            return [Result("counts", db, "diff", clauses(bad))]
         total = sum(int(v or 0) for v in src.values())
         return [Result("counts", db, "ok",
                        f"{len(src)} tables, rows {total:,} both sides")]
@@ -406,8 +409,12 @@ class MSSQLEngine(DbapiRows, Engine):
              " join sys.schemas s on s.schema_id=t.schema_id"
              " join sys.columns c on c.object_id=ic.object_id"
              " and c.column_id=ic.column_id order by 1")
-        src = {r[0]: r[2] for r in self._cmd("src", db, q)}
-        drows = self._cmd("dst", db, q)
+        # the identities of the tables the hop takes: one it leaves out
+        # keeps the seed its own writer gives it
+        src = {r[0]: r[2] for r in self._cmd("src", db, q)
+               if self.in_scope(db, r[0])}
+        drows = [r for r in self._cmd("dst", db, q)
+                 if self.in_scope(db, r[0])]
         dcol = {r[0]: r[1] for r in drows}
         dcur = {r[0]: r[2] for r in drows}
         collide = []
@@ -542,10 +549,17 @@ class MSSQLEngine(DbapiRows, Engine):
         gate = Throttle(1, probe=lambda: self._health("src", db))
         q = ("select s.name+'.'+t.name from sys.tables t"
              " join sys.schemas s on s.schema_id=t.schema_id order by 1")
-        st = [r[0] for r in self._cmd("src", db, q)]
+        # the tables the hop takes (`in_scope`), on the source; one the
+        # target lacks is a difference, not a table passed over
+        st = [r[0] for r in self._cmd("src", db, q)
+              if self.in_scope(db, r[0])]
         dt = {r[0] for r in self._cmd("dst", db, q)}
         tables = [table] if table else [t for t in st if t in dt]
         bad, left = [], []
+        outcomes = {} if table else {t: "diff" for t in st if t not in dt}
+        apart = {}
+        if not table:
+            bad += [f"{t} missing on target" for t in st if t not in dt]
         rows_a = rows_b = 0
         bad_counts, settled = [], []
         salt = self.digest_salt()
@@ -560,6 +574,7 @@ class MSSQLEngine(DbapiRows, Engine):
                 row, out = self._row_json(db, t)
             except Exception as e:  # noqa: BLE001 - the table is named
                 bad.append(f"{t} error {e}")
+                outcomes[t] = "error"
                 continue
             left += out
             cq = ("select count_big(*), isnull(sum(h), 0) from (select"
@@ -572,7 +587,9 @@ class MSSQLEngine(DbapiRows, Engine):
                     b = self._cmd("dst", db, cq)[0]
             except RuntimeError as e:
                 bad.append(f"{t} error {e}")
+                outcomes[t] = "error"
                 continue
+            outcomes[t] = "ok"
             rows_a += int(a[0] or 0)
             rows_b += int(b[0] or 0)
             if a[0] != b[0]:
@@ -591,6 +608,7 @@ class MSSQLEngine(DbapiRows, Engine):
                         bad.append(f"{t} differs, not localized: the sums"
                                    " still differ and no row differs by"
                                    " key")
+                        outcomes[t] = "diff"
                     else:
                         settled.append(t)
                     continue
@@ -603,8 +621,10 @@ class MSSQLEngine(DbapiRows, Engine):
                     m, e, c = drill
                     bad.append(f"{t} missing={m} extra={e} changed={c}"
                                " (pk files written)")
+                    apart.update(rows_counted(t, m, e, c))
                 else:
                     bad.append(f"{t} src={a} dst={b}")
+                outcomes[t] = "diff"
         res = []
         if with_counts:
             bad_counts += [f"{t} missing on target" for t in st
@@ -626,18 +646,20 @@ class MSSQLEngine(DbapiRows, Engine):
         if note and stream:
             stream(f"# {note}")
         if bad:
-            res.append(Result("data", db, "diff", "; ".join(bad[:10]) + said,
+            res.append(Result("data", db, "diff", clauses(bad) + said,
                               "", "pk-level diffs in data-*.missing/extra/"
                               f"changed; migkit sync {self.hop.name} --db"
                               f" {db} --kind rows shows the repair, --apply"
-                              " runs it"))
+                              " runs it", tables=outcomes,
+                              rows_apart=apart))
         else:
             again = (f"; {len(settled)} read while rows changed, every row"
                      " equal by key and the sums equal when read again: "
                      + ", ".join(settled[:8]) if settled else "")
             res.append(Result("data", db, "ok",
                               f"{len(tables)} tables, counts and every"
-                              " row's hash equal both sides" + again + said))
+                              " row's hash equal both sides" + again + said,
+                              tables=outcomes))
         return res
 
     #: CLR types a row hash reads through their own rendering: `FOR JSON`
@@ -747,12 +769,12 @@ class MSSQLEngine(DbapiRows, Engine):
         res = []
         # no pk/unique = CDC drops its updates/deletes and it can't be verified
         # or repaired by key (same trap as the other engines)
-        nopk = [r[0] for r in self._cmd("src", db,
+        nopk = [r[0] for r in self._scoped_rows(db, self._cmd("src", db,
                 "select s.name+'.'+t.name from sys.tables t"
                 " join sys.schemas s on s.schema_id=t.schema_id"
                 " where not exists (select 1 from sys.indexes i"
                 " where i.object_id=t.object_id"
-                " and (i.is_primary_key=1 or i.is_unique=1))")]
+                " and (i.is_primary_key=1 or i.is_unique=1))"))]
         if nopk:
             res.append(Result("deep", f"{db} keys", "diff",
                               f"{len(nopk)} tables have no pk/unique (CDC drops"
@@ -767,12 +789,13 @@ class MSSQLEngine(DbapiRows, Engine):
         # movers load with constraints/triggers disabled and often forget
         # to re-enable or re-validate: is_disabled and is_not_trusted are
         # the sql server analog of postgres NOT VALID
-        rows = self._cmd("dst", db,
+        # each after the table it is on, which decides its scope
+        rows = self._scoped_rows(db, self._cmd("dst", db,
                        "select s.name+'.'+t.name+'.'+fk.name,"
-                       " fk.is_disabled, fk.is_not_trusted"
+                       " fk.is_disabled, fk.is_not_trusted, s.name+'.'+t.name"
                        " from sys.foreign_keys fk"
                        " join sys.tables t on t.object_id=fk.parent_object_id"
-                       " join sys.schemas s on s.schema_id=t.schema_id")
+                       " join sys.schemas s on s.schema_id=t.schema_id"), 3)
         disabled = [r[0] for r in rows if r[1] == "1"]
         untrusted = [r[0] for r in rows if r[1] == "0" and r[2] == "1"]
         bad = ([f"disabled: {', '.join(disabled[:4])}"] if disabled else []) \
@@ -783,11 +806,12 @@ class MSSQLEngine(DbapiRows, Engine):
                           else f"{len(rows)} fks enabled and trusted", "",
                           "alter table ... with check check constraint ..."
                           if bad else ""))
-        trg = [r[0] for r in self._cmd("dst", db,
-               "select s.name+'.'+t.name+'.'+tr.name from sys.triggers tr"
+        trg = [r[0] for r in self._scoped_rows(db, self._cmd("dst", db,
+               "select s.name+'.'+t.name+'.'+tr.name, s.name+'.'+t.name"
+               " from sys.triggers tr"
                " join sys.tables t on t.object_id=tr.parent_id"
                " join sys.schemas s on s.schema_id=t.schema_id"
-               " where tr.is_disabled=1")]
+               " where tr.is_disabled=1"), 1)]
         res.append(Result("deep", f"{db} triggers",
                           "diff" if trg else "ok",
                           "disabled on target: " + ", ".join(trg[:5]) if trg
@@ -797,10 +821,13 @@ class MSSQLEngine(DbapiRows, Engine):
                 "data_type+'|'+is_nullable+'|'+isnull(column_default,'')+'|'+"
                 "isnull(cast(character_maximum_length as varchar),'')+'|'+"
                 "isnull(cast(numeric_precision as varchar),'')+'|'+"
-                "isnull(collation_name,'')"
+                "isnull(collation_name,''),"
+                " table_schema+'.'+table_name"
                 " from information_schema.columns order by 1")
-        sc = {r[0].split("|", 1)[0]: r[0] for r in self._cmd("src", db, colq)}
-        dc = {r[0].split("|", 1)[0]: r[0] for r in self._cmd("dst", db, colq)}
+        sc = {r[0].split("|", 1)[0]: r[0] for r in
+              self._scoped_rows(db, self._cmd("src", db, colq), 1)}
+        dc = {r[0].split("|", 1)[0]: r[0] for r in
+              self._scoped_rows(db, self._cmd("dst", db, colq), 1)}
         drift = [k for k in sorted(sc) if k in dc and sc[k] != dc[k]]
         if drift:
             out = self.hop.report_dir(db) / "deep-columns.diff"
@@ -833,7 +860,7 @@ class MSSQLEngine(DbapiRows, Engine):
                           " i2.index_id=ic2.index_id and i2.is_primary_key=1"
                           " where ic2.object_id=t.object_id)")
         ahead, behind, n = [], [], 0
-        for t, c in pk_rows:
+        for t, c in self._scoped_rows(db, pk_rows):
             n += 1
             try:
                 q = (f"select isnull(max({self._q(c)}),0) from"
@@ -860,6 +887,7 @@ class MSSQLEngine(DbapiRows, Engine):
                               f" none ahead of source{note}"))
         from .. import workload
         res.append(workload.compare(self, db))
+        res.append(self._mojibake(db))
         return res
 
     # --- the source's own statements, from its Query Store (R23, 4) -----
@@ -1004,36 +1032,50 @@ class MSSQLEngine(DbapiRows, Engine):
     def repair_plan(self, db, kind):
         actions = []
         if kind in ("sequences", "all"):
-            src = dict(self._cmd("src", db,
-                               "select s.name+'.'+t.name,"
-                               " cast(ident_current(s.name+'.'+t.name) as bigint)"
-                               " from sys.tables t join sys.schemas s"
-                               " on s.schema_id=t.schema_id where"
-                               " objectproperty(t.object_id,'TableHasIdentity')=1"))
-            dst = dict(self._cmd("dst", db,
-                               "select s.name+'.'+t.name,"
-                               " cast(ident_current(s.name+'.'+t.name) as bigint)"
-                               " from sys.tables t join sys.schemas s"
-                               " on s.schema_id=t.schema_id where"
-                               " objectproperty(t.object_id,'TableHasIdentity')=1"))
+            q = ("select s.name+'.'+t.name,"
+                 " cast(ident_current(s.name+'.'+t.name) as bigint)"
+                 " from sys.tables t join sys.schemas s"
+                 " on s.schema_id=t.schema_id where"
+                 " objectproperty(t.object_id,'TableHasIdentity')=1")
+            # the identities of the tables the hop takes only: one it
+            # leaves out keeps the seed its own writer gives it
+            src, dst = ({t: v for t, v in self._cmd(side, db, q)
+                         if self.in_scope(db, t)} for side in ("src", "dst"))
+
             def lit(t):
                 # the table's quoted name, as a literal: a quote in a name
                 # stays in the name
                 return self._qualified("dst", db, t).replace("'", "''")
-            stmts = [f"dbcc checkident ('{lit(t)}', reseed, {int(v)});"
-                     f"  -- dst now {dst.get(t, 'MISSING')}"
-                     for t, v in sorted(src.items())
-                     if dst.get(t) != v and v != "NULL"]
+
+            def ahead(t):
+                # never lowered: a seed past the source's has handed out
+                # the keys up to it, and reseeded back, the next insert
+                # takes one of them again
+                return dst.get(t) not in (None, "NULL") \
+                    and src[t] != "NULL" and int(dst[t]) > int(src[t])
+            change = [t for t, v in sorted(src.items())
+                      if dst.get(t) != v and v != "NULL" and not ahead(t)]
+            stmts = [f"dbcc checkident ('{lit(t)}', reseed, {int(src[t])});"
+                     f"  -- dst now {dst.get(t, 'MISSING')}" for t in change]
             undo = [f"dbcc checkident ('{lit(t)}', reseed, {int(dst[t])});"
-                    for t in sorted(src) if t in dst and dst.get(t) != src[t]
-                    and dst[t] != "NULL"]
+                    for t in change if t in dst and dst[t] != "NULL"]
             same = sum(1 for t, v in src.items() if dst.get(t) == v)
-            if stmts:
+            past = [f"{t}: target {dst[t]} > source {src[t]}"
+                    for t in sorted(src) if ahead(t)]
+            if stmts or past:
                 actions.append(RepairAction(
                     db, "sequences", stmts, undo,
-                    f"{len(stmts)} identities differ, {same} already equal"))
+                    f"{len(stmts)} identities differ, {same} already equal"
+                    + (f"; left alone {len(past)} (the target's seed is past"
+                       " it already, never lowered): " + "; ".join(past[:4])
+                       if past else "")))
         if kind in ("rows", "all"):
             actions += self._rows_found_plan(db)
+            # after the rows, never before: a row copied again takes the
+            # source's text, which is where the broken text lives
+            text = self._mojibake_repair(db)
+            if text:
+                actions.append(text)
         return actions
 
     def _found(self, db, t):
@@ -1061,7 +1103,10 @@ class MSSQLEngine(DbapiRows, Engine):
         tables = sorted({f.name[len("data-"):].rsplit(".", 1)[0]
                          for k in ("missing", "changed", "extra")
                          for f in d.glob(f"data-*.{k}")})
-        out = []
+        # a drilldown of a table the hop has since left out is said, never
+        # acted on
+        tables, said = self._drills_in_scope(db, tables)
+        out = [said] if said else []
         for t in tables:
             n = {k: sum(1 for x in (d / f"data-{t}.{k}").read_text()
                         .splitlines() if x)
@@ -1084,6 +1129,8 @@ class MSSQLEngine(DbapiRows, Engine):
         return self._found(db, table)
 
     def apply(self, db, action):
+        if action.kind == "text":
+            return self._apply_text(db, action)
         if action.kind == "rows":
             t = action.scope.split(".", 1)[1]
             sc, dc, _ = self._comparable_columns(db, self, t, self, t)
@@ -1093,8 +1140,10 @@ class MSSQLEngine(DbapiRows, Engine):
                                         found=self._found(db, t))
         if action.kind != "sequences":
             raise SystemExit(f"mssql cannot apply a {action.kind!r} action")
-        self._cmd("dst", db,
-                " ".join(s.split("  --")[0] for s in action.statements))
+        # seeds left alone and nothing to reseed send nothing
+        if action.statements:
+            self._cmd("dst", db,
+                      " ".join(s.split("  --")[0] for s in action.statements))
 
     def snapshot_state(self, db, state_dir, kind="all"):
         """What the target held before a repair: each identity column's
@@ -1311,7 +1360,7 @@ class MSSQLEngine(DbapiRows, Engine):
             side, db, "select s.name + '.' + t.name from sys.tables t join"
                       " sys.schemas s on s.schema_id = t.schema_id where"
                       " t.is_ms_shipped = 0 order by 1")
-            if not self.hop.excluded(db, *t.split(".", 1))]
+            if self.in_scope(db, t)]
 
     def column_facts(self, side, db, table):
         """Whether each column takes NULL, and the collation its text is
@@ -1488,7 +1537,7 @@ class MSSQLEngine(DbapiRows, Engine):
                           " v.schema_id join sys.sql_modules m on"
                           " m.object_id = v.object_id where v.is_ms_shipped"
                           " = 0 order by 1"):
-            if self.hop.excluded(db, *name.split(".", 1)):
+            if not self.in_scope(db, name):
                 continue
             try:
                 tree = sqlglot.parse_one(definition, read="tsql")
@@ -1555,7 +1604,7 @@ class MSSQLEngine(DbapiRows, Engine):
                 r.table, r.events = table, tuple(events)
                 r.timing = "INSTEAD OF" if instead else "AFTER"
                 r.level = "statement"
-                if table and self.hop.excluded(db, *table.split(".", 1)):
+                if table and not self.in_scope(db, table):
                     continue
             try:
                 from ..storedcode.tsql_pg import body_of
@@ -1840,9 +1889,16 @@ class MSSQLEngine(DbapiRows, Engine):
     @staticmethod
     def _bulk_unusable():
         """Why the bulk load's driver cannot be used on this machine, or
-        None. It is a dependency, and still a compiled one: a wheel built
+        None. It brings Microsoft's ODBC driver, which is not open source,
+        so it is installed only once its terms are accepted (`tools.TERMS`,
+        `migkit doctor --install`); and it is a compiled one: a wheel built
         for a newer C library than the machine's installs and then fails
         to load."""
+        from ..tools import MSSQL_BULK, driver_present
+        if not driver_present(MSSQL_BULK):
+            return ("the bulk load's driver is not installed here - `migkit"
+                    " doctor --install` puts it in place once its terms are"
+                    " accepted")
         try:
             import mssql_py_core  # noqa: F401
             import mssql_python  # noqa: F401
@@ -2368,7 +2424,7 @@ class MSSQLEngine(DbapiRows, Engine):
         self._all_tracked(side, db)
         plans = []
         for t in sorted(self._tracked(side, db)):
-            if self.hop.excluded(db, *t.split(".", 1)):
+            if not self.in_scope(db, t):
                 continue
             key = self.neutral_key(side, db, t)
             cols = [n for n, _ in self.neutral_columns(side, db, t)]
