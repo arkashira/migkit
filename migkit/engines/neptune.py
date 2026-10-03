@@ -849,9 +849,10 @@ class NeptuneEngine(NeutralCopier, Engine):
                 break
             if status not in ("LOAD_NOT_STARTED", "LOAD_IN_PROGRESS",
                               "LOAD_IN_QUEUE") or time.time() > deadline:
+                records, unread = got.get("totalRecords"), got.get(
+                    "parsingErrors")
                 raise SystemExit(f"{table}: the target's load {load} ended"
-                                 f" {status}: {got.get('totalRecords')}"
-                                 f" records, {got.get('parsingErrors')}"
+                                 f" {status}: {records} records, {unread}"
                                  " that could not be read")
             time.sleep(5)
         if log:
