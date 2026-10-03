@@ -790,6 +790,11 @@ def _job_rows(hop, eng, d, conf):
         out.append(("warn", f"{d}: jobs already running on the target:"
                             f" {', '.join(on_dst[:5])} - they write there"
                             " before the flip"))
+    alone = jobs.left_alone(hop, eng, d, "src")
+    if alone:
+        out.append(("ok", f"{d}: jobs left as they are on both sides:"
+                          f" {', '.join(alone[:5])} - they write only"
+                          " tables the hop does not take"))
     return out
 
 

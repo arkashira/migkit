@@ -1064,7 +1064,7 @@ def pgdump_move(hop, db, workers, go, log):
     outdir = hop.report_dir(db) / "pgdump"
     # the same resolution pgcopydb and `check` use, so all three exclude
     # exactly the same tables rather than three readings of one pattern
-    skip, routed, unresolved = [], [], ""
+    skip, routed, unresolved, seqs = [], [], "", []
     if _routes_any(hop, db):
         try:
             from .engines.postgres import PostgresEngine
@@ -1072,6 +1072,7 @@ def pgdump_move(hop, db, workers, go, log):
             skip = excluded_tables(hop, db, tables)
             routed = [n for n in routed_to_copier(hop, db, "pgdump", tables)
                       if n not in skip]
+            seqs = _pg_sequences_left_out(hop, db)
         except Exception as e:
             unresolved = str(e).splitlines()[-1][:70] if str(e) \
                 else type(e).__name__
@@ -1086,6 +1087,7 @@ def pgdump_move(hop, db, workers, go, log):
         ["pg_dump", "-h", s.host, "-p", s.port, "-U", s.user, "-d", db,
          "-Fd", "-j", reads, "--data-only", "-v", "-f", outdir,
          *[a for name in left_out for a in ("-T", name)],
+         *[a for name in seqs for a in ("-T", _pg_pattern(name))],
          *leftovers.pg_dump_args()])
     load = Step(
         phase("load", workers=writes),
@@ -1103,7 +1105,9 @@ def pgdump_move(hop, db, workers, go, log):
             steps.insert(1, _routed_note(routed))
         if skip:
             steps.insert(1, f"# {len(skip)} tables the hop excludes are not"
-                            " dumped at all")
+                            " dumped at all"
+                         + (f", nor the {len(seqs)} sequences that go with"
+                            " them" if seqs else ""))
     if not go:
         return steps + ["# dry-run, add --go to execute"]
     if unresolved:
@@ -1496,6 +1500,21 @@ def _pg_quiet_triggers(hop, db, tables):
         " service's admin user.")
 
 
+def _pg_sequences_left_out(hop, db):
+    """The source's sequences the hop does not take, as `schema.sequence`
+    (`PostgresEngine._seq_left_out`): a dump of the data alone still writes
+    the value of a serial's sequence whose table it was told to leave out -
+    it dumps a sequence its table owns with that table's flags and its own
+    - so the counter of a table the target writes itself was set back to
+    the source's. Left out of the dump by name; the carry after it leaves
+    them too (`_pg_carry_sequences`)."""
+    from .engines.postgres import PostgresEngine
+    eng = PostgresEngine(hop)
+    names = [line.rpartition("|")[0] for line in
+             eng._psql("src", db, eng.SEQ_Q).splitlines() if "|" in line]
+    return sorted(eng._seq_left_out("src", db, names))
+
+
 def _pg_carry_sequences(hop, db, log=None):
     """Set the target's sequences from the source's after a copy that
     carries rows and not sequences.
@@ -1505,8 +1524,9 @@ def _pg_carry_sequences(hop, db, log=None):
     `duplicate key ... Key (id)=(1) already exists`. The copy program's own
     sequence command, run on its own, read 0 sequences and reset the
     target's. The engine's sequence repair decides the value instead - the
-    source's, never below a row the target holds - and refuses a target
-    already ahead of the source, which it says.
+    source's, never below a row the target holds, never below where the
+    target's counter stands, and only of the tables the hop takes - and
+    refuses a target already ahead of the source, which it says.
     """
     from .engines.postgres import PostgresEngine
     eng = PostgresEngine(hop)

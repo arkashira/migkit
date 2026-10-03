@@ -107,6 +107,10 @@ HOP_OPTIONS = {
                   " the API - viewer, operator, approver, admin - added to"
                   " the file's own `access`", "dict",
                   subs=("viewer", "operator", "approver", "admin")),
+    "accounts": Key("false: the move does not carry users, roles or grants"
+                    " (a DTS job told not to move them) - their checks are"
+                    " skipped and said as not compared, and no repair"
+                    " grants them", "bool"),
     "app_roles": Key("the application's roles protect_target holds",
                      "list"),
     "approvals": Key("the steps that wait for an approval", "dict",

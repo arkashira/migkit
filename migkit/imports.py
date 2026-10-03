@@ -499,12 +499,13 @@ def from_tencent_dts(data, stem="hop"):
                  " migkit move it instead")
     src = _tdts_end(d, "Src", notes)
     dst = _tdts_end(d, "Dst", notes) if kind != "subscription" else None
-    ops = {}
+    ops, accounts = {}, True
     if kind == "migration":
         opt = d["MigrateOption"]
         picked = opt.get("DatabaseTable") or {"ObjectMode": "all"}
         mode, items = picked.get("ObjectMode"), picked.get("Databases")
         _tdts_migrate_notes(opt, notes)
+        accounts = opt.get("IsMigrateAccount") is not False
     elif kind == "migration-2018":
         opt = d.get("MigrateOption") or {}
         mode = "all" if str(opt.get("MigrateObject")) == "1" else "partial"
@@ -548,6 +549,8 @@ def from_tencent_dts(data, stem="hop"):
     elif (src_e or dst_e) and any(isinstance(out.raw.get(x), dict)
                                   for x in ("source", "target")):
         out.raw["engine"] = src_e or dst_e
+    if not accounts:
+        _no_accounts(out)
     if dbs and not isinstance(out.raw.get("source"), str):
         out.raw["databases"] = dbs
     if db_map and not isinstance(out.raw.get("target"), str):
@@ -561,6 +564,14 @@ def from_tencent_dts(data, stem="hop"):
     if mapping:
         out.raw["mapping"] = mapping
     return out
+
+
+def _no_accounts(out):
+    """The hop of a job that does not move accounts says so (`accounts:
+    false`): its users, roles and grants are skipped by the check and said
+    as not compared, rather than read as differences the job was never
+    asked to carry (`users.carried`)."""
+    out.raw.setdefault("options", {})["accounts"] = False
 
 
 def _tdts_2018_items(info):
@@ -880,7 +891,8 @@ def _tdts_migrate_notes(opt, notes):
     if opt.get("IsMigrateAccount") is False:
         notes.append("the job does not move accounts (IsMigrateAccount"
                      " false): the target's users and grants are not the"
-                     " source's")
+                     " source's - the hop says accounts: false, so they are"
+                     " not compared")
     if opt.get("IsDstReadOnly") is False:
         notes.append("the target stays writable while the job runs"
                      " (IsDstReadOnly false): a row written there directly"
@@ -1061,6 +1073,7 @@ def from_alibaba_dts(data, stem="hop"):
     if got.get("exclude"):
         out.raw["exclude"] = got["exclude"]
     _adts_mode_notes(data.get("MigrationMode") or {}, notes)
+    accounts = _adts_accounts(data.get("Reserve"), notes)
     dbs, db_map = got["dbs"], got["db_map"]
     for side, end, names in (("source", src, dbs),
                              ("target", dst, [db_map.get(x, x)
@@ -1077,6 +1090,8 @@ def from_alibaba_dts(data, stem="hop"):
     elif (src_e or dst_e) and any(isinstance(out.raw.get(x), dict)
                                   for x in ("source", "target")):
         out.raw["engine"] = src_e or dst_e
+    if not accounts:
+        _no_accounts(out)
     if one_db and dst and dst["db"] and dst["db"] != one_db:
         db_map = {one_db: dst["db"]}
     if dbs and not isinstance(out.raw.get("source"), str):
@@ -1289,6 +1304,27 @@ def _adts_ops(ident, spec, notes, got):
                                             " arrives")):
         if op not in have:
             notes.append(f"{ident}: the job does not carry {word} - {said}")
+
+
+def _adts_accounts(reserve, notes):
+    """Whether the job moves accounts: not where its reserved settings
+    (`Reserve`, a JSON text or a mapping) say `privilegeMigration` false -
+    the setting the service's documentation names for it. Where they do
+    not say, the job is taken as moving them, as before."""
+    if isinstance(reserve, str):
+        try:
+            reserve = json.loads(reserve or "{}")
+        except ValueError:
+            return True
+    said = (reserve or {}).get("privilegeMigration") \
+        if isinstance(reserve, dict) else None
+    if str(said).lower() != "false":
+        return True
+    notes.append("the job does not move accounts (privilegeMigration"
+                 " false): the target's users and grants are not the"
+                 " source's - the hop says accounts: false, so they are"
+                 " not compared")
+    return False
 
 
 def _adts_mode_notes(mode, notes):
