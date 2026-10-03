@@ -461,23 +461,48 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                       " order by column_id",
             (self._owner(side, db), self._q(table)[1:-1]))]
 
+    def _catalog_reads(self, side, db):
+        """(statement, binds) of the schema's columns `column_catalog`
+        reads and `shape_mark` digests: one row a column - its table, its
+        name, its declared type and its place."""
+        return (f"select table_name ct, column_name cn, {DECLARED} cd,"
+                " column_id cp from all_tab_columns where owner ="
+                f" {MARK} and table_name not like '{OWN_PREFIX}%' escape"
+                " '\\' and table_name in (select table_name from"
+                f" all_tables where owner = {MARK} and nested ="
+                " 'NO' and secondary = 'N' and temporary = 'N')",
+                (self._owner(side, db), self._owner(side, db)))
+
     def column_catalog(self, side, db):
         """{table: [(column, type)]} for the whole schema in one query:
         what the change tail's shape gate compares before each batch, so a
         DDL made under it is seen rather than mined."""
+        sql, binds = self._catalog_reads(side, db)
         out = {}
-        for t, n, typ in self._rows(
-                side, db, f"select table_name, column_name, {DECLARED} from"
-                          f" all_tab_columns where owner = {MARK} and"
-                          f" table_name not like '{OWN_PREFIX}%' escape"
-                          " '\\' and table_name in (select table_name from"
-                          f" all_tables where owner = {MARK} and nested ="
-                          " 'NO' and secondary = 'N' and temporary = 'N')"
-                          " order by 1, column_id",
-                (self._owner(side, db), self._owner(side, db))):
+        for t, n, typ, _place in self._rows(
+                side, db, sql + " order by 1, column_id", binds):
             out.setdefault(self._said(t), []).append((self._said(n),
                                                       str(typ)))
         return {t: sorted(c) for t, c in out.items()}
+
+    def shape_mark(self, side, db):
+        """One digest of what `column_catalog` reads, computed by the
+        server (`_catalog_reads`): the columns counted, and each column's
+        row - its values as their lengths and texts, a missing one apart -
+        hashed twice with two seeds (`ora_hash`, 32 bits each) and each
+        hash summed, so the digest holds however many columns there are
+        and whatever order they are read in; a column's place is among
+        its values. What a tail asks every batch before it reads the
+        whole shape again (`hetero._shape_now`, audit SP8)."""
+        sql, binds = self._catalog_reads(side, db)
+        row = " || ".join(
+            f"nvl2({v}, length({v}) || ':' || {v}, '-')"
+            for v in ("q.ct", "q.cn", "q.cd", "to_char(q.cp)"))
+        got = self._rows(side, db, (
+            f"select count(*), sum(ora_hash({row}, 4294967295, 0)),"
+            f" sum(ora_hash({row}, 4294967295, 1)) from ({sql}) q"), binds)
+        return ":".join(str(v if v is not None else 0) for v in got[0]) \
+            if got else None
 
     def _facts(self, side, db, table):
         """[{name, kind, length, chars, precision, scale}] in column order:
