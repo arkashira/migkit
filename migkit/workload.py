@@ -99,23 +99,25 @@ def _versions_differ(eng, db):
 
 def _translator(eng, db, src, dst):
     """sql -> the target's SQL, or raises `translate.Refused`; the
-    statement as it is where both sides speak one SQL."""
+    statement as it is where both sides speak one SQL. The hop's renames
+    of tables and columns, and the columns it leaves out, are the one
+    rewrite every carried statement takes (`statements.localized`)."""
     if not _across(src, dst):
         return lambda sql: sql
-    from .storedcode.convert import localizer
+    from .storedcode.statements import localized
     from .storedcode.translate import translate
-    local = localizer(eng, db)
+    local = localized(eng, db)
     return lambda sql: translate(sql, src.SQL_DIALECT, dst.SQL_DIALECT,
                                  local)
 
 
-def _statements(src, db, what):
+def _statements(src, db, what, most=TOP):
     """[(label, statement, runnable, source ms or None, calls)] from the
     source's `workload_reads` or `workload_writes`, or a reason (str)."""
     reads = getattr(src, f"workload_{what}", None)
     if reads is None:
         return "this engine cannot read the source's statements"
-    got = reads(db, TOP)
+    got = reads(db, most)
     if isinstance(got, str):
         return got
     out = []
@@ -130,6 +132,14 @@ def compare(eng, db):
     advice, or skip saying why nothing was asked."""
     from .engines.base import Result
     src, dst = _sides(eng)
+    hop = getattr(eng, "hop", None)
+    most = TOP
+    if hop is not None:
+        from .storedcode import corpus
+        if corpus.turned_on(hop):
+            # the corpus: every statement on the source's record within
+            # the budget, an Oracle source through its shared pool
+            src, most = corpus.source(src), corpus.TIMED
     across = _across(src, dst)
     scope = f"{db} performance"
     if across and not (getattr(src, "SQL_DIALECT", None)
@@ -142,7 +152,7 @@ def compare(eng, db):
                       "the target's engine cannot plan the source's"
                       " statements")
     try:
-        got = _statements(src, db, "reads")
+        got = _statements(src, db, "reads", most)
     except Exception as e:  # noqa: BLE001 - said, as the skip's reason
         return Result("deep", scope, "skip",
                       f"the source's statements could not be read:"
@@ -150,7 +160,7 @@ def compare(eng, db):
     if isinstance(got, str):
         return Result("deep", scope, "skip", got)
     try:
-        writes = _statements(src, db, "writes")
+        writes = _statements(src, db, "writes", most)
     except Exception:  # noqa: BLE001 - the reads are compared still
         writes = []
     if isinstance(writes, str):
@@ -163,6 +173,9 @@ def compare(eng, db):
     timed_writes = _writes_timed(getattr(eng, "hop", None))
     began = time.time()
     slower, rescanned, refused, differ = [], [], [], []
+    #: the translated statements the target planned, for the indexes
+    #: measured on its planner (`indexadvice`)
+    translated = []
     planned, timed = {"read": 0, "write": 0}, {"read": 0, "write": 0}
     weight = {"alike": 0, "asked": 0}
     for kind, items in (("read", got), ("write", writes)):
@@ -177,6 +190,7 @@ def compare(eng, db):
             plans = _plans(src, dst, db, sql, there)
             if plans is not None:
                 planned[kind] += 1
+                translated.append((there, calls, kind))
                 lost = _read_whole(eng, db, plans, across)
                 if lost:
                     rescanned.append((label, lost, plans[0]))
@@ -204,7 +218,8 @@ def compare(eng, db):
                 slower.append(f"{label}: {b:,.0f} ms on the target against"
                               f" {a:,.0f} ms on the source"
                               + (" (its own average there)" if kind ==
-                                 "write" else ""))
+                                 "write" or getattr(src, "RECORDED_TIMES",
+                                                    False) else ""))
     if not (sum(planned.values()) or sum(timed.values())):
         return Result("deep", scope, "skip",
                       f"none of the source's {len(got) + len(writes)}"
@@ -231,7 +246,7 @@ def compare(eng, db):
              for label, lost, src_plan in rescanned]
     found = whole + slower + differ
     if found:
-        advice = advise(eng, db, rescanned)
+        advice = advise(eng, db, rescanned, translated)
         return Result("deep", scope, "warn",
                       f"{len(found)} of the source's statements are slower"
                       f" or answer otherwise on the target ({asked}): "
@@ -244,11 +259,21 @@ def compare(eng, db):
                       "compare the target's indexes and statistics with the"
                       " source's for those tables; `migkit check` names"
                       " what is missing")
+    advice = advise(eng, db, [], translated) if _indexes_measured(hop) \
+        else {}
     return Result("deep", scope, "ok",
                   f"the target plans and answers the source's statements as"
                   f" well as the source does ({asked})"
                   + (f"; not translated: {'; '.join(refused[:2])}"
-                     if refused else ""))
+                     if refused else "")
+                  + (f"; measured to help further: {advice['said']}"
+                     if advice.get("said") else ""),
+                  advice.get("file", ""))
+
+
+def _indexes_measured(hop):
+    from .storedcode import indexadvice
+    return hop is not None and indexadvice.turned_on(hop)
 
 
 def _plans(src, dst, db, sql, there):
@@ -406,15 +431,29 @@ def alike(a, b):
 
 # --- advice ------------------------------------------------------------------
 
-def advise(eng, db, rescanned):
+def advise(eng, db, rescanned, translated=()):
     """{"said": the fix in words, "file": where the statements were
     written} for the findings: the index the source reaches each table
-    read whole by, as the target makes it; the tables whose statistics the
+    read whole by, as the target makes it; with the hop option
+    `index_advice`, the indexes the translated statements `translated`
+    ([(the target's SQL, runs, kind)]) are measured on the target's own
+    planner to need (`indexadvice`); the tables whose statistics the
     target lacks; the planner's settings that differ between two servers
     of one engine. {} where there is nothing to say."""
     src, dst = _sides(eng)
     hop = getattr(eng, "hop", None)
     statements, said = [], []
+    if translated and _indexes_measured(hop):
+        from .storedcode import indexadvice
+        try:
+            made, why = indexadvice.advise(dst, db, list(translated))
+        except Exception as e:  # noqa: BLE001 - said, nothing advised
+            made, why = [], ["no other index could be measured: "
+                             + (str(e).strip().splitlines()
+                                or [""])[0][:100]]
+        statements += made
+        said += [f"measured on the target's planner: {w}" if made else w
+                 for w in why]
     for _, lost, src_plan in rescanned:
         for t in lost:
             got = _index_for(eng, db, t, src_plan)
@@ -446,7 +485,8 @@ def advise(eng, db, rescanned):
             path = hop.report_dir(db) / "for-the-target.sql"
             path.write_text(
                 "-- the indexes the source reads these tables by and the"
-                " target lacks,\n-- written by migkit's check; migkit runs"
+                " target lacks, and those measured on the target's own"
+                " planner,\n-- written by migkit's check; migkit runs"
                 " none of this\n" + ";\n".join(statements) + ";\n")
             out["file"] = str(path)
         except OSError:

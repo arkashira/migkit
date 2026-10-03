@@ -49,7 +49,8 @@ TOOLS = ("pgcopydb", "reladiff", "sqeleton", "datacompy", "mydumper",
          "jt400", "apprise", "redisshake", "dsbulk",
          "connect-mirror-maker", "reindex-from-snapshot",
          "documentsfromsnapshot", "pg_upgrade", "initdb",
-         "teradatasql", "pyodata", "singer", "airbyte")
+         "teradatasql", "pyodata", "singer", "airbyte", "ast-grep",
+         "ast_grep", "tree-sitter", "hypopg")
 
 
 def _engine(tmp_path):

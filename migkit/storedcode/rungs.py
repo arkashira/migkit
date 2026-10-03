@@ -86,7 +86,7 @@ def candidates(pair, routine, ctx):
                   make=lambda r: translator(pair, ctx, r)),
         Candidate("rules", "migkit's rules",
                   _all("mysql->postgres", "tsql->postgres") |
-                  _all("postgres->mysql",
+                  _all("postgres->mysql", "oracle->postgres",
                        kinds=("function", "procedure", "trigger")),
                   make=lambda r: rules(pair, ctx, r)),
         Candidate("emulate", "the target's emulation of Oracle's functions",
