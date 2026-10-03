@@ -3481,10 +3481,10 @@ def _my_mask_facts(hop, db):
 
 
 def _streams_back(hop):
+    from .hopkeys import topology
     opts = getattr(hop, "options", None) or {}
-    topo = str(opts.get("topology") or "").lower()
     return bool(opts.get("reverse") or opts.get("two_way")
-                or topo in ("two-way", "two_way", "bidirectional"))
+                or topology(hop) == "two_way")
 
 
 def mask_plan(hop, db, keys, columns=None):

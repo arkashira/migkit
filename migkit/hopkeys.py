@@ -467,7 +467,8 @@ HOP_OPTIONS = {
                            ("postgres",)),
     "float_tolerance": Key("how far two floats may differ", "number",
                            ("postgres",)),
-    "format": Key("the change stream's message format", "str", STREAMS),
+    "format": Key("the change stream's message format", "str", STREAMS,
+                  check="migkit.streamout:options"),
     "keep_proof": Key("the tail keeps every table's digest leaves up as"
                       " it applies, so a check reads only what changed",
                       "bool"),
@@ -563,7 +564,8 @@ HOP_OPTIONS = {
                           "subscription", "resource_group", "location",
                           "project", "address", "upgrade", "backup",
                           "restore_from", "profile", "role", "product",
-                          "zone", "vpc", "subnet", "spec", "storage")),
+                          "zone", "vpc", "subnet", "spec", "storage"),
+                    check="migkit.hopkeys:_physical_read"),
     "proof_sandbox": Key("the two scratch servers stored code, the"
                          " constraints, the collations and the sized types"
                          " are run and compared on, or docker for migkit"
@@ -628,8 +630,10 @@ HOP_OPTIONS = {
                             " true, or {source: host:port} where the target"
                             " reaches the source at another address",
                             "bool|dict", ("postgres",), subs=("source",)),
-    "settle": Key("seconds a re-check waits for a stream to settle",
-                  "number", least=0),
+    "settle": Key("seconds a re-check waits for a stream to settle - left"
+                  " out, none before a re-check of what a stream may still"
+                  " carry, and 2 between the proof's generations", "number",
+                  least=0),
     "share_tables": Key("machines share one move's tables: true, each"
                         " table to one machine; ranges, a large table's"
                         " ranges as well, every write held to the number"
@@ -699,7 +703,7 @@ HOP_OPTIONS = {
                                         " too", "bool"),
                         "most": Key("the most rows it may hold", "int",
                                     least=1)},
-                  check="migkit.subset:settings"),
+                  check="migkit.hopkeys:_subset_read"),
     "tables": Key("the tables of a generic hop", "list", ("generic",)),
     "target_access": Key("the answer, given ahead, to the change of the"
                          " target's access policy protect_target offers"
@@ -1998,6 +2002,25 @@ def _notify(where, got):
             " this machine's keychain or write a reference: env:NAME,"
             " keyring:name, file:/path, vault:path#key"))
     return out
+
+
+def _subset_read(hop):
+    """A subset's settings and each table's rule read as the copy reads
+    them (`subset.settings`, `subset.rule`)."""
+    from . import subset
+    got = subset.settings(hop)
+    for table, said in ((got or {}).get("start") or {}).items():
+        subset.rule(table, said)
+    return got
+
+
+def _physical_read(hop):
+    """The address the target reaches the source at, where the hop says
+    one, read as the page copy reads it."""
+    from . import physical
+    got = (hop.options or {}).get("physical")
+    if isinstance(got, dict) and got.get("source"):
+        physical._source_address(hop, got)
 
 
 def _schedule(where, got):

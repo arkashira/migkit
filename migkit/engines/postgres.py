@@ -4573,21 +4573,17 @@ select json_build_object(
         caller matches against the whole tuple. Returns () when unset, which
         makes `startswith(())` false and every `any()` below empty.
         """
-        return tuple(p.strip() for p in
-                     self.hop.options.get("noise_prefix", "").split(",")
-                     if p.strip())
+        from ..hopkeys import noise
+        return noise(self.hop)
 
     def _keep_tbl(self, db, t):
         """False if the 'schema.table' is excluded for this db, so it is
         neither verified nor repaired (protects target-owned tables).
 
-        Tables the mover keeps for itself (noise_prefix) are excluded too: they
-        exist on one side by nature and would count as a difference every time
-        while holding no application data."""
-        sch, tbl = self._split(t)
-        noise = self._noise()
-        if noise and tbl.startswith(noise):
-            return False
+        Tables the mover keeps for itself (noise_prefix) are excluded too,
+        by the hop's scope as every engine's are (`Hop.excluded`): they
+        exist on one side by nature and would count as a difference every
+        time while holding no application data."""
         from .. import drift
         if drift.maybe_transient(t) and t in self._working_tables(db):
             return False

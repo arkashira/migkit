@@ -213,10 +213,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the bulk copy finished and <...> of <...>'s tables do not hold what the source does: <...> ... | <...>. Nothing has been marked as moved. A source written to while it was copied differs by what changed - move with --mode full+cdc for that; otherwise `migkit sync` puts the rows right
 
-* reverse: <...> - the one there is, is at_cutover
-
-* topology: <...> - one_way or two_way
-
 * topology: two_way - <...>. Nothing was set up.
 
 * the hop maps columns or renames tables (mapping.columns, mapping.tables), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.

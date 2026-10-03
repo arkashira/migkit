@@ -101,6 +101,23 @@ def test_a_value_is_held_to_its_words_and_its_owners_reader():
     assert "freeze servr" in got["hops.h.options.cutover"], got
 
 
+def test_the_readers_of_a_subset_a_page_copy_and_a_stream_at_load():
+    got = _errors({**PG, "goal": "subset", "options": {
+        "subset": {"start": {"orders": "150%"}}}})
+    assert "a share is more than 0%" in got["hops.h.options.subset"], got
+    assert not _errors({**PG, "goal": "subset", "options": {
+        "subset": {"start": {"orders": "10%"}}}})
+    got = _errors({**PG, "options": {"physical": {"source": "db1"}}})
+    assert "host:port" in got["hops.h.options.physical"], got
+    assert not _errors({**PG, "options": {"physical": {
+        "source": "10.0.0.1:5432"}}})
+    kafka = {"source": "kafka://10.0.0.1:9092",
+             "target": "kafka://10.0.0.2:9092"}
+    got = _errors({**kafka, "options": {"format": "xml"}})
+    assert "format: xml is not one of" in got["hops.h.options.format"], got
+    assert not _errors({**kafka, "options": {"format": "json"}})
+
+
 def test_a_secret_written_out_is_said_wherever_the_registry_has_one():
     raw = {"source": {"host": "a", "user": "u", "password": "env:PW",
                       "options": {"mine_password": "hunter2"}},
