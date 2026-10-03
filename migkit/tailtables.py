@@ -43,8 +43,10 @@ why, or set aside - by the tail (`hetero._Accounts`).
 What a DDL does is the hop's `ddl`:
 
     stop    (the default, as before) a DDL the target does not follow
-            stops the whole tail before the batch; a table emptied on the
-            source stops it too - it was carried by nothing before
+            stops the whole tail before the batch; a table emptied or
+            renamed on the source stops it too - the one was carried by
+            nothing before, the other left the target's table holding the
+            old rows under the new table's changes
     park    the table the DDL touched is parked, and only it; a table
             emptied on the source is copied again
     apply   what can be carried at its place in the log is: a column
@@ -54,7 +56,12 @@ What a DDL does is the hop's `ddl`:
 
 Under park and apply a table dropped or renamed on the source leaves the
 tail, and one a rename or a create brings in joins it with its copy;
-migkit never drops a target table.
+migkit never drops a target table. `ddl` may say it per table, and leave
+some kinds out (`policy`, `skipped`).
+
+Each table is known by its whole name as the source names it (`key`):
+by its last part alone, two schemas' `orders` shared one state and one
+target table.
 """
 import json
 import os
@@ -80,16 +87,77 @@ HELD = "held until its range of the copy lands"
 SPOOLED = "set aside while its table is parked"
 OUT_OF_SCOPE = "not in the hop's scope"
 COPIED = "already in what the copy read"
+#: a change of a kind the hop's `mapping.ops` does not carry for its table
+NOT_CARRIED = "not carried by the hop"
 WHY = (HELD, SPOOLED, OUT_OF_SCOPE)
 
+#: the DDL kinds `ddl: {skip: [...]}` may leave out: each leaves the
+#: target's table as it is and the tail going on. An ALTER or a rename
+#: left out would have every change after it written to columns or a
+#: table the target does not have
+SKIPPABLE = ("truncate", "drop", "create")
+#: the keys of a `ddl` mapping that name no table
+_DDL_WORDS = ("default", "skip")
 
-def policy(hop):
-    got = str((hop.options or {}).get("ddl") or "stop").strip().lower()
+
+def _word(got, where="ddl"):
+    got = str(got or "stop").strip().lower()
     if got not in POLICIES:
-        raise SystemExit(f"ddl: {got} is not one of {', '.join(POLICIES)}"
+        raise SystemExit(f"{where}: {got} is not one of {', '.join(POLICIES)}"
                          " - stop the tail, park the table the DDL"
                          " touched, or apply what can be carried")
     return got
+
+
+def policy(hop, table=None):
+    """What a DDL does to `table`'s tail - stop, park or apply: the hop's
+    `ddl` as one word for every table, or a mapping of them -
+
+        ddl:
+          default: park             # every table no key names
+          "billing.*": apply        # names or patterns, matched as
+          logistics.orders: stop    #   mapping.ops is: the most
+                                    #   particular key wins
+          skip: [drop, truncate]    # kinds left out of every table
+
+    as Tencent's and Alibaba's DTS let a job say which DDL it carries.
+    `table` is its name's parts from the database down, or a dotted
+    name; None asks for the default."""
+    got = (hop.options or {}).get("ddl")
+    if not isinstance(got, dict):
+        return _word(got)
+    rules = {k: v for k, v in got.items() if k not in _DDL_WORDS}
+    if table is not None and rules:
+        parts = table.split(".") if isinstance(table, str) else table
+        best = hop.most_particular(rules, *parts)
+        if best is not None:
+            return _word(rules[best], f"ddl.{best}")
+    return _word(got.get("default"), "ddl.default")
+
+
+def skipped(hop):
+    """The DDL kinds the hop's `ddl` leaves out (`skip`): each is left out
+    of the tail and counted, and the target's table left as it is - a
+    `reload` (a partition's rows gone with no row event for them) with a
+    truncate."""
+    got = (hop.options or {}).get("ddl")
+    if not isinstance(got, dict) or not got.get("skip"):
+        return frozenset()
+    words = got["skip"]
+    words = [words] if isinstance(words, str) else list(words)
+    out = set()
+    for w in words:
+        w = str(w).strip().lower()
+        if w not in SKIPPABLE:
+            raise SystemExit(f"ddl.skip: {w} is not one of"
+                             f" {', '.join(SKIPPABLE)} - an ALTER or a"
+                             " rename left out would have every change"
+                             " after it written where the target has no"
+                             " column or table for it")
+        out.add(w)
+    if "truncate" in out:
+        out.add("reload")
+    return frozenset(out)
 
 
 def spool_most(hop):
@@ -207,17 +275,21 @@ class Spool:
 
 
 class _HopFile:
-    """The hop's `exclude` and `include` as its file says them now, read
-    again only when the file has changed - so a table taken out of the
-    scope, or put in it, joins or leaves the running tail at the next
-    batch. A hop the file does not name (made in code) is left as it is;
-    what the environment or a command added to either list stays."""
+    """The hop's `exclude`, `include` and `mapping` as its file says them
+    now, read again only when the file has changed - so a table taken out
+    of the scope, or put in it, joins or leaves the running tail at the
+    next batch, and one whose row filter, columns, name or changes carried
+    the mapping changes is taken again (`TableSet._remapped`). A hop the
+    file does not name (made in code) is left as it is; what the
+    environment or a command added to either list stays."""
 
     def __init__(self, hop):
         from .config import CONF
         self.hop, self.path = hop, CONF
         self.stamp = self._stamp()
         self.said = self._read()
+        #: the mapping the hop had before the file changed it, until taken
+        self.remapped = None
 
     def _stamp(self):
         try:
@@ -238,16 +310,20 @@ class _HopFile:
             return None
         from .config import scope_patterns
         try:
-            return {k: scope_patterns(got.get(k))
-                    for k in ("exclude", "include")}
+            out = {k: scope_patterns(got.get(k))
+                   for k in ("exclude", "include")}
         except SystemExit:
             # said wrong mid-run: the scope stays as it was until the
             # file says it right
             return None
+        mapping = got.get("mapping")
+        out["mapping"] = mapping if isinstance(mapping, dict) else {}
+        return out
 
     def refresh(self):
-        """Whether the hop's scope changed, its `exclude` and `include`
-        set to what the file says now."""
+        """Whether the hop's scope changed, its `exclude` and `include` set
+        to what the file says now - and its `mapping`, the one it had kept
+        for `take_remapped`."""
         stamp = self._stamp()
         if stamp == self.stamp or self.said is None:
             return False
@@ -255,14 +331,26 @@ class _HopFile:
         now = self._read()
         if now is None or now == self.said:
             return False
+        moved = any(now[k] != (self.said.get(k) or [])
+                    for k in ("exclude", "include"))
         for k in ("exclude", "include"):
             was = self.said.get(k) or []
             others = [p for p in (getattr(self.hop, k, None) or [])
                       if p not in was]
             setattr(self.hop, k, list(now[k]) + [p for p in others
                                                  if p not in now[k]])
+        if now["mapping"] != self.said.get("mapping"):
+            if self.remapped is None:
+                self.remapped = dict(self.hop.mapping or {})
+            self.hop.mapping = dict(now["mapping"])
         self.said = now
-        return True
+        return moved
+
+    def take_remapped(self):
+        """The mapping the hop had before the file changed it, once; None
+        where it has not changed."""
+        got, self.remapped = self.remapped, None
+        return got
 
 
 def _add_ways():
@@ -320,22 +408,28 @@ class TableSet:
         self.src = pair.src_engine
         self.where = token_path.parent
         self.path = self.where / STATE
+        #: the hop's `ddl` for a table no rule names (`policy`)
         self.policy = policy(self.hop)
+        skipped(self.hop)
         self.most = spool_most(self.hop)
         try:
             doc = json.loads(self.path.read_text())
         except (OSError, ValueError):
             doc = {}
-        self.tables = doc.get("tables") or {}
-        self.fresh = not self.tables
-        self.lock = threading.RLock()
-        self.file = _HopFile(self.hop)
-        self.jobs, self.slots, self.ck = {}, None, None
         try:
             from . import evidence
             self.recipients = evidence.recipients_of(self.hop)
         except Exception:  # noqa: BLE001 - kept plain
             self.recipients = []
+        self.tables = self._keyed(doc.get("tables") or {})
+        self.fresh = not self.tables
+        #: the scope the tail last ran under (`save`), held to the hop's at
+        #: the first batch: a scope changed while it was stopped is a
+        #: scope changed
+        self.was = doc.get("scope") if not self.fresh else None
+        self.lock = threading.RLock()
+        self.file = _HopFile(self.hop)
+        self.jobs, self.slots, self.ck = {}, None, None
         self.scope_at = self.level_at = 0.0
         # what a job beside the stream has to tell the next batch
         self.events = []
@@ -345,6 +439,50 @@ class TableSet:
         self.entries = {}
         # copies that stopped, by table, for the wait before the next try
         self.failures = Counter()
+        #: `quiet(name)`, where the tail gives one: the target's triggers
+        #: held off for a table that joins, as for those it began with -
+        #: and the tables it was asked for
+        self.quiet, self.quieted = None, set()
+        # the hop's mapping changed under the running tail, for the tail
+        # to read its targets again (`take_remapped`)
+        self.remapped = False
+
+    # --- names --------------------------------------------------------------
+
+    def _parts(self, name):
+        """A table's name as its parts, a quoted part unquoted
+        (`util._parts`)."""
+        from .util import _canonical, _parts
+        eng = _canonical(getattr(self.src, "CANON_ENGINE", "") or "")
+        return [p for p in _parts(eng, str(name)) if p]
+
+    def key(self, name):
+        """A table's key among the tail's: its whole name as the source
+        names it, each part unquoted - the log's `public."Orders"` and the
+        catalogue's `public.Orders` one table."""
+        return ".".join(self._parts(name))
+
+    def _keyed(self, tables):
+        """The states a tail saved, each under its `key` - one saved by its
+        last part alone moved to its whole name, its spool with it."""
+        out = {}
+        for k, st in tables.items():
+            new = self.key(st.get("name") or k)
+            if new != k:
+                old = self.spool(k).path
+                if old.exists():
+                    self.spool(new).path.parent.mkdir(parents=True,
+                                                      exist_ok=True)
+                    os.replace(old, self.spool(new).path)
+            out[new] = st
+        return out
+
+    def _out(self, name):
+        """Whether the hop leaves this table out."""
+        return self.hop.excluded(self.db, *self._parts(name))
+
+    def _policy(self, name):
+        return policy(self.hop, [self.db, *self._parts(name)])
 
     # --- files --------------------------------------------------------------
 
@@ -362,12 +500,23 @@ class TableSet:
         return self.ck
 
     def _entry(self, leaf):
-        return self.pair.move_key(self.db, "", leaf)
+        # the name the table copier keeps a table's checkpoint under
+        return self.pair.move_key(self.db, "", self.pair._leaf(leaf))
+
+    def _scope_said(self):
+        """What the tail runs under, kept beside its tables: the hop's
+        scope fingerprint (`Hop.scope_fingerprint`), and its lists and
+        mapping, to tell a table they changed for."""
+        return {"fingerprint": self.hop.scope_fingerprint(),
+                "include": sorted(str(p) for p in self.hop.include or []),
+                "exclude": sorted(str(p) for p in self.hop.exclude or []),
+                "mapping": self.hop.mapping or {}}
 
     def save(self):
         """Written whole, before the position it goes with."""
         with self.lock:
-            text = json.dumps({"tables": self.tables}, indent=1,
+            text = json.dumps({"tables": self.tables,
+                               "scope": self._scope_said()}, indent=1,
                               sort_keys=True, default=str)
         self.where.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
@@ -398,7 +547,7 @@ class TableSet:
     # --- scope, between batches -------------------------------------------
 
     def _scope(self, shape, changed=False):
-        """{leaf: the name the log gives it} of the tables in the hop's
+        """{key: the name the log gives it} of the tables in the hop's
         scope now: `shape`'s (`drift.shape`, read under the hop's scope),
         read again where the scope has just changed."""
         from . import drift
@@ -408,24 +557,60 @@ class TableSet:
             names = [str(t) for t in shape]
         else:
             names = [str(t) for t in self.src.neutral_tables("src", self.db)
-                     if not self.hop.excluded(self.db, *str(t).split("."))]
+                     if not self._out(t)]
             working = drift.transient_among(names)
             names = [t for t in names if t not in working]
-        return {self.pair._leaf(t): t for t in names}
+        return {self.key(t): t for t in names}
+
+    def _since_stopped(self):
+        """(whether the hop's scope changed while the tail was stopped,
+        the mapping it ran under where that changed, else None) - read
+        once, at the first batch after a start: a table it now takes was
+        marked live from the current file, with none of its rows."""
+        was, self.was = self.was, None
+        if not isinstance(was, dict) or not self.hop.scope_changed(
+                was.get("fingerprint")):
+            return False, None
+        said = self._scope_said()
+        moved = any(sorted(was.get(k) or []) != said[k]
+                    for k in ("include", "exclude"))
+        mapping = was.get("mapping") or {}
+        remapped = mapping if mapping != said["mapping"] else None
+        if moved or remapped is not None:
+            self.log("the hop's scope changed while the tail was stopped:"
+                     " the tables it takes or leaves since are taken or"
+                     " left as a change of it while running would")
+        return moved, remapped
+
+    def take_remapped(self):
+        """Whether the hop's mapping changed since last asked: the tail's
+        own reading of names and columns is then read again."""
+        got, self.remapped = self.remapped, False
+        return got
 
     def boundary(self, token, shape, force=False):
         """Between batches, before the next is read: the hop's scope held
         to the tables' states - a table added is started on, one gone is
-        removed. Returns whether the hop's scope changed, for a reader
-        that read ahead under the old one to be started again."""
+        removed, one whose mapping changed is taken again, one replaced
+        under its name is copied or stops the tail. Returns whether the
+        hop's scope changed, for a reader that read ahead under the old
+        one to be started again."""
         self._events()
         changed = self.file.refresh()
+        remapped = self.file.take_remapped()
+        if not self.fresh and self.was is not None:
+            moved, before = self._since_stopped()
+            changed = changed or moved
+            if remapped is None:
+                remapped = before
         if not (changed or force or self.fresh or shape is not None
+                or remapped is not None
                 or time.monotonic() - self.scope_at >= 60):
             return False
         self.scope_at = time.monotonic()
         try:
             scope = self._scope(shape, changed)
+            oids = self._oids()
         except Exception as e:  # noqa: BLE001 - asked again next batch
             self.log(f"the source's tables could not be listed"
                      f" ({type(e).__name__}); the tail's scope is as it was")
@@ -434,23 +619,39 @@ class TableSet:
             if self.fresh:
                 for leaf, name in scope.items():
                     self.tables[leaf] = {"state": "live", "name": name}
+                    if oids.get(leaf):
+                        self.tables[leaf]["oid"] = oids[leaf]
                 self.fresh = False
                 self.save()
                 return False
             known = {t for t, st in self.tables.items()
                      if st["state"] != "removed"}
-            added = [t for t in scope if t not in known]
+            # a table the hop's `ddl` left out as it was made stays out
+            # until the hop's scope is changed
+            added = [t for t in scope if t not in known and (
+                changed or not (self.tables.get(t) or {}).get("left"))]
             gone = [t for t in sorted(known) if t not in scope]
         for leaf in gone:
             self._remove(self.tables, leaf, token,
                          "taken out of the hop's scope" if changed
                          else "no longer on the source")
+        unseen = getattr(self.src, "CREATES_UNSEEN", False)
         for leaf in added:
-            back = (self.tables.get(leaf) or {}).get("state") == "removed"
-            if changed or back or self.policy != "stop":
+            st = self.tables.get(leaf) or {}
+            back = st.get("state") == "removed" and not st.get("left")
+            made = not (changed or back)
+            if made and "create" in skipped(self.hop):
+                self._leave(self.tables, leaf, scope[leaf], token,
+                            "made on the source, and the hop's ddl leaves"
+                            " creates out")
+            elif not made or self._policy(scope[leaf]) != "stop" or unseen:
                 self._add(self.tables, leaf, scope[leaf], token,
                           "put back in the hop's scope" if back
                           else "added to the hop's scope" if changed
+                          else "made on the source, where the log says"
+                               " nothing of a table's making and a table"
+                               " made with its rows (CREATE TABLE AS) has"
+                               " them in no change" if unseen
                           else "made on the source")
             else:
                 # as the tail always did: a table made on the source is
@@ -459,10 +660,102 @@ class TableSet:
                 with self.lock:
                     self.tables[leaf] = {"state": "live",
                                          "name": scope[leaf]}
-        if gone or added:
+            if oids.get(leaf):
+                with self.lock:
+                    self.tables[leaf]["oid"] = oids[leaf]
+        again = self._replaced(oids, token, set(added))
+        if remapped is not None:
+            again += self._remapped(remapped, token)
+        if gone or added or again:
             self._settle()
             self.save()
         return bool(changed and (gone or added))
+
+    def _oids(self):
+        """{key: the table's own id} where the source keeps one a name can
+        be given to another table (`table_oids`), else {}."""
+        read = getattr(self.src, "table_oids", None)
+        if read is None:
+            return {}
+        return {self.key(t): oid for t, oid in read("src", self.db).items()}
+
+    def _replaced(self, oids, token, added):
+        """The tables whose name now names another table on the source - a
+        rename, or two that swap one in under it - where its log says
+        nothing of a rename and its columns may be the same
+        (`table_oids`): under stop the tail stops, under park and apply
+        the table is copied again. [the keys copied again]"""
+        out = []
+        with self.lock:
+            held = [(k, dict(st)) for k, st in self.tables.items()
+                    if st["state"] != "removed" and k not in added]
+        for k, st in held:
+            now = oids.get(k)
+            if not now:
+                continue
+            if not st.get("oid"):
+                with self.lock:
+                    self.tables[k]["oid"] = now
+                continue
+            if now == st["oid"]:
+                continue
+            name = st.get("name") or k
+            if self._policy(name) == "stop":
+                raise SystemExit(
+                    f"{self.db}: {name} was replaced on the source - its"
+                    " name names another table now (renamed, or two"
+                    " renames swapped one in under it) - at"
+                    f" {str(token)[:60]} or after, and nothing after that"
+                    " position was applied. The hop's `ddl` is stop: set"
+                    " `ddl: apply` or `ddl: park` to have it copied again,"
+                    " and run the tail again; it resumes from there")
+            self._add(self.tables, k, name, token,
+                      "replaced on the source under its name (a rename or"
+                      " a swap), copied again")
+            with self.lock:
+                self.tables[k]["oid"] = now
+            out.append(k)
+        return out
+
+    def _remapped(self, before, token):
+        """The tables the hop carries whose row filter, columns, name on
+        the target or changes carried read otherwise under the mapping
+        now than under `before`, taken again by a copy - their target
+        holds rows the mapping they ran under put there. Said whether any
+        are or not. [the keys taken again]"""
+        import dataclasses
+        was = dataclasses.replace(self.hop, mapping=dict(before or {}))
+        self.remapped = True
+        out = []
+        with self.lock:
+            held = [(k, dict(st)) for k, st in self.tables.items()
+                    if st["state"] in ("live", "parked", "copying")]
+        for k, st in held:
+            parts = [self.db, *self._parts(st.get("name") or k)]
+            if all(getattr(was, f)(*parts) == getattr(self.hop, f)(*parts)
+                   for f in ("row_filter", "column_rules", "carries")) and \
+                    was.target_table_in(*parts) == \
+                    self.hop.target_table_in(*parts):
+                continue
+            self._add(self.tables, k, st.get("name") or k, token,
+                      "its row filter, columns, name on the target or"
+                      " changes carried changed in the hop's mapping,"
+                      " taken again")
+            out.append(k)
+        self.log("the hop's mapping changed"
+                 + (f": {', '.join(out[:8])}" + (" ..." if len(out) > 8
+                                                 else "")
+                    + " taken again by a copy" if out
+                    else " - no table the tail carries reads otherwise"))
+        return out
+
+    def _leave(self, states, leaf, name, token, why):
+        """A table the hop's `ddl` leaves out as it is made: out of the
+        tail, its changes counted as out of the hop's scope, and its target
+        - which it has none on - never digested."""
+        states[leaf] = {"state": "removed", "name": name, "at": token,
+                        "why": why, "was": None, "left": True, "said": True}
+        self.log(f"{leaf}: {why} - its changes are left out and counted")
 
     def _remove(self, states, leaf, token, why):
         st = states.get(leaf) or {}
@@ -536,6 +829,9 @@ class TableSet:
         with self.lock:
             todo = [(t, dict(st)) for t, st in self.tables.items()]
         for leaf, st in todo:
+            if st["state"] in ("live", "copying") and not self._quiet(leaf,
+                                                                     st):
+                continue
             if st["state"] == "copying" and st.get("start"):
                 with self.lock:
                     self.tables[leaf].pop("start", None)
@@ -553,6 +849,28 @@ class TableSet:
                          f" {str(st['at'])[:60]} - {st['why']}; its"
                          " changes are left out and counted, and its target"
                          " is left as it is")
+
+    def _quiet(self, leaf, st):
+        """The target's triggers held off for a table the tail takes, once
+        (`quiet`): a table that joined after the tail began had its
+        target's triggers fire for every row its copy and its changes
+        wrote. Where they cannot be held off the table parks, and its copy
+        is tried again later. Whether it goes on."""
+        if self.quiet is None or leaf in self.quieted:
+            return True
+        self.quieted.add(leaf)
+        try:
+            self.quiet(st.get("name") or leaf)
+            return True
+        except SystemExit as e:
+            said = (str(e).strip().splitlines() or ["refused"])[0]
+            with self.lock:
+                self.quieted.discard(leaf)
+                self.tables[leaf].pop("start", None)
+                self._park(self.tables, leaf, None,
+                           f"its target's triggers would fire for what is"
+                           f" written: {said[:200]}", "copy")
+            return False
 
     # --- the jobs beside the stream -----------------------------------------
 
@@ -666,6 +984,11 @@ class TableSet:
                 ck.save()
         sch, _, tbl = name.rpartition(".")
         with contextlib.ExitStack() as later:
+            # its rows written as a load writes them, the target's
+            # triggers held off: this pair's engines are its own, and the
+            # stream's window holds off nothing they write
+            later.enter_context(pair.load_window(
+                self.db, lambda m: self.log(f"{leaf}: {m}"), {name}))
             pair._neutral_move(self.db, sch, tbl, 10 ** 9, ck,
                                lambda m: self.log(f"{leaf}: {m}"), later)
         if stop.is_set():
@@ -707,8 +1030,7 @@ class TableSet:
                     break
                 changes, after = reader.neutral_changes(
                     "src", self.db, token, limit=16000)
-                mine = [c for c in changes
-                        if pair._leaf(c["table"]) == leaf]
+                mine = [c for c in changes if self.key(c["table"]) == leaf]
                 if any(canon.is_ddl(c) for c in mine):
                     self.log(f"{leaf}: its shape changed while it was out"
                              " of the tail - copying it instead")
@@ -895,14 +1217,22 @@ class TableSet:
         left = {w: Counter() for w in (COPIED,) + WHY}
         put = {}
         for c in changes:
-            leaf = self.pair._leaf(c["table"])
+            leaf = self.key(c["table"])
             st = states.get(leaf)
-            if st is None and not self.fresh and self.policy != "stop":
+            if st is None and not self.fresh and (
+                    self._policy(c["table"]) != "stop"
+                    or getattr(self.src, "CREATES_UNSEEN", False)):
                 # a table the tail has not met - made on the source since
                 # the scope was read - joins with its copy, its changes
-                # held to it from the first
-                self._add(states, leaf, c["table"], token,
-                          "made on the source")
+                # held to it from the first; or stays out, where the hop's
+                # `ddl` leaves creates out
+                if "create" in skipped(self.hop):
+                    self._leave(states, leaf, c["table"], token,
+                                "made on the source, and the hop's ddl"
+                                " leaves creates out")
+                else:
+                    self._add(states, leaf, c["table"], token,
+                              "made on the source")
                 st = states[leaf]
             state = st["state"] if st else "live"
             if state == "live":
@@ -935,22 +1265,58 @@ class TableSet:
         """What a DDL at its place in the batch does, by the hop's `ddl`:
         None, or ("truncate", leaf) for the target to be emptied there.
         The states the rest of the batch is routed by are changed here;
-        they become the tail's when the batch is saved."""
-        leaf = self.pair._leaf(change["table"])
+        they become the tail's when the batch is saved.
+
+        The policy is the table's own (`policy`), and for a table renamed
+        into the hop's scope the name it comes in under. A kind the hop's
+        `ddl` leaves out (`skipped`), and a table emptied whose deletes
+        the hop does not carry (`mapping.ops`, an archive kept on the
+        target), are left out and counted (`pending["ddl_left"]`) - never
+        applied, never a stop. The swap an online schema change ends with
+        (gh-ost's and pt-online-schema-change's renames through their
+        working tables, `drift.transient`) is the table's new content, not
+        a table renamed out of the hop's scope and one renamed into it:
+        under stop its shape is held as any DDL's is (`hetero._shape_now`),
+        under park and apply it is copied again."""
+        from . import canon, drift
+        leaf = self.key(change["table"])
         kind = change["kind"]
+        to = change.get("to")
         st = states.get(leaf) or {"state": "live", "name": change["table"]}
+        if kind == "rename" and drift.transient(change["table"]):
+            # the working table swapped in under the table's name: the
+            # table's own rename out of the way says what is done
+            return None
         if st["state"] == "removed" and kind not in ("create", "rename"):
             return None
-        stops = getattr(self.src, "DDL_STOPS", ("truncate",))
-        if self.policy == "stop":
+        why = self._left_out(kind, change["table"])
+        if why:
+            self.pending.setdefault("ddl_left", Counter())[
+                (change["table"], why)] += 1
+            return None
+        theirs = change["table"] if (leaf in states or not to or not self._out(
+            change["table"])) else to
+        pol = self._policy(theirs)
+        if kind == "rename" and to and drift.transient(to):
+            if pol != "stop":
+                self._add(states, leaf, st.get("name") or leaf, token,
+                          f"swapped for its online schema change's copy"
+                          f" ({to}) on the source, copied again")
+            return None
+        stops = getattr(self.src, "DDL_STOPS", ("truncate", "rename"))
+        came = change.get(canon.CAME_FROM)
+        if pol == "stop":
             # rows changed with no row event for them stop the tail
-            # wherever an emptied table does
-            if kind in stops or (kind == "reload" and "truncate" in stops):
+            # wherever an emptied table does, and a table renamed in from
+            # another database, with its rows, wherever a rename does
+            if kind in stops or (kind == "reload" and "truncate" in stops) \
+                    or (came and "rename" in stops):
                 raise SystemExit(
                     f"{self.db}: {change['table']} was "
                     + {"truncate": "emptied", "drop": "dropped",
                        "rename": f"renamed to {change.get('to')}",
-                       "create": "made", "alter": "altered",
+                       "create": f"renamed in from {came}" if came
+                       else "made", "alter": "altered",
                        "reload": "given or robbed of rows with no row"
                                  " event for them (a partition's)"}[kind]
                     + f" on the source at {str(token)[:60]} or after, and"
@@ -968,8 +1334,7 @@ class TableSet:
                       " them (a partition's), copied again")
             return None
         if kind == "truncate":
-            if st["state"] == "copying" or self.policy == "park" \
-                    or two_way:
+            if st["state"] == "copying" or pol == "park" or two_way:
                 self._add(states, leaf, st.get("name") or leaf, token,
                           "emptied on the source, copied again")
                 return None
@@ -983,20 +1348,38 @@ class TableSet:
             self._remove(states, leaf, token, "dropped on the source")
             return None
         if kind == "rename":
-            self._remove(states, leaf, token,
-                         f"renamed to {change.get('to')} on the source")
-            to = change.get("to")
-            if to and not self.hop.excluded(self.db, *str(to).split(".")):
-                self._add(states, self.pair._leaf(to), str(to), token,
+            # a table the hop never took is not one the tail lets go of
+            if leaf in states or not self._out(change["table"]):
+                self._remove(states, leaf, token,
+                             f"renamed to {to} on the source")
+            if to and not self._out(to):
+                self._add(states, self.key(to), str(to), token,
                           f"renamed from {change['table']} on the source")
             return None
         if kind == "create":
-            if st["state"] in ("live", "removed") and (
-                    leaf not in states or st["state"] == "removed"):
+            if st["state"] in ("live", "removed") and not st.get("left") \
+                    and (leaf not in states or st["state"] == "removed"):
                 self._add(states, leaf, change["table"], token,
                           "made on the source")
             return None
         return None
+
+    def _left_out(self, kind, table):
+        """Why a DDL of `table` is left out of the tail, or "": a kind the
+        hop's `ddl` skips, or the table emptied - wholly, or a partition's
+        rows with no row event for them - where the hop does not carry its
+        deletes, which keeps what the source takes away."""
+        if kind in skipped(self.hop):
+            return f"{kind} left out by the hop's ddl"
+        if kind in ("truncate", "reload") and "delete" not in \
+                self.hop.carries(self.db, *self._parts(table)):
+            return f"{kind} {NOT_CARRIED} (it does not carry deletes)"
+        return ""
+
+    def left_ddl(self):
+        """{(table, why): DDLs} the batch in hand left out (`_left_out`),
+        for the tail's accounts."""
+        return dict(self.pending.get("ddl_left") or {})
 
     def park(self, states, leaf, token, why):
         self._park(states, leaf, token, why, "shape")
@@ -1101,6 +1484,12 @@ class TableSet:
             names = [t for t, st in self.tables.items()
                      if st["state"] in ("parked", "copying")]
         return {t: self.spool(t).size() for t in names}
+
+    def taken(self):
+        """The keys of the tables the tail carries or is taking in."""
+        with self.lock:
+            return frozenset(t for t, st in self.tables.items()
+                             if st["state"] != "removed")
 
     def counts(self):
         """{state: tables in it}."""

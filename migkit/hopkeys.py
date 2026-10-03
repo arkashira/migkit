@@ -166,7 +166,10 @@ HOP_OPTIONS = {
                          "no_return", "restore_points")),
     "ddl": Key("what a DDL on the source does to a running tail: stop"
                " it, park only the table it touched, or apply what can be"
-               " carried at its place in the log", "str"),
+               " carried at its place in the log - one word, or a mapping"
+               " of `default`, tables or patterns to a word each, and"
+               " `skip`: the kinds left out (truncate, drop, create)",
+               "str|dict"),
     "deadline": Key("when the move must be done by - a duration (6h,"
                     " 90m, 2d) or a moment (2026-10-01T02:00): the plan"
                     " names the cheapest machine for migkit that meets it",
@@ -1413,6 +1416,7 @@ def check_hop(name, raw):
         out += _notify(f"{where}.options.notify", opts.get("notify"))
         out += _egress(f"{where}.options.egress", opts.get("egress"))
         out += _two_way(f"{where}.options.two_way", opts.get("two_way"))
+        out += _ddl_problems(f"{where}.options.ddl", opts.get("ddl"))
         from .web import roles
         for w, text in roles.hop_problems(opts.get("access")):
             out.append(Problem("error", f"{where}.options.{w}", text))
@@ -1535,6 +1539,68 @@ def _two_way(where, got):
     return []
 
 
+def _ddl_problems(where, got):
+    """The hop's `ddl` said wrong (`tailtables.policy`, `skipped`): a word
+    that is not stop, park or apply - for every table, the default, or a
+    table or pattern - and a kind `skip` cannot leave out. Said before
+    anything runs rather than when the tail meets its first DDL."""
+    from .tailtables import POLICIES, SKIPPABLE
+    if got is None:
+        return []
+    out = []
+    if not isinstance(got, dict):
+        if str(got).strip().lower() not in POLICIES:
+            out.append(Problem("error", where,
+                               f"{got!r} - one of {', '.join(POLICIES)}"))
+        return out
+    for k, v in got.items():
+        if k == "skip":
+            words = [v] if isinstance(v, str) else v
+            if not isinstance(words, (list, tuple)):
+                out.append(Problem("error", f"{where}.skip",
+                                   "a list of the kinds left out"))
+                continue
+            for w in words:
+                if str(w).strip().lower() not in SKIPPABLE:
+                    out.append(Problem(
+                        "error", f"{where}.skip",
+                        f"{w!r} - one of {', '.join(SKIPPABLE)}: an ALTER"
+                        " or a rename left out would have every change"
+                        " after it written where the target has no column"
+                        " or table for it"))
+            continue
+        if not isinstance(v, str) or v.strip().lower() not in POLICIES:
+            out.append(Problem("error", f"{where}.{k}",
+                               f"{v!r} - one of {', '.join(POLICIES)}"))
+    return out
+
+
+def _scope_apart(ra, rb):
+    """What one hop takes that its way back does not, in words; "" where
+    the two take the same tables. The way back's `include` and `exclude`
+    are read in the first's names (`Hop.reversed` reads them the other
+    way), so a pair that names one table on each side as the database it
+    lands in is the same scope."""
+    from .config import Endpoint, Hop
+    try:
+        a = Hop(name="", engine="", source=Endpoint(), target=Endpoint(),
+                include=_patterns_or_none(ra.get("include")),
+                exclude=_patterns_or_none(ra.get("exclude")),
+                db_map=dict(ra.get("db_map") or {}))
+        back = a.reversed()
+    except Exception:  # noqa: BLE001 - each hop's own check says it
+        return ""
+    for k in ("include", "exclude"):
+        there = sorted(str(p) for p in getattr(back, k) or [])
+        theirs = sorted(_patterns_or_none(rb.get(k)))
+        if there != theirs:
+            return (f"one takes {k} {there or 'nothing'} in the other's"
+                    f" names and the other {theirs or 'nothing'} - a change"
+                    " to a table only one of them takes is carried one way"
+                    " and never back")
+    return ""
+
+
 def _two_way_pairs(hops):
     """Two hops of the file that are each other's way back, both two-way:
     every conflict is settled at both ends, so a rule that would settle
@@ -1553,6 +1619,11 @@ def _two_way_pairs(hops):
             ga, gb = (r["options"]["two_way"] for r in (ra, rb))
             for said in twoway.apart(ga if isinstance(ga, dict) else {},
                                      gb if isinstance(gb, dict) else {}):
+                out.append(Problem("error", f"hops.{a} and hops.{b}",
+                                   f"each is the other's way back: {said}"))
+            # and the same tables both ways
+            said = _scope_apart(ra, rb)
+            if said:
                 out.append(Problem("error", f"hops.{a} and hops.{b}",
                                    f"each is the other's way back: {said}"))
     return out

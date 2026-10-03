@@ -793,8 +793,13 @@ class MongoEngine(Engine):
                 after = (event.get("_id") or {}).get("_data")
                 ts = self._event_time(event)
                 # a collection the hop leaves alone, dropped or written,
-                # is the target's business and not the tail's
-                if table and self.hop.excluded(db, table):
+                # is the target's business and not the tail's - unless it
+                # is renamed into the hop's scope, which the tail must
+                # meet: dropped here, the collection joined with none of
+                # its documents under every `ddl` (as MySQL's `_ddl_of`
+                # keeps a rename whose either end is in scope)
+                if table and self.hop.excluded(db, table) and not (
+                        op == "rename" and self._renamed_in(db, event)):
                     continue
                 if op in self.STREAM_DDL:
                     got = self._ddl_event(db, op, event)
@@ -854,6 +859,13 @@ class MongoEngine(Engine):
                   "dropIndexes": "alter", "shardCollection": "alter",
                   "reshardCollection": "alter",
                   "refineCollectionShardKey": "alter"}
+
+    def _renamed_in(self, db, event):
+        """Whether a rename event's new name, in this database, is one the
+        hop takes."""
+        dest = event.get("to") or {}
+        return bool(dest.get("coll")) and dest.get("db") == self._d(
+            "src", db) and not self.hop.excluded(db, dest["coll"])
 
     def _ddl_event(self, db, op, event):
         """[canon.ddl] for a collection event, None where it is not one
