@@ -164,22 +164,35 @@ class OpenSearchEngine(NeutralCopier, Engine):
         document the cluster pushes back for being busy is sent again
         after a wait (`BULK_RETRIES`), which parallel sending does not do.
         A delete of a document that is not there is what was wanted; any
-        other refusal stops the copy, naming the first."""
+        other refusal stops the copy, naming the first.
+
+        Every operation the target numbered is counted as migkit's own
+        where the hop names the target's other writes (`freeze.counted`)."""
         from opensearchpy.helpers import streaming_bulk
+
+        from .. import freeze
         written, kept, refused = 0, 0, []
-        for ok, item in streaming_bulk(
-                self._os(side), actions, chunk_size=self.BULK_DOCS,
-                max_chunk_bytes=self.BULK_BYTES, raise_on_error=False,
-                raise_on_exception=True, max_retries=self.BULK_RETRIES,
-                initial_backoff=1, max_backoff=60, yield_ok=True):
-            op, got = next(iter(item.items()))
-            status = int(got.get("status") or 0)
-            if ok:
-                written += 1
-            elif status == 409:
-                kept += 1
-            elif not (op == "delete" and status == 404):
-                refused.append(got)
+        numbered = {}
+        try:
+            for ok, item in streaming_bulk(
+                    self._os(side), actions, chunk_size=self.BULK_DOCS,
+                    max_chunk_bytes=self.BULK_BYTES, raise_on_error=False,
+                    raise_on_exception=True, max_retries=self.BULK_RETRIES,
+                    initial_backoff=1, max_backoff=60, yield_ok=True):
+                op, got = next(iter(item.items()))
+                status = int(got.get("status") or 0)
+                if int(got.get("_seq_no", -1)) >= 0:
+                    numbered[got.get("_index")] = numbered.get(
+                        got.get("_index"), 0) + 1
+                if ok:
+                    written += 1
+                elif status == 409:
+                    kept += 1
+                elif not (op == "delete" and status == 404):
+                    refused.append(got)
+        finally:
+            if side == "dst":
+                freeze.counted(self.hop, numbered)
         if refused:
             first = refused[0].get("error") or {}
             raise SystemExit(f"{refused[0].get('_index')}: the target refused"
@@ -490,9 +503,13 @@ class OpenSearchEngine(NeutralCopier, Engine):
         if where:
             raise SystemExit(f"{table}: a row filter is SQL, and OpenSearch"
                              " takes none")
-        got = self._call(side, "POST", f"/{self._index(side, db, table)}"
+        from .. import freeze
+        index = self._index(side, db, table)
+        got = self._call(side, "POST", f"/{index}"
                                        "/_delete_by_query?refresh=true",
                          {"query": {"match_all": {}}})
+        # a delete each, numbered: migkit's own
+        freeze.counted(self.hop, {index: int(got.get("deleted", 0))})
         return int(got.get("deleted", 0))
 
     # ---- the checks, through the pair every engine compares by --------
@@ -894,10 +911,15 @@ class OpenSearchEngine(NeutralCopier, Engine):
         held = self._ids("src", db, table)
         gone = sorted(there - held)
         dst = self._index("dst", db, table)
+        from .. import freeze
         for at in range(0, len(gone), 500):
-            self._call("dst", "POST", f"/{dst}/_delete_by_query"
-                                      "?refresh=true&conflicts=proceed",
-                       {"query": {"ids": {"values": gone[at:at + 500]}}})
+            got = self._call("dst", "POST", f"/{dst}/_delete_by_query"
+                                            "?refresh=true&conflicts=proceed",
+                             {"query": {"ids": {"values":
+                                                gone[at:at + 500]}}})
+            # a delete each, numbered: migkit's own
+            freeze.counted(self.hop, {dst: int((got or {}).get("deleted",
+                                                               0))})
         lacking = sorted(held - there)
         src = self._index("src", db, table)
         refused = 0

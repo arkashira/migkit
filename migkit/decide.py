@@ -2053,6 +2053,11 @@ _DBAPI = ("mssql", "oracle", "db2", "db2i", "db2zos", "ase", "redshift",
 #: sources read through an application's own interface, never written
 _READ_ONLY = ("sapodp", "saas")
 _FILES = ("sqlite", "duckdb", "parquet", "copybook")
+#: the generic engine's, for the shapes of a side kept from writers: it
+#: compares two databases and writes to neither
+_COMPARES_ONLY = ("it compares two databases and writes to neither: nothing"
+                  " of migkit's lands on its target, and no cutover drains"
+                  " through it")
 _NONE = {**{n: (NOT_APPLICABLE, STREAM_ONLY.format(said, n))
             for n, said in (("kinesis", "Kinesis"), ("pubsub", "Pub/Sub"))},
          "generic": (NOT_YET, "33")}
@@ -2196,10 +2201,41 @@ WAYS = {
         "mongodb": (NOT_YET, "0"),
         "*": (NOT_APPLICABLE, _NO_PROGRAM),
     },
+    # the target kept from the application while migkit moves into it
+    # (`protect_target`): the same hold per engine the cutover's freeze
+    # stands on, its ways the ones that leave migkit's own account writing
+    # (`freeze.KEEPS`) - held, offered as a change of an access policy, or
+    # the writes that are not migkit's named
     "read-only target": {
         **_NONE,
-        "postgres": ("yes", "freeze.freeze"),
-        "mysql": ("yes", "freeze.freeze"),
+        **{n: ("yes", f"freeze.{c}") for n, c in (
+            ("postgres", "PostgresHold"), ("mysql", "MySQLHold"),
+            ("tidb", "TiDBHold"), ("mongodb", "MongoHold"),
+            ("redis", "RedisHold"), ("mssql", "MSSQLHold"),
+            ("cassandra", "CassandraHold"), ("kafka", "KafkaHold"),
+            ("opensearch", "OpenSearchHold"),
+            ("cockroachdb", "PgWireHold"), ("dsql", "PgWireHold"),
+            ("clickhouse", "ClickHouseHold"), ("oracle", "OracleHold"),
+            ("db2", "Db2Hold"), ("db2zos", "Db2ZosHold"),
+            ("db2i", "Db2iHold"), ("ase", "AseHold"),
+            ("teradata", "TeradataHold"), ("redshift", "RedshiftHold"),
+            ("snowflake", "SnowflakeHold"), ("couchbase", "CouchbaseHold"),
+            ("dynamodb", "DynamoDBHold"), ("bigquery", "BigQueryHold"))},
+        # a pair's target is kept as its own engine keeps it
+        "hetero": ("yes", "freeze.protect"),
+        "generic": (NOT_APPLICABLE, _COMPARES_ONLY),
+        **{n: (NOT_APPLICABLE, "a file is written by whoever opens it, and"
+                               " nothing in it can hold a writer or name"
+                               " one") for n in _FILES},
+        **{n: (NOT_APPLICABLE, "a lake table is files in a store, written"
+                               " by whoever the store lets write, and"
+                               " nothing in the table can hold a writer")
+           for n in ("iceberg", "delta")},
+        "cosmosdb": (NOT_APPLICABLE, "its writes are allowed by the"
+                                     " account's keys, which reach every"
+                                     " database of the account and cannot"
+                                     " be taken from one, and it names no"
+                                     " writer of a change"),
         **{n: (NOT_APPLICABLE, "it is read, never written") for n in
            _READ_ONLY},
         "*": (NOT_YET, "R13"),
@@ -2224,14 +2260,48 @@ WAYS = {
             ("postgres", "PostgresHold"), ("mysql", "MySQLHold"),
             ("mongodb", "MongoHold"), ("redis", "RedisHold"),
             ("mssql", "MSSQLHold"), ("cassandra", "CassandraHold"),
-            ("kafka", "KafkaHold"), ("opensearch", "OpenSearchHold"))},
+            ("kafka", "KafkaHold"), ("opensearch", "OpenSearchHold"),
+            ("tidb", "TiDBHold"), ("cockroachdb", "PgWireHold"),
+            ("clickhouse", "ClickHouseHold"), ("oracle", "OracleHold"),
+            ("db2", "Db2Hold"), ("ase", "AseHold"),
+            ("teradata", "TeradataHold"), ("redshift", "RedshiftHold"),
+            ("snowflake", "SnowflakeHold"), ("couchbase", "CouchbaseHold"))},
+        # a pair's source is held as its own engine holds it
+        "hetero": ("yes", "freeze.hold_for"),
+        "generic": (NOT_APPLICABLE, _COMPARES_ONLY),
         **{n: (NOT_APPLICABLE, "a file is written by whoever opens it, and"
                                " nothing on it can hold a writer")
            for n in _FILES},
+        **{n: (NOT_APPLICABLE, "a lake table is files in a store, written"
+                               " by whoever the store lets write, and"
+                               " nothing in the table can hold a writer")
+           for n in ("iceberg", "delta")},
         "dynamodb": (NOT_APPLICABLE, "its writes are allowed by the"
                                      " account's access policies, outside"
-                                     " the database, which migkit does not"
-                                     " change"),
+                                     " the data: a table's own policy keeps"
+                                     " a target on an answer of yes, and a"
+                                     " source is held by its operator"
+                                     " (freeze: operator)"),
+        "bigquery": (NOT_APPLICABLE, "a role granted on the project writes"
+                                     " every dataset, whatever a dataset's"
+                                     " access says, so no change migkit"
+                                     " makes to the dataset holds every"
+                                     " writer of a source"),
+        "cosmosdb": (NOT_APPLICABLE, "its writes are allowed by the"
+                                     " account's keys, which reach every"
+                                     " database of the account and cannot"
+                                     " be taken from one"),
+        "dsql": (NOT_APPLICABLE, "no session ends another's or sees its"
+                                 " transactions, so nothing it still holds"
+                                 " open can be ended or read back"),
+        **{n: (NOT_APPLICABLE, "its sessions are ended and what they hold"
+                               " open is read through the system's own"
+                               " operator interfaces, not SQL")
+           for n in ("db2i", "db2zos")},
+        **{n: (NOT_APPLICABLE, "the application writes it through its own"
+                               " interface, which migkit only reads; its"
+                               " operator stops the application")
+           for n in _READ_ONLY},
         "*": (NOT_YET, "F2"),
     },
 }
