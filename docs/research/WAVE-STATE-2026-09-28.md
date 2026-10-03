@@ -241,7 +241,8 @@ Running (each on its own `worktree-agent-<id>` branch; I merge, run compileall a
 - a88f190644bf5cea1 - AUD-D (options, environment and addresses checked at load)
 - a629ecb2da1a93623 - P0-CLOUDS.native, then P0-CLOUDS.more
 - a4acdb02ff0191804 - AUD-B (durable tail state, dirty tracking)
-- a3d309a6543a96c68 - read-only target and writes held on every engine (BAR-3)
+- a3d309a6543a96c68 - read-only target and writes held on every engine (BAR-3) - MERGED (unproved on servers: Db2 for i `SYSTABAUTH` columns, Teradata `LogonTime`, ClickHouse `ALTER USER ... SETTINGS`, Snowflake `SHOW LOCKS` order - the suite tells)
+- a2602d2c2bffb1f1b - AUD-G2 (the MySQL engine's connections, TLS, zone, keepalives, grants)
 - a36a1e64cac22cbfd - P0-PARITY.matrix and .guard (the depth matrix read off the code, each cell proved by a test on its engine or declared, the red guard; STATE.md shows it)
 - a83dabd5f6b0ea12e - P0-SCOPE 7 and 8 wired (transforms as the one masking language on every engine, the row filter's translations and zone, objects beyond PostgreSQL/MySQL, name collisions, narrower check incomplete, partitions on the check side, scope-change log, 6d's leftovers)
 
