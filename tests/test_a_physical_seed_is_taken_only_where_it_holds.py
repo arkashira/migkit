@@ -21,8 +21,10 @@ PG_OPTS = {"data": "/var/lib/postgresql/data",
            "start": "ssh 10.0.0.2 start", "source": "10.0.0.1:5432"}
 
 
-def _hop(engine="postgres", physical_opts=None, **kw):
-    opts = {} if physical_opts is None else {"physical": physical_opts}
+def _hop(engine="postgres", physical_opts=None, options=None, **kw):
+    opts = dict(options or {})
+    if physical_opts is not None:
+        opts["physical"] = physical_opts
     return Hop(name="seed", engine=engine,
                source=Endpoint(host="10.0.0.1", port=5432, user="app",
                                password="CHANGE_ME"),
@@ -99,8 +101,8 @@ def test_every_need_holding_takes_the_pages():
     ("unlogged", ["app.public.cache"],
      "app.public.cache are unlogged: their rows are not in the log"),
     ("tablespaces", ["fast"], "tablespaces fast outside its data"),
-    ("covers", "the hop excludes app.audit, and a copy of the pages carries"
-               " every table", "the hop excludes app.audit"),
+    ("covers", "the hop leaves out app.audit, and a copy of the pages"
+               " carries every table", "the hop leaves out app.audit"),
 ])
 def test_each_need_that_fails_is_said(fact, value, words):
     hop = _hop(physical_opts=PG_OPTS)
@@ -138,13 +140,26 @@ def test_a_hop_without_the_commands_is_told_which():
 
 
 def test_what_the_hop_covers(reports):
-    """A copy of the pages cannot leave a table out, rename a database or
-    filter a row, and it carries every database on the server."""
+    """A copy of the pages cannot leave a table or an object out, rename a
+    database or a table, filter a row, mask a value or keep a change off
+    the target - every way a hop narrows is read in one place
+    (`config.narrowed_by`) - and it carries every database on the
+    server."""
     cases = [
-        (dict(exclude=["app.audit"]), "the hop excludes app.audit"),
-        (dict(mapping={"where": {"orders": "id > 5"}}), "filters rows"),
-        (dict(mapping={"columns": {"orders": {"a": "b"}}}), "maps tables"),
-        (dict(db_map={"app": "app2"}), "renames app to app2"),
+        (dict(exclude=["app.audit"]), "the hop leaves out app.audit"),
+        (dict(include=["app.orders"]), "the hop takes only app.orders"),
+        (dict(objects={"views": False}), "objects not carried views"),
+        (dict(mapping={"where": {"orders": "id > 5"}}),
+         "rows filtered in orders"),
+        (dict(mapping={"columns": {"orders": {"a": "b"}}}),
+         "columns chosen in orders"),
+        (dict(mapping={"names": {"tables": {"case": "lower"}}}),
+         "names written tables: case lower"),
+        (dict(mapping={"ops": {"orders": "insert, update"}}),
+         "changes carried orders"),
+        (dict(options={"mask_on_write": {"orders.email": "null"}}),
+         "values masked in orders.email"),
+        (dict(db_map={"app": "app2"}), "databases renamed app -> app2"),
         (dict(databases=["app"]), "also holds tables in other"),
         # a hop naming no database follows every one but the maintenance
         # database, whose tables would arrive and never change again

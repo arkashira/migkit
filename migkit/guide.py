@@ -207,7 +207,8 @@ def run(ask, say, path, force=False, env=None):
     found = survey(hop, say, imported)
     if imported is not None and found.get("left_out"):
         left = found["left_out"]
-        raw["exclude"] = list(raw.get("exclude") or []) + left
+        from .config import scope_patterns
+        raw["exclude"] = scope_patterns(raw.get("exclude")) + left
         say(f"  the task took {len(found['tables']) - len(left)} of the"
             f" source's {len(found['tables'])} tables; left out:"
             f" {', '.join(left[:8])}{' ...' if len(left) > 8 else ''}")

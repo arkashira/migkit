@@ -57,9 +57,13 @@ def append(path, entry):
                 who = getpass.getuser()
             except Exception:  # noqa: BLE001 - no name to give
                 who = ""
+            # a run started from the web view: the person who started
+            # it, beside the machine's user it runs as
+            actor = os.environ.get("MIGKIT_ACTOR", "").strip()
             body = {"at": time.strftime("%F %T"), "who": who,
                     "host": socket.gethostname(),
-                    "session": session.current(), **entry,
+                    "session": session.current(),
+                    **({"by": actor} if actor else {}), **entry,
                     "prev": _last_hash(path)}
             body["hash"] = hashlib.sha256(
                 _canonical(body).encode()).hexdigest()

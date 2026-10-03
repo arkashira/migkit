@@ -71,6 +71,9 @@ VARS = {
                             "~/.local/share/migkit"),
     "MIGKIT_EXCLUDE": Var("databases or tables left alone for this run, on"
                           " top of the hop's `exclude`", "list"),
+    "MIGKIT_COMPARE_WITH": Var("another tool's own check report to hold"
+                               " this run's answers against, in place of"
+                               " the hop's `compare_with`", "path"),
     # ---- `migkit init` without a terminal -------------------------------
     "MIGKIT_SOURCE": Var("the source's address for `init`, and for a"
                          " step that writes its hop", "text"),
@@ -191,17 +194,20 @@ VARS = {
                                  "path"),
     "MIGKIT_DB2_CONNECT_LICENSE": Var("the Db2 Connect licence file",
                                       "path"),
-    "MIGKIT_UI_HOSTS": Var("the host names the dashboard answers to",
-                           "list"),
+    "MIGKIT_UI_HOSTS": Var("more host names the web view and the dashboard"
+                           " answer to", "list"),
     "MIGKIT_UI_USER_HEADER": Var("the header a signing-in proxy names the"
                                  " dashboard's user in", "text"),
     "MIGKIT_UI_PROXY_SECRET": Var("the secret a signing-in proxy sends in"
                                   " X-Migkit-Proxy: without it the user"
                                   " header is not believed", "secret"),
-    "MIGKIT_UI_BIND": Var("the address the dashboard listens on", "text",
+    "MIGKIT_UI_BIND": Var("the address the web view (and the dashboard)"
+                          " listens on; for the web view, anything but this"
+                          " machine's loopback needs TLS", "text",
                           "127.0.0.1"),
-    "MIGKIT_METRICS_TOKEN": Var("the bearer a scraper reads the dashboard's"
-                                " /metrics with", "secret"),
+    "MIGKIT_METRICS_TOKEN": Var("the bearer a scraper reads /metrics with;"
+                                " without it only someone signed in reads"
+                                " it, their own hops", "secret"),
     # ---- what leaves the machine ----------------------------------------
     "MIGKIT_EGRESS": Var("what may leave the machine, for every hop: none,"
                          " or the kinds that may (notify, traces, assist,"
@@ -210,6 +216,53 @@ VARS = {
     "MIGKIT_EGRESS_TO": Var("the hosts anything that leaves may go to:"
                             " names, shell patterns, addresses and"
                             " networks", "list"),
+    # ---- the web view (`migkit report --serve`) -------------------------
+    "MIGKIT_WEB_URL": Var("the address people open the web view at,"
+                          " https:// behind a proxy or with a certificate",
+                          "text"),
+    "MIGKIT_WEB_TLS_CERT": Var("the web view's certificate (PEM, its chain"
+                               " after it)", "path"),
+    "MIGKIT_WEB_TLS_KEY": Var("the certificate's private key", "path"),
+    "MIGKIT_WEB_PROXIES": Var("the addresses of the reverse proxies in front"
+                              " of the web view: the only ones answered,"
+                              " and whose forwarded headers are read",
+                              "list"),
+    "MIGKIT_WEB_STATE": Var("where the web view keeps its sessions, the"
+                            " people provisioned and its signing key",
+                            "path", "~/.local/share/migkit/web"),
+    "MIGKIT_WEB_OIDC_ISSUER": Var("the OpenID Connect provider people sign"
+                                  " in through, its issuer's address",
+                                  "text"),
+    "MIGKIT_WEB_OIDC_CLIENT_ID": Var("the client the provider registered"
+                                     " for the web view", "text"),
+    "MIGKIT_WEB_OIDC_CLIENT_SECRET": Var("its secret, or a reference to"
+                                         " where it is kept", "secret"),
+    "MIGKIT_WEB_OIDC_SCOPES": Var("the scopes asked for", "list",
+                                  "openid,email,profile"),
+    "MIGKIT_WEB_OIDC_GROUPS": Var("the claim a person's groups are in",
+                                  "text", "groups"),
+    "MIGKIT_WEB_SAML_METADATA": Var("the SAML identity provider's metadata,"
+                                    " as it publishes it", "path"),
+    "MIGKIT_WEB_SAML_GROUPS": Var("the attribute a person's groups are in",
+                                  "text", "groups"),
+    "MIGKIT_WEB_SAML_NAME": Var("the attribute naming the person, where"
+                                " not the name identifier", "text"),
+    "MIGKIT_WEB_SCIM_TOKEN": Var("the bearer token the provider provisions"
+                                 " people and groups with; set, only people"
+                                 " it provisioned sign in", "secret"),
+    "MIGKIT_WEB_SESSION_HOURS": Var("the longest a sign-in lasts", "number",
+                                    12, least=0.25),
+    "MIGKIT_WEB_IDLE_MINUTES": Var("minutes without a request before a"
+                                   " sign-in ends", "number", 60, least=5),
+    "MIGKIT_WEB_TOKEN_DAYS": Var("the longest an API token lasts",
+                                 "number", 90, least=1),
+    "MIGKIT_WEB_RESET": Var("print an address that sets the local"
+                            " operator's password again", "flag", False),
+    "MIGKIT_WEB_PLAIN": Var("serve the web view without TLS beyond this"
+                            " machine's loopback - only where the network"
+                            " to it is the operator's own: a container"
+                            " published on the host's loopback", "flag",
+                            False),
     # ---- the assistant ---------------------------------------------------
     "MIGKIT_AI": Var("the model provider asked, where one is: openai,"
                      " anthropic or google", "text"),
@@ -233,6 +286,13 @@ VARS = {
                                    named_for_a_program=True),
     "MIGKIT_SECOND_READER_PYTHON": Var("the interpreter the second reader"
                                        " runs in", "path"),
+    "MIGKIT_ACTOR": Var("the person who started a run from the web view",
+                        internal=True),
+    "MIGKIT_RUN_ID": Var("the id the web view drew for a run it started",
+                         internal=True),
+    "MIGKIT_HUAWEI_SDK_PYTHON": Var("the interpreter Huawei Cloud's API is"
+                                    " driven from, in its environment of"
+                                    " its own", "path"),
     # ---- the tests -------------------------------------------------------
     "MIGKIT_FAILPOINT": Var("stop a move where it keeps what it has done,"
                             " the way a crash would", "list", tests=True),

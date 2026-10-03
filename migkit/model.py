@@ -607,11 +607,22 @@ def _largest(facts, tables, sizes=None):
 
 
 def _carried(hop, eng, db, facts, tables):
-    """The tables the move carries, as the catalogue names them."""
+    """(the tables the move carries, as the catalogue names them; those of
+    them a row filter narrows - `Engine.carried` - whose rows and bytes
+    are the whole table's)."""
+    narrowed = []
+    ask = getattr(eng, "carried", None)
+    if callable(ask):
+        try:
+            narrowed = ask(db, facts)[1]
+        except Exception:  # noqa: BLE001 - weighed whole, as before
+            narrowed = []
     if tables is not None:
-        return [t for t in tables if t in facts] or list(tables)
-    return [t for t in facts
-            if not hop.excluded(db, *str(t).split("."))]
+        got = [t for t in tables if t in facts] or list(tables)
+    else:
+        got = [t for t in facts
+               if hop.takes_table(db, t)]
+    return got, [t for t in narrowed if t in got]
 
 
 def build(hop, eng, db, facts=None, tables=None, probe=None, write=True,
@@ -623,7 +634,7 @@ def build(hop, eng, db, facts=None, tables=None, probe=None, write=True,
     has none: no rate is assumed."""
     facts = facts if facts is not None else _safe(
         lambda: eng.table_facts("src", db), {}) or {}
-    carried = _carried(hop, eng, db, facts, tables)
+    carried, narrowed = _carried(hop, eng, db, facts, tables)
     disk = sum(int((facts.get(t) or {}).get("bytes") or 0) for t in carried)
     rows = sum(int((facts.get(t) or {}).get("rows") or 0) for t in carried)
     sizes = _safe(lambda: eng.row_sizes("src", db, carried), {}) or {}
@@ -644,6 +655,11 @@ def build(hop, eng, db, facts=None, tables=None, probe=None, write=True,
     if widest and widest[1] > PIECE and way is not None:
         # how the rows wider than a piece go, where there are any
         m.notes.append(f"large values: {way.said}")
+    if narrowed:
+        # a row filter's share of a table is not in any catalogue
+        m.notes.append(f"{len(narrowed)} tables a row filter narrows are"
+                       " weighed whole: the rows and bytes are the most the"
+                       " move carries")
     if probe is None:
         probe = disk >= probe_floor(hop)
     if probe and carried:

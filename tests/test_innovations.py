@@ -188,9 +188,9 @@ def test_db_map_resolves_target_name():
     hop = Hop(name="m", engine="postgres",
               source=Endpoint(host="s", user="u", password="p"),
               target=Endpoint(host="t", user="u", password="p"),
-              db_map={"cart_uat": "cart"})
-    assert hop.target_db("cart_uat") == "cart"     # mapped
-    assert hop.target_db("order_uat") == "order_uat"  # identity when unmapped
+              db_map={"shop_staging": "shop"})
+    assert hop.target_db("shop_staging") == "shop"     # mapped
+    assert hop.target_db("reports") == "reports"  # identity when unmapped
 
 
 def test_engine_side_resolution_maps_only_dst():
@@ -203,13 +203,13 @@ def test_engine_side_resolution_maps_only_dst():
         return Hop(name="m", engine=engine,
                    source=Endpoint(host="s", user="u", password="p"),
                    target=Endpoint(host="t", user="u", password="p"),
-                   db_map={"cart_uat": "cart"})
+                   db_map={"shop_staging": "shop"})
     for cls, eng_name in ((PostgresEngine, "postgres"),
                           (MySQLEngine, "mysql"),
                           (MongoEngine, "mongodb")):
         eng = cls(hop(eng_name))
-        assert eng._d("src", "cart_uat") == "cart_uat"   # source never maps
-        assert eng._d("dst", "cart_uat") == "cart"       # target maps
+        assert eng._d("src", "shop_staging") == "shop_staging"   # source never maps
+        assert eng._d("dst", "shop_staging") == "shop"       # target maps
         assert eng._d("dst", "other") == "other"         # unmapped identity
     # pg must never remap the maintenance db
     assert PostgresEngine(hop("postgres"))._d("dst", "postgres") == "postgres"
@@ -306,10 +306,30 @@ def test_atlas_authoritative_demotes_textual_diff():
     assert out["db (structural)"] == "diff"
     assert out["db objects"] == "diff"
     # opt-out keeps everything as-is
-    eng2 = Engine(_hop(options={"schema_authority": "strict"}))
+    eng2 = Engine(_hop(options={"schema_authority": "every-reading"}))
     res2 = [Result("schema", "db", "diff", "x"),
             Result("schema", "db (fix DDL)", "ok", "clean")]
     assert eng2._atlas_authoritative(res2)[0].status == "diff"
+
+
+def test_the_schema_authority_is_said_without_naming_a_program():
+    """The words a hop writes name what decides, not the program behind
+    it; an older hop's word for the default is read as it, and a word
+    that is neither is refused before anything runs."""
+    from migkit import hopkeys
+    from migkit.engines.base import Engine, Result
+    assert all("atlas" not in w for w in Engine.AUTHORITIES)
+    res = [Result("schema", "db", "diff", "x"),
+           Result("schema", "db (fix DDL)", "ok", "clean")]
+    for word in ("schema-aware", "atlas", None):
+        opts = {"schema_authority": word} if word else {}
+        got = Engine(_hop(options=opts))._atlas_authoritative(
+            [Result(r.check, r.scope, r.status, r.detail) for r in res])
+        assert got[0].status == "ok", word
+    assert hopkeys._authority_problems("x", "schema-aware") == []
+    assert hopkeys._authority_problems("x", "atlas") == []
+    bad = hopkeys._authority_problems("x", "schema_aware")
+    assert bad and bad[0].level == "error"
 
 
 def test_delta_available_on_all_engines():
@@ -354,6 +374,7 @@ def test_capabilities_and_install_selection(monkeypatch):
     monkeypatch.setattr(tools, "ase_driver_present", lambda: True)
     monkeypatch.setattr(tools, "install_second_reader",
                         lambda log=None: pytest.fail("nothing to install"))
+    monkeypatch.setattr(tools, "own_env_python", lambda name: "/bin/python")
     assert {st for _, _, st, _ in tools.capabilities()} == {"ready"}
     assert tools.install_missing(lambda m: None) == []
 

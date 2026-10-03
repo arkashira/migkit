@@ -313,6 +313,7 @@ def _is_driver_error(e):
 class TeradataEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "teradata"
+    CHARSETS = True
     SQL_DIALECT = None
     FOLDED_BECAUSE = ("has no SHA-256 of its own to render a row with, so"
                       " its rows are read - in its own parallel sessions"
@@ -1146,6 +1147,11 @@ class TeradataEngine(DbapiRows, Engine):
         return f"mod(hashbucket({self._hashrow(exprs)}), {int(n)})"
 
     def check_deep(self, db):
+        """What a load left on the target (`_left_by_loads`), and text
+        stored twice as UTF-8 on the source."""
+        return self._left_by_loads(db) + [self._mojibake(db)]
+
+    def _left_by_loads(self, db):
         """On the target: a bulk load's error tables or migkit's own stage
         tables left by a load that died, and a table left mid-load, which
         refuses every read until the load is ended or the table dropped."""
@@ -1162,7 +1168,8 @@ class TeradataEngine(DbapiRows, Engine):
                 or re.search(r"_ERR_[12]$", t, re.I)]
         stuck = []
         for t in names:
-            if self._own(t) or t in left:
+            # a table the hop leaves out is the target's own
+            if self._own(t) or t in left or not self.in_scope(db, t):
                 continue
             try:
                 self._rows("dst", db, "select top 1 1 from"

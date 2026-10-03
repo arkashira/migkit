@@ -191,6 +191,10 @@ PROGRAM = {
     # (`engines.saas`), under the Elastic License 2.0 they carry: any use
     # but offering them to others as a managed service
     "teradatasql": Program("LicenseRef-Teradata-SQL-Driver", role="driver"),
+    # SQL Server's bulk-load driver for Python (MIT), which brings
+    # Microsoft's ODBC driver with it - free to use, not open source - so
+    # it is installed on the operator's acceptance like Teradata's
+    "mssql-bulk": Program("LicenseRef-Microsoft-ODBC-Driver", role="driver"),
     "airbyte-connectors": Program("Elastic-2.0", role="connectors"),
 }
 
@@ -224,6 +228,41 @@ SECOND_READER = "second-reader"
 #: the version measured to write nothing to either side
 SECOND_READER_PACKAGE = "google-pso-data-validator==8.9.3"
 SECOND_READER_LICENCE = "Apache-2.0"
+
+#: Huawei Cloud's SDK lives in an environment of its own too: it pins
+#: pymongo 4.15.1 and pyasn1 0.6.3, older than migkit's, and is driven as
+#: a program (`migkit.huawei_sdk`)
+HUAWEI_SDK = "huawei-sdk"
+#: the release read for its requests' and answers' fields
+HUAWEI_SDK_PACKAGES = ("huaweicloudsdkcore==3.1.216",
+                       "huaweicloudsdkrds==3.1.216",
+                       "huaweicloudsdkdds==3.1.216",
+                       "huaweicloudsdkiam==3.1.216")
+#: {environment: its packages} `install_missing` makes where missing
+OWN_ENVS = {HUAWEI_SDK: HUAWEI_SDK_PACKAGES}
+
+
+def own_env(name):
+    """Where the environment of its own called `name` lives."""
+    return Path.home() / ".migkit" / name
+
+
+#: the variable that names each environment's Python where it is
+#: elsewhere (`envkeys`)
+OWN_ENV_PYTHON = {HUAWEI_SDK: "MIGKIT_HUAWEI_SDK_PYTHON"}
+
+
+def own_env_python(name):
+    """The environment's Python, or None where it is not installed here.
+    Named by its variable (`OWN_ENV_PYTHON`) - and then only that, so a
+    test can say it is absent."""
+    from . import envkeys
+    named = envkeys.text(OWN_ENV_PYTHON[name]) if name in OWN_ENV_PYTHON \
+        else ""
+    if named:
+        return named if Path(named).exists() else None
+    found = own_env(name) / "bin" / "python"
+    return str(found) if found.exists() else None
 
 
 def names():
@@ -389,6 +428,14 @@ TERMS = {
         "Db2 for z/OS is reached only where its subsystem is activated for"
         " Db2 Connect by its administrator; Db2 for i through its ODBC"
         " driver or its Mapepire server"),
+    "mssql-bulk": Terms(
+        "Microsoft's licence for its ODBC Driver for SQL Server, which the"
+        " bulk-load driver for Python brings with it (no charge)",
+        "https://pypi.org/project/mssql-python-odbc/",
+        "writing whole batches into a SQL Server target through the"
+        " server's own bulk insert",
+        "a SQL Server target is written by statements, in batches - the"
+        " same rows, more slowly"),
     "teradatasql": Terms(
         "Teradata's licence for its SQL driver for Python (no charge; its"
         " early-release features, FastLoad and FastExport among them,"
@@ -557,30 +604,48 @@ def db2_connect_present():
     return db2_connect_licence() is not None
 
 
-#: Teradata's driver, and the terms the certified SaaS connectors run
-#: under: not programs on PATH
+#: Teradata's driver, SQL Server's bulk-load driver, and the terms the
+#: certified SaaS connectors run under: not programs on PATH
 TERADATA_DRIVER, SAAS_CONNECTORS = "teradatasql", "airbyte-connectors"
+MSSQL_BULK = "mssql-bulk"
+
+#: the Python packages under closed terms installed into migkit's own
+#: environment once accepted: (what is installed, the modules that say it
+#: is here)
+DRIVERS = {TERADATA_DRIVER: ("teradatasql", ("teradatasql",)),
+           MSSQL_BULK: ("mssql-python>=1.15",
+                        ("mssql_python", "mssql_py_core"))}
 
 
-def teradata_driver_present():
+def driver_present(name):
     import importlib.util
-    return importlib.util.find_spec("teradatasql") is not None
+    return all(importlib.util.find_spec(m) is not None
+               for m in DRIVERS[name][1])
 
 
-def install_teradata(log=print):
-    """Teradata's driver into migkit's own environment, once its terms are
-    accepted: by the package manager migkit runs under where there is
+def install_driver(name, log=print):
+    """A driver of `DRIVERS` into migkit's own environment, once its terms
+    are accepted: by the package manager migkit runs under where there is
     one, else by pip. True once it imports."""
     import sys
+    package = DRIVERS[name][0]
     uv = which("uv")
-    step = ([uv, "pip", "install", "--python", sys.executable,
-             TERADATA_DRIVER] if uv else
-            [sys.executable, "-m", "pip", "install", "-q", TERADATA_DRIVER])
+    step = ([uv, "pip", "install", "--python", sys.executable, package]
+            if uv else
+            [sys.executable, "-m", "pip", "install", "-q", package])
     if not _step(step, log, "it did not install"):
         return False
     import importlib
     importlib.invalidate_caches()
-    return teradata_driver_present()
+    return driver_present(name)
+
+
+def teradata_driver_present():
+    return driver_present(TERADATA_DRIVER)
+
+
+def install_teradata(log=print):
+    return install_driver(TERADATA_DRIVER, log)
 
 
 def install_ibm(component, log=print):
@@ -692,6 +757,8 @@ def _present(cmd):
         return db2_connect_present()
     if cmd == TERADATA_DRIVER:
         return teradata_driver_present()
+    if cmd in DRIVERS:
+        return driver_present(cmd)
     if cmd == SAAS_CONNECTORS:
         return terms_accepted(SAAS_CONNECTORS)
     if cmd in SOURCE_BUILDS:
@@ -914,6 +981,10 @@ CAPABILITIES = [
     ("SQL Server: verify",
      "compare rows and objects",
      [], ["sqlcmd"]),
+    ("SQL Server: bulk load",
+     "write whole batches into a SQL Server target through the server's"
+     " own bulk insert",
+     [], [MSSQL_BULK]),
     ("Db2 for i (IBM i): verify, copy and follow",
      "compare and copy tables, and follow their journal; its own driver"
      " carries the types as IBM i keeps them",
@@ -1065,7 +1136,7 @@ def by_hand(programs):
             continue    # built from its source (`install_from_source`)
         if c in (IBMI_ODBC, DB2_CONNECT):
             continue    # IBM's, put in place by `install_ibm`
-        if c in (TERADATA_DRIVER, SAAS_CONNECTORS):
+        if c in DRIVERS or c == SAAS_CONNECTORS:
             continue    # put in place, or accepted, by `install_missing`
         formula, apt = PROGRAMS.get(c, ("", ""))
         if not (mgr and (formula if mgr == "brew" else apt)):
@@ -1200,6 +1271,8 @@ def install_missing(log=print, ask=None):
     # for here and used where a hop runs one - docker pulls a container
     # where it runs, as it pulls the pipeline's images
     teradata = TERADATA_DRIVER in wanted and not _present(TERADATA_DRIVER)
+    drivers = [c for c in wanted if c in DRIVERS and c != TERADATA_DRIVER
+               and not _present(c)]
     redo = REDO_READER in wanted and not _present(REDO_READER)
     # the terms first, all of them, before anything is fetched or built: a
     # question asked halfway through a long download is one nobody is
@@ -1209,7 +1282,7 @@ def install_missing(log=print, ask=None):
     answer = accept_terms(fetch_them + ibm + [i for i in IMAGES if i in TERMS]
                           + ([REDO_READER_CLIENT] if redo else [])
                           + ([TERADATA_DRIVER] if teradata else [])
-                          + [SAAS_CONNECTORS], ask, log)
+                          + drivers + [SAAS_CONNECTORS], ask, log)
     if _bundle() is not None:
         _load_images(answer, log)
     java = sorted({NEEDS_JAVA[c][0 if mgr == "brew" else 1]
@@ -1240,6 +1313,11 @@ def install_missing(log=print, ask=None):
         if not install_teradata(log):
             log("  the Teradata driver is not in place; run migkit doctor"
                 " again to see which capability is still short")
+    for n, cmd in enumerate([c for c in drivers if answer.get(c)], 1):
+        log(f"installing driver {n} ...")
+        if not install_driver(cmd, log):
+            log(f"  driver {n} is not in place; run migkit doctor again to"
+                " see which capability is still short")
     for n, cmd in enumerate([c for c in ibm if answer.get(c)], 1):
         log(f"putting IBM component {n} in place ...")
         if not install_ibm(cmd, log):
@@ -1253,6 +1331,14 @@ def install_missing(log=print, ask=None):
                 " to see which capability is still short")
     if not _present(SECOND_READER):
         install_second_reader(log)
+    envs = [name for name in OWN_ENVS if own_env_python(name) is None]
+    for n, name in enumerate(envs, 1):
+        install_own_env(
+            own_env(name), OWN_ENVS[name], log,
+            (f"installing component {n} of {len(envs)} in an environment of"
+             " its own ...",
+             f"  component {n} did not install; everything else still"
+             " works, and migkit doctor --install tries again"))
     if redo and answer.get(REDO_READER_CLIENT):
         install_redo_reader(log)
     if not _present(COMPILED_MOVER):
@@ -1766,32 +1852,48 @@ def install_second_reader(log=print):
     index at all where one is named. Said in migkit's words; the package
     is nobody's business but migkit's.
     """
-    import sys
-    home = Path.home() / ".migkit" / "second-reader"
-    log("installing the independent second reading in its own environment"
-        " (a large download, once) ...")
     what = (["-r", str(SECOND_READER_LOCK), "--require-hashes"]
             if SECOND_READER_LOCK.exists() else [SECOND_READER_PACKAGE])
     bundle = _bundle()
     if bundle is not None:
         what += ["--no-index", "--find-links",
                  str(bundle.root / "second-reader")]
+    return install_own_env(
+        own_env(SECOND_READER), what, log,
+        ("installing the independent second reading in its own environment"
+         " (a large download, once) ...",
+         "  the second reading did not install; everything else still"
+         " works, and migkit doctor --install tries again"))
+
+
+def install_own_env(home, packages, log, said):
+    """An environment of its own at `home` with `packages` in it - their
+    names, or a lock's arguments - beside migkit's, for a library whose
+    dependencies would break migkit's. `said` is (the line said before,
+    the line said where it did not install). On Python 3.12 where the
+    package manager can fetch one; a program the machine does not have is
+    a failed install, said as such."""
+    import sys
+    first, failed = said
+    log(first)
     uv = which("uv")
-    failed = "the second reading did not install"
     quiet = (lambda m: None)
-    if uv:
-        made = _step([uv, "venv", "-q", "--python", "3.12", str(home)],
-                     quiet, failed) and _step(
-            [uv, "pip", "install", "-q", "--python",
-             str(home / "bin" / "python"), *what], quiet, failed)
-    else:
-        made = _step([sys.executable, "-m", "venv", str(home)], quiet,
-                     failed) and _step(
-            [str(home / "bin" / "pip"), "install", "-q", *what], quiet,
-            failed)
+    why = failed.strip()
+    try:
+        if uv:
+            made = _step([uv, "venv", "-q", "--python", "3.12", str(home)],
+                         quiet, why) and _step(
+                [uv, "pip", "install", "-q", "--python",
+                 str(home / "bin" / "python"), *packages], quiet, why)
+        else:
+            made = _step([sys.executable, "-m", "venv", str(home)], quiet,
+                         why) and _step(
+                [str(home / "bin" / "pip"), "install", "-q", *packages],
+                quiet, why)
+    except OSError:
+        made = False
     if not made:
-        log("  the second reading did not install; everything else still"
-            " works, and migkit doctor --install tries again")
+        log(failed)
         return False
     return True
 
@@ -1923,7 +2025,8 @@ AGPL_COMPATIBLE = {
     "0BSD", "AGPL-3.0-only", "AGPL-3.0-or-later", "Apache-2.0",
     "BSD-2-Clause", "BSD-3-Clause", "BSL-1.0", "CC0-1.0", "GPL-2.0-or-later",
     "GPL-3.0-only", "GPL-3.0-or-later", "HPND", "ISC", "LGPL-2.1-only",
-    "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later", "MIT",
+    "LGPL-2.0-or-later", "LGPL-2.1-or-later", "LGPL-3.0-only",
+    "LGPL-3.0-or-later", "MIT",
     "MIT-0", "MPL-2.0", "PSF-2.0", "Python-2.0", "UPL-1.0", "Unlicense",
     "Zlib", "PostgreSQL",
 }
@@ -1952,6 +2055,11 @@ _SPDX = [
     (r"^lgpl with exceptions$", "LGPL-3.0-or-later"),
     (r"^gnu general public license v3 or later \(gplv3\+\)$",
      "GPL-3.0-or-later"),
+    (r"^gnu lesser general public license v2 or later \(lgplv2\+\)$",
+     "LGPL-2.0-or-later"),
+    (r"^universal permissive license(?: \(upl\))?(?:,? (?:v|version )?1\.0)?$",
+     "UPL-1.0"),
+    (r"^mit no attribution(?: license)?(?: \(mit-0\))?$", "MIT-0"),
 ]
 
 
@@ -2003,10 +2111,13 @@ def _licences_of(dist):
     meta = dist.metadata
     expr = meta.get("License-Expression")
     raw = (meta.get("License") or "").strip()
-    if not expr and re.fullmatch(r"[\w.+-]+(\s+OR\s+[\w.+-]+)+", raw):
-        # an SPDX expression of alternatives written in the free-text
-        # field (simplejson's `MIT OR AFL-2.1`)
-        expr = raw
+    parts = re.split(r"\s+(OR|AND)\s+", raw) if "\n" not in raw else [raw]
+    if not expr and len(parts) > 1:
+        # an expression written in the free-text field - alternatives
+        # (simplejson's `MIT OR AFL-2.1`, `BSD 3-Clause OR Apache-2.0`) or
+        # both (`Apache-2.0 AND MIT`) - each part in SPDX's words
+        expr = " ".join(p if p in ("OR", "AND") else spdx_of(p)
+                        for p in parts)
     if expr:
         # `A OR B` is either, at the user's choice; `A AND B` is both
         alts = [a.strip("() ") for a in re.split(r"\s+OR\s+", expr)]

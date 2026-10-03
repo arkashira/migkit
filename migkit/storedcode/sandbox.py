@@ -288,6 +288,7 @@ class Sandbox:
         self.twin = HeteroEngine(Hop(
             name=f"{self.hop.name}-proof", engine="hetero", source=src_ep,
             target=dst_ep, databases=[self.db], exclude=self.hop.exclude,
+            include=list(getattr(self.hop, "include", None) or []),
             options=opts, db_map=dict(self.hop.db_map or {}),
             mapping=dict(self.hop.mapping or {})))
         self._fresh_databases()
@@ -330,6 +331,13 @@ class Sandbox:
                             " docker is not on this machine")
         prefix = str(opts.get("name") or f"migkit-sandbox-{self.hop.name}")
         ports = list(opts.get("ports") or [])
+        from .convert import emulating
+        kept = emulating(self.pair.dst_engine, "dst", self.db) - {"mariadb"}
+        if kept:
+            raise NoSandbox("the target is an emulation of another engine"
+                            f" ({', '.join(sorted(kept))}), which migkit"
+                            " cannot start a copy of itself; name one in"
+                            " the hop's proof_sandbox")
         out = []
         for k, (engine, eng, side) in enumerate((
                 (self.pair.src_name, self.pair.src_engine, "src"),
@@ -642,7 +650,7 @@ class Sandbox:
             self._exec(self.dst, self.tdb, self._split(
                 pair.dst_engine.table_ddl("dst", db, t)))
         pairs, _, _, _ = pair.match_tables(src_tables, dst_tables,
-                                           pair._rename)
+                                           pair._renamer(db))
         self.tables = dict(pairs)
         sample = self._sample(src_tables, src_fks)
         self._carry(src_tables, sample)
@@ -766,6 +774,7 @@ class Sandbox:
             name=f"{self.hop.name}-proof-sample", engine="hetero",
             source=self.hop.source, target=self.src.hop.target,
             databases=[db], exclude=self.hop.exclude,
+            include=list(getattr(self.hop, "include", None) or []),
             options={"source_engine": pair.src_name,
                      "target_engine": pair.src_name},
             mapping={"where": where}))

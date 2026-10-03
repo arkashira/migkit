@@ -72,6 +72,49 @@ def system_principals_sql(engine, column):
     return "(" + " or ".join(parts) + ")"
 
 
+#: what a check of accounts says on a hop whose move does not carry them
+NOT_CARRIED = ("the hop does not carry users, roles or grants (accounts:"
+               " false) - not compared")
+
+
+def carried(hop):
+    """Whether the hop's move carries users, roles and grants: not where
+    the operator says it does not - `accounts: false`, or `objects:
+    {roles: false}`, two ways of saying one thing - because the target's
+    accounts are made apart from this move. The checks of them are then
+    skipped and said as not compared (`NOT_CARRIED`) - never as the same -
+    and no repair grants what the move was not asked to carry. A service's
+    job that moves none is not taken as saying so (`imports`): the
+    application needs them on the target all the same."""
+    if (getattr(hop, "options", None) or {}).get("accounts") is False:
+        return False
+    from .config import objects_of
+    try:
+        return objects_of(hop).get("roles", True) is not False
+    except SystemExit:
+        return True
+
+
+def role_names(hop):
+    """The patterns of the accounts the hop names (`objects: {roles:
+    [...]}`), or None where it carries every one (or none - `carried`)."""
+    from .config import objects_of
+    try:
+        got = objects_of(hop).get("roles", True)
+    except SystemExit:
+        return None
+    return got if isinstance(got, list) else None
+
+
+def role_taken(hop, key):
+    """Whether an account the comparison keys as `key` - a role, `user@host`,
+    `database.user` - is one the hop names (`Hop.takes_object`): by its
+    whole key, or by the user's name alone where it has a host."""
+    key = "@".join(key) if isinstance(key, tuple) else str(key)
+    names = [key] + ([key.split("@", 1)[0]] if "@" in key else [])
+    return any(hop.takes_object("roles", n) for n in names)
+
+
 def _h(x):
     b = x if isinstance(x, bytes) else str(x or "").encode()
     return hashlib.md5(b, usedforsecurity=False).hexdigest()[:10]
@@ -528,6 +571,14 @@ def compare(hop, say=print, sides=None):
         from .capabilities import require
         require(eng, "users")
         raise SystemExit(f"users: engine {eng} not supported")
+    if role_names(hop) is not None:
+        # the roles the hop names, and only those (`objects: {roles:
+        # [...]}`): every other account is the target's own to keep
+        def keep(keys):
+            return None if keys is None else type(keys)(
+                k for k in keys if role_taken(hop, k))
+        skeys, tkeys = keep(skeys), keep(tkeys)
+        ad, gm, gx, pw = keep(ad), keep(gm), keep(gx), keep(pw)
     missing = sorted(skeys - tkeys)
     extra = sorted(tkeys - skeys)
     out = {"check": "users", "hop": hop.name, "engine": eng,
@@ -3274,6 +3325,12 @@ def run(hop_name, mode, apply=False, pw_file="", say=print):
         raise SystemExit(mongo_setpw(hop, passwords, apply, say))
     elif mode == "rollback":
         rollback(hop, apply, say)
+    elif not carried(hop):
+        say(f"hop={hop.name}: {NOT_CARRIED}")
+        if mode == "verify":
+            from .verdict import VERDICTS
+            say("VERIFY: not compared")
+            raise SystemExit(VERDICTS["incomplete"].exit)
     else:
         out, _ = compare(hop, say)
         if mode == "verify":

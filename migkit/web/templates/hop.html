@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}{{ hop.name }} - migkit{% endblock %}
+{% block main %}
+{% set api = "/api/v1/hops/" ~ (hop.name|urlencode) %}
+<header class="hophead">
+  <h1><span class="dot {{ card.verdict or 'none' }}"></span>{{ hop.name }}
+    <span class="badge">your role: {{ role }}</span></h1>
+  <p class="route">{{ card.route }}</p>
+  <p><span class="pill">{{ card.engine }}</span> <span class="pill">goal {{ card.goal }}</span>
+  {% if card.verdict %}<span class="pill {{ card.verdict }}">last check: {{ card.verdict }}</span>{% else %}<span class="pill">not checked yet</span>{% endif %}</p>
+  <nav class="sections">
+    <a href="#outcome">What it does</a> <a href="#time">How long</a>
+    <a href="#now">Now</a> <a href="#waiting">Waiting</a>
+    <a href="#runs">Runs</a> <a href="#evidence">Evidence</a>
+    <a href="#decisions">Decision record</a> <a href="#config">Configuration</a>
+  </nav>
+</header>
+
+<section class="card" id="outcome">
+  <h2>What this hop does</h2>
+  <ul class="said">{% for line in outcome.goal %}<li>{{ line }}</li>{% endfor %}</ul>
+  {% if outcome.limits %}
+  <h3>Its limits</h3>
+  <ul class="said">{% for line in outcome.limits %}<li>{{ line }}</li>{% endfor %}</ul>
+  {% endif %}
+</section>
+
+<section class="card" id="time">
+  <h2>How long it would take</h2>
+  {% if not outcome.databases %}
+  <p class="muted">No plan has been made yet. {% if may.operator %}The plan
+  asks the two servers and writes nothing to either:{% endif %}</p>
+  {% endif %}
+  {% for d in outcome.databases %}
+  <h3>{{ d.db }}</h3>
+  <table>
+    <thead><tr><th>Phase</th><th>About</th><th>At most (p90)</th><th>Set by</th><th>From</th></tr></thead>
+    <tbody>
+    {% for p in d.phases %}
+      <tr><td>{{ p.name }}</td>
+        <td>{% if p.never %}never{% elif p.p50 is none %}not estimated{% else %}{{ p.p50|took }}{% endif %}</td>
+        <td>{% if p.p90 %}{{ p.p90|took }}{% else %}-{% endif %}</td>
+        <td>{{ p.binds or "-" }}</td><td>{{ p.truth or p.detail or "-" }}</td></tr>
+    {% endfor %}
+    </tbody>
+    <tfoot><tr><th>All of it</th><th>{{ d.p50|took }}</th><th>{{ d.p90|took }}</th><th colspan="2"></th></tr></tfoot>
+  </table>
+  {% if d.outage %}
+  <p><b>The outage at the cutover:</b> about {{ d.outage.p50|took }}{% if d.outage.p90 %}, at most {{ d.outage.p90|took }} (p90){% endif %}.</p>
+  {% endif %}
+  {% if d.limits %}<p class="note">{{ d.limits }}</p>{% endif %}
+  {% endfor %}
+  {% if may.operator %}
+  <form data-api="{{ api }}/plan" data-go-run="{{ hop.name }}" class="row">
+    <label>Mode <select name="mode"><option>full</option><option>cdc</option><option>full+cdc</option></select></label>
+    <label>Database <input name="db" placeholder="all"></label>
+    <button type="submit">Make the plan</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card" id="now" data-live="{{ api }}/progress" data-every="10">
+  <h2>Now</h2>
+  <div data-slot="verdict">
+  {% if progress.verdict %}
+    <p><span class="pill {{ progress.verdict.status }}">{{ progress.verdict.status }}</span>
+    as of {{ progress.verdict.generated }}
+    {% for k, v in progress.verdict.totals.items() if v %}<span class="pill">{{ k }} {{ v }}</span>{% endfor %}</p>
+    {% if progress.verdict.why %}<p class="muted">{{ progress.verdict.why }}</p>{% endif %}
+    {% if progress.verdict.findings %}
+    <ul class="findings">{% for f in progress.verdict.findings[:20] %}<li><b>{{ f.scope }}</b> {{ f.check }}: {{ f.detail }}</li>{% endfor %}</ul>
+    {% endif %}
+  {% else %}<p class="muted">No check has run yet.</p>{% endif %}
+  </div>
+  <table data-slot="databases">
+    <thead><tr><th>Database</th><th>The move</th><th>The change tail</th><th></th></tr></thead>
+    <tbody>
+    {% for d in progress.databases %}
+    <tr><td>{{ d.db }}</td>
+      <td>{% if d.move %}{{ d.move.rows_done|num }}{% if d.move.rows_total %} of {{ d.move.rows_total|num }}{% endif %} rows{% if d.move.done %}, done{% elif d.move.eta_copy %}, about {{ d.move.eta_copy|took }} left{% endif %}{% if d.move.binding %}; held by {{ d.move.binding }}{% endif %}{% else %}-{% endif %}</td>
+      <td>{% if d.tail %}{% if d.tail.running %}{% if d.tail.paused %}held{% else %}running{% endif %}{% if d.tail.behind is not none %}, {{ d.tail.behind|took }} behind{% endif %}{% else %}stopped{% if d.tail.stopped %}: {{ d.tail.stopped }}{% endif %}{% endif %}{% else %}-{% endif %}</td>
+      <td>{% if d.tail and d.tail.running and may.operator %}
+        {% if d.tail.paused %}<button data-post="{{ api }}/tails/{{ d.db|urlencode }}/resume">Let it go on</button>
+        {% else %}<button data-post="{{ api }}/tails/{{ d.db|urlencode }}/hold" data-confirm="Hold the change tail of {{ d.db }} between batches?">Hold</button>{% endif %}
+        <button data-post="{{ api }}/tails/{{ d.db|urlencode }}/stop" data-confirm="End the change tail of {{ d.db }} at its next batch?">End</button>
+      {% endif %}</td></tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">Nothing has moved yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <details><summary>The metrics ({{ progress.metrics|length }})</summary>
+  <table class="metrics" data-slot="metrics">
+    <thead><tr><th>Metric</th><th>Of</th><th>Value</th></tr></thead>
+    <tbody>{% for m in progress.metrics %}<tr title="{{ m.help }}"><td>{{ m.name }}</td><td>{% for k, v in m.labels.items() %}{{ k }}={{ v }} {% endfor %}</td><td>{{ m.value }}</td></tr>{% endfor %}</tbody>
+  </table>
+  </details>
+</section>
+
+<section class="card" id="waiting">
+  <h2>Waiting for someone</h2>
+  <h3>Approvals</h3>
+  {% if not approvals %}<p class="muted">No step is waiting for approval.</p>{% endif %}
+  {% if approvals and not counts %}<p class="note">Approvals for this hop are signed with approvers' own keys; one given here would not count, as the hop's access names no approver.</p>{% endif %}
+  {% for a in approvals %}
+  <div class="waiting">
+    <h4>{{ a.step }}{% if a.db %} on {{ a.db }}{% endif %} <span class="pill">{{ a.have|length }} of {{ a.need }}</span></h4>
+    <p>Asked by <b>{{ a.asked_by }}</b>, standing until {{ a.expires|when }}.</p>
+    {% if a.lets %}<p><b>Approving lets this happen:</b> {{ a.lets }}.</p>{% endif %}
+    {% if a.detail %}<pre class="detail">{{ a.detail|join("\n") }}</pre>{% endif %}
+    {% if a.have %}<p class="muted">Approved by {{ a.have|join(", ") }}.</p>{% endif %}
+    {% if a.may %}
+    <button data-post="{{ api }}/approvals/{{ a.id|urlencode }}" data-body='{{ {"db": a.db}|tojson }}' data-confirm="Approve {{ a.step }}{% if a.db %} on {{ a.db }}{% endif %}? {{ a.lets }}.">Approve as {{ me.id }}</button>
+    {% else %}<p class="muted">{{ a.why_not }}.</p>{% endif %}
+  </div>
+  {% endfor %}
+  <h3>Changes on the source a faster way needs</h3>
+  {% if not offers.offered %}<p class="muted">No change on the source is offered.</p>{% endif %}
+  {% for o in offers.offered %}
+  <div class="waiting">
+    <h4>{{ o.said }} <span class="pill">for {{ o["for"] }}</span></h4>
+    <pre class="detail">{{ o.lines|join("\n") }}</pre>
+    {% if may.operator %}
+    <p class="row">
+      <button data-post="{{ api }}/offers/{{ o.change|urlencode }}" data-body='{"answer": "yes"}' data-confirm="Yes: migkit makes this change on the source, behind the hop's approvals, and takes it off again after.">Yes, change the source</button>
+      <button data-post="{{ api }}/offers/{{ o.change|urlencode }}" data-body='{"answer": "no"}'>No, leave it</button>
+      <button data-post="{{ api }}/offers/{{ o.change|urlencode }}" data-body='{"answer": "dba"}'>Hand it to the DBA</button>
+    </p>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% if offers.answers %}
+  <p class="muted">Answered: {% for a in offers.answers %}{{ a.change }} {{ a.answer }} ({{ a.where }}){% if not loop.last %}; {% endif %}{% endfor %}.</p>
+  {% endif %}
+  {% if offers.handed %}
+  <h4>The DBA's to make</h4>
+  {% for h in offers.handed %}<p><b>{{ h.said }}</b> - {{ h.why }}</p><pre class="detail">{{ h.make|join("\n") }}</pre>{% endfor %}
+  {% endif %}
+</section>
+
+<section class="card" id="runs">
+  <h2>Runs</h2>
+  {% if may.operator %}
+  <form data-api="{{ api }}/runs" data-go-run="{{ hop.name }}" class="run-form">
+    <label>Run <select name="action" data-describe>
+      {% for name, a in actions.items() %}<option value="{{ name }}" title="{{ a.what }}">{{ name }}</option>{% endfor %}
+    </select></label>
+    <label>Database <input name="db" placeholder="all"></label>
+    <label>Table <input name="table" placeholder="all"></label>
+    <label>Mode <input name="mode" placeholder="as the run takes"></label>
+    <label><input type="checkbox" name="go" value="1"> go (write; without it a dry run where the run has one)</label>
+    <label><input type="checkbox" name="apply" value="1"> apply</label>
+    <button type="submit" data-confirm="Start this run on {{ hop.name }}? A run that writes goes through the hop's guards and approvals, as at a terminal.">Start</button>
+  </form>
+  <ul class="actions">{% for name, a in actions.items() %}<li><b>{{ name }}</b>: {{ a.what }}</li>{% endfor %}</ul>
+  {% endif %}
+  <table>
+    <thead><tr><th>Run</th><th>What</th><th>By</th><th>State</th><th>Exit</th></tr></thead>
+    <tbody>
+    {% for r in runs %}
+    <tr><td><a href="/hops/{{ hop.name|urlencode }}/runs/{{ r.id|urlencode }}">{{ r.id }}</a></td>
+      <td>{{ r.action }}</td><td>{{ r.by }}</td><td><span class="pill {{ r.state }}">{{ r.state }}</span></td>
+      <td>{{ r.exit if r.exit is not none else "-" }}</td></tr>
+    {% else %}<tr><td colspan="5" class="muted">No run started from here yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card" id="evidence">
+  <h2>Evidence</h2>
+  <p>The hop's record: {{ evidence.record.entries }} entries,
+  {% if evidence.record.whole %}<span class="pill same">whole</span>{% else %}<span class="pill error">broken: {{ evidence.record.broken }}</span>{% endif %}</p>
+  {% if not evidence.bundles %}<p class="muted">No evidence exported yet.{% if may.operator %} The evidence export is a run: "report" above.{% endif %}</p>{% endif %}
+  <table>
+    <thead><tr><th>Bundle</th><th>Written</th><th>Files</th></tr></thead>
+    <tbody>
+    {% for b in evidence.bundles %}
+    <tr><td><a href="/hops/{{ hop.name|urlencode }}/evidence/{{ (b.run or 'all')|urlencode }}">{{ b.run or "the whole history" }}</a></td>
+      <td>{{ b.at|when }}</td>
+      <td>{% for f in b.files %}<a href="{{ api }}/evidence/{% if b.run %}{{ b.run|urlencode }}/{% endif %}{{ f }}" download>{{ f }}</a> {% endfor %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card" id="decisions">
+  <h2>Decision record</h2>
+  {% if decisions is none %}
+  <p class="muted">Why each way was chosen is kept in the hop's decision
+  record, shown here only when asked: <a href="/hops/{{ hop.name|urlencode }}/decisions">read it</a>,
+  or turn it on for every hop on your <a href="/account">account</a>.</p>
+  {% else %}
+  {% for d in decisions %}
+  <div class="decision"><p><b>{{ d.work }}</b>: {{ d.way }} - {{ d.reason }} <span class="muted">{{ d.at }}</span></p>
+  {% if d.passed %}<ul>{% for p in d.passed %}<li>not {{ p.way }}: {{ p.why }}</li>{% endfor %}</ul>{% endif %}</div>
+  {% else %}<p class="muted">Nothing decided yet.</p>
+  {% endfor %}
+  <p><a href="/hops/{{ hop.name|urlencode }}/decisions">The whole record</a></p>
+  {% endif %}
+</section>
+
+<section class="card" id="config">
+  <h2>Configuration</h2>
+  <details><summary>The hop as its file says it, secrets hidden</summary>
+  <pre class="detail">{{ config.config|tojson(indent=2) }}</pre>
+  {% if config.left_out %}<p class="muted">{{ config.left_out }} more option{{ "s" if config.left_out > 1 }} in the file.</p>{% endif %}
+  <p><a href="{{ api }}/validation">What is wrong with it, if anything</a></p>
+  </details>
+  <details><summary>Who is told what</summary>
+  <ul>
+    {% for r in notifications.receivers %}<li>{{ r.kind }}{% if r.written_out %} (written out in the file){% endif %}</li>{% else %}<li class="muted">No receiver.</li>{% endfor %}
+  </ul>
+  <p>Events: {{ notifications.events|join(", ") }}; a tail behind by more than {{ notifications.lag }} s is said.</p>
+  {% if may.admin and notifications.receivers %}<button data-post="{{ api }}/notifications/test" data-confirm="Send the hop's receivers a test message?">Send a test message</button>{% endif %}
+  </details>
+</section>
+{% endblock %}

@@ -483,7 +483,7 @@ class Db2iEngine(Db2Engine):
             out += pair.check_data(db, t, stream)
         return out
 
-    def check_deep(self, db):
+    def _pending(self, db):
         """Constraints on the target left in check pending by a load: IBM i
         does not enforce them until checked."""
         try:
@@ -496,6 +496,7 @@ class Db2iEngine(Db2Engine):
             return [Result("deep", f"{db} target tables", "error",
                            "could not read the target's constraints:"
                            f" {str(e).splitlines()[0][:90]}")]
+        held = self._held_in_scope(db, held)
         if held:
             return [Result("deep", f"{db} target tables", "diff",
                            f"{len(held)} constraints in check pending: "
