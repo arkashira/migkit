@@ -206,8 +206,8 @@ class Table:
 
 
 def _table(pair, db, t, rule, there):
-    got, _, _, _ = pair.match_tables([t], there, pair._rename)
-    target = got[0][1] if got else pair._leaf(pair._rename(t))
+    got, _, _, _ = pair.match_tables([t], there, pair._renamer(db))
+    target = got[0][1] if got else pair._leaf(pair._rename(t, db))
     key = list(pair.src_engine.neutral_key("src", db, t) or [])
     if not got:
         return Table(t, target, rule, key, [], [], [])

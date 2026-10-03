@@ -2632,14 +2632,19 @@ class MySQLEngine(Engine):
         # ambiguity as the row hash had, just with rarer characters
         return rowtext.mysql_row(pks)
 
-    def _scope(self, side, db, t):
+    def _scope(self, side, db, t, renamed=False):
         """What a check reads of table `t` on one side, as a FROM item
         aliased `t`: the whole table, or the rows the hop's row filter
         selects. The PostgreSQL engine has the same method for the same
         reason - the filter the move applies was never applied by any check,
         so a filtered move was reported as missing rows for good. Every read
-        a check makes of a table goes through here."""
-        qt = f"`{self._d(side, db)}`.`{t}`"
+        a check makes of a table goes through here. `renamed`: the target's
+        table under the name the hop gives it there (`Hop.target_table_in`),
+        as the delta reads it by key."""
+        name = (self.hop.target_table_in(db, t)
+                if renamed and side == "dst"
+                and hasattr(self.hop, "target_table_in") else t)
+        qt = f"`{self._d(side, db)}`.`{name}`"
         pred = (self.hop.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         return f"(select * from {qt} where {pred}) t" if pred else f"{qt} t"
@@ -2792,9 +2797,12 @@ class MySQLEngine(Engine):
               if col else _cp.Checkpoint(None))
         # "md5-64": ranges a run that summed crc32 and 32 bits of md5, or
         # folded by XOR, recorded are not mixed in; a resumed run hashes
-        # with the salt its partials were taken with
-        todo = cp.begin(scope, "md5-64:" + expr, pk_ranges) if col \
-            else pk_ranges
+        # with the salt its partials were taken with; and partials taken
+        # under another row filter are not added in
+        pred = self.hop.row_filter(db, t) if col else None
+        todo = cp.begin(scope, "md5-64:" + expr + (f" where {pred}" if pred
+                                                   else ""),
+                        pk_ranges) if col else pk_ranges
         done_before = cp.resumed(scope) if col else 0
         salt = cp.salt(scope, self.digest_salt()) if col \
             else self.digest_salt()
@@ -3066,6 +3074,11 @@ class MySQLEngine(Engine):
         return diff
 
     def _compare_pks(self, db, t, keys):
+        """(missing, extra, changed) of the keys a delta saw change, or None
+        without a key: each side read as the check reads it (`_scope`) -
+        through the hop's row filter, the target under its own name. Read
+        raw, a changed row the filter leaves behind was missing on the
+        target every cycle and the position never moved."""
         pks = self._pk_cols(db, t)
         if not pks:
             return None
@@ -3089,8 +3102,12 @@ class MySQLEngine(Engine):
                     # decoded by the same module that encoded it; splitting
                     # on a tab here is what a tab inside a key value broke
                     args = [x for k in chunk for x in rowtext.parse(k)]
+                # the keys go as arguments, so a `%` the filter holds is
+                # doubled for the driver to read back as itself
+                frm = self._scope(side, db, t, renamed=True).replace("%",
+                                                                     "%%")
                 q = (f"select {pkexpr}, md5({expr})"
-                     f" from `{self._d(side, db)}`.`{t}` where {where}")
+                     f" from {frm} where {where}")
                 out.update({r[0]: r[1] for r in self._q(side, q, args)})
             return out
         src, dst = fetch("src"), fetch("dst")
@@ -8327,12 +8344,22 @@ class MySQLEngine(Engine):
             [n for n, ty in types.items() if sr.padded(ty)])
 
     def watch_sample(self, db):
+        """The server's own row estimates, per table on both sides, summed
+        over what the hop takes (`watched`). Not said per table: InnoDB's
+        estimate of a table moves between two readings nobody wrote
+        between, which would read as a table still being written."""
         import time
-        q = ("select coalesce(sum(table_rows), 0) from information_schema.tables"
-             " where table_schema=%s")
+        q = ("select table_name, coalesce(table_rows, 0)"
+             " from information_schema.tables where table_schema=%s")
+
+        def rows(side, name):
+            return {str(t): int(n or 0) for t, n in self._q(side, q, (name,))}
+        src, dst, narrowed = self.watched(db, rows("src", db),
+                                          rows("dst", self._d("dst", db)))
         return {"db": db, "ts": time.time(),
-                "src_rows": int(self._q("src", q, (db,))[0][0]),
-                "dst_rows": int(self._q("dst", q, (self._d("dst", db),))[0][0])}
+                "src_rows": sum(src.values()),
+                "dst_rows": sum(dst.values()),
+                **({"narrowed": narrowed} if narrowed else {})}
 
 
 def _copy_my_range(item):

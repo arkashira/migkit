@@ -627,7 +627,7 @@ def plan(hop, eng, db):
                                                                       db)
     except Exception:  # noqa: BLE001 - a database not made yet has none
         there = []
-    pairs, _, _, _ = pair.match_tables(tables, there, pair._rename)
+    pairs, _, _, _ = pair.match_tables(tables, there, pair._renamer(db))
     have = dict(pairs)
     p = Plan(db, repair=bool(how and how["repair"]), declared=how)
     mysql_to = _mysql_declared(how) if _family(

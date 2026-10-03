@@ -2528,6 +2528,71 @@ class Engine:
                 "error": f"{type(self).__name__} has no row count to watch"
                          " - use `migkit check` for this hop"}
 
+    def watched(self, db, src, dst):
+        """What a watch sums of two sides' `{table: rows}`, as this engine's
+        listings name them: (the source's tables the hop takes, the
+        target's tables they land in - under the names the hop gives them
+        there - and the taken tables a row filter narrows, whose source
+        rows are the whole table's). Summed whole, a hop taking a few
+        tables of a billion-row database read `src~1B dst~5M` and a time
+        left that never came, and a busy table it leaves out said the
+        source was still being written. A hop that narrows nothing is
+        summed as it always was."""
+        from ..util import split_table
+        got = self._taken(db, src)
+        if got is None:
+            return src, dst, []
+        taken, narrowed = got
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        there = set()
+        for t in taken:
+            schema, name = split_table(eng, str(t))
+            s2, n2 = split_table(eng, self.hop.target_table_in(
+                db, *([schema] if schema else []), name), schema)
+            there.add(f"{s2}.{n2}" if s2 else n2)
+        return ({t: src[t] for t in taken},
+                {t: n for t, n in dst.items() if t in there}, narrowed)
+
+    def carried(self, db, facts=None):
+        """(the source's `table_facts` of the tables the move carries out
+        of `db`, the names of those a row filter narrows) - the one count
+        of what a move carries that its plan, its time, its pieces of work
+        and the rate it keeps are taken from. Every table the hop leaves
+        out is taken away: summed whole, a hop taking a few tables kept a
+        rate of every table's rows over its own seconds, and every later
+        plan - other hops' too - was read from it. A narrowed table's rows
+        and bytes are the whole table's, so a sum over it is the most the
+        move carries, never what it carries. A hop that narrows nothing
+        has every table, as it always had."""
+        facts = self.table_facts("src", db) if facts is None else facts
+        got = self._taken(db, facts or {})
+        if got is None:
+            return dict(facts or {}), []
+        taken, narrowed = got
+        return {t: facts[t] for t in taken}, narrowed
+
+    def _taken(self, db, names):
+        """([the names of `names` the hop takes], [those a row filter
+        narrows]), each as this engine's listings name it (`in_scope`) - or
+        None where the hop narrows nothing by name or by row, and every
+        name is taken whole as it always was."""
+        from ..config import scoped
+        from ..util import split_table
+        rules = self.hop.mapping or {}
+        if not (scoped(self.hop) or rules.get("tables")
+                or rules.get("where")):
+            return None
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        taken, narrowed = [], []
+        for t in names:
+            if not self.in_scope(db, t):
+                continue
+            taken.append(t)
+            schema, name = split_table(eng, str(t))
+            if self.hop.row_filter(db, *([schema] if schema else []), name):
+                narrowed.append(t)
+        return taken, sorted(narrowed)
+
     # which family of client tools this engine uses, for the version check
     ENGINE_FAMILY = ""
 
@@ -4821,6 +4886,104 @@ class Engine:
             return self.columns_pair()._compare_pks(
                 db, str(table).rpartition(".")[2], keys)
         return self._compare_pks(db, table, keys)
+
+    #: the files a delta verify keeps its position in, under a database's
+    #: reports - one an engine; PostgreSQL's is a slot on the source
+    DELTA_FILES = ("delta-pos.json", "delta-token.json",
+                   "pair-delta-token.json", "delta-offsets.json",
+                   "delta-seqno.json", "delta-ctver.json",
+                   "delta-parts.json")
+    #: the scope the delta's position was taken under, kept beside it
+    DELTA_SCOPE = "delta-scope.json"
+
+    def _delta_kept(self, db):
+        """What the delta's position for `db` was taken under, {} where
+        nothing says (a position from before this was kept, or none)."""
+        from .. import durable
+        got = durable.read_state(self.hop.report_dir(db) / self.DELTA_SCOPE,
+                                 "position")
+        return got if isinstance(got, dict) else {}
+
+    def delta_covers(self, db):
+        """Whether the delta's position for `db` stands for everything the
+        hop takes now: taken under its scope (`Hop.scope_changed`), and,
+        where it was taken again because the scope changed, a whole check
+        under this scope has found the two the same since. A delta reads
+        only what changed after its position - the changes of a table the
+        hop left out were passed over, and a table it took in later was
+        never compared whole - so the cutover's last check compares every
+        table instead (`cutover._has_delta`)."""
+        kept = self._delta_kept(db)
+        if self.hop.scope_changed(kept):
+            return False
+        return not kept.get("scope_changed_from") or \
+            self._whole_since(float(kept.get("at") or 0))
+
+    def _whole_since(self, at):
+        """Whether the hop's last check, taken after `at` under the hop's
+        scope now, found the two the same (`verdict.json`)."""
+        from .. import durable
+        p = self.hop.report_dir() / "verdict.json"
+        try:
+            got = durable.read_state(p, "cache") or {}
+            taken = p.stat().st_mtime
+        except OSError:
+            return False
+        return (taken >= at and got.get("status") == "same"
+                and not self.hop.scope_changed(got)
+                and bool(got.get("scope_fingerprint")))
+
+    def delta_forget(self, db):
+        """The delta's position for `db` gone - its slot dropped where it
+        keeps one on the source, its files removed - so the next verify
+        takes its baseline afresh."""
+        if callable(getattr(self, "delta_teardown", None)):
+            self.delta_teardown(db)
+        where = self.hop.report_dir(db)
+        for f in self.DELTA_FILES + (self.DELTA_SCOPE,):
+            (where / f).unlink(missing_ok=True)
+
+    def delta_in_scope(self, db, limit=20000, log=None):
+        """`delta_verify`, its position held to the scope it was taken
+        under (backlog P0-SCOPE.6c). Kept beside every position, so a
+        position taken under another scope is never gone on from: the
+        PostgreSQL slot had advanced past the changes of every table the
+        hop left out, and a table taken in later was then verified only
+        from wherever the position stood. Where the scope changed, the
+        position is dropped and taken again here, and every cycle says -
+        and the cutover compares every table - until a whole check under
+        the new scope finds the two the same. A position with nothing kept
+        beside it predates this, and is gone on from as it always was."""
+        from .. import durable
+        kept = self._delta_kept(db)
+        changed = self.hop.scope_changed(kept)
+        if changed:
+            self.delta_forget(db)
+        got = list(self.delta_verify(db, limit, log))
+        fp = self.hop.scope_fingerprint()
+        if kept.get("scope_fingerprint") != fp:
+            now = {"scope_fingerprint": fp, "at": time.time()}
+            if changed:
+                now["scope_changed_from"] = kept["scope_fingerprint"]
+            durable.write_json(self.hop.report_dir(db) / self.DELTA_SCOPE,
+                               now)
+            kept = now
+        if changed:
+            got.append(Result(
+                "delta", db, "warn",
+                "the hop's scope changed since the last verified position,"
+                " which was taken again here: what the hop takes now was"
+                " not compared whole, and the delta sees only what changes"
+                " from here", "",
+                f"migkit check {self.hop.name} --db {db}"))
+        elif kept.get("scope_changed_from") and not self.delta_covers(db):
+            got.append(Result(
+                "delta", db, "warn",
+                "the hop's scope changed after the delta's first position;"
+                " no whole check under the scope it has now has found the"
+                " two the same since, so the delta covers only what"
+                " changed", "", f"migkit check {self.hop.name} --db {db}"))
+        return got
 
     def _mapped_schema(self, db):
         """The schema results for the tables this engine's whole-database
