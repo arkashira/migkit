@@ -114,6 +114,44 @@ def parse_ops(value):
     return frozenset(got)
 
 
+#: the kinds of object beside the tables a hop's `objects` says it
+#: carries, and the words each is written with
+OBJECT_KINDS = {"views": ("views", "view", "matviews"),
+                "functions": ("functions", "function"),
+                "procedures": ("procedures", "procedure"),
+                "triggers": ("triggers", "trigger"),
+                "events": ("events", "event"),
+                "sequences": ("sequences", "sequence"),
+                "roles": ("roles", "role", "users", "accounts", "grants")}
+#: words that name more than one kind at once
+OBJECT_GROUPS = {"routines": ("functions", "procedures"),
+                 "routine": ("functions", "procedures")}
+
+
+def objects_of(hop):
+    """{kind: True | False | [names]} of the hop's `objects`, each kind
+    under its one name (`OBJECT_KINDS`; `routines` says functions and
+    procedures at once); a kind not said is True."""
+    raw = getattr(hop, "objects", None) or {}
+    words = {w: (k,) for k, ws in OBJECT_KINDS.items() for w in ws}
+    words.update(OBJECT_GROUPS)
+    out = {}
+    for k, v in raw.items():
+        kinds = words.get(str(k).lower())
+        if kinds is None:
+            raise SystemExit(f"objects: {k} is not a kind of object - "
+                             + ", ".join(list(OBJECT_KINDS) + ["routines"]))
+        if v in (True, None) or str(v).lower() in ("all", "true", "yes"):
+            got = True
+        elif v is False or str(v).lower() in ("none", "false", "no"):
+            got = False
+        else:
+            got = list(dict.fromkeys(scope_patterns(v)))
+        for kind in kinds:
+            out[kind] = got
+    return out
+
+
 def scope_patterns(value):
     """A hop's `include` or `exclude` as the dotted patterns every reader
     matches: a list as written, or the nested form that reads like the
@@ -608,6 +646,8 @@ class Hop:
     #: what the hop takes, where it takes less than everything - the same
     #: patterns `exclude` reads; empty takes everything (`included`)
     include: list = field(default_factory=list)
+    #: the kinds of object beside the tables it carries (`takes_object`)
+    objects: dict = field(default_factory=dict)
     service: str = ""
     big_rows: int = 5_000_000
     slice: int = 1_000_000
@@ -641,6 +681,9 @@ class Hop:
             db_map={v: k for k, v in (self.db_map or {}).items()},
             include=[self._on_target(p) for p in self.include or []],
             exclude=[self._on_target(p) for p in self.exclude or []],
+            objects={k: ([self._on_target(p) for p in v]
+                         if isinstance(v, list) else v)
+                     for k, v in objects_of(self).items()},
             mapping=mapping,
             # never `physical`: the way back would empty the old source's
             # data directory to fill it with the new primary's pages
@@ -715,6 +758,7 @@ class Hop:
                           sorted((self.db_map or {}).items())},
                "include": sorted(str(p) for p in self.include or []),
                "exclude": sorted(str(p) for p in self.exclude or []),
+               "objects": self.objects or {},
                "mapping": self.mapping or {}}
         text = json.dumps(got, sort_keys=True, default=str)
         return hashlib.sha256(text.encode()).hexdigest()[:16]
@@ -939,6 +983,25 @@ class Hop:
             if ident in rules:
                 return str(rules[ident])
         return None
+
+    def takes_object(self, kind, *parts):
+        """Whether the hop carries this object of a kind beside the tables
+        - a view, a routine, a trigger, an event, a sequence, a role - by
+        its `objects`: all of a kind (the default), none of it, or the
+        ones named, matched as every other name in the hop. A kind the hop
+        does not carry is out of its scope as an excluded table is: not
+        moved, not compared, not repaired - and said, in the scope the
+        evidence carries and before the move, so nobody takes its absence
+        on the target for a pass. A table's own objects follow the table
+        too (`excluded`)."""
+        got = objects_of(self).get(kind, True)
+        if got is True:
+            return True
+        if got is False:
+            return False
+        ids = self._ids(*self._names(*parts))
+        fold = self.folds_case()
+        return any(name_matches(i, p, fold) for p in got for i in ids)
 
     def carries(self, *parts):
         """The changes the hop carries for this table: insert, update and
@@ -1225,6 +1288,7 @@ def build_hop(name, raw):
         databases=dbs,
         exclude=scope_patterns(raw.get("exclude")),
         include=scope_patterns(raw.get("include")),
+        objects=dict(raw.get("objects") or {}),
         service=raw.get("service", ""),
         big_rows=int(raw.get("big_rows", 5_000_000)),
         slice=int(raw.get("slice", 1_000_000)),

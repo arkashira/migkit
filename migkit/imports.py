@@ -537,6 +537,8 @@ def from_tencent_dts(data, stem="hop"):
         out.raw["db_map"] = db_map
     if got["include"]:
         out.raw["include"] = got["include"]
+    if got.get("objects"):
+        out.raw["objects"] = got["objects"]
     mapping = {k: got[k] for k in ("tables", "columns", "where", "ops")
                if got.get(k)}
     if mapping:
@@ -775,20 +777,48 @@ def _tdts_selection(mode, items, notes):
             whole = False
             for t in tables:
                 _tdts_table(got, base, sch, new_sch, t, notes)
-        vmode = str(it.get("ViewMode") or "").lower()
-        if vmode == "partial":
-            whole = False
-            got["include"] += [f"{base}.{v.get('ViewName')}"
-                               for v in it.get("Views") or []
-                               if v.get("ViewName")]
-        elif vmode == "all" and tmode == "partial":
-            notes.append(f"the job takes every view of {base}; the hop names"
-                         " the tables it takes, so a view is checked only"
-                         " where include names it")
+        _tdts_objects(got, base, it)
     if whole:
         # whole databases: the databases say it
         got["include"] = []
+    # a kind every database takes whole is all of it: nothing to say
+    got["objects"] = {k: list(dict.fromkeys(v)) for k, v in
+                      got.get("objects", {}).items()
+                      if v and not all(p.endswith(".*") for p in v)}
     return got
+
+
+#: the job's per-database modes for the objects beside its tables, the
+#: list each names them in, the key a name sits under, and the kind of
+#: the hop's `objects`
+_TDTS_OBJECTS = (("ViewMode", "Views", "ViewName", "views"),
+                 ("FunctionMode", "Functions", None, "functions"),
+                 ("ProcedureMode", "Procedures", None, "procedures"),
+                 ("TriggerMode", "Triggers", None, "triggers"),
+                 ("EventMode", "Events", None, "events"),
+                 ("RoleMode", "Roles", "RoleName", "roles"))
+
+
+def _tdts_objects(got, base, item):
+    """The objects beside its tables a database of the job names one by
+    one - views, functions and procedures, triggers, events, roles - as
+    the hop's `objects` names them. Only a choice the job made by name is
+    carried: a kind it does not take at all is not one migkit leaves out
+    of the check, because the application needs it on the target all
+    the same - its absence there is a finding, said beside the hop."""
+    objects = got.setdefault("objects", {})
+    for mode_key, list_key, name_key, kind in _TDTS_OBJECTS:
+        # a database that says nothing of a kind takes all of it
+        mode = str(item.get(mode_key) or "all").lower()
+        mine = objects.setdefault(kind, [])
+        if mode == "partial":
+            for o in item.get(list_key) or []:
+                name = o.get(name_key) if name_key and isinstance(o, dict) \
+                    else o
+                if name:
+                    mine.append(f"{base}.{name}")
+        elif mode == "all":
+            mine.append(f"{base}.*")
 
 
 def _tdts_table(got, base, sch, new_sch, t, notes):
@@ -839,6 +869,13 @@ def _tdts_migrate_notes(opt, notes):
                      " (IsDstReadOnly false): a row written there directly"
                      " reads as a difference")
     adv = (opt.get("DatabaseTable") or {}).get("AdvancedObjects")
+    left = sorted({"trigger", "function", "procedure", "event"}
+                  - {str(a).lower() for a in adv or []})
+    if left:
+        notes.append(f"the job carries no {', '.join(x + 's' for x in left)}:"
+                     " the check shows"
+                     " them missing on the target until they are made there"
+                     " (migkit sync --kind schema makes them)")
     if adv:
         notes.append(f"the job also takes {', '.join(adv)}; migkit compares"
                      " them with the schema")

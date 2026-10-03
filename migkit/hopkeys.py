@@ -73,6 +73,11 @@ HOP_KEYS = {
     "exclude": Key("databases, schemas or tables left alone - dotted"
                    " names and patterns, or databases each with all, its"
                    " tables or its schemas", "list|dict"),
+    "objects": Key("the kinds of object beside the tables carried: views,"
+                   " routines, triggers, events, sequences, roles - each"
+                   " all (the default), none, or a list of names; one not"
+                   " carried is out of scope as an excluded table is",
+                   "dict"),
     "include": Key("the only databases, schemas or tables taken - moved,"
                    " followed, checked and repaired - the rest left alone"
                    " as if excluded; exclude wins where both name one."
@@ -1594,6 +1599,23 @@ def _patterns_or_none(value):
         return []
 
 
+def _objects_problems(where, raw):
+    """`objects` said wrong: a kind that is not one, a value that is
+    neither all, none nor names."""
+    from .config import objects_of
+    got = raw.get("objects")
+    if not isinstance(got, dict):
+        return []
+
+    class _Said:
+        objects = got
+    try:
+        objects_of(_Said)
+    except SystemExit as e:
+        return [Problem("error", f"{where}.objects", str(e))]
+    return []
+
+
 def _include_problems(where, raw, probe):
     """`include` said wrong, or said against the rest of the hop: an
     entry that is not a name, one `exclude` takes back whole, a mapping
@@ -1673,6 +1695,7 @@ def _contradictions(where, raw, opts, goal, engine):
                     " nothing - drop one of the two"))
     out += _include_problems(where, raw, probe)
     out += _ops_problems(where, mapping)
+    out += _objects_problems(where, raw)
     if goal in GOALS and not GOALS[goal]["writes"]:
         for k in WRITING:
             if opts.get(k):
@@ -1995,6 +2018,7 @@ def decisions(hop):
             "databases": [str(d) for d in hop.databases or []],
             "exclude": list(hop.exclude or []),
             "include": list(getattr(hop, "include", None) or []),
+            "objects": dict(getattr(hop, "objects", None) or {}),
             "service": hop.service or "native", "slice": hop.slice,
             "workers": hop.workers if hop.workers_set else None,
             "options": opts,
@@ -2068,7 +2092,7 @@ def smallest(name, raw):
         out["workers"] = raw["workers"]
     if "slice" in raw and int(raw["slice"]) != 1_000_000:
         out["slice"] = raw["slice"]
-    for k in ("exclude", "include", "mapping"):
+    for k in ("exclude", "include", "objects", "mapping"):
         if raw.get(k):
             out[k] = raw[k]
     if opts:

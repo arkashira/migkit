@@ -600,6 +600,15 @@ def hop_scope(hop):
     out["column_rules"] = sorted((mapping.get("columns") or {}))
     out["renamed"] = [f"{k} -> {v}" for k, v in
                       sorted((mapping.get("tables") or {}).items())]
+    from .config import objects_of
+    try:
+        said = objects_of(hop)
+    except SystemExit:
+        said = {}
+    out["objects_not_carried"] = sorted(k for k, v in said.items()
+                                        if v is False)
+    out["objects_named"] = [f"{k}: {', '.join(v)}" for k, v in
+                            sorted(said.items()) if isinstance(v, list)]
     out["changes_carried"] = [
         f"{k}: {', '.join(v) if isinstance(v, (list, tuple)) else v}"
         for k, v in sorted((mapping.get("ops") or {}).items())]
