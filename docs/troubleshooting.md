@@ -803,6 +803,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: the target stopped logging each statement's text with its rows (binlog_rows_query_log_events), which is how this tail's writes were told apart there. Nothing of the batch was applied; start the tail again and it chooses another way
 
+* the source's binary log carries a statement that changes rows (<...>), and the rows it changed cannot be read from its text: it writes through a routine, a join, a trigger or a cascading key. Set binlog_format = 'ROW' on the source (set global binlog_format = 'ROW'), so the log carries the rows
+
 * two_way: <...> keeps no batch here
 
 * binlog_row_image is <...> on this server, and the tail reads FULL, MINIMAL or NOBLOB only

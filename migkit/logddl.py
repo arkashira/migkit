@@ -183,3 +183,53 @@ def mysql(query, schema):
             return _alter(d, t, text[got.end():], schema)
         return [(d, t, kind, None)]
     return []
+
+
+#: a statement that changes rows, in a binlog written in STATEMENT or
+#: MIXED format - which carries the text of those, where ROW carries the
+#: rows. Only the plain forms are read: one table, named after its
+#: keyword. Anything else that writes (a join, a CALL, a DO, a trigger's
+#: or a cascade's effect on another table) names tables the text does not.
+_DML = (
+    re.compile(rf"^(?:insert|replace)\s+(?:low_priority\s+|delayed\s+|"
+               rf"high_priority\s+|ignore\s+)*(?:into\s+)?{_TABLE}", re.I),
+    re.compile(rf"^update\s+(?:low_priority\s+|ignore\s+)*{_TABLE}"
+               rf"(?:\s+(?:as\s+)?{_NAME})?\s+set\b", re.I),
+    re.compile(rf"^delete\s+(?:low_priority\s+|quick\s+|ignore\s+)*from\s+"
+               rf"{_TABLE}(?:\s+(?:where|order|limit)\b|\s*$)", re.I),
+    re.compile(rf"^load\s+data\s.*?\binto\s+table\s+{_TABLE}", re.I | re.S),
+)
+#: a statement that writes rows by a way the text does not name the
+#: tables of
+_DML_UNREAD = re.compile(r"^(?:insert|replace|update|delete|load\s+data|call|"
+                         r"do|execute|xa\s+commit)\b", re.I)
+#: what a transaction's bracket and a session's setting look like
+_NOT_ROWS = re.compile(r"^(?:begin|commit|rollback|savepoint|release|set|"
+                       r"flush|grant|revoke|create\s+(?:user|role|database|"
+                       r"view|function|procedure|trigger|event|definer)|"
+                       r"drop\s+(?:user|role|database|view|function|"
+                       r"procedure|trigger|event)|alter\s+(?:user|database|"
+                       r"view|function|procedure|event)|analyze|optimize|"
+                       r"use|xa\s+(?:start|end|prepare|rollback))\b", re.I)
+
+
+def dml(query, schema):
+    """([(database, table)] a statement changes rows of, whether it also
+    changes rows of tables its text does not name). ([], False) for a
+    statement that changes none - a transaction's bracket, a session's
+    setting, the DDL `mysql` reads."""
+    if isinstance(query, bytes):
+        query = query.decode("utf-8", "replace")
+    if isinstance(schema, bytes):
+        schema = schema.decode("utf-8", "replace")
+    text = _COMMENTS.sub(" ", str(query) + "\n").strip().rstrip(";").strip()
+    if not text or _NOT_ROWS.match(text):
+        return [], False
+    for rule in _DML:
+        got = rule.match(text)
+        if got:
+            # an INSERT ... SELECT, or an UPDATE of a view or a table with
+            # a trigger, writes where the text does not say: the caller
+            # knows which tables have triggers
+            return [_pair(got.group(1), got.group(2), schema)], False
+    return [], bool(_DML_UNREAD.match(text))

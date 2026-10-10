@@ -1246,6 +1246,50 @@ class MySQLEngine(Engine):
                             (self._origin_row(),
                              twoway.batch_seen(self)))
 
+    def _statement_rows(self, ev, side, db, gtid):
+        """[canon.ddl `reload`] for each table of the tail's database a
+        statement changed rows of, where the binlog carries the statement
+        and not the rows (`binlog_format` STATEMENT, or MIXED for the
+        statements it finds safe): which tables changed is all it says
+        (depth D1, `changedepth`), so each is copied again. A statement
+        that changes rows of tables its text does not name - a CALL, a join,
+        or any write into a database with triggers or cascading keys - is
+        not read as nothing: the tail stops, saying what to set."""
+        from .. import canon, logddl
+        tables, unread = logddl.dml(ev.query, ev.schema)
+        if not tables and not unread:
+            return []
+        here = self._d(side, db)
+        text = ev.query.decode("utf-8", "replace") \
+            if isinstance(ev.query, bytes) else str(ev.query)
+        out = [canon.ddl(t, "reload", sql=text[:4000], txn=gtid)
+               for d, t in tables
+               if d == here and not self.hop.excluded(db, t)]
+        if unread or (out and self._writes_beyond_statements(side, db)):
+            raise SystemExit(
+                "the source's binary log carries a statement that changes"
+                " rows (" + " ".join(text.split())[:80] + "), and the rows"
+                " it changed cannot be read from its text: it writes through"
+                " a routine, a join, a trigger or a cascading key. Set"
+                " binlog_format = 'ROW' on the source (set global"
+                " binlog_format = 'ROW'), so the log carries the rows")
+        return out
+
+    def _writes_beyond_statements(self, side, db):
+        """Whether a write to a table of the database may change rows of
+        another that the statement does not name: a trigger, or a key that
+        cascades a delete or an update."""
+        here = self._d(side, db)
+        got = self._q(side, "select (select count(*) from"
+                            " information_schema.triggers where"
+                            " trigger_schema = %s) + (select count(*) from"
+                            " information_schema.referential_constraints"
+                            " where constraint_schema = %s and (update_rule"
+                            " not in ('RESTRICT', 'NO ACTION') or"
+                            " delete_rule not in ('RESTRICT', 'NO ACTION')))",
+                      (here, here))
+        return bool(got and int(got[0][0]))
+
     def _ddl_of(self, ev, side, db, gtid, keys_of):
         """[canon.ddl] for a statement the binlog carries as text, one for
         each table of the tail's database it touches and the hop does not
@@ -1709,6 +1753,7 @@ class MySQLEngine(Engine):
                     # this database it touches (`canon.ddl`); a table whose
                     # key it may have changed is asked for its key again
                     out += self._ddl_of(ev, side, db, gtid, keys_of)
+                    out += self._statement_rows(ev, side, db, gtid)
                     continue
                 if isinstance(ev, NotImplementedEvent):
                     if ev.event_type in self.COMPRESSED_ROWS:

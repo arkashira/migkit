@@ -353,7 +353,7 @@ in these historical totals.
 | 269 | LT.R5 | Oracle NOLOGGING operations detected | DONE 0c89d67 (a NOLOGGING table stops the start by name) | S | change follow | L4510 |
 | 270 | LT.R6 | Db2 without DATA CAPTURE CHANGES (db2ReadLog) | BLOCKED (Db2 is x86-only) | M | change follow | L4511-4512 |
 | 271 | LT.R7 | MySQL MINIMAL/NOBLOB/PARTIAL_JSON row images lifted | DONE | S | change follow | L4501-4503 |
-| 272 | LT.R8 | MySQL STATEMENT/MIXED binlogs as invalidations | OPEN | M | change follow | report L1081 |
+| 272 | LT.R8 | MySQL STATEMENT/MIXED binlogs as invalidations | PARTLY | M | change follow | report L1081 |
 | 273 | LT.R9 | PostgreSQL at wal_level=replica via pg_walinspect/pg_waldump | OPEN | M | change follow | L4503-4505 |
 | 274 | LT.R10 | MongoDB standalone (dbHash + raw-BSON bucket digests) | OPEN (in the report's table; the backlog names R1-R9) | S | change follow | report L1083 |
 | 275 | LT.C1 | mongosync's job rebuilt from change streams, raw BSON and generations, bypassWriteBlockingMode audited | OPEN | M | change follow | L3947-3949, L4513-4517 |
