@@ -47,7 +47,9 @@ their own names, and `LADDER.table` (a WAVE queue item).
 
 ## Summary
 
-438 items.
+438 items in the historical summary below. Later appended rows, including
+rows 445-483 (P0-VALIDATE, P0-DECISION-ALL, P0-WORKFLOW-DEPTH and P0-MINIMAL-INPUT) added 2026-10-05, are listed in Items and are not included
+in these historical totals.
 
 | Status | S | M | L | Total |
 |---|---|---|---|---|
@@ -524,3 +526,54 @@ their own names, and `LADDER.table` (a WAVE queue item).
 | 442 | P0-PARITY.matrix | A depth matrix generated from the code: every engine against every item of scope, verification and tail depth, each a way with its test or not applicable with a reason | DONE 9fd2442 (`capabilities.depth()`: 86 items in 10 areas read off each engine's code - scope, verify, tail, assess, schema, move, cutover, security, managed, operations - the capability table's and the shapes' cells linked in; a way counted once a test proves it on that engine, `PROVES` in 208 test modules; gaps in `DEPTH_GAPS`, owed tests in `UNPROVED`; STATE.md shows it - 3,096 cells: yes 435, test owed 252, not applicable 869, not yet 1,540) | M | engines | P0-PARITY (added 2026-10-04) |
 | 443 | P0-PARITY.all | Every capability migkit has (assess, schema and conversion, move, tail and DDL, verification, repair with undo, cutover, scope, accounts and objects, security, managed services, HA, evidence) on every engine, in one generated matrix | PARTLY 9fd2442 (done: the one generated matrix, `capabilities.depth()`; missing: the ways - assess, schema, move, cutover, security, managed services and operations at {C}: yes 248, test owed 68, not applicable 261, not yet 539; evidence, observability and the forecast are one way for every engine, not read engine by engine) | L | engines | P0-PARITY (owner 2026-10-04: all of it, deep) |
 | 444 | P0-PARITY.guard | A test that fails when any matrix cell is 'not yet' without a backlog row or a written not-applicable reason | DONE 9fd2442 (`tests/test_every_engine_is_as_deep_as_postgres_and_mysql.py`: red on a cell nobody declared, a way with no test nobody declared, a declaration the code or a test has closed, a test claiming a way the code does not show, a not yet whose row is not in this index, an item or engine nobody knows; static, run with the guards) | S | engines | P0-PARITY (added 2026-10-04) |
+| 445 | P0-VALIDATE.decide | Standalone validation selects and replans methods automatically through the shared decision engine | OPEN | L | verify | P0-VALIDATE (owner, 2026-10-05) |
+| 446 | P0-VALIDATE.ranges | Complete adaptive scans for composite/text keys, skew and large values with safe resume | OPEN | L | verify | P0-VALIDATE (owner, 2026-10-05) |
+| 447 | P0-VALIDATE.state | Durable per-check evidence and understandable progress, interruption and recovery states | OPEN | M | operations/scale | P0-VALIDATE (owner, 2026-10-05) |
+| 448 | P0-VALIDATE.results | Consistent database-first verdicts and readable differences across console, UI and exports | OPEN | M | ease of use | P0-VALIDATE (owner, 2026-10-05) |
+| 449 | P0-VALIDATE.config | Minimal hop setup, imported scope, preflight guidance and direct resume | OPEN | M | ease of use | P0-VALIDATE (owner, 2026-10-05) |
+| 450 | P0-VALIDATE.depth | Deep accurate checks and measured end-to-end validation acceptance | OPEN | L | verify | P0-VALIDATE (owner, 2026-10-05) |
+| 451 | P0-DECISION-ALL.coverage | Every task and consequential decision inventoried, routed and guarded | OPEN | L | tools used whole | P0-DECISION-ALL (owner, 2026-10-05) |
+| 452 | P0-DECISION-ALL.reason | Fact-driven deep reasoning and compatible composed strategies under hard guarantees | OPEN | L | tools used whole | P0-DECISION-ALL (owner, 2026-10-05) |
+| 453 | P0-DECISION-ALL.adapt | Measured learning, resource control and replanning throughout every task | OPEN | L | tools used whole | P0-DECISION-ALL (owner, 2026-10-05) |
+| 454 | P0-DECISION-ALL.experience | Simple shared configuration, progress, outcomes and recovery for every task | OPEN | L | tools used whole | P0-DECISION-ALL (owner, 2026-10-05) |
+| 455 | P0-DECISION-ALL.proof | Actual workflow coverage and measured decision quality across tasks and engines | OPEN | L | tools used whole | P0-DECISION-ALL (owner, 2026-10-05) |
+| 456 | P0-WORKFLOW-DEPTH.model | Workflow contracts and dependencies at task, phase, object and unit depth | OPEN | L | operations/scale | P0-WORKFLOW-DEPTH (owner, 2026-10-05) |
+| 457 | P0-WORKFLOW-DEPTH.investigate | Evidence-driven branching and bounded investigation of supported causes | OPEN | L | operations/scale | P0-WORKFLOW-DEPTH (owner, 2026-10-05) |
+| 458 | P0-WORKFLOW-DEPTH.connect | Facts and evidence connected across phases with explicit invalidation | OPEN | L | operations/scale | P0-WORKFLOW-DEPTH (owner, 2026-10-05) |
+| 459 | P0-WORKFLOW-DEPTH.recover | Safe adaptive execution, partial failure handling and durable recovery | OPEN | L | operations/scale | P0-WORKFLOW-DEPTH (owner, 2026-10-05) |
+| 460 | P0-WORKFLOW-DEPTH.operator | Deep workflows with simple operation and clear phase and outcome views | OPEN | L | operations/scale | P0-WORKFLOW-DEPTH (owner, 2026-10-05) |
+| 461 | P0-WORKFLOW-DEPTH.acceptance | End-to-end scenario proof of workflow depth, correctness and efficiency | OPEN | L | operations/scale | P0-WORKFLOW-DEPTH (owner, 2026-10-05) |
+| 462 | P0-MINIMAL-INPUT.setup | Fewest irreducible operator inputs with automatic discovery and explicit scope | OPEN | L | ease of use | P0-MINIMAL-INPUT (owner, 2026-10-05) |
+| 463 | P0-MINIMAL-INPUT.ownership | Complete automatic task execution and recovery through the shared decision engine | OPEN | L | tools used whole | P0-MINIMAL-INPUT (owner, 2026-10-05) |
+| 464 | P0-MINIMAL-INPUT.correctness | Strongest supported correctness and consistency with truthful evidence | OPEN | L | verify | P0-MINIMAL-INPUT (owner, 2026-10-05) |
+| 465 | P0-MINIMAL-INPUT.idempotency | Stable operation identity, reconciliation and safe repetition across workflows | OPEN | L | operations/scale | P0-MINIMAL-INPUT (owner, 2026-10-05) |
+| 466 | P0-MINIMAL-INPUT.acceptance | End-to-end proof of minimal effort, consistency and idempotent outcomes | OPEN | L | ease of use | P0-MINIMAL-INPUT (owner, 2026-10-05) |
+| 467 | P0-RESULT-SCOPE.scope | Readable resolved scope, mappings, exclusions and honest coverage | OPEN | M | ease of use | P0-RESULT-SCOPE (owner and documentation research, 2026-10-05) |
+| 468 | P0-RESULT-SCOPE.summary | Concise grouped database outcomes and explicit problems | OPEN | M | ease of use | P0-RESULT-SCOPE (owner and documentation research, 2026-10-05) |
+| 469 | P0-RESULT-SCOPE.usability | Prototype and verify result comprehension across console, UI and exports | OPEN | M | ease of use | P0-RESULT-SCOPE (owner and documentation research, 2026-10-05) |
+| 470 | P0-RESULT-SCOPE.commercial | Maintained exhaustive inventory of relevant paid products and managed-service result/scope presentation | OPEN | L | ease of use | P0-RESULT-SCOPE commercial clarification (owner, 2026-10-05) |
+| 471 | P0-RESULT-SCOPE.unmatched | Proposed and user-verified displays for every required dimension without a direct commercial equivalent | OPEN | M | ease of use | P0-RESULT-SCOPE commercial clarification (owner, 2026-10-05) |
+| 472 | P0-AUTO-RESOURCES.route | Inventory and integrate task/thread/resource allocation for every process | OPEN | L | operations/scale | P0-AUTO-RESOURCES (owner, 2026-10-05) |
+| 473 | P0-AUTO-RESOURCES.budget | Shared endpoint budgets across nested pools and concurrent work | OPEN | L | operations/scale | P0-AUTO-RESOURCES (owner, 2026-10-05) |
+| 474 | P0-AUTO-RESOURCES.adapt | Automatic scaling at every task, phase, step and nested unit, with measured work balancing | OPEN | L | operations/scale | P0-AUTO-RESOURCES (owner, 2026-10-05) |
+| 475 | P0-AUTO-RESOURCES.explain | Measured bottleneck reporting, actual concurrency and ETA uncertainty | OPEN | L | operations/scale | P0-AUTO-RESOURCES (owner, 2026-10-05) |
+| 476 | P0-AUTO-RESOURCES.proof | End-to-end automatic resource-management acceptance | OPEN | L | operations/scale | P0-AUTO-RESOURCES (owner, 2026-10-05) |
+| 477 | P0-DECISION-ALL.engines | Complete adaptive migration workflows across every database engine and applicable homogeneous/heterogeneous pair, with explicit gaps and engine-specific proof | OPEN | L | engines | Platform-wide migration contract: every database engine (owner, 2026-10-06); extends P0-PARITY.all |
+| 478 | P0-DECISION-ALL.priority | Reasoned dynamic prioritization of tasks, evidence and probes by guarantees, consequence, dependencies, uncertainty and decision value | OPEN | L | tools used whole | P0-DECISION-ALL.priority (owner, 2026-10-06) |
+| 479 | P0-SAFETY-INTEGRITY | Data safety, fidelity, transaction/dependency ordering and durable recovery as hard constraints on every strategy and parallel workflow | OPEN | L | operations/scale | P0-SAFETY-INTEGRITY (owner, 2026-10-06) |
+| 480 | P0-RESILIENCE-ALL | Platform-wide hazard assessment, prevention, containment and verified safe recovery across all identified failure classes and conservative handling of unknown failures | OPEN | L | operations/scale | P0-RESILIENCE-ALL (owner, 2026-10-06) |
+| 481 | P0-AUTONOMOUS-MIGRATION | Minimal operator intent to verified complete migration, established-product mechanism parity and measured improvements in judgement, depth, recovery and user effort | OPEN | L | ease of use | P0-AUTONOMOUS-MIGRATION (owner, 2026-10-06) |
+| 482 | P0-AUTOTUNE-ALL | Fact-driven automatic tuning and verified recovery across every migration dimension, including LOB/payload limits, with integrity guarantees and minimal user input | OPEN | L | operations/scale | P0-AUTOTUNE-ALL (owner, 2026-10-06) |
+| 483 | P0-PRODUCT-TELEMETRY | Comprehensive secure product usage metrics/events with strict exclusion of customer database content, effective controls and deferred storage selection | OPEN | L | operations/scale | P0-PRODUCT-TELEMETRY (owner, 2026-10-06) |
+| 484 | P1-SOURCE-HIERARCHY.inventory | Complete source/import/resource inventory and ownership map | OPEN | L | maintainability | Source hierarchy plan (owner, 2026-10-06) |
+| 485 | P1-SOURCE-HIERARCHY.layout | Responsibility hierarchy and enforced dependency rules | OPEN | L | maintainability | Source hierarchy plan (owner, 2026-10-06) |
+| 486 | P1-SOURCE-HIERARCHY.engines | Split large engine adapters behind stable contracts | OPEN | L | maintainability | Source hierarchy plan (owner, 2026-10-06) |
+| 487 | P1-SOURCE-HIERARCHY.navigation | Align tests, documentation and contributor navigation | OPEN | L | maintainability | Source hierarchy plan (owner, 2026-10-06) |
+| 488 | P1-SOURCE-HIERARCHY.proof | Staged compatibility-preserving migration and installed-workflow proof | OPEN | L | maintainability | Source hierarchy plan (owner, 2026-10-06) |
+| 489 | P0-RESULT-SCOPE.contract | Structured outcome, execution, coverage and severity with truthful shared aggregation | OPEN | L | ease of use | Result and report presentation plan (owner, 2026-10-06) |
+| 490 | P0-RESULT-SCOPE.presentation | Database-first concise summaries, grouped practical issues and evidence drilldown across output surfaces | OPEN | L | ease of use | Result and report presentation plan (owner, 2026-10-06) |
+| 491 | P0-RESULT-SCOPE.artifacts | Navigable run artifact hierarchy, single entry point, database links and authoritative evidence manifest | OPEN | L | ease of use | Result and report presentation plan, run artifact hierarchy (owner, 2026-10-06) |
+| 492 | P0-READABILITY-ALL | Consistent comprehensible configuration, commands, workflows, states, errors, results, artifacts, docs and source navigation | OPEN | L | ease of use | Platform-wide readability requirement (owner, 2026-10-06) |
+| 493 | P0-ARTIFACTS | First-class typed workflow artifacts, lineage, durable publication, validity, retention and safe discoverability/export | OPEN | L | operations/scale | First-class artifacts in result presentation plan (owner, 2026-10-06) |
+| 494 | P0-VALIDATE.no-silent-skip | Next-campaign incident regression: failed/omitted deep units remain incomplete, recover safely and never yield a complete pass | OPEN | L | correctness | Observed deep-check timeout omission, owner 2026-10-06 |
+| 495 | P0-RESUME-ALL | Durable safe resume and automatic recovery contracts for every task, phase, work unit and supported engine/pair | OPEN | L | operations/scale | Every-task resume requirement (owner, 2026-10-06) |

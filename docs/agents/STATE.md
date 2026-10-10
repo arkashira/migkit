@@ -179,24 +179,26 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | managed.catalogued | the rest (19) | - | ase couchbase db2i db2zos delta duckdb generic iceberg parquet saas sapodp snowflake sqlite teradata tidb | copybook hetero |
 | operations.fencing | mysql postgres | tidb | the rest (30) | hetero saas sapodp |
 
-## Backlog (445 items, `docs/backlog-index.md`)
+## Backlog (496 items, `docs/backlog-index.md`)
 
-DONE 283 - PARTLY 47 - IN PROGRESS 9 - OPEN 77 - BLOCKED 20 - NOT PURSUED 9
+DONE 283 - PARTLY 47 - IN PROGRESS 9 - OPEN 128 - BLOCKED 20 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
 | change follow | 39 | 3 | 1 | 15 | 5 | 0 |
 | conversion | 29 | 1 | 0 | 1 | 0 | 0 |
+| correctness | 0 | 0 | 0 | 1 | 0 | 0 |
 | cutover | 14 | 1 | 1 | 4 | 0 | 0 |
-| ease of use | 19 | 2 | 1 | 3 | 1 | 1 |
-| engines | 26 | 6 | 3 | 14 | 6 | 1 |
+| ease of use | 19 | 2 | 1 | 17 | 1 | 1 |
+| engines | 26 | 6 | 3 | 15 | 6 | 1 |
+| maintainability | 0 | 0 | 0 | 5 | 0 | 0 |
 | move | 30 | 10 | 2 | 10 | 0 | 2 |
-| operations/scale | 26 | 9 | 0 | 11 | 5 | 3 |
+| operations/scale | 26 | 9 | 0 | 30 | 5 | 3 |
 | security | 10 | 2 | 0 | 4 | 2 | 1 |
-| tools used whole | 32 | 6 | 0 | 2 | 0 | 0 |
+| tools used whole | 32 | 6 | 0 | 9 | 0 | 0 |
 | two-way | 4 | 2 | 0 | 3 | 0 | 0 |
 | types | 12 | 1 | 1 | 0 | 0 | 0 |
-| verify | 42 | 4 | 0 | 10 | 1 | 1 |
+| verify | 42 | 4 | 0 | 14 | 1 | 1 |
 
-Not done (153): P0-DE.1, P0-DE.2, P0-DE.3, P0-DE.4, BAR-1, BAR-2, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, R9.docdb, A2/D10, C1.managed, F1.dual, P3.dryrun, R6.cloud, 26.versions, 26.trino, 26.striim, MSSQL-x86, AUD.slot.more, AUD.release, P0-DEPTH.constants, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.triggers, P0-DEPTH.rank, P0-DEPTH.tombstones, P0-AUDIT, AUD-B, AUD-C, AUD-D, AUD-E.pin, AUD-F, AUD-G2, AUD-H, AUD-T2, AUD-Z, P0-PARITY.lv, P0-PARITY.part, P0-PARITY.small, P0-PARITY.lv.new, P0-SMART.route, P0-CLOUDS.native, P0-CLOUDS.more, DEC1001.media, DEC1001.gui, P0-SCENARIOS.brands, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, P0-SCENARIOS.consolidate, DEC30.sweep, DEC.deps, DEC.ptcs, S1.e, S3.link, S4, F2.freeze, F3, F7.beat, F7.edges, F7.sec, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R2, LT.R3, LT.R6, LT.R7, LT.R8, LT.R9, LT.R10, LT.C1, LT.C2, LT.C3, LT.C4, LT.C5, LT.C6, LT.P1, LT.P2, LT.P3, W1, W2, W4.a, W4.b, W6, W7, W8, W9, 28.rates, R5.actions, R5.anchor, 32.rds, 45.run, R4.msk, R4.formats, R3.topo, 38.real, R17b.hmac, R17b.prog, DOCS, 43.fix, R8.more, R8.mv, R10.pieces, R12.minio, R13-DB2, R13-ASE, R13-HETERO, R13-GENERIC, R13.kafka, R13.redis, R13.sqlite, R13.parquet, R15.2nd, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.7, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R23.7, R23.8, R25.2, R25.3, P0-SCOPE.open, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all
+Not done (204): P0-DE.1, P0-DE.2, P0-DE.3, P0-DE.4, BAR-1, BAR-2, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, R9.docdb, A2/D10, C1.managed, F1.dual, P3.dryrun, R6.cloud, 26.versions, 26.trino, 26.striim, MSSQL-x86, AUD.slot.more, AUD.release, P0-DEPTH.constants, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.triggers, P0-DEPTH.rank, P0-DEPTH.tombstones, P0-AUDIT, AUD-B, AUD-C, AUD-D, AUD-E.pin, AUD-F, AUD-G2, AUD-H, AUD-T2, AUD-Z, P0-PARITY.lv, P0-PARITY.part, P0-PARITY.small, P0-PARITY.lv.new, P0-SMART.route, P0-CLOUDS.native, P0-CLOUDS.more, DEC1001.media, DEC1001.gui, P0-SCENARIOS.brands, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, P0-SCENARIOS.consolidate, DEC30.sweep, DEC.deps, DEC.ptcs, S1.e, S3.link, S4, F2.freeze, F3, F7.beat, F7.edges, F7.sec, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R2, LT.R3, LT.R6, LT.R7, LT.R8, LT.R9, LT.R10, LT.C1, LT.C2, LT.C3, LT.C4, LT.C5, LT.C6, LT.P1, LT.P2, LT.P3, W1, W2, W4.a, W4.b, W6, W7, W8, W9, 28.rates, R5.actions, R5.anchor, 32.rds, 45.run, R4.msk, R4.formats, R3.topo, 38.real, R17b.hmac, R17b.prog, DOCS, 43.fix, R8.more, R8.mv, R10.pieces, R12.minio, R13-DB2, R13-ASE, R13-HETERO, R13-GENERIC, R13.kafka, R13.redis, R13.sqlite, R13.parquet, R15.2nd, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.7, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R23.7, R23.8, R25.2, R25.3, P0-SCOPE.open, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all, P0-VALIDATE.decide, P0-VALIDATE.ranges, P0-VALIDATE.state, P0-VALIDATE.results, P0-VALIDATE.config, P0-VALIDATE.depth, P0-DECISION-ALL.coverage, P0-DECISION-ALL.reason, P0-DECISION-ALL.adapt, P0-DECISION-ALL.experience, P0-DECISION-ALL.proof, P0-WORKFLOW-DEPTH.model, P0-WORKFLOW-DEPTH.investigate, P0-WORKFLOW-DEPTH.connect, P0-WORKFLOW-DEPTH.recover, P0-WORKFLOW-DEPTH.operator, P0-WORKFLOW-DEPTH.acceptance, P0-MINIMAL-INPUT.setup, P0-MINIMAL-INPUT.ownership, P0-MINIMAL-INPUT.correctness, P0-MINIMAL-INPUT.idempotency, P0-MINIMAL-INPUT.acceptance, P0-RESULT-SCOPE.scope, P0-RESULT-SCOPE.summary, P0-RESULT-SCOPE.usability, P0-RESULT-SCOPE.commercial, P0-RESULT-SCOPE.unmatched, P0-AUTO-RESOURCES.route, P0-AUTO-RESOURCES.budget, P0-AUTO-RESOURCES.adapt, P0-AUTO-RESOURCES.explain, P0-AUTO-RESOURCES.proof, P0-DECISION-ALL.engines, P0-DECISION-ALL.priority, P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL, P0-AUTONOMOUS-MIGRATION, P0-AUTOTUNE-ALL, P0-PRODUCT-TELEMETRY, P1-SOURCE-HIERARCHY.inventory, P1-SOURCE-HIERARCHY.layout, P1-SOURCE-HIERARCHY.engines, P1-SOURCE-HIERARCHY.navigation, P1-SOURCE-HIERARCHY.proof, P0-RESULT-SCOPE.contract, P0-RESULT-SCOPE.presentation, P0-RESULT-SCOPE.artifacts, P0-READABILITY-ALL, P0-ARTIFACTS, P0-VALIDATE.no-silent-skip, P0-RESUME-ALL
 

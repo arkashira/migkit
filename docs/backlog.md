@@ -8740,3 +8740,869 @@ Asked by the owner and still to do, in order:
 * [Vitess VDiff v2](https://vitess.io/blog/2022-11-22-vdiff-v2/)
 * [Debezium incremental snapshots](https://debezium.io/blog/2021/10/07/incremental-snapshots/), [read-only variant](https://debezium.io/blog/2022/04/07/read-only-incremental-snapshots/)
 * [MongoDB migration-verifier](https://github.com/mongodb-labs/migration-verifier)
+
+
+## P0-VALIDATE: automatic validation and a clear operator workflow
+
+Owner request, 2026-10-05. Status: OPEN. This extends P0-SMART.route and the
+existing scope, verdict and reporting work; shared decision logic must be
+reused rather than implemented again. Validation must be easy to configure,
+choose its own effective strategy, inspect deeply and explain the outcome.
+The operator should not need private scripts or knowledge of wrapped tools.
+
+Observed gaps: standalone MySQL validation defaults to native checksums,
+requires an explicit option for an alternative verifier, and partitions its
+native scan only for a single-column primary key. A copy-time verification
+chooser does not establish automatic choice for standalone validation.
+Large values, composite keys, interrupted reads and incomplete results expose
+both planning and operator-experience gaps. Capability presence alone is not
+proof that the complete workflow uses it effectively.
+
+| ID | Deliverable | Acceptance criteria |
+|---|---|---|
+| P0-VALIDATE.decide | Route standalone validation through the shared decision engine | Discover usable methods and their prerequisites automatically; measure representative work within a bounded exploration budget; select and combine methods per table and check using measured cost, consistency requirements and source-load limits. Replan remaining work when rates or failures change. The normal workflow needs no verifier-selection option or external orchestration. Evidence records the decision and guarantees; the operator sees the expected outcome and relevant limits. |
+| P0-VALIDATE.ranges | Efficient complete scans for difficult tables | Cover composite and textual keys, skew, partitions, keyless tables and large JSON/LOB values. Adapt range size and concurrency to measured bytes, duration and server load. Include target-only rows and open boundaries, avoid gaps or duplicate coverage, and preserve duplicate-sensitive comparison. Resume completed ranges after interruption; invalidate proofs when scope, schema, encoding or consistency context changes. Full validation must never silently become sampling. |
+| P0-VALIDATE.state | Durable state that explains progress | Persist every successful table, range and check before advancing. After timeout, disconnect or restart, retain completed evidence and distinguish running, waiting, retrying, blocked, incomplete and complete states from correctness verdicts. Show completed and remaining databases, tables and checks, progress by rows/bytes where measured, elapsed time, ETA uncertainty, last progress and the cause of a stall. Stop or reclaim only queries owned by this run. |
+| P0-VALIDATE.results | Clear results from summary to evidence | Console, UI and exported reports use the same scope and verdict. Lead with each database's outcome, then tables and objects that differ, with source value, target value, impact and next action. Clearly separate matched, different, expected migration differences, inconclusive and not checked. A count match cannot imply content equality; execution completion cannot imply a clean result. Expose coverage, observation window, concurrent-write limitations and unsupported checks, with evidence available on demand. Keep wrapped-tool names and implementation noise out of user-facing output. |
+| P0-VALIDATE.config | Simple setup and guided execution | Reuse the existing hop model and commands. Accept minimal source, target and intended scope, or an imported migration task; discover safe defaults and explain missing permissions and unsupported scope before costly scans. Preview exactly what will be checked and the load and consistency limits. Provide actionable configuration errors and a direct resume path without requiring internal flags, manual checkpoints or custom scripts. Credentials remain private. |
+| P0-VALIDATE.depth | Deep, accurate checks with measured workflow acceptance | Cover data, schema, sequences/counters, accounts/grants, routines/events, parameters, timezone rules and migration artifacts where applicable; name every omitted or unsupported dimension. Distinguish active replication lag, expected transformations and heuristic advice from confirmed defects. Use sandbox end-to-end fixtures with injected differences, key skew, large values, composite keys, failures and concurrent changes. Prove missing/extra/changed and duplicate rows are detected, completed results survive failure, estimates adapt, and the operator can configure, run, resume and interpret results without a custom script. Benchmark full coverage against the fixed default and record time, bytes read, server load and retry waste; claim improvement only when measured. |
+
+Implementation order: state and verdict contract first, then decision routing
+and adaptive ranges, then guided configuration and all report surfaces, followed
+by complete workflow acceptance. Existing features marked DONE are not reopened
+without evidence; these items remain OPEN until the integrated validation path
+and operator workflow meet the criteria above. No implementation is included
+in this backlog change.
+
+
+## P0-DECISION-ALL: intelligent decisions throughout every task
+
+Owner clarification, 2026-10-05. Status: OPEN. The decision engine is the
+shared decision mechanism for every task, including existing tasks and future
+features. P0-VALIDATE is one application of this requirement. This extends
+P0-DE and P0-SMART.route; reuse their contracts and cost model. A working mover
+chooser or a capability matrix does not establish complete task coverage.
+
+The goal is deep, effective judgement throughout the workflow: understand the
+task, discover relevant facts, compose a correct strategy, measure its actual
+performance, adapt when circumstances change and explain the outcome simply.
+A fixed chain of defaults, a wrapper dispatch or a single startup choice is
+not sufficient evidence that this requirement is complete. Explicit operator
+intent, permissions and correctness requirements remain hard constraints.
+
+| ID | Deliverable | Acceptance criteria |
+|---|---|---|
+| P0-DECISION-ALL.coverage | Audit every task and route every consequential choice through the shared decision engine | Maintain a generated inventory across configuration/import, discovery/assessment, planning, schema/conversion, move, replication/DDL, validation, repair/undo, cutover/rollback, security/accounts, managed services, HA, recovery and reporting. Map each task's meaningful strategy, ordering, resource, retry and fallback decisions to the shared engine. Pure formatting and deterministic domain invariants need no artificial alternatives; record the reason where there is no choice. Tests fail for an undeclared or bypassed decision, including new task entry points. |
+| P0-DECISION-ALL.reason | Deep task understanding and composed strategies | Use engine/version, data shape and distribution, dependencies, capabilities, permissions, consistency, current state, available resources and operator goals. Separate known, measured, predicted and unknown facts; acquire missing facts safely when they can change a decision. Evaluate compatible compositions and relevant alternatives, prerequisites, cost, risk and guarantees rather than selecting only by installation order or nominal capability. For one feasible path, explain why; for none, give an actionable blocker. Never silently weaken correctness, scope, durability or authorization to meet a speed target. |
+| P0-DECISION-ALL.adapt | Learn and adapt throughout execution | Bound representative exploration, measure real rates and failures, and update predictions and the remaining schedule at safe task boundaries. Choose concurrency, batching, order, retries and fallback within resource limits; retain valid completed work and recover from interruption. Reuse local learning only when its engine, version, shape and conditions apply; invalidate stale assumptions. Different conditions must produce different appropriate choices without operator scripts. |
+| P0-DECISION-ALL.experience | One simple workflow with understandable state and results | Let operators state endpoints, scope, goals and limits using the existing configuration model. Discover defaults, guide missing inputs, preview outcomes and resume directly. Every task shares clear progress, verdicts, impact, next actions and evidence access. Explain consequential trade-offs and uncertainty in ordinary language; keep internal strategy and wrapped-tool details behind diagnostic evidence. Do not force operators to select internal algorithms or interpret raw logs to complete a task. |
+| P0-DECISION-ALL.proof | Prove judgement, depth and end-to-end benefit for every task | Run sandbox workflow acceptance for supported engines and shapes with changed resources, skew, large values, missing permissions, failures and concurrent activity. Demonstrate correct feasible choices, useful blockers, safe adaptation, preserved evidence and readable outcomes. Compare to fixed defaults using task-relevant completion time, server/network load, cost, retry waste and correctness detection. Record actual entry-point coverage and unresolved gaps; simulated chooser tests and capability presence alone cannot mark the integrated task DONE. |
+
+All five items are OPEN. Build an inventory of gaps before implementation;
+connect existing decision facilities rather than duplicating them. Completion
+requires the actual task workflows to meet these criteria, with exceptions
+explicitly justified and tested. This backlog update adds no implementation.
+
+
+## P0-WORKFLOW-DEPTH: deep and adaptive workflows throughout the platform
+
+Owner requirement, 2026-10-05. Status: OPEN. Every workflow must be detailed,
+intelligent and deep. P0-DECISION-ALL supplies the shared decisions;
+P0-WORKFLOW-DEPTH requires the complete process to use those decisions well.
+A linear sequence of commands, a flat checklist or a collection of independent
+feature calls is not sufficient. Reuse the existing task, scope, state,
+verdict, dependency and evidence owners; do not create a parallel workflow
+framework without first identifying a missing contract.
+
+| ID | Deliverable | Acceptance criteria |
+|---|---|---|
+| P0-WORKFLOW-DEPTH.model | Model workflows at task, phase, object and work-unit depth | Each workflow declares its intended outcome, applicable scope, prerequisites, dependencies, required evidence, entry/exit criteria and durable states. Decompose work only as far as needed to plan, detect failure and resume safely. Cross-object dependencies and engine-specific behavior affect the actual schedule. Distinguish prerequisites that block work from independent checks that can continue. Unsupported scope is explicit; no silently skipped work. |
+| P0-WORKFLOW-DEPTH.investigate | Branch and investigate according to actual findings | Each phase uses observed results to select the next relevant checks, including deeper investigation of suspicious ranges, constraints, transformations, permissions or configuration. Track hypotheses and supporting or contradicting evidence; distinguish symptoms from supported causes. Return inconclusive when evidence cannot establish a cause. A clean count, heuristic warning or successful command cannot end deeper checks required by the task's guarantees. Bound investigation cost and avoid repeating evidence already valid for the same context. |
+| P0-WORKFLOW-DEPTH.connect | Carry facts, decisions and evidence between phases | Assessment findings shape the plan; chosen transformations shape validation; dependency and consistency state shape readiness; execution findings update downstream checks and recovery. Each phase consumes versioned evidence and states its validity conditions. Schema, scope or consistency changes invalidate affected evidence and downstream conclusions. A final outcome is derived from required phase evidence, never from the last command's exit status. |
+| P0-WORKFLOW-DEPTH.recover | Adapt, checkpoint and recover at safe boundaries | Detect stalls and partial failures, diagnose relevant conditions, and choose bounded retry, alternative execution, replan or an actionable blocker through the decision engine. Persist completed units, isolate failures where dependencies allow and resume valid work without restarting everything. Respect load, consistency, authorization and side-effect limits. Repair, rollback and cutover require explicit preconditions, ownership, consequence checks and outcome verification; read-only workflows cannot become writes through fallback. |
+| P0-WORKFLOW-DEPTH.operator | Keep deep internal behavior easy to operate | The user supplies goals, scope and limits through the existing workflow. Show the current phase, what is complete, what is being investigated, why progress is waiting, the remaining work and any required user action. Lead reports with database/object outcomes and practical impact; deeper reasoning and evidence are available on demand. Depth must reduce manual coordination, not produce more flags, configuration or logs for the user to interpret. |
+| P0-WORKFLOW-DEPTH.acceptance | Prove depth through complete scenario execution | For each supported workflow and applicable engine, test healthy, misleading, ambiguous, unsupported, interrupted and changing-state scenarios in the sandbox. Demonstrate that identical initial checks with different underlying causes lead to appropriate different investigations and actions. Verify phase dependencies, invalidation, preserved evidence, truthful partial outcomes, safe recovery and correct completion criteria. Measure end-to-end time, repeated work and resource use; do not claim deep workflow coverage from isolated feature or decision tests alone. |
+
+Implementation starts with a workflow inventory tied to P0-DECISION-ALL.coverage:
+record the current phases, decision points, evidence dependencies, depth gaps
+and task-specific completion rules. Keep these items OPEN until the integrated
+processes meet their acceptance criteria. This change records requirements
+only; it does not implement or certify those workflows.
+
+
+## P0-MINIMAL-INPUT: minimal configuration and complete task ownership
+
+Owner requirement, 2026-10-05. Status: OPEN. This is a platform-wide product
+contract, extending P0-DECISION-ALL, P0-WORKFLOW-DEPTH and P0-VALIDATE.config.
+The user supplies as few values as genuinely necessary. migkit owns discovery,
+planning, strategy composition, execution, verification, adaptation and
+recovery throughout the task. The system must pursue the best supported
+outcome with the strongest applicable correctness, consistency and idempotency
+guarantees. Complexity belongs inside migkit, not in operator configuration.
+
+| ID | Deliverable | Acceptance criteria |
+|---|---|---|
+| P0-MINIMAL-INPUT.setup | Ask only for irreducible inputs | Start from endpoints or an authorized imported task and the intended goal. Reuse securely available connection information and discover engines, versions, capabilities, scope, dependencies, object shapes and applicable settings. Ask only for facts or intent that cannot safely be inferred, including ambiguous destructive scope or required authorization. Distinguish required values from optional expert overrides. Show discovered scope for review; never interpret missing scope as permission to access everything. Measure required input count and manual steps for each supported workflow; remove every field with a reliable discovery or derivation path. |
+| P0-MINIMAL-INPUT.ownership | Own the complete process automatically | Once the goal and necessary access are supplied, compose and execute the applicable workflow through the shared decision engine. Choose methods, ordering, concurrency, batching, consistency boundaries, validation depth, retries and recovery without asking the user to choose implementation details. Reuse valid evidence and learning, adapt to measured conditions and provide actionable blockers when completion is impossible. Normal operation requires no custom scripts or manual checkpoint management. Expert overrides remain optional and cannot silently bypass required guarantees. |
+| P0-MINIMAL-INPUT.correctness | Strongest supported correctness and consistency | Explicitly model the task's required and achievable guarantees before choosing a plan. Prefer the strongest feasible consistent view and complete scope under authorized constraints; distinguish an observation during concurrent writes from a consistent snapshot or verified cutover. Establish compatible boundaries across related objects where required, account for replication position and transformations, and verify completion from evidence. Never silently replace complete checks with sampling, claim a stronger guarantee than established, or weaken required guarantees for speed. If the required level cannot be achieved, explain the missing condition and leave the task incomplete. |
+| P0-MINIMAL-INPUT.idempotency | Safe repetition, retry and resume across the entire workflow | Every side-effecting unit has stable operation identity, known preconditions, durable progress and verified postconditions. After interruption, reconcile actual state before repeating an operation; retain valid completed work and prevent duplicate effects. Use native transactional or idempotent mechanisms where available and compensate only where explicitly safe and authorized. State exact limits where external systems cannot guarantee atomicity or exactly-once effects. Repeated execution of the same task against the same valid context produces the same intended outcome without accumulating extra effects. |
+| P0-MINIMAL-INPUT.acceptance | Prove minimal effort and strong guarantees together | Use sandbox end-to-end scenarios across applicable engines, shapes and workflows. Demonstrate setup with the smallest necessary input set, correct discovery and scope, automatic strategy selection, consistent outcomes, truthful guarantee reporting and safe repeated runs. Inject interruption before and after side effects, stale evidence, changed scope, concurrent writes and partial permissions. Measure operator inputs/actions alongside completion time, resource use and retry waste. A shorter configuration that shifts work to manual steps, conceals ambiguity or weakens guarantees does not pass. |
+
+Best is evaluated against the task's explicit guarantees and authorized limits,
+using measured evidence rather than an absolute or unproved marketing claim.
+Correctness, required consistency and idempotency constrain the strategy;
+performance is optimized within those constraints. All items remain OPEN.
+This update records requirements only and changes no runtime behavior.
+
+
+## P0-RESULT-SCOPE: concise database-first scope and validation results
+
+Owner request and documentation research, 2026-10-05. Status: OPEN. Extends
+P0-VALIDATE.results and P0-WORKFLOW-DEPTH.operator. Current operator feedback:
+results are difficult to read, contain too much text and do not clearly show
+which database has which problem or what has actually been established.
+
+Documentation comparison (not a visual usability test):
+
+| Product | Documented presentation | Useful pattern and remaining design need |
+|---|---|---|
+| AWS DMS | Table-level validation states and counts for pending, failed and suspended records | Separate execution state from data problems. Add a database summary above table detail and distinguish unable-to-compare from confirmed differences. |
+| Vitess VDiff | Workflow result, comparison counts, progress and table/shard details; detailed summaries/reports available on mismatches or verbose output | Keep the first view compact and expand evidence only when needed. Include scope and omitted checks so a clean result has an explicit meaning. |
+| Data Validation Tool | Tabular output, success/fail filtering and structured result handlers; several validation dimensions | Use structured comparison rows and filters. Aggregate by database and explain incomplete/unsupported dimensions rather than relying only on success/fail. |
+
+Sources consulted:
+- https://docs.aws.amazon.com/dms/latest/userguide/CHAP_Validating.html
+- https://vitess.io/docs/24.0/reference/vreplication/vdiff/
+- https://github.com/GoogleCloudPlatform/professional-services-data-validator
+
+Recommended design to prototype and verify with users:
+
+| Level | Default content |
+|---|---|
+| Scope | Source to target mapping, included databases and table counts, checked dimensions, excluded/unsupported scope, filters/transforms and consistency window. Long rules and object lists are expandable; show resolved scope, not configuration syntax alone. |
+| Overview | Databases with confirmed issues, databases with no issues found in completed checks, and databases still incomplete. Display overall checked/total coverage and an explicit incomplete outcome when required checks remain. |
+| Database | One row per database: mapped target, outcome, checked/total tables and required checks, issue count, and a short plain-language problem summary. Prioritize confirmed issues and incomplete work; matching databases remain visible in a compact group. |
+| Problems | Group within each database by data, schema/objects, access, counters, configuration and execution blockers. Show object, problem, source value, target value, impact and next action. Separate confirmed defects, expected differences and advice. |
+| Evidence | Expand the affected object or check for detailed evidence, observation time and diagnostic context. Raw logs are never the main report. |
+
+| ID | Deliverable | Acceptance criteria |
+|---|---|---|
+| P0-RESULT-SCOPE.scope | A readable resolved-scope view | Clearly show what was included, excluded, transformed, unsupported and actually checked, with source/target mappings and honest denominators. In-scope failures cannot disappear into excluded scope. Related objects and non-table checks remain visible. |
+| P0-RESULT-SCOPE.summary | Database-first grouped results with concise language | First view identifies each affected database and its problems without opening logs. Distinguish confirmed issue, no issue found within completed coverage, expected difference and incomplete evidence. Use explicit text labels, not color alone; one finding has one short statement, with detail on demand. |
+| P0-RESULT-SCOPE.usability | Prototype and prove comprehension across result surfaces | Use synthetic clean, mixed, interrupted, filtered, renamed and unsupported scenarios. An operator must identify scope, affected databases, concrete problems and remaining work from the first view, then find supporting evidence on demand. Console, UI and exports agree on facts, grouping and verdicts. Compare alternative layouts with users; documentation research alone cannot mark usability DONE. |
+
+All items are OPEN. This is a researched design proposal, not implemented UI.
+Current priority remains completing the ongoing validation; implement the
+report redesign separately from that read-only operational work.
+
+
+### P0-RESULT-SCOPE: commercial comparison and unmatched dimensions
+
+Owner clarification, 2026-10-05: compare the result/scope experience against
+commercial products as well as open-source tools. Maintain an explicit product
+inventory and research status; do not describe a selected sample as every paid
+product. The research must cover all relevant products in the inventory,
+including products subsequently discovered. Current operational priority is
+finishing validation; the exhaustive comparison remains OPEN.
+
+Initial commercial documentation findings:
+
+| Product | Documented behavior | Application to migkit |
+|---|---|---|
+| Oracle GoldenGate Veridata | Job/group/compare-pair hierarchy, comparison status filtering and out-of-sync reports | Group by database and object and expand problem details without treating a finished job as a clean result. |
+| Informatica Cloud Data Validation | Suite and job reports; matched, unmatched, missing and extra records; row counts and column type matching | Keep distinct difference categories and comparison dimensions. Explicitly label full verification versus sampling and report sample limits. |
+| Qlik Replicate | Separate full-load and change-processing monitoring; completed/loading/queued/error table groups and table progress | Separate execution progress from correctness verdict. The referenced monitor documentation does not establish equivalent content-verification presentation. |
+| Redgate SQL Data Compare | Object results and side-by-side row/value differences; identical and unable-to-compare cases | Show affected objects before detailed source/target values. Explain why an object cannot be compared. |
+| Devart dbForge Data Compare | Object summary above record details; filters for different, identical, included/excluded and mapped/unmapped objects | Present resolved scope and mapping quality alongside results, with drill-down from the affected object. |
+| Datafold | High-level diff overview and value-level exploration | Offer a concise outcome view with separate detailed rows/columns. Vendor claims about scale are not a measured usability or performance result. |
+| QuerySurge | Run dashboard and hierarchical project/test progress | Preserve useful suite/task context while adding the requested database-first outcome grouping. |
+| IBM Data Replication asntdiff | Console summary and a differences table | Generate a readable database/object summary from structured evidence; raw diagnostic tables must not be the operator's primary view. |
+
+Official sources:
+- https://docs.oracle.com/goldengate/v1221/gg-veridata/GVDUG/working_with_jobs.htm
+- https://docs.informatica.com/content/dam/source/GUID-B/GUID-BE90AF74-E490-4BA6-9EC6-2D9B079C5D7B/7/en/CDV_July2024_Monitor_en.pdf
+- https://help.qlik.com/en-US/replicate/May2025/Content/Replicate/Main/Tutorial/RunMonitorTask_sample.htm
+- https://documentation.red-gate.com/sdc15/reviewing-the-comparison-results/viewing-the-row-differences
+- https://docs.devart.com/data-compare-for-mysql/view-comparison-results/view-comparison-results.html
+- https://www.datafold.com/blog/what-the-heck-is-data-diffing/
+- https://www.querysurge.com/product-tour/features
+- https://www.ibm.com/docs/en/idr/10.2.1?topic=tables-table-compare-utility-asntdiff
+
+| ID | Deliverable | Acceptance criteria |
+|---|---|---|
+| P0-RESULT-SCOPE.commercial | Complete a maintained commercial result/scope comparison inventory | Cover the initial eight products above, managed AWS/Azure/Google/Tencent/Alibaba/Huawei migration services, and additional relevant commercial comparators discovered during research. For each, record applicable product/version, official evidence, scope preview, mappings/filters, database/object grouping, progress versus correctness, incomplete/unsupported states, diff categories, consistency guarantees, next actions, export and detail navigation. Mark documented present, documented absent/not applicable and evidence unavailable separately. Missing public documentation does not prove a feature is absent. Record research coverage and remaining products honestly. |
+| P0-RESULT-SCOPE.unmatched | Design clear presentation for dimensions without a direct competitor equivalent | Every required migkit dimension has a proposed display and acceptance scenario even if no comparable product exposes it: counters, accounts/grants, routines/events, parameters/timezone, replication lag, expected transforms, migration artifacts, proof invalidation and recovery. Show database, affected object, short problem, actual source/target state, impact, verdict certainty and next action. Group shared settings once with affected-database references instead of duplicating long text. Separate observed vendor behavior from inferred design proposals. Use prototypes and comprehension checks to choose the result, without copying irrelevant product hierarchy or repair defaults. |
+
+
+## P0-AUTO-RESOURCES: task and worker management throughout every process
+
+Owner clarification, 2026-10-05. Status: OPEN. Every applicable process must
+manage its own tasks, concurrency and resources through the shared decision
+engine. The operator should not tune worker/thread counts or orchestrate nested
+pools. Serial execution is valid when dependencies, guarantees or measured
+cost make it appropriate, but its reason must be explicit in evidence.
+
+Verified integration gaps, not a full platform audit: `jointplan` models joint
+schedules and worker allocation, `decide.Trials` accounts for pressure, and
+MySQL database validation uses a health-based throttle. However, its table
+pool uses `hop.workers` while native per-table checksum work creates a fixed
+four-thread pool. CLI and PostgreSQL paths also contain configured or fixed
+pools. These observations establish incomplete automatic integration; they do
+not establish that every constant pool is wrong or that all task families
+have been audited. Existing optimization components must be reused.
+
+| ID | Deliverable | Acceptance criteria |
+|---|---|---|
+| P0-AUTO-RESOURCES.route | Inventory and integrate resource decisions for every process | Cover all task families in P0-DECISION-ALL.coverage, including discovery, assessment, planning, schema, conversion, copy, CDC, validation/deep checks, recovery, repair, cutover and reporting. Identify every pool, queue, subprocess, server-side parallel job and serialized stage; classify justified fixed constraints versus decisions that need adaptive allocation. Route consequential allocation through shared contracts and guard new bypasses. Map gaps to implementation items; do not mark platform coverage complete from mover-only tests. |
+| P0-AUTO-RESOURCES.budget | Shared budgets across nested work and concurrent runs | Coordinate task, table, range and source/target execution against real endpoint connection, CPU, I/O, memory, network and applicable API quotas. Account for nested pools and server-side workers so a configured outer limit is not multiplied silently. Track endpoint ownership and contention across simultaneous local runs where controllable; disclose external workload uncertainty. Enforce operator limits and correctness dependencies rather than equating more threads with more throughput. |
+| P0-AUTO-RESOURCES.adapt | Automatic measured allocation and load balancing | Discover available capacity and obtain bounded representative measurements; choose task ordering, work-unit size, source/target concurrency and workers/processes appropriate to the workload. Adapt at safe boundaries to skew, large values, latency, saturation and failures. Increase concurrency only where measured benefit and limits permit; reduce or serialize when appropriate. Preserve coverage, consistency, checkpoint validity and idempotency. An optional user worker limit is a constraint, not a required tuning task. |
+| P0-AUTO-RESOURCES.explain | Useful bottleneck and progress reporting | Identify the slow stage and affected endpoint/object from measurements; report actual versus allocated concurrency, throughput, queue/wait time, remaining work and ETA uncertainty. Separate measured CPU/I/O/network/server waits from inferred causes and unavailable metrics. Explain allocation changes concisely and retain detailed evidence. Missing metrics cannot be treated as spare capacity or as a confirmed cause. |
+| P0-AUTO-RESOURCES.proof | End-to-end resource-management acceptance | Test actual workflows with nested pools, competing tasks, slow endpoints, skew, server-side parallelism and changing limits in the sandbox. Prove shared budgets hold, adaptation improves or bounds completion cost, serial choices are justified and recovery does not duplicate effects. Compare automatic allocation with fixed baselines using time, load, memory, connections and retry waste. The user can complete every supported workflow without selecting internal workers or threads. |
+
+This is an implementation and integration backlog, not a configuration-only
+issue. All items remain OPEN; current operational validation uses private
+orchestration to finish existing work, without claiming these gaps are closed.
+
+
+### P0-AUTO-RESOURCES: every task and every step must adapt automatically
+
+Owner acceptance clarification, 2026-10-05. Required final behavior: automatic
+scaling applies to every task, phase, step and nested work unit, including
+future features. Allocation is continuously reconsidered from applicable
+measurements and dependencies throughout execution, not merely chosen once
+at startup or for the mover. The system increases, reduces, pauses, resumes
+or redistributes work at safe boundaries as conditions warrant. Scale here
+means execution concurrency and work allocation within available, authorized
+resources; provisioning paid infrastructure or changing database capacity
+requires separate explicit authorization.
+
+Additional acceptance requirements for P0-AUTO-RESOURCES.route, .adapt and
+.proof:
+
+- Inventory every execution step and its allocation owner. Each step either
+  participates in automatic allocation or declares a measured or contractual
+  reason why it must remain serial or has a fixed maximum. A serial step is
+  still managed automatically; it is not omitted from resource accounting.
+- Coordinate scaling across runs, tasks, phases, tables, ranges, threads,
+  processes, connections and applicable server-side parallel execution through
+  shared budgets. A child step cannot independently multiply its parent's
+  allowance. Track contention, dependencies and fairness so small or critical
+  work does not starve behind large scans.
+- Re-evaluate after relevant rate, queue, load, lag, capacity, error or phase
+  changes. Use bounded exploration, backpressure and stabilization to avoid
+  uncontrolled growth or oscillation. Unknown capacity calls for a conservative
+  measured start, not an assumption that more workers are safe.
+- Scale work units and execution together; handle skew and large values without
+  weakening complete coverage, required consistency, durable evidence or
+  idempotency. Pause or switch safely where a running operation cannot be
+  resized, and apply the new allocation to remaining valid work.
+- The normal workflow must complete without user tuning of workers, threads,
+  batching or task concurrency. Optional overrides express limits or goals.
+  Report actual allocation, concise reasons for changes and ETA uncertainty.
+- Prove scaling up and down, serialization, redistribution and recovery through
+  actual multi-step sandbox workflows under changing constraints. A unit test
+  of the chooser, a static worker count or scaling only one task family cannot
+  satisfy platform acceptance. New steps require the same coverage guard.
+
+All related items remain OPEN until these integrated behaviors are proved.
+
+
+### P0-AUTO-RESOURCES: fine-grained high-throughput parallel execution
+
+Owner requirement, 2026-10-05. The design must support very large numbers of
+independent work units and high concurrency wherever the complete system can
+sustain useful throughput. Two endpoint readers or a fixed four-thread pool
+must not become an architectural ceiling. Large task counts do not require
+one thread or connection per task: use bounded queues, backpressure, reusable
+workers and the execution primitive appropriate to each engine and workload.
+
+Additional requirements for P0-AUTO-RESOURCES.budget, .adapt and .proof, and
+P0-VALIDATE.ranges:
+
+- Decompose large tables and steps into independently schedulable, resumable
+  units, including composite/text keys, partitions, skew and large values.
+  Dynamically balance units by measured bytes and duration; avoid long tails,
+  excessive planning costs and head-of-line blocking. Drain completed units
+  as they finish and persist evidence immediately, irrespective of submission
+  order. Verify complete non-overlapping scope and target-only rows.
+- Schedule multiple units on each endpoint concurrently when useful, with
+  source/target pairing or pipelining according to required consistency and
+  bounded memory. Coordinate nested work, multiple tables and processes using
+  shared endpoint budgets. No default fixed per-table pool may silently cap
+  or multiply the globally justified allocation.
+- Evaluate every relevant available factor: local CPU, memory, executor and
+  connection overhead; endpoint CPU, storage latency/IOPS/throughput, cache,
+  query plans, indexes, partitions, server-side parallelism and connection
+  limits; network bandwidth/latency/errors; row size, JSON/LOB serialization
+  and key distribution; application workload, locks, replication lag,
+  consistency/snapshot lifetime, cost and service quotas. Distinguish measured
+  facts, estimates and unknown signals; unavailable telemetry is explicit.
+- Use bounded probing and marginal throughput/load measurements to increase
+  concurrency while beneficial and within limits, and reduce it when it
+  saturates a resource, harms application workload or increases retries.
+  Prevent oscillation, starvation, unbounded task materialization, connection
+  storms and duplicate/orphaned work. Choose threads, processes, asynchronous
+  I/O or server-native parallelism by workload rather than assuming threads
+  alone make every step faster.
+- Never trade full coverage, comparison semantics, required consistency,
+  duplicate detection, durable proofs or idempotency for concurrency. A
+  scalable execution strategy that cannot preserve the task's guarantees is
+  ineligible. Report the limiting factor and actual useful parallelism, with
+  uncertainty where the cause is not established.
+- Benchmark end-to-end scaling across increasing concurrency and task counts
+  in the sandbox, including asymmetric endpoints, large values, skew,
+  competing application load and injected failures. Record throughput,
+  latency, memory, connections, resource saturation, retry waste and verified
+  coverage. Prove bounded overhead and correct recovery at high task counts;
+  claim faster execution only from measured results, not worker count alone.
+
+These are OPEN design and implementation acceptance requirements. Optimize
+for the fastest verified complete outcome the available authorized system can
+sustain, with minimal operator input and no arbitrary thread-count ceiling.
+
+
+### P0-AUTO-RESOURCES: deeply dynamic telemetry, prediction and execution
+
+Owner requirement, 2026-10-05. Telemetry, work decomposition, scheduling,
+validation depth and prediction must operate as one continuous feedback loop
+through the shared decision engine. Target the fastest complete outcome that
+preserves the task's strongest required guarantees; a fixed checklist,
+static chunk size, one-time ETA or worker-count heuristic is insufficient.
+Reuse existing cost, workflow and evidence owners rather than building an
+independent prediction or scheduling system.
+
+Additional acceptance requirements:
+
+- Discover remaining work at task, phase, object and range levels, including
+  dependent downstream checks. Measure rows, bytes, value sizes, skew,
+  per-endpoint service time, queue/wait time, resource pressure, retries and
+  evidence validity where available. Represent unknowns explicitly and choose
+  bounded probes when their information could change the plan.
+- Dynamically refine work units and diagnostic depth from evidence. Prefer
+  incrementally measurable scans to monolithic opaque queries where equivalent
+  guarantees can be preserved. Large-value sizing must not silently skip a
+  timed-out column and report the remaining columns as complete. When native
+  progress is unavailable, use applicable historical/representative rates and
+  conservative bounds, clearly labeled as predictions; do not fabricate
+  observed progress or an exact completion time.
+- Update ETA for each step and the full dependency-aware remaining workflow
+  from measured rates and uncertainty. Include queueing, contention, resource
+  sharing, retry/failure probability, warm-up and downstream work; account for
+  concurrent steps without adding all durations as though they were serial.
+  Detect stalls and explain their effect. Distinguish active runtime from
+  network interruption or machine suspend. Expose confidence/bounds and the
+  limiting unknown; make reliable estimation actionable rather than merely
+  displaying an unexplained unknown.
+- Couple forecasts to action: compare alternative method compositions, range
+  sizes, concurrency and ordering using their measured cost and guarantees.
+  Replan when new observations justify it, redistribute remaining work and
+  investigate anomalies within bounded budgets. Preserve completed proofs
+  only when their scope and consistency context remain valid. Scale-down,
+  serialization and additional checks are valid when they improve the
+  verified outcome or protect required guarantees.
+- Prove through sandbox end-to-end scenarios that changing conditions produce
+  appropriate different plans, depth and estimates. Track forecast error and
+  calibration, completion time, resource use, retry waste and defect detection
+  against fixed baselines. Include asymmetric endpoints, skewed JSON/LOB,
+  opaque native operations, network failures and interrupted runs. An accurate
+  ETA alone does not pass if it describes an unnecessarily slow strategy;
+  faster execution alone does not pass if evidence or required checks are lost.
+
+This is an extension of P0-AUTO-RESOURCES.adapt/.explain/.proof,
+P0-WORKFLOW-DEPTH.investigate and P0-VALIDATE.depth. All remain OPEN until the
+integrated feedback loop and actual workflows satisfy these criteria.
+
+
+### Platform-wide migration contract: every task uses the adaptive loop
+
+Owner scope clarification, 2026-10-05. The loop of measuring, analyzing,
+choosing a strategy, adapting execution and depth, and updating predictions
+is a requirement for everything migkit does throughout migration. It is not
+limited to telemetry, worker allocation, move or validation. Applies to all
+current and future task families: configuration/import and discovery,
+assessment, scope and mapping, planning, schema and data conversion, object
+and account migration, data movement, initial/incremental replication and DDL,
+validation, diagnosis, authorized repair and undo, cutover and rollback,
+security, managed services, HA, recovery, evidence and reporting.
+
+Each task, phase, step and applicable work unit must have a declared goal,
+inputs and observations, constraints and guarantees, decision owner,
+execution/dependency state, completion evidence and prediction of remaining
+work where meaningful. Its observations feed the same shared decision engine
+and inform dependent tasks. Choices must adapt at safe boundaries from actual
+facts; deterministic invariants remain enforced and serial steps remain
+accounted for. Applicable task-specific depth and correctness criteria cannot
+be replaced by one generic checklist. No task is exempt merely because its
+implementation is currently a fixed command or a wrapped program.
+
+This is the umbrella acceptance contract for P0-DECISION-ALL,
+P0-WORKFLOW-DEPTH, P0-MINIMAL-INPUT, P0-AUTO-RESOURCES and P0-VALIDATE.
+Audit and prove complete task coverage rather than creating a separate loop
+per feature. New features must declare their integration and end-to-end proof.
+The operator provides minimal irreducible intent and access; migkit owns the
+process and exposes concise truthful outcomes. Automatic decisions remain
+within authorized scope and preserve required correctness, consistency and
+idempotency. All related implementation items remain OPEN.
+
+
+### Platform-wide migration contract: every database engine
+
+Owner requirement, 2026-10-06. The complete adaptive migration workflow must
+apply to every database engine, including homogeneous and heterogeneous engine
+pairs and future engine additions. PostgreSQL and MySQL are not the boundary
+of the product. This extends P0-PARITY.all and the umbrella contract above;
+reuse the shared capability/depth matrices rather than creating another
+independent engine list.
+
+Acceptance criteria:
+
+- Maintain an explicit engine and engine-pair inventory with discovered versions,
+  data models, source/target roles and managed-service constraints. Extend the
+  inventory when an engine is added or discovered; current adapter coverage
+  cannot be described as support for every engine in existence.
+- Every engine must participate in the shared decision, adaptive workflow,
+  resource allocation, minimal configuration, durable state, evidence, result
+  and prediction contracts. Cover all applicable migration tasks, including
+  conversion across different engines, and prove them through actual workflows.
+- Implement engine-specific mechanisms and semantic handling behind shared
+  contracts. Preserve type/value meaning, keys and duplicates, ordering where
+  required, transaction boundaries, consistency and idempotency. Do not force
+  relational assumptions onto document, key-value, graph, time-series or other
+  database models; require model-appropriate evidence of the intended outcome.
+- Track each applicable task and depth dimension by engine/pair as implemented
+  and proved, implemented but unproved, missing, blocked or genuinely not
+  applicable with a concrete semantic reason. Missing adapters, permissions or
+  implementation are gaps, not reasons to mark a capability not applicable.
+- Where native guarantees differ, compose supported mechanisms to meet the
+  task's required guarantees. If that cannot be established, state the exact
+  gap and block the unsupported outcome; never silently downgrade or claim
+  equivalent guarantees without proof. These limits must remain visible in
+  simple database-level results and resolved scope.
+- Use sandbox integration and end-to-end scenario acceptance for applicable
+  versions, shapes and engine pairs, including conversions, concurrent changes,
+  large/skewed data and interruption/repetition. Engine registration, method
+  existence or one happy-path test cannot establish full support. Future engines
+  require the same depth and guards; partial support remains explicit and OPEN.
+
+Universal engine support is the target requirement, not a claim about current
+implementation. P0-PARITY.all and the associated decision/workflow/resource
+items remain OPEN or PARTLY until their actual engine/pair coverage is proved.
+
+
+## P0-DECISION-ALL.priority: reasoned priorities and selective investigation
+
+Owner requirement, 2026-10-06. Status: OPEN. Knowing what matters, which facts
+to acquire and what to do first is part of deep intelligence, not a reason to
+reduce depth. Applies to every migration task, step, engine and applicable
+engine pair through the shared decision engine and adaptive migration rule.
+Reuse existing facts, costs, guarantees and workflow dependencies.
+
+Acceptance criteria:
+
+- Rank work and unknowns from explicit operator goals, mandatory guarantees,
+  dependency/critical-path effects, correctness and data-loss risk, affected
+  scope, reversibility, uncertainty and expected cost of delay or failure.
+  Mandatory correctness evidence is a requirement, not optional work that can
+  lose a priority score. Do not use one fixed priority list for all workloads.
+- Decide which observations and probes to acquire by expected decision impact:
+  plausible outcomes, whether they change the feasible strategy or verdict,
+  risk reduced, prerequisites unlocked and investigation time/resource cost.
+  Explain the evidence behind the priority and its uncertainty. Use bounded
+  measurement and reusable valid evidence instead of collecting every metric
+  indiscriminately or treating unmeasured assumptions as facts.
+- Balance immediate task cost against downstream and whole-workflow benefit;
+  prioritize blockers and critical evidence while independent useful work
+  continues within shared budgets. Account for fairness and prevent starvation
+  of smaller tasks or checks whose importance is not proportional to row count.
+  Distinguish urgent, important and inexpensive work rather than equating them.
+- Update priorities when facts, failures, resource pressure, replication state,
+  scope or goals change. Deepen investigation where anomalies or uncertainty
+  threaten the required outcome; stop optional probing when further information
+  cannot justify its cost within the task's limits. If required evidence cannot
+  be obtained, leave the outcome explicitly incomplete, not silently skipped.
+- Keep the decision record of alternatives, chosen priorities, factual basis,
+  expected benefit, cost and guarantees. Operator output remains concise:
+  current focus, why it matters, blocked/remaining work and required action.
+- Prove through sandbox multi-task scenarios that different consequences and
+  uncertainty lead to appropriate different priorities and investigations.
+  Include misleading cheap signals, critical expensive checks, changed goals,
+  competing resources, dependent blockers and uncertain failures. Compare
+  completion cost, detection of defects, probe overhead, starvation and useful
+  decisions against fixed-order and indiscriminate-measurement baselines.
+  A priority formula or narrative explanation alone cannot mark this DONE.
+
+This extends P0-DECISION-ALL.reason/.adapt/.proof and
+P0-WORKFLOW-DEPTH.investigate. The requirement is evidence-driven depth and
+reasoned prioritization throughout the process; implementation remains OPEN.
+
+
+## P0-SAFETY-INTEGRITY: data safety before execution speed
+
+Owner requirement, 2026-10-06. Status: OPEN. Applies to every task, step,
+engine and applicable engine pair. Speed is optimized only within the required
+safety and correctness guarantees. Data loss, corruption, duplicate effects,
+broken dependencies or incorrect required ordering are unacceptable outcomes.
+Extend the shared guarantees, decision, workflow and evidence contracts.
+
+Acceptance criteria:
+
+- Model required semantics before execution: exact intended scope, type/value
+  fidelity, NULL/empty and encoding distinctions, duplicates and key meaning,
+  dependency order, transaction atomicity, applicable change/event ordering,
+  deletes and schema-version compatibility. Preserve the ordering required by
+  the source model and application contract; do not invent a total row order
+  for unordered tables or claim unsupported global ordering across partitions.
+- Admit only strategies and parallel schedules that establish the required
+  guarantees. Respect dependency barriers, consistent snapshots or applicable
+  replication positions, transaction boundaries and schema transitions.
+  Parallelism must not reorder dependent effects, race checkpoint advancement,
+  acknowledge unverified writes or lose intervening updates/deletes.
+- Preserve durable progress and provenance. Reconcile actual side effects after
+  uncertain failures before retrying, deduplicate where applicable and advance
+  positions only after their corresponding durable effects. Detect schema,
+  scope and consistency changes that invalidate evidence. No silent skips,
+  lossy conversions, truncation, dropped events or incompatible fallback.
+- Detect integrity problems with evidence appropriate to the task: missing,
+  extra, changed and duplicate data, ordering/transaction violations, conversion
+  fidelity, constraints and referential dependencies. Distinguish concurrent
+  change from established equality and require applicable completion evidence
+  before readiness or cutover. A count match or a successful operation alone
+  cannot certify correctness.
+- When a required guarantee is unavailable or cannot be verified, stop the
+  affected unsafe action or leave the task incomplete with an actionable
+  explanation. Continue independent safe work only where dependencies permit.
+  Repair, destructive actions and infrastructure changes stay within explicit
+  authorization; neither urgency nor speed permits a weaker silent plan.
+- Prove safety through sandbox failure-injection workflows: crashes around
+  commit/ack/checkpoint boundaries, retries, duplicate delivery, out-of-order
+  dependent events, concurrent writes/deletes, DDL transitions, partial batches,
+  resource exhaustion and cross-engine conversions. Verify invariant outcomes,
+  safe recovery and complete evidence at high concurrency. Performance gains
+  count only when these safety checks pass; unsupported guarantees remain
+  explicit gaps rather than claims of absolute safety.
+
+Links: P0-MINIMAL-INPUT.correctness/.idempotency,
+P0-DECISION-ALL.reason/.priority, P0-WORKFLOW-DEPTH.recover and
+P0-AUTO-RESOURCES.proof. This is a hard implementation and review requirement;
+current behavior is not certified by recording it. Status remains OPEN.
+
+
+## P0-RESILIENCE-ALL: prevent, contain and recover from migration failures
+
+Owner clarification, 2026-10-06. Status: OPEN. Applies to every current/future
+task, step, engine and applicable engine pair. Cover every identified class of
+conditions that can harm the outcome or surrounding systems, not only query
+timeouts. Unknown failures must also reach a conservative safe state; no
+finite failure catalogue proves that all possible failures are understood.
+Reuse the shared decision engine, execution/resource controller, guarantees,
+state, ownership and evidence contracts rather than a separate chooser.
+
+Acceptance criteria:
+
+- Maintain a task/engine failure catalogue covering connectivity, authentication,
+  permissions, expired credentials, quotas, throttling, CPU/memory/storage
+  pressure, disk exhaustion, lock/deadlock, long or orphaned work, retries,
+  duplicate/out-of-order events, partial/uncertain commits, process/machine
+  interruption, failover, stale checkpoints, inconsistent views, replication
+  lag/lost history, schema changes, unsupported or lossy conversion, malformed
+  data, corrupted evidence, dependency failures and external workload impact.
+  Extend it from incidents and new features; link each applicable class to
+  detection, prevention, containment, recovery and its proof or explicit gap.
+- Assess hazards before execution and continuously during work. Use actionable
+  observations with bounded cost; distinguish known faults, probable causes and
+  unavailable evidence. Decision choices include proceed, probe, throttle,
+  pause, isolate, replan, reconcile, retry, authorized compensate/rollback and
+  stop. Classify transient versus persistent faults and retryability according
+  to actual effect/state, not exception text alone.
+- Enforce decisions through execution controls: owned operation identities,
+  lifecycle tracking, cancellation acknowledgement where available, shared
+  budgets, admission control, bounded retries/backoff, circuit breaking and
+  dependency barriers. Prevent retry storms, duplicated effects and abandoned
+  operations from accumulating. Unknown outcome is reconciled before repeat;
+  work ownership and authorization constrain cleanup and compensation.
+- Contain the blast radius across steps, tasks, databases and endpoints. Preserve
+  source data and application availability within declared limits; prevent
+  failed optional work from hiding failed required evidence. Continue independent
+  safe work where possible, without allowing dependents to proceed on invalid
+  prerequisites. Define bounded shutdown and recovery behavior for failures of
+  the controller, its telemetry and its durable state themselves.
+- Recover from verified state with evidence validity checks, idempotent effects
+  and required consistency/order preserved. Never silently downgrade guarantees
+  or interpret a skipped/timed-out check as success. When no safe supported
+  recovery exists, block the affected outcome and explain the fault, affected
+  scope, retained progress and precise next action in concise operator language.
+- Prove integrated prevention, detection, containment and recovery through
+  sandbox fault injection and compound failures, including controller restart,
+  telemetry loss, failure during cleanup, resource exhaustion and unknown
+  outcomes. Verify safety invariants, bounded resource/retry growth, correct
+  dependency handling and honest results. Treat unhandled classes as OPEN gaps;
+  a broad exception handler or a catalogue without workflow tests is insufficient.
+
+Links: P0-SAFETY-INTEGRITY, P0-DECISION-ALL.reason/.adapt/.priority,
+P0-WORKFLOW-DEPTH.recover and P0-AUTO-RESOURCES. This is a platform-wide hard
+requirement, not a claim of current resilience coverage. Status remains OPEN.
+
+
+## P0-AUTONOMOUS-MIGRATION: operator intent to verified outcome
+
+Owner requirement, 2026-10-06. Status: OPEN. Provide the relevant capabilities
+of established migration and verification products, then demonstrably exceed
+their depth, judgement and complete operator experience. Normal users state
+their goal and supply necessary access; migkit owns the technical process to
+its verified outcome. Users must not have to select algorithms, diagnose logs,
+coordinate recovery or tune workers to make supported workflows work.
+
+Acceptance criteria:
+
+- Maintain a source-grounded capability and mechanism comparison against AWS
+  DMS, Tencent DTS, Oracle GoldenGate/Veridata and the relevant commercial
+  inventory in P0-RESULT-SCOPE.commercial. Establish applicable versions,
+  engines, prerequisites and guarantees. Include preflight, restart/resume,
+  error classification, backoff, conflict handling, lag-aware confirmation,
+  state/evidence and reporting. Reuse existing research and shared matrices;
+  translate differences into explicit implementation gaps and scenario proofs.
+- Deliver capability parity where applicable, then add integrated fact-driven
+  diagnosis, safe strategy composition, dynamic depth and resource management,
+  dependency-aware recovery and verification across every supported task and
+  engine pair. Use competitor mechanisms as grounded baselines, not blanket
+  assumptions about their limitations. A wrapped feature alone is not parity
+  unless the actual user workflow and required guarantees work.
+- Accept minimal irreducible goals, endpoints/access and authorized scope.
+  Discover the rest, resolve technical choices internally and execute the whole
+  workflow automatically. Ask only for unavailable intent/access, consequential
+  business choices or necessary authorization; do not shift implementation
+  decisions to users. Never invent business semantics, broaden scope or perform
+  unauthorized destructive actions to avoid a question.
+- Anticipate and contain hazards; diagnose and recover supported failures from
+  verified durable state. Preserve correctness, consistency, required ordering,
+  idempotency and surrounding workload limits. Unknown or unsupported conditions
+  produce a safe, precise blocker rather than silent success or repeated unsafe
+  attempts. Automatically handle everything the supported contract permits;
+  disclose the remaining boundary truthfully.
+- Prove better outcomes in equivalent sandbox end-to-end scenarios with the
+  same scope, guarantees and resource constraints. Measure operator inputs and
+  interventions, valid completion rate, failure recovery, defect detection,
+  total completion time, resource use, probe/retry waste and evidence clarity.
+  Report actual results and remaining gaps; neither claims of intelligence nor
+  more features/threads establish superiority. No universal superiority claim
+  without applicable comparative evidence.
+- The user-facing flow is goal, minimal setup, understandable progress and
+  concise database-level outcomes with evidence on demand. A user can complete
+  healthy and recoverable-failure scenarios without custom scripts, internal
+  tool knowledge or manual orchestration. Prototype and test comprehension;
+  complexity stays within the implementation.
+
+This is the product-level acceptance target linking P0-DECISION-ALL,
+P0-WORKFLOW-DEPTH, P0-MINIMAL-INPUT, P0-AUTO-RESOURCES,
+P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL and P0-RESULT-SCOPE.
+It records requirements only; implementation and comparative proof remain OPEN.
+
+
+### P0-AUTONOMOUS-MIGRATION: recover intelligently toward completion
+
+Owner clarification, 2026-10-06. The intended behavior is to detect and
+understand problems, handle them autonomously where supported and safely
+continue toward the best verified complete outcome. Stopping on every error
+or blindly retrying is insufficient. Established products already provide
+conditional retries/restarts; compare their actual mechanisms rather than
+assuming all errors immediately stop them.
+
+Additional acceptance criteria for P0-RESILIENCE-ALL and
+P0-AUTONOMOUS-MIGRATION:
+
+- Diagnose failures in their task, dependency, resource and consistency context.
+  Reconcile whether work committed, is still running or had no effect. Select
+  bounded recovery based on evidence: cancel owned abandoned work, back off,
+  resize units, rebalance concurrency, switch an equivalent method, repair an
+  authorized technical condition or replan remaining work. Avoid retry storms,
+  hidden data skips and duplicate or reordered effects.
+- Preserve valid completed work and continue independent safe tasks while
+  isolating affected units. Re-establish prerequisites and required guarantees
+  before releasing dependent work. Persist recovery decisions and verified
+  postconditions; update remaining scope, resource budgets and ETA.
+- Optimize recovery for whole-workflow completion, correctness and minimum
+  wasted time/resources, not the fastest local retry. Learn from recurring
+  faults and change the approach when evidence shows the previous one will
+  fail again. Recovery must be bounded and stable under compound failures.
+- Normal recoverable cases complete without user diagnosis or technical tuning.
+  Show concise current impact, recovery action and retained progress; keep
+  detailed reasoning available on demand. Necessary intent, unavailable access
+  and authorization remain explicit boundaries. Impossible prerequisites,
+  irrecoverable loss or unprovable guarantees require an actionable safe blocker;
+  never claim universal completion or zero loss without evidence.
+- Inject recoverable faults at different phases and side-effect boundaries in
+  sandbox workflows. Prove completion with full coverage and preserved value,
+  ordering, consistency and idempotency invariants, without duplicate effects
+  or omitted checks. Include unrecoverable cases to prove safe stopping and
+  truthful partial results. Measure automatic recovery success, user actions,
+  total completion time, retry waste and external workload impact.
+
+The target is smooth autonomous completion without sacrificing any required
+guarantee. It does not authorize source changes, destructive repair or weakened
+verification merely to keep moving. These implementation criteria remain OPEN.
+
+
+## P0-AUTOTUNE-ALL: diagnose and tune the complete migration workflow
+
+Owner clarification, 2026-10-06. Status: OPEN. Retry/restart alone is not
+intelligent recovery when an inappropriate setting or execution strategy is
+the cause. Reported example: unreasonable LOB sizing causes failure rather
+than automatic adjustment. This is operational feedback, not a claim that
+all competitor versions behave identically. migkit must discover, diagnose,
+tune and verify every applicable aspect of the task through shared decisions.
+
+Acceptance criteria:
+
+- Inventory tunable dimensions across every current/future task, step, engine
+  and engine pair: large-value handling, payload and statement sizing, batching,
+  partitions/ranges, concurrency, queues and memory, timeouts/retry budgets,
+  flow control, transport/compression, conversion and validation strategies,
+  consistency boundaries and applicable session settings. Link each to its
+  factual prerequisites, valid bounds, guarantees, ownership and scenario proof.
+  Do not confuse a tunable performance parameter with a correctness invariant.
+- Before costly work, measure or establish representative shape, actual limits
+  and uncertainty. For LOB/JSON, consider maximum and distribution of value/row
+  sizes, encoding/serialization expansion, packet/statement/driver/service
+  limits, memory pressure and supported streaming/chunking semantics. Use an
+  exact bound where safety requires one, or a safe streaming strategy; a sample
+  maximum is not proof that all values fit. Retain unsupported scope explicitly.
+- Classify the failure cause and compare feasible adjustments rather than
+  retrying identical doomed work. Select compatible combinations such as
+  smaller batches, bounded payloads, streaming, changed chunking or an equivalent
+  alternative path. Tune within available authorized resources; neither blindly
+  raising every limit nor silently truncating a value is acceptable.
+- Adapt from execution evidence and marginal benefit throughout the workflow.
+  Use bounded probes, coordinated budgets, backpressure and stable control to
+  avoid oscillation and resource storms. Reconcile partial effects before
+  switching strategies, preserve valid completed work and update predictions.
+  Verify the adjustment actually resolves the fault and preserves full coverage,
+  data/type fidelity, required order, consistency and idempotency.
+- Own technical tuning internally so supported recoverable scenarios finish
+  without asking users to choose LOB modes, packet sizes, workers or retries.
+  Automatic session/local strategy changes stay within authorized contracts;
+  global database changes, source writes, destructive repair and paid capacity
+  changes require applicable authorization. If no safe authorized tuning can
+  meet the requirements, provide a precise blocker instead of false success.
+- Prove end-to-end recovery from mis-sized LOB/payload, skew, resource pressure,
+  incompatible limits and interacting misconfigurations in the sandbox across
+  applicable engines. Demonstrate that the cause is diagnosed, tuning changes
+  appropriately, the task completes and integrity is independently established.
+  Measure user intervention, completion time, resource impact, tuning/probe
+  overhead and retry waste against fixed-configuration and retry-only baselines.
+  Do not claim lossless completion from disappearance of an error alone.
+
+This extends P0-DECISION-ALL, P0-AUTO-RESOURCES,
+P0-AUTONOMOUS-MIGRATION and P0-RESILIENCE-ALL. The target is deep dynamic
+handling of all applicable migration dimensions, not a special-case LOB patch.
+Implementation and actual comparative proof remain OPEN.
+
+
+## P0-PRODUCT-TELEMETRY: complete usage evidence without customer data
+
+Owner requirement, 2026-10-06. Status: OPEN. Plan comprehensive metrics and
+structured events describing migkit's behavior and actual usage outcomes to
+improve the product, decision quality, safety and performance. Customer
+database content must never leave the user's environment. Storage/backend
+selection is deferred; Hugging Face is not a selected destination. This
+backlog change enables no collection or transmission. The owner previously
+requested default-on product telemetry; actual implementation must disclose
+that behavior clearly, provide effective opt-out and respect organizational
+controls before any transmission.
+
+Acceptance criteria:
+
+- Define a versioned allowlisted event schema across every task, step, engine
+  and applicable pair: product/adapter versions, coarse workload shapes and
+  size buckets, selected strategy identifiers, safe decision reason codes,
+  timings/rates, allocated/actual resources, progress and ETA calibration,
+  bounded error categories, retry/recovery/autotuning outcomes, verified scope
+  coverage and guarantee levels, completion state and user interventions.
+  Comprehensive means coverage of product behavior, not collection of arbitrary
+  runtime values or everything the process can read.
+- Prohibit outbound row/value content, samples, database dumps, keys/checksums
+  derived from customer values, query text, query plans containing literals or
+  object names, schema/DDL, names of databases/tables/columns/accounts, endpoints,
+  connection strings, credentials/tokens, paths, unrestricted configuration,
+  raw logs, stack traces and arbitrary exception messages. No hashing of customer
+  identifiers or content as a substitute for exclusion. Use coarse safe enums,
+  aggregate counts and thresholds/buckets to reduce contextual disclosure;
+  review remaining metadata for sensitive combinations and reidentification.
+- Build outbound events directly from safe typed fields; never upload raw logs
+  with best-effort redaction. Enforce schema/size validation and reject unknown
+  fields and free-form values at the producer and receiver. Keep diagnostic
+  evidence containing SQL, names or values local and separate from the outbound
+  queue. Automatic fallback, crash reporting and support bundles must obey the
+  same boundary; opt-in to telemetry does not authorize database-content export.
+- Show what is collected, purpose, destinations once selected and default state;
+  allow payload inspection, immediate disable and an organization-wide no-egress
+  policy. Respect offline/air-gapped environments. On disable, stop queued sends
+  and dispose of queued outbound events under the declared policy. Define
+  minimal installation/session identifiers only if needed, rotation and retention;
+  do not treat stable identifiers as anonymous without qualification.
+- Secure local queues and transport, isolate receiver credentials from distributed
+  clients, apply least-privilege ingestion/storage access, rate/size limits,
+  authenticated administrative access, abuse protection, retention/deletion and
+  auditability. Choose storage later against these requirements; private visibility
+  alone does not establish confidentiality. Do not embed a shared storage write
+  token in the client. Third-party destinations are explicit and reviewed.
+- Keep collection and sending asynchronous with bounded CPU, memory, disk and
+  network budgets, batching and capped retry/backoff. Telemetry failure must not
+  block or change migration semantics, consume unbounded resources or trigger
+  source/target queries solely to collect unnecessary product analytics.
+- Establish an analysis loop linking usage evidence to benchmark cases, decision
+  calibration, recovery improvements and backlog priorities. Segment by safe
+  engine/version/workload metadata and distinguish observational correlations
+  from causal performance claims. Missing telemetry cannot imply success.
+  Untrusted submitted events must not automatically change executable strategies
+  or production defaults without validation and regression proof.
+- Prove privacy and reliability with synthetic secret/content canaries in rows,
+  SQL, DDL, identifiers, errors, paths and crash contexts; inspect all network
+  payloads, queues and retry/support paths. Test unknown-field rejection,
+  opt-out/offline controls, authentication boundaries, abuse and receiver outage.
+  No customer database content or identifying schema is present in outbound
+  evidence. Complete task coverage, useful analytics and bounded operational
+  overhead must be demonstrated before marking DONE.
+
+This extends existing evidence/observability and local-learning owners; it does
+not replace detailed local diagnostics or authorize sending company material.
+All implementation and storage selection remain OPEN.
+
+## P1-SOURCE-HIERARCHY: readable project and source organization
+
+Owner request, 2026-10-06. OPEN. Research and proposed layout: [source hierarchy plan](research/source-hierarchy-2026-10-06.md). Compare verified GitHub layouts, inventory every source file and dependency, establish responsibility packages and complete old-to-new mapping, split oversized engine adapters behind stable contracts, align tests/docs/navigation, and enforce dependency rules. Preserve behavior, installed packaging, CLI/configuration/result contracts, state and resume compatibility. Stage coherent moves separately from behavioral changes; prove final sandbox and installed-wheel workflows under the repository test cadence. Do not interrupt active validation. This is a plan, not a completed reorganization.
+
+### P0-RESULT-SCOPE.contract and presentation plan
+
+Owner clarification, 2026-10-06. OPEN. [Result and report presentation plan](research/result-presentation-2026-10-06.md). Separate outcome, execution state, coverage and severity in a versioned structured envelope; no complete pass from partial/skipped/unsupported/failed work. Show actual scope then one row per database, practical issues grouped by database, and evidence on demand. Use one aggregation contract across CLI/web/exports/reports. Validate mixed-state examples and 30-second comprehension; preserve existing consumers and confidential evidence. Extends existing scope/results items rather than duplicating their research.
+
+### P0-RESULT-SCOPE.artifacts
+
+OPEN. Owner clarification, 2026-10-06: the run's directories and files must be understandable as well as the rendered report. Extend the result presentation plan with one readable entry point, database links, a versioned artifact manifest, separate evidence/diagnostics/internal state/exports, explicit authoritative retry results, safe paths and secret-free sharing. Provide non-destructive legacy indexing and resume compatibility; do not reorganize active run checkpoints.
+
+### P0-READABILITY-ALL: coherent readable product surfaces
+
+OPEN. Owner requirement, 2026-10-06: everything the user or maintainer encounters must be easy to find, read and understand. Applies to source hierarchy, configuration, commands/help, workflow/state/progress/ETA, errors/recovery, results/reports, directories/artifacts, exports and documentation. Use consistent plain names, a clear entry point, task/database grouping and progressive detail. Explain what happened, what it affects, what is verified or unfinished and whether action is needed; avoid unexplained identifiers, long repetitive prose and raw internal output in normal views. Preserve technical depth through linked detail, not omission. Enforce truthful scope, guarantees, uncertainty and evidence. Assess real representative tasks with comprehension/navigation exercises; cosmetic styling alone is insufficient. Extends P1-SOURCE-HIERARCHY, P0-MINIMAL-INPUT, P0-VALIDATE and P0-RESULT-SCOPE; those items retain implementation ownership.
+
+### P0-ARTIFACTS: typed workflow products and lineage
+
+OPEN. Owner request, 2026-10-06. Extend the [result presentation plan](research/result-presentation-2026-10-06.md) with first-class typed artifacts for every migration workflow. One manifest contract over existing evidence/state/audit owners; provenance, scope, validity, attempts, dependencies, sensitivity, durable atomic publication, safe reuse/invalidation, discoverability, retention and safe export. No duplicate storage engine; local by default. Prove crash/rerun/stale-scope/restore/retention scenarios. Artifact availability never implies complete verification or authorization to apply it.
+
+### P0-VALIDATE.no-silent-skip: incomplete deep checks cannot pass
+
+OPEN. Required in the next implementation campaign, owner 2026-10-06. Observed validation incident: whole-table per-column LOB queries timed out; a broad exception handler continued and the deep result described only successfully read columns as OK without disclosing omitted columns. Related charset, NULL/empty and float paths also catch errors and continue; partition digest paths can fall back to counts. This is execution completion without complete evidence, not a complete verified pass. Keep customer names/data out of public fixtures.
+
+Inventory every engine/task/check handler that suppresses errors or substitutes weaker evidence. Materialize required table/column/range/check work before execution, retain durable unit identity, record attempts and failed/pending/unsupported scope, and aggregate only from structured evidence. A failed required unit makes its check incomplete even when other units succeed. Counts-only fallback cannot imply digest/content verification. Safe independent work may continue, but readiness/cutover gates refuse unmet required guarantees.
+
+Shared decision/execution owners must diagnose timeout, connection loss and resource pressure, replan compatible methods or batch/split work, preserve valid units and resume with bounded retries and budgets. Reconcile owned queries and uncertain effects before retry. Preserve original check semantics and actual scope; no downgrade to sampling or silent subset. If recovery is impossible, return an explicit blocker or unsupported guarantee. Make omitted/failed counts and affected scope visible in concise results.
+
+Mandatory sandbox regression: one large-value column times out while the others succeed; overall check remains incomplete and names the missing scope; interruption/resume completes only remaining units; batched range execution yields the same exact maxima/counts as a complete reference; all output surfaces and readiness gates agree. Include charset/NULL-empty/float/partition weaker-evidence cases, lost connections, repeat failures, changing scope and restart. Never test with customer data. Regression and integration proof follow the repository final-suite cadence. Extends P0-VALIDATE, P0-RESILIENCE-ALL, P0-AUTO-RESOURCES and P0-RESULT-SCOPE.contract rather than adding a parallel controller.
+
+### P0-RESUME-ALL: every task, step and engine
+
+OPEN. Mandatory owner requirement, 2026-10-06. Every current/future task, phase, step and work unit across all supported engines/pairs must participate in durable resumable workflows, including discovery, assessment, configuration/planning, conversion, schema/objects/users, bulk move, CDC/DDL, validation, diagnosis, authorized repair, cutover/rollback, reporting/artifacts and cleanup. No path is exempt because its command is short or a wrapper.
+
+Persist scoped/versioned work identity, dependencies, completed evidence, pending/failed units and relevant transaction/replication positions. Publish checkpoint advancement only after durable confirmed effects. On restart, reconcile actual state and unknown effects before replay, preserve transaction/dependency/event order, prevent duplicate effects and respect source/target ownership. Retry resumes an idempotent unit, not an assumed undoable external call. Non-atomic external operations require detect-and-reconcile or explicit safe re-execution contracts; impossible or unauthorized recovery remains an actionable blocker, never claimed automatic success.
+
+Use shared decision/execution/persistence owners for automatic recovery/replanning where safe. Handle connection loss, process/host/controller crash, timeout, cancellation, resource pressure and restart; differentiate explicit pause/cancel from transient failure so no automation overrides user intent. Safely invalidate cached evidence on schema/scope/method/source-window changes. Maintain compatibility/version migration for saved state and authoritative artifact lineage.
+
+Acceptance: inventory every execution entry point and work unit with its resume contract, guarantees and proof; no unsupported path hidden behind a broad claim. Sandbox interruption before/after effects, during checkpoint publication and after ambiguous acknowledgements must resume to the correct final state without duplication, loss or weaker coverage. Cover nested parallel work, changing resources, repeated resume, upgrades, cutover critical sections and rollback. Test per-task/per-engine coverage plus representative full workflows under repository final-suite cadence. Extends P0-RESILIENCE-ALL, P0-ARTIFACTS, P0-VALIDATE.no-silent-skip and P0-DECISION-ALL; no parallel recovery controller.
