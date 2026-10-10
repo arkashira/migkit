@@ -267,3 +267,9 @@ No docker on this machine; nothing run against a database. Python 3.13 has click
 Done: P0-DECISION-ALL.coverage, first slice - `decide.TASKS` names every CLI task as routed (its modules must import the engine), a declared gap or a stated no-choice; `decide.task_gaps()` lists them; `tests/test_every_task_is_decided_or_declared.py` fails on a command missing from the table. Gaps declared: init, doctor, advise, assess, users. Guards run: compileall, the task test, no-method-said-twice, code map, depth matrix pass; `test_the_report_does_not_name_its_tools.py` has 3 failures that also fail on the tree without this change (not looked into). Full suite not run.
 
 Next: route the five gaps through the engine (advise/assess first), then entry points that are not CLI commands (UI actions, scheduled jobs) into `TASKS`; then P0-DECISION-ALL.reason.
+
+## 2026-10-10 - scheduled run 2
+
+Done: `assess` routed - `ready.depth` climbs full readiness check vs configuration-only through `decide.climb` from whether the servers answer (the engine's rows asked once, reused); `cli assess` says when it fell to the configuration alone. `TASKS["assess"]` is routed. Test: `tests/test_assess_depth_follows_the_servers.py`. Guards run and pass (task, no-method-said-twice, code map, depth matrix). Docker daemon is not running here; nothing run against a database. Full suite not run.
+
+Next: `advise`, then `doctor`, `init`, `users` through the engine; then non-CLI entry points into `TASKS`; then P0-DECISION-ALL.reason.

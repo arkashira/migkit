@@ -1302,7 +1302,11 @@ def assess(hop_name):
     # person does by hand and when
     from . import ready, rehearsal
     rehearsal.mark(hop)
-    got = ready.items(hop, eng)
+    quick, assessed, why = ready.depth(hop, eng)
+    if quick:
+        console.print(f"[yellow]assessed from the configuration alone:"
+                      f"[/yellow] {why}")
+    got = ready.items(hop, eng, quick=quick, assessed=assessed)
     items = [i.row() for i in got]
     color = {"pass": "green", "warn": "yellow", "fail": "red"}
     counts = {"pass": 0, "warn": 0, "fail": 0}

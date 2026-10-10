@@ -460,14 +460,43 @@ def by_hand(hop, eng=None):
 
 # --- in one place ------------------------------------------------------------
 
-def items(hop, eng, dbs=None, mode=None, quick=False):
+def depth(hop, eng):
+    """How deep an assessment goes, chosen from what the servers answer:
+    (quick, assessed, why). The full one asks the engine's own assessment
+    once (bounded by the engine's connect timeout); where the servers do
+    not answer it, the assessment stands on the hop's configuration alone
+    and says so - never a clean bill from what was not asked."""
+    from . import decide
+    box = {}
+
+    def answers(_facts):
+        try:
+            box["rows"] = list(eng.assess())
+            return True
+        except Exception as e:  # noqa: BLE001 - the rung below says it
+            box["error"] = _last(e)
+            return False
+    facts = decide.Facts()
+    full = decide.Rung(
+        "full", "the full readiness check",
+        needs=(decide.Need("the servers to answer", answers,
+                           lambda _f: "the servers did not answer: "
+                           + box.get("error", "unknown")),))
+    quick = decide.Rung("quick", "the check of the hop's configuration"
+                        " alone, the servers unasked")
+    got = decide.climb(f"assessing {hop.name}", (full, quick), facts)
+    return got.path == "quick", box.get("rows"), got.reason
+
+
+def items(hop, eng, dbs=None, mode=None, quick=False, assessed=None):
     """Every `Item` of the hop's goal: with `quick`, only what a step's
-    gate needs (no engine assess, no probe, no statement compared)."""
+    gate needs (no engine assess, no probe, no statement compared).
+    `assessed` is the engine's rows where `depth` already asked them."""
     dbs = _dbs(hop, eng, dbs)
     out = []
     if not quick:
         try:
-            for r in eng.assess():
+            for r in (assessed if assessed is not None else eng.assess()):
                 detail, _, fix = str(r.get("detail", "")).partition(
                     "  [fix] ")
                 out.append(Item(r["level"], r.get("scope") or BEFORE,

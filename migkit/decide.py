@@ -2371,8 +2371,7 @@ TASKS = {
     "doctor": ("discovery", ("gap", "the tool and permission probes run in"
                " a fixed order, not by what could change a decision")),
     "advise": ("assessment", ("gap", "advisors rank by fixed rules")),
-    "assess": ("assessment", ("gap", "the assessment's depth and order are"
-               " fixed, not chosen from what the probes found")),
+    "assess": ("assessment", ("routed", "ready")),
     "schema": ("schema", ("routed", "tableway")),
     "check": ("validation", ("routed", "verdict", "tableway")),
     "sync": ("repair", ("routed", "repairways", "verdict")),
