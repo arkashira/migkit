@@ -6,7 +6,7 @@ Tools for moving databases, checking the result and repairing differences.
 [![ci](https://github.com/arkashira/migkit/actions/workflows/ci.yml/badge.svg)](https://github.com/arkashira/migkit/actions/workflows/ci.yml)
 [![engines](https://img.shields.io/badge/engines-34-2a78d6)](#supported-engines)
 [![pairs](https://img.shields.io/badge/cross--engine-any_pair-0ca30c)](#cross-engine-hetero)
-[![python](https://img.shields.io/badge/python-3.10.12+-3776ab)](pyproject.toml)
+[![python](https://img.shields.io/badge/python-3.12+-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-0ca30c)](LICENSE)
 <!-- /gen_docs: badge -->
 
