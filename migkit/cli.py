@@ -940,7 +940,9 @@ def doctor(install):
         # every hop at once, and each hop's two sides at once: a host that
         # does not answer costs its connect wait once, not once for every
         # side of every hop after it; what each says is kept to its hop
-        with ThreadPoolExecutor(max_workers=min(8, len(hops))) as pool:
+        from . import decide
+        with ThreadPoolExecutor(
+                max_workers=decide.probe_width(len(hops), 8)) as pool:
             said = list(pool.map(
                 lambda item: _doctor_hop(item[0], item[1],
                                          raw.get(item[0]) or {}),

@@ -2357,6 +2357,20 @@ def uncovered():
             for s, state in row.items() if state in ("undeclared", "stale")]
 
 
+def probe_width(items, per_item=4):
+    """How many probes of waiting work (each holding `per_item` sockets)
+    run at once: all of them, held back only by what this process may have
+    open - the descriptor limit less a reserve for its own files - never a
+    number picked by hand."""
+    try:
+        import resource
+        soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        room = (soft - 64) // max(1, per_item) if soft > 0 else items
+    except (ImportError, ValueError, OSError):
+        room = items
+    return max(1, min(items, room))
+
+
 # What each task the operator can start asks of the decision engine
 # (backlog P0-DECISION-ALL.coverage). A task is routed when the module
 # that does its consequential choosing goes through this engine, a gap when
@@ -2368,8 +2382,7 @@ TASKS = {
     # task: (family, ("routed", modules...) | ("gap", why) | ("no choice", why))
     "init": ("configuration", ("gap", "the defaults it writes are fixed,"
              " not discovered by a bounded probe")),
-    "doctor": ("discovery", ("gap", "the tool and permission probes run in"
-               " a fixed order, not by what could change a decision")),
+    "doctor": ("discovery", ("routed", "cli")),
     "advise": ("assessment", ("routed", "advisors")),
     "assess": ("assessment", ("routed", "ready")),
     "schema": ("schema", ("routed", "tableway")),
