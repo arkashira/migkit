@@ -47,7 +47,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1489, test owed 261, yes 459. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1489, test owed 254, yes 466. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -73,11 +73,11 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | mongodb | 1/9 | 11/23 | 1/6 | 4/7 | 0/3 | 4/5 | 3/5 | 1/1 | 1/1 | 0/1 | 26/61 |
 | mssql | 4/10 | 12/35 | 1/6 | 0/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 29/81 |
-| mysql | 9/10 | 25/31 | 5/6 | 5/7 | 6/6 | 7/7 | 7/8 | 1/1 | 1/1 | 1/1 | 67/78 |
+| mysql | 9/10 | 26/31 | 5/6 | 5/7 | 6/6 | 7/7 | 7/8 | 1/1 | 1/1 | 1/1 | 68/78 |
 | opensearch | 0/9 | 3/26 | 1/6 | 2/7 | 1/4 | 3/6 | 4/6 | 1/1 | 1/1 | 0/1 | 16/67 |
 | oracle | 3/10 | 8/36 | 1/6 | 1/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 25/82 |
 | parquet | 0/7 | 0/15 | - | 0/4 | 1/2 | 3/6 | 1/1 | 0/1 | 0/1 | 0/1 | 5/38 |
-| postgres | 9/10 | 29/37 | 4/6 | 7/7 | 5/6 | 7/7 | 8/8 | 1/1 | 1/1 | 1/1 | 72/84 |
+| postgres | 9/10 | 35/37 | 4/6 | 7/7 | 5/6 | 7/7 | 8/8 | 1/1 | 1/1 | 1/1 | 78/84 |
 | pubsub | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | redis | 1/8 | 7/14 | 1/6 | 4/7 | 0/1 | 4/5 | 3/6 | 1/1 | 1/1 | 0/1 | 22/50 |
 | redshift | 0/10 | 0/32 | 0/6 | 1/7 | 1/5 | 1/5 | 1/7 | 1/1 | 1/1 | 0/1 | 6/75 |
@@ -107,7 +107,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.access.table-grants | mysql postgres | - | the rest (22) | copybook cosmosdb delta duckdb dynamodb iceberg kinesis parquet pubsub saas sapodp sqlite |
 | verify.identity.sequence-collision | mssql mysql oracle postgres | - | ase bigquery cockroachdb db2 db2i db2zos dsql duckdb generic hetero redshift snowflake sqlite tidb | the rest (18) |
 | verify.identity.sequence-parity | mssql mysql oracle postgres | - | ase bigquery cockroachdb db2 db2i db2zos dsql duckdb generic hetero redshift snowflake sqlite tidb | the rest (18) |
-| verify.movement.target-ahead | - | mongodb mssql mysql postgres | the rest (28) | kinesis pubsub saas sapodp |
+| verify.movement.target-ahead | mysql postgres | mongodb mssql | the rest (28) | kinesis pubsub saas sapodp |
 | verify.structure.collection-options | mongodb | - | the rest (28) | copybook kinesis parquet pubsub redis saas sapodp |
 | verify.structure.columns | mssql mysql postgres | - | the rest (23) | cosmosdb couchbase dynamodb kafka kinesis mongodb pubsub redis saas sapodp |
 | verify.structure.deferrable | postgres | - | generic hetero oracle sqlite | the rest (31) |
@@ -115,7 +115,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.structure.foreign-keys | mssql mysql postgres | - | ase bigquery cockroachdb db2 db2i db2zos duckdb generic hetero oracle redshift snowflake sqlite teradata tidb | the rest (18) |
 | verify.structure.indexes | mongodb postgres | tidb | the rest (20) | copybook delta iceberg kafka kinesis mysql opensearch parquet pubsub redis redshift saas sapodp |
 | verify.structure.keys | mssql mysql postgres redis | - | the rest (19) | cassandra cosmosdb couchbase delta dynamodb kafka kinesis mongodb opensearch parquet pubsub saas sapodp |
-| verify.structure.materialized-views | - | postgres | ase bigquery cassandra clickhouse cockroachdb cosmosdb db2 db2i db2zos generic hetero iceberg mssql oracle redshift snowflake teradata | the rest (18) |
+| verify.structure.materialized-views | postgres | - | ase bigquery cassandra clickhouse cockroachdb cosmosdb db2 db2i db2zos generic hetero iceberg mssql oracle redshift snowflake teradata | the rest (18) |
 | verify.structure.objects | cockroachdb duckdb mongodb mysql oracle postgres | - | the rest (22) | copybook dynamodb kinesis parquet pubsub redis saas sapodp |
 | verify.structure.partitions | mysql postgres | - | the rest (20) | cassandra copybook cosmosdb couchbase duckdb dynamodb kinesis mongodb opensearch pubsub redis saas sapodp sqlite |
 | verify.structure.row-security | postgres | - | ase bigquery clickhouse cockroachdb db2 db2i db2zos delta generic hetero iceberg mssql opensearch oracle redshift snowflake teradata | the rest (18) |
@@ -129,7 +129,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.value.narrowing | mysql postgres | - | the rest (28) | kafka kinesis pubsub redis saas sapodp |
 | verify.value.null-empty | mongodb mysql postgres | - | the rest (28) | kinesis pubsub redis saas sapodp |
 | verify.value.precision | mysql postgres | - | the rest (28) | kafka kinesis pubsub redis saas sapodp |
-| verify.value.rendering | - | postgres | the rest (29) | kafka kinesis pubsub redis saas sapodp |
+| verify.value.rendering | postgres | - | the rest (29) | kafka kinesis pubsub redis saas sapodp |
 | verify.value.timezone | mysql postgres | - | the rest (28) | kafka kinesis pubsub redis saas sapodp |
 | verify.value.type-drift | mongodb | - | cosmosdb couchbase dynamodb generic hetero kafka opensearch redis sqlite | the rest (26) |
 | verify.delta | the rest (12) | cockroachdb cosmosdb couchbase db2i dsql tidb | ase bigquery db2 delta generic iceberg redshift snowflake | copybook db2zos duckdb kinesis parquet pubsub saas sapodp sqlite teradata |
@@ -138,9 +138,9 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.users | cassandra clickhouse db2i kafka mssql mysql opensearch oracle postgres redis teradata | mongodb | the rest (12) | copybook cosmosdb delta duckdb dynamodb iceberg kinesis parquet pubsub saas sapodp sqlite |
 | verify.repair | generic hetero kafka mongodb mysql oracle postgres redis sqlite | cockroachdb cosmosdb couchbase dsql mssql tidb | the rest (17) | kinesis pubsub saas sapodp |
 | verify.repair-undo | generic hetero kafka mongodb mysql postgres redis sqlite | cockroachdb cosmosdb couchbase dsql mssql oracle tidb | the rest (17) | kinesis pubsub saas sapodp |
-| verify.rows-apart | mssql mysql | mongodb postgres | the rest (30) | kinesis pubsub |
-| verify.tables | mssql | postgres | the rest (32) | kinesis pubsub |
-| verify.table | mysql | the rest (29) | generic kafka mssql redis | kinesis pubsub |
+| verify.rows-apart | mssql mysql postgres | mongodb | the rest (30) | kinesis pubsub |
+| verify.tables | mssql postgres | - | the rest (32) | kinesis pubsub |
+| verify.table | mysql postgres | the rest (28) | generic kafka mssql redis | kinesis pubsub |
 | tail.follows | the rest (17) | db2i | ase bigquery db2 delta generic iceberg redshift snowflake | copybook db2zos duckdb kinesis parquet pubsub saas sapodp sqlite teradata |
 | tail.table-states | cockroachdb mysql postgres | cosmosdb couchbase db2i dsql dynamodb hetero mssql oracle saas sapodp tidb | the rest (14) | copybook db2zos duckdb kinesis parquet pubsub sqlite teradata |
 | tail.added | cockroachdb postgres | mssql mysql tidb | the rest (22) | copybook db2zos duckdb hetero kinesis parquet pubsub sqlite teradata |

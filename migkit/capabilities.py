@@ -2086,10 +2086,8 @@ UNPROVED = {
                     "db2zos ase teradata opensearch cassandra redshift "
                     "snowflake bigquery duckdb copybook iceberg delta tidb "
                     "cockroachdb dsql couchbase cosmosdb"),
-    "verify.movement.target-ahead": "postgres mysql mongodb mssql",
+    "verify.movement.target-ahead": "mongodb mssql",
     "verify.structure.indexes": "tidb",
-    "verify.structure.materialized-views": "postgres",
-    "verify.value.rendering": "postgres",
     "verify.delta": "db2i tidb cockroachdb dsql couchbase cosmosdb",
     "verify.fence": "db2i",
     "verify.confirm": ("postgres clickhouse dynamodb db2i opensearch "
@@ -2098,9 +2096,8 @@ UNPROVED = {
     "verify.repair": "mssql tidb cockroachdb dsql couchbase cosmosdb",
     "verify.repair-undo": ("mssql oracle tidb cockroachdb dsql couchbase "
                            "cosmosdb"),
-    "verify.rows-apart": "postgres mongodb",
-    "verify.tables": "postgres",
-    "verify.table": ("postgres mongodb sqlite parquet clickhouse "
+    "verify.rows-apart": "mongodb",
+    "verify.table": ("mongodb sqlite parquet clickhouse "
                      "dynamodb oracle db2 db2i db2zos ase teradata "
                      "opensearch cassandra redshift snowflake bigquery "
                      "duckdb copybook iceberg delta tidb cockroachdb dsql "
