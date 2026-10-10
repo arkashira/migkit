@@ -1281,10 +1281,10 @@ def _link_line(got, name):
 def advise(hop_name):
     """Show the migration playbook for this hop's service."""
     hop = get_hop(hop_name)
-    pb = advisors.playbook(hop.service or "native")
-    if not pb:
-        raise SystemExit(f"no playbook for service '{hop.service}',"
-                         f" have: {', '.join(advisors.PLAYBOOKS)}")
+    service, why = advisors.pick(hop)
+    if service == "native" and hop.service:
+        console.print(f"[yellow]{why}; migkit's own route:[/yellow]")
+    pb = advisors.playbook(service)
     console.print(pb)
 
 

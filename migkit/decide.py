@@ -2370,7 +2370,7 @@ TASKS = {
              " not discovered by a bounded probe")),
     "doctor": ("discovery", ("gap", "the tool and permission probes run in"
                " a fixed order, not by what could change a decision")),
-    "advise": ("assessment", ("gap", "advisors rank by fixed rules")),
+    "advise": ("assessment", ("routed", "advisors")),
     "assess": ("assessment", ("routed", "ready")),
     "schema": ("schema", ("routed", "tableway")),
     "check": ("validation", ("routed", "verdict", "tableway")),
