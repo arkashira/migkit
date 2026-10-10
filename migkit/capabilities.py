@@ -1759,7 +1759,7 @@ DEPTH_GAPS = {
     },
     "verify.rows-apart": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "redis kafka sqlite parquet clickhouse dynamodb oracle db2 "
+                "redis kafka parquet clickhouse dynamodb oracle db2 "
                 "db2i db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb copybook iceberg delta tidb "
                 "cockroachdb dsql couchbase cosmosdb sapodp saas hetero"),
@@ -2097,7 +2097,7 @@ UNPROVED = {
     "verify.repair-undo": ("mssql oracle tidb cockroachdb dsql couchbase "
                            "cosmosdb"),
     "verify.rows-apart": "mongodb",
-    "verify.table": ("mongodb sqlite parquet clickhouse "
+    "verify.table": ("mongodb parquet clickhouse "
                      "dynamodb oracle db2 db2i db2zos ase teradata "
                      "opensearch cassandra redshift snowflake bigquery "
                      "duckdb copybook iceberg delta tidb cockroachdb dsql "
@@ -2108,7 +2108,7 @@ UNPROVED = {
     "tail.added": "mysql mssql tidb",
     "tail.readded": "mssql tidb",
     "tail.renames": "postgres",
-    "assess.versions": "mysql mongodb",
+    "assess.versions": "mongodb",
     "assess.brands": "tidb",
     "assess.engine-checks": ("db2i teradata snowflake tidb cockroachdb dsql "
                              "couchbase cosmosdb sapodp saas"),

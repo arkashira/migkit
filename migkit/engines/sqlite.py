@@ -3,7 +3,8 @@ import hashlib
 import time
 
 from .. import pieces
-from .base import Engine, NeutralCopier, RepairAction, Result, clauses
+from .base import (Engine, NeutralCopier, RepairAction, Result, clauses,
+                   rows_counted)
 
 
 class SQLiteEngine(NeutralCopier, Engine):
@@ -966,7 +967,7 @@ class SQLiteEngine(NeutralCopier, Engine):
                 res.append(Result("data", f"{db}.{t}", "diff",
                                   "missing on target", "",
                                   "create and copy the table, sqlite files"
-                                  " are cheap"))
+                                  " are cheap", table=str(t)))
                 continue
             if self.hop.column_rules(db, t) or self.hop.row_filter(db, t):
                 # the whole-row hash cannot know a column was dropped or
@@ -990,7 +991,8 @@ class SQLiteEngine(NeutralCopier, Engine):
                     stream(f"{t}: error")
                 res.append(Result("data", f"{db}.{t}", "error", why, "",
                                   "migkit could not read the table, which is"
-                                  " not the same as the two sides agreeing"))
+                                  " not the same as the two sides agreeing",
+                                  table=str(t)))
                 continue
             status = "ok" if (ha, na) == (hb, nb) else "diff"
             if stream:
@@ -998,15 +1000,18 @@ class SQLiteEngine(NeutralCopier, Engine):
             detail = (f"rows {na:,}=={nb:,}, md5 {ha} both sides"
                       if status == "ok"
                       else f"rows {na} vs {nb}, md5 {ha} vs {hb}")
+            apart = {}
             if status == "ok":
                 self._write_drill(db, t, missing=[], changed=[], extra=[])
             else:
-                detail += self._drill(db, t)
+                clause, apart = self._drill(db, t)
+                detail += clause
             res.append(Result("data", f"{db}.{t}", status, detail, "",
                               "" if status == "ok" else
                               "`migkit sync --kind rows` names the rows and"
                               " can put them right, or recopy the whole"
-                              " table - sqlite files are cheap"))
+                              " table - sqlite files are cheap",
+                              table=str(t), rows_apart=apart))
         return res
 
     def _drill(self, db, table):
@@ -1023,14 +1028,22 @@ class SQLiteEngine(NeutralCopier, Engine):
             cols, dst_cols, notes = self._comparable_columns(
                 db, self, table, self, table)
         except Exception as e:
-            return f"; rows not localised: {str(e).splitlines()[-1][:80]}"
+            return (f"; rows not localised: {str(e).splitlines()[-1][:80]}",
+                    {})
         if not cols:
             return ("; rows not localised: no column on this table has a"
                     " canonical rendering"
-                    + ("; " + "; ".join(notes) if notes else ""))
-        clause = self._drill_rows(db, table, self, table, cols, self, table,
-                                  dst_cols)
-        return clause + (("; " + "; ".join(notes)) if notes else "")
+                    + ("; " + "; ".join(notes) if notes else ""), {})
+        found = self._localise(db, table, self, table, cols, self, table,
+                               dst_cols)
+        if isinstance(found, str):
+            return found, {}
+        missing, changed, extra, capped = found
+        clause = self._drill_clause(db, table, *found)
+        # counted one by one unless the walk was cut short
+        apart = rows_counted(table, len(missing), len(extra), len(changed),
+                             exact=not capped)
+        return clause + (("; " + "; ".join(notes)) if notes else ""), apart
 
     def repair_plan(self, db, kind):
         def q(name):
