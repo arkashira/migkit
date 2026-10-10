@@ -192,6 +192,9 @@ class RedisEngine(Engine):
                    " - memory only, so a restart between the load and the"
                    " cutover loses everything with no error anywhere"))
 
+        why = self._snapshot_valkey_refuses(*self._brands())
+        add("fail" if why else "pass", "target reads the source's snapshot",
+            why or "no snapshot format the target refuses is known")
         pol = str(d.get("maxmemory_policy", "?"))
         add("pass" if pol in ("noeviction", "?") else "fail",
             "target eviction policy",
@@ -1404,6 +1407,25 @@ class RedisEngine(Engine):
                     " empties every database of the target")
         return self._older_target()
 
+    @staticmethod
+    def _snapshot_valkey_refuses(s, d):
+        """Why a Valkey target cannot take a Redis source's keys, or None.
+
+        Redis 7.4 and later write a snapshot format (and a DUMP payload)
+        that Valkey, which forked from 7.2, does not read: a replica's
+        first sync fails with the target already emptied, and a restore of
+        a dumped key is refused. Said before the move starts."""
+        import re
+        if not (s.name == "redis" and d.name == "valkey"):
+            return None
+        got = tuple(int(x) for x in re.findall(r"\d+", str(s.version))[:2])
+        if got >= (7, 4):
+            return (f"the source is Redis {s.version}, whose snapshots and"
+                    " dumped keys Valkey does not read (they changed after"
+                    " 7.2): a replica's first sync would empty the target"
+                    " and fail, and a restored key is refused")
+        return None
+
     def _older_target(self):
         """Why the target cannot load the source's snapshot, or None.
 
@@ -1414,6 +1436,9 @@ class RedisEngine(Engine):
         own version; different software by the Redis version each says it
         is compatible with, which is what decides the format it reads."""
         s, d = self._brands()
+        newer = self._snapshot_valkey_refuses(s, d)
+        if newer:
+            return newer
         if s.name and s.name == d.name and s.version and d.version:
             have, need = d.version, s.version
         else:
