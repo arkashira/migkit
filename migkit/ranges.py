@@ -784,6 +784,24 @@ def bounds_sql(quote, table, key, every, where=None):
             f" order by {k}")
 
 
+def thin(bounds, rows, every):
+    """The range edges a table's histogram gives: its equi-depth bucket
+    bounds (`pg_stats.histogram_bounds`, each bucket about the same number
+    of rows) thinned to the `ceil(rows / every)` ranges the table needs.
+    None where the histogram is coarser than that, or empty - the caller
+    then reads the key itself (`bounds_sql`).
+
+    An edge is only where one range ends and the next begins, so a stale
+    or sampled histogram makes ranges uneven, never a row left out: the
+    first and last ranges are the table's own minimum and maximum."""
+    need = -(-int(rows) // max(int(every), 1))
+    got = sorted({int(b) for b in bounds or ()})
+    buckets = len(got) - 1
+    if need < 2 or buckets < need:
+        return None
+    return sorted({got[i * buckets // need] for i in range(1, need)})
+
+
 def split(lo, hi, edges):
     """[(after, upto)] covering (lo - 1, hi] with the edges between."""
     cuts = [e for e in sorted(set(int(e) for e in edges)) if lo <= e < hi]

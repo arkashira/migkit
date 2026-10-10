@@ -12297,6 +12297,22 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             self, db, key, key, st, ck, log, later=later, chunk=chunk, rf=rf,
             qt=qt, pk=pk, cols=cols))
 
+    def _histogram(self, db, qt, column):
+        """The bucket bounds the planner holds for an integer column of a
+        table (`qt`, quoted), or [] where it has none - never analyzed, or
+        the column's values are not integers."""
+        try:
+            return [int(r[0]) for r in self.run_rule(
+                "src", db,
+                "select distinct unnest(s.histogram_bounds::text::bigint[])"
+                " from pg_stats s join pg_class c on c.relname = s.tablename"
+                " join pg_namespace n on n.oid = c.relnamespace and"
+                " n.nspname = s.schemaname where c.oid ="
+                f" {_literal(qt)}::regclass and s.attname ="
+                f" {_literal(column)}")]
+        except Exception:  # noqa: BLE001 - no statistics is not a failure
+            return []
+
     def _copy_ranges(self, job, way):
         """The table by the copier's own ranges, each climbing `COPY_WAYS`
         on the table's own measurements (`_copy_ways`) and proved as it
@@ -12337,6 +12353,14 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             every = ranges.step(rows, chunk, slots.workers)
             if rows <= every:
                 return []
+            # the statistics' bucket bounds where there are enough of them,
+            # not a pass over the whole key in order; the rows a row filter
+            # leaves are not what the histogram counted
+            got = None if rf else ranges.thin(
+                self._histogram(db, qt, pk), rows, every)
+            if got:
+                log(f"{key}: range edges from the table's statistics")
+                return got
             return [r[0] for r in self.run_rule("src", db, ranges.bounds_sql(
                 self._quote_ident, qt, pk, every, rf))]
         todo = (ranges.plan(st, lo, hi, edges, ck.save, table=key)
