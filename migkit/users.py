@@ -704,10 +704,58 @@ def _kafka_accounts(hop, side):
             out["acls"] = {_acl_key(a) for a in acls}
         except Exception as e:
             unread["acls"] = f"{type(e).__name__}: {str(e)[:120]}"
+        try:
+            out["quotas"] = _kafka_quotas(admin)
+        except Exception as e:
+            unread["quotas"] = f"{type(e).__name__}: {str(e)[:120]}"
     finally:
         admin.close()
     out["unread"] = unread
     return out
+
+
+def _kafka_quotas(admin):
+    """{entity: {quota: value}} of a cluster's client quotas, an entity
+    being ((type, name), ...) for a user, a client id or an address, with
+    name None for the default of that type."""
+    from kafka.protocol.admin import DescribeClientQuotasRequest
+
+    async def ask():
+        got = await admin._manager.send(
+            DescribeClientQuotasRequest(components=[], strict=False))
+        if got.error_code:
+            raise RuntimeError(got.error_message or f"error {got.error_code}")
+        return got
+    got = admin._manager.run(ask)
+    return {tuple((e.entity_type, e.entity_name) for e in entry.entity):
+            {v.key: v.value for v in entry.values}
+            for entry in got.entries or []}
+
+
+def _kafka_set_quotas(admin, changes):
+    """Apply [(entity, quota, value or None)] - None removes - and return
+    the entries the cluster refused, with its words."""
+    from kafka.protocol.admin import AlterClientQuotasRequest as Alter
+    entries = [Alter.EntryData(
+        entity=[Alter.EntryData.EntityData(entity_type=t, entity_name=n)
+                for t, n in entity],
+        ops=[Alter.EntryData.OpData(
+            key=key, value=0.0 if value is None else value,
+            remove=value is None)]) for entity, key, value in changes]
+
+    async def alter():
+        return await admin._manager.send(
+            Alter(entries=entries, validate_only=False))
+    got = admin._manager.run(alter)
+    return [f"quota {_quota_said(tuple(tuple(x) for x in c[0]), c[1])}:"
+            f" {e.error_message or e.error_code}"
+            for c, e in zip(changes, got.entries) if e.error_code]
+
+
+def _quota_said(entity, key):
+    who = ", ".join(f"{t} {n if n is not None else '(default)'}"
+                    for t, n in entity)
+    return f"{key} of {who}"
 
 
 def _acl_key(acl):
@@ -751,6 +799,15 @@ def _kafka_compared(out, s, t, missing, say):
     out["grants_missing"] = [_acl_said(k) for k in gone]
     out["grants_extra"] = [_acl_said(k) for k in extra]
     out["source_acls"] = len(sa or ())
+    # a quota the source sets and the target lacks or sets otherwise; the
+    # target's own are left alone
+    tq = t.get("quotas")
+    out["quotas_missing"] = [
+        [[list(x) for x in ent], key, val]
+        for ent, qs in sorted((s.get("quotas") or {}).items(),
+                              key=lambda kv: str(kv[0]))
+        for key, val in sorted(qs.items())
+        if tq is not None and (tq.get(ent) or {}).get(key) != val]
     unread = [f"{side} {what}: {why}"
               for side, acc in (("source", s), ("target", t))
               for what, why in acc["unread"].items()
@@ -762,7 +819,8 @@ def _kafka_compared(out, s, t, missing, say):
                       " do anything")
     out["not_compared"] = unread
     out["result"] = ("unknown" if unread else "gap"
-                     if missing or mech or gone else "pass")
+                     if missing or mech or gone or out["quotas_missing"]
+                     else "pass")
 
 
 def _kafka_create(hop, apply, passwords, say):
@@ -783,12 +841,17 @@ def _kafka_create(hop, apply, passwords, say):
     users = [(u, m) for u, m in wanted if (passwords or {}).get(u)]
     skipped = sorted({u for u, _ in wanted if not (passwords or {}).get(u)})
     acls = [tuple(k) for k in out["acls_missing"]]
-    if not users and not acls:
+    quotas = [(tuple(tuple(x) for x in ent), key, val)
+              for ent, key, val in out["quotas_missing"]]
+    if not users and not acls and not quotas:
         say("  nothing to create" + (f"; skipped {skipped}: no password"
                                      " given" if skipped else ""))
         return
     say(f">> kafka: create {len(users)} SCRAM credential(s), {len(acls)}"
-        " ACL(s)" + ("" if apply else "  (nothing done; add --apply)"))
+        f" ACL(s), {len(quotas)} quota(s)"
+        + ("" if apply else "  (nothing done; add --apply)"))
+    for ent, key, val in quotas:
+        say(f"   quota {_quota_said(ent, key)} = {val}")
     for u, m in users:
         say(f"   user {u} ({m})")
     for k in acls:
@@ -799,7 +862,7 @@ def _kafka_create(hop, apply, passwords, say):
     if not apply:
         return
     admin = _kafka_admin(hop, "dst")
-    made_users, made_acls, failed = [], [], []
+    made_users, made_acls, made_quotas, failed = [], [], [], []
     try:
         if users:
             said = admin.alter_user_scram_credentials([
@@ -817,18 +880,31 @@ def _kafka_create(hop, apply, passwords, say):
             made_acls = [list(k) for k in acls if k in made]
             failed += [f"acl: {type(e).__name__ if isinstance(e, type) else e}"
                        for e in said["failed"]]
+        if quotas:
+            # what the target held, so a rollback puts it back
+            before = (t.get("quotas") or {})
+            refused = _kafka_set_quotas(
+                admin, [(e, k, v) for e, k, v in quotas])
+            failed += refused
+            bad = " ".join(refused)
+            made_quotas = [[[list(x) for x in e], k, v,
+                            (before.get(e) or {}).get(k)]
+                           for e, k, v in quotas
+                           if f"quota {_quota_said(e, k)}:" not in bad]
     finally:
         admin.close()
     rec = hop.report_dir() / "user-sync-created.json"
     prev = json.loads(rec.read_text()) if rec.exists() else []
     prev.append({"at": datetime.datetime.now().isoformat(timespec="seconds"),
                  "engine": "kafka", "users": made_users, "acls": made_acls,
-                 "failed": failed, "skipped": skipped})
+                 "quotas": made_quotas, "failed": failed,
+                 "skipped": skipped})
     json.dump(prev, open(rec, "w"), indent=2, ensure_ascii=False)
     for f in failed:
         say(f"   FAILED {f}")
     say(f"  created {len(made_users)} credential(s), {len(made_acls)}"
-        f" ACL(s); recorded at {rec} (undo with users {hop.name} rollback)")
+        f" ACL(s), {len(made_quotas)} quota(s); recorded at {rec}"
+        f" (undo with users {hop.name} rollback)")
     if failed:
         raise SystemExit(f"users: {len(failed)} could not be created")
 
@@ -843,9 +919,18 @@ def _kafka_rollback(hop, apply, say):
             if e.get("engine") == "kafka"]
     users = [tuple(u) for e in runs for u in e.get("users", [])]
     acls = [tuple(k) for e in runs for k in e.get("acls", [])]
-    if not users and not acls:
-        say("  no kafka users or ACLs were created by us, nothing to undo")
+    # newest first, so a key set twice goes back to what it was before us
+    quotas = [(tuple(tuple(x) for x in ent), key, old)
+              for e in reversed(runs) for ent, key, _, old
+              in reversed(e.get("quotas", []))]
+    if not users and not acls and not quotas:
+        say("  no kafka users, ACLs or quotas were created by us, nothing"
+            " to undo")
         return
+    for ent, key, old in quotas:
+        say(f"   {'restore' if apply else 'would restore'} quota"
+            f" {_quota_said(ent, key)} to"
+            f" {'unset' if old is None else old}")
     for u, m in users:
         say(f"   {'delete' if apply else 'would delete'} user {u} ({m})")
     for k in acls:
@@ -854,6 +939,10 @@ def _kafka_rollback(hop, apply, say):
         return
     admin = _kafka_admin(hop, "dst")
     try:
+        if quotas:
+            refused = _kafka_set_quotas(admin, quotas)
+            if refused:
+                raise SystemExit("users: " + "; ".join(refused))
         if acls:
             admin.delete_acls([_acl_of(k) for k in acls])
         if users:

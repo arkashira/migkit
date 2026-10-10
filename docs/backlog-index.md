@@ -436,7 +436,7 @@ in these historical totals.
 | 352 | R13-ASE | SAP ASE cells (11) and a run against a server | BLOCKED (SAP's image is x86-only; the x86 CI workflow is merged in fed3f89 and runs once pushed) | L | engines | L5424-5434; GAPS ase |
 | 353 | R13-HETERO | Users carried across engines | OPEN | M | engines | L8156; GAPS hetero users |
 | 354 | R13-GENERIC | Generic engine cells (confirm, sequences, settings, bulk, table copy, follow, fence, delta, users, guard, statistics, snapshot) | OPEN | L | engines | L761-762; GAPS generic |
-| 355 | R13.kafka | Kafka quotas and changed configs | OPEN | S | engines | L6731-6732 |
+| 355 | R13.kafka | Kafka quotas and changed configs | PARTLY | S | engines | L6731-6732 |
 | 356 | R13.redis | A Redis 7.4+ RDB that Valkey refuses, said before a move | DONE | S | engines | L6733-6734 |
 | 357 | R13.sqlite | SQLite changes through the session extension (APSW) | OPEN (capabilities.py declares SQLite's follow not applicable) | S | engines | L6735-6736 |
 | 358 | R13.parquet | Parquet on object storage: manifests and footers as the fence, versioning as the snapshot, only changed objects verified | OPEN (capabilities.py declares these not applicable) | M | engines | L6737-6738 |
