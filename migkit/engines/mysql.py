@@ -2073,10 +2073,10 @@ class MySQLEngine(Engine):
 
         A server that says where its consistent snapshot stands in the
         binlog (MariaDB, Percona: `Binlog_snapshot_file`/`_position`)
-        gives that - exact, since that snapshot sees every transaction
-        before it. Elsewhere the binlog's end is read, and then every
-        commit under way is waited out (`_commits_under_way`): one whose
-        events are before the position is among them until it is visible.
+        gives that - exact on MariaDB, not on Percona (below). Elsewhere
+        the binlog's end is read, and then every commit under way is waited
+        out (`_commits_under_way`): one whose events are before the
+        position is among them until it is visible.
 
         Not the start of the binlog file, though rotating does wait for
         every commit before it (measured on 8.4: `FLUSH BINARY LOGS` in the
@@ -2099,7 +2099,17 @@ class MySQLEngine(Engine):
         at, pos = (got.get("binlog_snapshot_file"),
                    got.get("binlog_snapshot_position"))
         if at and str(pos or "").isdigit():
-            return {"log_file": str(at), "log_pos": int(pos)}
+            point = {"log_file": str(at), "log_pos": int(pos)}
+            # MariaDB's is exact where measured (11.4: a commit held before
+            # its log write is after it). Percona's is the log's end:
+            # measured on 8.4.11 with a commit held, it was past an insert
+            # no read could see yet (1066, where the insert ended; 800
+            # before it). So that server's commits under way are waited out
+            # as on MySQL, and one that cannot be seen is refused
+            maria = self._brands()[0 if side == "src" else 1].name == "mariadb"
+            if not maria or self.sees_every_session(side):
+                self._commits_under_way(side)
+            return point
         point = self.change_point(side, db)
         self._commits_under_way(side)
         return point
@@ -2136,9 +2146,9 @@ class MySQLEngine(Engine):
                 " starts cannot be read, and a commit written to the binary"
                 " log before the copy's position but not yet visible would"
                 " be in neither the copy nor the tail. Grant it - `grant"
-                " process on *.* to <the account>;` - or use a server that"
-                " says its snapshot's binary log position (MariaDB,"
-                " Percona). Nothing was copied")
+                " process on *.* to <the account>;` - or use a MariaDB"
+                " server, whose snapshot says its binary log position."
+                " Nothing was copied")
         q = ("select id from information_schema.processlist"
              " where id <> connection_id()"
              " and lower(coalesce(state, '')) like '%commit%'")

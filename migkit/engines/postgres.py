@@ -3451,7 +3451,7 @@ select json_build_object(
                    + " from pg_class r join pg_namespace rn on rn.oid ="
                    " r.relnamespace where r.oid = pg_partition_root(c.oid)),"
                    " " + name.format(n="n", c="c") + ") || chr(31) ||"
-                   " c.relkind from pg_class c join pg_namespace n on n.oid"
+                   " c.relkind::text from pg_class c join pg_namespace n on n.oid"
                    " = c.relnamespace where c.relkind in ('r', 'p') and"
                    " n.nspname not in ('pg_catalog', 'information_schema')")
         else:
@@ -3462,7 +3462,7 @@ select json_build_object(
                    " on i.inhrelid = up.top join pg_class p on p.oid ="
                    " i.inhparent and p.relkind = 'p') select "
                    + name.format(n="n", c="c") + " || chr(31) || "
-                   + name.format(n="rn", c="r") + " || chr(31) || c.relkind"
+                   + name.format(n="rn", c="r") + " || chr(31) || c.relkind::text"
                    " from up join pg_class c on c.oid = up.rel join"
                    " pg_namespace n on n.oid = c.relnamespace join pg_class"
                    " r on r.oid = up.top join pg_namespace rn on rn.oid ="

@@ -207,7 +207,7 @@ def _pg(hop, e, key, side, dbs, where, read, write, follow, native):
         for db in dbs:
             gaps = _pg_rows(
                 e, key, db,
-                "select n.nspname||chr(31)||c.relname||chr(31)||c.relkind"
+                "select n.nspname||chr(31)||c.relname||chr(31)||c.relkind::text"
                 "||chr(31)||has_schema_privilege(n.oid, 'USAGE')::int"
                 " from pg_class c join pg_namespace n on n.oid ="
                 " c.relnamespace where c.relkind in ('r', 'p', 'S')"

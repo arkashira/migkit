@@ -819,7 +819,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the binlog is off on this server, so there is no change log to read - turn on log_bin, or move without CDC
 
-* the source's account cannot see the other sessions (PROCESS), so which commits are under way when the copy starts cannot be read, and a commit written to the binary log before the copy's position but not yet visible would be in neither the copy nor the tail. Grant it - `grant process on *.* to <the account>;` - or use a server that says its snapshot's binary log position (MariaDB, Percona). Nothing was copied
+* the source's account cannot see the other sessions (PROCESS), so which commits are under way when the copy starts cannot be read, and a commit written to the binary log before the copy's position but not yet visible would be in neither the copy nor the tail. Grant it - `grant process on *.* to <the account>;` - or use a MariaDB server, whose snapshot says its binary log position. Nothing was copied
 
 * <...> commits on the source have not finished after <...>s (threads <...>). A copy read now could miss one the change tail starts after, so nothing was copied - move again once they are through.
 
