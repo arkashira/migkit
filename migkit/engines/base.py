@@ -1800,6 +1800,39 @@ class Engine:
                       f" {total['target']} on the target, every one valid"
                       " and usable by the planner")
 
+    def history_tables(self, side, db):
+        """{lower-cased name: how this engine names it} of the tables in
+        `db` an application's migration tool keeps its history in
+        (`appversions`); empty where the engine cannot say."""
+        return {}
+
+    def history_rows(self, side, db, ref, columns, where=""):
+        """The rows of one such table, `columns` of those satisfying
+        `where`, as tuples."""
+        raise NotImplementedError
+
+    def check_app_versions(self, db):
+        """Whether the application's migration tool records the same
+        migrations on both sides: [Result], none where neither side keeps
+        such a history."""
+        from .. import appversions
+        try:
+            reads = {side: appversions.applied(
+                lambda side=side: self.history_tables(side, db),
+                lambda ref, cols, where, side=side: self.history_rows(
+                    side, db, ref, cols, where))
+                for side in ("src", "dst")}
+        except Exception as e:  # noqa: BLE001 - a side that would not say
+            return [Result("schema", f"{db} application migrations", "skip",
+                           f"the migration history could not be read:"
+                           f" {str(e)[:120]}")]
+        return [Result("schema", f"{db} {tool} history", status, detail,
+                       fix_hint="" if status == "ok" else
+                       "run the application's migration tool on the side"
+                       " that lacks them, or compare the history tables")
+                for status, tool, detail in appversions.compare(
+                    reads["src"], reads["dst"])]
+
     def check_params(self, db):
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]

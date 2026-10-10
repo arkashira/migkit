@@ -3891,6 +3891,30 @@ select json_build_object(
             keep = [l for l in keep if not any(pt.search(l) for pt in pats)]
         return "\n".join(keep)
 
+    def history_tables(self, side, db):
+        from ..appversions import TOOLS
+        names = sorted({n for ns, _, _ in TOOLS.values() for n in ns})
+        got = self._psql(side, db, "select schemaname || '|' || tablename"
+                         " from pg_tables where lower(tablename) in ("
+                         + ", ".join(f"'{n}'" for n in names) + ") and"
+                         " schemaname not in ('pg_catalog',"
+                         " 'information_schema')")
+        out = {}
+        for line in got.splitlines():
+            schema, _, table = line.partition("|")
+            # the schema the connection finds first wins, as the tool's does
+            out.setdefault(table.lower(),
+                           f'"{schema}"."{table}"')
+        return out
+
+    def history_rows(self, side, db, ref, columns, where=""):
+        import json
+        cols = ", ".join(f'"{c}"' for c in columns)
+        got = self._psql(side, db, f"select coalesce(json_agg(json_build_array"
+                                   f"({cols})), '[]') from {ref}"
+                         + (f' where "{where}"' if where else ""))
+        return json.loads(got or "[]")
+
     def check_schema(self, db):
         import difflib
         src = self._dump_schema_native("src", db)
@@ -3919,6 +3943,7 @@ select json_build_object(
         res[0].whole_table = whole
         res.append(self.check_structural_diff(db))
         res.append(self.check_objects(db))
+        res += self.check_app_versions(db)
         # the two optional readings are said where they did not run, and
         # why - they used to vanish from the report on a timeout (audit
         # 2026-10-01, SC16)

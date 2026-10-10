@@ -2342,6 +2342,21 @@ class MySQLEngine(Engine):
                     if side == "dst" else leaf)
         return out
 
+    def history_tables(self, side, db):
+        from ..appversions import TOOLS
+        names = sorted({n for ns, _, _ in TOOLS.values() for n in ns})
+        rows = self._q(side, "select table_name from information_schema.tables"
+                             " where table_schema = %s and table_type ="
+                             " 'BASE TABLE' and lower(table_name) in ("
+                       + ", ".join(["%s"] * len(names)) + ")",
+                       (self._d(side, db), *names))
+        return {str(r[0]).lower(): str(r[0]) for r in rows}
+
+    def history_rows(self, side, db, ref, columns, where=""):
+        cols = ", ".join(f"`{c}`" for c in columns)
+        return self._q(side, f"select {cols} from `{self._d(side, db)}`."
+                             f"`{ref}`" + (f" where `{where}`" if where else ""))
+
     def check_schema(self, db):
         d = self.hop.report_dir(db)
         src = self._dump_schema("src", db)
@@ -2371,6 +2386,7 @@ class MySQLEngine(Engine):
                 "CREATE TABLE") for l in changed)
             res.append(r)
         res.append(self.check_objects(db))
+        res += self.check_app_versions(db)
         if which("atlas") and self.hop.options.get("atlas", True):
             at = self._atlas(db)
             if at:
