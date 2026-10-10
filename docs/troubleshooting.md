@@ -805,11 +805,17 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: <...> keeps no batch here
 
+* binlog_row_image is <...> on this server, and the tail reads FULL, MINIMAL or NOBLOB only
+
 * no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. Add a key, or exclude the table
 
 * <...> is <...> on this server, and the tail needs FULL: <...>. set global <...> = 'FULL'; -- self-managed <...>=FULL -- parameter group
 
 * the source no longer has the binlog this tail had read up to (<...>, position <...>): <...>. The changes after it went with it, so starting again from now would skip them without a trace. Move again with --mode full+cdc, and keep the binlog longer than the tail may be stopped for (binlog_expire_logs_seconds, or `binlog retention hours` on RDS)
+
+* <...>: the binlog's before image did not carry <...>, so migkit cannot say which row it meant
+
+* <...>: the binlog's row image did not carry <...>, so migkit cannot say which row it meant
 
 * the binlog is off on this server, so there is no change log to read - turn on log_bin, or move without CDC
 
