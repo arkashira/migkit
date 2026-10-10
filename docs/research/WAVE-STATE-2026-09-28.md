@@ -259,3 +259,11 @@ Next waves, in order, as agents free up:
 - last: AUD-T2, AUD-Z, DOCS, then the full suite once (`tools/final_suite.py`), fixes, REL.gate, the rename, 1.0.0
 
 Merged and to delete once the owner agrees: worktree-agent-a63f9cda75a39b26c, a77c01f557923ecec, a48385fdc8d55e9fb, abc1934894b9f57a5, a8e86fe046716b281.
+
+## 2026-10-10 - resumed (scheduled run)
+
+No docker on this machine; nothing run against a database. Python 3.13 has click and pytest (`python` here is 3.11 without them).
+
+Done: P0-DECISION-ALL.coverage, first slice - `decide.TASKS` names every CLI task as routed (its modules must import the engine), a declared gap or a stated no-choice; `decide.task_gaps()` lists them; `tests/test_every_task_is_decided_or_declared.py` fails on a command missing from the table. Gaps declared: init, doctor, advise, assess, users. Guards run: compileall, the task test, no-method-said-twice, code map, depth matrix pass; `test_the_report_does_not_name_its_tools.py` has 3 failures that also fail on the tree without this change (not looked into). Full suite not run.
+
+Next: route the five gaps through the engine (advise/assess first), then entry points that are not CLI commands (UI actions, scheduled jobs) into `TASKS`; then P0-DECISION-ALL.reason.

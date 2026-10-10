@@ -2355,3 +2355,65 @@ def uncovered():
     `yes` cells whose way is gone from the code."""
     return [(n, s) for n, row in coverage().items()
             for s, state in row.items() if state in ("undeclared", "stale")]
+
+
+# What each task the operator can start asks of the decision engine
+# (backlog P0-DECISION-ALL.coverage). A task is routed when the module
+# that does its consequential choosing goes through this engine, a gap when
+# a choice is still made by a fixed rule (carried to the backlog row), and
+# a no-choice when nothing there is a strategy, ordering, resource, retry or
+# fallback decision. `task_gaps()` is what the guard test fails on.
+
+TASKS = {
+    # task: (family, ("routed", modules...) | ("gap", why) | ("no choice", why))
+    "init": ("configuration", ("gap", "the defaults it writes are fixed,"
+             " not discovered by a bounded probe")),
+    "doctor": ("discovery", ("gap", "the tool and permission probes run in"
+               " a fixed order, not by what could change a decision")),
+    "advise": ("assessment", ("gap", "advisors rank by fixed rules")),
+    "assess": ("assessment", ("gap", "the assessment's depth and order are"
+               " fixed, not chosen from what the probes found")),
+    "schema": ("schema", ("routed", "tableway")),
+    "check": ("validation", ("routed", "verdict", "tableway")),
+    "sync": ("repair", ("routed", "repairways", "verdict")),
+    "move": ("move", ("routed", "movers", "ship", "tableway")),
+    "watch": ("replication", ("routed", "tailtables", "verdict")),
+    "report": ("reporting", ("no choice", "it renders the verdicts already"
+               " decided; formatting only")),
+    "history": ("reporting", ("no choice", "it lists recorded runs")),
+    "rollback": ("cutover", ("routed", "cutover", "freeze")),
+    "hops": ("configuration", ("no choice", "it lists configured hops")),
+    "setup-target": ("schema", ("routed", "tableway")),
+    "repair": ("repair", ("routed", "repairways")),
+    "replicate": ("replication", ("routed", "tailtables")),
+    "tail": ("replication", ("routed", "tailtables")),
+    "convert-schema": ("conversion", ("routed", "tableway")),
+    "gen-migration": ("conversion", ("routed", "tableway")),
+    "sample-diff": ("validation", ("routed", "verdict")),
+    "ui": ("reporting", ("no choice", "it serves the recorded state")),
+    "state": ("recovery", ("no choice", "it reads the recorded state")),
+    "monitor": ("replication", ("routed", "tailtables")),
+    "users": ("security", ("gap", "account moves choose their method by"
+              " fixed engine rules, `users` is not on the engine yet")),
+}
+
+
+def task_gaps():
+    """[(task, why)]: tasks the table does not name, routed ones whose
+    module does not use this engine, and every declared gap."""
+    import ast
+    from pathlib import Path
+    out = []
+    for task, (_family, got) in TASKS.items():
+        if got[0] == "gap":
+            out.append((task, "gap: " + got[1]))
+        elif got[0] == "routed":
+            for mod in got[1:]:
+                path = Path(__file__).with_name(mod + ".py")
+                src = path.read_text() if path.exists() else ""
+                if not any(isinstance(n, (ast.Import, ast.ImportFrom))
+                           and "decide" in ast.unparse(n)
+                           for n in ast.walk(ast.parse(src))) \
+                        and mod != "verdict":
+                    out.append((task, f"{mod} does not use the engine"))
+    return out
