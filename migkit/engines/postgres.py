@@ -8445,8 +8445,8 @@ acl as (
   select case c.relkind when 'S' then 'SEQUENCE' else 'TABLE' end k,
          format('%I.%I', ns.nspname, c.relname) o, '' col,
          ns.nspname s, c.relname n, c.relowner w,
-         coalesce(c.relacl, acldefault(case c.relkind when 'S' then 's'
-                                       else 'r' end, c.relowner)) a
+         coalesce(c.relacl, acldefault((case c.relkind when 'S' then 's'
+                                        else 'r' end)::"char", c.relowner)) a
     from pg_class c join ns on ns.oid = c.relnamespace
    where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
      and c.relname not in {OWN_SQL}

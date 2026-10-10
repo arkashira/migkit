@@ -1,6 +1,6 @@
 # migkit
 
-> Verify, repair, and move databases across engines - without trusting the mover.
+Tools for moving databases, checking the result and repairing differences.
 
 <!-- gen_docs: badge -->
 [![ci](https://github.com/arkashira/migkit/actions/workflows/ci.yml/badge.svg)](https://github.com/arkashira/migkit/actions/workflows/ci.yml)
@@ -10,18 +10,15 @@
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-0ca30c)](LICENSE)
 <!-- /gen_docs: badge -->
 
-migkit does everything *around* a database migration: it prepares the target,
-tells you exactly when to start the mover, watches the load, validates the
-result down to every row and every object, and repairs what the mover could
-not carry. The heavy data movement is done by a managed service (AWS DMS,
-Tencent DTS, GCP DMS) or by native replication - or, when the network is
-trusted, by migkit itself with full crash-resume.
+migkit is a personal project built from database migration work. It helps
+prepare the target, move or follow data, compare both sides and repair supported
+differences. It can work alongside a managed migration service or handle data
+movement itself.
 
-The rule it is built on: **never let the mover be the judge of its own work.**
+A successful copy is not the end of a migration. I want to check what arrived,
+what was left out and whether the target is ready for the application.
 
-[Docs / usage reference ->](https://migkit.axentx.cloud/) | [Changelog ->](CHANGELOG.md)
-
----
+[Usage reference](https://migkit.axentx.cloud/) | [Changelog](CHANGELOG.md)
 
 ## Table of contents
 
@@ -38,109 +35,43 @@ The rule it is built on: **never let the mover be the judge of its own work.**
 - [Safety model](#safety-model)
 - [License](#license)
 
----
-
 ## Why
 
-Managed migration tools (DMS/DTS) move rows well but leave gaps that break the
-target silently: they skip sequences and identity counters, secondary indexes,
-foreign keys, defaults, views, procedures and triggers; they only compare rows,
-never structure; and they cannot repair a single differing row or roll back.
+A migration can finish while sequences, indexes, permissions or other database
+objects still need attention. Row counts alone also miss changes to the values
+inside those rows.
 
-migkit closes every one of those gaps with a uniform, evidence-first workflow
-across all engines. Every `OK` prints the counts and hashes of both sides, so
-"equal" is something you can see, not something you trust.
+migkit checks the source and target separately from the copy process. Reports
+include the results from both sides so you can investigate differences and keep
+a record of the run. Support varies by engine; check the capability tables for
+your pair before planning a migration.
 
-Worked example, with real findings from migrations a managed service had
-already reported as consistent:
-[what a "consistent" report does not cover](docs/case-study-what-a-consistent-report-does-not-cover.md).
+The [case study](docs/case-study-what-a-consistent-report-does-not-cover.md)
+shows findings from migrations that had already been reported as consistent.
 
 ## Features
 
-- **Layered validation** - structure (tables, columns, PK, FK, indexes,
-  defaults, views, procedures, triggers, sequences, extensions) -> table
-  presence and exact row counts -> auto-increment / identity / sequence values ->
-  full row-data checksums with per-primary-key drilldown. Every pass shows both
-  sides' numbers.
-- **Fast at scale** - data checksums use a commutative sum-of-md5 that Postgres
-  runs as a parallel aggregate; a 488M-row table verifies in ~10 minutes, a
-  1.06B-row database in ~16, with zero sorts and no locks beyond a plain SELECT.
-- **Repair with undo** - align sequences/identity to the source value (never
-  max+1, so deleted-id gaps stay identical), or delete-and-recopy differing
-  rows by primary key. Target rows are saved before any change; source is never
-  written.
-- **One move command, no choices to make** - `move` uses the fastest bulk
-  path installed for the engine and falls back to a chunked copy that resumes
-  after a crash; a single table always takes the resumable path. `--mode cdc`
-  follows the engine's native change feed, or stands up migkit's own streaming
-  pipeline where the engine has none. You never tell migkit which tool to use:
-  it knows, and `migkit doctor` tells you what this machine can do. Whatever
-  moves the data, migkit verifies it.
-- **No double scans** - when counts and data run together, row counts ride
-  along with the checksum query, so each table is scanned once, not twice.
-  `-q/--quiet` drops the per-table chatter and keeps diffs, errors and
-  summaries.
-- **Repair DDL says what it locks** - the generated fix is accompanied by a
-  per-statement lock classification, flagging what blocks writes and what
-  blocks everything, with the safer form named where one exists. Verified
-  against a live server, and deliberately one-sided: it may over-warn, never
-  under-warn.
-- **A long verify survives being interrupted** - big tables are checksummed
-  in primary-key ranges whose sums add up to exactly the whole-table value, so
-  a run that dies at 90% resumes instead of starting over, and a difference is
-  reported against the key range it lives in. Partials are fingerprinted, so a
-  table that changed underneath them is re-verified rather than half-trusted.
-- **Never the heaviest thing on the server** - `check` reads the database's
-  own load (active sessions against its limit, queued operations, replication
-  lag) and its own query latency, then sleeps and narrows concurrency while
-  the server is struggling. PostgreSQL, MySQL and MongoDB each report it in
-  their own terms; a signal a provider hides reads as unknown, never as idle. Nothing to configure and no safe-concurrency to guess; a busy
-  database is still verified, just more slowly, and `verdict.json` records
-  that it was throttled and why.
-- **Consistency by design, not guesswork** - `check --consistent` checksums
-  every table of a database inside one repeatable-read transaction per side;
-  suspect rows are then proven in-flight or real with an **LSN fence**: wait
-  until every replication consumer (your subscription *or* an opaque managed
-  mover - its slot lives on the source) confirms flushing past the source
-  LSN, then re-compare. What survives two fenced rounds is a real diff.
-- **Delta verify, O(changes)** - `watch --verify --delta` keeps a logical
-  slot (pg) / binlog position (mysql) / change-stream token (mongo) and each
-  cycle re-verifies **only the rows touched since the last verified point**.
-  The cursor advances only after a clean verify, so crashes and diffs replay
-  the same window - idempotent by construction, cheap enough to run forever
-  against billion-row databases.
-- **Column fingerprint** - when a table differs, one extra scan with one
-  aggregate per column names *which columns* drift before any row-level
-  work ("only `updated_at` differs" is a timezone bug, not data loss).
-- **Deep checks** (`check --deep`) - FK orphan scan behind NOT VALID
-  constraints, disabled triggers, column-level type/null/default/charset
-  drift, materialized-view freshness, table-grant parity, and a boundary
-  check (max PK / newest `_id` both sides) that catches CDC stalls and
-  rogue writers on the target.
-- **Continuous validation** - `watch --verify` re-checks on an interval and
-  tells transient replication lag apart from a real diff (the
-  confirm-out-of-sync idea from enterprise tools).
-- **Zero footprint on the destination** - migkit writes nothing of its own
-  into the target, so the target stays a faithful copy of the source and
-  schema verification never trips over migkit's own objects. The audit is
-  local-only: a per-hop `changelog.jsonl` ledger plus state journals.
-- **State and rollback** - tagged snapshots of target sequences and schema kept
-  in two places, a `terraform-plan`-style rollback preview, and the local
-  changelog ledger of every write migkit made.
-- **Nothing reinvented** - schema comparison, cross-engine row diffing, DDL
-  transpiling, row repair and column-level sampling are each done by a proven
-  implementation that migkit drives and normalizes. Which one is an
-  implementation detail: `migkit doctor` reports capabilities, not program
-  names, and every capability degrades to a built-in fallback rather than
-  disappearing. Third-party components are credited in
-  [NOTICE](NOTICE).
-- **Web dashboard** - every hop's status, tiles and reports on one
-  auto-refreshing page.
+- Compare schema, row counts, data checksums and sequence or identity values.
+- Locate differences by key range, primary key or column where supported.
+- Repair rows and counters, saving target state for undo before changes.
+- Resume supported copies and long checks after an interruption.
+- Follow source changes and verify changed rows on supported engines.
+- Use consistent snapshots and replication fences to investigate differences
+  caused by replication lag.
+- Adjust verification concurrency when supported database load signals show
+  pressure on the server.
+- Show expected locks for generated repair DDL before applying it.
+- Keep local state, write records and reports, with an optional web dashboard.
+
+The available checks, copy methods and recovery options depend on the engine,
+permissions and installed components. `migkit doctor` reports what is available
+on your machine. The [usage reference](https://migkit.axentx.cloud/) covers the
+individual workflows and limitations.
 
 ## Quickstart
 
-Two addresses to a cutover; every command that writes shows its plan
-first and does nothing until `--go`:
+Start by installing migkit and defining a source and target. The move commands
+below show a plan first; `--go` allows the write:
 
 <!-- gen_docs: quickstart -->
 ```
@@ -264,7 +195,7 @@ off for a hop where the time matters more.
 
 Every check is read-only and rerunnable. Every repair is dry-run unless
 `--apply`/`--go`, saves an undo first, and converges to the same end state on
-re-run. Add `-q/--quiet` before any command to silence per-table chatter.
+re-run. Add `-q/--quiet` before any command to silence per-table output.
 
 The pre-0.2 command names (`hops`, `setup-target`, `repair`, `replicate`,
 `tail`, `convert-schema`, `gen-migration`, `sample-diff`, `ui`, `state`,
@@ -341,10 +272,9 @@ the hop's options name any two of the engines above.
 
 ## How it compares
 
-migkit's own decision engine finds the fastest, exact, consistent way for
-each source -> target pair, and adds the layer movers skip: proving the
-result is correct and repairing what is not. The comparison below is
-feature-by-feature, by the kind of tool rather than any one of them.
+migkit combines migration, verification and repair in one workflow. The tables
+below summarize the intended scope of the tool categories. Actual support varies
+by engine, service version and configuration; they are not a benchmark.
 
 | Capability | migkit | AWS DMS / Tencent DTS | a change-capture connector | a table-sync script | GoldenGate + Veridata |
 |---|:--:|:--:|:--:|:--:|:--:|
@@ -366,10 +296,8 @@ feature-by-feature, by the kind of tool rather than any one of them.
 
 ### Silent-corruption detection
 
-The movers report success while the data is quietly wrong. These are the
-failure classes migkit detects on its own - `check` auto-discovers what applies
-to the hop and runs every relevant one, no flags to choose. Sourced from
-real-world DMS/DTS/GoldenGate post-mortems, not guesses.
+These checks look for problems that a completed load or matching row count can
+miss. Which checks apply depends on the database engine and the hop.
 
 | Silent failure (data looks "present", is wrong) | migkit | DMS/DTS | Veridata | a row-diff tool | a table-sync script |
 |---|:--:|:--:|:--:|:--:|:--:|
@@ -388,17 +316,9 @@ real-world DMS/DTS/GoldenGate post-mortems, not guesses.
 | Extensions + sequence-level grant parity | yes | no | no | no | no |
 | Replication slot bloat / abandoned slot / long-txn | yes | partial | no | no | no |
 
-<sub>Postgres and MySQL have the full set; what every other engine does is on
-the engines page of the usage reference, cell by cell. Full usage reference:
-<b><a href="https://migkit.axentx.cloud/">migkit.axentx.cloud</a></b>.</sub>
-
-The managed services move data well but validate weakly and cannot repair a
-single row or carry a sequence. A change-capture connector and a table-sync
-script are excellent at one job each; migkit adds the verification neither
-performs.
-Veridata is the closest match on verify-and-repair, and is commercial and
-Oracle-centric. migkit is the one place that combines move, provable verify,
-row-and-schema repair with undo, and rollback, across engines, for free.
+PostgreSQL and MySQL have the deepest coverage. See the
+[engine tables](https://migkit.axentx.cloud/site/engines.html) for the checks
+available on each engine and the gaps still being worked on.
 
 ## Safety model
 

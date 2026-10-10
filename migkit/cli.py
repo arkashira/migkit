@@ -1,5 +1,6 @@
 import contextlib
 import json
+import re
 import socket
 import threading
 import time
@@ -2256,7 +2257,13 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state=None):
         for s in a.statements[:20]:
             say_raw(f"  {s}")
         if len(a.statements) > 20:
-            console.print(f"  ... {len(a.statements) - 20} more")
+            # the whole plan kept beside the reports: what an operator
+            # approves is every statement, not the first twenty
+            whole = hop.report_dir(db) / ("plan-" + re.sub(
+                r"[^a-z0-9]+", "-", str(a.kind).lower()).strip("-") + ".sql")
+            whole.write_text("\n".join(str(x) for x in a.statements) + "\n")
+            console.print(f"  ... {len(a.statements) - 20} more, every"
+                          f" statement in {_esc(str(whole))}")
         if a.kind == LEFT_OUT:
             # said with the plan, nothing to carry out
             continue
