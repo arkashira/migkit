@@ -2072,7 +2072,7 @@ DEPTH_GAPS = {
 UNPROVED = {
     "scope.listings": "oracle ase tidb cockroachdb dsql",
     "scope.deep": "mongodb db2i db2zos ase tidb hetero",
-    "scope.copy": "mysql mongodb mssql oracle ase tidb cockroachdb dsql",
+    "scope.copy": "mongodb mssql oracle ase tidb cockroachdb dsql",
     "scope.repair": "oracle tidb cockroachdb dsql couchbase cosmosdb",
     "scope.counters": "tidb",
     "scope.ops": ("mssql redis dynamodb oracle db2i redshift snowflake "
@@ -2087,7 +2087,6 @@ UNPROVED = {
                     "snowflake bigquery duckdb copybook iceberg delta tidb "
                     "cockroachdb dsql couchbase cosmosdb"),
     "verify.movement.target-ahead": "postgres mysql mongodb mssql",
-    "verify.structure.columns": "mysql",
     "verify.structure.indexes": "tidb",
     "verify.structure.materialized-views": "postgres",
     "verify.value.rendering": "postgres",
@@ -2099,9 +2098,9 @@ UNPROVED = {
     "verify.repair": "mssql tidb cockroachdb dsql couchbase cosmosdb",
     "verify.repair-undo": ("mssql oracle tidb cockroachdb dsql couchbase "
                            "cosmosdb"),
-    "verify.rows-apart": "postgres mysql mongodb",
+    "verify.rows-apart": "postgres mongodb",
     "verify.tables": "postgres",
-    "verify.table": ("postgres mysql mongodb sqlite parquet clickhouse "
+    "verify.table": ("postgres mongodb sqlite parquet clickhouse "
                      "dynamodb oracle db2 db2i db2zos ase teradata "
                      "opensearch cassandra redshift snowflake bigquery "
                      "duckdb copybook iceberg delta tidb cockroachdb dsql "

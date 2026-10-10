@@ -47,7 +47,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1489, test owed 265, yes 455. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1489, test owed 261, yes 459. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -73,7 +73,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | mongodb | 1/9 | 11/23 | 1/6 | 4/7 | 0/3 | 4/5 | 3/5 | 1/1 | 1/1 | 0/1 | 26/61 |
 | mssql | 4/10 | 12/35 | 1/6 | 0/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 29/81 |
-| mysql | 8/10 | 22/31 | 5/6 | 5/7 | 6/6 | 7/7 | 7/8 | 1/1 | 1/1 | 1/1 | 63/78 |
+| mysql | 9/10 | 25/31 | 5/6 | 5/7 | 6/6 | 7/7 | 7/8 | 1/1 | 1/1 | 1/1 | 67/78 |
 | opensearch | 0/9 | 3/26 | 1/6 | 2/7 | 1/4 | 3/6 | 4/6 | 1/1 | 1/1 | 0/1 | 16/67 |
 | oracle | 3/10 | 8/36 | 1/6 | 1/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 25/82 |
 | parquet | 0/7 | 0/15 | - | 0/4 | 1/2 | 3/6 | 1/1 | 0/1 | 0/1 | 0/1 | 5/38 |
@@ -94,7 +94,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 |---|---|---|---|---|
 | scope.listings | mssql mysql postgres | ase cockroachdb dsql oracle tidb | the rest (26) | kinesis pubsub |
 | scope.deep | clickhouse cockroachdb db2 mssql mysql oracle postgres teradata | ase db2i db2zos hetero mongodb tidb | the rest (18) | kinesis pubsub saas sapodp |
-| scope.copy | postgres | ase cockroachdb dsql mongodb mssql mysql oracle tidb | the rest (25) | kinesis pubsub |
+| scope.copy | mysql postgres | ase cockroachdb dsql mongodb mssql oracle tidb | the rest (25) | kinesis pubsub |
 | scope.repair | generic hetero mongodb mssql mysql postgres redis sqlite | cockroachdb cosmosdb couchbase dsql oracle tidb | the rest (18) | kinesis pubsub saas sapodp |
 | scope.counters | mssql mysql oracle postgres | tidb | ase bigquery cockroachdb db2 db2i db2zos dsql duckdb generic hetero redshift snowflake sqlite | the rest (18) |
 | scope.objects | mysql oracle postgres | - | the rest (25) | copybook dynamodb kinesis parquet pubsub redis saas sapodp |
@@ -109,7 +109,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.identity.sequence-parity | mssql mysql oracle postgres | - | ase bigquery cockroachdb db2 db2i db2zos dsql duckdb generic hetero redshift snowflake sqlite tidb | the rest (18) |
 | verify.movement.target-ahead | - | mongodb mssql mysql postgres | the rest (28) | kinesis pubsub saas sapodp |
 | verify.structure.collection-options | mongodb | - | the rest (28) | copybook kinesis parquet pubsub redis saas sapodp |
-| verify.structure.columns | mssql postgres | mysql | the rest (23) | cosmosdb couchbase dynamodb kafka kinesis mongodb pubsub redis saas sapodp |
+| verify.structure.columns | mssql mysql postgres | - | the rest (23) | cosmosdb couchbase dynamodb kafka kinesis mongodb pubsub redis saas sapodp |
 | verify.structure.deferrable | postgres | - | generic hetero oracle sqlite | the rest (31) |
 | verify.structure.extensions | postgres | - | generic hetero | the rest (33) |
 | verify.structure.foreign-keys | mssql mysql postgres | - | ase bigquery cockroachdb db2 db2i db2zos duckdb generic hetero oracle redshift snowflake sqlite teradata tidb | the rest (18) |
@@ -138,9 +138,9 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.users | cassandra clickhouse db2i kafka mssql mysql opensearch oracle postgres redis teradata | mongodb | the rest (12) | copybook cosmosdb delta duckdb dynamodb iceberg kinesis parquet pubsub saas sapodp sqlite |
 | verify.repair | generic hetero kafka mongodb mysql oracle postgres redis sqlite | cockroachdb cosmosdb couchbase dsql mssql tidb | the rest (17) | kinesis pubsub saas sapodp |
 | verify.repair-undo | generic hetero kafka mongodb mysql postgres redis sqlite | cockroachdb cosmosdb couchbase dsql mssql oracle tidb | the rest (17) | kinesis pubsub saas sapodp |
-| verify.rows-apart | mssql | mongodb mysql postgres | the rest (30) | kinesis pubsub |
+| verify.rows-apart | mssql mysql | mongodb postgres | the rest (30) | kinesis pubsub |
 | verify.tables | mssql | postgres | the rest (32) | kinesis pubsub |
-| verify.table | - | the rest (30) | generic kafka mssql redis | kinesis pubsub |
+| verify.table | mysql | the rest (29) | generic kafka mssql redis | kinesis pubsub |
 | tail.follows | the rest (17) | db2i | ase bigquery db2 delta generic iceberg redshift snowflake | copybook db2zos duckdb kinesis parquet pubsub saas sapodp sqlite teradata |
 | tail.table-states | cockroachdb mysql postgres | cosmosdb couchbase db2i dsql dynamodb hetero mssql oracle saas sapodp tidb | the rest (14) | copybook db2zos duckdb kinesis parquet pubsub sqlite teradata |
 | tail.added | cockroachdb postgres | mssql mysql tidb | the rest (22) | copybook db2zos duckdb hetero kinesis parquet pubsub sqlite teradata |
@@ -181,11 +181,11 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Backlog (496 items, `docs/backlog-index.md`)
 
-DONE 286 - PARTLY 51 - IN PROGRESS 9 - OPEN 121 - BLOCKED 20 - NOT PURSUED 9
+DONE 286 - PARTLY 52 - IN PROGRESS 9 - OPEN 120 - BLOCKED 20 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
-| change follow | 41 | 4 | 1 | 12 | 5 | 0 |
+| change follow | 41 | 5 | 1 | 11 | 5 | 0 |
 | conversion | 29 | 1 | 0 | 1 | 0 | 0 |
 | correctness | 0 | 0 | 0 | 1 | 0 | 0 |
 | cutover | 14 | 1 | 1 | 4 | 0 | 0 |
