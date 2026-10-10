@@ -273,3 +273,8 @@ Next: route the five gaps through the engine (advise/assess first), then entry p
 Done: `assess` routed - `ready.depth` climbs full readiness check vs configuration-only through `decide.climb` from whether the servers answer (the engine's rows asked once, reused); `cli assess` says when it fell to the configuration alone. `TASKS["assess"]` is routed. Test: `tests/test_assess_depth_follows_the_servers.py`. Guards run and pass (task, no-method-said-twice, code map, depth matrix). Docker daemon is not running here; nothing run against a database. Full suite not run.
 
 Next: `advise`, then `doctor`, `init`, `users` through the engine; then non-CLI entry points into `TASKS`; then P0-DECISION-ALL.reason.
+
+## 2026-10-10 - routine run
+
+- LT.R7 DONE: the MySQL tail reads binlog_row_image MINIMAL and NOBLOB (columns left out are written as nothing and named in `canon.UNCHANGED`, key from the before image, a moved key kept) and PARTIAL_JSON diffs (the column read where the source holds it; left to later changes when the row is gone). Proved on a MySQL 8.4 sandbox (`test_a_partial_row_image_is_read_not_refused`). Not done: NOBLOB has no test of its own (same bitmap path); a target that replaces whole documents from a partial update is not shown.
+- Next: LT.R1 (depth D0-D4 per table in assess), then the S-sized OPEN items in `docs/backlog-index.md` order.

@@ -1059,6 +1059,45 @@ class MySQLEngine(Engine):
                 cur.execute("set foreign_key_checks = 0")
         return conn
 
+    def _image(self, db, table, values, sources):
+        """A row image as (values by name without the columns it left out,
+        the names it left out, the names it carries as a JSON diff).
+
+        At `binlog_row_image` MINIMAL or NOBLOB a row event names the
+        columns it carries (the columns-present bitmap), and the reader
+        hands the others back as None - a value no different from a
+        NULL, which is why it says which (`none_sources`)."""
+        from pymysqlreplication.constants import NONE_SOURCE
+        from pymysqlreplication.json_binary import JsonDiff
+        vals = self.binlog_names(db, table, values)
+        flagged = {}
+        for k, why in (sources or {}).items():
+            flagged.setdefault(why, {})[k] = True
+        left = set(self.binlog_names(
+            db, table, flagged.get(NONE_SOURCE.COLS_BITMAP, {})))
+        # the reader hands a diff back as an object, or as None where it
+        # could not open it
+        diffed = set(self.binlog_names(
+            db, table, flagged.get(NONE_SOURCE.JSON_PARTIAL_UPDATE, {})))
+        diffed |= {k for k, v in vals.items() if isinstance(v, JsonDiff)}
+        gone = left | diffed
+        return ({k: v for k, v in vals.items() if k not in gone},
+                sorted(left), sorted(diffed))
+
+    def _json_now(self, side, db, table, key, after, names):
+        """Put into `after` each of `names` (JSON columns an update carried
+        as a diff) as the source holds it now; the names of those the row no
+        longer has, to leave to the changes that follow."""
+        cols = ", ".join(f"`{n}`" for n in names)
+        where = " and ".join(f"`{k}` <=> %s" for k in key)
+        got = self._q(side, f"select {cols} from `{self._d(side, db)}`."
+                            f"`{table}` where {where}", list(key.values()))
+        if not got:
+            return list(names)
+        for n, v in zip(names, got[0]):
+            after[n] = v
+        return []
+
     def binlog_names(self, db, table, values):
         """Binlog row values keyed by column name rather than by position.
 
@@ -1530,6 +1569,7 @@ class MySQLEngine(Engine):
         from pymysqlreplication import BinLogStreamReader
         from pymysqlreplication.event import NotImplementedEvent
         from pymysqlreplication.row_event import (DeleteRowsEvent,
+                                                  PartialUpdateRowsEvent,
                                                   UpdateRowsEvent,
                                                   WriteRowsEvent)
 
@@ -1543,10 +1583,7 @@ class MySQLEngine(Engine):
                  " decode the binary and raises. The library's way around"
                  " that replaces the bytes it cannot decode, which is worse"
                  " than stopping"),
-                ("binlog_row_image",
-                 "without it an UPDATE's before image carries only the key,"
-                 " so a column that was not part of the change arrives as"
-                 " missing rather than unchanged")):
+                ):
             got = self._q(side, f"select @@{name}")
             value = str(got[0][0]) if got else "?"
             if value.upper() != "FULL":
@@ -1555,6 +1592,16 @@ class MySQLEngine(Engine):
                     f" FULL: {why}.\n"
                     f"    set global {name} = 'FULL';   -- self-managed\n"
                     f"    {name}=FULL                   -- parameter group")
+        # FULL, MINIMAL and NOBLOB are all read: the log names the columns
+        # a row image carries, and what it leaves out is left as the target
+        # holds it (`_image`); anything else is a setting this reader has
+        # not been shown
+        got = self._q(side, "select @@binlog_row_image")
+        image = str(got[0][0]).upper() if got else "?"
+        if image not in ("FULL", "MINIMAL", "NOBLOB"):
+            raise SystemExit(
+                f"binlog_row_image is {image} on this server, and the tail"
+                " reads FULL, MINIMAL or NOBLOB only")
         from pymysqlreplication.event import GtidEvent, QueryEvent, XidEvent
 
         from ..binlog_marks import register as register_marks
@@ -1604,6 +1651,7 @@ class MySQLEngine(Engine):
                 log_pos=token.get("log_pos"),
                 only_schemas=[self._d(side, db)],
                 only_events=[WriteRowsEvent, UpdateRowsEvent,
+                             PartialUpdateRowsEvent,
                              DeleteRowsEvent, NotImplementedEvent,
                              XidEvent, QueryEvent, GtidEvent, register(),
                              *mark_events],
@@ -1710,21 +1758,62 @@ class MySQLEngine(Engine):
                             "insert", table,
                             {k: vals[k] for k in keys}, vals, txn=gtid))
                     elif isinstance(ev, UpdateRowsEvent):
-                        before = self.binlog_names(named, table,
-                                                   row["before_values"])
-                        after = self.binlog_names(named, table,
-                                                  row["after_values"])
+                        before, gone, _ = self._image(
+                            named, table, row["before_values"],
+                            row.get("before_none_sources"))
+                        after, left, diffed = self._image(
+                            named, table, row["after_values"],
+                            row.get("after_none_sources"))
+                        missing = [k for k in keys if k not in before]
+                        if missing:
+                            raise SystemExit(
+                                f"{table}: the binlog's before image did not"
+                                f" carry {', '.join(missing)}, so migkit"
+                                " cannot say which row it meant")
                         # the key from the *before* image: an UPDATE that
                         # moved the primary key has to find the old row
-                        out.append(canon.change(
-                            "update", table,
-                            {k: before[k] for k in keys}, after,
-                            before=before, txn=gtid))
+                        key = {k: before[k] for k in keys}
+                        # a partial after image (binlog_row_image MINIMAL or
+                        # NOBLOB) holds what changed and nothing of the rest:
+                        # the key it did not move is the before image's, a
+                        # column it left out is the before image's where that
+                        # has it and otherwise left to the target as it
+                        # stands (`canon.UNCHANGED`) - written as nothing
+                        for k in keys:
+                            after.setdefault(k, key[k])
+                        kept = []
+                        for n in left:
+                            if n in before:
+                                after[n] = before[n]
+                            elif n not in after:
+                                kept.append(n)
+                        if diffed:
+                            # a JSON column the log carries as a diff
+                            # (binlog_row_value_options PARTIAL_JSON): the
+                            # row's value read where it stands, which later
+                            # changes of the log bring to the same end
+                            kept += self._json_now(side, db, table, key,
+                                                   after, diffed)
+                        whole = before if set(before) - set(keys) else None
+                        change = canon.change("update", table, key, after,
+                                              before=whole, txn=gtid)
+                        if kept:
+                            change[canon.UNCHANGED] = kept
+                        out.append(change)
                     else:
-                        vals = self.binlog_names(named, table, row["values"])
+                        vals, _, _ = self._image(
+                            named, table, row["values"],
+                            row.get("none_sources"))
+                        missing = [k for k in keys if k not in vals]
+                        if missing:
+                            raise SystemExit(
+                                f"{table}: the binlog's row image did not"
+                                f" carry {', '.join(missing)}, so migkit"
+                                " cannot say which row it meant")
                         out.append(canon.change(
                             "delete", table, {k: vals[k] for k in keys},
-                            before=vals, txn=gtid))
+                            before=(vals if set(vals) - set(keys)
+                                    else None), txn=gtid))
                 if len(out) >= limit:
                     keep = True
                     break
@@ -6279,8 +6368,6 @@ class MySQLEngine(Engine):
                 ("log_bin", "ON", "fail", sc.requirement("log_bin", "OFF")),
                 ("binlog_format", "ROW", "fail",
                  sc.requirement("binlog_format", "not ROW")),
-                ("binlog_row_image", "FULL", "warn",
-                 sc.requirement("binlog_row_image", "not FULL")),
                 # the change tail refuses without it - measured, the reader
                 # otherwise cannot tell a varbinary from a varchar
                 ("binlog_row_metadata", "FULL", "warn",
@@ -6289,6 +6376,14 @@ class MySQLEngine(Engine):
             add("pass" if str(v).upper() == want else lvl, "instance",
                 f"{name}={want} on source (CDC requirement)",
                 v if str(v).upper() == want else f"{v} - {fix}")
+        # a row image is read whole or partial: the tail writes what
+        # a partial one holds and leaves the rest as the target has it
+        v = var("src", "binlog_row_image")
+        add("pass" if str(v).upper() in ("FULL", "MINIMAL", "NOBLOB")
+            else "warn", "instance",
+            "binlog_row_image FULL, MINIMAL or NOBLOB on source",
+            v if str(v).upper() in ("FULL", "MINIMAL", "NOBLOB")
+            else f"{v} - {sc.requirement('binlog_row_image', 'not FULL')}")
         ret = var("src", "binlog_expire_logs_seconds")
         try:
             ok = int(ret) >= 86400
