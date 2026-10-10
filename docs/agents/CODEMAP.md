@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (149 modules)
+## `migkit/` (150 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -39,6 +39,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/carriers.py` - Where a seed shipped on media is written, and where the far end reads it back (`ship`; the owner's scope, 2026-10-01). Classes: Limits, Store, LocalStore, S3Store, AzureBlobStore, GcsStore.
 - `migkit/case.py` - The case migkit recognised between a hop's two servers, said and held to before anything is written (backlog P0-SCENARIOS). Classes: Case.
 - `migkit/catalog.py` - What one side's catalogue says about its tables, in one shape every reader and every comparer meets on (audit 2026-10-01, SC3, SC15). Classes: Column, Index, ForeignKey, Shape, Catalog.
+- `migkit/changedepth.py` - How deeply the changes of a table can be read from its source: the scale `assess` prints per table, with the statement that would raise it (
 - `migkit/changetopic.py` - One reader for a source that hands its changes out as a feed in a known envelope (backlog ER4, ER5): TiDB through TiCDC, CockroachDB through Classes: Row, Mark, Envelope, TicdcCanalJson, TicdcSimple, CrdbChangefeed.
 - `migkit/charsets.py` - A change of character set or collation, planned and proved (backlog P0-SCENARIOS): latin1, cp1252 and the other Windows code pages into utf8 Classes: Charset, Unfit, Column, Plan, Found.
 - `migkit/checkpoint.py` - Make a long verify restartable. Classes: Checkpoint, Rate.

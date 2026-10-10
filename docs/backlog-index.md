@@ -346,7 +346,7 @@ in these historical totals.
 | 262 | L6 | Re-add a table from its removal position | DONE 63ad3f5: a rung of `tailtables._add_ways`, only where the source reads its log again from a position, the shape is the same and the target's digest unchanged; else copied | S | change follow | live-tail report L1071 |
 | 263 | L7 | Per-table accounting identity every batch | DONE 6f07ceb, 63ad3f5 (the spool's terms: held, set aside, out of scope, taken back) | S | change follow | L4466-4469, L7138-7140 |
 | 264 | L8 | Publication-add guard below PostgreSQL 17.5 | DONE 63ad3f5: `publication_add_risk` (the 2025-05-08 minors) a need of the subscription rung, migkit's own tail taken instead | S | change follow | L4468-4469; report L1073 |
-| 265 | LT.R1 | Depth D0-D4 per table in assess/doctor, with the statement that raises it | OPEN | S | change follow | L4499-4501 |
+| 265 | LT.R1 | Depth D0-D4 per table in assess/doctor, with the statement that raises it | PARTLY | S | change follow | L4499-4501 |
 | 266 | LT.R2 | SQL Server without CT/CDC: the log-backup chain restored onto a SQL Server migkit owns | BLOCKED (full SQL Server is x86-only) | L | change follow | L4505-4508 |
 | 267 | LT.R3 | SQL Server live `fn_dblog` reader | BLOCKED (full SQL Server is x86-only) | L | change follow | report L1076 |
 | 268 | LT.R4 | Oracle partial updates lifted to full images by flashback reads | DONE 0c89d67 (what a statement does not give is read from the table as of the commit) | M | change follow | L4508-4510 |

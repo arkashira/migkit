@@ -6384,6 +6384,29 @@ class MySQLEngine(Engine):
             "binlog_row_image FULL, MINIMAL or NOBLOB on source",
             v if str(v).upper() in ("FULL", "MINIMAL", "NOBLOB")
             else f"{v} - {sc.requirement('binlog_row_image', 'not FULL')}")
+        # how deeply each table's changes can be read, and what raises it
+        try:
+            from .. import changedepth
+            seen = {}
+            for db in self.databases():
+                nokey = {r[0] for r in self._q(
+                    "src", "select t.table_name from information_schema.tables"
+                    " t where t.table_schema = %s and t.table_type ="
+                    " 'BASE TABLE' and not exists (select 1 from"
+                    " information_schema.table_constraints c where"
+                    " c.table_schema = t.table_schema and c.table_name ="
+                    " t.table_name and c.constraint_type = 'PRIMARY KEY')",
+                    (self._d("src", db),))}
+                for t in self._tables("src", db):
+                    seen[f"{db}.{t}"] = changedepth.mysql(
+                        var("src", "log_bin"), var("src", "binlog_format"),
+                        var("src", "binlog_row_image"),
+                        var("src", "binlog_row_metadata"), t not in nokey)
+            for level, item, detail in changedepth.lines(seen):
+                add(level, "instance", item, detail)
+        except Exception as e:  # noqa: BLE001 - a view of the log, not a gate
+            add("warn", "instance", "change reading depth not worked out",
+                str(e)[:200])
         ret = var("src", "binlog_expire_logs_seconds")
         try:
             ok = int(ret) >= 86400
