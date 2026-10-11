@@ -6733,6 +6733,29 @@ planned:
   passes, a new NOT NULL column is refused and said). JSON Schema next,
   Protobuf last. confluent-kafka only in the tests, as a byte-for-byte
   check. Tested against Redpanda's registry.
+* JSON Schema and Protobuf (R4.formats, built, tests offline only):
+  `migkit/schemaformats.py` reads a message the registry framed whatever the
+  schema's kind (`registry.entry` returns the registry's `schemaType`):
+  JSON Schema (body checked against `type`, `required`, a closed
+  `additionalProperties` and each property's simple type), Protobuf (the
+  `.proto` text parsed in the module, proto3 only: scalars, enums, nested
+  and repeated fields, packed or not; the message-index list as zigzag
+  varints, a lone zero byte being `[0]`). It refuses, with the reason and
+  never by skipping: a schema with references, proto2, imports (the
+  well-known types among them), `oneof`, maps, groups, extensions, a field
+  the schema does not name, an id the registry does not hold, a kind that is
+  not AVRO, JSON or PROTOBUF. `format: jsonschema` writes the same envelope
+  as `format: avro`; `format: protobuf` is refused as a write (field numbers
+  for a table's columns would have to be kept for the topic's life). A copy
+  between two registries registers each schema under its own kind.
+  Tested in `tests/test_registry_messages_in_json_schema_and_protobuf.py`
+  with a dict for a registry and wire bytes made by hand. **Not verified**:
+  against a real registry (its `schemaType`/references answers, whether its
+  rule takes the JSON Schema versions written), against bytes a real
+  Protobuf serializer wrote (the zigzag encoding of the index list is as
+  remembered from the serializers, not measured here), and the JSON Schema
+  keywords other than the ones above. The reader is not yet called by a
+  row-reading path of the Kafka engine, which copies and compares messages.
 * MSK IAM: the Kafka client migkit already uses signs `AWS_MSK_IAM` itself;
   raise its floor to 2.2.15. Tested offline (the signed payload with frozen
   credentials and clock); a real handshake is **blocked** on an AWS account.

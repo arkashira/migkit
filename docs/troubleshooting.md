@@ -463,9 +463,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: no way of marking migkit's own writes proved itself on the target, so what it applies would come back to where it began. <...> | None of them is allowed there.
 
+* format: protobuf is not written: <...>
+
 * format: <...> is not one of <...>
 
-* format: avro is written through a schema registry, which a Kafka target has and this stream does not - one of <...>
+* format: <...> is written through a schema registry, which a Kafka target has and this stream does not - one of <...>
 
 * follow_until: <...> is not one of <...> - run until asked to stop, or until caught up with the source
 
@@ -887,9 +889,17 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>[<...>]: the target refused the message at offset <...> (<...>); nothing past the last saved position is counted as copied. A message larger than the target's topic takes needs its max.message.bytes raised to the source topic's
 
-* format: avro needs the target's `schema_registry` - the URL of the registry its consumers read schemas from
+* format: <...> needs the target's `schema_registry` - the URL of the registry its consumers read schemas from
 
 * <...>: the schema registry refused the table's new schema - its compatibility rule says the consumers of the topic could not read it: <...>
+
+* <...>: not written as <...>: <...>
+
+* <...>: schema <...> refers to other schemas in the source's registry, which a copy does not carry over - the message is not copied, nor skipped
+
+* <...>: a message names schema <...>, which the source's registry does not hold: <...>
+
+* <...>: the target's registry refused schema <...> (<...>) - its compatibility rule says the topic's consumers could not read it: <...>
 
 * <...> has fewer partitions on the target than on the source: a key's messages would land in another partition, out of the order its consumers read them
 
