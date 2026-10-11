@@ -1,3 +1,4 @@
+import re
 import time
 
 from .. import pieces
@@ -103,7 +104,252 @@ class MongoEngine(Engine):
         return {"UTF-8": 1}
 
     def list_move_tables(self, db):
-        return [("", c) for c in self.neutral_tables("src", db)]
+        """The collections the copy fills: a view is not one - it holds no
+        documents, and read through it a copy made a collection of what it
+        answers - it is carried as a view, once the collections are in
+        (`carry_database_objects`)."""
+        views = {v[0] for v in self._views("src", db)}
+        return [("", c) for c in self.neutral_tables("src", db)
+                if c not in views]
+
+    # ---- indexes -----------------------------------------------------------
+
+    @staticmethod
+    def _index_specs(coll):
+        """[(name, keys, options)] of a collection's indexes but its `_id`
+        one: the keys as `create_index` takes them, the options as the
+        server keeps them (`unique`, `sparse`, a TTL's `expireAfterSeconds`,
+        a `partialFilterExpression`, a `collation`, a text index's weights
+        ...) less the build's own bookkeeping. One reading, for the copy
+        that makes the indexes of a collection it made and for what is
+        told to another engine."""
+        out = []
+        for name, spec in coll.index_information().items():
+            if name == "_id_":
+                continue
+            spec = dict(spec)
+            keys = spec.pop("key")
+            spec.pop("v", None)
+            spec.pop("ns", None)
+            spec.pop("background", None)
+            out.append((name, list(keys), spec))
+        return out
+
+    def neutral_indexes(self, side, db, table):
+        """[(name, unique, [fields], plain)] of a collection's indexes
+        beside `_id`'s. `plain` is False for one another engine cannot be
+        given as it is: a TTL, partial, sparse, hidden, collated, text,
+        geospatial, hashed or wildcard one, a compound one that mixes
+        directions - and the fields of a nested path, which are no
+        column. [] for a view, which has none."""
+        from pymongo.errors import OperationFailure
+        coll = self._client(side)[self._d(side, db)][table]
+        try:
+            specs = self._index_specs(coll)
+        except OperationFailure as e:
+            if e.code == 166:
+                return []
+            raise
+        out = []
+        for name, keys, spec in specs:
+            ascending = [d for _, d in keys]
+            plain = (not set(spec) - {"unique"}
+                     and all(d in (1, -1) for d in ascending)
+                     and (len(set(ascending)) == 1
+                          or all(d == 1 for d in ascending))
+                     and not any("$" in str(f) for f, _ in keys))
+            out.append((name, bool(spec.get("unique")),
+                        [str(f) for f, _ in keys], plain))
+        return out
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        """The statement that makes one index here, in the shell's own
+        words - what `execute_ddl` runs and a person can run by hand."""
+        import json
+        keys = json.dumps({c: 1 for c in columns})
+        opts = {"name": name}
+        if unique:
+            opts["unique"] = True
+        return (f"db.getCollection({json.dumps(str(table))})"
+                f".createIndex({keys}, {json.dumps(opts)})")
+
+    #: the one statement `execute_ddl` runs (`neutral_create_index_sql`)
+    _CREATE_INDEX = re.compile(r"^db\.getCollection\(")
+
+    def execute_ddl(self, side, db, sql):
+        """Run one statement that changes this side's schema: the index
+        `neutral_create_index_sql` writes, and nothing else - a document
+        store keeps no other schema to change. Read as JSON from end to
+        end, never matched by text, so a collection or a field named with
+        a brace or a quote is what it is named."""
+        import json
+        self._target_only(side, "change a schema")
+        text = str(sql).strip()
+        refuse = ValueError(
+            "a document store takes one schema statement, an index made"
+            f" with createIndex: {text[:80]}")
+        got = self._CREATE_INDEX.match(text)
+        if not got:
+            raise refuse
+        read = json.JSONDecoder().raw_decode
+        try:
+            coll, at = read(text, got.end())
+            glue = ").createIndex("
+            if text[at:at + len(glue)] != glue:
+                raise refuse
+            keys, at = read(text, at + len(glue))
+            if text[at:at + 2] != ", ":
+                raise refuse
+            opts, at = read(text, at + 2)
+        except json.JSONDecodeError:
+            raise refuse
+        if text[at:] != ")" or not isinstance(coll, str) \
+                or not isinstance(keys, dict) or not isinstance(opts, dict):
+            raise refuse
+        self._client(side)[self._d(side, db)][coll].create_index(
+            list(keys.items()), **opts)
+
+    # ---- views and stored functions ----------------------------------------
+
+    def _views(self, side, db):
+        """[(name, viewOn, pipeline, collation)] of the database's views,
+        the hop's scope not asked: an aggregation pipeline over a
+        collection (or another view), kept by the server as the view's
+        definition."""
+        d = self._client(side)[self._d(side, db)]
+        out = []
+        for c in d.list_collections(filter={"type": "view"}):
+            opts = c.get("options") or {}
+            out.append((c["name"], opts.get("viewOn"),
+                        list(opts.get("pipeline") or []),
+                        opts.get("collation")))
+        return sorted(out, key=lambda v: v[0])
+
+    @staticmethod
+    def _view_text(on, pipeline, collation=None):
+        """A view's definition as one text, Extended JSON with its keys in
+        order: what two views are held to, and what a person reads."""
+        from bson import json_util
+        body = {"viewOn": on, "pipeline": pipeline}
+        if collation:
+            body["collation"] = collation
+        return json_util.dumps(body, sort_keys=True)
+
+    def neutral_views(self, side, db):
+        """[(name, definition)] of the views the hop takes: each its
+        pipeline and the collection it reads, as `_view_text` says it -
+        not SQL, which no other engine's converter reads (it asks for an
+        SQL dialect first)."""
+        return [(n, self._view_text(on, pipe, coll))
+                for n, on, pipe, coll in self._views(side, db)
+                if self.takes(db, "view", n)]
+
+    def code_routines(self, side, db):
+        """The functions stored in the database's `system.js`, the one
+        stored code a document store keeps: JavaScript, each by the name
+        it is called by in the server's own scripts. A routine of another
+        engine's language cannot be made from it - the conversion names
+        that - and `carry_database_objects` carries it to a server of this
+        engine as it is."""
+        from ..storedcode.routines import Routine
+        out = []
+        for doc in self._client(side)[self._d(side, db)]["system.js"].find(
+                sort=[("_id", 1)]):
+            name = str(doc["_id"])
+            if not self.hop.takes_object("function", db, name):
+                continue
+            body = doc.get("value")
+            out.append(Routine(
+                kind="function", name=name, body=str(body),
+                definition=self._function_text(doc), language="javascript",
+                settings={"kept in": "system.js"}))
+        return out
+
+    @staticmethod
+    def _function_text(doc):
+        from bson import json_util
+        return json_util.dumps({"_id": doc["_id"], "value": doc.get("value")},
+                               sort_keys=True)
+
+    def carry_database_objects(self, db, log=None):
+        """What a database holds outside its collections, made on the
+        target once the collections are in: its views - each over the
+        collection it reads, a view over a view after the one it reads -
+        and its stored functions. One the target already holds the same is
+        left; one it holds that differs is the target's own and is said,
+        never replaced; a view over a collection the hop leaves out is
+        not made, and said."""
+        log = log or (lambda m: None)
+        self._carry_views(db, log)
+        self._carry_functions(db, log)
+
+    def _carry_views(self, db, log):
+        from pymongo.errors import PyMongoError
+        views = [v for v in self._views("src", db)
+                 if self.takes(db, "view", v[0])]
+        if not views:
+            return
+        target = self._client("dst")[self._d("dst", db)]
+        have = {n: (on, pipe, coll) for n, on, pipe, coll in
+                self._views("dst", db)}
+        taken = {v[0] for v in views}
+        kept = set(self.neutral_tables("src", db)) - taken
+        waiting = list(views)
+        while waiting:
+            later = []
+            for name, on, pipe, coll in waiting:
+                there = self.hop.target_table_in(db, name)
+                over = self.hop.target_table_in(db, on)
+                if any(v[0] == on for v in waiting):
+                    later.append((name, on, pipe, coll))
+                    continue
+                if on not in kept and on not in taken:
+                    log(f"view {name}: not made - it reads {on}, which the"
+                        " hop leaves out")
+                    continue
+                if there in have:
+                    same = have[there] == (over, pipe, coll)
+                    log(f"view {name}: " + (
+                        "already on the target" if same else
+                        "the target has a view of that name that reads"
+                        " otherwise; left as it is"))
+                    continue
+                try:
+                    kw = {"viewOn": over, "pipeline": pipe}
+                    if coll:
+                        kw["collation"] = coll
+                    target.create_collection(there, **kw)
+                except PyMongoError as e:
+                    log(f"view {name}: not made - "
+                        f"{(str(e).splitlines() or [''])[0][:100]}")
+                    continue
+                have[there] = (over, pipe, coll)
+                log(f"view {name}: made over {over}")
+            if len(later) == len(waiting):
+                for name, on, *_ in later:
+                    log(f"view {name}: not made - it reads {on}, a view"
+                        " that could not be made")
+                return
+            waiting = later
+
+    def _carry_functions(self, db, log):
+        src = self.code_routines("src", db)
+        if not src:
+            return
+        target = self._client("dst")[self._d("dst", db)]["system.js"]
+        read = self._client("src")[self._d("src", db)]["system.js"]
+        for r in src:
+            doc = read.find_one({"_id": r.name})
+            held = target.find_one({"_id": r.name})
+            if held is None:
+                target.insert_one(doc)
+                log(f"function {r.name}: made")
+            elif self._function_text(held) == self._function_text(doc):
+                log(f"function {r.name}: already on the target")
+            else:
+                log(f"function {r.name}: the target has one of that name"
+                    " that reads otherwise; left as it is")
 
     #: documents per read of the collection copier, and the bytes of BSON
     #: a read ends at (`_docs_until`)
@@ -268,12 +514,7 @@ class MongoEngine(Engine):
             log(progress(key, moved, total, began, time.monotonic(),
                          unit="documents", since=from_docs))
         if st.get("made"):
-            for index_name, spec in src.index_information().items():
-                if index_name == "_id_":
-                    continue
-                keys = spec.pop("key")
-                spec.pop("v", None)
-                spec.pop("ns", None)
+            for index_name, keys, spec in self._index_specs(src):
                 dst.create_index(keys, name=index_name, **spec)
         st["done"] = True
         ck.save()
@@ -1039,13 +1280,15 @@ class MongoEngine(Engine):
         for name in sorted(n for n in d.list_collection_names()
                            if self.in_scope(db, n)):
             idx = {}
-            for i in d[name].list_indexes():
+            opts = d.command("listCollections",
+                             filter={"name": name})["cursor"]["firstBatch"][0]
+            # a view has no indexes, and the server refuses to list them
+            for i in ([] if opts.get("type") == "view"
+                      else d[name].list_indexes()):
                 spec = {k: (str(v) if k == "key" else v)
                         for k, v in i.items()
                         if k not in ("v", "ns", "background")}
                 idx[i["name"]] = repr(sorted(spec.items(), key=str))
-            opts = d.command("listCollections",
-                             filter={"name": name})["cursor"]["firstBatch"][0]
             o = {k: v for k, v in opts.get("options", {}).items()
                  if k not in ("storageEngine", "autoIndexId")
                  and not (k == "capped" and not v)}
@@ -1807,7 +2050,14 @@ class MongoEngine(Engine):
             else _id
 
     def snapshot_state(self, db, state_dir, kind="all"):
-        (state_dir / "dst-shape.txt").write_text(repr(self._shape("dst", db)))
+        """The target's collections as they stand - type, options, indexes
+        - set down whole or not at all before a repair begins, so a
+        rollback has what the repair changed to go back to. A document
+        store keeps no counters to put back; its rows are put back by the
+        repair's own undo (`repair_io`)."""
+        from ..durable import write_atomic
+        write_atomic(state_dir / "dst-shape.txt",
+                     repr(self._shape("dst", db)))
 
     def check_deep(self, db):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
@@ -1931,7 +2181,14 @@ class MongoEngine(Engine):
         # case/accent-insensitive collation on the target COLLAPSES distinct
         # source values into duplicates on load - silent data loss.
         def indexes(coll):
-            return {ix["name"]: ix for ix in coll.list_indexes()}
+            from pymongo.errors import OperationFailure
+            try:
+                return {ix["name"]: ix for ix in coll.list_indexes()}
+            except OperationFailure as e:
+                # a view has no indexes, and the server refuses to list them
+                if e.code == 166:
+                    return {}
+                raise
         ixbad = []
         for name in names:
             if name.startswith("system."):
@@ -2036,6 +2293,7 @@ class MongoEngine(Engine):
             res.append(Result("deep", f"{db} sharding", status, detail, "",
                               "cleanupOrphaned / dedupe and stop the"
                               " balancer before cutover" if sh else ""))
+        res += [r for r in (self.set_aside(db),) if r]
         return res
 
     # delta verify: re-check only _ids touched since the saved change-stream
@@ -2314,23 +2572,205 @@ class MongoEngine(Engine):
                 "".join(k + "\n" for k in kept))
         return [by[k] for k in overwrite]
 
-    def assess(self):
-        items = []
-
-        def add(level, scope, item, detail=""):
-            items.append({"level": level, "scope": scope,
-                          "item": item, "detail": str(detail)})
-
-        items += self._brand_rows()
-        sv, dv = self._server_versions()
-        items.append(self._version_row(sv, dv))
-        items += self._leg_items()
-
+    def _assess_extra(self):
+        """What a document store has to say beside what every engine's
+        assessment does (`Engine.assess`: the brands, the two servers'
+        versions held to each other, the connections, the pre-flight
+        checks, the scope and the writers already on the target): the
+        work the move will not do, what a mover left on the source, and
+        the programs the move would run."""
         inv = self._handwork()
-        items += inv.rows() + inv.summary()
-        items += self._mover_leftovers()
-        items += self._bulk_path_rows()
+        return (inv.rows() + inv.summary() + self._mover_leftovers()
+                + self._bulk_path_rows())
+
+    #: what `assess` asks before anything moves (`Engine._preflight_items`)
+    PREFLIGHT = ("_stream_ready", "_features_the_target_lacks")
+
+    def _stream_ready(self, db):
+        """Whether the source can be followed once it is copied: a change
+        stream is read from the oplog of a replica set (or the router of a
+        sharded cluster), and a standalone server has none. How far back
+        the oplog reaches is said with it - the copy must be followed from
+        a point it still holds. Asked of the source only, and read-only."""
+        from pymongo.errors import PyMongoError
+        scope = f"{db} change stream"
+        try:
+            client = self._client("src")
+            hello = client.admin.command("hello")
+        except PyMongoError as e:
+            return Result("schema", scope, "error",
+                          f"could not ask the source: {str(e)[:80]}")
+        on = hello.get("setName")
+        sharded = hello.get("msg") == "isdbgrid"
+        if not on and not sharded:
+            return Result(
+                "schema", scope, "warn",
+                "the source is a standalone server and keeps no oplog, so"
+                " its changes cannot be followed after the copy; only a"
+                " full copy is possible",
+                fix_hint="run the source as a replica set (a single member"
+                         " is enough) to follow it online")
+        if sharded:
+            return Result("schema", scope, "ok",
+                          "a sharded cluster: its changes are read through"
+                          " its router")
+        try:
+            oldest = next(iter(client.local["oplog.rs"].find({}, {"ts": 1})
+                               .sort("$natural", 1).limit(1)), None)
+        except PyMongoError:
+            oldest = None
+        now = hello.get("operationTime")
+        if oldest is None or now is None:
+            return Result("schema", scope, "warn",
+                          f"replica set {on}: how far back its oplog"
+                          " reaches could not be read with this account -"
+                          " unknown, not clean")
+        window = max(int(now.time) - int(oldest["ts"].time), 0)
+        return Result("schema", scope, "ok",
+                      f"replica set {on}: its oplog holds the last"
+                      f" {window / 3600:.1f} hours of changes; a copy is"
+                      " followed from the point taken before it, which has"
+                      " to stay inside that")
+
+    #: the first server version that has each feature, from the server's
+    #: own documentation: a collection or index that uses one cannot be
+    #: made on an older server
+    FEATURE_SINCE = {
+        "wildcard index": (4, 2), "hidden index": (4, 4),
+        "time-series collection": (5, 0), "clustered collection": (5, 3)}
+
+    def _features_the_target_lacks(self, db):
+        """The collections and indexes the source has that need a newer
+        server than the target runs: made on it, they fail or arrive as
+        something else. Read from the source's listing and the two
+        servers' versions."""
+        from pymongo.errors import PyMongoError
+        scope = f"{db} features the target lacks"
+        try:
+            sv, dv = self._server_versions()
+            used = self._features_used(db)
+        except PyMongoError as e:
+            return Result("schema", scope, "error",
+                          f"could not ask: {str(e)[:80]}")
+        try:
+            have = tuple(int(x) for x in str(dv).split(".")[:2])
+        except ValueError:
+            have = None
+        if have is None:
+            return Result("schema", scope, "warn",
+                          "the target's version could not be read - whether"
+                          " it has what the source uses is unknown, not"
+                          " clean")
+        short = {f: names for f, names in used.items()
+                 if have < self.FEATURE_SINCE[f]}
+        if not short:
+            return Result("schema", scope, "ok",
+                          f"the target ({dv}) has every feature the source"
+                          f" ({sv}) uses here")
+        return Result(
+            "schema", scope, "diff",
+            "; ".join(
+                f"{f} ({', '.join(sorted(names)[:3])}) needs"
+                f" {'.'.join(map(str, self.FEATURE_SINCE[f]))} and the"
+                f" target runs {dv}" for f, names in sorted(short.items())),
+            fix_hint="move to a target of at least the source's version")
+
+    def _features_used(self, db):
+        """{feature (`FEATURE_SINCE`): the source's collections or indexes
+        that use it}, of the collections the hop takes."""
+        used = {}
+        d = self._client("src")[self._d("src", db)]
+        for c in d.list_collections():
+            name = c["name"]
+            if name.startswith("system.") or not self.in_scope(db, name):
+                continue
+            opts = c.get("options") or {}
+            if c.get("type") == "timeseries" or "timeseries" in opts:
+                used.setdefault("time-series collection", set()).add(name)
+            if "clusteredIndex" in opts:
+                used.setdefault("clustered collection", set()).add(name)
+            if c.get("type") == "view":
+                continue
+            for ix in d[name].list_indexes():
+                key = dict(ix.get("key") or {})
+                if any(str(f).endswith("$**") for f in key):
+                    used.setdefault("wildcard index", set()).add(
+                        f"{name}.{ix['name']}")
+                if ix.get("hidden"):
+                    used.setdefault("hidden index", set()).add(
+                        f"{name}.{ix['name']}")
+        return used
+
+    def stream_writers(self, db):
+        """Adds what else writes into the target's database: the operations
+        running on it just now, by the client that sent each (`currentOp`),
+        and - for a writer between its operations at that instant - the
+        writes the server counts on it over a short watch (`top`). None of
+        them is migkit's to pause. The tail of migkit's own is the base's,
+        and its writes are expected."""
+        from pymongo.errors import PyMongoError
+        out = super().stream_writers(db)
+        blind = self.__dict__.setdefault("_writers_blind", {})
+        try:
+            who, wrote = self._writers_seen(db)
+        except PyMongoError as e:
+            # a repair goes on as it did; the assessment says it could not
+            # ask (`_writer_items`)
+            blind[db] = (str(e).splitlines() or [""])[0][:80]
+            return out
+        blind.pop(db, None)
+        out += [(w, False) for w in who]
+        if wrote and not who and not out:
+            out.append((f"a writer the server does not name ({wrote} writes"
+                        f" in {self.WRITE_WATCH:g}s)", False))
+        return out
+
+    def _writer_items(self, db):
+        """The base's, but a target that would not say who writes to it is
+        unknown and not clean - its `none found` would be a claim."""
+        items = super()._writer_items(db)
+        why = self.__dict__.get("_writers_blind", {}).get(db)
+        if why and items and items[0]["level"] == "pass":
+            items = [{**items[0], "level": "warn",
+                      "detail": f"could not ask the target ({why}) -"
+                                " unknown, not clean"}]
         return items
+
+    #: seconds the target is watched for writes, and the looks at what is
+    #: running in them (`stream_writers`)
+    WRITE_WATCH, WRITE_LOOKS = 1.0, 5
+    #: the commands of a running operation that write
+    _WRITING = ("insert", "update", "delete", "findAndModify", "bulkWrite")
+
+    def _writers_seen(self, db):
+        """([who writes now], writes counted in the watch) on the target's
+        database, from `$currentOp` (every account's operations) and
+        `top` before and after. Bounded by `WRITE_WATCH`; a writer that
+        is quiet for the whole watch is not seen, so a clear answer is
+        about that window and no more."""
+        name = self._d("dst", db)
+        admin = self._client("dst").admin
+        mine = re.compile("^" + re.escape(name) + r"\.")
+
+        def counted():
+            totals = admin.command("top").get("totals") or {}
+            return sum(int((v.get(k) or {}).get("count") or 0)
+                       for ns, v in totals.items() if mine.match(ns)
+                       for k in ("insert", "update", "remove"))
+        before = counted()
+        who = set()
+        for _ in range(self.WRITE_LOOKS):
+            for op in admin.aggregate([
+                    {"$currentOp": {"allUsers": True}},
+                    {"$match": {"ns": {"$regex": mine.pattern}}}]):
+                command = op.get("command") or {}
+                if op.get("op") in ("insert", "update", "remove") or any(
+                        k in command for k in self._WRITING):
+                    who.add(f"{op.get('appName') or 'a client'} at"
+                            f" {str(op.get('client') or '?').split(':')[0]}"
+                            f" writing to {op.get('ns')}")
+            time.sleep(self.WRITE_WATCH / self.WRITE_LOOKS)
+        return sorted(who), max(counted() - before, 0)
 
     def _mover_leftovers(self):
         """What a mover added to the source and did not take away.
@@ -2595,8 +3035,165 @@ class MongoEngine(Engine):
                          secrets=(self.hop.source.password,
                                   self.hop.target.password))
 
+    def load_window(self, db, log=None, tables=None):
+        """The target's TTL indexes, held from deleting what the load
+        writes (`_TtlWindow`). A document store runs no trigger and keeps
+        no other index that rewrites a document."""
+        return _TtlWindow(self, db, log, tables)
+
+    def set_aside(self, db):
+        """The TTL indexes a load held and has not put back. Held by a
+        load still running they are held on purpose, and go back when it
+        stops. Held by one whose process is gone, they never expire what
+        the application writes: the cutover onto this target would run
+        without the expiry, and nothing else compares the two."""
+        from ..setaside import SetAside
+        held, lost, unread = [], [], []
+        for path, alive, defs in SetAside(self.hop, db,
+                                          "dropped-indexes").records():
+            if defs is None:
+                unread.append(str(path))
+            elif alive:
+                held += sorted(defs)
+            else:
+                lost += [(n, str(path)) for n in sorted(defs)]
+        scope = f"{db} ttl set aside"
+        if lost or unread:
+            said = []
+            if lost:
+                said.append(f"{len(lost)} TTL indexes a load held from"
+                            " deleting and never put back: "
+                            + ", ".join(n for n, _ in lost[:5])
+                            + " - their values in "
+                            + ", ".join(sorted({p for _, p in lost})))
+            if unread:
+                said.append("a record of TTL indexes held cannot be read: "
+                            + ", ".join(unread))
+            return Result("deep", scope, "diff", "; ".join(said), "",
+                          "the next `migkit move` into this database puts"
+                          " them back")
+        if held:
+            return Result("deep", scope, "ok",
+                          f"{len(held)} TTL indexes are held on the target"
+                          " while a migkit load runs into it ("
+                          + ", ".join(held[:5]) + "); they go back when it"
+                          " stops")
+        return None
+
     def watch_sample(self, db):
         a = self._client("src")[db].command("dbStats")
         b = self._client("dst")[self._d("dst", db)].command("dbStats")
         return {"db": db, "ts": time.time(),
                 "src_rows": a.get("objects", 0), "dst_rows": b.get("objects", 0)}
+
+
+class _TtlWindow:
+    """The target's TTL indexes, held from deleting for the load.
+
+    A TTL index has the server delete the documents whose date is past its
+    expiry, a minute at a time. A load writes the source's documents with
+    the dates they have - documents the source's own expiry has not reached
+    yet - and the target's expiry, running beside the load, deletes them
+    as they land: the move would say complete over a collection short of
+    documents the source still holds. So each TTL index of a collection
+    the load writes is set, for the load, to the longest expiry the server
+    takes, its own value saved to disk first and put back on the way out
+    whether the load worked or not (`setaside`, as a trigger or an index
+    set aside is in the other engines).
+
+    A load killed in between does not put them back. What it held goes back
+    at the end of the next load into the database, and `check` and the
+    cutover name it until then (`MongoEngine.set_aside`).
+    """
+
+    #: the longest expiry a TTL index takes, in seconds
+    MOST = 2_147_483_647
+
+    def __init__(self, eng, db, log=None, tables=None):
+        from ..setaside import SetAside
+        self.eng, self.db, self.log = eng, db, log or (lambda m: None)
+        # the collections the load writes, by the names it is asked with
+        # (the source's, from a copy of this engine's own; the target's,
+        # from a pair's) and by the names the hop gives them there
+        # (`mapping.tables`)
+        self.tables = (None if tables is None else
+                       set(tables) | {eng.hop.target_table_in(db, t)
+                                      for t in tables})
+        self.held = {}
+        self.record = SetAside(eng.hop, db, "dropped-indexes")
+
+    def _target(self):
+        return self.eng._client("dst")[self.eng._d("dst", self.db)]
+
+    def __enter__(self):
+        import json
+        target = self._target()
+        now = {}
+        for name in target.list_collection_names():
+            if name.startswith("system.") \
+                    or not self.eng.in_scope(self.db, name) \
+                    or (self.tables is not None and name not in self.tables):
+                continue
+            try:
+                indexes = list(target[name].list_indexes())
+            except Exception:  # noqa: BLE001 - a view has none
+                continue
+            for ix in indexes:
+                if "expireAfterSeconds" in ix:
+                    now[f"{name}.{ix['name']}"] = {
+                        "collection": name, "index": ix["name"],
+                        "seconds": int(ix["expireAfterSeconds"])}
+        # what a load that died held: put back at the end of this one,
+        # whichever collections this one writes. It is held already, so its
+        # own value is the saved one, and the value read now is not
+        left, stale = self.record.left_behind()
+        adopted = {k: json.loads(v) for k, v in left.items()}
+        self.held = {**now, **adopted}
+        if not self.held:
+            for path in stale:
+                path.unlink(missing_ok=True)
+            return self
+        kept = {k: json.dumps(v, sort_keys=True)
+                for k, v in self.held.items()}
+        if not self.record.save(kept, stale):
+            raise SystemExit(
+                f"{self.db}: the target's TTL indexes could not be saved"
+                " before holding them for the load, so nothing was loaded")
+        fresh = [k for k in now if k not in adopted]
+        for key in fresh:
+            self._set(now[key], self.MOST)
+        if adopted:
+            self.log(f"{len(adopted)} TTL indexes an earlier load held and"
+                     " did not put back go back at the end of this one: "
+                     + ", ".join(sorted(adopted)[:5]))
+        if fresh:
+            self.log(f"{len(fresh)} TTL indexes of the target held from"
+                     " deleting for the load; their values saved to"
+                     f" {self.record.path}")
+        return self
+
+    def _set(self, one, seconds):
+        self._target().command(
+            "collMod", one["collection"],
+            index={"name": one["index"], "expireAfterSeconds": seconds})
+
+    def __exit__(self, exc_type, *exc):
+        failed = []
+        for key, one in sorted(self.held.items()):
+            try:
+                self._set(one, one["seconds"])
+            except Exception as e:  # noqa: BLE001 - said, and kept
+                failed.append(key)
+                self.log(f"TTL INDEX NOT PUT BACK: {key}:"
+                         f" {(str(e).splitlines() or [''])[0][:100]}")
+        if self.held:
+            self.log(f"{len(self.held) - len(failed)} of {len(self.held)}"
+                     " TTL indexes put back")
+        if not failed:
+            self.record.done()
+        if failed and exc_type is None:
+            raise SystemExit(
+                f"{self.db}: {len(failed)} TTL indexes were not put back:"
+                f" {', '.join(failed)}. Their values are in"
+                f" {self.record.path}")
+        return False

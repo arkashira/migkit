@@ -43,8 +43,8 @@ def test_a_sql_server_change_is_held_to_the_version_of_its_mark():
 def test_a_mongodb_change_is_held_to_the_cluster_time_of_its_mark():
     from bson.timestamp import Timestamp
 
-    from migkit.engines.mongodb import MongoDBEngine
-    eng = MongoDBEngine(_hop("mongodb"))
+    from migkit.engines.mongodb import MongoEngine
+    eng = MongoEngine(_hop("mongodb"))
     eng.stream_identity = lambda side, db: {"replica set": "rs0"}
     mark = "rs0|100:3"
     for (t, i), want in (((99, 9), True), ((100, 3), True),
@@ -95,8 +95,8 @@ def _event(n, txn=None, op="insert"):
 
 
 def test_a_mongodb_transaction_ends_at_its_last_event():
-    from migkit.engines.mongodb import MongoDBEngine
-    eng = MongoDBEngine(_hop("mongodb"))
+    from migkit.engines.mongodb import MongoEngine
+    eng = MongoEngine(_hop("mongodb"))
     events = [_event(1), _event(2, 7), _event(3, 7), _event(4)]
     eng._client = lambda side: _Client(list(events))
     got, _ = eng.neutral_changes("src", "d", "82", limit=10)
@@ -112,8 +112,8 @@ def test_a_mongodb_transaction_ends_at_its_last_event():
 
 
 def test_a_collection_event_is_a_ddl_at_its_place():
-    from migkit.engines.mongodb import MongoDBEngine
-    eng = MongoDBEngine(_hop("mongodb"))
+    from migkit.engines.mongodb import MongoEngine
+    eng = MongoEngine(_hop("mongodb"))
     drop = _event(2, op="drop")
     rename = _event(3, op="rename")
     rename["to"] = {"db": "d", "coll": "c2"}
@@ -158,10 +158,10 @@ def mongo_server():
 
 @needs_docker
 def test_a_mongodb_mark_covers_what_was_written_before_it(mongo_server):
-    from migkit.engines.mongodb import MongoDBEngine
+    from migkit.engines.mongodb import MongoEngine
     ep = Endpoint(host="127.0.0.1", port=MONGO_PORT, user="", password="",
                   options={"uri_options": "directConnection=true"})
-    eng = MongoDBEngine(Hop(name="seam", engine="mongodb", source=ep,
+    eng = MongoEngine(Hop(name="seam", engine="mongodb", source=ep,
                             target=ep, databases=["d"]))
     client = eng._client("src")
     client["d"]["c"].delete_many({})
