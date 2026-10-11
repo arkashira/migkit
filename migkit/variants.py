@@ -118,6 +118,9 @@ class Brand:
 SIGNATURES = {
     "postgres": [
         ("cockroachdb", [("version", "cockroachdb")], "version"),
+        # Aurora DSQL answers as PostgreSQL does and is told by its
+        # endpoint's name (`<cluster>.dsql.<region>.on.aws`)
+        ("dsql", [("endpoint", ".dsql.")], "server_version"),
         ("yugabytedb", [("version", "-yb-"), ("version", "yugabyte")],
          "version"),
         ("greenplum", [("version", "greenplum")], "version"),

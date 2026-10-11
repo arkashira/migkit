@@ -2161,6 +2161,111 @@ UNPROVED = {
     "operations.fencing": "tidb",
 }
 
+# --- CockroachDB and Aurora DSQL, on PostgreSQL's wire (P0-PARITY) ----------
+#
+# `engines/pgwire.py` reads the catalogue both keep and holds a target to
+# its source, and the cells below were declared before it did. They are
+# changed here, apart from the groups above: the ways it now has are no
+# longer "not yet", and what a server is not is said with the reason a
+# reviewer can check against its documentation.
+
+#: ways both engines now have (the shared checks, counters, assessment and
+#: writer's number of `pgwire`)
+_WIRE_BOTH = (
+    "scope.counters", "scope.objects", "verify.access.object-ownership",
+    "verify.access.sequence-grants", "verify.access.table-grants",
+    "verify.identity.sequence-collision", "verify.identity.sequence-parity",
+    "verify.movement.target-ahead", "verify.structure.columns",
+    "verify.structure.indexes", "verify.structure.keys",
+    "verify.structure.schema-diff", "verify.value.charset",
+    "verify.value.collation", "verify.value.generated",
+    "verify.value.narrowing", "verify.value.null-empty",
+    "verify.value.precision", "verify.value.rendering",
+    "verify.value.timezone", "verify.rows-apart", "assess.versions",
+    "assess.brands", "assess.preflight", "assess.handwork",
+    "schema.views", "move.create-missing", "operations.fencing",
+    "verify.structure.foreign-keys", "schema.foreign-keys",
+    "verify.structure.unvalidated-constraints")
+#: and the ways one has: CockroachDB keeps triggers, materialized views
+#: and functions; DSQL keeps foreign keys that can be deferred, and the
+#: objects beside its tables
+_WIRE_ONLY = {
+    "cockroachdb": ("verify.structure.materialized-views",
+                    "verify.structure.triggers", "schema.routines"),
+    "dsql": ("scope.deep", "verify.structure.objects",
+             "verify.structure.deferrable"),
+}
+for _item in _WIRE_BOTH:
+    for _engine in ("cockroachdb", "dsql"):
+        DEPTH_GAPS.get(_item, {}).pop(_engine, None)
+for _engine, _items in _WIRE_ONLY.items():
+    for _item in _items:
+        DEPTH_GAPS.get(_item, {}).pop(_engine, None)
+
+#: a partition of CockroachDB's labels rows of one table for a zone to
+#: place: no row is held in a child that could arrive empty
+_LABELS_ONLY = ("a partition only labels rows of one table for a zone to"
+                " place: no row is held in a child table that could arrive"
+                " empty or in the wrong place")
+DEPTH_GAPS["verify.structure.partitions"]["cockroachdb"] = (
+    NOT_APPLICABLE, _LABELS_ONLY)
+DEPTH_GAPS["verify.structure.partitions"]["dsql"] = (
+    NOT_APPLICABLE, _NO_PARTITIONS)
+# counters are carried and checked (`pgwire.check_autoinc`)
+GAPS["cockroachdb"].pop("sequences", None)
+GAPS["dsql"].pop("sequences", None)
+
+
+def _owed(engine, items):
+    """Ways the code has whose test on this engine is owed: they run, in the
+    tests, on a PostgreSQL server (`tests/pg_local.py`) and are proved on
+    none of the two servers, whose catalogue or statements they were not
+    run against."""
+    for item in items.split():
+        have = UNPROVED.get(item, "").split()
+        if engine not in have:
+            UNPROVED[item] = " ".join(have + [engine])
+
+
+def _proved(engine, items):
+    """Ways a test now proves on this engine: no longer owed."""
+    for item in items.split():
+        UNPROVED[item] = " ".join(
+            e for e in UNPROVED.get(item, "").split() if e != engine)
+
+
+_proved("cockroachdb", "scope.ops")
+_proved("dsql", "scope.ops scope.names verify.repair verify.repair-undo"
+                " verify.table move.table-copy move.sized"
+                " cutover.read-only-target")
+# CockroachDB: every statement the shared checks send is its own to answer
+# (`crdb_internal`, `is_hidden`, `UPSERT`, `AS OF SYSTEM TIME` are not
+# PostgreSQL's), and none has run against it
+_owed("cockroachdb",
+      "scope.counters scope.objects verify.access.object-ownership"
+      " verify.access.sequence-grants verify.access.table-grants"
+      " verify.identity.sequence-collision verify.identity.sequence-parity"
+      " verify.movement.target-ahead verify.structure.foreign-keys"
+      " verify.structure.indexes verify.structure.materialized-views"
+      " verify.structure.schema-diff verify.structure.triggers"
+      " verify.structure.unvalidated-constraints verify.value.charset"
+      " verify.value.collation verify.value.generated"
+      " verify.value.null-empty verify.value.precision"
+      " verify.value.rendering verify.value.timezone verify.rows-apart"
+      " assess.versions assess.brands assess.preflight assess.handwork"
+      " schema.foreign-keys schema.views schema.routines"
+      " move.create-missing cutover.counters operations.fencing")
+# DSQL: what reads a catalogue its documentation does not list as supported
+# (`information_schema.sequences`, `table_privileges`, `usage_privileges`,
+# `routines`, `SHOW server_encoding`, `pg_get_serial_sequence`) or leans on
+# a lock its optimistic concurrency may not take
+_owed("dsql",
+      "scope.deep scope.counters scope.objects"
+      " verify.access.sequence-grants verify.access.table-grants"
+      " verify.identity.sequence-collision verify.identity.sequence-parity"
+      " verify.structure.objects verify.value.charset assess.brands"
+      " assess.handwork cutover.counters operations.fencing")
+
 
 @functools.lru_cache(maxsize=None)
 def proofs(tests=None):

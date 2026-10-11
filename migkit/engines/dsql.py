@@ -375,25 +375,42 @@ class DsqlEngine(PgWireEngine):
         return {"cluster": str(ep.host).split(".")[0],
                 "changes": str(spec.get("stream") or "")}
 
+    #: a constraint added to a table is added `NOT VALID` and checked by a
+    #: job of its own
+    VALIDATE_HINT = ("ALTER TABLE ASYNC ... VALIDATE CONSTRAINT <name>, and"
+                     " wait for the job (sys.wait_for_job)")
+
+    def _deep_extra(self):
+        """The checks for what DSQL keeps that CockroachDB does not:
+        foreign keys that can be deferred to the end of a transaction, and
+        added without checking the rows there (`NOT VALID`)."""
+        return [
+            ("fk", self._deep_foreign_keys),
+            ("deferrable", self._deep_deferrable),
+            ("checks", self._deep_unvalidated)]
+
     def check_deep(self, db):
-        """Index builds DSQL still runs on the target (`sys.jobs`): a table
+        """The shared checks (`pgwire`), and the index builds DSQL still
+        runs on the target (`sys.jobs`): a table
         whose index is not built yet answers the queries that use it by
         reading the whole table, and a unique one does not refuse a
         duplicate yet."""
+        shared = self._shared_deep(db)
         try:
             got = self._rows("dst", db, "select job_id, status from sys.jobs"
                                         " where status not in"
                                         " ('completed', 'cancelled')")
         except Exception as e:  # noqa: BLE001 - said, as the error
-            return [self._deep_error(db, "target", e)]
+            return shared + [self._deep_error(db, "target", e)]
         if got:
-            return [Result("deep", f"{db} target index builds", "warn",
-                           f"{len(got)} index builds still running or"
-                           " failed on the target", "",
-                           "wait for them (sys.wait_for_job), and rebuild a"
-                           " failed one, before the cutover")]
-        return [Result("deep", f"{db} target index builds", "ok",
-                       "every index built")]
+            return shared + [Result(
+                "deep", f"{db} target index builds", "warn",
+                f"{len(got)} index builds still running or failed on the"
+                " target", "",
+                "wait for them (sys.wait_for_job), and rebuild a failed one,"
+                " before the cutover")]
+        return shared + [Result("deep", f"{db} target index builds", "ok",
+                                "every index built")]
 
     def reach_items(self, side):
         from ..changetopic import DsqlCdc
