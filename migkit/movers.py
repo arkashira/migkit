@@ -18,7 +18,7 @@ import threading
 import time
 from urllib.parse import quote
 
-from . import envkeys, leftovers, runner, toolversion, tooluse
+from . import envkeys, evidence, leftovers, runner, toolversion, tooluse
 from .runner import run
 from .config import scoped as _scoped
 from .tools import IMAGES, PROGRAM
@@ -1304,7 +1304,7 @@ def pgdump_move(hop, db, workers, go, log):
     - a move that failed and still deleted what it had come to replace.
     """
     s, t = hop.source, hop.target
-    outdir = hop.report_dir(db) / "pgdump"
+    outdir = evidence.program_path(hop, db, "pgdump")
     # the same resolution pgcopydb and `check` use, so all three exclude
     # exactly the same tables rather than three readings of one pattern.
     # Each partition is named beside its table: `-T` of a partitioned
@@ -1373,6 +1373,8 @@ def pgdump_move(hop, db, workers, go, log):
         env_t["PGOPTIONS"] = "-c session_replication_role=replica"
     with _LocalCopy(outdir):
         if log:
+            if evidence.program_files_note(hop):
+                log(evidence.program_files_note(hop))
             log(dump)
         _sh(dump.argv, {**s.libpq_env(), "PGPASSWORD": s.password,
                         "PGCONNECT_TIMEOUT": "15"},
@@ -3086,7 +3088,8 @@ def mydumper_table(hop, db, table, workers, rows, log=None):
     import shutil
 
     from .engines.mysql import MySQLEngine
-    outdir = hop.report_dir(db) / f"dump-table-{report_name(table)}"
+    outdir = evidence.program_path(hop, db,
+                                   f"dump-table-{report_name(table)}")
     shutil.rmtree(outdir, ignore_errors=True)
     dump, load = _mydumper_commands(
         hop, db, workers, outdir, logs=_my_target_logs(hop, quick=False))
@@ -3998,8 +4001,8 @@ def mydumper_move(hop, db, workers, go, log, only=None):
     """
     from .wording import Step, phase
     root = hop.report_dir(db)
-    outdir = root / "mydumper"
-    shell_dir = root / "straight-copy"
+    outdir = evidence.program_path(hop, db, "mydumper")
+    shell_dir = evidence.program_path(hop, db, "straight-copy")
     script = root / "straight-copy.py"
     # beside the dump directory, not inside it: myloader is pointed at
     # that directory and has no reason to meet a file it does not read
@@ -4181,6 +4184,8 @@ def mydumper_move(hop, db, workers, go, log, only=None):
         if dump_tables:
             stack.enter_context(_LocalCopy(outdir))
             if log:
+                if evidence.program_files_note(hop):
+                    log(evidence.program_files_note(hop))
                 log(dump)
             reading = _MyDumpLog()
             began = time.monotonic()

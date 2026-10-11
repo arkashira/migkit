@@ -33,6 +33,9 @@ and each claim below names the test that holds it.
   dump-and-load move runs, a local copy of the source's data. That copy
   is readable by this user only, and it is removed when the move ends,
   whichever way it ends (`test_the_local_copy_is_private_and_goes.py`).
+  `at_rest` cannot seal a program's own dump; its option `scratch` puts
+  the copy on a volume the operator keeps encrypted or in memory
+  (`test_a_programs_files_go_where_at_rest_says.py`).
 
 ## Secrets
 
@@ -57,9 +60,12 @@ and each claim below names the test that holds it.
 
 A report shows rows, because a difference that names the row is the one
 someone can fix. Keys and values appear in drilldowns and in repair
-plans. The hop option `mask` shows them as salted hashes instead. Equal
-values show as equal tokens, so a difference is still visible. The salt
-is readable by this user only (`test_the_drilldown_can_be_masked.py`).
+plans. The hop option `mask` shows them as keyed HMACs instead. Equal
+values show as equal tokens, so a difference is still visible. The key
+has two parts: the hop's salt in its report directory, and a secret that
+stays in the user's state directory and never in a report, so a report
+shared with its salt cannot be tested against guessed values
+(`test_the_drilldown_can_be_masked.py`, `test_a_shown_hash_is_keyed.py`).
 
 ## What leaves the machine
 

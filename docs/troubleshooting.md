@@ -559,6 +559,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * a line of an encrypted file cannot be opened (<...>)
 
+* at_rest.scratch is <...>: an absolute path to a directory on an encrypted or memory-backed volume
+
+* at_rest.scratch <...> cannot be used for the files a program writes (<...>)
+
 * <...> holds values the hop keeps encrypted (at_rest), and a file opened '<...>' cannot be kept so
 
 ## The cutover, and what guards a write
