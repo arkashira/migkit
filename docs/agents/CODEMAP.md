@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (151 modules)
+## `migkit/` (152 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -164,6 +164,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/unchanged.py` - Proof that a table has not moved since it was last proved equal. Classes: Proof.
 - `migkit/upgrade.py` - A major-version upgrade as a goal (backlog R23, 7).
 - `migkit/users.py` - Login/user sync source -> target, keeping the same password.
+- `migkit/userways.py` - How an account's password reaches the target, chosen by what the source shows and what the target takes (backlog P0-DECISION-ALL.coverage, t
 - `migkit/util.py` - (no docstring) Classes: CommandFailed, Timer, PrivateFile, Probes.
 - `migkit/variants.py` - Which brand is actually answering, and what that brand cannot do. Classes: Brand.
 - `migkit/vectors.py` - A vector - an embedding - as the numbers it holds, each exactly.

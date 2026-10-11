@@ -23,6 +23,7 @@ import datetime
 import hashlib
 import os
 
+from . import userways
 from .config import get_hop
 
 #: accounts and roles a server makes for itself, or its provider makes on a
@@ -1888,15 +1889,21 @@ def _ora_create(hop, apply, passwords, say):
         name = _ora_there(hop, v["name"])
         secret = (passwords or {}).get(v["name"]) or \
             (passwords or {}).get(v["name"].lower())
-        if v["hash"] and re.fullmatch(r"[0-9A-Za-z:;]+", v["hash"]):
+        way = userways.password(
+            key,
+            hash_ok=bool(v["hash"] and re.fullmatch(r"[0-9A-Za-z:;]+",
+                                                    v["hash"])),
+            hash_why="its password hash is not readable here",
+            secret_ok=bool(secret and '"' not in str(secret)),
+            secret_why="the passwords file has none for it that Oracle"
+                       " takes (no double quote)")
+        if way.path == userways.HASH:
             how = f"IDENTIFIED BY VALUES '{v['hash']}'"
-        elif secret and '"' not in str(secret):
+        elif way.path == userways.FILE:
             how = f"IDENTIFIED BY {q(secret)}"
         else:
             skipped.append(key)
-            say(f"   skipped {key}: its password hash is not readable here"
-                " and the passwords file has none for it that Oracle takes"
-                " (no double quote)")
+            say(f"   skipped {key}: {way.reason}")
             continue
         head = f"CREATE USER {q(name)} {how}"
         if v["tablespace"] in spaces:
@@ -2867,14 +2874,19 @@ def _my_plan(out, s, t, plugins=None, passwords=None):
                 continue
             sql = f"CREATE USER %s@%s {opts}"
             shown = f"CREATE USER '{u}'@'{h}' {said} (a role: no password)"
-        elif plugins is not None and plugin and plugin not in plugins:
-            secret = passwords.get(u) or passwords.get(name)
-            if not secret:
-                skipped.append((name, f"the target does not sign in with"
-                                      f" {plugin}, so its password cannot"
-                                      " be carried as its hash, and the"
-                                      " passwords file has none for it"))
+        elif (way := userways.password(
+                name,
+                hash_ok=not (plugins is not None and plugin
+                             and plugin not in plugins),
+                hash_why=f"the target does not sign in with {plugin}, so"
+                         " its password cannot be carried as its hash",
+                secret_ok=bool(passwords.get(u) or passwords.get(name)),
+                secret_why="the passwords file has none for it")
+              ).path != userways.HASH:
+            if way.path is None:
+                skipped.append((name, way.reason))
                 continue
+            secret = passwords.get(u) or passwords.get(name)
             sql = f"CREATE USER %s@%s IDENTIFIED BY %s {opts}"
             shown = (f"CREATE USER '{u}'@'{h}' IDENTIFIED BY <from the"
                      f" passwords file> {said} (the target has no {plugin})")
@@ -2990,14 +3002,19 @@ def _pg_plan(out, s, t, hashes, passwords):
     for r in sorted(missing):
         a = s[r]
         secret, how = None, None
-        if hashes and r in hashes:
-            secret, how = hashes[r], "hash from source (same password)"
-        elif r in passwords:
-            secret, how = passwords[r], "from --passwords file"
-        elif a["login"]:
-            skipped.append((r, "no hash readable on source and no"
-                               " --passwords entry"))
-            continue
+        if a["login"] or (hashes and r in hashes) or r in passwords:
+            way = userways.password(
+                r, hash_ok=bool(hashes and r in hashes),
+                hash_why="no hash is readable on the source",
+                secret_ok=r in passwords,
+                secret_why="the passwords file has no entry for it")
+            if way.path == userways.HASH:
+                secret, how = hashes[r], "hash from source (same password)"
+            elif way.path == userways.FILE:
+                secret, how = passwords[r], "from --passwords file"
+            else:
+                skipped.append((r, way.reason))
+                continue
         # defaults left out: a managed target refuses to be told even
         # NOREPLICATION by a role that is not a superuser
         only = [k for k in PG_ATTRS if k not in ("connlimit", "valid_until")

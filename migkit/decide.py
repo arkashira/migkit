@@ -2392,8 +2392,7 @@ TASKS = {
     "ui": ("reporting", ("no choice", "it serves the recorded state")),
     "state": ("recovery", ("no choice", "it reads the recorded state")),
     "monitor": ("replication", ("routed", "tailtables")),
-    "users": ("security", ("gap", "account moves choose their method by"
-              " fixed engine rules, `users` is not on the engine yet")),
+    "users": ("security", ("routed", "userways")),
 }
 
 
