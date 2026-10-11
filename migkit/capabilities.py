@@ -1791,7 +1791,7 @@ DEPTH_GAPS = {
     },
     "tail.added": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb redis kafka clickhouse dynamodb oracle db2 db2i "
+                "mongodb redis kafka clickhouse dynamodb db2 db2i "
                 "ase opensearch cassandra redshift snowflake bigquery "
                 "iceberg delta dsql couchbase cosmosdb sapodp saas"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
@@ -1801,7 +1801,7 @@ DEPTH_GAPS = {
     },
     "tail.readded": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "postgres mongodb redis kafka clickhouse dynamodb oracle "
+                "postgres mongodb redis kafka clickhouse dynamodb "
                 "db2 db2i ase opensearch cassandra redshift snowflake "
                 "bigquery iceberg delta cockroachdb dsql couchbase cosmosdb "
                 "sapodp saas"),
@@ -1812,7 +1812,7 @@ DEPTH_GAPS = {
     },
     "tail.ddl": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb mssql redis kafka clickhouse dynamodb oracle db2 "
+                "mongodb mssql redis kafka clickhouse dynamodb db2 "
                 "db2i ase opensearch cassandra redshift snowflake bigquery "
                 "iceberg delta tidb cockroachdb dsql couchbase cosmosdb "
                 "sapodp saas"),
@@ -1823,7 +1823,7 @@ DEPTH_GAPS = {
     },
     "tail.renames": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb mssql redis clickhouse oracle db2 db2i ase "
+                "mongodb mssql redis clickhouse db2 db2i ase "
                 "opensearch redshift snowflake bigquery iceberg delta tidb "
                 "cockroachdb dsql sapodp saas"),
         **_each(NOT_APPLICABLE, _NOT_RENAMED,
@@ -2151,6 +2151,8 @@ UNPROVED = {
     "assess.handwork": "oracle",
     "cutover.jobs": "oracle",
     "security.tls": "oracle",
+    "tail.ddl": "oracle",
+    "tail.renames": "oracle",
 }
 
 

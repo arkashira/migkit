@@ -2078,7 +2078,87 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
     def neutral_changes(self, side, db, token=None, limit=1000):
         if token is None:
             return [], self.change_point(side, db)
-        return self._reader(side, db).read(token, limit)
+        return self._reader(side, db).read(token, limit, self._ddl_of)
+
+    def release_changes(self):
+        """The readers' sessions let go, once the tail is done with them
+        (a table read again from where it left, beside the stream)."""
+        for reader in list(self.__dict__.get("_readers", {}).values()):
+            reader.close()
+        self.__dict__["_readers"] = {}
+
+    #: the redo is read again from any position it still holds, by a
+    #: reader of its own that moves nothing of the tail's: a table that
+    #: left the tail and comes back gets its changes since from there
+    REREADS_FROM_A_POSITION = True
+
+    def _ddl_of(self, db, sql, commit):
+        """[canon.ddl] for a statement the redo carries as text, one for
+        each table of the tail's schema it touches and the hop does not
+        leave alone, at the SCN it committed at. A statement naming
+        another schema's table is not this tail's."""
+        from .. import canon, logddl
+        owner = self._owner("src", db)
+        out = []
+        for d, t, kind, to in logddl.oracle(sql, owner):
+            if d != owner:
+                continue
+            if to is not None and to[0] != owner:
+                # renamed into another schema: gone from this one
+                kind, to = "drop", None
+            name = self._said(t)
+            went = self._said(to[1]) if to is not None else None
+            if self.hop.excluded(db, name) and not (
+                    went is not None and not self.hop.excluded(db, went)):
+                continue
+            out.append(canon.ddl(name, kind, sql=str(sql)[:4000], to=went,
+                                 txn=int(commit)))
+        return out
+
+    def _marked_on(self, side, db):
+        """The database a mark belongs to - its id, its incarnation and
+        its container - asked once: an SCN means something in one
+        database only."""
+        from . import oracle_logminer
+        known = self.__dict__.setdefault("_marks_on", {})
+        if (side, db) not in known:
+            try:
+                got = oracle_logminer.identity(self, side, db)
+                known[(side, db)] = (
+                    f"{got['database']}/{got['incarnation']}/"
+                    f"{got['container']}" if got else None)
+            except Exception:  # noqa: BLE001 - no mark, then
+                known[(side, db)] = None
+        return known[(side, db)]
+
+    def snapshot_mark(self, side, db):
+        """The SCN now, after the database it was read in: every
+        transaction that committed at or below it is visible to a read
+        begun after (a read sees the database as of the SCN it begins at).
+        None where the database cannot be told from another."""
+        from . import oracle_logminer
+        on = self._marked_on(side, db)
+        if on is None:
+            return None
+        try:
+            return f"{on}|{oracle_logminer.current_scn(self, side, db)}"
+        except Exception:  # noqa: BLE001 - no mark, then
+            return None
+
+    def mark_covers(self, side, db, mark, change):
+        """Whether the SCN the change committed at (`txn`) is at or below
+        the mark's, in the same database."""
+        version = change.get("txn")
+        if not isinstance(mark, str) or not isinstance(version, int) \
+                or isinstance(version, bool):
+            return None
+        on, _, at = mark.rpartition("|")
+        if not on or on != self._marked_on(side, db):
+            return None
+        try:
+            return version <= int(at)
+        except ValueError:
+            return None
 
     def log_position(self, side, db):
         from . import oracle_logminer
