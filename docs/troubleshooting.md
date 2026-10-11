@@ -1003,8 +1003,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the stream no longer holds the records after <...> of <...>: its 24 hours passed, and what was written then is carried by nothing. Move again with --mode full+cdc
 
-* <...> has a new stream since the saved position: the stream was turned off and on, and the records between are gone. Move again with --mode full+cdc
-
 ## Oracle Database
 
 * the change reader cannot see the open transactions (select on v$transaction), and without them it cannot tell where a transaction still open began - so it cannot mine without losing that transaction's first changes: <...>. Grant the account SELECT_CATALOG_ROLE, or select on v_$transaction
