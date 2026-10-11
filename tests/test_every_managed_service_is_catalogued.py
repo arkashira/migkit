@@ -23,6 +23,13 @@ PROVES = [
                             "db2", "opensearch", "cassandra", "redshift",
                             "bigquery", "kinesis", "pubsub", "cockroachdb",
                             "dsql", "cosmosdb")),
+    # the cloud-native services, each its own engine's family
+    # (`test_the_cloud_native_services_are_moved_by_their_own_engines`)
+    ("managed.catalogued", ("spanner", "bigtable", "firestore", "datastore",
+                            "gaussdb", "oceanbase", "oceanbase-oracle",
+                            "polardbx", "dcdb", "keyspaces", "neptune",
+                            "timestream", "lindorm", "geminidb-cassandra",
+                            "geminidb-redis", "geminidb-mongo")),
 ]
 
 #: every provider the owner named, and the vendors'

@@ -377,11 +377,11 @@ GAPS = {
     },
     "gaussdb": {},
     **{name: {
-        "bulk-move": (NOT_YET, "CN1"),
+        "bulk-move": (NOT_YET, "P0-CLOUDS.native"),
     } for name in ("oceanbase", "polardbx", "dcdb")},
     "oceanbase-oracle": {
-        "bulk-move": (NOT_YET, "CN1"),
-        **{cap: (NOT_YET, "CN4")
+        "bulk-move": (NOT_YET, "P0-CLOUDS.native"),
+        **{cap: (NOT_YET, "P0-CLOUDS.native")
            for cap in ("stream", "fence", "confirm", "delta")},
     },
     "keyspaces": {
@@ -416,7 +416,7 @@ GAPS = {
                                       " service, its bulk load - are run from"
                                       " its console, not by a client: its"
                                       " tables go by the table copier"),
-        **{cap: (NOT_YET, "CN4")
+        **{cap: (NOT_YET, "P0-CLOUDS.native")
            for cap in ("stream", "fence", "confirm", "delta")},
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
@@ -2171,6 +2171,354 @@ DEPTH_GAPS = {
     },
 }
 
+_ONE_VERSION = ("the service runs one version for every database it keeps:"
+                " there is no version of the operator's to hold to another")
+#: the cloud-native services' engines that keep no sequences, whose
+#: counters' items say so as their capability does (`GAPS`)
+_KEYS_GIVEN = ("bigtable firestore datastore keyspaces neptune timestream "
+               "lindorm geminidb-cassandra geminidb-redis geminidb-mongo")
+#: the cloud-native services' engines whose changes are not followed - the
+#: service keeps none a client can read, or its follow is not built - said
+#: as their `stream` is (`GAPS`)
+_UNFOLLOWED = "datastore oceanbase-oracle timestream lindorm geminidb-redis"
+_CN = ("spanner bigtable firestore datastore gaussdb oceanbase "
+       "oceanbase-oracle polardbx dcdb keyspaces neptune timestream lindorm "
+       "geminidb-cassandra geminidb-redis geminidb-mongo")
+
+
+def _but(*left_out):
+    """The cloud-native services' engines but those named."""
+    return " ".join(n for n in _CN.split() if n not in left_out)
+
+
+#: the cloud-native services' depth gaps (P0-CLOUDS.native), by item: kept
+#: together and merged into `DEPTH_GAPS`. A service on another's API (the
+#: Keyspaces and GeminiDB APIs, OceanBase, PolarDB-X and TDSQL on MySQL's)
+#: has what that API's data model has, and not applicable says so for the
+#: same reason; anything less sure is not yet
+_CLOUD_NATIVE_GAPS = {
+    "scope.listings": _each(NOT_YET, "P0-PARITY.scope",
+                            "keyspaces geminidb-cassandra geminidb-redis "
+                            "geminidb-mongo"),
+    "scope.deep": {
+        **_each(NOT_YET, "P0-PARITY.scope",
+                "keyspaces neptune geminidb-cassandra geminidb-redis"),
+        **_as("deep", "timestream"),
+    },
+    "scope.copy": _each(NOT_YET, "P0-PARITY.scope",
+                        "keyspaces geminidb-cassandra geminidb-redis"),
+    "scope.repair": _each(NOT_YET, "P0-PARITY.scope",
+                          "keyspaces geminidb-cassandra"),
+    "scope.counters": {
+        **_each(NOT_YET, "P0-PARITY.scope", "spanner"),
+        **_as("sequences", _KEYS_GIVEN),
+    },
+    "scope.objects": {
+        **_each(NOT_APPLICABLE, _NOTHING_BESIDE, "neptune geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.scope",
+                _but("oceanbase-oracle", "neptune", "geminidb-redis")),
+    },
+    "scope.ops": {
+        **_as("stream", _UNFOLLOWED),
+        **_each(NOT_YET, "P0-PARITY.scope", "geminidb-mongo"),
+    },
+    "scope.row-filter": _each(NOT_YET, "P0-PARITY.scope",
+                              "geminidb-redis geminidb-mongo"),
+    "scope.transforms": _each(NOT_YET, "P0-PARITY.scope", _CN),
+    "scope.names": _each(NOT_YET, "P0-PARITY.scope",
+                         "geminidb-redis geminidb-mongo"),
+    "verify.access.object-ownership": {
+        **_as("users", "bigtable firestore datastore keyspaces neptune "
+                       "timestream"),
+        **_each(NOT_APPLICABLE, _NO_OWNER,
+                "geminidb-cassandra geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase-oracle polardbx lindorm"),
+    },
+    "verify.access.sequence-grants": {
+        **_as("sequences", _KEYS_GIVEN),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase oceanbase-oracle polardbx dcdb"),
+    },
+    "verify.access.table-grants": {
+        **_as("users", "bigtable firestore datastore keyspaces neptune "
+                       "timestream"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase-oracle polardbx lindorm "
+                "geminidb-cassandra geminidb-redis geminidb-mongo"),
+    },
+    "verify.identity.sequence-collision": {
+        **_as("sequences", _KEYS_GIVEN),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase-oracle polardbx"),
+    },
+    "verify.identity.sequence-parity": {
+        **_as("sequences", _KEYS_GIVEN),
+        **_each(NOT_YET, "P0-PARITY.verify", "spanner gaussdb polardbx"),
+    },
+    "verify.movement.target-ahead": _each(
+        NOT_YET, "P0-PARITY.verify",
+        _but("oceanbase", "dcdb", "geminidb-mongo")),
+    "verify.structure.collection-options": {
+        **_each(NOT_APPLICABLE, _NO_COLLECTION, "geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                _but("geminidb-redis", "geminidb-mongo")),
+    },
+    "verify.structure.columns": {
+        **_each(NOT_APPLICABLE, _NO_COLUMNS,
+                "bigtable firestore datastore neptune timestream "
+                "geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase-oracle polardbx keyspaces lindorm "
+                "geminidb-cassandra"),
+    },
+    "verify.structure.deferrable": {
+        **_each(NOT_APPLICABLE, _NO_CONSTRAINT, _KEYS_GIVEN),
+        **_each(NOT_APPLICABLE, _AT_ONCE, "oceanbase polardbx dcdb"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase-oracle"),
+    },
+    "verify.structure.extensions": {
+        **_each(NOT_APPLICABLE, _NO_EXTENSION, _but("gaussdb")),
+        **_each(NOT_YET, "P0-PARITY.verify", "gaussdb"),
+    },
+    "verify.structure.foreign-keys": {
+        **_each(NOT_APPLICABLE, _NO_FK,
+                "bigtable firestore datastore keyspaces timestream lindorm "
+                "geminidb-cassandra geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase-oracle polardbx neptune"),
+    },
+    "verify.structure.indexes": {
+        **_each(NOT_APPLICABLE, _NO_INDEX,
+                "keyspaces timestream geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "bigtable oceanbase oceanbase-oracle polardbx dcdb neptune "
+                "geminidb-cassandra"),
+    },
+    "verify.structure.keys": {
+        **_each(NOT_APPLICABLE, _KEYED,
+                "spanner bigtable firestore datastore keyspaces neptune "
+                "timestream lindorm geminidb-cassandra geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "gaussdb oceanbase-oracle polardbx"),
+    },
+    "verify.structure.materialized-views": {
+        **_each(NOT_APPLICABLE, _NO_MATVIEW,
+                "spanner firestore datastore keyspaces neptune timestream "
+                "dcdb geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "bigtable gaussdb oceanbase oceanbase-oracle polardbx lindorm "
+                "geminidb-cassandra"),
+    },
+    "verify.structure.objects": {
+        **_each(NOT_APPLICABLE, _NOTHING_BESIDE, "neptune geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                _but("oceanbase-oracle", "neptune", "geminidb-redis",
+                     "geminidb-mongo")),
+    },
+    "verify.structure.partitions": {
+        **_each(NOT_APPLICABLE, _NO_PARTITIONS,
+                "spanner bigtable firestore datastore keyspaces neptune "
+                "geminidb-cassandra geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "gaussdb oceanbase-oracle polardbx timestream lindorm"),
+    },
+    "verify.structure.row-security": {
+        **_each(NOT_APPLICABLE, _NO_RLS,
+                _but("firestore", "gaussdb", "oceanbase-oracle")),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "firestore gaussdb oceanbase-oracle"),
+    },
+    "verify.structure.schema-diff": {
+        **_each(NOT_APPLICABLE, _SCHEMALESS,
+                "firestore datastore neptune geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner bigtable gaussdb oceanbase oceanbase-oracle polardbx "
+                "dcdb keyspaces timestream lindorm geminidb-cassandra"),
+    },
+    "verify.structure.sharding": {
+        **_each(NOT_APPLICABLE, _PLACED_BY_KEY,
+                "keyspaces geminidb-cassandra geminidb-redis"),
+        **_each(NOT_APPLICABLE, _SPREAD_BY_STORE,
+                "spanner bigtable firestore datastore lindorm"),
+        **_each(NOT_APPLICABLE, _ONE_DATABASE, "neptune"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "gaussdb oceanbase oceanbase-oracle polardbx dcdb "
+                "timestream"),
+    },
+    "verify.structure.triggers": {
+        **_each(NOT_APPLICABLE, _NO_TRIGGER,
+                "spanner bigtable firestore datastore keyspaces neptune "
+                "timestream lindorm geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "gaussdb oceanbase oceanbase-oracle polardbx dcdb "
+                "geminidb-cassandra"),
+    },
+    "verify.structure.unvalidated-constraints": {
+        **_each(NOT_APPLICABLE, _NO_CONSTRAINT, _KEYS_GIVEN),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase-oracle polardbx"),
+    },
+    "verify.value.charset": _each(
+        NOT_YET, "P0-PARITY.verify", _but("oceanbase", "dcdb")),
+    "verify.value.collation": {
+        **_each(NOT_APPLICABLE, _BYTES,
+                "spanner bigtable firestore datastore keyspaces neptune "
+                "timestream lindorm geminidb-cassandra geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "gaussdb oceanbase-oracle polardbx geminidb-mongo"),
+    },
+    "verify.value.generated": {
+        **_each(NOT_APPLICABLE, _NO_GENERATED,
+                "bigtable firestore datastore keyspaces neptune timestream "
+                "geminidb-cassandra geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "spanner gaussdb oceanbase-oracle polardbx lindorm"),
+    },
+    # what OceanBase and TDSQL have here is MySQL's, and its test is owed
+    **{item: {
+        **_each(NOT_APPLICABLE, _UNTYPED, "bigtable geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                _but("bigtable", "geminidb-redis", *mysqls)),
+    } for item, mysqls in (("verify.value.narrowing", ("oceanbase", "dcdb")),
+                           ("verify.value.precision", ("oceanbase", "dcdb")),
+                           ("verify.value.timezone", ("oceanbase", "dcdb")),
+                           ("verify.value.rendering", ()))},
+    "verify.value.null-empty": {
+        **_each(NOT_APPLICABLE, _NO_NULL, "geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                _but("geminidb-redis", "oceanbase", "dcdb",
+                     "geminidb-mongo")),
+    },
+    "verify.value.type-drift": {
+        **_each(NOT_APPLICABLE, _TYPED,
+                "spanner gaussdb oceanbase oceanbase-oracle polardbx dcdb "
+                "keyspaces lindorm geminidb-cassandra"),
+        **_each(NOT_YET, "P0-PARITY.verify",
+                "bigtable firestore datastore neptune timestream "
+                "geminidb-redis"),
+    },
+    "verify.repair": _each(NOT_YET, "P0-PARITY.verify",
+                           "keyspaces geminidb-cassandra"),
+    "verify.repair-undo": _each(NOT_YET, "P0-PARITY.verify",
+                                "gaussdb keyspaces geminidb-cassandra"),
+    "verify.rows-apart": _each(NOT_YET, "P0-PARITY.verify",
+                               _but("geminidb-mongo")),
+    "verify.tables": _each(NOT_YET, "P0-PARITY.verify", _CN),
+    "verify.table": _each(NOT_YET, "P0-PARITY.verify", "geminidb-redis"),
+    "tail.table-states": {
+        **_as("stream", _UNFOLLOWED),
+        **_each(NOT_YET, "P0-PARITY.tail", "geminidb-mongo"),
+    },
+    "tail.added": {
+        **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
+        **_each(NOT_YET, "P0-PARITY.tail",
+                "bigtable firestore gaussdb dcdb keyspaces neptune "
+                "geminidb-mongo"),
+    },
+    **{item: {
+        **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
+        **_each(NOT_YET, "P0-PARITY.tail",
+                "spanner bigtable firestore gaussdb dcdb keyspaces neptune "
+                "geminidb-mongo"),
+    } for item in ("tail.readded", "tail.ddl")},
+    "tail.renames": {
+        **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
+        **_each(NOT_APPLICABLE, _NOT_RENAMED,
+                "bigtable firestore keyspaces neptune"),
+        **_each(NOT_YET, "P0-PARITY.tail",
+                "spanner gaussdb dcdb geminidb-mongo"),
+    },
+    "assess.versions": {
+        **_each(NOT_APPLICABLE, _ONE_VERSION,
+                "spanner bigtable firestore datastore keyspaces timestream"),
+        **_each(NOT_YET, "P0-PARITY.all",
+                "gaussdb oceanbase oceanbase-oracle polardbx dcdb neptune "
+                "lindorm geminidb-cassandra"),
+    },
+    "assess.brands": _each(NOT_YET, "P0-PARITY.all",
+                           "spanner bigtable firestore datastore gaussdb "
+                           "oceanbase-oracle keyspaces neptune timestream "
+                           "lindorm geminidb-cassandra"),
+    "assess.preflight": _each(NOT_YET, "P0-PARITY.all", _CN),
+    "assess.capacity": _each(NOT_YET, "P0-PARITY.all",
+                             _but("oceanbase", "polardbx", "dcdb",
+                                  "geminidb-mongo")),
+    "assess.writers": _each(NOT_YET, "P0-PARITY.all", _CN),
+    "assess.handwork": _each(NOT_YET, "P0-PARITY.all",
+                             _but("geminidb-mongo")),
+    "schema.create": _each(NOT_APPLICABLE, _MADE_BY_WRITE,
+                           "geminidb-redis geminidb-mongo"),
+    "schema.indexes": {
+        **_each(NOT_APPLICABLE, _NO_INDEX,
+                "keyspaces timestream geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.all",
+                "bigtable firestore datastore oceanbase-oracle neptune "
+                "lindorm geminidb-cassandra geminidb-mongo"),
+    },
+    "schema.foreign-keys": {
+        **_each(NOT_APPLICABLE, _NO_FK,
+                "bigtable firestore datastore keyspaces timestream lindorm "
+                "geminidb-cassandra geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.all", "gaussdb oceanbase-oracle"),
+    },
+    "schema.defaults": {
+        **_each(NOT_APPLICABLE, _NO_COLUMNS,
+                "bigtable firestore datastore neptune timestream "
+                "geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.all",
+                "oceanbase-oracle keyspaces lindorm geminidb-cassandra"),
+    },
+    "schema.views": {
+        **_each(NOT_APPLICABLE, _NO_VIEW,
+                "firestore datastore keyspaces neptune timestream "
+                "geminidb-cassandra geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.all",
+                "spanner bigtable gaussdb oceanbase-oracle lindorm "
+                "geminidb-mongo"),
+    },
+    "schema.routines": {
+        **_each(NOT_APPLICABLE, _NO_CODE,
+                "bigtable firestore datastore keyspaces neptune timestream"),
+        **_each(NOT_YET, "P0-PARITY.all",
+                "spanner gaussdb oceanbase-oracle lindorm geminidb-cassandra "
+                "geminidb-redis geminidb-mongo"),
+    },
+    "move.sized": _each(NOT_YET, "P0-PARITY.all",
+                        "spanner bigtable firestore datastore keyspaces "
+                        "neptune timestream geminidb-cassandra"),
+    "move.load-window": {
+        **_each(NOT_APPLICABLE, _NOTHING_SLOWS,
+                "bigtable keyspaces neptune timestream geminidb-redis"),
+        **_each(NOT_YET, "P0-PARITY.all",
+                "spanner firestore datastore gaussdb oceanbase-oracle "
+                "lindorm geminidb-cassandra geminidb-mongo"),
+    },
+    "move.create-missing": {
+        **_each(NOT_APPLICABLE, _MADE_BY_WRITE,
+                "firestore datastore neptune geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.all",
+                "spanner bigtable gaussdb oceanbase-oracle keyspaces "
+                "timestream lindorm geminidb-cassandra"),
+    },
+    "cutover.drain": _as("stream", _UNFOLLOWED),
+    "cutover.pause-replication": _each(NOT_APPLICABLE, _ONE_PAUSE, _CN),
+    "cutover.two-way": _each(NOT_YET, "P0-PARITY.all", _CN),
+    "cutover.jobs": {
+        **_each(NOT_APPLICABLE, _NO_JOBS,
+                "spanner bigtable firestore datastore keyspaces neptune "
+                "geminidb-cassandra geminidb-redis geminidb-mongo"),
+        **_each(NOT_YET, "P0-PARITY.all",
+                "gaussdb oceanbase oceanbase-oracle polardbx dcdb timestream "
+                "lindorm"),
+    },
+    "operations.fencing": _each(NOT_YET, "P0-PARITY.all",
+                                _but("oceanbase", "polardbx", "dcdb")),
+}
+for _item, _gaps in _CLOUD_NATIVE_GAPS.items():
+    DEPTH_GAPS.setdefault(_item, {}).update(_gaps)
+
 #: the ways the code has whose test on that engine is not written yet, by
 #: item: the engines, each waiting on its area's backlog row (`AREAS`).
 #: Such a cell is "not yet": a way is one only once a test proves it
@@ -2242,6 +2590,104 @@ UNPROVED = {
     "security.tls": "parquet duckdb copybook tidb cockroachdb dsql",
     "operations.fencing": "tidb",
 }
+
+#: the cloud-native services' ways whose tests are owed, merged into
+#: `UNPROVED`: most are the way of the API a service speaks - MySQL's on
+#: OceanBase, PolarDB-X and TDSQL, Cassandra's, Redis's and MongoDB's on
+#: Keyspaces' and GeminiDB's - proved on that API's engine and owed on the
+#: service's own server, which the sandbox has for some and a cloud account
+#: alone for the rest
+_CLOUD_NATIVE_UNPROVED = {
+    "scope.listings": ("spanner firestore datastore gaussdb oceanbase "
+                       "oceanbase-oracle polardbx dcdb neptune timestream "
+                       "lindorm"),
+    "scope.deep": ("spanner bigtable firestore datastore gaussdb oceanbase "
+                   "oceanbase-oracle polardbx dcdb lindorm geminidb-mongo"),
+    "scope.copy": ("spanner bigtable firestore datastore gaussdb oceanbase "
+                   "oceanbase-oracle polardbx dcdb neptune timestream lindorm "
+                   "geminidb-mongo"),
+    "scope.repair": ("spanner bigtable firestore datastore gaussdb oceanbase "
+                     "oceanbase-oracle polardbx dcdb neptune timestream "
+                     "lindorm geminidb-redis geminidb-mongo"),
+    "scope.counters": "gaussdb oceanbase oceanbase-oracle polardbx dcdb",
+    "scope.objects": "oceanbase-oracle",
+    "scope.ops": ("spanner bigtable firestore gaussdb oceanbase polardbx dcdb "
+                  "keyspaces neptune geminidb-cassandra"),
+    **{item: ("spanner bigtable firestore datastore gaussdb oceanbase "
+              "oceanbase-oracle polardbx dcdb keyspaces neptune timestream "
+              "lindorm geminidb-cassandra")
+       for item in ("scope.row-filter", "scope.names")},
+    **{item: "oceanbase dcdb" for item in (
+        "verify.access.object-ownership", "verify.access.table-grants",
+        "verify.identity.sequence-collision", "verify.structure.columns",
+        "verify.structure.foreign-keys", "verify.structure.partitions",
+        "verify.structure.unvalidated-constraints", "verify.value.charset",
+        "verify.value.collation", "verify.value.generated",
+        "verify.value.narrowing", "verify.value.precision",
+        "verify.value.timezone")},
+    "verify.identity.sequence-parity": "oceanbase oceanbase-oracle dcdb",
+    "verify.movement.target-ahead": "oceanbase dcdb geminidb-mongo",
+    "verify.structure.collection-options": "geminidb-mongo",
+    "verify.structure.indexes": "spanner datastore geminidb-mongo",
+    "verify.structure.keys": "oceanbase dcdb geminidb-redis",
+    "verify.structure.objects": "oceanbase-oracle geminidb-mongo",
+    "verify.structure.sharding": "geminidb-mongo",
+    "verify.value.null-empty": "oceanbase dcdb geminidb-mongo",
+    "verify.value.type-drift": "geminidb-mongo",
+    "verify.delta": ("spanner bigtable firestore gaussdb oceanbase polardbx "
+                     "dcdb keyspaces neptune geminidb-redis geminidb-mongo"),
+    "verify.fence": "bigtable oceanbase polardbx keyspaces neptune "
+                    "geminidb-mongo",
+    "verify.confirm": ("spanner bigtable firestore gaussdb oceanbase "
+                       "polardbx dcdb keyspaces neptune geminidb-mongo"),
+    "verify.repair": ("spanner bigtable firestore datastore gaussdb "
+                      "oceanbase oceanbase-oracle polardbx dcdb neptune "
+                      "timestream lindorm geminidb-redis geminidb-mongo"),
+    "verify.repair-undo": ("spanner bigtable firestore datastore oceanbase "
+                           "oceanbase-oracle polardbx dcdb neptune "
+                           "timestream lindorm geminidb-redis "
+                           "geminidb-mongo"),
+    "verify.rows-apart": "geminidb-mongo",
+    "verify.table": ("spanner bigtable firestore datastore gaussdb oceanbase "
+                     "oceanbase-oracle polardbx dcdb keyspaces neptune "
+                     "timestream lindorm geminidb-cassandra geminidb-mongo"),
+    "tail.follows": "oceanbase polardbx geminidb-mongo",
+    "tail.table-states": ("spanner bigtable firestore gaussdb oceanbase "
+                          "polardbx dcdb keyspaces neptune "
+                          "geminidb-cassandra"),
+    "tail.added": "spanner oceanbase polardbx",
+    **{item: "oceanbase polardbx"
+       for item in ("tail.readded", "tail.ddl", "tail.renames")},
+    "assess.versions": "geminidb-redis geminidb-mongo",
+    "assess.brands": "oceanbase polardbx dcdb geminidb-redis geminidb-mongo",
+    "assess.engine-checks": _CN,
+    "assess.capacity": "oceanbase polardbx dcdb geminidb-mongo",
+    "assess.handwork": "geminidb-mongo",
+    "schema.create": ("firestore datastore oceanbase-oracle polardbx neptune "
+                      "timestream lindorm geminidb-cassandra"),
+    "schema.indexes": "spanner gaussdb oceanbase polardbx dcdb",
+    "schema.foreign-keys": "spanner oceanbase polardbx dcdb neptune",
+    "schema.defaults": "spanner gaussdb oceanbase polardbx dcdb",
+    **{item: "oceanbase polardbx dcdb" for item in (
+        "schema.views", "schema.routines", "move.load-window",
+        "move.create-missing", "operations.fencing")},
+    "move.table-copy": ("oceanbase-oracle polardbx dcdb timestream lindorm "
+                        "geminidb-cassandra geminidb-mongo"),
+    "move.bulk": "keyspaces geminidb-cassandra geminidb-mongo",
+    "move.sized": ("gaussdb oceanbase oceanbase-oracle polardbx dcdb lindorm "
+                   "geminidb-redis geminidb-mongo"),
+    **{item: ("gaussdb oceanbase oceanbase-oracle polardbx dcdb "
+              "geminidb-cassandra geminidb-redis geminidb-mongo")
+       for item in ("cutover.freeze", "cutover.read-only-target")},
+    "cutover.counters": "oceanbase",
+    "cutover.rollback": ("bigtable datastore oceanbase polardbx keyspaces "
+                         "neptune lindorm geminidb-cassandra geminidb-redis "
+                         "geminidb-mongo"),
+    "cutover.drain": ("bigtable oceanbase polardbx keyspaces neptune "
+                      "geminidb-cassandra geminidb-mongo"),
+}
+for _item, _engines in _CLOUD_NATIVE_UNPROVED.items():
+    UNPROVED[_item] = f"{UNPROVED.get(_item, '')} {_engines}".strip()
 
 
 @functools.lru_cache(maxsize=None)

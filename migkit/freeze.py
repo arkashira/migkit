@@ -6438,14 +6438,16 @@ class LindormHold(_Grants):
                 if u == who and p in self.WRITES and self._here(db, s, o)]
 
     def take(self, db, who, grant):
+        from .users import _ld_on
         p, s, o = grant
-        return [f"revoke {p.lower()} on {s.lower()} {self.eng._q(o)} from"
-                f" {self.eng._q(who)}"]
+        return [f"revoke {p.lower()} on {s.lower()} {_ld_on(self.eng, s, o)}"
+                f" from {self.eng._q(who)}"]
 
     def give(self, db, who, grant):
+        from .users import _ld_on
         p, s, o = grant
-        return [f"grant {p.lower()} on {s.lower()} {self.eng._q(o)} to"
-                f" {self.eng._q(who)}"]
+        return [f"grant {p.lower()} on {s.lower()} {_ld_on(self.eng, s, o)}"
+                f" to {self.eng._q(who)}"]
 
     def said(self, grant):
         return f"{grant[1].lower()} {grant[2]} ({grant[0].lower()})"

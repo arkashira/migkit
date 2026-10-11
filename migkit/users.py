@@ -3259,25 +3259,42 @@ def _ld_part(row, part):
                 None)
 
 
+def _ld_on(eng, scope, on):
+    """What a grant is on, as Lindorm's statements write it: nothing for
+    the whole instance, a database by its name, a table by its own or by
+    its database's and its own (`shop.orders`)."""
+    if not on or scope == "GLOBAL":
+        return ""
+    if scope == "TABLE":
+        return ".".join(eng._q(p) for p in str(on).split(".", 1))
+    return eng._q(on)
+
+
 def _ld_said(hop, side, scope, name):
-    """A database a grant is on, as the source names it: the target's
-    named back through the hop's map, so the two sides' grants compare."""
-    if scope not in ("DATABASE", "SCHEMA") or side != "dst":
+    """A database a grant is on, or a table's, as the source names it: the
+    target's named back through the hop's map, so the two sides' grants
+    compare."""
+    if scope not in ("DATABASE", "SCHEMA", "TABLE") or side != "dst":
         return name
     back = {str(v): str(k) for k, v in (hop.db_map or {}).items()}
+    if scope == "TABLE":
+        db, dot, table = str(name or "").partition(".")
+        return f"{back.get(db, db)}.{table}" if dot else name
     return back.get(str(name), name)
 
 
 def _ld_there(hop, grant):
-    """A source's grant as the target takes it: a database the hop maps
-    named as the target calls it."""
+    """A source's grant as the target takes it: a database the hop maps -
+    the grant's own, or its table's - named as the target calls it."""
     import re
-    m = re.match(r"(\w+ ON (?:DATABASE|SCHEMA) )`((?:[^`]|``)+)`$", grant)
-    if not m:
+    m = re.match(r"(\w+ ON (?:DATABASE|SCHEMA|TABLE) )`((?:[^`]|``)+)`"
+                 r"(\.`(?:[^`]|``)+`)?$", grant)
+    if not m or (m.group(3) is None) != (" TABLE " not in m.group(1)):
         return grant
     name = m.group(2).replace("``", "`")
     there = hop.target_db(name) if name in (hop.databases or []) else name
-    return m.group(1) + "`" + str(there).replace("`", "``") + "`"
+    return (m.group(1) + "`" + str(there).replace("`", "``") + "`"
+            + (m.group(3) or ""))
 
 
 def _ld_users(hop, side):
@@ -3293,10 +3310,11 @@ def _ld_users(hop, side):
         if who not in out:
             continue
         scope = str(_ld_part(r, "scope") or "GLOBAL").upper()
-        on = _ld_said(hop, side, scope, _ld_part(r, "on"))
+        on = _ld_on(eng, scope, _ld_said(hop, side, scope,
+                                          _ld_part(r, "on")))
         out[who]["grants"].append(
             f"{str(_ld_part(r, 'privilege')).upper()} ON {scope}"
-            + (f" {eng._q(on)}" if on and scope != "GLOBAL" else ""))
+            + (f" {on}" if on else ""))
     for v in out.values():
         v["grants"].sort()
     return out

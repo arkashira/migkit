@@ -14,6 +14,10 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+PROVES = [
+    ("move.table-copy", "geminidb-redis"),
+]
+
 pytestmark = needs_docker
 
 SRC, SRC_PORT = "migkit-test-gemini-src", 16450

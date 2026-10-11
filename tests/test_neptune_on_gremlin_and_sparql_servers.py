@@ -19,6 +19,10 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+PROVES = [
+    ("move.table-copy", "neptune"),
+]
+
 pytestmark = needs_docker
 
 GREMLIN = "tinkerpop/gremlin-server:3.7.3"

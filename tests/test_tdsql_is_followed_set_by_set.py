@@ -15,6 +15,12 @@ from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 from tests.mysql_pair import _ready
 
+PROVES = [
+    ("tail.follows", "dcdb"),
+    ("verify.fence", "dcdb"),
+    ("cutover.drain", "dcdb"),
+]
+
 pytestmark = needs_docker
 
 SETS = (("migkit-test-tdsql-a", 16456), ("migkit-test-tdsql-b", 16457))

@@ -19,6 +19,13 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+PROVES = [
+    ("move.table-copy", ("firestore", "datastore")),
+    ("tail.follows", "firestore"),
+    ("verify.fence", "firestore"),
+    ("cutover.drain", "firestore"),
+]
+
 pytestmark = needs_docker
 
 IMAGE = "gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators"

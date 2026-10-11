@@ -22,6 +22,14 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+PROVES = [
+    ("move.table-copy", "spanner"),
+    ("schema.create", "spanner"),
+    ("tail.follows", "spanner"),
+    ("verify.fence", "spanner"),
+    ("cutover.drain", "spanner"),
+]
+
 pytestmark = needs_docker
 
 EMU, PORT = "migkit-test-spanner", 16450

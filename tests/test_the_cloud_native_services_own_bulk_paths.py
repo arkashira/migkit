@@ -17,6 +17,11 @@ import pytest
 from migkit import decide
 from migkit.config import Endpoint, Hop
 
+PROVES = [
+    ("move.bulk", ("spanner", "bigtable", "firestore", "datastore",
+                   "gaussdb", "neptune", "timestream")),
+]
+
 
 def _hop(engine, tmp_path, src=None, dst=None, **opts):
     hop = Hop(name="bulk", engine=engine,

@@ -17,6 +17,11 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+PROVES = [
+    ("move.table-copy", "keyspaces"),
+    ("schema.create", "keyspaces"),
+]
+
 pytestmark = needs_docker
 
 NAME, PORT = "migkit-test-keyspaces", 16458

@@ -4,12 +4,20 @@ accounts read as that one's (OceanBase, PolarDB-X and TDSQL as MySQL's,
 OceanBase's Oracle mode as Oracle's, GeminiDB's APIs as their engines'),
 GaussDB's roles with its own administrators, a Spanner database's roles
 and their privileges, Lindorm's users and grants - each plan said, run a
-statement at a time into the ledger, and undone from it.
+statement at a time into the ledger, and undone from it. And a Lindorm
+target kept from its application by its users' rights, given back exactly.
 """
 import json
 
 from migkit import users
 from migkit.config import Endpoint, Hop
+
+PROVES = [
+    ("verify.users", ("dcdb", "gaussdb", "spanner", "lindorm", "oceanbase",
+                      "polardbx", "oceanbase-oracle", "geminidb-cassandra",
+                      "geminidb-redis", "geminidb-mongo")),
+    ("cutover.read-only-target", "lindorm"),
+]
 
 
 def _hop(engine, tmp_path, **kw):
@@ -55,6 +63,75 @@ def test_a_tdsql_hops_accounts_are_compared_as_mysqls(monkeypatch, tmp_path):
     out, _ = users.compare(hop, say=_quiet)
     assert out["engine"] == "mysql" and seen == ["10.0.0.1", "10.0.0.2"]
     assert out["missing_on_target"] == ["app@%"]
+
+
+#: each service on another's API, the reader of that API's accounts and
+#: what it reads them by, an account each side has and the source's one the
+#: target lacks: (reader, by the side's endpoint, source, target)
+_ON_ANOTHERS = {
+    "oceanbase": ("_mysql_users", True,
+                  {("app", "%"): {"auth": "*A", "attrs": "", "ssl": "",
+                                  "default_roles": [], "plugin": "x",
+                                  "grants": ["SELECT ON `shop`.*",
+                                             "INSERT ON `shop`.*"]},
+                   ("rpt", "%"): {"auth": "*B", "attrs": "", "ssl": "",
+                                  "default_roles": [], "plugin": "x",
+                                  "grants": []}},
+                  {("app", "%"): {"auth": "*A", "attrs": "", "ssl": "",
+                                  "default_roles": [], "plugin": "x",
+                                  "grants": ["SELECT ON `shop`.*"]}}),
+    "geminidb-mongo": ("_mongo_users", True,
+                       {("shop", "app"): [("readWrite", "shop")],
+                        ("shop", "rpt"): [("read", "shop")]},
+                       {("shop", "app"): [("read", "shop")]}),
+    "geminidb-redis": ("_redis_users", True,
+                       {"app": {"hashes": ["#a"], "rules": "+@all ~*"},
+                        "rpt": {"hashes": ["#b"], "rules": "+@read ~*"}},
+                       {"app": {"hashes": ["#a"], "rules": "+@read ~*"}}),
+    "geminidb-cassandra": ("_cs_roles", False,
+                           {"app": {"hash": "h", "login": True,
+                                    "superuser": False, "member_of": [],
+                                    "grants": ["SELECT ON ks", "MODIFY ON"
+                                               " ks"]},
+                            "rpt": {"hash": "r", "login": True,
+                                    "superuser": False, "member_of": [],
+                                    "grants": []}},
+                           {"app": {"hash": "h", "login": True,
+                                    "superuser": False, "member_of": [],
+                                    "grants": ["SELECT ON ks"]}}),
+    "oceanbase-oracle": ("_ora_principals", False,
+                         {"user:APP": {"hash": "h", "roles": ["CONNECT",
+                                                              "RESOURCE"]},
+                          "user:RPT": {"hash": "r", "roles": []}},
+                         {"user:APP": {"hash": "h", "roles": ["CONNECT"]}}),
+}
+_ON_ANOTHERS["polardbx"] = _ON_ANOTHERS["oceanbase"]
+
+
+def test_a_service_on_anothers_api_has_its_accounts_compared_as_that_ones(
+        monkeypatch, tmp_path):
+    """OceanBase and PolarDB-X as MySQL's, OceanBase's Oracle mode as
+    Oracle's, GeminiDB's APIs as MongoDB's, Redis's and Cassandra's: each
+    side's accounts read by that one's reader, from that side, and the gap
+    found - an account the target lacks and a grant it is short of."""
+    for engine, (reader, by_ep, src, dst) in _ON_ANOTHERS.items():
+        hop = _hop(engine, tmp_path)
+        seen = []
+
+        def read(*args, src=src, dst=dst, by_ep=by_ep, seen=seen):
+            far = args[0].host if by_ep else args[1]
+            seen.append(far)
+            return dict(src if far in ("10.0.0.1", "src") else dst)
+        monkeypatch.setattr(users, reader, read)
+        out, _ = users.compare(hop, say=_quiet)
+        assert out["engine"] == users.ACCOUNTS_AS[engine], engine
+        assert len(seen) == 2 and seen[0] != seen[1], (engine, seen)
+        assert len(out["missing_on_target"]) == 1, (engine, out)
+        assert "rpt" in out["missing_on_target"][0].lower(), (engine, out)
+        assert len(out["grants_missing"]) == 1, (engine, out)
+        assert "app" in out["grants_missing"][0].lower(), (engine, out)
+        assert out["result"] == "gap", engine
+        assert hop.engine == engine
 
 
 class _Cursor:
@@ -238,3 +315,124 @@ def test_lindorm_users_made_with_the_files_password_and_their_grants(
     fake.answers["dst"]["show users"].append({"user_name": "app"})
     t = users._ld_users(hop, "dst")
     assert t["app"]["grants"] == ["READ ON DATABASE `shop`"]
+
+
+def test_lindorm_table_grants_are_named_for_the_targets_database(tmp_path):
+    hop = _hop("lindorm", tmp_path, db_map={"shop": "shop_copy"})
+    assert users._ld_there(hop, "WRITE ON TABLE `shop`.`orders`") == \
+        "WRITE ON TABLE `shop_copy`.`orders`"
+    assert users._ld_there(hop, "WRITE ON TABLE `orders`") == \
+        "WRITE ON TABLE `orders`"
+    assert users._ld_said(hop, "dst", "TABLE", "shop_copy.orders") == \
+        "shop.orders"
+    assert users._ld_on(_Lindorm({}), "TABLE", "shop.orders") == \
+        "`shop`.`orders`"
+    assert users._ld_on(_Lindorm({}), "GLOBAL", None) == ""
+
+
+# ---- Lindorm's target kept by its users' rights ------------------------------
+
+class _LindormRights:
+    """A Lindorm instance's rights as `SHOW PRIVILEGES` says them, changed
+    by each statement a hold runs through its connection - a revoke of a
+    right it does not hold is an error, as the server's is."""
+
+    def __init__(self, rows):
+        self.rows = [dict(r) for r in rows]
+        self.ran = []
+
+    def _answered(self, side, db, sql):
+        assert sql == "show privileges", sql
+        return [dict(r) for r in self.rows]
+
+    def _ep(self, side):
+        return Endpoint(host="10.0.0.2", user="migkit")
+
+    def _q(self, name):
+        return "`" + str(name).replace("`", "``") + "`"
+
+    def _d(self, side, db):
+        return db
+
+    def in_scope(self, db, table):
+        return table != "audit"
+
+    def _connect(self, side, db):
+        server = self
+
+        class Cur:
+            def execute(self, sql, args=None):
+                import re
+                server.ran.append(sql)
+                kind, priv, scope, on, who = re.match(
+                    r"(revoke|grant) (\w+) on (\w+) (.+) (?:from|to)"
+                    r" `(\w+)`$", sql).groups()
+                row = {"user_name": who, "privilege": priv.upper(),
+                       "resource_type": scope.upper(),
+                       "resource_name": on.replace("`", "")}
+                if kind == "revoke":
+                    server.rows.remove(row)
+                else:
+                    server.rows.append(row)
+
+        class Conn:
+            autocommit = True
+
+            def cursor(self):
+                return Cur()
+
+            def close(self):
+                pass
+        return Conn()
+
+
+def _right(who, priv, scope, on=None):
+    return {"user_name": who, "privilege": priv, "resource_type": scope,
+            "resource_name": on}
+
+
+def test_a_lindorm_target_is_kept_by_its_users_rights_and_given_back(
+        tmp_path):
+    from migkit import freeze
+    hop = _hop("lindorm", tmp_path, options={"protect_target": True})
+    server = _LindormRights([
+        _right("app", "WRITE", "DATABASE", "shop"),
+        _right("app", "READ", "DATABASE", "shop"),
+        _right("app", "TRASH", "TABLE", "shop.orders"),
+        # a table the hop leaves out, another database, a read: not taken
+        _right("app", "WRITE", "TABLE", "shop.audit"),
+        _right("app", "WRITE", "DATABASE", "other"),
+        _right("rpt", "READ", "TABLE", "shop.orders"),
+        # migkit's own and the system's rights are theirs to keep
+        _right("migkit", "ALL", "DATABASE", "shop"),
+        _right("root", "ALL", "GLOBAL"),
+        # a right on the whole instance: named, never taken
+        _right("ops", "WRITE", "GLOBAL")])
+    before = [dict(r) for r in server.rows]
+    h = freeze.KEEPS["lindorm"](hop, server, "dst")
+    assert type(h) is freeze.LindormHold
+    assert h.accounts("shop") == ["app"]
+    said = []
+    h.keep("shop", h.WAY, said.append)
+    assert sorted(server.ran) == [
+        "revoke trash on table `shop`.`orders` from `app`",
+        "revoke write on database `shop` from `app`"]
+    record = freeze.state(hop, "shop", "dst")
+    assert sorted(map(tuple, record["roles"]["app"]["revoked"])) == [
+        ("TRASH", "TABLE", "shop.orders"), ("WRITE", "DATABASE", "shop")]
+    assert any("ops may write in every database" in s for s in said), said
+    assert all(ok for ok, _ in h.kept("shop", record))
+    # a right granted since is read back as not kept
+    server.rows.append(_right("rpt", "WRITE", "TABLE", "orders"))
+    got = {what.split(":")[0]: ok for ok, what in h.kept("shop", record)}
+    assert got == {"app": True, "rpt": False}
+    server.rows.pop()
+    server.ran.clear()
+    h.release("shop", record, said.append)
+    assert sorted(server.ran) == [
+        "grant trash on table `shop`.`orders` to `app`",
+        "grant write on database `shop` to `app`"]
+
+    def key(r):
+        return sorted((k, str(v)) for k, v in r.items())
+    assert sorted(map(key, server.rows)) == sorted(map(key, before))

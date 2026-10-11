@@ -1349,6 +1349,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * a property graph is written through Gremlin: give the target graph_api: gremlin
 
+* <...>: the target's load <...> ended <...>: <...> records, <...> that could not be read
+
 * Neptune Streams no longer holds the saved position: its retention (neptune_streams_expiry_days) passed, and what changed then is carried by nothing
 
 ## Amazon Timestream
@@ -1368,6 +1370,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: Timestream deletes no record
 
 * <...>: Timestream deletes no record, so a part of a table cannot be emptied
+
+* <...>: the batch load <...> ended <...>: <...> (its report: s3://<...>/<...>/report)
 
 ## Lindorm
 
@@ -1593,6 +1597,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * no AWS credentials: looked in the environment (AWS_ACCESS_KEY_ID), the CLI's credentials and config files (profile <...>), its single sign-on login, a web identity token, the container's role and the instance's role
 
+* <...>: point-in-time recovery is off on <...> - a table without it has no time to be restored to; turn it on (ALTER TABLE ... WITH custom_properties = {'point_in_time_recovery': {'status': 'enabled'}})
+
 * <...> has no parameter <...> in its parameter groups
 
 * <...> cannot be changed on <...>
@@ -1607,7 +1613,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> has no primary instance
 
+* a Spanner side's id is <instance>/<database>; <...> is not
+
+* <...>: point-in-time recovery is off, so its versions are kept an hour only - turn it on (seven days) for a restore point that outlasts the cutover
+
 * <...> was made, and the provider does not list it
+
+* the copy <...> failed: <...>
 
 * <...> is no flag the provider lets <...> set
 

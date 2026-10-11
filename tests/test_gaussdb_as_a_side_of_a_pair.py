@@ -21,6 +21,14 @@ import pytest
 from migkit.config import Endpoint, Hop
 from tests.conftest import needs_docker
 
+PROVES = [
+    ("move.table-copy", "gaussdb"),
+    ("schema.create", "gaussdb"),
+    ("tail.follows", "gaussdb"),
+    ("verify.fence", "gaussdb"),
+    ("cutover.drain", "gaussdb"),
+]
+
 pytestmark = needs_docker
 
 NAME, PORT = "migkit-test-gaussdb", 16454

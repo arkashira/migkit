@@ -19,6 +19,22 @@ NEW = ("spanner", "bigtable", "firestore", "datastore", "gaussdb",
        "neptune", "timestream", "lindorm", "geminidb-cassandra",
        "geminidb-redis", "geminidb-mongo")
 
+PROVES = [
+    ("security.tls", ("spanner", "bigtable", "firestore", "datastore",
+                      "gaussdb", "oceanbase", "oceanbase-oracle", "polardbx",
+                      "dcdb", "keyspaces", "neptune", "timestream",
+                      "lindorm", "geminidb-cassandra", "geminidb-redis",
+                      "geminidb-mongo")),
+    ("cutover.counters", ("spanner", "gaussdb", "oceanbase-oracle",
+                          "polardbx", "dcdb")),
+    ("cutover.rollback", ("spanner", "gaussdb", "firestore",
+                          "oceanbase-oracle", "dcdb", "timestream")),
+    ("verify.structure.indexes", ("gaussdb", "firestore", "lindorm")),
+    ("scope.listings", "bigtable"),
+    ("tail.follows", ("bigtable", "keyspaces", "neptune")),
+    ("schema.create", "dcdb"),
+]
+
 
 def _hop(engine, **opts):
     return Hop(name="cn", engine=engine,
@@ -107,6 +123,59 @@ def test_a_licence_written_as_an_expression_in_the_free_text_field():
     assert tools._licences_of(Dist()) == ["Apache-2.0", "MIT"]
     Dist.metadata = Meta({"License": "BSD-3-Clause OR GPL-2.0-only"})
     assert tools._licences_of(Dist()) == ["BSD-3-Clause"]
+
+
+def test_each_says_whether_its_connection_is_checked(monkeypatch):
+    """The assessment's word on each side's connection, from the engine's
+    own: Google's services over the TLS their SDKs check unless an
+    emulator is named, Neptune over wss and https unless told not,
+    Timestream through its SDK unless another address is named, and the
+    rest as the wire they speak - read off the options their own
+    connections are made with. Nothing is asked of the network."""
+    from migkit import tls
+    from migkit.engines import _class_for
+
+    def refuse(*a, **k):
+        raise AssertionError("asked the network")
+    monkeypatch.setattr(tls, "_probe", refuse)
+
+    def said(name, **opts):
+        tls._SEEN.clear()
+        hop = Hop(name="t", engine=name,
+                  source=Endpoint(host="10.0.0.7", port=1, user="u",
+                                  password="p", options=dict(opts)),
+                  target=Endpoint(host="127.0.0.1", port=1),
+                  databases=["shop"])
+        rows = {r["item"]: r["level"]
+                for r in _class_for(name)(hop)._leg_items()}
+        return next(k for k in rows if k.startswith("source")), rows
+    for name in ("spanner", "bigtable", "firestore", "datastore"):
+        assert said(name)[0] == "source connection verified", name
+        assert said(name, emulator="10.0.0.8:9010")[0] == \
+            "source connection NOT encrypted", name
+    assert said("neptune")[0] == "source connection verified"
+    assert said("neptune", tls=False)[0] == "source connection NOT encrypted"
+    assert said("timestream")[0] == "source connection verified"
+    assert said("timestream", endpoint_url="http://10.0.0.8:8086")[0] == \
+        "source connection NOT encrypted"
+    for name in ("oceanbase", "polardbx", "dcdb", "oceanbase-oracle",
+                 "lindorm"):
+        assert said(name, ssl_ca="/ca.pem")[0] == \
+            "source connection verified", name
+        item, rows = said(name, ssl=True)
+        assert item == "source connection NOT verified", name
+        assert rows[item] == "fail", name
+    assert said("gaussdb", sslmode="verify-full",
+                sslrootcert="/ca.pem")[0] == "source connection verified"
+    assert said("gaussdb", sslmode="disable")[0] == \
+        "source connection NOT encrypted"
+    for name in ("keyspaces", "geminidb-cassandra", "geminidb-redis",
+                 "geminidb-mongo"):
+        assert said(name, tls_ca_file="/ca.pem")[0] == \
+            "source connection verified", name
+        assert said(name, tls=True, tls_insecure=True)[0] == \
+            "source connection NOT verified", name
+    tls._SEEN.clear()
 
 
 def test_a_service_on_another_api_is_paired_as_itself():
