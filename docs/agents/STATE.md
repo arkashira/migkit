@@ -181,14 +181,14 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Backlog (496 items, `docs/backlog-index.md`)
 
-DONE 286 - PARTLY 59 - IN PROGRESS 8 - OPEN 114 - BLOCKED 20 - NOT PURSUED 9
+DONE 286 - PARTLY 61 - IN PROGRESS 8 - OPEN 112 - BLOCKED 20 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
 | change follow | 41 | 7 | 1 | 9 | 5 | 0 |
 | conversion | 29 | 1 | 0 | 1 | 0 | 0 |
 | correctness | 0 | 0 | 0 | 1 | 0 | 0 |
-| cutover | 14 | 1 | 1 | 4 | 0 | 0 |
+| cutover | 14 | 3 | 1 | 2 | 0 | 0 |
 | ease of use | 19 | 2 | 1 | 17 | 1 | 1 |
 | engines | 27 | 8 | 2 | 13 | 6 | 1 |
 | maintainability | 0 | 0 | 0 | 5 | 0 | 0 |

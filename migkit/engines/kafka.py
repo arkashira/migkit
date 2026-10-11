@@ -423,7 +423,14 @@ class KafkaEngine(Engine):
     def _copy_topic(self, topic, st, chunk, save, log):
         """What `topic` holds past the positions in `st`, copied, and the
         positions moved on: the copy's whole work, and each round of the
-        tail's. Returns how many messages went."""
+        tail's. Returns how many messages went.
+
+        Each partition is copied in the way it was planned when the copy
+        reached it (`_plan_offsets`, kept in its state as `mode`):
+        `identical` - the target's offsets are the source's, one message to
+        one offset, every one proved as it lands; `mapped` - each batch and
+        the source-to-target offsets it took are one transaction on the
+        target (`_copy_mapped`); `plain` - sent and counted as before."""
         from kafka import TopicPartition
 
         from ..wording import progress
@@ -432,9 +439,26 @@ class KafkaEngine(Engine):
         src = self._consumer("src", isolation_level="read_committed")
         dst = self._consumer("dst")
         # sized to the largest message the source topic takes (`LARGE_VALUES`)
-        producer = self._producer(max_in_flight_requests_per_connection=1,
-                                  **self._sized_for(
-                                      self._message_bound(topic)))
+        sized = self._sized_for(self._message_bound(topic))
+        producers = {}
+
+        def producer_of(kind):
+            """The producer of one kind, made when first asked: `plain`
+            as it always was, `ident` idempotent (a retried send is not a
+            second message, which would move every offset after it), `txn`
+            transactional, its id one per target topic so a restarted copy
+            fences the old one and ends what it left open."""
+            if kind not in producers:
+                extra = dict(sized, max_in_flight_requests_per_connection=1)
+                if kind != "plain":
+                    extra["enable_idempotence"] = True
+                if kind == "txn":
+                    extra["transactional_id"] = f"migkit-copy.{topic}"
+                made = self._producer(**extra)
+                if kind == "txn":
+                    made.init_transactions()
+                producers[kind] = made
+            return producers[kind]
         marked = self._marks_positions()
         sent = 0
         try:
@@ -455,17 +479,23 @@ class KafkaEngine(Engine):
                 end = src.end_offsets([src_tp])[src_tp]
                 there = dst.end_offsets([dst_tp])[dst_tp]
                 if "base" not in pst:
+                    plan = self._plan_offsets(src, dst, src_tp, dst_tp)
                     pst.update(base=there, copied=0,
-                               next=src.beginning_offsets([src_tp])[src_tp])
+                               next=src.beginning_offsets([src_tp])[src_tp],
+                               mode=plan["mode"], first=plan["first"])
                     # kept before anything is sent: a stop before the
                     # first batch's position was saved took what that
                     # batch put on the target for messages held before
                     # the copy, and sent them again
                     save()
-                    if there:
+                    log(f"{topic}[{p}]: {plan['why']}")
+                    if there and plan["mode"] == "plain":
                         log(f"{topic}[{p}]: the target held {there:,}"
                             " messages before the copy; offsets will differ,"
                             " and group positions are translated by message")
+                self._partition_ready(topic, p, pst, src, dst, src_tp, dst_tp,
+                                      end, producer_of, save, log)
+                there = dst.end_offsets([dst_tp])[dst_tp]
                 if pst["next"] >= end:
                     continue
                 # what reached the target after the last checkpoint
@@ -484,28 +514,49 @@ class KafkaEngine(Engine):
                         # - a transaction's marker, an aborted write - the
                         # consumer's own position says so; its end is not
                         # reached by any message
-                        pst["next"] = max(pst["next"],
-                                          min(src.position(src_tp), end))
+                        moved = max(pst["next"],
+                                    min(src.position(src_tp), end))
+                        if pst.get("mode") == "identical" \
+                                and moved > pst["next"]:
+                            # an offset with no message: the offsets are
+                            # not one to one from here
+                            self._identity_ends(
+                                topic, p, pst, producer_of, save, log,
+                                f"offset {pst['next']:,} holds no message a"
+                                " reader of committed messages is given")
+                        pst["next"] = moved
                         save()
                         break
+                    if pst.get("mode") == "identical":
+                        batch, went = self._copy_identical(
+                            topic, p, pst, batch, producer_of, marked, save,
+                            log)
+                        sent += went
+                        done += went
+                        if went:
+                            log(progress(f"{topic}[{p}]", done, total, began,
+                                         time.monotonic(), unit="messages"))
+                        if not batch:
+                            continue
+                        ahead = 0
+                    if pst.get("mode") == "mapped":
+                        went = self._copy_mapped(topic, p, pst, batch,
+                                                 producer_of("txn"), marked,
+                                                 save)
+                        sent += went
+                        done += went
+                        log(progress(f"{topic}[{p}]", done, total, began,
+                                     time.monotonic(), unit="messages"))
+                        continue
+                    producer = producer_of("plain")
                     sends, counted = [], 0
                     for m in batch:
                         if ahead > 0:
                             ahead -= 1
                         else:
-                            headers = list(m.headers or [])
-                            if marked:
-                                headers = [h for h in headers
-                                           if h[0] != self.HEADER] + [
-                                    (self.HEADER, self._position(
-                                        p, m.offset))]
                             sends.append((m.offset, producer.send(
-                                topic,
-                                value=self._translated(topic, "value",
-                                                       m.value),
-                                key=self._translated(topic, "key", m.key),
-                                headers=headers,
-                                partition=p, timestamp_ms=m.timestamp)))
+                                topic, **self._carried(topic, p, m,
+                                                       marked))))
                             sent += 1
                         counted += 1
                     producer.flush()
@@ -519,7 +570,8 @@ class KafkaEngine(Engine):
                     log(progress(f"{topic}[{p}]", done, total, began,
                                  time.monotonic(), unit="messages"))
         finally:
-            producer.close()
+            for made in producers.values():
+                made.close()
             src.close()
             dst.close()
         return sent
@@ -982,6 +1034,590 @@ class KafkaEngine(Engine):
                                   f" configs match on {len(common)} topics"))
         return res
 
+    # --- offsets: kept identical where they can be, otherwise mapped -----
+    #
+    # A consumer group's committed offset is a position in one cluster's
+    # log. The copy gives it the same meaning on the target in one of two
+    # exact ways, and says which for every partition:
+    #
+    # * `identical` (LT.C2). A source partition whose offsets run one to
+    #   one from its first - no compaction hole, no transaction marker, no
+    #   aborted write - is copied to a target partition whose first offset
+    #   was made the source's (`_partition_ready`): the target is padded
+    #   with throwaway records up to the source's first offset and
+    #   `DeleteRecords` then moves its start there; Kafka has no call that
+    #   sets a log's first offset, only this one, which cannot go below the
+    #   log's end. The copy is not transactional - a transaction's marker
+    #   would take an offset - and every message's landed offset is read
+    #   back and held to the source's. Where the offsets stop being one to
+    #   one, the copy says where and goes on the other way.
+    # * `mapped` (LT.C3), where the hop says `offsets: map` and the client
+    #   can run transactions. Each batch and the record of the source and
+    #   target offsets it took are written in one producer transaction, so
+    #   a crash leaves both or neither, and the copy goes on from the map
+    #   itself, not from a counter that can be a batch behind. The map is
+    #   read back whole at a cutover (`_read_offset_map`) to place a
+    #   group's offsets (`_located`).
+    #
+    # Everything else is `plain`, as the copy always was: positions placed
+    # by the message, or by the header `offset_header` asks for.
+
+    #: the target's topic of the offset map: one partition, kept for good
+    OFFSET_MAP = "__migkit_offset_map"
+    #: the words `offsets` may be
+    OFFSET_WAYS = ("auto", "map", "off")
+    #: padding records sent, and checked, in one round
+    PAD_ROUND = 50_000
+
+    def _offsets_way(self):
+        way = str((self.hop.options or {}).get("offsets") or "auto").lower()
+        if way not in self.OFFSET_WAYS:
+            raise SystemExit(f"offsets: {way} is not one of"
+                             f" {', '.join(self.OFFSET_WAYS)}")
+        return way
+
+    @staticmethod
+    def _can_transact():
+        """Whether the client can run a producer transaction: a client
+        that cannot is not asked to, and a map is not claimed."""
+        try:
+            from kafka import KafkaProducer
+        except ImportError:
+            return False
+        return callable(getattr(KafkaProducer, "init_transactions", None))
+
+    def _gap_free(self, src, tp, beg, end):
+        """(True, "") where every offset from `beg` up to `end` holds one
+        message a reader of committed messages is given; (False, why) at
+        the first that does not - a compaction hole, a transaction's
+        marker or an aborted write. Read, not inferred: only the log can
+        say. A partition not read to its end is not gap-free."""
+        if end <= beg:
+            return True, ""
+        src.assign([tp])
+        src.seek(tp, beg)
+        want = beg
+        while want < end:
+            got = [m for msgs in src.poll(timeout_ms=5000, max_records=5000)
+                   .values() for m in msgs if m.offset < end]
+            if not got:
+                return False, (f"offset {want:,} holds no message a reader"
+                               " of committed messages is given (a"
+                               " compaction hole, a transaction's marker or"
+                               " an aborted write), or could not be read")
+            for m in got:
+                if m.offset != want:
+                    return False, (f"offsets {want:,} to {m.offset - 1:,}"
+                                   " hold no message (compaction, a"
+                                   " transaction's marker or an aborted"
+                                   " write)")
+                want += 1
+        return True, ""
+
+    @staticmethod
+    def choose_offsets(way, *, sbeg, dbeg, dend, gap_free=None, gap_why="",
+                       can_pad=True, pad_why="", transactions=False):
+        """(mode, why) a partition is copied in, from the facts alone.
+
+        `identical` only where the target partition is empty and its next
+        offset is not past the source's first (offsets cannot go back),
+        padding it is possible, and the source has no gap: `gap_free` True
+        (read) or None (not read - nothing to pad, so the copy proves each
+        offset as it goes). Anything else is not claimed as identical, and
+        is `mapped` where the hop asks for the map and the client can
+        write it, `plain` otherwise - with the reason said."""
+        def otherwise(why):
+            if way == "map" and transactions:
+                return "mapped", (why + "; offsets are not kept, the source"
+                                  " to target offsets are written in the"
+                                  " data's transactions")
+            if way == "map":
+                return "plain", (why + "; this client cannot run"
+                                 " transactions, so no offset map is"
+                                 " written either: group positions are"
+                                 " placed by message")
+            return "plain", (why + "; group positions are placed by message"
+                             " (or by the position header)")
+        if way == "off":
+            return "plain", "offsets: off - copied without keeping offsets"
+        if dend != dbeg:
+            return otherwise(f"the target already holds {dend - dbeg:,}"
+                             " messages in this partition")
+        if dend > sbeg:
+            return otherwise(f"the target's next offset {dend:,} is past the"
+                             f" source's first {sbeg:,}")
+        if dend < sbeg and not can_pad:
+            return otherwise(pad_why)
+        if gap_free is False:
+            return otherwise(f"the source's offsets are not consecutive:"
+                             f" {gap_why}")
+        pad = sbeg - dend
+        return "identical", (
+            f"offsets kept identical from {sbeg:,}"
+            + (f", the target padded with {pad:,} records and then cut to"
+               f" start there (the source was read to its end: consecutive)"
+               if pad else ", the target starting at the same offset; every"
+               " offset is checked as it lands"))
+
+    def _plan_offsets(self, src, dst, src_tp, dst_tp):
+        """{"mode", "why", "first"} for a partition the copy is reaching:
+        what `choose_offsets` says of what the clusters show. The cheap
+        facts first; the source is read to its end for gaps only where a
+        padding would be wasted by one."""
+        way = self._offsets_way()
+        sbeg = src.beginning_offsets([src_tp])[src_tp]
+        send = src.end_offsets([src_tp])[src_tp]
+        dbeg = dst.beginning_offsets([dst_tp])[dst_tp]
+        dend = dst.end_offsets([dst_tp])[dst_tp]
+        facts = dict(sbeg=sbeg, dbeg=dbeg, dend=dend,
+                     transactions=self._can_transact())
+        if way != "off" and dend == dbeg and dend < sbeg:
+            limit = (self.hop.options or {}).get("offsets_pad_limit")
+            if limit is not None and sbeg - dend > int(limit):
+                facts.update(can_pad=False, pad_why=(
+                    f"making its first offset {sbeg:,} needs {sbeg - dend:,}"
+                    f" records of padding, past offsets_pad_limit {limit}"))
+            else:
+                ok, why = self._may_delete_records(dst_tp, dbeg)
+                if not ok:
+                    facts.update(can_pad=False, pad_why=why)
+                else:
+                    ok, why = self._gap_free(src, src_tp, sbeg, send)
+                    facts.update(gap_free=ok, gap_why=why)
+        mode, why = self.choose_offsets(way, **facts)
+        return {"mode": mode, "why": why, "first": sbeg}
+
+    def _may_delete_records(self, tp, offset):
+        """(True, "") where the target lets migkit move a partition's start
+        up, asked by a request that deletes nothing (up to the start it
+        already has); (False, why) where it does not. Nothing is padded
+        that could not then be cut."""
+        try:
+            admin = self._admin("dst")
+        except Exception as e:  # noqa: BLE001 - said
+            return False, f"the target could not be reached to cut its" \
+                          f" padding ({type(e).__name__})"
+        try:
+            admin.delete_records({tp: offset})
+        except Exception as e:  # noqa: BLE001 - said, not guessed
+            return False, ("the target does not allow its records to be"
+                           f" deleted ({type(e).__name__}: {str(e)[:60]}),"
+                           " so it cannot be padded and cut")
+        finally:
+            admin.close()
+        return True, ""
+
+    def _carried(self, topic, p, m, marked):
+        """What `producer.send` is given for source message `m`."""
+        headers = list(m.headers or [])
+        if marked:
+            headers = [h for h in headers if h[0] != self.HEADER] + [
+                (self.HEADER, self._position(p, m.offset))]
+        return dict(value=self._translated(topic, "value", m.value),
+                    key=self._translated(topic, "key", m.key),
+                    headers=headers, partition=p, timestamp_ms=m.timestamp)
+
+    # -- the map's own topic and records ----
+
+    def _map_topic_ready(self):
+        """The target's offset-map topic, made where it is missing: one
+        partition, nothing ever expired (it is read at a cutover, however
+        long after)."""
+        if getattr(self, "_map_topic_made", False):
+            return
+        from kafka.admin import NewTopic
+        dst = self._consumer("dst")
+        try:
+            if self.OFFSET_MAP in dst.topics():
+                self._map_topic_made = True
+                return
+            brokers = len(dst._client.cluster.brokers()) or 1
+        finally:
+            dst.close()
+        rf = int((self.hop.options or {}).get("replication_factor",
+                                                min(3, brokers)))
+        admin = self._admin("dst")
+        try:
+            admin.create_topics([NewTopic(
+                self.OFFSET_MAP, num_partitions=1, replication_factor=rf,
+                topic_configs={"retention.ms": "-1",
+                               "cleanup.policy": "delete"})])
+        finally:
+            admin.close()
+        self._map_topic_made = True
+
+    @staticmethod
+    def _map_record(kind, topic, p, **fields):
+        """(key, value) of one record of the offset map. The key says what
+        the record is about, so a record said twice is one."""
+        import json
+        value = {"v": 1, "kind": kind, "topic": topic, "partition": int(p),
+                 **fields}
+        key = "\x1f".join([kind, topic, str(int(p))]
+                          + ([str(fields["from"])] if kind == "batch"
+                             else []))
+        return key.encode(), json.dumps(value, sort_keys=True).encode()
+
+    def _write_map(self, producer, topic, p, kind, **fields):
+        """One record of the map, outside a transaction (the identity
+        records), written and checked."""
+        self._map_topic_ready()
+        key, value = self._map_record(kind, topic, p, **fields)
+        sent = producer.send(self.OFFSET_MAP, key=key, value=value,
+                             partition=0)
+        producer.flush()
+        self._refused(self.OFFSET_MAP, 0, [(0, sent)])
+
+    @staticmethod
+    def _runs(pairs):
+        """[[source offset, target offset, how many]] from (source, target)
+        pairs in order: consecutive on both sides is one run. Exact for any
+        shape - a batch with holes is a run for each stretch."""
+        runs = []
+        for s, d in pairs:
+            if runs and runs[-1][0] + runs[-1][2] == s \
+                    and runs[-1][1] + runs[-1][2] == d:
+                runs[-1][2] += 1
+            else:
+                runs.append([s, d, 1])
+        return runs
+
+    def _read_offset_map(self):
+        """{(topic, partition): {"identical": (from, until or None) or
+        None, "runs": [(source, target, n)], "next": the source position
+        after the last committed batch or None}} - everything the map holds,
+        read as a reader of committed records is given it, so a batch that
+        was written and not committed is not in it. {} where the target has
+        no map. A map not read to its end, or one that disagrees with
+        itself, stops the caller: a position is never placed from part of
+        it."""
+        import json
+
+        from kafka import TopicPartition
+        consumer = self._consumer("dst", isolation_level="read_committed")
+        try:
+            if self.OFFSET_MAP not in consumer.topics():
+                return {}
+            tp = TopicPartition(self.OFFSET_MAP, 0)
+            consumer.assign([tp])
+            consumer.seek_to_beginning(tp)
+            end = consumer.end_offsets([tp])[tp]
+            out = {}
+            idle = time.monotonic()
+            while consumer.position(tp) < end:
+                got = consumer.poll(timeout_ms=2000)
+                if not got:
+                    if time.monotonic() - idle > 120:
+                        raise SystemExit(
+                            "the offset map on the target could not be read"
+                            " to its end: no position is placed from part of"
+                            " it")
+                    continue
+                idle = time.monotonic()
+                for msgs in got.values():
+                    for m in msgs:
+                        self._take_map_record(out, json.loads(m.value))
+            return out
+        finally:
+            consumer.close()
+
+    @staticmethod
+    def _take_map_record(out, rec):
+        if rec.get("v") != 1:
+            raise SystemExit(f"the offset map holds a record of version"
+                             f" {rec.get('v')}, which this migkit does not"
+                             " read: nothing is placed from it")
+        entry = out.setdefault((rec["topic"], rec["partition"]), {
+            "identical": None, "runs": [], "next": None})
+        if rec["kind"] == "identical":
+            entry["identical"] = (rec["from"], rec.get("until"))
+            return
+        for s, d, n in rec["runs"]:
+            runs = entry["runs"]
+            if runs and s < runs[-1][0] + runs[-1][2]:
+                raise SystemExit(
+                    f"the offset map disagrees with itself at {rec['topic']}"
+                    f"[{rec['partition']}] source offset {s:,}: it is in two"
+                    " committed batches; nothing is placed from it")
+            if runs and runs[-1][0] + runs[-1][2] == s \
+                    and runs[-1][1] + runs[-1][2] == d:
+                runs[-1] = (runs[-1][0], runs[-1][1], runs[-1][2] + n)
+            else:
+                runs.append((s, d, n))
+        entry["next"] = rec["next"]
+
+    @staticmethod
+    def _map_position(entry, offset, dst_end):
+        """(the target's offset of the first message at or after source
+        `offset`, how), or None where the map does not know it: an offset
+        past the last message copied, or one the target does not hold yet.
+        Exact: nothing here is searched for."""
+        import bisect
+        ident = entry.get("identical")
+        if ident and offset >= ident[0] \
+                and (ident[1] is None or offset < ident[1]):
+            if offset < dst_end:
+                return offset, "identical offsets, kept by the copy"
+            return None
+        runs = entry.get("runs") or []
+        starts = [r[0] for r in runs]
+        i = bisect.bisect_right(starts, offset) - 1
+        if i >= 0 and offset < runs[i][0] + runs[i][2]:
+            s, d, _ = runs[i]
+            return d + (offset - s), ("the offset map written in the"
+                                      " data's transactions")
+        if i + 1 < len(runs):
+            return runs[i + 1][1], ("the offset map written in the data's"
+                                    " transactions (the offset holds no"
+                                    " message: the next one)")
+        return None
+
+    def _mapped_partitions(self):
+        """{(topic, partition)} the target holds a map for: partitions
+        whose offsets are not the source's, so offset arithmetic between
+        the two sides says nothing about them."""
+        try:
+            return {k for k, e in self._read_offset_map().items()
+                    if e["runs"]}
+        except SystemExit:
+            return set()
+
+    # -- a partition made ready, and the ways a batch goes ----
+
+    def _partition_ready(self, topic, p, pst, src, dst, src_tp, dst_tp, end,
+                         producer_of, save, log):
+        """A partition made ready to be copied further, each round: an
+        identical one padded and cut where that was not done, and its
+        position put where the target's own end says it is; a mapped one
+        put where the map says. A plain one is left."""
+        mode = pst.get("mode")
+        if mode == "identical":
+            self._identity_ready(topic, p, pst, src, dst, src_tp, dst_tp,
+                                 end, producer_of, save, log)
+        elif mode == "mapped":
+            self._map_reconciled(topic, p, pst, save, log)
+
+    def _identity_ready(self, topic, p, pst, src, dst, src_tp, dst_tp, end,
+                        producer_of, save, log):
+        first = pst["first"]
+        dbeg = dst.beginning_offsets([dst_tp])[dst_tp]
+        dend = dst.end_offsets([dst_tp])[dst_tp]
+        if not pst.get("padded"):
+            if dend > first or dbeg > first:
+                raise SystemExit(
+                    f"{topic}[{p}]: the target's log is at {dbeg:,}-{dend:,},"
+                    f" past the source's first offset {first:,}, and the"
+                    " copy has not begun: someone else wrote to it. Nothing"
+                    " is copied, and no offset is claimed identical")
+            producer = producer_of("ident")
+            if dend < first:
+                log(f"{topic}[{p}]: padding the target with"
+                    f" {first - dend:,} records, to cut away")
+                self._pad(producer, topic, p, dend, first)
+                dend = dst.end_offsets([dst_tp])[dst_tp]
+                if dend != first:
+                    raise SystemExit(
+                        f"{topic}[{p}]: after the padding the target's end is"
+                        f" {dend:,}, not {first:,}: someone else wrote to it."
+                        " The padding stays until it is cut; nothing is"
+                        " copied")
+            if dbeg < first:
+                admin = self._admin("dst")
+                try:
+                    admin.delete_records({dst_tp: first})
+                finally:
+                    admin.close()
+                dbeg = dst.beginning_offsets([dst_tp])[dst_tp]
+                if dbeg != first:
+                    raise SystemExit(
+                        f"{topic}[{p}]: the target's first offset is"
+                        f" {dbeg:,} after DeleteRecords up to {first:,}:"
+                        " the offsets are not identical, and nothing is"
+                        " copied")
+            self._write_map(producer, topic, p, "identical", **{
+                "from": first, "until": None})
+            pst["padded"] = True
+            save()
+            return
+        if dend == pst["next"]:
+            return
+        if dend < pst["next"] or dend > end:
+            raise SystemExit(
+                f"{topic}[{p}]: the target's end is {dend:,} where the copy"
+                f" has reached source offset {pst['next']:,} (the source"
+                f" ends at {end:,}): identical offsets cannot be vouched"
+                " for. Nothing more is copied")
+        # a batch reached the target and the position was not saved: it
+        # is the last one's identical message, or the copy stops
+        if not self._same_message(src, dst, src_tp, dend - 1, dend - 1):
+            raise SystemExit(
+                f"{topic}[{p}]: the target's message at {dend - 1:,} is not"
+                " the source's: the copy stops, and no offset is claimed"
+                " identical")
+        pst["copied"] += dend - pst["next"]
+        pst["next"] = dend
+        save()
+
+    def _pad(self, producer, topic, p, have, want):
+        """Records sent to partition `p` until it ends at `want`, nothing
+        taken as sent that the target did not accept. The key is set (a
+        compacted topic takes no message without one)."""
+        while have < want:
+            n = min(want - have, self.PAD_ROUND)
+            sends = [(have + i, producer.send(topic, key=b"migkit-pad",
+                                              value=b"", partition=p))
+                     for i in range(n)]
+            producer.flush()
+            self._refused(topic, p, sends)
+            have += n
+
+    def _copy_identical(self, topic, p, pst, batch, producer_of, marked, save,
+                        log):
+        """(the part of `batch` not copied this way, how many went):
+        the consecutive head of the batch is sent without a transaction
+        and each message's landed offset held to its own; where the
+        offsets stop being consecutive, or a message lands elsewhere, the
+        identity ends there and is said."""
+        expect = pst["next"]
+        head = []
+        for m in batch:
+            if m.offset != expect + len(head):
+                break
+            head.append(m)
+        went = 0
+        if head:
+            producer = producer_of("ident")
+            sends = [(m.offset, producer.send(
+                topic, **self._carried(topic, p, m, marked))) for m in head]
+            producer.flush()
+            self._refused(topic, p, sends)
+            for m, (_, sent) in zip(head, sends):
+                at = sent.get(15).offset
+                if at != m.offset:
+                    pst["copied"] += went
+                    pst["next"] = expect + went
+                    self._write_map(producer, topic, p, "identical", **{
+                        "from": pst["first"], "until": m.offset})
+                    save()
+                    raise SystemExit(
+                        f"{topic}[{p}]: source offset {m.offset:,} landed at"
+                        f" {at:,} on the target - another writer is on the"
+                        " partition. Identical offsets hold below"
+                        f" {m.offset:,} and are not claimed past it;"
+                        " nothing more is copied")
+                went += 1
+            pst["copied"] += went
+            pst["next"] = head[-1].offset + 1
+            save()
+        rest = batch[len(head):]
+        if rest:
+            self._identity_ends(
+                topic, p, pst, producer_of, save, log,
+                f"source offset {pst['next']:,} is followed by"
+                f" {rest[0].offset:,}")
+        return rest, went
+
+    def _identity_ends(self, topic, p, pst, producer_of, save, log, why):
+        """The identical offsets of a partition end at its position: said
+        in the map, and the partition goes on the way the hop asks for
+        (`mapped` where it can, `plain`)."""
+        until = pst["next"]
+        mode = "mapped" if self._offsets_way() == "map" \
+            and self._can_transact() else "plain"
+        self._write_map(producer_of("ident"), topic, p, "identical", **{
+            "from": pst["first"], "until": until})
+        pst["mode"] = mode
+        # what the copy counts as landed from here is counted off the
+        # target's own end, as a plain copy does
+        pst["base"] = until - pst["copied"]
+        pst["identical_until"] = until
+        save()
+        log(f"{topic}[{p}]: offsets are identical below {until:,} and not"
+            f" from there ({why}); the rest is copied "
+            + ("with its offsets written in the data's transactions"
+               if mode == "mapped" else
+               "without keeping them, group positions placed by message"
+               + ("; this client cannot run transactions, so no offset map"
+                  " is written either" if self._offsets_way() == "map"
+                  else "")))
+
+    def _copy_mapped(self, topic, p, pst, batch, producer, marked, save):
+        """One batch and the map of where it landed, in one transaction:
+        the target holds both or neither. Every send is checked before the
+        offsets are read from what the target answered, and the map's record
+        is the last thing sent before the commit. A failure ends the
+        transaction (aborted) and stops the copy; a stop that never got to
+        say anything leaves it open, and the next producer with the same id
+        ends it before it writes."""
+        self._map_topic_ready()
+        claimed = self.__dict__.get("_claimed", {}).get((topic, p))
+        if claimed is not None and batch[0].offset < claimed:
+            raise SystemExit(
+                f"{topic}[{p}]: the saved position was {claimed:,} but the"
+                f" offset map on the target knows messages only before"
+                f" {pst['next']:,}: the map is missing what was copied. No"
+                " offset is placed from it; nothing more is copied")
+        producer.begin_transaction()
+        try:
+            sends = [(m.offset, producer.send(
+                topic, **self._carried(topic, p, m, marked))) for m in batch]
+            producer.flush()
+            self._refused(topic, p, sends)
+            pairs = [(off, sent.get(15).offset) for off, sent in sends]
+            following = batch[-1].offset + 1
+            key, value = self._map_record(
+                "batch", topic, p, **{
+                    "from": batch[0].offset, "next": following,
+                    "runs": self._runs(pairs)})
+            written = producer.send(self.OFFSET_MAP, key=key, value=value,
+                                    partition=0)
+            producer.flush()
+            self._refused(self.OFFSET_MAP, 0, [(batch[0].offset, written)])
+            producer.commit_transaction()
+        except (Exception, SystemExit):
+            # what the target holds of this partition is read again from
+            # the map before it is written to again
+            self.__dict__.setdefault("_settled", set()).discard((topic, p))
+            try:
+                producer.abort_transaction()
+            except Exception:  # noqa: BLE001 - the first failure is the news
+                pass
+            raise
+        self.__dict__.setdefault("_claimed", {}).pop((topic, p), None)
+        pst["copied"] += len(batch)
+        pst["next"] = following
+        save()
+        return len(batch)
+
+    def _map_reconciled(self, topic, p, pst, save, log):
+        """The position of a mapped partition put where the map on the
+        target says: once for each partition in this process, and again
+        after any failure. The map is what a crash leaves exact - a batch
+        is in it exactly when it is on the target - so a batch committed
+        and not saved is not sent again, and a position saved past the
+        map is not trusted."""
+        settled = self.__dict__.setdefault("_settled", set())
+        if (topic, p) in settled:
+            return
+        entry = self._read_offset_map().get((topic, p))
+        known = entry["next"] if entry else None
+        if known is not None and known != pst["next"]:
+            if known > pst["next"]:
+                landed = sum(n for s, d, n in entry["runs"]
+                             if s >= pst["next"])
+                pst["copied"] += landed
+                log(f"{topic}[{p}]: {landed:,} messages were committed with"
+                    " their offsets and the position was not saved: counted,"
+                    " not sent again")
+            else:
+                # the saved position is past the map: markers only, or a
+                # map that lost batches - the next message read says which
+                self.__dict__.setdefault("_claimed", {})[(topic, p)] = \
+                    pst["next"]
+            pst["next"] = known
+            save()
+        settled.add((topic, p))
+
     def _groups(self, side):
         """Consumer group ids on one side.
 
@@ -1147,13 +1783,22 @@ class KafkaEngine(Engine):
 
     def _located(self, sc, dc, tp, offset, tables, group):
         """(the target's offset of the source's message at `offset`, how it
-        was found), or (None, why). By the header the copier wrote where
+        was found), or (None, why). By the offset map the copier wrote on
+        the target - identical offsets, or the source and target offsets
+        of each batch, exact and not searched for; by the header the
+        copier wrote where
         the target's messages carry one; by the cluster mirror's own tables
         where it copied them (`mirror.read_table`) - a checkpoint of this
         very group at this very offset, or the offset syncs around it - each
         proved by the message before it is taken; by the message itself
         (its time, key and value) otherwise."""
         from .. import mirror
+        kept = (tables.get("map") or {}).get((tp.topic, tp.partition))
+        if kept is not None:
+            got = self._map_position(kept, offset,
+                                     dc.end_offsets([tp])[tp])
+            if got is not None:
+                return got
         message = self._message_at(sc, tp, offset)
         if message is None:
             return None, "the message it reads next could not be read"
@@ -1249,6 +1894,9 @@ class KafkaEngine(Engine):
         groups = self._groups("src") | self._groups("dst")
         sc = dc = None
         tables = None
+        # the offset map the copy wrote on the target, read whole or not
+        # at all: a position is never placed from part of it
+        kept = self._read_offset_map()
         try:
             for group in sorted(groups):
                 try:
@@ -1264,6 +1912,15 @@ class KafkaEngine(Engine):
                     offs_d = {}
                 checked += 1
                 same, apart = self._comparable(list(offs_s))
+                # equal starts and ends on a partition copied with a map
+                # are a coincidence of markers and holes, not one message
+                same, apart = (
+                    [tp for tp in same
+                     if not (kept.get((tp.topic, tp.partition)) or {})
+                     .get("runs")],
+                    apart + [tp for tp in same
+                             if (kept.get((tp.topic, tp.partition)) or {})
+                             .get("runs")])
                 for tp in same:
                     rows.append({"group": group, "topic": tp.topic,
                                  "partition": tp.partition,
@@ -1276,6 +1933,7 @@ class KafkaEngine(Engine):
                     if tables is None:
                         tables = {k: mirror.read_table(self, k)
                                   for k in ("syncs", "checkpoints")}
+                        tables["map"] = kept
                     try:
                         there, how, note = self._place(sc, dc, tp,
                                                        offs_s[tp], tables,
@@ -1478,8 +2136,15 @@ class KafkaEngine(Engine):
         bad = []
         n = 0
         total_a = total_b = 0
+        mapped = self._mapped_partitions()
+        apart = []
         for t in self._topics(sc):
             tps = [TopicPartition(t, p) for p in self._partitions(sc, t)]
+            if any((t, tp.partition) in mapped for tp in tps):
+                # the target's offsets carry transaction markers the source
+                # has not: arithmetic on them says nothing
+                apart.append(t)
+                continue
             if not tps:
                 continue
             a = sum(sc.end_offsets(tps)[tp] - sc.beginning_offsets(tps)[tp]
@@ -1494,13 +2159,23 @@ class KafkaEngine(Engine):
             total_b += b
             if a != b:
                 bad.append(f"{t} messages src={a} dst={b}")
+        res = []
+        if apart:
+            res.append(Result(
+                "counts", "offset-map topics", "warn",
+                f"{len(apart)} topics are copied with an offset map, their"
+                " offsets not the source's, so end minus start is not their"
+                " message count and was not compared: "
+                + ", ".join(apart[:10]), "", "compare their messages by content (check --check data)"
+                " until a count by the map is built"))
         if bad:
-            return [Result("counts", "messages", "diff", "; ".join(bad[:10]), "",
-                           "counts net of retention: small gaps are normal"
-                           " while mirror lags, big gaps mean missing data")]
-        return [Result("counts", "messages", "ok",
-                       f"{n} topics, messages {total_a:,}=={total_b:,}"
-                       " (net of retention)")]
+            return res + [Result(
+                "counts", "messages", "diff", "; ".join(bad[:10]), "",
+                "counts net of retention: small gaps are normal"
+                " while mirror lags, big gaps mean missing data")]
+        return res + [Result("counts", "messages", "ok",
+                             f"{n} topics, messages {total_a:,}=={total_b:,}"
+                             " (net of retention)")]
 
     def check_data(self, db, table=None, stream=None):
         from kafka import TopicPartition
@@ -1522,12 +2197,17 @@ class KafkaEngine(Engine):
         # finding rather than used as a brake - a cluster missing a broker is
         # exactly when a quick honest answer matters most.
         gate = Throttle(1)
+        mapped = self._mapped_partitions()
+        skipped = []
         for t in topics:
             parts = self._partitions(sc, t)
             if not parts:
                 unread.append((t, None, "no partitions on the source"))
                 continue
             for p in parts:
+                if (t, p) in mapped:
+                    skipped.append(f"{t}[{p}]")
+                    continue
                 tp = TopicPartition(t, p)
                 with gate.unit():
                     a, ea = self._tail_hash(sc, tp, sample, "src")
@@ -1564,17 +2244,26 @@ class KafkaEngine(Engine):
                               f"content differs in: {', '.join(bad[:10])}", "",
                               "re-mirror those topics, verify consumer-group"
                               " checkpoints before cutover"))
-        if not res and not checked:
+        if not res and not checked and not skipped:
             res.append(Result("data", "tail-sample", "error",
                               "no partitions were compared at all, which is"
                               " not the same as every partition matching"))
-        elif not res:
+        elif not res and checked:
             res.append(Result("data", "tail-sample", "ok",
                               f"last {sample} messages hash-equal on"
                               f" {checked} partitions"
                               + (f"; {', '.join(healed)} differed while"
                                  " their changes were still arriving"
                                  if healed else "")))
+        if skipped:
+            res.append(Result(
+                "data", "tail-sample offset-map", "warn",
+                f"{len(skipped)} partitions are copied with an offset map:"
+                " their messages are not at the source's offsets, so a tail"
+                " window by offset is not the same messages on both sides"
+                f" and was not compared ({', '.join(skipped[:6])})", "",
+                "not verified for these partitions until a comparison by"
+                " the map is built"))
         return res
 
     def _confirmed(self, db, bad, stream=None):

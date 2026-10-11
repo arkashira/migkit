@@ -903,6 +903,28 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> has fewer partitions on the target than on the source: a key's messages would land in another partition, out of the order its consumers read them
 
+* offsets: <...> is not one of <...>
+
+* the offset map on the target could not be read to its end: no position is placed from part of it
+
+* the offset map holds a record of version <...>, which this migkit does not read: nothing is placed from it
+
+* the offset map disagrees with itself at <...>[<...>] source offset <...>: it is in two committed batches; nothing is placed from it
+
+* <...>[<...>]: the target's end is <...> where the copy has reached source offset <...> (the source ends at <...>): identical offsets cannot be vouched for. Nothing more is copied
+
+* <...>[<...>]: the target's message at <...> is not the source's: the copy stops, and no offset is claimed identical
+
+* <...>[<...>]: the target's log is at <...>-<...>, past the source's first offset <...>, and the copy has not begun: someone else wrote to it. Nothing is copied, and no offset is claimed identical
+
+* <...>[<...>]: after the padding the target's end is <...>, not <...>: someone else wrote to it. The padding stays until it is cut; nothing is copied
+
+* <...>[<...>]: the target's first offset is <...> after DeleteRecords up to <...>: the offsets are not identical, and nothing is copied
+
+* <...>[<...>]: source offset <...> landed at <...> on the target - another writer is on the partition. Identical offsets hold below <...> and are not claimed past it; nothing more is copied
+
+* <...>[<...>]: the saved position was <...> but the offset map on the target knows messages only before <...>: the map is missing what was copied. No offset is placed from it; nothing more is copied
+
 * the target refused offsets for <...>: <...>. Offsets committed before this one stand; nothing was deleted
 
 ## SQLite

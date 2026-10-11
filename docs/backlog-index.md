@@ -53,29 +53,29 @@ in these historical totals.
 
 | Status | S | M | L | Total |
 |---|---|---|---|---|
-| DONE | 93 | 137 | 29 | 259 |
-| PARTLY | 5 | 24 | 20 | 49 |
-| IN PROGRESS | 0 | 7 | 11 | 18 |
-| OPEN | 37 | 36 | 10 | 83 |
+| DONE | 106 | 145 | 33 | 284 |
+| PARTLY | 13 | 26 | 20 | 59 |
+| IN PROGRESS | 0 | 1 | 7 | 8 |
+| OPEN | 16 | 32 | 10 | 58 |
 | BLOCKED | 10 | 4 | 6 | 20 |
 | NOT PURSUED | 8 | 1 | 0 | 9 |
 | **Total** | 153 | 209 | 76 | **438** |
 
 | Area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED | Total |
 |---|---|---|---|---|---|---|---|
-| move | 29 | 10 | 2 | 11 | 0 | 2 | 54 |
-| verify | 40 | 4 | 0 | 10 | 1 | 1 | 56 |
-| change follow | 34 | 4 | 1 | 18 | 5 | 0 | 62 |
+| move | 30 | 11 | 2 | 9 | 0 | 2 | 54 |
+| verify | 42 | 4 | 0 | 8 | 1 | 1 | 56 |
+| change follow | 41 | 7 | 1 | 8 | 5 | 0 | 62 |
 | two-way | 4 | 2 | 0 | 3 | 0 | 0 | 9 |
-| cutover | 14 | 1 | 1 | 4 | 0 | 0 | 20 |
-| types | 11 | 1 | 1 | 1 | 0 | 0 | 14 |
-| engines | 24 | 5 | 3 | 13 | 6 | 1 | 52 |
-| conversion | 18 | 3 | 9 | 1 | 0 | 0 | 31 |
-| security | 10 | 2 | 0 | 4 | 2 | 1 | 19 |
+| cutover | 14 | 3 | 1 | 2 | 0 | 0 | 20 |
+| types | 12 | 1 | 1 | 0 | 0 | 0 | 14 |
+| engines | 25 | 7 | 2 | 11 | 6 | 1 | 52 |
+| conversion | 29 | 1 | 0 | 1 | 0 | 0 | 31 |
+| security | 10 | 5 | 0 | 1 | 2 | 1 | 19 |
 | ease of use | 19 | 2 | 1 | 3 | 1 | 1 | 27 |
-| operations/scale | 26 | 9 | 0 | 11 | 5 | 3 | 54 |
-| tools used whole | 30 | 6 | 0 | 4 | 0 | 0 | 40 |
-| **Total** | 259 | 49 | 18 | 83 | 20 | 9 | **438** |
+| operations/scale | 26 | 10 | 0 | 10 | 5 | 3 | 54 |
+| tools used whole | 32 | 6 | 0 | 2 | 0 | 0 | 40 |
+| **Total** | 284 | 59 | 8 | 58 | 20 | 9 | **438** |
 
 ## Items
 
@@ -357,8 +357,8 @@ in these historical totals.
 | 273 | LT.R9 | PostgreSQL at wal_level=replica via pg_walinspect/pg_waldump | OPEN | M | change follow | L4503-4505 |
 | 274 | LT.R10 | MongoDB standalone (dbHash + raw-BSON bucket digests) | OPEN (in the report's table; the backlog names R1-R9) | S | change follow | report L1083 |
 | 275 | LT.C1 | mongosync's job rebuilt from change streams, raw BSON and generations, bypassWriteBlockingMode audited | OPEN | M | change follow | L3947-3949, L4513-4517 |
-| 276 | LT.C2 | Kafka offsets kept identical for gap-free partitions (pad, DeleteRecords) | OPEN | M | cutover | L3949-3951, L4517-4519 |
-| 277 | LT.C3 | Kafka offset map written in the data's transaction | OPEN | M | cutover | L4519-4521 |
+| 276 | LT.C2 | Kafka offsets kept identical for gap-free partitions (pad, DeleteRecords) | PARTLY (done: `KafkaEngine._plan_offsets` / `choose_offsets` / `_identity_ready` / `_copy_identical`, hop key `offsets` (auto, map, off) and `offsets_pad_limit`: a partition whose target is empty and whose source offsets are consecutive (read to its end where padding is owed, otherwise proved offset by offset as each lands) is padded with throwaway records up to the source's first offset, `DeleteRecords` moves the target's start there (the only call Kafka has for it; probed first with a request that deletes nothing, so nothing is padded that cannot be cut), the copy is not transactional (a marker would take an offset), each landed offset is read back and held to the source's, a gap met later ends identity there and is said, a stop mid-padding or after a landed batch resumes from the target's own end; where the offsets are not consecutive, the target holds messages, or the cut is refused, nothing is padded or claimed and the reason is said; proved without a broker on in-memory clusters (`tests/test_a_kafka_copy_keeps_the_sources_offsets_where_it_can.py`, `tests/kafka_fake.py`). missing: not run on a real broker (DeleteRecords on a live log, the idempotent producer's offsets, retention racing the padding are modelled, not measured); the source is read twice where padding is owed; a prefix of billions of offsets is billions of padding records (`offsets_pad_limit` is the only bound, no cost-model choice yet); `auto` does not fall back to the map, only `offsets: map` does) | M | cutover | L3949-3951, L4517-4519 |
+| 277 | LT.C3 | Kafka offset map written in the data's transaction | PARTLY (done, with `offsets: map` and a client that runs transactions: `KafkaEngine._copy_mapped`, `_map_reconciled`, `_read_offset_map`, `_map_position`: a partition that cannot be identical is copied one batch to one producer transaction (`transactional_id` per target topic), the batch's messages and the runs of source to target offsets they took (the offsets the target answered) are written to the target's `__migkit_offset_map` in that transaction, so a crash leaves both or neither; the copy goes on from the map, not from a counter (a batch committed and not saved is counted, not sent again; a position saved past the map is refused); the map is read back whole (read-committed) in `group_positions` to place a group's offset exactly, a hole to the next message, a map that disagrees with itself or is not read to its end refused; the count and tail checks say a mapped partition is not compared by offset instead of reporting a false difference; proved without a broker, with crash before commit, crash after commit, replay equal to an uninterrupted run (`tests/test_a_kafka_offset_map_is_written_in_the_data_transaction.py`). missing: not run on a real broker (transactions, fencing and the abort marker's offset are modelled, not measured); a client older than the transactional one writes no map and says so; mapped partitions are not verified by content yet (`check_counts` and `check_data` warn and skip them, so cutover readiness for them rests on the map alone); a group at the very end of a partition whose last offset is a marker is not placed from the map; the map's size grows with the batches, with no thinning; `auto` does not turn the map on) | M | cutover | L4519-4521 |
 | 278 | LT.C4 | Redis/Valkey two-site active-active rules | OPEN | L | two-way | L3951-3952, L4521-4522 |
 | 279 | LT.C5 | XStream's job: LogMiner on a migkit Oracle Free mining instance (mining on a standby) | OPEN | M | change follow | L3935, L3953, L4522-4524, L4547 |
 | 280 | LT.C6 | RIOT-X's live mode made lossless (PSYNC client or IDLETIME sweep) | OPEN | M | change follow | L4524-4525 |

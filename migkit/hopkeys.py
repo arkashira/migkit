@@ -573,6 +573,19 @@ HOP_OPTIONS = {
                          " partition and offset in a header, so a group's"
                          " position is placed on the target exactly", "bool",
                          ("kafka",)),
+    "offsets": Key("how a copied topic's offsets are kept: auto gives a"
+                   " partition whose source offsets have no gap the very"
+                   " same offsets on the target, map also writes every other"
+                   " partition's source-to-target offsets into the target in"
+                   " the same transaction as the messages they describe, off"
+                   " copies as before", "str", ("kafka",),
+                   choices=("auto", "map", "off"), fold=True, knob="way",
+                   default="auto"),
+    "offsets_pad_limit": Key("the most records migkit may produce and then"
+                             " delete to make a partition's first offset the"
+                             " source's; a partition that needs more is"
+                             " copied without identical offsets", "int",
+                             ("kafka",), knob="ceiling", least=0),
     "on_conflict": Key("source-wins or keep-target", "str",
                        choices=("source-wins", "keep-target"), fold=True,
                        default="source-wins"),
