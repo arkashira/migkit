@@ -330,8 +330,10 @@ HOP_OPTIONS = {
                                         "int", least=1, default=1),
                            "expires": Key("seconds a request stands",
                                           "number", least=1)}),
-    "at_rest": Key("who may read the files holding values", "dict",
-                   subs=("recipients",)),
+    "at_rest": Key("who may read the files holding values (recipients),"
+                   " and the directory on an encrypted or memory-backed"
+                   " volume where the files a program writes lie"
+                   " (scratch)", "dict", subs=("recipients", "scratch")),
     "atlas": Key("the structural schema reading, on or off", "bool",
                  ("postgres", "mysql"), knob="way",
                  named_for_a_program=True),

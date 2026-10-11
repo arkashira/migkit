@@ -16,8 +16,14 @@ back with the operator's own key (`MIGKIT_IDENTITY`: a private SSH key or
 an age identity file, `~/.ssh/id_ed25519` by default). Nothing else
 changes: every place that reads or writes one goes on reading and writing
 a path; the path itself encrypts (`EvidencePath`). A file written before
-the hop asked reads as it was. What a program migkit drives writes on its
-own (a dump's files) is not covered: keep those on an encrypted disk.
+the hop asked reads as it was.
+
+What a program migkit drives writes on its own (a dump's files, backlog
+R17b.prog) cannot be sealed by migkit: the program owns those bytes. The
+hop can name where they lie instead (`at_rest.scratch`, `program_path`), a
+volume the operator keeps encrypted or in memory; the files are private
+and removed when the move ends either way. That is a place, not a cipher,
+and `program_path` states its limits.
 """
 import base64
 import fnmatch
@@ -270,3 +276,72 @@ def report_path(hop, path):
         return path
     _ROOTS[str(pathlib.Path(path))] = who
     return EvidencePath(str(path))
+
+
+def scratch_of(hop):
+    """The directory the hop names for the files programs write
+    (`at_rest: {scratch: /path}`), or None."""
+    got = ((hop.options or {}).get("at_rest") or {})
+    got = got.get("scratch") if isinstance(got, dict) else None
+    return str(got).strip() if got and str(got).strip() else None
+
+
+def program_path(hop, db, name):
+    """Where a program migkit drives writes `name` (a dump directory), for
+    this hop and database (backlog R17b.prog).
+
+    A dump is the source's data, all of it, in files the program writes in
+    its own format: it cannot be sealed as migkit seals its own evidence -
+    a parallel restore reads its directory format by seeking, and the
+    program owns the bytes. So the design is a place, not a cipher:
+    * no `at_rest.scratch`: under the hop's report directory, as always -
+      private (0700) while it exists and removed on every way out
+      (`movers._LocalCopy`)
+    * `at_rest.scratch: /path` - an absolute directory on a volume the
+      operator keeps encrypted or memory-backed (a LUKS mount, a tmpfs):
+      the dump lives under `<scratch>/<hop>/<db>/<name>`, each level 0700,
+      and goes the same way. The report directory stays a place for
+      reports only.
+
+    Limits, stated plainly: migkit does not check that the volume is
+    encrypted or memory-backed - it can only be asked for and recorded
+    (`program_files_note`); a killed run leaves a dump there until the next
+    run of the same hop and database removes it first; files a program
+    writes elsewhere (its own temporary directory, a log) are not moved;
+    and nothing here encrypts the bytes a program has written.
+    """
+    where = scratch_of(hop)
+    if not where:
+        return hop.report_dir(db) / name
+    base = pathlib.Path(where).expanduser()
+    if not base.is_absolute():
+        raise SystemExit(f"at_rest.scratch is {where!r}: an absolute path"
+                         " to a directory on an encrypted or memory-backed"
+                         " volume")
+    from . import durable
+    try:
+        d = durable.private_dir(base / str(hop.name))
+        if db:
+            d = durable.private_dir(d / str(db))
+    except OSError as e:
+        raise SystemExit(f"at_rest.scratch {where} cannot be used for the"
+                         f" files a program writes ({e})") from None
+    return d / name
+
+
+def program_files_note(hop):
+    """One sentence for the plan and the log: where a dump's files lie and
+    how far at_rest reaches over them; None where the hop asks nothing."""
+    if not recipients_of(hop) and not scratch_of(hop):
+        return None
+    where = scratch_of(hop)
+    if where:
+        return (f"the local copy of the source is written to {where}"
+                " (at_rest.scratch), private to this user and removed when"
+                " the move ends; keep that volume encrypted or in memory -"
+                " migkit cannot check it")
+    return ("the local copy of the source is written in the clear under the"
+            " report directory (private to this user, removed when the"
+            " move ends): at_rest seals migkit's own files, not a program's"
+            " dump - name at_rest.scratch to put it on an encrypted or"
+            " memory-backed volume")

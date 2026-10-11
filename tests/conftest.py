@@ -19,6 +19,12 @@ if not os.environ.get("MIGKIT_KNOWLEDGE"):
     os.environ["MIGKIT_KNOWLEDGE"] = os.path.join(
         tempfile.mkdtemp(prefix="migkit-knowledge-"), "knowledge.json")
 
+# the user's state directory (`config.state_home`: the masking secret, restore
+# points) is kept apart for a test run, never this machine's own
+if not os.environ.get("XDG_STATE_HOME"):
+    import tempfile
+    os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="migkit-state-")
+
 
 def _free(host, port):
     with socket.socket() as s:

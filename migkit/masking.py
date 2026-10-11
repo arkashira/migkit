@@ -10,14 +10,38 @@ masked:
   name in the hop: those columns' values; a table with any of them has its
   keys shown masked too, because a key shown whole can be the column itself
 
-A masked value is shown as `masked:` and ten hex digits, a hash of the value
-with a salt kept for this hop. Equal values show equal, so a comparison
+A masked value is shown as `masked:` and ten hex digits, a keyed HMAC-SHA256
+of the value (backlog R17b.hmac). Equal values show equal, so a comparison
 over masked values still lines rows up and still says which differ. The
-salt stays in the hop's report directory, readable by this user only. What
-migkit keeps on disk for its own repairs (the drilldown key files) is not
-masked: those are its working state, not a report.
+key is made of two parts, and the report holds only one:
+* the hop's salt (`mask.salt`, in the hop's report directory, readable by
+  this user only) - a domain separator, so another hop shows other tokens
+* a secret kept local to the user, outside every report directory
+  (`mask.key` in the state directory, `config.state_home`, 0600)
+
+A report that is shared with its salt still cannot be tested against a list
+of guessed emails or card numbers: without the secret, a token confirms
+nothing. A salted hash with the salt in the report could be.
+
+`keyed` is the one function every hash of a value a report shows goes
+through; `token` is its masked-value form. Every place that shows one
+(the drilldown, the repair plan, the second reading, the evidence export,
+the two-way conflicts) already calls `token`.
+
+Limits: the secret lives in the user's state directory, so a report taken
+to another machine cannot be re-tokenised there and tokens differ between
+users and machines (they only ever needed to agree within one report). Where
+the state directory cannot be written the secret is drawn for the process
+alone: tokens then agree within that run and not across runs, never
+weaker. Tokens made before this (a salted SHA-256) do not match the new
+ones. Not covered here: the integrity digests of files that hold values
+(`applied_sha256`, `plain_sha256`, a conflict record's `sha256`) - those
+are plain hashes of a whole file, checked by recomputing them, and stay so.
+What migkit keeps on disk for its own repairs (the drilldown key files) is
+not masked: those are its working state, not a report.
 """
 import hashlib
+import hmac
 import os
 
 
@@ -82,13 +106,61 @@ def _salt(hop):
         return path.read_bytes()
 
 
+#: {state directory: the user's local secret}, read once per process
+_SECRETS = {}
+
+
+def _secret():
+    """The user's local secret: 32 random bytes in `mask.key` under the
+    state directory, 0600, made once. Never inside a report directory."""
+    from . import config
+    where = config.state_home()
+    got = _SECRETS.get(str(where))
+    if got is not None:
+        return got
+    path = where / "mask.key"
+    try:
+        got = path.read_bytes()
+    except OSError:
+        got = b""
+    if len(got) < 32:
+        fresh = os.urandom(32)
+        got = fresh
+        try:
+            from . import durable
+            durable.private_dir(where)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(fresh)
+        except FileExistsError:
+            try:
+                got = path.read_bytes()
+            except OSError:
+                pass
+        except OSError:
+            pass  # the process's own: it agrees within this run only
+        if len(got) < 32:
+            got = fresh
+    _SECRETS[str(where)] = got
+    return got
+
+
+def keyed(hop, data):
+    """The HMAC-SHA256 hex digest of `data` (bytes or text) under this hop's
+    key: the local secret and the hop's salt. The one way a hash of a value
+    is made for a report that may be shared (R17b.hmac)."""
+    if not isinstance(data, bytes):
+        data = str(data).encode("utf-8", "surrogatepass")
+    key = hmac.new(_secret(), b"migkit-mask-v1|" + _salt(hop),
+                   hashlib.sha256).digest()
+    return hmac.new(key, data, hashlib.sha256).hexdigest()
+
+
 def token(hop, value):
     """The value as shown masked; NULL stays NULL, which is not a value."""
     if value is None:
         return None
-    digest = hashlib.sha256(_salt(hop) + str(value).encode("utf-8",
-                                                            "surrogatepass"))
-    return "masked:" + digest.hexdigest()[:10]
+    return "masked:" + keyed(hop, str(value))[:10]
 
 
 def shown(hop, table, name, value):
