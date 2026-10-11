@@ -364,6 +364,29 @@ def test_a_routine_that_runs_with_the_callers_rights_instead_is_found(cat):
     assert _eng()._deep_ownership("app").status == "ok"
 
 
+def test_table_options_that_differ_are_found_and_a_read_only_target_is_said(
+        cat):
+    cat.on("read_only, iot_type from all_tables", lambda side, sql: [
+        ("ORDERS", "YES", "DISABLED", "ENABLED", "NO", None),
+        ("LINES", "YES", "DISABLED", "DISABLED", "NO", None)] if side == "src"
+        else [("ORDERS", "NO", "DISABLED", "ENABLED", "YES", None),
+              ("LINES", "YES", "DISABLED", "DISABLED", "NO", None)])
+    got = _eng()._deep_options("app")
+    assert got.status == "diff"
+    assert got.category == "structure.collection-options"
+    assert "orders: logging YES on the source, NO on the target" in got.detail
+    assert "orders: read-only NO on the source, YES on the target" \
+        in got.detail
+    assert "lines" not in got.detail
+    # a server before 12.2 keeps no read-only flag: the rest are compared
+    cat.answers.clear()
+    cat.on("null, iot_type from all_tables",
+           [("ORDERS", "YES", "DISABLED", "ENABLED", None, None)])
+    cat.on("read_only, iot_type from all_tables",
+           RuntimeError("ORA-00904: \"READ_ONLY\": invalid identifier"))
+    assert _eng()._deep_options("app").status == "ok"
+
+
 # ---- all of them together ----------------------------------------------------
 
 def test_a_check_that_cannot_read_is_an_error_and_the_others_still_run(

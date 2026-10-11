@@ -1458,7 +1458,7 @@ DEPTH_GAPS = {
     "verify.structure.collection-options": {
         **_each(NOT_YET, "P0-PARITY.verify",
                 "postgres mysql mssql kafka sqlite clickhouse dynamodb "
-                "oracle db2 db2i db2zos ase teradata opensearch cassandra "
+                "db2 db2i db2zos ase teradata opensearch cassandra "
                 "redshift snowflake bigquery duckdb iceberg delta tidb "
                 "cockroachdb dsql couchbase cosmosdb hetero"),
         **_each(NOT_APPLICABLE, _NO_COLLECTION, "redis parquet copybook"),
@@ -2153,6 +2153,7 @@ UNPROVED = {
     "security.tls": "oracle",
     "tail.ddl": "oracle",
     "tail.renames": "oracle",
+    "verify.structure.collection-options": "oracle",
 }
 
 

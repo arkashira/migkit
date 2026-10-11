@@ -226,3 +226,40 @@ def test_assess_carries_the_inventory_and_the_pre_flight(cat, monkeypatch):
     assert [r["item"] for r in before] == ["app keys", "app mojibake"]
     assert before[0]["level"] == "fail" and "events" in before[0]["detail"]
     assert any(r["scope"] == "manual work" for r in rows)
+
+
+# ---- rows sized where they lie ---------------------------------------------
+
+def test_a_rows_widest_value_is_measured_by_the_server_not_sampled(cat):
+    eng = _eng()
+    eng.neutral_columns = lambda side, db, table: [
+        ("id", "NUMBER(10,0)"), ("body", "CLOB"), ("blob", "BLOB"),
+        ("note", "VARCHAR2(40)")]
+    eng.table_facts = lambda side, db: {"orders": {"rows": 1000,
+                                                   "bytes": 5_000_000}}
+    eng.neutral_tables = lambda side, db: ["orders"]
+    cat.on("select max(s), avg(s), count(*) from",
+           [(40_000_000, 120_000.5, 1000)])
+    cat.on("fetch first", [(100,), (900,), (40_000_000,)])
+    got = eng.row_sizes("src", "app")
+    assert got["orders"]["largest"] == 40_000_000
+    assert got["orders"]["rows"] == 1000
+    sent = " ".join(sql for _, sql in cat.sent)
+    # a text large object is counted at the most a character can take, a
+    # binary one by its length, an ordinary column by its stored bytes, the
+    # rest at eight
+    assert 'coalesce(dbms_lob.getlength("BODY") * 4, 0)' in sent
+    assert 'coalesce(dbms_lob.getlength("BLOB"), 0)' in sent
+    assert 'coalesce(lengthb("NOTE"), 0)' in sent
+
+
+def test_a_table_with_no_column_that_can_be_large_is_sized_from_its_catalogue(
+        cat):
+    eng = _eng()
+    eng.neutral_columns = lambda side, db, table: [
+        ("id", "NUMBER(10,0)"), ("at", "DATE")]
+    eng.table_facts = lambda side, db: {"orders": {"rows": 10,
+                                                   "bytes": 1_000}}
+    got = eng.row_sizes("src", "app", ["orders"])
+    assert got["orders"]["largest"] == 8 * 2 + 1
+    assert cat.sent == []

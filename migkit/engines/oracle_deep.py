@@ -97,7 +97,8 @@ class OracleDeep:
                 ("rls", self._deep_rls, ()),
                 ("grants", self._deep_grants, ()),
                 ("seq-grants", self._deep_seq_grants, ()),
-                ("ownership", self._deep_ownership, ())):
+                ("ownership", self._deep_ownership, ()),
+                ("options", self._deep_options, ())):
             got = self._guarded(db, word, fn, also)
             out += got if isinstance(got, list) else [got]
         return out
@@ -768,6 +769,45 @@ class OracleDeep:
         return ("diff", "; ".join(parts),
                 "migkit users create <hop> --apply replays the source's"
                 " grants")
+
+    def _deep_options(self, db):
+        """What a table is kept with beyond its columns - written without
+        redo (`nologging`), compressed, held read-only, free to move its
+        rows - the target's held to the source's. A table the target keeps
+        read-only refuses the tail's writes; one kept without redo cannot
+        be recovered past the load."""
+        sql = ("select table_name, logging, compression, row_movement,"
+               " read_only, iot_type from all_tables where owner = " + MARK
+               + " and nested = 'NO' and secondary = 'N' and temporary ="
+                 " 'N' order by 1")
+
+        def read(side):
+            try:
+                rows = self._cat(side, db, sql)
+            except Exception as e:  # noqa: BLE001 - before 12.2: no read_only
+                if "ORA-00904" not in str(e):
+                    raise
+                rows = self._cat(side, db,
+                                 sql.replace(" read_only,", " null,"))
+            return {self._said(str(t)): (str(lg), str(c), str(m),
+                                         str(ro or "NO"), str(i or ""))
+                    for t, lg, c, m, ro, i in self._taken(db, rows)}
+        src, dst = read("src"), read("dst")
+        names = ("logging", "compression", "row movement", "read-only",
+                 "organisation")
+        bad = [f"{t}: {names[i]} {a[i]} on the source, {dst[t][i]} on the"
+               " target" for t, a in sorted(src.items()) if t in dst
+               for i in range(len(names)) if a[i] != dst[t][i]]
+        if bad:
+            return Result("deep", f"{db} options", "diff",
+                          f"{len(bad)} table options differ: "
+                          + "; ".join(bad[:5]), "",
+                          "alter table ... as the source has it",
+                          category="structure.collection-options")
+        return Result("deep", f"{db} options", "ok",
+                      f"{len(src)} tables kept with the options the source"
+                      " keeps them with",
+                      category="structure.collection-options")
 
     def _deep_ownership(self, db):
         """Whose privileges a routine runs with - its owner's (definer's

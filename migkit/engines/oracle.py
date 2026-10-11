@@ -35,6 +35,7 @@ import re
 import threading
 import time
 
+from .. import pieces
 from ..decide import Need, Rung
 from .base import Engine, RepairAction, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
@@ -358,6 +359,23 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
     CANON_ENGINE = "oracle"
     OWN_PREFIX = OWN_PREFIX
     BRAND_FAMILY = "oracle"
+    #: large values: a row sized by the server over the stored length of
+    #: the columns that can hold one (a character takes at most four bytes
+    #: of a text large object), a large table over a sample of its rows.
+    #: They are read and written through the value's locator in pieces
+    #: (`_read_in_pieces`), which is Oracle's own
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, read and written in pieces through the"
+        " value's locator",
+        length={"clob": "dbms_lob.getlength({c}) * 4",
+                "nclob": "dbms_lob.getlength({c}) * 4",
+                "blob": "dbms_lob.getlength({c})",
+                "varchar2": "lengthb({c})", "nvarchar2": "lengthb({c})",
+                "char": "lengthb({c})", "nchar": "lengthb({c})",
+                "raw": "lengthb({c})"},
+        types=("varchar2", "nvarchar2", "char", "nchar", "clob", "nclob",
+               "blob", "raw"),
+        sample="sample ({pct})")
     #: what `assess` asks before anything moves: the tables no key names a
     #: row of, and text stored twice as UTF-8 on the source
     PREFLIGHT = ("_deep_keys", "_mojibake")
