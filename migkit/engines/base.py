@@ -2759,6 +2759,11 @@ class Engine:
 
     # which family of client tools this engine uses, for the version check
     ENGINE_FAMILY = ""
+    #: the family whose brands `variants.SIGNATURES` tells apart, where the
+    #: engine reads them and has no `ENGINE_FAMILY` (which the client-tool
+    #: check, the TLS posture and the feature comparison take as the
+    #: engine's own software)
+    BRAND_FAMILY = ""
 
     def _client_tool_versions(self, tools, server_version):
         """assess rows for client tools running ahead of the target server.
@@ -2841,7 +2846,7 @@ class Engine:
         cached = getattr(self, "_brand_cache", None)
         if cached is None:
             from .. import variants as _v
-            fam = self.ENGINE_FAMILY or ""
+            fam = self.ENGINE_FAMILY or self.BRAND_FAMILY or ""
             try:
                 s_raw, d_raw = self._brand_probes()
             except Exception:

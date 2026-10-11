@@ -62,13 +62,15 @@ def hop(server):
 def test_constraints_the_server_named_are_compared_by_what_they_are(hop):
     assert [(r.status, r.detail) for r in hop.check_schema("shop")] == [
         ("ok", "2 tables, 6 columns with their keys, indexes, constraints"
-               " and triggers, and 0 views, routines, sequences and synonyms"
-               " the same on both sides")]
+               " and triggers the same on both sides"),
+        ("ok", "0 views, routines, sequences and synonyms the same on both"
+               " sides")]
     _sql("shop", "alter table dbo.p add constraint named_ck check (id > 0)")
     got = hop.check_schema("shop")
-    assert [(r.status, r.detail) for r in got] == [
-        ("diff", "dbo.p: check named_ck ([id]>(0)) missing on the target")
-    ], got
+    assert [(r.status, r.detail) for r in got][0] == (
+        "diff", "dbo.p: check named_ck ([id]>(0)) missing on the target"
+    ), got
+    assert got[1].status == "ok", got
 
 
 def test_every_part_of_a_column_and_a_table_is_compared(hop):
@@ -89,7 +91,7 @@ def test_every_part_of_a_column_and_a_table_is_compared(hop):
          "drop index ix_q on dbo.q", "create index ix_q on dbo.q (y, x)",
          "alter table dbo.q add constraint fk_q foreign key (id) references"
          " dbo.o (id)")
-    (got,) = hop.check_schema("shop")
+    got = hop.check_schema("shop")[0]
     assert got.status == "diff", got
     said = pathlib.Path(got.report).read_text()
     for part in ("dbo.o: column v nvarchar(10) -> nvarchar(5) (longer values"

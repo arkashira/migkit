@@ -1,3 +1,4 @@
+import re
 import time
 
 from .. import canon, decide, pieces
@@ -55,6 +56,12 @@ class MSSQLEngine(DbapiRows, Engine):
     #: a change tracking version only says where a read begins: one of its
     #: own reads from an older one again, while the retention keeps it
     REREADS_FROM_A_POSITION = True
+    #: the products that answer on this wire, told apart (`variants`)
+    BRAND_FAMILY = "mssql"
+    #: its row hash, copy and bulk load take whole rows under the source's
+    #: names: a table the hop maps the columns of or renames goes through
+    #: the pair, which reads the mapping (`Engine.through_pair`)
+    OWN_PATHS_READ_COLUMN_MAPPING = False
 
     def _kept(self, side, db):
         """The connection this thread keeps to one side's database: every
@@ -336,6 +343,13 @@ class MSSQLEngine(DbapiRows, Engine):
         from .. import drift
         return drift.pairs(self.shape_catalog(side, db))
 
+    #: the kind of `objects` each `type_desc` of `_objects` is
+    OBJECT_KINDS = {"VIEW": "view", "SQL_STORED_PROCEDURE": "procedure",
+                    "SQL_SCALAR_FUNCTION": "function",
+                    "SQL_TABLE_VALUED_FUNCTION": "function",
+                    "SQL_INLINE_TABLE_VALUED_FUNCTION": "function",
+                    "SEQUENCE_OBJECT": "sequence", "SYNONYM": "synonym"}
+
     def _objects(self, side, db):
         """{(schema.name, kind): definition hash} of the views, routines,
         sequences and synonyms - each by the text the server keeps of it; a
@@ -362,8 +376,12 @@ class MSSQLEngine(DbapiRows, Engine):
                          " s.schema_id = o.schema_id where o.is_ms_shipped = 0"
                          " and o.type in ('V', 'P', 'FN', 'TF', 'IF', 'SO',"
                          " 'SN') order by 1, 2")
+        # each kind asked of the one scope answer (`Engine.takes`): the
+        # table-free objects are the hop's by their `objects` too, and a
+        # kind the hop leaves out is the target's own
         return {(r[0], r[1]): r[2] for r in rows
-                if not self.hop.excluded(db, r[3], r[4])}
+                if self.takes(db, self.OBJECT_KINDS.get(r[1], r[1]),
+                              r[0])}
 
     def check_schema(self, db):
         """Every table compared whole on both sides, by the one comparer
@@ -379,8 +397,14 @@ class MSSQLEngine(DbapiRows, Engine):
         from .. import drift
         src, dst = self.shape_catalog("src", db), self.shape_catalog("dst",
                                                                      db)
-        keep = [set(drift.in_scope(self, db, dict.fromkeys(c.tables)))
-                for c in (src, dst)]
+        # a table whose columns the hop maps, or that it renames, is the
+        # pair's to compare, through the mapping (`_mapped_schema`): here
+        # it stands under the source's name on one side and the target's
+        # on the other
+        mapped = self.mapped_tables(db)
+        gone = (set(mapped), {self._target_name(db, t) for t in mapped})
+        keep = [set(drift.in_scope(self, db, dict.fromkeys(c.tables))) - g
+                for c, g in zip((src, dst), gone)]
         so, do = self._objects("src", db), self._objects("dst", db)
         bad = [f"missing table {t}" for t in sorted(keep[0] - keep[1])]
         bad += [f"extra table {t}" for t in sorted(keep[1] - keep[0])]
@@ -391,13 +415,16 @@ class MSSQLEngine(DbapiRows, Engine):
                                added="only on the target",
                                dropped="missing on the target")
             bad.append(f"{t}: {', '.join(said)}")
+        # the objects beside the tables, a finding of their own
+        # (`structure.objects`)
+        lost = []
         for k in sorted(set(so) | set(do)):
             if k not in do:
-                bad.append(f"missing {k[1]} {k[0]}")
+                lost.append(f"missing {k[1]} {k[0]}")
             elif k not in so:
-                bad.append(f"extra {k[1]} {k[0]}")
+                lost.append(f"extra {k[1]} {k[0]}")
             elif so[k] != do[k]:
-                bad.append(f"definition differs {k[1]} {k[0]}")
+                lost.append(f"definition differs {k[1]} {k[0]}")
         d = self.hop.report_dir(db)
         for side, cat, mine, objs in (("src", src, keep[0], so),
                                       ("dst", dst, keep[1], do)):
@@ -407,18 +434,48 @@ class MSSQLEngine(DbapiRows, Engine):
                 + "".join(f"{k[1]} {k[0]} {v}\n"
                           for k, v in sorted(objs.items())))
         columns = sum(len(src.columns.get(t) or []) for t in keep[0])
-        if bad:
-            (d / "schema.diff").write_text("\n".join(bad) + "\n")
-            return [Result("schema", db, "diff", "; ".join(bad[:8]),
-                           str(d / "schema.diff"),
-                           "make the target's tables, keys, indexes and"
-                           " code the source's before loading: each"
-                           " difference is in schema.diff")]
-        return [Result("schema", db, "ok",
-                       f"{len(keep[0])} tables, {columns} columns with their"
-                       " keys, indexes, constraints and triggers, and"
-                       f" {len(so)} views, routines, sequences and synonyms"
-                       " the same on both sides")]
+        if bad or lost:
+            (d / "schema.diff").write_text("\n".join(bad + lost) + "\n")
+        else:
+            (d / "schema.diff").unlink(missing_ok=True)
+        fix = ("make the target's tables, keys, indexes and code the"
+               " source's before loading: each difference is in"
+               " schema.diff")
+        res = [Result("schema", db, "diff", "; ".join(bad[:8]),
+                      str(d / "schema.diff"), fix) if bad else
+               Result("schema", db, "ok",
+                      f"{len(keep[0])} tables, {columns} columns with their"
+                      " keys, indexes, constraints and triggers the same on"
+                      " both sides"),
+               Result("schema", f"{db} objects", "diff", "; ".join(lost[:8]),
+                      str(d / "schema.diff"), fix) if lost else
+               Result("schema", f"{db} objects", "ok",
+                      f"{len(so)} views, routines, sequences and synonyms"
+                      " the same on both sides")]
+        return res + self._mapped_schema(db)
+
+    def _filter(self, db, t):
+        """The predicate of the hop's row filter for table `t` as the
+        source names it (`dbo.orders`), or None: a rule written with the
+        schema, the table alone or the database all name it
+        (`Hop.row_filter`)."""
+        return self.hop.row_filter(db, *self.hop.parts_of(t, "mssql"))
+
+    @staticmethod
+    def _outside(pred):
+        """A condition true of the rows a row filter does not select - a
+        row whose predicate is NULL among them, which `not` would pass
+        over."""
+        return f"case when ({pred}) then 1 else 0 end = 0"
+
+    def _target_name(self, db, t):
+        """The target's name for source table `t` (`schema.table`) under
+        the hop's name rules (`Hop.target_table_in`): `t` itself where none
+        applies."""
+        parts = self.hop.parts_of(t, "mssql")
+        got = self.hop.target_table_in(db, *parts)
+        return got if "." in got else \
+            f"{parts[0]}.{got}" if len(parts) > 1 else got
 
     def check_counts(self, db):
         q = ("select s.name+'.'+t.name, sum(p.rows) from sys.tables t"
@@ -429,8 +486,36 @@ class MSSQLEngine(DbapiRows, Engine):
                self._scoped_rows(db, self._cmd("src", db, q))}
         dst = {r[0]: r[1] for r in
                self._scoped_rows(db, self._cmd("dst", db, q))}
+        # a table the hop renames is the target's under its new name, and
+        # a table the hop filters is counted by its filter: the whole
+        # table's count would call the rows the filter leaves out missing
+        # (`through_pair`, `_filter`)
+        outside = []
+        for t in sorted(src):
+            to = self._target_name(db, t) if self.through_pair(db, t) else t
+            if to != t:
+                dst[t] = dst.pop(to, None)
+            pred = self._filter(db, t)
+            if not pred:
+                continue
+            src[t] = self._cmd("src", db, "select count_big(*) from "
+                               + self._qualified("src", db, t)
+                               + " t where " + pred)[0][0]
+            if dst.get(t) is not None:
+                qt = self._qualified("dst", db, to)
+                dst[t] = self._cmd("dst", db, "select count_big(*) from "
+                                   + qt + " t where " + pred)[0][0]
+                # the move puts no row outside the filter on the target
+                n = int(self._cmd("dst", db, "select count_big(*) from "
+                                  + qt + " t where "
+                                  + self._outside(pred))[0][0] or 0)
+                if n:
+                    outside.append(f"{t} dst holds {n} rows the hop's row"
+                                   " filter excludes - the move does not put"
+                                   " them there")
         bad = [f"{t} src={src.get(t)} dst={dst.get(t)}"
                for t in sorted(set(src) | set(dst)) if src.get(t) != dst.get(t)]
+        bad += outside
         if bad:
             return [Result("counts", db, "diff", clauses(bad))]
         total = sum(int(v or 0) for v in src.values())
@@ -516,15 +601,18 @@ class MSSQLEngine(DbapiRows, Engine):
         if not pks:
             return None
         named = self._qualified("src", db, t)
+        # only the rows the hop's row filter selects, on both sides
+        pred = self._filter(db, t)
+        where = f" where {pred}" if pred else ""
         n = int(self._cmd("src", db, f"select count_big(*) from {named}"
-                                     " with (nolock)")[0][0] or 0)
+                                     f" with (nolock){where}")[0][0] or 0)
         if n > self.DRILL_MAX_ROWS:
             return None
         pkexpr = "+'\t'+".join(f"cast(t.{self._q(c)} as varchar(100))"
                                for c in pks)
         row, _ = self._row_json(db, t)
         q = (f"select {pkexpr}, convert(varchar(64), hashbytes('SHA2_256',"
-             f" {row}), 2) from {named} t with (nolock)")
+             f" {row}), 2) from {named} t with (nolock){where}")
         src = {r[0]: r[1] for r in self._cmd("src", db, q)}
         dst = {r[0]: r[1] for r in self._cmd("dst", db, q)}
         missing = sorted(k for k in src if k not in dst)
@@ -583,6 +671,15 @@ class MSSQLEngine(DbapiRows, Engine):
                       replica=lag is not None)
 
     def check_data(self, db, table=None, stream=None, with_counts=False):
+        # a table whose columns the hop maps, or that it renames, is
+        # compared by the pair, which reads the mapping
+        if table and self.through_pair(db, table):
+            return self.columns_pair().check_data(db, table, stream)
+        got = self._own_check_data(db, table, stream, with_counts)
+        return got if table else got + self._mapped_data(db, stream)
+
+    def _own_check_data(self, db, table=None, stream=None,
+                        with_counts=False):
         from ..throttle import Throttle
         # a table's two row-hash sums at a time, the source's load asked
         # between them (backlog C4)
@@ -590,9 +687,10 @@ class MSSQLEngine(DbapiRows, Engine):
         q = ("select s.name+'.'+t.name from sys.tables t"
              " join sys.schemas s on s.schema_id=t.schema_id order by 1")
         # the tables the hop takes (`in_scope`), on the source; one the
-        # target lacks is a difference, not a table passed over
+        # target lacks is a difference, not a table passed over. A table
+        # the pair compares (`through_pair`) is not this pass's
         st = [r[0] for r in self._cmd("src", db, q)
-              if self.in_scope(db, r[0])]
+              if self.in_scope(db, r[0]) and not self.through_pair(db, r[0])]
         dt = {r[0] for r in self._cmd("dst", db, q)}
         tables = [table] if table else [t for t in st if t in dt]
         bad, left = [], []
@@ -617,19 +715,34 @@ class MSSQLEngine(DbapiRows, Engine):
                 outcomes[t] = "error"
                 continue
             left += out
+            # only the rows the hop's row filter selects (`_filter`): the
+            # rows it leaves out are the target's own, and a filtered
+            # target compared against the whole source reads as missing
+            # rows for good
+            pred = self._filter(db, t)
             cq = ("select count_big(*), isnull(sum(h), 0) from (select"
                   " cast(convert(bigint, substring(hashbytes('SHA2_256',"
                   f" N'{salt}' + {row}), 1, 8)) as decimal(38, 0)) h"
-                  f" from {self._qualified('src', db, t)} t) rows_hashed")
+                  f" from {self._qualified('src', db, t)} t"
+                  + (f" where {pred}" if pred else "") + ") rows_hashed")
             try:
                 with gate.unit():
                     a = self._cmd("src", db, cq)[0]
                     b = self._cmd("dst", db, cq)[0]
+                    outside = 0 if not pred else int(self._cmd(
+                        "dst", db, "select count_big(*) from "
+                        + self._qualified("dst", db, t) + " t where "
+                        + self._outside(pred))[0][0] or 0)
             except RuntimeError as e:
                 bad.append(f"{t} error {e}")
                 outcomes[t] = "error"
                 continue
             outcomes[t] = "ok"
+            if outside:
+                bad.append(f"{t} dst holds {outside} rows the hop's row"
+                           " filter excludes - the move does not put them"
+                           " there")
+                outcomes[t] = "diff"
             rows_a += int(a[0] or 0)
             rows_b += int(b[0] or 0)
             if a[0] != b[0]:
@@ -691,7 +804,10 @@ class MSSQLEngine(DbapiRows, Engine):
                               f"changed; migkit sync {self.hop.name} --db"
                               f" {db} --kind rows shows the repair, --apply"
                               " runs it", tables=outcomes,
-                              rows_apart=apart))
+                              rows_apart=apart,
+                              # one table asked for: the finding is its
+                              # own, named as the source names it
+                              table=str(table) if table else ""))
         else:
             again = (f"; {len(settled)} read while rows changed, every row"
                      " equal by key and the sums equal when read again: "
@@ -699,7 +815,8 @@ class MSSQLEngine(DbapiRows, Engine):
             res.append(Result("data", db, "ok",
                               f"{len(tables)} tables, counts and every"
                               " row's hash equal both sides" + again + said,
-                              tables=outcomes))
+                              tables=outcomes,
+                              table=str(table) if table else ""))
         return res
 
     #: CLR types a row hash reads through their own rendering: `FOR JSON`
@@ -927,114 +1044,1236 @@ class MSSQLEngine(DbapiRows, Engine):
                               f" none ahead of source{note}"))
         from .. import workload
         res.append(workload.compare(self, db))
-        res.append(self._deep_partitions(db))
         res.append(self._mojibake(db))
+        res += self._deep_value_checks(db)
+        # what a load switched off on the target and never switched on
+        res += [r for r in self._guarded(db, "set aside", self.set_aside)
+                if r is not None]
         return res
 
-    # ---- partitions ------------------------------------------------------
+    # --- the deep checks PostgreSQL and MySQL already had ------------------
+    #
+    # Each reads both sides' catalogues (or a few values) and says what the
+    # move leaves different; each is a finding of its own category
+    # (`base.CATEGORIES`). A check that cannot read is one finding saying
+    # so, never a pass (`_guarded`).
+
+    #: the base tables' columns, with what a declared type is made of
+    COLUMN_TYPES = (
+        "select c.table_schema + '.' + c.table_name, c.column_name,"
+        " c.data_type, c.character_maximum_length, c.numeric_precision,"
+        " c.numeric_scale, c.collation_name from information_schema.columns"
+        " c where exists (select 1 from information_schema.tables t where"
+        " t.table_schema = c.table_schema and t.table_name = c.table_name"
+        " and t.table_type = 'BASE TABLE')")
+
+    def _guarded(self, db, word, check):
+        """`check(db)`'s findings as a list, or the one finding that the
+        check could not read what it needed - said, never passed over."""
+        try:
+            got = check(db)
+        except Exception as e:  # noqa: BLE001 - said as what it is
+            return [Result("deep", f"{db} {word}", "error",
+                           "could not read: "
+                           f"{(str(e).strip().splitlines() or [''])[-1][:110]}"
+                           " - unknown, not clean")]
+        return list(got) if isinstance(got, (list, tuple)) else [got]
+
+    def _deep_value_checks(self, db):
+        """The value, structure and access checks beyond the ones above,
+        each read on both sides."""
+        res = []
+        for word, check in (
+                ("narrowing", self._deep_narrowing),
+                ("timeshift", self._deep_timeshift),
+                ("charset", self._deep_charset),
+                ("collation", self._deep_collation),
+                ("generated", self._deep_generated),
+                ("nullempty", self._deep_nullempty),
+                ("float", self._deep_float),
+                ("render", self._deep_render),
+                ("checks", self._deep_unenforced_checks),
+                ("partitions", self._deep_partitions),
+                ("indexes", self._deep_indexes),
+                ("rls", self._deep_row_security),
+                ("ownership", self._deep_ownership),
+                ("grants", self._deep_grants)):
+            res += self._guarded(db, word, check)
+        return res
+
+    @staticmethod
+    def _declared(kind, length, precision, scale):
+        """A column's type as it is declared (`varchar(20)`,
+        `decimal(10,2)`, `nvarchar(max)`) from the parts the catalogue
+        gives, which `verdict.narrowing` reads."""
+        kind = str(kind).lower()
+        if kind in ("char", "varchar", "nchar", "nvarchar", "binary",
+                    "varbinary"):
+            return f"{kind}({'max' if str(length) in ('-1', 'NULL') else length})"
+        if kind in ("decimal", "numeric"):
+            return f"{kind}({precision},{scale})"
+        return kind
+
+    def _deep_narrowing(self, db):
+        """A target column narrower than the source's quietly cuts or
+        overflows what it is given - asked over the declared types, by
+        the reasoning every engine's deep check asks
+        (`verdict.narrowing`)."""
+        from .. import verdict
+        read = {side: {(r[0], r[1]): self._declared(*r[2:6])
+                       for r in self._scoped_rows(
+                           db, self._cmd(side, db, self.COLUMN_TYPES))}
+                for side in ("src", "dst")}
+        narrow = []
+        for k in sorted(read["src"]):
+            if k not in read["dst"]:
+                continue
+            why = verdict.narrowing("mssql", read["src"][k], read["dst"][k])
+            if why:
+                narrow.append(f"{k[0]}.{k[1]}: {why}")
+        return verdict.narrowing_result(db, narrow)
+
+    #: the moment a datetime reads as, in seconds from 1970, and the
+    #: kinds of column it is read from
+    EPOCH = {"datetimeoffset": "switchoffset({c}, '+00:00')"}
+
+    def _deep_timeshift(self, db):
+        """A constant offset on a datetime column is a time zone converted
+        on the way, not rows corrupted one by one: the first rows of each
+        column by key, read as seconds from 1970 on both sides, differ by
+        0 in a faithful copy (`verdict.uniform_shift`)."""
+        from .. import verdict
+        cols = self._scoped_rows(db, self._cmd(
+            "src", db, "select c.table_schema + '.' + c.table_name,"
+                       " c.column_name, c.data_type from"
+                       " information_schema.columns c where c.data_type in"
+                       " ('datetime', 'datetime2', 'smalldatetime',"
+                       " 'datetimeoffset') and exists (select 1 from"
+                       " information_schema.tables t where t.table_schema"
+                       " = c.table_schema and t.table_name = c.table_name"
+                       " and t.table_type = 'BASE TABLE')"))
+        shifts = []
+        for t, col, kind in cols[:10]:
+            pk = self._pk_cols(db, t)
+            if len(pk) != 1 or self.through_pair(db, t):
+                continue
+            instant = self.EPOCH.get(kind, "{c}").format(
+                c=f"t.{self._q(col)}")
+            q = (f"select top (200) cast(t.{self._q(pk[0])} as nvarchar(100)),"
+                 f" datediff_big(second, cast('1970-01-01' as datetime2),"
+                 f" {instant}) from {self._qualified('src', db, t)} t"
+                 f" where t.{self._q(col)} is not null order by"
+                 f" t.{self._q(pk[0])}")
+
+            def rows(side):
+                return {r[0]: r[1] for r in self._cmd(side, db, q)
+                        if r[1] != "NULL"}
+            line = verdict.uniform_shift(f"{t}.{col}", rows("src"),
+                                         rows("dst"))
+            if line:
+                shifts.append(line)
+        return verdict.timeshift_result(db, shifts)
+
+    #: how much of a character set a column holds: a Unicode type and a
+    #: UTF-8 collation (code page 65001) the most, a double-byte code page
+    #: less, a single-byte one the least
+    UNICODE = ("nchar", "nvarchar", "ntext")
+
+    @classmethod
+    def _width(cls, kind, page):
+        if kind in cls.UNICODE or str(page) == "65001":
+            return 3
+        return 2 if str(page) in ("932", "936", "949", "950") else 1
+
+    def _deep_charset(self, db):
+        """A text column downgraded to a narrower character set on the
+        target (an `nvarchar` made `varchar`, a UTF-8 collation made a
+        code page) drops what it cannot hold - as `?`, with no error - and
+        a lossy transcode leaves U+FFFD behind; both silent."""
+        q = ("select c.table_schema + '.' + c.table_name, c.column_name,"
+             " c.data_type, cast(collationproperty(c.collation_name,"
+             " 'CodePage') as int) from information_schema.columns c where"
+             " c.data_type in ('char', 'varchar', 'nchar', 'nvarchar',"
+             " 'text', 'ntext') and exists (select 1 from"
+             " information_schema.tables t where t.table_schema ="
+             " c.table_schema and t.table_name = c.table_name and"
+             " t.table_type = 'BASE TABLE')")
+        read = {side: {(r[0], r[1]): (r[2], r[3]) for r in
+                       self._scoped_rows(db, self._cmd(side, db, q))}
+                for side in ("src", "dst")}
+        bad = []
+        for k, (kind, page) in sorted(read["src"].items()):
+            there = read["dst"].get(k)
+            if there is None or there == (kind, page):
+                continue
+            note = f"{k[0]}.{k[1]}: {kind}/{page} -> {there[0]}/{there[1]}"
+            if self._width(*there) < self._width(kind, page):
+                note += " (DOWNGRADE, what the target cannot hold arrives" \
+                        " as ?)"
+            bad.append(note)
+        for (t, col), (kind, _) in sorted(read["src"].items())[:30]:
+            if kind in ("text", "ntext") or (t, col) not in read["dst"]:
+                continue
+            mark = "nchar(65533)" if kind in self.UNICODE else "'?'"
+            count = ("select count_big(*) from "
+                     f"{self._qualified('src', db, t)} where charindex("
+                     f"{mark}, {self._q(col)}) > 0")
+            try:
+                src = int(self._cmd("src", db, count)[0][0] or 0)
+                dst = int(self._cmd("dst", db, count)[0][0] or 0)
+            except (RuntimeError, IndexError, ValueError):
+                continue
+            if dst > src:
+                bad.append(f"{t}.{col}: {dst - src} more rows hold "
+                           + ("U+FFFD" if kind in self.UNICODE else "a ?")
+                           + " on the target")
+        if bad:
+            return Result("deep", f"{db} charset", "diff", "; ".join(bad[:6]),
+                          "", "keep the target column as wide as the"
+                              " source's (nvarchar, or a UTF-8 collation)"
+                              " and load the affected rows again")
+        return Result("deep", f"{db} charset", "ok",
+                      "text columns hold the same character set, and no"
+                      " replacement characters appeared on the target")
+
+    #: unique and primary keys over text, with their collation and how
+    #: many columns the key has
+    TEXT_KEYS = (
+        "select s.name + '.' + t.name, c.name, c.collation_name,"
+        " (select count(*) from sys.index_columns k where k.object_id ="
+        " i.object_id and k.index_id = i.index_id and k.is_included_column"
+        " = 0) from sys.index_columns ic join sys.indexes i on i.object_id"
+        " = ic.object_id and i.index_id = ic.index_id and"
+        " (i.is_primary_key = 1 or i.is_unique = 1) join sys.columns c on"
+        " c.object_id = ic.object_id and c.column_id = ic.column_id join"
+        " sys.tables t on t.object_id = c.object_id join sys.schemas s on"
+        " s.schema_id = t.schema_id where c.collation_name is not null and"
+        " ic.is_included_column = 0")
+
+    def _deep_collation(self, db):
+        """A unique key over text whose collation differs on the target:
+        a case- or accent-insensitive one collapses distinct source rows
+        into duplicates on load. A single-column key is counted - the
+        source's groups the target's collation would merge."""
+        read = {side: {(r[0], r[1]): (r[2], r[3]) for r in
+                       self._scoped_rows(db, self._cmd(side, db,
+                                                       self.TEXT_KEYS))}
+                for side in ("src", "dst")}
+        bad = []
+        for k, (coll, width) in sorted(read["src"].items()):
+            there = read["dst"].get(k)
+            if there is None or there[0] == coll:
+                continue
+            t, col = k
+            note = f"{t}.{col}: unique-key collation src({coll}) !=" \
+                   f" dst({there[0]})"
+            if width == "1" and re.fullmatch(r"[A-Za-z0-9_]+", there[0]):
+                try:
+                    n = int(self._cmd(
+                        "src", db, "select count(*) from (select 1 x from "
+                        f"{self._qualified('src', db, t)} group by "
+                        f"{self._q(col)} collate {there[0]} having count(*)"
+                        " > 1) x")[0][0] or 0)
+                except (RuntimeError, IndexError, ValueError):
+                    note += "; collapse untestable"
+                else:
+                    if n:
+                        note += (f"; {n} source groups COLLAPSE to"
+                                 " duplicates under the target collation"
+                                 " (data loss)")
+            bad.append(note)
+        return Result("deep", f"{db} collation", "diff" if bad else "ok",
+                      "; ".join(bad[:6]) if bad
+                      else "unique-key collations match", "",
+                      "match the unique-key collation to the source's (or"
+                      " remove the duplicates first)" if bad else "")
+
+    #: computed columns, and the columns the server writes itself
+    #: (a temporal table's period)
+    COMPUTED = (
+        "select s.name + '.' + t.name, c.name, c.definition, c.is_persisted"
+        " from sys.computed_columns c join sys.tables t on t.object_id ="
+        " c.object_id join sys.schemas s on s.schema_id = t.schema_id")
+    GENERATED_ALWAYS = (
+        "select s.name + '.' + t.name, c.name, c.generated_always_type_desc,"
+        " '' from sys.columns c join sys.tables t on t.object_id ="
+        " c.object_id join sys.schemas s on s.schema_id = t.schema_id where"
+        " c.generated_always_type <> 0")
+
+    def _deep_generated(self, db):
+        """A computed column the target holds plain (or not at all), or
+        with another expression, derives another value from the same
+        row."""
+        def norm(text):
+            return re.sub(r"[\s\[\]()]", "", str(text)).lower()
+        read = {side: {(r[0], r[1]): (r[2], r[3]) for q in (
+            self.COMPUTED, self.GENERATED_ALWAYS) for r in
+            self._scoped_rows(db, self._cmd(side, db, q))}
+            for side in ("src", "dst")}
+        bad = []
+        for k, (expr, kept) in sorted(read["src"].items()):
+            there = read["dst"].get(k)
+            if there is None:
+                bad.append(f"{k[0]}.{k[1]}: generated on the source, plain"
+                           " or missing on the target")
+            elif norm(there[0]) != norm(expr):
+                bad.append(f"{k[0]}.{k[1]}: generation expression differs")
+            elif there[1] != kept:
+                bad.append(f"{k[0]}.{k[1]}: persisted on one side only")
+        bad += [f"{k[0]}.{k[1]}: generated on the target but plain on the"
+                " source" for k in sorted(read["dst"])
+                if k not in read["src"]]
+        return Result("deep", f"{db} generated", "diff" if bad else "ok",
+                      "; ".join(bad[:6]) if bad
+                      else (f"{len(read['src'])} generated columns match"
+                            if read["src"] else "no generated columns"), "",
+                      "align the expression and its storage on the target"
+                      if bad else "")
+
+    #: the text columns, and the float ones, of the tables in scope
+    TEXT_COLUMNS = ("char", "varchar", "nchar", "nvarchar")
+    FLOAT_COLUMNS = ("float", "real")
+
+    def _columns_named(self, db, kinds):
+        """[(table, column)] of the base tables in scope whose type is one
+        of `kinds`, by name."""
+        names = ", ".join(f"'{k}'" for k in kinds)
+        return self._scoped_rows(db, self._cmd(
+            "src", db, "select c.table_schema + '.' + c.table_name,"
+                       " c.column_name from information_schema.columns c"
+                       f" where c.data_type in ({names}) and exists (select"
+                       " 1 from information_schema.tables t where"
+                       " t.table_schema = c.table_schema and t.table_name ="
+                       " c.table_name and t.table_type = 'BASE TABLE')"
+                       " order by 1, 2"))
+
+    def _deep_nullempty(self, db):
+        """NULL and '' are different values a mover swaps without a word:
+        both sides still hold something in the column, a row checksum can
+        agree, and the application's `IS NULL` and `= ''` branches
+        diverge. The two counts per text column are compared."""
+        bad = []
+        for t, col in self._columns_named(db, self.TEXT_COLUMNS)[:30]:
+            q = (f"select sum(case when {self._q(col)} is null then 1 else 0"
+                 f" end), sum(case when {self._q(col)} = '' then 1 else 0"
+                 f" end) from {self._qualified('src', db, t)}")
+            try:
+                s = [int(x) if x != "NULL" else 0
+                     for x in self._cmd("src", db, q)[0]]
+                d = [int(x) if x != "NULL" else 0
+                     for x in self._cmd("dst", db, q)[0]]
+            except (RuntimeError, IndexError, ValueError):
+                continue
+            if s != d:
+                bad.append(f"{t}.{col}: src null/empty={s[0]}|{s[1]}"
+                           f" dst={d[0]}|{d[1]}")
+        if bad:
+            return Result("deep", f"{db} nullempty", "diff",
+                          f"{len(bad)} text columns differ in NULL vs"
+                          " empty-string split (semantic flip): "
+                          + "; ".join(bad[:5]), "",
+                          "normalize with NULLIF(col, '') / ISNULL per"
+                          " column intent; decide which side is canonical")
+        return Result("deep", f"{db} nullempty", "ok",
+                      "NULL vs empty-string consistent on text columns")
+
+    def _deep_float(self, db):
+        """`float` and `real` are approximations, so a checksum over them
+        is the wrong instrument: the aggregate is compared with a
+        tolerance against the magnitude actually present."""
+        cols = self._columns_named(db, self.FLOAT_COLUMNS)[:30]
+        bad = []
+        for t, col in cols:
+            c = self._q(col)
+            q = (f"select count({c}), isnull(sum(cast({c} as float)), 0),"
+                 f" isnull(max(abs(cast({c} as float))), 0) from "
+                 f"{self._qualified('src', db, t)}")
+            try:
+                sn, ss, smax = self._cmd("src", db, q)[0]
+                dn, ds, dmax = self._cmd("dst", db, q)[0]
+                counts = (int(sn), int(dn))
+                sums = (float(ss), float(ds))
+                top = max(float(smax), float(dmax))
+            except (RuntimeError, IndexError, ValueError):
+                continue
+            if counts[0] != counts[1]:
+                bad.append(f"{t}.{col}: non-null count src={counts[0]}"
+                           f" dst={counts[1]}")
+                continue
+            scale = max(abs(sums[0]), abs(sums[1]), top, 1.0)
+            if abs(sums[0] - sums[1]) > scale * 1e-9:
+                bad.append(f"{t}.{col}: sum src={sums[0]!r} dst={sums[1]!r}")
+        if bad:
+            return Result("deep", f"{db} float", "diff",
+                          f"{len(bad)} float/real columns drift beyond"
+                          " tolerance: " + "; ".join(bad[:5]), "",
+                          "a mover that changed the column's precision will"
+                          " do this; compare the column definitions first")
+        return Result("deep", f"{db} float", "ok",
+                      f"{len(cols)} float/real columns within tolerance"
+                      if cols else "no float/real columns")
+
+    #: the types whose text a server may write otherwise from one build to
+    #: the next, each as the expression that writes it
+    EXOTIC = {"xml": "convert(nvarchar(max), {c})",
+              "sql_variant": "convert(nvarchar(max), {c})",
+              "geography": "{c}.ToString()", "geometry": "{c}.ToString()",
+              "hierarchyid": "{c}.ToString()",
+              "money": "convert(nvarchar(40), {c}, 2)",
+              "smallmoney": "convert(nvarchar(40), {c}, 2)",
+              "datetimeoffset": "convert(nvarchar(40), {c}, 121)",
+              "time": "convert(nvarchar(40), {c}, 121)"}
+
+    def _deep_render(self, db):
+        """Exotic types can render differently across builds: the text of
+        a few rows of each such column is compared by key, so a checksum
+        that agrees cannot hide it."""
+        names = ", ".join(f"'{k}'" for k in self.EXOTIC)
+        cols = self._scoped_rows(db, self._cmd(
+            "src", db, "select s.name + '.' + t.name, c.name, ty.name from"
+                       " sys.columns c join sys.tables t on t.object_id ="
+                       " c.object_id join sys.schemas s on s.schema_id ="
+                       " t.schema_id join sys.types ty on ty.user_type_id ="
+                       f" c.user_type_id where ty.name in ({names}) and"
+                       " t.is_ms_shipped = 0 order by 1, 2"))[:20]
+        drifts, audited = [], 0
+        for t, col, kind in cols:
+            pks = self._pk_cols(db, t)
+            if not pks or self.through_pair(db, t):
+                continue
+            key = " + char(31) + ".join(
+                f"cast(t.{self._q(p)} as nvarchar(100))" for p in pks)
+            shown = self.EXOTIC[kind].format(c=f"t.{self._q(col)}")
+            named = self._qualified("src", db, t)
+            got = {r[0]: r[1] for r in self._cmd(
+                "src", db, f"select top (5) {key}, {shown} from {named} t"
+                           f" where t.{self._q(col)} is not null order by"
+                           f" {key}")}
+            if not got:
+                continue
+            audited += 1
+            part = ", ".join("'" + k.replace("'", "''") + "'" for k in got)
+            there = {r[0]: r[1] for r in self._cmd(
+                "dst", db, f"select {key}, {shown} from {named} t where"
+                           f" {key} in ({part})")}
+            for k, v in got.items():
+                if k in there and there[k] != v:
+                    drifts.append(f"{t}.{col}: renders differently"
+                                  f" (src {v[:40]!r} dst {there[k][:40]!r})")
+                    break
+        return Result("deep", f"{db} render", "diff" if drifts else "ok",
+                      "; ".join(drifts[:5]) if drifts
+                      else (f"{audited} exotic-typed columns sampled,"
+                            " rendering identical" if audited
+                            else "no exotic-typed columns"), "",
+                      "check the type definitions and the versions of the"
+                      " two servers" if drifts else "")
+
+    #: CHECK constraints, and whether the server enforces and trusts them
+    CHECKS = (
+        "select s.name + '.' + t.name, k.name, k.definition, k.is_disabled,"
+        " k.is_not_trusted from sys.check_constraints k join sys.tables t on"
+        " t.object_id = k.parent_object_id join sys.schemas s on s.schema_id"
+        " = t.schema_id")
+
+    def _deep_unenforced_checks(self, db):
+        """SQL Server's NOT VALID: a CHECK loaded WITH NOCHECK is in the
+        catalogue and in every schema diff, and enforces nothing for the
+        rows already there - counting constraints finds both sides equal;
+        only `is_disabled` and `is_not_trusted` show that the target takes
+        rows the source would refuse."""
+        read = {side: {(r[0], r[1]): (r[2], r[3] == "1", r[4] == "1")
+                       for r in self._scoped_rows(
+                           db, self._cmd(side, db, self.CHECKS))}
+                for side in ("src", "dst")}
+        bad = []
+        for k, (clause, off, loose) in sorted(read["src"].items()):
+            there = read["dst"].get(k)
+            if there is None:
+                bad.append(f"{k[0]}.{k[1]} missing on target")
+            elif there[1] and not off:
+                bad.append(f"{k[0]}.{k[1]} DISABLED on target (enforced on"
+                           " source)")
+            elif there[2] and not (off or loose):
+                bad.append(f"{k[0]}.{k[1]} not trusted on target (loaded"
+                           " WITH NOCHECK)")
+            elif re.sub(r"\s+", "", clause) != re.sub(r"\s+", "", there[0]):
+                bad.append(f"{k[0]}.{k[1]} clause differs")
+        if bad:
+            return Result("deep", f"{db} checks", "diff",
+                          f"{len(bad)} CHECK constraints differ: "
+                          + "; ".join(bad[:5]), "",
+                          "alter table ... with check check constraint ...,"
+                          " after confirming the existing rows satisfy it")
+        return Result("deep", f"{db} checks", "ok",
+                      f"{len(read['src'])} CHECK constraints match, enabled"
+                      " and trusted as on the source")
+
+    #: partitioned tables: the function, its side and the column
+    PARTITIONED = (
+        "select s.name + '.' + t.name, pf.name, pf.boundary_value_on_right,"
+        " pf.fanout, (select top (1) c.name from sys.index_columns ic join"
+        " sys.columns c on c.object_id = ic.object_id and c.column_id ="
+        " ic.column_id where ic.object_id = i.object_id and ic.index_id ="
+        " i.index_id and ic.partition_ordinal = 1) from sys.tables t join"
+        " sys.schemas s on s.schema_id = t.schema_id join sys.indexes i on"
+        " i.object_id = t.object_id and i.index_id in (0, 1) join"
+        " sys.partition_schemes ps on ps.data_space_id = i.data_space_id"
+        " join sys.partition_functions pf on pf.function_id = ps.function_id"
+        " where t.is_ms_shipped = 0")
+    BOUNDARIES = (
+        "select pf.name, prv.boundary_id, convert(nvarchar(100), prv.value,"
+        " 121) from sys.partition_range_values prv join"
+        " sys.partition_functions pf on pf.function_id = prv.function_id"
+        " order by 1, 2")
 
     def partition_scheme(self, side, db):
-        """{table: {"m": method, "e": the partitioning column and which
-        side a boundary value belongs to, "p": {partition: its bound}}} of
-        every partitioned table in scope. A partition has a number and no
-        name, so `p1`, `p2` ...: the number is its place in the function's
-        order, and its bound the boundary value that closes it (`<= v` on
-        a function that puts a boundary on its left) or opens it (`>= v`).
-        The partition every other value lands in is the open end."""
-        rows = self._cmd(side, db, (
-            "select s.name + '.' + t.name, pf.name, pf.type_desc,"
-            " pf.boundary_value_on_right, c.name, p.partition_number,"
-            " pf.fanout from sys.partitions p join sys.tables t on"
-            " t.object_id = p.object_id join sys.schemas s on s.schema_id ="
-            " t.schema_id join sys.indexes i on i.object_id = p.object_id"
-            " and i.index_id = p.index_id join sys.partition_schemes ps on"
-            " ps.data_space_id = i.data_space_id join sys.partition_functions"
-            " pf on pf.function_id = ps.function_id join sys.index_columns ic"
-            " on ic.object_id = i.object_id and ic.index_id = i.index_id and"
-            " ic.partition_ordinal = 1 join sys.columns c on c.object_id ="
-            " ic.object_id and c.column_id = ic.column_id where i.index_id in"
-            " (0, 1) order by 1, p.partition_number"))
+        """{table: {"m": "range left" | "range right", "e": the column,
+        "f": the function, "n": its partitions, "bounds": [boundary,
+        ...]}} of every partitioned table in scope."""
         bounds = {}
-        for fn, at, value in self._cmd(side, db, (
-                "select pf.name, prv.boundary_id, convert(nvarchar(4000),"
-                " prv.value, 126) from sys.partition_functions pf join"
-                " sys.partition_range_values prv on prv.function_id ="
-                " pf.function_id order by 1, 2")):
-            bounds[(fn, int(at))] = value
+        for fn, at, value in self._cmd(side, db, self.BOUNDARIES):
+            bounds.setdefault(fn, []).append((int(at), value))
         out = {}
-        for table, fn, kind, right, col, number, fanout in rows:
-            if not self.in_scope(db, table):
-                continue
-            right, number, fanout = (str(right) in ("1", "True")), \
-                int(number), int(fanout)
-            one = out.setdefault(table, {
-                "m": f"{kind} {'RIGHT' if right else 'LEFT'}", "e": col,
-                "f": fn, "p": {}})
-            if right:
-                bound = (f">= {bounds[(fn, number - 1)]}" if number > 1
-                         else "MINVALUE")
-            else:
-                bound = (f"<= {bounds[(fn, number)]}" if number < fanout
-                         else "MAXVALUE")
-            one["p"][f"p{number}"] = bound
+        for t, fn, right, n, col in self._scoped_rows(
+                db, self._cmd(side, db, self.PARTITIONED)):
+            out[t] = {"m": "range right" if right == "1" else "range left",
+                      "e": col, "f": fn, "n": int(n),
+                      "bounds": [v for _, v in sorted(bounds.get(fn, []))]}
         return out
 
-    def _partition_rows(self, side, db, table, parts, scheme):
-        """{partition: {"rows", "digest", "bound", "catchall"}} of one
-        table on one side: every partition counted by `$PARTITION` over its
-        function and column, in one statement. Counted and not digested -
-        the digest is left None, and the check says so."""
-        one = scheme[table]
-        function = one["f"]
-        at = f"$PARTITION.{self._q(function)}({self._q(one['e'])})"
-        got = {int(n): int(c) for n, c in self._cmd(side, db, (
-            f"select {at}, count_big(*) from "
-            f"{self._qualified(side, db, table)} t group by {at}"))}
+    @staticmethod
+    def _partition_bound(scheme, number):
+        """What partition `number` (from 1) holds, as the boundaries say:
+        `<= b` under a range left, `>= b` under a range right; the last
+        takes what lies past the highest."""
+        b, right = scheme["bounds"], scheme["m"] == "range right"
+        if right:
+            return f"< {b[0]}" if number == 1 and b else \
+                f">= {b[number - 2]}" if b else ""
+        return f"<= {b[number - 1]}" if number <= len(b) else \
+            f"> {b[-1]}" if b else ""
+
+    def _partition_rows(self, side, db, t, scheme):
+        """{"p1": {"rows", "digest", "bound", "catchall"}, ...} of one
+        table on one side: every partition's count and the sum of its
+        rows' hashes (the data check's own), read with `$PARTITION` in one
+        statement; the counts alone where the row text cannot be read."""
+        n = scheme["n"]
+        counted = {}
+        digest = True
+        try:
+            row, _ = self._row_json(db, t)
+            fn, col = self._q(scheme["f"]), f"t.{self._q(scheme['e'])}"
+            got = self._cmd(side, db, (
+                f"select $PARTITION.{fn}({col}), count_big(*), isnull(sum("
+                "cast(convert(bigint, substring(hashbytes('SHA2_256', N'"
+                f"{self.digest_salt()}' + {row}), 1, 8)) as decimal(38, 0)))"
+                f", 0) from {self._qualified(side, db, t)} t group by "
+                f"$PARTITION.{fn}({col})"))
+            counted = {int(r[0]): (int(r[1]), r[2]) for r in got}
+        except Exception:  # noqa: BLE001 - counted, then
+            digest = False
+            got = self._cmd(side, db, (
+                "select p.partition_number, sum(p.rows) from sys.partitions"
+                " p where p.object_id = object_id('"
+                + self._qualified(side, db, t).replace("'", "''")
+                + "') and p.index_id in (0, 1) group by p.partition_number"))
+            counted = {int(r[0]): (int(float(r[1])), None) for r in got}
         out = {}
-        for name, bound in parts.items():
-            out[name] = {"rows": got.get(int(name[1:]), 0), "digest": None,
-                         "bound": bound,
-                         "catchall": bound in ("MAXVALUE", "MINVALUE")}
+        for number in range(1, n + 1):
+            rows, dig = counted.get(number, (0, "0" if digest else None))
+            out[f"p{number}"] = {
+                "rows": rows, "digest": dig if digest else None,
+                "bound": self._partition_bound(scheme, number),
+                "catchall": number == n}
         return out
 
     def _deep_partitions(self, db):
-        """Every partitioned table's function and column on both sides, and
-        every partition held to its own count (`Engine._partitions_verdict`)
-        - a partition that arrived empty leaves the table's total
+        """Every partitioned table's method, column and boundaries on
+        both sides, and every partition held to its own count and digest
+        (`Engine._partitions_verdict`): a partition that arrives empty
+        or rows stranded in the last one leave the table's total
         plausible."""
-        try:
-            sp = self.partition_scheme("src", db)
-            dp = self.partition_scheme("dst", db)
-            names = {side: {r[0] for r in self._cmd(side, db, (
-                "select s.name + '.' + t.name from sys.tables t join"
-                " sys.schemas s on s.schema_id = t.schema_id"))}
-                for side in ("src", "dst")}
-            scheme, tables = [], {}
-            for t, si in sorted(sp.items()):
-                di = dp.get(t)
-                if not di:
-                    scheme.append(
-                        f"{t}: partitioned on source, not on target"
-                        if t in names["dst"] else
-                        f"{t}: missing on target (partitioned by"
-                        f" {si['m']} on the source)")
+        sp, dp = self.partition_scheme("src", db), \
+            self.partition_scheme("dst", db)
+        plain = {side: set(self.neutral_tables(side, db))
+                 for side in ("src", "dst")}
+        scheme, tables = [], {}
+        for t, si in sorted(sp.items()):
+            di = dp.get(t)
+            if not di:
+                scheme.append(f"{t}: partitioned on source, not on target"
+                              if t in plain["dst"] else
+                              f"{t}: missing on target (partitioned by"
+                              f" {si['m']} on the source)")
+                continue
+            if (si["m"], si["e"], si["bounds"]) != (di["m"], di["e"],
+                                                    di["bounds"]):
+                scheme.append(f"{t}: partition scheme differs"
+                              f" src({si['m']} {si['e']}"
+                              f" {', '.join(si['bounds'])})"
+                              f" dst({di['m']} {di['e']}"
+                              f" {', '.join(di['bounds'])})")
+            tables[t] = (self._partition_rows("src", db, t, si),
+                         self._partition_rows("dst", db, t, di))
+        for t, di in sorted(dp.items()):
+            if t not in sp and t in plain["src"]:
+                scheme.append(f"{t}: partitioned on target ({di['m']}"
+                              f" {di['e']}), not on source")
+        return self._partitions_verdict(db, tables, scheme, "last")
+
+    #: indexes the server has switched off, or only imagined
+    INDEXES = (
+        "select s.name + '.' + t.name, i.name, i.is_disabled,"
+        " i.is_hypothetical from sys.indexes i join sys.tables t on"
+        " t.object_id = i.object_id join sys.schemas s on s.schema_id ="
+        " t.schema_id where i.name is not null and t.is_ms_shipped = 0")
+
+    def _deep_indexes(self, db):
+        """An index a load switched off and never rebuilt stays in the
+        catalogue, answers no query and is not maintained: the schema
+        check finds it present. On the target it is the post-load rebuild
+        that did not happen; on the source, a reason not to move yet."""
+        broken, total = [], {"source": 0, "target": 0}
+        for side, word in (("src", "source"), ("dst", "target")):
+            for t, name, off, imagined in self._scoped_rows(
+                    db, self._cmd(side, db, self.INDEXES)):
+                total[word] += 1
+                if off == "1" or imagined == "1":
+                    broken.append((word, t, name, off == "1"))
+        if broken:
+            worst = ", ".join(
+                f"{w} {t}.{i} (" + ("disabled: not maintained, answers no"
+                                    " query" if off else "hypothetical")
+                + ")" for w, t, i, off in broken[:4])
+            return Result("deep", f"{db} indexes", "diff",
+                          f"{len(broken)} indexes exist but answer no query:"
+                          f" {worst}" + (" ..." if len(broken) > 4 else ""),
+                          "", "alter index ... rebuild (a disabled index is"
+                              " enabled by rebuilding it); drop a"
+                              " hypothetical one")
+        if not sum(total.values()):
+            return Result("deep", f"{db} indexes", "skip",
+                          "no indexes on either side to check")
+        return Result("deep", f"{db} indexes", "ok",
+                      f"{total['source']} on the source and"
+                      f" {total['target']} on the target, every one enabled")
+
+    #: row-level security policies and the predicates they hold
+    POLICIES = (
+        "select s.name + '.' + p.name, p.is_enabled, p.is_schema_bound,"
+        " pr.predicate_type_desc, pr.operation_desc, pr.predicate_definition,"
+        " ts.name + '.' + tt.name from sys.security_policies p join"
+        " sys.schemas s on s.schema_id = p.schema_id left join"
+        " sys.security_predicates pr on pr.object_id = p.object_id left join"
+        " sys.objects tt on tt.object_id = pr.target_object_id left join"
+        " sys.schemas ts on ts.schema_id = tt.schema_id")
+
+    def _deep_row_security(self, db):
+        """A row-level security policy the data arrives without: the
+        tables are all there and every row is visible to everyone. A
+        policy is compared by its predicates, the tables they guard and
+        whether it is switched on."""
+        read = {}
+        for side in ("src", "dst"):
+            major = self._cmd(side, db, "select cast(serverproperty("
+                                        "'ProductMajorVersion') as int)")
+            if major and major[0][0] not in ("NULL", "") \
+                    and int(major[0][0]) < 13:
+                read[side] = {}
+                continue
+            policies = {}
+            for name, on, bound, kind, op, expr, table in self._cmd(
+                    side, db, self.POLICIES):
+                if table != "NULL" and not self.in_scope(db, table):
                     continue
-                if (si["m"], si["e"]) != (di["m"], di["e"]):
-                    scheme.append(f"{t}: partition scheme differs"
-                                  f" src({si['m']} {si['e']})"
-                                  f" dst({di['m']} {di['e']})")
-                tables[t] = (
-                    self._partition_rows("src", db, t, si["p"], sp),
-                    self._partition_rows("dst", db, t, di["p"], dp))
-            for t, di in sorted(dp.items()):
-                if t not in sp and t in names["src"]:
-                    scheme.append(f"{t}: partitioned on target ({di['m']}"
-                                  f" {di['e']}), not on source")
-            return self._partitions_verdict(db, tables, scheme, "open-ended")
-        except Exception as e:  # noqa: BLE001 - said, and the rest runs
-            return Result("deep", f"{db} partitions", "error",
-                          "could not read the partitions:"
-                          f" {str(e).splitlines()[-1][:120]}")
+                p = policies.setdefault(name, {"on": on == "1",
+                                               "predicates": set()})
+                if kind != "NULL":
+                    p["predicates"].add(
+                        (kind, op, table, re.sub(r"\s+", "", expr)))
+            read[side] = policies
+        bad = []
+        for name, p in sorted(read["src"].items()):
+            there = read["dst"].get(name)
+            if there is None:
+                bad.append(f"policy {name}: missing on target")
+            elif p["on"] and not there["on"]:
+                bad.append(f"policy {name}: switched OFF on target")
+            elif p["predicates"] != there["predicates"]:
+                bad.append(f"policy {name}: predicates differ")
+        bad += [f"policy {n}: only on target" for n in sorted(read["dst"])
+                if n not in read["src"]]
+        if bad:
+            return Result("deep", f"{db} rls", "diff", "; ".join(bad[:5]),
+                          "", "create the security policy on the target and"
+                              " switch it on (alter security policy ... with"
+                              " (state = on))")
+        return Result("deep", f"{db} rls", "ok",
+                      f"{len(read['src'])} security policies match, switched"
+                      " on as on the source" if read["src"]
+                      else "no row-level security policies")
+
+    #: what runs as whom: a module's EXECUTE AS clause, per object
+    EXECUTES_AS = (
+        "select s.name + '.' + o.name, o.type_desc, case when"
+        " m.execute_as_principal_id is null then 'CALLER' when"
+        " m.execute_as_principal_id = -2 then 'OWNER' else"
+        " coalesce(user_name(m.execute_as_principal_id), 'unknown') end,"
+        " case when o.parent_object_id <> 0 then object_schema_name("
+        "o.parent_object_id) + '.' + object_name(o.parent_object_id) else"
+        " s.name + '.' + o.name end from sys.sql_modules m join sys.objects o"
+        " on o.object_id = m.object_id join sys.schemas s on s.schema_id ="
+        " o.schema_id where o.is_ms_shipped = 0 and o.type in ('V', 'P',"
+        " 'FN', 'IF', 'TF', 'TR')")
+
+    def _deep_ownership(self, db):
+        """EXECUTE AS drift, which the schema diff cannot see: a module's
+        definition text carries the clause, but a mover that recreates the
+        objects under its own account leaves them running as the account
+        the move used. A routine that ran as its owner and now runs as the
+        caller either stops working or starts working for callers who
+        should not have been able to run it."""
+        from .. import ownership
+        kinds = dict(self.OBJECT_KINDS, SQL_TRIGGER="trigger")
+        read = {}
+        for side in ("src", "dst"):
+            read[side] = {(r[0], r[1]): r[2] for r in self._cmd(
+                side, db, self.EXECUTES_AS)
+                if self.takes(db, kinds.get(r[1], "function"), r[0], r[3])}
+        rows = [(f"{k[1].lower()} {k[0]}", f"EXECUTE AS {read['src'][k]}",
+                 f"EXECUTE AS {read['dst'][k]}")
+                for k in sorted(set(read["src"]) & set(read["dst"]))]
+        if not rows:
+            return Result("deep", f"{db} ownership", "ok",
+                          "no views, routines or triggers on both sides")
+        changes = ownership.group(rows)
+        if not changes:
+            return Result("deep", f"{db} ownership", "ok",
+                          f"{len(rows)} objects run as the same account")
+        note = ("one substitution across every object - a decision or"
+                " something the mover did to all of them"
+                if ownership.systematic(changes) else
+                "objects drifted individually - read each one")
+        caller = sum(len(v) for (a, b), v in changes.items()
+                     if "CALLER" not in a and "CALLER" in b)
+        detail = (f"{ownership.total(changes)} of {len(rows)}: "
+                  f"{ownership.describe(changes)}")
+        if caller:
+            detail += (f"; {caller} dropped from running as a fixed account"
+                       " to the caller - they now run with the caller's"
+                       " privileges")
+        return Result("deep", f"{db} ownership", "diff", detail, "",
+                      f"{note}; recreate with the intended EXECUTE AS"
+                      " before the application depends on it")
+
+    #: the objects of the database that hold a grant: tables and views, and
+    #: sequences
+    GRANTABLE = ("select s.name + '.' + o.name, o.type from sys.objects o"
+                 " join sys.schemas s on s.schema_id = o.schema_id where"
+                 " o.is_ms_shipped = 0 and o.type in ('U', 'V', 'SO')")
+
+    def _grants_on(self, side, db):
+        """({principal: {grant, ...}} on the tables and views in scope,
+        the same on the sequences in scope, the database's principals):
+        each grant as the one that gives it (`users._ms_permission`), read
+        by the one query the users check reads (`users.MS_PERMISSIONS`)."""
+        from .. import users
+        kind = {r[0]: r[1] for r in self._cmd(side, db, self.GRANTABLE)}
+        tables, sequences = {}, {}
+        for (who, state, perm, cls, sch, obj, col, ptype, _, _,
+             _) in self._rows(side, db, users.MS_PERMISSIONS):
+            if int(cls) != 1 or sch is None or obj is None \
+                    or users.system_principal("mssql", who):
+                continue
+            name = f"{sch}.{obj}"
+            said = users._ms_permission(
+                state, perm, users._ms_securable(int(cls), sch, obj, col,
+                                                 ptype))
+            if said is None:
+                continue
+            if kind.get(name) == "SO" and self.takes(db, "sequence", name):
+                sequences.setdefault(who, set()).add(f"{name}: {said}")
+            elif kind.get(name) in ("U", "V") and self.in_scope(db, name):
+                tables.setdefault(who, set()).add(f"{name}: {said}")
+        who = {r[0] for r in self._cmd(
+            side, db, "select name from sys.database_principals where"
+                      " principal_id > 4")}
+        return tables, sequences, who
+
+    @staticmethod
+    def _grant_gaps(src, dst, there, what):
+        """(what differs in words or "", the grants compared) between the
+        grants an account holds on one kind of object on the two sides:
+        the ones missing on the target, the extra ones, and the accounts
+        the target lacks."""
+        miss, extra, gone = [], [], []
+        for who in sorted(src):
+            if who not in there:
+                gone.append(who)
+                continue
+            miss += [f"{who}: {g}" for g in sorted(src[who] -
+                                                   dst.get(who, set()))]
+        # an account the source gave nothing on the target's own is the
+        # target's to grant; one that holds grants on both sides is held
+        # to the source's
+        for who in sorted(set(dst) & set(src)):
+            extra += [f"{who}: {g}" for g in sorted(dst[who] - src[who])]
+        parts = []
+        if miss:
+            parts.append(f"{len(miss)} {what} grants missing on target: "
+                         + "; ".join(miss[:3]))
+        if extra:
+            parts.append(f"{len(extra)} on target the source does not give: "
+                         + "; ".join(extra[:3]))
+        if gone:
+            parts.append(f"{len(gone)} users hold {what} grants on the"
+                         " source but do not exist on the target: "
+                         + ", ".join(gone[:3]))
+        return "; ".join(parts), sum(len(v) for v in src.values())
+
+    def _deep_grants(self, db):
+        """What the application may do to the tables and sequences: the
+        data arrives and the permissions do not - the symptom is an
+        application that connects and then cannot read its own tables.
+        The accounts both sides have are compared grant by grant; an
+        account the target lacks is the users check's finding."""
+        from ..users import NOT_CARRIED, carried
+        if not carried(self.hop):
+            return [Result("deep", f"{db} grants", "skip", NOT_CARRIED),
+                    Result("deep", f"{db} seq-grants", "skip", NOT_CARRIED)]
+        s_tab, s_seq, _ = self._grants_on("src", db)
+        d_tab, d_seq, there = self._grants_on("dst", db)
+        tab, tabs = self._grant_gaps(s_tab, d_tab, there, "table and view")
+        seq, seqs = self._grant_gaps(s_seq, d_seq, there, "sequence")
+        fix = ("create the users first - migkit users create replays their"
+               " grants from the source")
+        return [
+            Result("deep", f"{db} grants", "diff", tab, "", fix) if tab else
+            Result("deep", f"{db} grants", "ok",
+                   f"{tabs} table and view grants match" if tabs
+                   else "no explicit table or view grants"),
+            Result("deep", f"{db} seq-grants", "diff", seq, "", fix) if seq
+            else Result("deep", f"{db} seq-grants", "ok",
+                        f"{seqs} sequence grants match" if seqs
+                        else "no explicit sequence grants")]
+
+    # --- the assessment, before anything moves ----------------------------
+
+    def _server_versions(self):
+        """(source, target) `ProductVersion` - `16.0.4135.4` - as each
+        server reports it, held to each other by `assess`."""
+        def one(side):
+            got = self._rows(side, "master",
+                             "select cast(serverproperty('ProductVersion')"
+                             " as nvarchar(128))")
+            return str(got[0][0]) if got and got[0][0] else None
+        return one("src"), one("dst")
+
+    def _brand_probes(self):
+        """The banner, the product version, the edition and the engine
+        edition per side, in one round trip: the products that speak this
+        wire split across them. Azure SQL Edge says so in the banner,
+        Azure's services by their engine edition (5 a database, 8 a managed
+        instance), and Babelfish - PostgreSQL answering as SQL Server - by a
+        property of its own, which a SQL Server answers NULL."""
+        def one(side):
+            try:
+                got = self._rows(
+                    side, "master",
+                    "select @@version, cast(serverproperty('EngineEdition')"
+                    " as int), cast(serverproperty('Edition') as"
+                    " nvarchar(128)), cast(serverproperty('ProductVersion')"
+                    " as nvarchar(128)), cast(serverproperty("
+                    "'babelfishversion') as nvarchar(64))")
+            except Exception:  # noqa: BLE001 - unidentified, then
+                return {}
+            if not got:
+                return {}
+            banner, edition_no, edition, version, babelfish = got[0]
+            out = {"banner": banner, "engine_edition": edition_no,
+                   "edition": edition, "product_version": version}
+            # only a product that has one says it: an empty field would
+            # name the brand by its absence
+            if babelfish:
+                out["babelfish"] = babelfish
+            return out
+        return (one("src"), one("dst"))
+
+    def _assess_extra(self):
+        """What a move from and to SQL Server needs, asked of the servers:
+        whether the change feed is on and follows every table, whether the
+        two databases compare text alike and run at one compatibility
+        level, and the work the move leaves for hands (`_handwork`)."""
+        items = []
+        try:
+            dbs = self.databases()
+        except Exception as e:  # noqa: BLE001 - said, as a row
+            return [{"level": "warn", "scope": "instance",
+                     "item": "databases in scope",
+                     "detail": "could not be listed: "
+                               f"{(str(e).strip().splitlines() or [''])[-1][:80]}"
+                               " - unknown, not clean"}]
+        for db in dbs:
+            for part in (self._assess_tracking, self._assess_alike):
+                try:
+                    items += part(db)
+                except Exception as e:  # noqa: BLE001 - said, as a row
+                    items.append({
+                        "level": "warn", "scope": db,
+                        "item": part.__name__.replace("_assess_", ""),
+                        "detail": "not asked: "
+                                  f"{(str(e).strip().splitlines() or [''])[-1][:90]}"
+                                  " - unknown, not clean"})
+        inv = self._handwork()
+        return items + inv.rows() + inv.summary()
+
+    def _assess_tracking(self, db):
+        """Change Tracking is the feed a tail reads here: on for the
+        database, and on for each table the hop moves."""
+        from .. import sourcechange as sc
+        on = self._rows("src", db,
+                        "select count(*) from sys.change_tracking_databases"
+                        " where database_id = db_id()")
+        if not on or not int(on[0][0] or 0):
+            return [{"level": "warn", "scope": db, "item": "change tracking",
+                     "detail": sc.requirement("change_tracking", "off",
+                                              sc.Ctx(db=db))
+                     + ". Until it is on, `migkit check` compares every row"
+                       " and a tail cannot follow the source"}]
+        missed = sorted(set(self.neutral_tables("src", db))
+                        - self._tracked("src", db))
+        if missed:
+            tables = [tuple(t.split(".", 1)) if "." in t else ("dbo", t)
+                      for t in missed[:6]]
+            return [{"level": "warn", "scope": db,
+                     "item": "change tracking on tables",
+                     "detail": f"{len(missed)} tables are not followed: "
+                     + ", ".join(missed[:6]) + " - "
+                     + sc.requirement("table_tracking",
+                                      f"{len(missed)} not tracked",
+                                      sc.Ctx(db=db, tables=tables))}]
+        return [{"level": "pass", "scope": db, "item": "change tracking",
+                 "detail": "on, and following every table the hop moves"}]
+
+    def _assess_alike(self, db):
+        """The database's collation and compatibility level on each side:
+        a different collation compares the same text otherwise, and a
+        different level plans and parses it otherwise."""
+        got = {}
+        for side in ("src", "dst"):
+            row = self._rows(
+                side, db, "select cast(databasepropertyex(db_name(),"
+                          " 'Collation') as nvarchar(128)),"
+                          " (select compatibility_level from sys.databases"
+                          " where database_id = db_id())")
+            got[side] = tuple(row[0]) if row else (None, None)
+        out = []
+        for i, (item, what) in enumerate((
+                ("collation matches", "text compares and sorts the same"),
+                ("compatibility level matches",
+                 "statements parse and plan the same"))):
+            a, b = got["src"][i], got["dst"][i]
+            out.append({"level": "pass" if a == b else "warn", "scope": db,
+                        "item": item,
+                        "detail": f"src {a} / dst {b}"
+                        + ("" if a == b else f" - {what} on neither")})
+        return out
+
+    def _handwork(self):
+        """Inventory the work the move will not do, per `migkit.handwork`:
+        what lives beside the tables in the instance or the database and
+        no data mover carries. A probe that could not run is unknown, never
+        zero."""
+        from .. import handwork
+        inv = handwork.Inventory()
+        for db in self.databases():
+            reads = (
+                ("no-row-key", "tables", "select s.name + '.' + t.name from"
+                 " sys.tables t join sys.schemas s on s.schema_id ="
+                 " t.schema_id where t.is_ms_shipped = 0 and not exists"
+                 " (select 1 from sys.indexes i where i.object_id ="
+                 " t.object_id and (i.is_primary_key = 1 or i.is_unique = 1))"),
+                ("not-carried", "memory-optimized tables",
+                 "select s.name + '.' + t.name from sys.tables t join"
+                 " sys.schemas s on s.schema_id = t.schema_id where"
+                 " t.is_memory_optimized = 1"),
+                ("not-carried", "full-text catalogs",
+                 "select name from sys.fulltext_catalogs"),
+                ("not-carried", "CLR assemblies",
+                 "select name from sys.assemblies where is_user_defined = 1"),
+                ("not-carried", "Service Broker queues",
+                 "select s.name + '.' + q.name from sys.service_queues q"
+                 " join sys.schemas s on s.schema_id = q.schema_id where"
+                 " q.is_ms_shipped = 0"),
+                ("target-prereq", "keys and certificates the data is"
+                 " encrypted under (they must exist on the target before the"
+                 " load)",
+                 "select name from sys.symmetric_keys where name not like"
+                 " '##%' union all select name from sys.certificates where"
+                 " name not like '##%' union all select name from"
+                 " sys.asymmetric_keys"),
+            )
+            for kind, what, sql in reads:
+                try:
+                    inv.add(kind, db, what,
+                            [r[0] for r in self._rows("src", db, sql)])
+                except Exception as e:  # noqa: BLE001 - unknown, not zero
+                    inv.unknown(kind, db, f"{what}: the catalogue could not"
+                                          f" be read ({str(e)[:80]})")
+        return inv
+
+    #: what `assess` asks before anything moves: each is about the move
+    #: that is about to happen, not the one that did
+    PREFLIGHT = ("_capacity_gaps", "_mojibake")
+
+    def _scalar(self, side, db, sql):
+        """One row as text, or None for a statement that answers none."""
+        rows = self._cmd(side, db, sql)
+        return rows[0] if rows else None
+
+    def _capacity_probe(self, col, cap):
+        """(the rows that do not fit, the largest value) for a capacity,
+        in T-SQL - `len` for characters, a range for a whole number, the
+        digits left of the point for a decimal."""
+        kind = cap[0]
+        if kind == "chars":
+            return f"len({col}) > {int(cap[1])}", f"max(len({col}))"
+        if kind == "int":
+            return (f"({col} < {int(cap[1])} or {col} > {int(cap[2])})",
+                    f"max(abs(cast({col} as decimal(38, 0))))")
+        if kind == "numeric":
+            return (f"abs({col}) >= {10 ** (int(cap[1]) - int(cap[2]))}",
+                    f"max(abs({col}))")
+        raise ValueError(f"no capacity probe for kind {kind!r}")
+
+    def capacity(self, side, db):
+        """What the server can give a move, for `sizing`: the CPUs it
+        schedules on, the connections it has left and the requests running
+        now. A key it will not answer (VIEW SERVER STATE) is left out, which
+        the sizing reads as not readable and never as idle."""
+        out = {}
+        for key, sql in (
+                ("cpus", "select cpu_count from sys.dm_os_sys_info"),
+                ("free_connections",
+                 "select @@max_connections - (select count(*) from"
+                 " sys.dm_exec_connections)"),
+                ("running",
+                 "select count(*) from sys.dm_exec_requests r join"
+                 " sys.dm_exec_sessions s on s.session_id = r.session_id"
+                 " where s.is_user_process = 1 and r.session_id <> @@spid")):
+            try:
+                got = self._rows(side, db, sql)
+                if got and got[0][0] is not None:
+                    out[key] = max(0, int(got[0][0]))
+            except Exception:  # noqa: BLE001 - not readable, left out
+                pass
+        return out
+
+    def free_bytes(self, side, db):
+        """What the volumes holding the database's files have free, the
+        least of them, or None where the server will not say."""
+        try:
+            got = self._rows(
+                side, db, "select min(vs.available_bytes) from"
+                          " sys.master_files f cross apply"
+                          " sys.dm_os_volume_stats(f.database_id,"
+                          " f.file_id) vs where f.database_id = db_id()")
+        except Exception:  # noqa: BLE001 - not readable
+            return None
+        return int(got[0][0]) if got and got[0][0] is not None else None
+
+    def stream_writers(self, db):
+        """What else writes into the target besides a repair: migkit's own
+        tail, and the replication the server can see on it - an
+        availability group's redo applying the primary's changes,
+        transactional replication applying a publication, log shipping
+        restoring logs. None of those is migkit's to pause."""
+        out = super().stream_writers(db)
+        for what, sql in (
+                ("the availability group applying the primary's changes",
+                 "select count(*) from sys.dm_hadr_database_replica_states"
+                 " where is_local = 1 and is_primary_replica = 0 and"
+                 " database_id = db_id()"),
+                ("transactional replication applying a publication",
+                 "select count(*) from sys.databases where database_id ="
+                 " db_id() and is_subscribed = 1"),
+                ("log shipping restoring logs",
+                 "select count(*) from msdb.dbo."
+                 "log_shipping_secondary_databases where"
+                 " secondary_database = db_name()")):
+            try:
+                got = self._rows("dst", db, sql)
+            except Exception:  # noqa: BLE001 - not there, or not readable
+                continue
+            if got and int(got[0][0] or 0):
+                out.append((what, False))
+        return out
+
+    # --- the schema a table is made with ------------------------------------
+
+    @staticmethod
+    def _unwrapped(text):
+        """A default as the catalogue keeps it - `((0))`, `('new')`,
+        `(getdate())` - without the parentheses it is wrapped in, which
+        every rendering of a default adds again."""
+        s = str(text).strip()
+        while s.startswith("(") and s.endswith(")"):
+            depth, quoted = 0, False
+            for i, ch in enumerate(s):
+                if ch == "'":
+                    quoted = not quoted
+                if quoted:
+                    continue
+                depth += (ch == "(") - (ch == ")")
+                if depth == 0 and i < len(s) - 1:
+                    return s
+            s = s[1:-1].strip()
+        return s
+
+    def neutral_column_rules(self, side, db, table):
+        """{column: {"null", "default", "identity"}} of the table's columns
+        the server does not compute: what a table made on another engine,
+        or here, keeps beyond the types."""
+        out = {}
+        for name, null, identity, default, computed in self._rows(
+                side, db, "select c.name, c.is_nullable, c.is_identity,"
+                          " object_definition(c.default_object_id),"
+                          " c.is_computed from sys.columns c where"
+                          f" c.object_id = object_id({MARK})"
+                          " order by c.column_id",
+                (self._qualified(side, db, table),)):
+            if computed:
+                continue
+            out[str(name)] = {
+                "null": bool(null),
+                "default": None if default is None or identity
+                else self._unwrapped(default),
+                "identity": bool(identity)}
+        return out
+
+    def default_works(self, side, db, expr, typ=None):
+        """Whether this server accepts `expr` as a default, asked of it."""
+        try:
+            self._cmd(side, db, f"select ({expr})")
+            return True
+        except RuntimeError:
+            return False
+
+    def execute_ddl(self, side, db, sql):
+        self._target_only(side, "change a schema")
+        self._cmd(side, db, sql)
+
+    #: the kinds of index a plain `create index` over the key's columns
+    #: makes as it was: rowstore, clustered or not
+    PLAIN_INDEXES = (1, 2)
+
+    def neutral_indexes(self, side, db, table):
+        """[(name, unique, [key columns], carried)] of the table's indexes
+        other than its primary key. Carried: a rowstore index with no
+        filter - over its key columns in their order; its included columns
+        and the direction of a key are what a plain index does not say, and
+        affect only how a query is answered, never what is kept. One that
+        is filtered, XML, spatial, columnstore or hashed cannot be given to
+        another engine as it is, and is named."""
+        got = {}
+        for name, unique, column, key, filtered, kind in self._rows(
+                side, db, "select i.name, i.is_unique, c.name,"
+                          " ic.key_ordinal, i.has_filter, i.type from"
+                          " sys.indexes i join sys.index_columns ic on"
+                          " ic.object_id = i.object_id and ic.index_id ="
+                          " i.index_id join sys.columns c on c.object_id ="
+                          " ic.object_id and c.column_id = ic.column_id"
+                          f" where i.object_id = object_id({MARK}) and"
+                          " i.is_primary_key = 0 and i.name is not null and"
+                          " i.is_hypothetical = 0 order by i.name,"
+                          " ic.key_ordinal, ic.index_column_id",
+                (self._qualified(side, db, table),)):
+            one = got.setdefault(str(name), [bool(unique), [], True])
+            if filtered or int(kind) not in self.PLAIN_INDEXES:
+                one[2] = False
+            if int(key or 0) > 0 or int(kind) not in self.PLAIN_INDEXES:
+                one[1].append(str(column))
+        return [(n, u, c, ok) for n, (u, c, ok) in sorted(got.items())]
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        # the table by the name it was made under: a bare one is in `dbo`
+        return (f"create {'unique ' if unique else ''}index {self._q(name)}"
+                f" on {self._create_name(side, db, table)} ("
+                + ", ".join(self._q(c) for c in columns) + ")")
+
+    def create_missing(self, db, log=None):
+        """The tables the target lacks, built the way the copier builds
+        them before any is filled, by the pair that copies (a table made
+        by the first batch it writes had no place for its indexes)."""
+        return self._as_pair().create_missing(db, log)
+
+    def finish_created(self, db, log=None):
+        """The indexes of the tables that were built, once their rows are
+        in."""
+        return self._as_pair().finish_created(db, log)
+
+    # --- the target kept free of what a load would trip over ---------------
+
+    def load_window(self, db, log=None, tables=None):
+        """The target's triggers, switched off for the load and on again
+        after (`_LoadWindow`)."""
+        return _LoadWindow(self, db, log, tables)
+
+    def _switched_off(self, db):
+        """{key: what it is} of the triggers switched off on the target now,
+        keyed as a load records what it switched off."""
+        return {f"trigger {t}.{name}": "trigger" for t, name in self._rows(
+            "dst", db, "select s.name + '.' + t.name, tr.name from"
+                       " sys.triggers tr join sys.tables t on"
+                       " t.object_id = tr.parent_id join sys.schemas s on"
+                       " s.schema_id = t.schema_id where tr.parent_class = 1"
+                       " and tr.is_disabled = 1")}
+
+    def set_aside(self, db):
+        """The target's triggers a load switched off and has not switched
+        on again. Held by a load still running - a change tail, for as long
+        as it runs - they are off on purpose and come back when that stops;
+        held by one whose process is gone, they are simply off: the
+        application's cutover onto this target would run without them, and
+        nothing else in the check compares a target's own triggers."""
+        from ..setaside import SetAside
+        held, lost, unread = [], [], []
+        off = None
+        for path, alive, defs in SetAside(
+                self.hop, db, _LoadWindow.TRIGGERS).records():
+            if defs is None:
+                unread.append(str(path))
+            elif alive:
+                held += sorted(defs)
+            else:
+                if off is None:
+                    off = self._switched_off(db)
+                lost += [(n, str(path)) for n in sorted(defs) if n in off]
+        scope = f"{db} triggers set aside"
+        if lost or unread:
+            said = []
+            if lost:
+                said.append(f"{len(lost)} triggers a load switched off on"
+                            " the target and never switched on again: "
+                            + ", ".join(n for n, _ in lost[:5])
+                            + " - recorded in "
+                            + ", ".join(sorted({p for _, p in lost})))
+            if unread:
+                said.append("a record of triggers switched off cannot be"
+                            " read: " + ", ".join(unread))
+            return Result("deep", scope, "diff", "; ".join(said), "",
+                          "the next `migkit move` into this database puts"
+                          " them back; or run the statements in that file")
+        if held:
+            return Result("deep", scope, "ok",
+                          f"{len(held)} triggers are off the target while a"
+                          " migkit load runs into it ("
+                          + ", ".join(held[:5]) + "); they go back when it"
+                          " stops")
+        return None
 
     # --- the source's own statements, from its Query Store (R23, 4) -----
 
@@ -1217,6 +2456,8 @@ class MSSQLEngine(DbapiRows, Engine):
                        if past else "")))
         if kind in ("rows", "all"):
             actions += self._rows_found_plan(db)
+            # the tables the pair compares are repaired by it
+            actions += self._mapped_repairs(db, kind)
             # after the rows, never before: a row copied again takes the
             # source's text, which is where the broken text lives
             text = self._mojibake_repair(db)
@@ -1275,6 +2516,8 @@ class MSSQLEngine(DbapiRows, Engine):
         return self._found(db, table)
 
     def apply(self, db, action):
+        if action.by == "pair":
+            return self.columns_pair().apply(db, action)
         if action.kind == "text":
             return self._apply_text(db, action)
         if action.kind == "rows":
@@ -1399,7 +2642,10 @@ class MSSQLEngine(DbapiRows, Engine):
             if n == 0:
                 continue
             total += n
-            r = self._drilldown(db, tbl)
+            if self.through_pair(db, tbl):
+                r = self._pair_drilldown(db, tbl)
+            else:
+                r = self._drilldown(db, tbl)
             ok = r == (0, 0, 0)
             clean = clean and ok
             if r is None:
@@ -1413,7 +2659,10 @@ class MSSQLEngine(DbapiRows, Engine):
                 continue
             res.append(Result("delta", f"{db}.{tbl}", "ok" if ok else "diff",
                               f"{n} rows changed since v{last}, table"
-                              f" {'verified equal' if ok else 'DIFFERS'}"))
+                              f" {'verified equal' if ok else 'DIFFERS'}",
+                              table=str(tbl),
+                              rows_apart=rows_counted(tbl, *r) if not ok
+                              else {}))
             if log:
                 log(f"{tbl}: {n} changed, {'ok' if ok else 'DIFF'}")
         if clean:
@@ -1425,6 +2674,20 @@ class MSSQLEngine(DbapiRows, Engine):
                              f" since v{last}, version"
                              f" {'advanced' if clean else 'NOT advanced'}"))
         return res
+
+    def _pair_drilldown(self, db, tbl):
+        """(missing, extra, changed) of a table the pair compares
+        (`through_pair`: its columns or name are the hop's to map), as the
+        pair counted them; None where the pair found a difference it did
+        not count - not compared row by row is no `ok`."""
+        got = self.columns_pair().check_data(db, tbl)
+        if any(g.status not in ("ok", "diff") for g in got):
+            return None
+        apart = [a for g in got for a in g.rows_apart.values()]
+        if any(g.status == "diff" for g in got) and not apart:
+            return None
+        return tuple(sum(int(a.get(k, 0)) for a in apart)
+                     for k in ("missing", "extra", "changed"))
 
     def watch_sample(self, db):
         q = "select sum(p.rows) from sys.partitions p where p.index_id in (0,1)"
@@ -2400,6 +3663,18 @@ class MSSQLEngine(DbapiRows, Engine):
                       " t.object_id = c.object_id join sys.schemas s on"
                       " s.schema_id = t.schema_id")}
 
+    def table_oids(self, side, db):
+        """{schema.table: its object id} of the application's tables, as
+        `neutral_tables` names them. Change Tracking carries no DDL, and a
+        shape is keyed by name: a table swapped in under another's name
+        (two renames) keeps the name and the columns and changes only
+        this - the id a table keeps through a rename and no other table
+        has - which the tail holds each table to (`tailtables`)."""
+        return {str(t): str(oid) for t, oid in self._rows(
+            side, db, "select s.name + '.' + t.name, t.object_id from"
+                      " sys.tables t join sys.schemas s on s.schema_id ="
+                      " t.schema_id where t.is_ms_shipped = 0")}
+
     def change_point(self, side, db):
         """The database's Change Tracking version now. Refused where the
         database does not track, or where a table the hop moves is not
@@ -2881,6 +4156,130 @@ class _Stage:
                     cur.execute(f"set identity_insert {self.target} off")
                 except Exception:  # noqa: BLE001 - a lost session holds
                     pass           # nothing on, and the first error stands
+
+
+class _LoadWindow:
+    """Switch off the target's triggers on the tables a load writes, and on
+    again afterwards.
+
+    A trigger on a table the load writes fires for every row it writes and
+    can rewrite it - a `created`/`updated` stamp set to the day of the
+    move, an audit row the source never had - where the servers' own
+    replication applies a change without firing one. SQL Server switches a
+    trigger off without dropping it (`DISABLE TRIGGER`), so what goes back
+    is a statement, and the definition never leaves the server. A change
+    tail holds the window for as long as it runs, which is days.
+
+    Secondary indexes are not switched off here: this window is also the
+    tail's and a repair's, and a target whose indexes were off for days -
+    or rebuilt to repair a few rows - would be worse than one whose
+    triggers fire.
+
+    A trigger already off is another load's (a change tail holds its window
+    for days), and that load puts it back. The record of what is about to
+    go off is on disk before anything does (`setaside`), one file per load:
+    a process killed in between left them off, and the next load into the
+    database switches on what the target still has off, at its own end;
+    `check` names it until then (`set_aside`). Everything goes back on the
+    way out whether the load worked or not; one that does not is named and
+    its record kept.
+    """
+
+    TRIGGERS = "dropped-triggers"
+
+    def __init__(self, eng, db, log=None, tables=None):
+        from ..setaside import SetAside
+        self.eng, self.db = eng, db
+        self.log = log or (lambda m: None)
+        self.tables = None if tables is None else {str(t) for t in tables}
+        self.record = SetAside(eng.hop, db, self.TRIGGERS)
+        #: key -> the statement that puts it back
+        self.back = {}
+
+    def _writes(self, table):
+        """Whether the load writes `table` (`schema.table`) and the hop
+        takes it."""
+        if not self.eng.in_scope(self.db, table):
+            return False
+        return (self.tables is None or table in self.tables
+                or table.rpartition(".")[2] in self.tables)
+
+    def _plan(self):
+        """{key: (the statement that switches it off, the one that puts it
+        back)} for each enabled trigger on a table the load writes."""
+        q = self.eng._q
+        out = {}
+        for table, name in self.eng._rows(
+                "dst", self.db,
+                "select s.name + '.' + t.name, tr.name from sys.triggers tr"
+                " join sys.tables t on t.object_id = tr.parent_id join"
+                " sys.schemas s on s.schema_id = t.schema_id where"
+                " tr.parent_class = 1 and tr.is_disabled = 0 and"
+                " tr.is_ms_shipped = 0"):
+            if self._writes(table):
+                schema, _, leaf = str(table).partition(".")
+                on = f"{q(schema)}.{q(name)} on {q(schema)}.{q(leaf)}"
+                out[f"trigger {table}.{name}"] = (f"disable trigger {on}",
+                                                  f"enable trigger {on}")
+        return out
+
+    def __enter__(self):
+        eng = self.eng
+        plan = self._plan()
+        # what a load that died switched off and the target still has off:
+        # switched on at the end of this one, whichever tables this one
+        # writes
+        left, stale = self.record.left_behind(set())
+        off = eng._switched_off(self.db)
+        adopted = {k: v for k, v in left.items() if k in off}
+        mine = {k: v[1] for k, v in plan.items()}
+        if not mine and not adopted:
+            for path in stale:
+                path.unlink(missing_ok=True)
+            return self
+        if not self.record.save({**adopted, **mine}, stale):
+            raise SystemExit(
+                f"{self.db}: the triggers the load would switch off on the"
+                " target could not be recorded first, so none was switched"
+                " off and nothing was loaded")
+        self.back = {**adopted, **mine}
+        for key, (go, _) in plan.items():
+            try:
+                eng._cmd("dst", self.db, go)
+            except RuntimeError as e:
+                # left on, and the load runs with it
+                self.back.pop(key, None)
+                self.log(f"could not switch off {key}, leaving it:"
+                         f" {str(e)[-80:]}")
+        if adopted:
+            self.log(f"{len(adopted)} triggers an earlier load switched off"
+                     " and did not switch on are switched on at the end of"
+                     " this one: " + ", ".join(sorted(adopted)[:5]))
+        done = len(self.back) - len(adopted)
+        if done:
+            self.log(f"{done} triggers switched off for the load; the"
+                     f" record is in {self.record.path}")
+        return self
+
+    def __exit__(self, exc_type, *exc):
+        failed = []
+        for key, statement in sorted(self.back.items()):
+            try:
+                self.eng._cmd("dst", self.db, statement)
+            except RuntimeError as e:
+                failed.append(key)
+                self.log(f"NOT SWITCHED ON: {key}: {str(e)[-100:]}")
+        if self.back:
+            self.log(f"{len(self.back) - len(failed)} of {len(self.back)}"
+                     " triggers switched on again")
+        if not failed:
+            self.record.done()
+        if failed and exc_type is None:
+            raise SystemExit(
+                f"{self.db}: {len(failed)} triggers were not switched on"
+                f" again: {', '.join(failed[:5])}. What to run is in"
+                f" {self.record.path}")
+        return False
 
 
 class _NotLoaded(Exception):

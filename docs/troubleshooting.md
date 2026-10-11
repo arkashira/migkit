@@ -865,6 +865,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * Change Tracking does not follow <...> and <...> more | <...>, so their changes would be carried by nothing - <...>
 
+* <...>: the triggers the load would switch off on the target could not be recorded first, so none was switched off and nothing was loaded
+
+* <...>: <...> triggers were not switched on again: <...>. What to run is in <...>
+
 ## Redis
 
 * pip install 'migkit[redis]' for redis support
