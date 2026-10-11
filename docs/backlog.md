@@ -3856,9 +3856,30 @@ they are three cross-cutting gaps, not 26 engine problems:
   and the per-row factors of `PAIR_MEMORY`, `KafkaEngine.COPY_MEMORY`
   counted from the code, measured by `CAP_CALIBRATE=1` on
   `tests/test_large_values_on_every_engine.py`.
-* **Partitioned** - not yet on 15: copy by partition (the partition as
+* **Partitioned** - not yet on 13: copy by partition (the partition as
   the range), partition coverage checked (deep checks did it for
   PostgreSQL and MySQL), partition-aware workers.
+  **Built (2026-10-11), owed a server proof:** the deep check holds each
+  partition of each partitioned table to its own rows on both sides on
+  SQL Server (`$PARTITION` over the function and column; a partition has a
+  number and no name, so `p1`, `p2`), Oracle (`PARTITION (p)`) and TiDB
+  (MySQL's reader), through the one verdict (`Engine._partitions_verdict`).
+  SQL Server and Oracle are counted and not digested, and the finding says
+  how many partitions were compared by count only. Redis, Snowflake and
+  Redshift are declared not applicable with the reason. The catalogue
+  statements are new and have not run against a server of each kind
+  (`capabilities.UNPROVED`); the tests hold the readers' logic over
+  stubbed catalogues. Left: the same on DB2, Db2 for i, Db2 for z/OS, ASE,
+  Teradata, BigQuery, Iceberg, Delta, Parquet, CockroachDB, DSQL, the pair
+  and the generic engine; the copy by partition and the partition-aware
+  workers beyond PostgreSQL, MySQL, ClickHouse and Kafka.
+* **Large values on TiDB, CockroachDB and Aurora DSQL** - left to be
+  measured: each server's own widest row and entry, its packet and
+  transaction limits, and what it does at the limit (refused by name or
+  cut), on a server of each kind. The numbers are not taken from the
+  documentation, from memory or from a sample (a sampled maximum cannot
+  certify an exact bound), so the cell stays not yet until they are
+  measured (P0-PARITY.lv.new).
 * **Read-only target** (BAR-3) - not yet on 24: the target kept from
   the application while migkit moves into it, or its writes named - the
   same hold-writes primitives the cutover's freezes use on the source

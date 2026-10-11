@@ -1567,8 +1567,8 @@ DEPTH_GAPS = {
                 "mongodb redis sqlite dynamodb opensearch cassandra duckdb "
                 "copybook couchbase cosmosdb"),
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mssql kafka parquet clickhouse oracle db2 db2i db2zos ase "
-                "teradata redshift snowflake bigquery iceberg delta tidb "
+                "kafka parquet clickhouse db2 db2i db2zos ase "
+                "teradata redshift snowflake bigquery iceberg delta "
                 "cockroachdb dsql hetero"),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
@@ -2104,6 +2104,8 @@ UNPROVED = {
     "tail.table-states": ("mssql dynamodb oracle db2i tidb dsql couchbase "
                           "cosmosdb sapodp saas hetero"),
     "assess.versions": "mongodb",
+    "verify.structure.partitions": "mssql oracle tidb",
+    "move.partitioned": "mssql oracle tidb",
     "assess.engine-checks": ("db2i snowflake "
                              "sapodp "),
     "schema.create": "db2i db2zos ",

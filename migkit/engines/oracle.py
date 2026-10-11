@@ -1580,8 +1580,106 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                                         " validated", "",
                           "alter table ... enable validate constraint ..."
                           if loose else ""))
+        out.append(self._deep_partitions(db))
         out.append(self._mojibake(db))
         return out
+
+    # ---- partitions ------------------------------------------------------
+
+    def partition_scheme(self, side, db):
+        """{table: {"m": method, "e": the key's columns, "p": {partition:
+        its high value}}} of every partitioned table in scope, the
+        partitions in their order. A composite table's subpartitions are
+        its partitions' rows and read as them. A list's `DEFAULT` and a
+        range's `MAXVALUE` are the partitions every other row lands in."""
+        owner = self._owner(side, db)
+        keys = {}
+        for tbl, col in self._rows(
+                side, db, "select name, column_name from all_part_key_columns"
+                          f" where owner = {MARK} and object_type = 'TABLE'"
+                          " order by name, column_position", (owner,)):
+            keys.setdefault(str(tbl), []).append(str(col))
+        out = {}
+        for tbl, how in self._rows(
+                side, db, "select table_name, partitioning_type from"
+                          f" all_part_tables where owner = {MARK}"
+                          " order by 1", (owner,)):
+            if self.in_scope(db, self._said(str(tbl))):
+                out[str(tbl)] = {"m": str(how),
+                                 "e": ", ".join(keys.get(str(tbl), [])),
+                                 "p": {}}
+        for tbl, name, high in self._rows(
+                side, db, "select table_name, partition_name, high_value"
+                          f" from all_tab_partitions where table_owner ="
+                          f" {MARK} order by table_name, partition_position",
+                (owner,)):
+            if str(tbl) in out:
+                out[str(tbl)]["p"][str(name)] = " ".join(
+                    str(high or "").split())
+        return out
+
+    #: partitions counted in one statement at most
+    PARTITIONS_PER_READ = 100
+
+    def _partition_rows(self, side, db, tbl, parts):
+        """{partition: {"rows", "digest", "bound", "catchall"}} of one
+        table on one side: each partition's rows counted with `PARTITION
+        (p)`. Counted and not digested - the digest is left None, and the
+        check says which partitions were compared by count only."""
+        names = list(parts)
+        out = {}
+        for at in range(0, len(names), self.PARTITIONS_PER_READ):
+            reads = []
+            for i, name in enumerate(names[at:at + self.PARTITIONS_PER_READ],
+                                     start=at):
+                bound = parts[name] or ""
+                out[name] = {"rows": 0, "digest": None, "bound": bound,
+                             "catchall": bound.upper() in (
+                                 "MAXVALUE", "DEFAULT")}
+                reads.append(
+                    f"select {i}, count(*) from "
+                    f"{self._qualified(side, db, tbl)} partition "
+                    f"({self._q(name)})")
+            for i, rows in self._rows(side, db, " union all ".join(reads)):
+                out[names[int(i)]]["rows"] = int(rows)
+        return out
+
+    def _deep_partitions(self, db):
+        """Every partitioned table's method and key on both sides, and every
+        partition held to its own count (`Engine._partitions_verdict`). A
+        partition that arrived empty leaves the table's total plausible."""
+        try:
+            sp = self.partition_scheme("src", db)
+            dp = self.partition_scheme("dst", db)
+            plain = {side: {self._said(str(t[0])) for t in self._rows(
+                side, db, "select table_name from all_tables where owner ="
+                          f" {MARK}", (self._owner(side, db),))}
+                     for side in ("src", "dst")}
+            scheme, tables = [], {}
+            for t, si in sorted(sp.items()):
+                di = dp.get(t)
+                if not di:
+                    scheme.append(
+                        f"{t}: partitioned on source, not on target"
+                        if self._said(t) in plain["dst"] else
+                        f"{t}: missing on target (partitioned by"
+                        f" {si['m']} on the source)")
+                    continue
+                if (si["m"], si["e"]) != (di["m"], di["e"]):
+                    scheme.append(f"{t}: partition scheme differs"
+                                  f" src({si['m']} {si['e']})"
+                                  f" dst({di['m']} {di['e']})")
+                tables[t] = (self._partition_rows("src", db, t, si["p"]),
+                             self._partition_rows("dst", db, t, di["p"]))
+            for t, di in sorted(dp.items()):
+                if t not in sp and self._said(t) in plain["src"]:
+                    scheme.append(f"{t}: partitioned on target ({di['m']}"
+                                  f" {di['e']}), not on source")
+            return self._partitions_verdict(db, tables, scheme, "MAXVALUE")
+        except Exception as e:  # noqa: BLE001 - said, and the rest runs
+            return Result("deep", f"{db} partitions", "error",
+                          "could not read the partitions:"
+                          f" {str(e).splitlines()[-1][:120]}")
 
     # ---- settings --------------------------------------------------------
 

@@ -927,8 +927,114 @@ class MSSQLEngine(DbapiRows, Engine):
                               f" none ahead of source{note}"))
         from .. import workload
         res.append(workload.compare(self, db))
+        res.append(self._deep_partitions(db))
         res.append(self._mojibake(db))
         return res
+
+    # ---- partitions ------------------------------------------------------
+
+    def partition_scheme(self, side, db):
+        """{table: {"m": method, "e": the partitioning column and which
+        side a boundary value belongs to, "p": {partition: its bound}}} of
+        every partitioned table in scope. A partition has a number and no
+        name, so `p1`, `p2` ...: the number is its place in the function's
+        order, and its bound the boundary value that closes it (`<= v` on
+        a function that puts a boundary on its left) or opens it (`>= v`).
+        The partition every other value lands in is the open end."""
+        rows = self._cmd(side, db, (
+            "select s.name + '.' + t.name, pf.name, pf.type_desc,"
+            " pf.boundary_value_on_right, c.name, p.partition_number,"
+            " pf.fanout from sys.partitions p join sys.tables t on"
+            " t.object_id = p.object_id join sys.schemas s on s.schema_id ="
+            " t.schema_id join sys.indexes i on i.object_id = p.object_id"
+            " and i.index_id = p.index_id join sys.partition_schemes ps on"
+            " ps.data_space_id = i.data_space_id join sys.partition_functions"
+            " pf on pf.function_id = ps.function_id join sys.index_columns ic"
+            " on ic.object_id = i.object_id and ic.index_id = i.index_id and"
+            " ic.partition_ordinal = 1 join sys.columns c on c.object_id ="
+            " ic.object_id and c.column_id = ic.column_id where i.index_id in"
+            " (0, 1) order by 1, p.partition_number"))
+        bounds = {}
+        for fn, at, value in self._cmd(side, db, (
+                "select pf.name, prv.boundary_id, convert(nvarchar(4000),"
+                " prv.value, 126) from sys.partition_functions pf join"
+                " sys.partition_range_values prv on prv.function_id ="
+                " pf.function_id order by 1, 2")):
+            bounds[(fn, int(at))] = value
+        out = {}
+        for table, fn, kind, right, col, number, fanout in rows:
+            if not self.in_scope(db, table):
+                continue
+            right, number, fanout = (str(right) in ("1", "True")), \
+                int(number), int(fanout)
+            one = out.setdefault(table, {
+                "m": f"{kind} {'RIGHT' if right else 'LEFT'}", "e": col,
+                "f": fn, "p": {}})
+            if right:
+                bound = (f">= {bounds[(fn, number - 1)]}" if number > 1
+                         else "MINVALUE")
+            else:
+                bound = (f"<= {bounds[(fn, number)]}" if number < fanout
+                         else "MAXVALUE")
+            one["p"][f"p{number}"] = bound
+        return out
+
+    def _partition_rows(self, side, db, table, parts, scheme):
+        """{partition: {"rows", "digest", "bound", "catchall"}} of one
+        table on one side: every partition counted by `$PARTITION` over its
+        function and column, in one statement. Counted and not digested -
+        the digest is left None, and the check says so."""
+        one = scheme[table]
+        function = one["f"]
+        at = f"$PARTITION.{self._q(function)}({self._q(one['e'])})"
+        got = {int(n): int(c) for n, c in self._cmd(side, db, (
+            f"select {at}, count_big(*) from "
+            f"{self._qualified(side, db, table)} t group by {at}"))}
+        out = {}
+        for name, bound in parts.items():
+            out[name] = {"rows": got.get(int(name[1:]), 0), "digest": None,
+                         "bound": bound,
+                         "catchall": bound in ("MAXVALUE", "MINVALUE")}
+        return out
+
+    def _deep_partitions(self, db):
+        """Every partitioned table's function and column on both sides, and
+        every partition held to its own count (`Engine._partitions_verdict`)
+        - a partition that arrived empty leaves the table's total
+        plausible."""
+        try:
+            sp = self.partition_scheme("src", db)
+            dp = self.partition_scheme("dst", db)
+            names = {side: {r[0] for r in self._cmd(side, db, (
+                "select s.name + '.' + t.name from sys.tables t join"
+                " sys.schemas s on s.schema_id = t.schema_id"))}
+                for side in ("src", "dst")}
+            scheme, tables = [], {}
+            for t, si in sorted(sp.items()):
+                di = dp.get(t)
+                if not di:
+                    scheme.append(
+                        f"{t}: partitioned on source, not on target"
+                        if t in names["dst"] else
+                        f"{t}: missing on target (partitioned by"
+                        f" {si['m']} on the source)")
+                    continue
+                if (si["m"], si["e"]) != (di["m"], di["e"]):
+                    scheme.append(f"{t}: partition scheme differs"
+                                  f" src({si['m']} {si['e']})"
+                                  f" dst({di['m']} {di['e']})")
+                tables[t] = (
+                    self._partition_rows("src", db, t, si["p"], sp),
+                    self._partition_rows("dst", db, t, di["p"], dp))
+            for t, di in sorted(dp.items()):
+                if t not in sp and t in names["src"]:
+                    scheme.append(f"{t}: partitioned on target ({di['m']}"
+                                  f" {di['e']}), not on source")
+            return self._partitions_verdict(db, tables, scheme, "open-ended")
+        except Exception as e:  # noqa: BLE001 - said, and the rest runs
+            return Result("deep", f"{db} partitions", "error",
+                          "could not read the partitions:"
+                          f" {str(e).splitlines()[-1][:120]}")
 
     # --- the source's own statements, from its Query Store (R23, 4) -----
 

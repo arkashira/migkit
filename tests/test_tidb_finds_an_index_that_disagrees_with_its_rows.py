@@ -36,17 +36,24 @@ def _engine(broken=()):
     return eng
 
 
+def _indexes(results):
+    """The finding of the index check, beside the deep check's others."""
+    return [r for r in results if r.scope == "d target indexes"]
+
+
 def test_a_target_whose_indexes_agree_with_its_rows_passes():
     eng = _engine()
-    got = eng.check_deep("d")
+    got = _indexes(eng.check_deep("d"))
     assert [(r.scope, r.status) for r in got] == [("d target indexes", "ok")]
-    # every table is asked, on the target and nowhere else
-    assert [s for s, _ in eng.asked] == ["dst"] * 3
-    assert all(sql.startswith("admin check table") for _, sql in eng.asked)
+    # every table is asked, on the target and nowhere else (the partition
+    # check beside it reads both sides' catalogues, which is its own)
+    checks = [(s, sql) for s, sql in eng.asked
+              if sql.startswith("admin check table")]
+    assert [s for s, _ in checks] == ["dst"] * 3
 
 
 def test_a_table_whose_index_disagrees_is_named_with_the_servers_words():
-    got = _engine(broken=("b",)).check_deep("d")
+    got = _indexes(_engine(broken=("b",)).check_deep("d"))
     assert [r.status for r in got] == ["diff"], got
     assert got[0].scope == "d target indexes"
     assert "1 tables whose indexes do not agree with their rows" \
@@ -57,7 +64,7 @@ def test_a_table_whose_index_disagrees_is_named_with_the_servers_words():
 
 
 def test_every_broken_table_is_found_not_only_the_first():
-    got = _engine(broken=("a", "c")).check_deep("d")
+    got = _indexes(_engine(broken=("a", "c")).check_deep("d"))
     assert got[0].status == "diff"
     assert "2 tables whose indexes do not agree" in got[0].detail
     assert "a (" in got[0].detail and "c (" in got[0].detail

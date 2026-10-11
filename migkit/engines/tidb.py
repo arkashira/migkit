@@ -449,6 +449,10 @@ class TiDBEngine(MySQLEngine):
         else:
             out.append(Result("deep", f"{db} target indexes", "ok",
                               "every table's indexes agree with its rows"))
+        # a partition that arrived empty leaves the table's total
+        # plausible: each is held to its own count and digest, read with
+        # `PARTITION (p)` as MySQL's are
+        out.append(self._deep_partitions(db, dst))
         return out
 
     def reach_items(self, side):

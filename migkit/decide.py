@@ -2147,8 +2147,22 @@ WAYS = {
         **_NONE,
         "postgres": ("yes", "@check_deep"),
         "mysql": ("yes", "@check_deep"),
+        # each partition held to its own count on both sides: a partition
+        # that arrived empty leaves the table's total plausible
+        "mssql": ("yes", "@_deep_partitions"),
+        "oracle": ("yes", "@_deep_partitions"),
+        "tidb": ("yes", "@_deep_partitions"),
         "clickhouse": ("yes", "@_partitioned_by"),
         "kafka": ("yes", "@move_table"),
+        "redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
+                                  " partitioned ones"),
+        "snowflake": (NOT_APPLICABLE, "a table is cut into micro-partitions"
+                                      " by the service itself; none is"
+                                      " declared by the application, so"
+                                      " none is carried"),
+        "redshift": (NOT_APPLICABLE, "a table is laid out by its"
+                                     " distribution and sort keys; it has"
+                                     " no partitions of its own"),
         "cassandra": (NOT_APPLICABLE, "every table is partitioned by its"
                                       " key; the copy goes by token ranges"),
         "dynamodb": (NOT_APPLICABLE, "every table is partitioned by its"

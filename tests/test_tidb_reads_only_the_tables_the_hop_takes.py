@@ -84,9 +84,13 @@ def test_the_counts_the_data_and_the_schema_read_the_same_tables(
 def test_the_deep_check_asks_the_server_only_of_the_taken_tables(
         tmp_path, asked):
     got = _engine(tmp_path).check_deep("d")
-    assert [r.status for r in got] == ["ok"]
+    assert [(r.scope, r.status) for r in got] == [
+        ("d target indexes", "ok"), ("d partitions", "ok")]
     checks = [s[1] for s in asked if s[1].startswith("admin check table")]
     assert checks == ["admin check table `d`.`orders`"]
+    # and the partitions are asked of no table the hop leaves out
+    for table in LEFT_OUT:
+        assert _names(asked, table) == [], table
 
 
 def test_the_counters_are_only_of_the_taken_tables(tmp_path, asked):

@@ -29,25 +29,25 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | kafka | 16/16 | 11/11 | - |
 | kinesis | 16/16 | 11/11 | - |
 | mongodb | 16/16 | 10/11 | missing grant |
-| mssql | 16/16 | 10/11 | partitioned |
+| mssql | 16/16 | 11/11 | - |
 | mysql | 16/16 | 11/11 | - |
 | opensearch | 16/16 | 11/11 | - |
-| oracle | 16/16 | 10/11 | partitioned |
+| oracle | 16/16 | 11/11 | - |
 | parquet | 16/16 | 10/11 | partitioned |
 | postgres | 16/16 | 11/11 | - |
 | pubsub | 16/16 | 11/11 | - |
-| redis | 16/16 | 10/11 | partitioned |
-| redshift | 5/16 | 10/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| redis | 16/16 | 11/11 | - |
+| redshift | 5/16 | 11/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
 | saas | 16/16 | 11/11 | - |
 | sapodp | 16/16 | 11/11 | - |
-| snowflake | 5/16 | 10/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| snowflake | 5/16 | 11/11 | deep, sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
 | sqlite | 16/16 | 11/11 | - |
 | teradata | 16/16 | 9/11 | large values, partitioned |
-| tidb | 13/16 | 9/11 | bulk-move, users, snapshot, large values, partitioned |
+| tidb | 13/16 | 10/11 | bulk-move, users, snapshot, large values |
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 203, yes 518. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 890, not yet 1479, test owed 209, yes 518. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -79,11 +79,11 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | parquet | 0/7 | 0/15 | - | 0/4 | 1/2 | 3/6 | 1/1 | 1/1 | 0/1 | 0/1 | 6/38 |
 | postgres | 9/10 | 35/37 | 5/6 | 7/7 | 5/6 | 7/7 | 8/8 | 1/1 | 1/1 | 1/1 | 79/84 |
 | pubsub | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
-| redis | 1/8 | 7/14 | 1/6 | 4/7 | 0/1 | 4/5 | 3/6 | 1/1 | 1/1 | 0/1 | 22/50 |
-| redshift | 1/10 | 0/32 | 0/6 | 1/7 | 1/5 | 1/5 | 1/7 | 1/1 | 1/1 | 0/1 | 7/75 |
+| redis | 1/8 | 7/14 | 1/6 | 4/7 | 0/1 | 4/4 | 3/6 | 1/1 | 1/1 | 0/1 | 22/49 |
+| redshift | 1/10 | 0/32 | 0/6 | 1/7 | 1/5 | 1/4 | 1/7 | 1/1 | 1/1 | 0/1 | 7/74 |
 | saas | 0/6 | 0/3 | 0/5 | 1/5 | - | 0/1 | 0/1 | 0/1 | 0/1 | - | 1/23 |
 | sapodp | 0/6 | 0/3 | 0/5 | 0/5 | 0/1 | 0/1 | 1/1 | 1/1 | 0/1 | - | 2/24 |
-| snowflake | 0/10 | 0/33 | 0/6 | 0/7 | 1/6 | 0/6 | 1/7 | 1/1 | 0/1 | 0/1 | 3/78 |
+| snowflake | 0/10 | 0/33 | 0/6 | 0/7 | 1/6 | 0/5 | 1/7 | 1/1 | 0/1 | 0/1 | 3/77 |
 | sqlite | 2/9 | 4/27 | - | 2/7 | 2/5 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 17/59 |
 | teradata | 1/8 | 1/30 | - | 1/7 | 1/6 | 1/6 | 2/4 | 1/1 | 0/1 | 0/1 | 8/64 |
 | tidb | 4/10 | 2/31 | 3/6 | 3/7 | 5/6 | 2/7 | 4/6 | 1/1 | 0/1 | 0/1 | 24/76 |
@@ -117,7 +117,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.structure.keys | mssql mysql postgres redis | - | the rest (19) | cassandra cosmosdb couchbase delta dynamodb kafka kinesis mongodb opensearch parquet pubsub saas sapodp |
 | verify.structure.materialized-views | postgres | - | ase bigquery cassandra clickhouse cockroachdb cosmosdb db2 db2i db2zos generic hetero iceberg mssql oracle redshift snowflake teradata | the rest (18) |
 | verify.structure.objects | cockroachdb duckdb mongodb mysql oracle postgres | - | the rest (22) | copybook dynamodb kinesis parquet pubsub redis saas sapodp |
-| verify.structure.partitions | mysql postgres | - | the rest (20) | cassandra copybook cosmosdb couchbase duckdb dynamodb kinesis mongodb opensearch pubsub redis saas sapodp sqlite |
+| verify.structure.partitions | mysql postgres | mssql oracle tidb | the rest (17) | cassandra copybook cosmosdb couchbase duckdb dynamodb kinesis mongodb opensearch pubsub redis saas sapodp sqlite |
 | verify.structure.row-security | postgres | - | ase bigquery clickhouse cockroachdb db2 db2i db2zos delta generic hetero iceberg mssql opensearch oracle redshift snowflake teradata | the rest (18) |
 | verify.structure.schema-diff | postgres | - | the rest (25) | cosmosdb couchbase dynamodb kafka kinesis mongodb pubsub redis saas sapodp |
 | verify.structure.sharding | mongodb | - | clickhouse cosmosdb generic hetero kafka opensearch redshift teradata | the rest (27) |
@@ -163,7 +163,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | move.table-copy | the rest (26) | bigquery db2i db2zos dsql snowflake | generic | kinesis pubsub saas sapodp |
 | move.bulk | the rest (15) | hetero | ase bigquery cockroachdb cosmosdb couchbase db2 db2i db2zos delta generic iceberg redshift snowflake tidb | dsql kinesis pubsub saas sapodp teradata |
 | move.large-values | the rest (17) | bigquery db2i db2zos snowflake | cockroachdb cosmosdb couchbase dsql generic teradata tidb | cassandra copybook dynamodb kinesis pubsub redshift saas sapodp |
-| move.partitioned | clickhouse kafka mysql postgres | - | the rest (19) | cassandra copybook cosmosdb couchbase duckdb dynamodb kinesis mongodb opensearch pubsub saas sapodp sqlite |
+| move.partitioned | clickhouse kafka mysql postgres | mssql oracle tidb | ase bigquery cockroachdb db2 db2i db2zos delta dsql generic hetero iceberg parquet teradata | the rest (16) |
 | move.sized | the rest (13) | cockroachdb db2i db2zos dsql oracle redshift snowflake teradata tidb | cassandra copybook cosmosdb couchbase delta dynamodb generic iceberg opensearch parquet saas sapodp | kinesis pubsub |
 | move.load-window | hetero mysql oracle postgres | tidb | the rest (18) | bigquery copybook delta iceberg kafka kinesis parquet pubsub redis redshift saas sapodp snowflake |
 | move.create-missing | hetero mysql postgres tidb | - | the rest (26) | kinesis mongodb pubsub redis saas sapodp |
@@ -181,7 +181,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Backlog (496 items, `docs/backlog-index.md`)
 
-DONE 286 - PARTLY 52 - IN PROGRESS 9 - OPEN 120 - BLOCKED 20 - NOT PURSUED 9
+DONE 286 - PARTLY 53 - IN PROGRESS 8 - OPEN 120 - BLOCKED 20 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
@@ -190,7 +190,7 @@ DONE 286 - PARTLY 52 - IN PROGRESS 9 - OPEN 120 - BLOCKED 20 - NOT PURSUED 9
 | correctness | 0 | 0 | 0 | 1 | 0 | 0 |
 | cutover | 14 | 1 | 1 | 4 | 0 | 0 |
 | ease of use | 19 | 2 | 1 | 17 | 1 | 1 |
-| engines | 27 | 7 | 3 | 13 | 6 | 1 |
+| engines | 27 | 8 | 2 | 13 | 6 | 1 |
 | maintainability | 0 | 0 | 0 | 5 | 0 | 0 |
 | move | 30 | 11 | 2 | 9 | 0 | 2 |
 | operations/scale | 26 | 9 | 0 | 30 | 5 | 3 |
