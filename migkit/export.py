@@ -1156,6 +1156,10 @@ def write(hop, session=None, log=None):
     # anchored: a record rewritten from its start since does not end there
     head = audit.append(root / "changelog.jsonl", anchor)
     _anchor_remote(hop, out, {**anchor, "head": head}, say)
+    # the record's own checkpoint, in a bucket nothing can rewrite
+    # (`anchor`); raises where the hop requires it and it could not go
+    from . import anchor as _anchor
+    _anchor.checkpoint(hop, say)
     return out
 
 

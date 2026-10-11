@@ -1439,6 +1439,18 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## Elsewhere in migkit
 
+* anchor: a mapping naming the bucket - bucket, prefix, retention, required
+
+* anchor: needs `bucket`, the object-locked bucket the checkpoints go to
+
+* anchor: retention is {mode: GOVERNANCE or COMPLIANCE, days: a whole number}
+
+* anchor: retention mode <...> is not one of <...>
+
+* anchor: retention days is a whole number of at least 1
+
+* anchor: <...> is not kept in the hop - the bucket is reached with the credentials the machine already has (environment, profile or role)
+
 * archive: is a mapping - remove, restore, batch
 
 * archive: remove and restore both - one of the two

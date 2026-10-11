@@ -6807,6 +6807,18 @@ HMAC for what a shared report shows. As planned:
 * **Audit:** hash-chained JSON lines, signed checkpoints, optionally
   anchored in an object-locked bucket; who, what, when, from where,
   approved by, plan hash.
+  *Anchor (2026-10-11, tests written, full suite not run):* `options:
+  anchor: {bucket, prefix, retention: {mode, days}, required}`
+  (`migkit/anchor.py`). At the end of every run that left anything, the
+  record's head and entry count (and an SSH signature over them where
+  `evidence: {sign}` or `MIGKIT_EVIDENCE_KEY` names a key) go as one
+  object per checkpoint into a bucket with Object Lock; a bucket without
+  it is refused with its reason; a failed write is said, kept and
+  retried, and stops nothing unless `required: true`. `migkit history`
+  reads every version of every checkpoint back and holds the record to
+  them (rewritten entries, entries taken out, a copy written over, a lock
+  gone or run out). Proved against `moto`, which is not the store: the
+  real Object Lock semantics (AWS S3, MinIO) are not yet exercised.
 * **One table across machines:** a lease per chunk in the shared bucket
   (conditional writes, a fencing token), work stealing by splitting the
   largest chunk in flight at its last checkpointed key. Looked at

@@ -5740,6 +5740,9 @@ def history(hop_name, db, show_ts):
                           " chain is whole"
                           + (f" ({n - chained} from before the chain began)"
                              if n > chained else ""))
+        from . import anchor
+        for line in anchor.lines(anchor.verify(hop)):
+            say_raw(line)
     elif not found:
         console.print("no history yet, nothing has been applied")
 

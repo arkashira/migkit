@@ -169,10 +169,15 @@ def step(command, params, log=None):
     if listening is not None:
         decide.LISTENERS.append(listening.heard)
     began = time.time()
-    failed, ok, ended = None, False, 0
+    failed, ok, ended, blocked = None, False, 0, None
     try:
         with traces.command(command, hop, params, run):
             try:
+                if writes and hop is not None:
+                    # a hop that requires its audit anchored is not
+                    # started when the bucket cannot hold an anchor
+                    from . import anchor
+                    anchor.require_ready(hop)
                 yield run
                 ok = True
             except SystemExit as e:
@@ -202,17 +207,25 @@ def step(command, params, log=None):
             except Exception as e:  # noqa: BLE001 - the answer stands
                 log(f"the hop's receivers could not be told"
                     f" ({type(e).__name__})")
-            _export(hop, run, log)
+            blocked = _export(hop, run, log)
         runlog.end(kept, "interrupted" if failed == "interrupted" else
                    "stopped" if failed else "done", time.time() - began,
                    failed, ended)
         traces.flush()
+        if blocked is not None and failed is None:
+            raise blocked
 
 
 def _export(hop, run, log):
-    from . import export
+    """The run's evidence written; the refusal (`anchor.Blocked`) where
+    the hop requires its audit anchored and a checkpoint could not be, for
+    the run to end with once its own record is closed."""
+    from . import anchor, export
     try:
         export.write_run(hop, run)
+    except anchor.Blocked as e:
+        log(str(e))
+        return e
     except Exception as e:  # noqa: BLE001 - said; the run's answer stands
         log(f"the run's evidence could not be exported"
             f" ({type(e).__name__}: {_first_line(e)[:120]})")

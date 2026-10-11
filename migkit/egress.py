@@ -1,14 +1,15 @@
 """What leaves the machine, and the one gate it goes through (audit
 2026-10-01, SEC12, SEC20, W8).
 
-migkit sends four things off the machine of its own accord, each only
+migkit sends five things off the machine of its own accord, each only
 where the operator configured it: the hop's notifications (`notify`), the
 run's spans to an OpenTelemetry collector (`traces`), findings and code
-to a language model (`assist`), and the evidence's digests into the run
-state's bucket (`evidence`). Each asks this gate first, with where it
+to a language model (`assist`), the evidence's digests into the run
+state's bucket (`evidence`), and the audit record's checkpoints into an
+object-locked bucket (`anchor`). Each asks this gate first, with where it
 would go, and sends nothing when the gate says no - no address read from
 where it is kept, no name looked up, no connection opened. Measured
-before the gate: each of the four decided alone, with its own idea of
+before the gate: each of the first four decided alone, with its own idea of
 what to take out, and nothing let a machine in a closed network say
 "nothing leaves" once.
 
@@ -51,6 +52,7 @@ KINDS = {
     "traces": "the run's spans to the OpenTelemetry collector",
     "assist": "findings and code to a language model",
     "evidence": "the evidence's digests in the run state's bucket",
+    "anchor": "the audit record's checkpoints in the anchor bucket",
 }
 
 NONE = ("none", "off", "false", "no", "0")
