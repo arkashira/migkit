@@ -1099,6 +1099,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> documents deleted on the target in the last minute refuse the source's version of them for a minute more - move again after it
 
+* <...>: the load's record could not be written under <...>, so its replicas and refresh are not taken away - a load that died inside the window could not give them back
+
 * <...> on the source was made again since the saved position (another index id): what the position counted is not in it. Move it again with --mode full+cdc
 
 ## Cassandra

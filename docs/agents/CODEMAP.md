@@ -205,7 +205,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/mssql.py` - (no docstring) Classes: MSSQLEngine.
 - `migkit/engines/my_pass.py` - MySQL into MySQL with no row passing through migkit (backlog R20 items 1 and 4). Classes: Different, TableCopy.
 - `migkit/engines/mysql.py` - (no docstring) Classes: MySQLEngine.
-- `migkit/engines/opensearch.py` - OpenSearch (and Elasticsearch) as one side of a pair (backlog 34). Classes: OpenSearchEngine.
+- `migkit/engines/opensearch.py` - OpenSearch (and Elasticsearch) as one side of a pair (backlog 34). Classes: TooManyFields, OpenSearchEngine.
 - `migkit/engines/oracle.py` - Oracle as a side of a pair and a hop's engine (backlog 11, F5), through python-oracledb in thin mode: no Instant Client on the machine. Classes: Zoned, Bind, OracleEngine.
 - `migkit/engines/oracle_logminer.py` - migkit's own reader of Oracle's redo, through LogMiner (backlog F5). Classes: NotRead, Miner.
 - `migkit/engines/oracle_pump.py` - Oracle to Oracle, server to server: the target's Data Pump pulls the tables over a database link to the source, as of one SCN, no row throug
