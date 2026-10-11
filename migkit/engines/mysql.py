@@ -6415,6 +6415,33 @@ class MySQLEngine(Engine):
                 "grant select on mysql.user to compare accounts")
         return items
 
+    def change_depths(self):
+        """{database.table: (depth, the statement that raises it or "")}
+        of the source's tables in scope (`changedepth`): from the log
+        settings it reports and whether each table has a primary key.
+        Read-only; one catalogue question a database."""
+        from .. import changedepth
+
+        def var(name):
+            r = self._q("src", f"show variables like '{name}'")
+            return r[0][1] if r else "?"
+        log_bin, fmt = var("log_bin"), var("binlog_format")
+        image, meta = var("binlog_row_image"), var("binlog_row_metadata")
+        seen = {}
+        for db in self.databases():
+            nokey = {r[0] for r in self._q(
+                "src", "select t.table_name from information_schema.tables"
+                " t where t.table_schema = %s and t.table_type ="
+                " 'BASE TABLE' and not exists (select 1 from"
+                " information_schema.table_constraints c where"
+                " c.table_schema = t.table_schema and c.table_name ="
+                " t.table_name and c.constraint_type = 'PRIMARY KEY')",
+                (self._d("src", db),))}
+            for t in self._tables("src", db):
+                seen[f"{db}.{t}"] = changedepth.mysql(
+                    log_bin, fmt, image, meta, t not in nokey)
+        return seen
+
     def assess(self):
         items = []
 
@@ -6458,22 +6485,8 @@ class MySQLEngine(Engine):
         # how deeply each table's changes can be read, and what raises it
         try:
             from .. import changedepth
-            seen = {}
-            for db in self.databases():
-                nokey = {r[0] for r in self._q(
-                    "src", "select t.table_name from information_schema.tables"
-                    " t where t.table_schema = %s and t.table_type ="
-                    " 'BASE TABLE' and not exists (select 1 from"
-                    " information_schema.table_constraints c where"
-                    " c.table_schema = t.table_schema and c.table_name ="
-                    " t.table_name and c.constraint_type = 'PRIMARY KEY')",
-                    (self._d("src", db),))}
-                for t in self._tables("src", db):
-                    seen[f"{db}.{t}"] = changedepth.mysql(
-                        var("src", "log_bin"), var("src", "binlog_format"),
-                        var("src", "binlog_row_image"),
-                        var("src", "binlog_row_metadata"), t not in nokey)
-            for level, item, detail in changedepth.lines(seen):
+            for level, item, detail in changedepth.lines(
+                    self.change_depths()):
                 add(level, "instance", item, detail)
         except Exception as e:  # noqa: BLE001 - a view of the log, not a gate
             add("warn", "instance", "change reading depth not worked out",

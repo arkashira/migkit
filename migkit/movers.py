@@ -69,53 +69,77 @@ def _ladder():
                     Need("its version-matched build",
                          lambda f: pgcopydb_available())),
              because="copy, index and constraint work overlap, and indexes"
-                     " are built after the rows land"),
+                     " are built after the rows land",
+             leaves="files in a work directory on this machine, and a"
+                    " container while it runs; nothing on the servers"),
         Rung("pgdump", "the dump and restore in parallel",
-             needs=(_moves("pgdump"), _installed("pg_dump", "pg_restore"))),
+             needs=(_moves("pgdump"), _installed("pg_dump", "pg_restore")),
+             leaves="a directory of dump files on this machine; nothing on"
+                    " the servers"),
         # the MySQL bulk copy: each table by the rung the engine's table
         # ladder gives it (`tableway.choose`), the straight copy alone where
         # the dump and load programs are not here
         Rung("mydumper", "the parallel dump and load",
              needs=(_moves("mydumper"),
-                    _installed("mydumper", "myloader"))),
+                    _installed("mydumper", "myloader")),
+             leaves="a directory of dump files on this machine; nothing on"
+                    " the servers"),
         Rung("mysqlsh", "the straight copy",
-             needs=(_moves("mysqlsh"), _installed("mysqlsh"))),
+             needs=(_moves("mysqlsh"), _installed("mysqlsh")),
+             leaves="a dump kept on this machine, which a stop goes on"
+                    " loading from; nothing on the servers"),
         Rung("pgloader", "the one-pass load",
-             needs=(_moves("pgloader"), _installed("pgloader"))),
+             needs=(_moves("pgloader"), _installed("pgloader")),
+             leaves="a load file on this machine; nothing on the"
+                    " servers"),
         # online, and consistent as of its commit - a dump of a source
         # still taking writes is neither; `fitted` falls back where the
         # hop or the servers cannot take it
         Rung("mongosync", "the online sync",
              gives=frozenset({"online", "consistent as of"}),
              needs=(_moves("mongosync"), _installed("mongosync")),
-             because="online, and consistent as of its commit"),
+             because="online, and consistent as of its commit",
+             leaves="a process on this machine while it syncs; what it keeps"
+                    " on the servers migkit has not measured"),
         Rung("mongodump", "the dump and restore",
              needs=(_moves("mongodump"),
-                    _installed("mongodump", "mongorestore"))),
+                    _installed("mongodump", "mongorestore")),
+             leaves="a directory of dump files on this machine; nothing on"
+                    " the servers"),
         # Redis's own tool, where its terms allow it: `fitted` gives way
         # to migkit's copier for any other target
         Rung("riotx", "the Redis products' own copy",
              needs=(_moves("riotx"), _installed("riotx")),
              because="many keys at once, and a cluster's nodes side by"
-                     " side"),
+                     " side",
+             leaves="a process on this machine while it runs; what it keeps"
+                    " on the servers migkit has not measured"),
         # the replica protocol's copy of a keyspace, and Kafka's own
         # cluster mirror: each ranked against migkit's copier on the hop's
         # measured rate (`bulkways`), where the list's order only starts it
         Rung("redisshake", "the keyspace copy by the replica protocol",
              needs=(_moves("redisshake"), _installed("redis-shake")),
              because="one snapshot of the whole keyspace as of the moment"
-                     " the source forked"),
+                     " the source forked",
+             leaves="a process on this machine, and a replica's connection"
+                    " on the source while it runs"),
         Rung("mirror", "the cluster mirror",
              needs=(_moves("mirror"),
                     Need("its runner here", lambda f: bool(_mirror_runner()),
                          "the cluster mirror is not installed here")),
-             because="Kafka's own Java clients, many partitions at once"),
-        Rung("native", "the engine's own means", needs=(_moves("native"),)),
+             because="Kafka's own Java clients, many partitions at once",
+             leaves="a process on this machine while it runs; what it keeps"
+                    " on the clusters migkit has not measured"),
+        Rung("native", "the engine's own means", needs=(_moves("native"),),
+             leaves="what the engine's own means leaves: set by the engine,"
+                    " not by migkit"),
         # a single table goes by the table copier: resuming by chunk
         # matters more than raw speed there
         Rung("builtin", "the table copier",
              gives=frozenset({"resume by chunk", "row filter",
-                              "column mapping"})),
+                              "column mapping"}),
+             leaves="a checkpoint of the ranges done, in files on this"
+                    " machine; nothing on the servers"),
     )
 
 
@@ -6143,7 +6167,10 @@ def stream_ways():
                     as_they_are),
              because="the target cannot dial the source, and the leg"
                      " connects out to both from here",
-             footprint=1),
+             footprint=1,
+             leaves="a slot and a publication on the source, an origin on"
+                    " the target, and a process and a state directory on"
+                    " this machine"),
         Rung("subscription", "the servers' own replication",
              needs=(pg, Need("the target able to dial the source",
                              lambda f: follow_selected() != "follow",
@@ -6155,7 +6182,10 @@ def stream_ways():
                          " without losing their changes",
                          lambda f: not f.get("publication_risk"),
                          lambda f: f["publication_risk"])),
-             because="the servers' own replication, nothing running here"),
+             because="the servers' own replication, nothing running here",
+             leaves="a slot and a publication on the source, and a"
+                    " subscription on the target, which holds the source's"
+                    " credentials; nothing on this machine"),
         Rung("tail", "migkit's own change tail",
              needs=(Need("a change tail",
                          lambda f: f["tail"] or f.get("by_pair"),
@@ -6172,7 +6202,9 @@ def stream_ways():
                         "a PostgreSQL source's changes go by its servers'"
                         " replication or the leg run from here")),
              because="read and applied by migkit, by key, with every batch"
-                     " accounted"),
+                     " accounted",
+             leaves="a position file and a process on this machine; on a"
+                    " PostgreSQL source also a slot"),
         Rung("replica", "the servers' own replication",
              needs=(Need("replication between the servers",
                          lambda f: f["repl"] and f["engine"] != "postgres",
@@ -6182,7 +6214,9 @@ def stream_ways():
                         "the change tail runs here, and applies by key"
                         " where a replica stops on a row the copy already"
                         " carried"),
-                    as_they_are)),
+                    as_they_are),
+             leaves="the replication set up on the target, which keeps its"
+                    " position there; nothing on this machine"),
         # its log is a source-available broker: started only once its
         # terms are accepted on this machine, and taken down whatever
         # they are, since a pipeline already running is the operator's
@@ -6196,7 +6230,9 @@ def stream_ways():
                     Need("its log's terms accepted",
                          lambda f: f.get("drop") or f["broker"][0],
                          lambda f: f"{PIPELINE_SAID}: {f['broker'][1]}")),
-             footprint=2),
+             footprint=2,
+             leaves="containers on this machine (a log and a connector), and"
+                    " on a PostgreSQL source a slot and a publication"),
     )
 
 

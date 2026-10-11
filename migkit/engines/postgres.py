@@ -9594,6 +9594,31 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                      " -> reset on target or apps cannot log in")
         return items
 
+    def change_depths(self):
+        """{database.table: (depth, the statement that raises it or "")}
+        of the source's tables in scope (`changedepth`): from wal_level
+        and each table's replica identity and primary key. Read-only; one
+        catalogue question a database."""
+        from .. import changedepth
+        wal = self._psql("src", "postgres", "show wal_level")
+        seen = {}
+        for db in self.databases():
+            for r in self._psql(
+                    "src", db,
+                    "select n.nspname || '.' || c.relname || '|' ||"
+                    " c.relreplident::text || '|' || exists (select 1 from"
+                    " pg_index i where i.indrelid = c.oid and"
+                    " i.indisprimary) from pg_class c join pg_namespace n"
+                    " on n.oid = c.relnamespace where c.relkind in"
+                    " ('r', 'p') and n.nspname not in ('pg_catalog',"
+                    " 'information_schema') and n.nspname not like"
+                    " 'pg_toast%'").splitlines():
+                name, ident, key = r.split("|")
+                if self.in_scope(db, name):
+                    seen[f"{db}.{name}"] = changedepth.postgres(
+                        wal, ident, key in ("t", "true"))
+        return seen
+
     def assess(self):
         items = []
 
@@ -9660,23 +9685,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         # how deeply each table's changes can be read, and what raises it
         try:
             from .. import changedepth
-            seen = {}
-            for db in self.databases():
-                for r in self._psql(
-                        "src", db,
-                        "select n.nspname || '.' || c.relname || '|' ||"
-                        " c.relreplident::text || '|' || exists (select 1 from"
-                        " pg_index i where i.indrelid = c.oid and"
-                        " i.indisprimary) from pg_class c join pg_namespace n"
-                        " on n.oid = c.relnamespace where c.relkind in"
-                        " ('r', 'p') and n.nspname not in ('pg_catalog',"
-                        " 'information_schema') and n.nspname not like"
-                        " 'pg_toast%'").splitlines():
-                    name, ident, key = r.split("|")
-                    if self.in_scope(db, name):
-                        seen[f"{db}.{name}"] = changedepth.postgres(
-                            wal, ident, key in ("t", "true"))
-            for level, item, detail in changedepth.lines(seen):
+            for level, item, detail in changedepth.lines(
+                    self.change_depths()):
                 add(level, "instance", item, detail)
         except Exception as e:  # noqa: BLE001 - a view of the log, not a gate
             add("warn", "instance", "change reading depth not worked out",

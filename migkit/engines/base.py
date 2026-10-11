@@ -2878,6 +2878,13 @@ class Engine:
         return {"level": "pass" if same else "warn", "scope": "instance",
                 "item": item, "detail": f"src {sv} / dst {dv}"}
 
+    def change_depths(self):
+        """{table: (depth, the statement that raises it or "")} of how
+        deeply each source table's changes can be read (`changedepth`),
+        or None where migkit has no reading of this engine's log settings
+        - not a depth guessed."""
+        return None
+
     def assess(self):
         """Pre-migration readiness. The same command on every engine.
 

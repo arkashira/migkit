@@ -230,6 +230,10 @@ class Rung:
     #: seconds before its first byte, and round trips a thousand rows take
     startup: float = 0.0
     trips: float = 0.0
+    #: what it leaves behind, in an operator's words - a table made, a
+    #: slot, a process, a file - and "nothing" where it leaves nothing:
+    #: the words `footprint` stands for, said by `doctor` (`waysaid`)
+    leaves: str = ""
 
     def __post_init__(self):
         for name in ("holds", "loads"):
