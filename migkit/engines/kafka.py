@@ -216,8 +216,8 @@ class KafkaEngine(Engine):
         to one partition."""
         from .. import streamout
         self._target_only(side, "write a change stream")
-        if streamout.options(self.hop)[0] == "avro":
-            return self._apply_avro(db, changes)
+        if streamout.options(self.hop)[0] in streamout.REGISTRY_FORMATS:
+            return self._apply_registered(db, changes)
         sent, skipped = streamout.encoded(self.hop, db, changes,
                                           int(time.time() * 1000))
         producer = self._producer()
@@ -240,17 +240,21 @@ class KafkaEngine(Engine):
                                      else self.hop.target)
         return held[side]
 
-    def _apply_avro(self, db, changes):
-        """The changes as Avro through the target's registry, in Debezium's
-        envelope (`avrostream`), a tombstone after each delete unless the
-        hop says `tombstones: false`."""
-        from .. import avrostream, registry, streamout
+    def _apply_registered(self, db, changes):
+        """The changes through the target's registry, as Avro or as JSON
+        Schema (`format`), in Debezium's envelope (`avrostream`,
+        `schemaformats`), a tombstone after each delete unless the hop says
+        `tombstones: false`."""
+        from .. import avrostream, registry, schemaformats, streamout
+        fmt = streamout.options(self.hop)[0]
         reg = self._registry("dst")
         if reg is None:
-            raise SystemExit("format: avro needs the target's"
+            raise SystemExit(f"format: {fmt} needs the target's"
                              " `schema_registry` - the URL of the registry"
                              " its consumers read schemas from")
-        enc = self.__dict__.setdefault("_avro", avrostream.Encoder(reg))
+        enc = self.__dict__.setdefault("_encoder", {}).setdefault(
+            fmt, avrostream.Encoder(reg) if fmt == "avro"
+            else schemaformats.JsonEncoder(reg))
         _, rule, _, most = streamout.options(self.hop)
         keep = (self.hop.options or {}).get("tombstones", True)
         now = int(time.time() * 1000)
@@ -266,6 +270,8 @@ class KafkaEngine(Engine):
                         f"{topic}: the schema registry refused the table's"
                         " new schema - its compatibility rule says the"
                         f" consumers of the topic could not read it: {e}")
+                except ValueError as e:
+                    raise SystemExit(f"{topic}: not written as {fmt}: {e}")
                 for key, value in out:
                     if value is not None and len(value) > most:
                         skipped[topic] = skipped.get(topic, 0) + 1
@@ -295,6 +301,8 @@ class KafkaEngine(Engine):
         Without it a copy between clusters with registries of their own
         carries ids the target's consumers look up in the wrong
         registry."""
+        import json
+
         from .. import registry
         src, dst = self._registry("src"), self._registry("dst")
         frame = (registry.frame_of(raw) if src is not None and dst is not None
@@ -302,8 +310,27 @@ class KafkaEngine(Engine):
         if frame is None:
             return raw
         sid, body = frame
-        return registry.framed(dst.register(f"{topic}-{part}",
-                                            src.schema(sid)), body)
+        try:
+            kind, text, refs = src.entry(sid)
+        except registry.Missing as e:
+            raise SystemExit(f"{topic}: a message names schema {sid}, which"
+                             f" the source's registry does not hold: {e}")
+        if refs:
+            raise SystemExit(
+                f"{topic}: schema {sid} refers to other schemas in the"
+                " source's registry, which a copy does not carry over - the"
+                " message is not copied, nor skipped")
+        # an Avro schema goes as its parsed form, as it always has; the
+        # others as their text, under the kind the source registry gave them
+        try:
+            return registry.framed(dst.register(
+                f"{topic}-{part}", json.loads(text) if kind == "AVRO"
+                else text, kind), body)
+        except registry.Refused as e:
+            raise SystemExit(
+                f"{topic}: the target's registry refused schema {sid}"
+                f" ({kind}) - its compatibility rule says the topic's"
+                f" consumers could not read it: {e}")
 
     def _count_skipped(self, db, skipped):
         from .. import streamout
