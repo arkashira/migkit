@@ -509,3 +509,96 @@ def test_a_delta_keeps_the_position_its_scope_took_effect_at(tmp_path):
     assert kept["position"] == "0/2A", kept
     assert hop.scope_log("appdb")[-1]["by"] == "delta"
     assert hop.scope_log("appdb")[-1]["position"] == "0/2A"
+
+
+# ---- partitions, by their table or by their own name (item 6) ---------------
+
+def test_a_partition_goes_by_its_table_unless_a_rule_names_it():
+    root, leaf = ["public", "orders"], ["public", "orders_2020"]
+    # by its table: left out with it, taken with it
+    assert not _hop(exclude=["public.orders"]).takes_partition(
+        "appdb", leaf, root)
+    assert _hop(include=["public.orders"]).takes_partition("appdb", leaf,
+                                                           root)
+    # by its own name: one partition left out, its table taken
+    assert not _hop(exclude=["orders_2020"]).takes_partition(
+        "appdb", leaf, root)
+    assert _hop(exclude=["orders_2019"]).takes_partition("appdb", leaf,
+                                                         root)
+    # one partition taken, its table not
+    assert _hop(include=["orders_2020"]).takes_partition("appdb", leaf,
+                                                         root)
+    # a rule naming both is about tables: its table's answer stands
+    assert not _hop(include=["public.*"], exclude=["public.orders"]
+                    ).takes_partition("appdb", leaf, root)
+
+
+def test_the_move_and_the_check_read_a_partition_one_way(monkeypatch):
+    from migkit import movers, planner
+    from migkit.engines.postgres import PostgresEngine
+    roots = {"public.orders_2020": "public.orders",
+             "public.orders_2021": "public.orders"}
+    hop = _hop(exclude=["orders_2020"])
+    eng = PostgresEngine(hop)
+    monkeypatch.setattr(PostgresEngine, "partition_roots",
+                        lambda self, side, db, ask=None: roots)
+    assert not eng.in_scope("appdb", "public.orders_2020")
+    assert eng.in_scope("appdb", "public.orders_2021")
+    assert eng.in_scope("appdb", "public.orders")
+    assert movers._left_out(hop, "appdb", "public.orders_2020", roots)
+    assert not movers._left_out(hop, "appdb", "public.orders_2021", roots)
+    got = {d.table: d.path for d in planner.plan(
+        hop, "appdb", "pgdump", ["public.orders", "public.orders_2020",
+                                 "public.orders_2021"], roots=roots,
+        choice={})}
+    assert got["public.orders_2020"] == planner.LEFT, got
+    assert got["public.orders_2021"] != planner.LEFT, got
+
+
+def test_a_partition_of_a_masked_table_is_compared_by_the_pair(monkeypatch):
+    from migkit.engines.postgres import PostgresEngine
+    hop = _hop(options={"mask_on_write": {"public.orders.email": "null"}})
+    eng = PostgresEngine(hop)
+    monkeypatch.setattr(PostgresEngine, "partition_roots",
+                        lambda self, side, db, ask=None: {
+                            "public.orders_2020": "public.orders"})
+    # asked by its own name it matched no rule, and was compared here
+    assert not eng.through_pair("appdb", "public.orders_2020")
+    assert eng._paired("appdb", "public.orders_2020")
+    assert not eng._paired("appdb", "public.people")
+
+
+@needs_docker
+def test_postgres_a_masked_partitioned_table_is_proved_by_its_table(
+        pg_pair, tmp_path):
+    from migkit import cli
+    from migkit.engines.postgres import PostgresEngine
+    from tests.conftest import psql
+    ddl = ("drop table if exists parted; create table parted (id int, at"
+           " date, email text, primary key (id, at)) partition by range"
+           " (at); create table parted_a partition of parted for values"
+           " from ('2020-01-01') to ('2021-01-01'); create table parted_b"
+           " partition of parted for values from ('2021-01-01') to"
+           " ('2022-01-01')")
+    for port in (pg_pair["src"], pg_pair["dst"]):
+        assert psql(port, ddl).returncode == 0
+    psql(pg_pair["src"], "insert into parted values (1, '2020-05-01',"
+                         " 'a@example.com'), (2, '2021-05-01',"
+                         " 'b@example.com')")
+    hop = Hop(name="parted", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=pg_pair["src"],
+                              user="postgres", password="test"),
+              target=Endpoint(host="127.0.0.1", port=pg_pair["dst"],
+                              user="postgres", password="test"),
+              databases=["postgres"], include=["public.parted"],
+              options={"mask_on_write": {"parted.email": "null"}})
+    hop.report_dir = lambda db=None, _p=tmp_path: _p
+    eng = PostgresEngine(hop)
+    ck = cli._checkpoint(hop, tmp_path / "move.json")
+    cli._copy_table_by(eng, "postgres", "public", "parted", 100, ck,
+                       lambda m: None)
+    assert psql(pg_pair["dst"], "select count(*) from parted_b where email"
+                                " is null").stdout.strip() == "1"
+    got = eng.check_data("postgres") + eng.check_counts("postgres")
+    assert got and all(r.status == "ok" for r in got), \
+        [(r.scope, r.status, r.detail) for r in got]

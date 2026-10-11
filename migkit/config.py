@@ -1131,12 +1131,41 @@ class Hop:
             from .leftovers import bookkeeping
             if bookkeeping(*parts):
                 return True
-        cands = {".".join(parts[i:]) for i in range(len(parts))}
-        fold = self.folds_case()
-        if any(name_matches(c, pat, fold) for pat in self.exclude
-               for c in cands):
+        if self._named_out(*parts):
             return True
         return not self.included(*parts)
+
+    def _named_out(self, *parts):
+        """Whether an `exclude` pattern names this object - its own name or
+        any right-anchored part of it (`excluded`'s first half)."""
+        parts = [str(p) for p in parts if p not in (None, "")]
+        cands = {".".join(parts[i:]) for i in range(len(parts))}
+        fold = self.folds_case()
+        return any(name_matches(c, pat, fold) for pat in self.exclude
+                   for c in cands)
+
+    def takes_partition(self, db, leaf, root):
+        """Whether the hop takes a partition (`leaf`, its own name's parts)
+        of table `root` (its parts): as its table is taken - the name the
+        hop's rules are written in - unless a rule names the partition
+        itself: an `exclude` naming it leaves it out, an `include` naming
+        it takes it though its table is not taken. So a hop says by root or
+        by leaf, and the move and the check read one answer
+        (`movers._left_out`, `PostgresEngine.in_scope`)."""
+        leaf = [str(p) for p in leaf if p not in (None, "")]
+        if self._named_out(db, *leaf):
+            return False
+        if not self.excluded(db, *root):
+            return True
+        # an `include` that names the partition and not its table: one
+        # naming both (`public.*`) is about tables, and its table's answer
+        # stands
+        fold = self.folds_case()
+        mine = self._ids(*self._names(db, *leaf))
+        its = self._ids(*self._names(db, *root))
+        return any(any(name_matches(i, p, fold) for i in mine)
+                   and not any(name_matches(i, p, fold) for i in its)
+                   for p in (str(x) for x in self.include) if p.strip())
 
     def takes_table(self, db, table, engine=None):
         """Whether the hop takes a table named as a listing names it

@@ -2232,7 +2232,10 @@ class MySQLEngine(Engine):
         through the mapping (`_mapped_schema`)."""
         out = {t for t in self._all_tables(side, db)
                if not self.in_scope(db, t)}
+        # a table only masked keeps its definition, and is compared here
         for t in self.mapped_tables(db):
+            if not self.made_by_pair(db, t):
+                continue
             leaf = t.rpartition(".")[2]
             out.add(self.hop.target_table(db, leaf).rpartition(".")[2]
                     if side == "dst" else leaf)
@@ -4926,11 +4929,13 @@ class MySQLEngine(Engine):
         plain = {side: set(self._all_tables(side, db))
                  for side in ("src", "dst")}
         scheme, tables = [], {}
+        # each under the name the hop gives it there
+        there = {t: self.hop.target_table_in(db, t) or t for t in sp}
         for t, si in sorted(sp.items()):
-            di = dp.get(t)
+            di = dp.get(there[t])
             if not di:
                 scheme.append(f"{t}: partitioned on source, not on target"
-                              if t in plain["dst"] else
+                              if there[t] in plain["dst"] else
                               f"{t}: missing on target (partitioned by"
                               f" {si['m']} on the source)")
                 continue
@@ -4939,29 +4944,39 @@ class MySQLEngine(Engine):
                               f" src({si['m']} {si['e']})"
                               f" dst({di['m']} {di['e']})")
             tables[t] = (self._partition_rows("src", db, t, si["p"]),
-                         self._partition_rows("dst", db, t, di["p"]))
+                         self._partition_rows("dst", db, t, di["p"],
+                                              there[t]))
         for t, di in sorted(dp.items()):
-            if t not in sp and t in plain["src"]:
+            if t not in sp and t not in there.values() and t in plain["src"]:
                 scheme.append(f"{t}: partitioned on target ({di['m']}"
                               f" {di['e']}), not on source")
         return self._partitions_verdict(db, tables, scheme, "MAXVALUE")
 
-    def _partition_rows(self, side, db, t, parts):
+    def _partition_rows(self, side, db, t, parts, there=None):
         """{partition: {"rows", "digest", "bound", "catchall"}} of one
-        table on one side, every partition's count and digest (the same
-        row text and sum the data check folds a table with) in one
-        statement. A side the source's row text cannot be read on - a
-        column the target lacks - is counted, and its digest left None."""
+        table on one side - the target's under the name the hop gives it
+        there (`there`) - every partition's count and digest (the same row
+        text and sum the data check folds a table with) in one statement.
+        A side the source's row text cannot be read on - a column the
+        target lacks - is counted, and its digest left None. A column the
+        hop masks is left out of the digest: it holds the target's own
+        text, which the pair proves through the hop's transforms."""
+        from .. import rowtext
         try:
-            return self._partition_read(side, db, t, parts,
-                                        self._row_expr(db, t))
+            cols = self._cols(db, t)
+            masked = self.hop.masks(db, t, columns=list(cols))
+            expr = (rowtext.mysql_row([c for c in cols if c not in masked])
+                    if masked else self._row_expr(db, t))
+            return self._partition_read(side, db, t, parts, expr, there)
         except Exception:  # noqa: BLE001 - counted, then
-            return self._partition_read(side, db, t, parts, None)
+            return self._partition_read(side, db, t, parts, None, there)
 
-    def _partition_read(self, side, db, t, parts, expr):
+    def _partition_read(self, side, db, t, parts, expr, there=None):
         dbn = self._d(side, db)
+        # the source's table's filter, read of the table it names there
         pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
+        t = there or t
         names = list(parts)
         out = {}
         for at in range(0, len(names), self.PARTITIONS_PER_READ):

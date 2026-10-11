@@ -3841,13 +3841,18 @@ select json_build_object(
         difference."""
         out = {self._split(t) for t in self._all_tables(side, db)
                if not self.in_scope(db, t)}
-        for t in self.mapped_tables(db):
-            sch, tbl = self._split(t)
-            if side == "dst":
-                sch, tbl = split_table("postgres",
-                                       self.hop.target_table_in(db, sch,
-                                                                tbl), sch)
-            out.add((sch, tbl))
+        # a table only masked keeps its definition, and is compared here
+        made = self._made_there(db)
+        for t, there in made.items():
+            out.add(self._split(t if side == "src" else there))
+        if made:
+            # and the partitions of a table the pair makes under another
+            # name, by their table (`_ruled`, `root_of`)
+            for t in self._all_tables(side, db):
+                top = ".".join(self._ruled(db, t) if side == "src"
+                               else self.root_of("dst", db, t))
+                if top in (made if side == "src" else made.values()):
+                    out.add(self._split(t))
         return out
 
     def _dump_schema_native(self, side, db, physical=None):
@@ -4604,8 +4609,45 @@ select json_build_object(
         as `_split` reads it: `regclass` names a table on the search path
         without one, and `orders` asked as itself missed an `include` of
         `appdb.public.orders`. A partition is asked with its table's name
-        (`_ruled`)."""
-        return not self.hop.excluded(db, *self._ruled(db, table))
+        (`_ruled`), and with its own where a rule names it itself
+        (`Hop.takes_partition`)."""
+        ruled = self._ruled(db, table)
+        own = self._split(table)
+        if ruled == own:
+            return not self.hop.excluded(db, *own)
+        return self.hop.takes_partition(db, own, ruled)
+
+    def _paired(self, db, t):
+        """Whether the pair carries and compares table `t` - a partition
+        as its table (`_ruled`): its rules are written in its table's
+        name, and asked by its own a partition of a masked or renamed
+        table was compared here, the values as they are."""
+        return self.through_pair(db, ".".join(self._ruled(db, t)))
+
+    def _made_there(self, db):
+        """{source table: its name on the target} of the tables the pair
+        makes under another name (`made_by_pair`), each `schema.table`."""
+        out = {}
+        for t in self.mapped_tables(db):
+            if not self.made_by_pair(db, t):
+                continue
+            sch, tbl = self._split(t)
+            there = split_table("postgres", self.hop.target_table_in(
+                db, sch, tbl), sch)
+            out[f"{sch}.{tbl}"] = ".".join(there)
+        return out
+
+    def _made_here(self, db, t, made):
+        """Whether target table `t` is, or is a partition of, a table the
+        pair makes there under another name (`_made_there`)."""
+        if not made:
+            return False
+        names = set(made.values())
+        try:
+            root = ".".join(self.root_of("dst", db, t))
+        except Exception:  # noqa: BLE001 - by its own name, then
+            root = t
+        return t in names or root in names
 
     def _ruled(self, db, t):
         """(schema, table) the hop's rules are asked about table `t` with:
@@ -4666,13 +4708,31 @@ select json_build_object(
         return known[db]
 
     def check_counts(self, db):
+        # a table the pair makes under another name - and each of its
+        # partitions - is counted whole, by its table, under the name it
+        # has on each side (`_made_there`): by its partitions' own names
+        # it was missing on the target and its new name extra there
+        made = self._made_there(db)
         st = [t for t in self._psql("src", db, self.USER_TABLES).splitlines()
-              if t and self._keep_tbl(db, t)]
+              if t and self._keep_tbl(db, t)
+              and ".".join(self._ruled(db, t)) not in made]
         dt = set(t for t in self._psql("dst", db, self.USER_TABLES).splitlines()
-                 if t and self._keep_tbl(db, t))
+                 if t and self._keep_tbl(db, t) and not self._made_here(
+                     db, t, made))
         bad = [f"{t} missing on target" for t in st if t not in dt]
         bad += [f"{t} extra on target"
                 for t in sorted(dt - set(st))]
+        for root in sorted(made):
+            a = int(self._psql("src", db, "select count(*) from"
+                                         f" {self._scope(db, root)}") or 0)
+            try:
+                b = int(self._psql("dst", db, "select count(*) from"
+                                   f" {self._scope(db, root, 'dst')}") or 0)
+            except SqlFailed:
+                bad.append(f"{root} missing on target as {made[root]}")
+                continue
+            if a != b:
+                bad.append(f"{root} src={a} dst={b} (as {made[root]})")
 
         def cnt(side, t):
             sch, tbl = self._split(t)
@@ -4952,7 +5012,7 @@ select json_build_object(
         tables = [t for t in
                   self._psql("src", db, self.USER_TABLES).splitlines()
                   if t and self._keep_tbl(db, t)
-                  and not self.through_pair(db, t)]
+                  and not self._paired(db, t)]
         w = int(self.hop.options.get("checksum_workers", 8))
 
         # The key hash rides along in the same scan. The row is already being
@@ -5624,10 +5684,15 @@ select json_build_object(
         n, rows_src, rows_dst, bad = self._parse_fast(out)
         # the tables the hop takes, as the pass these counts come from
         # reads them: one it leaves out, on one side only, is the target's
+        # a table the pair carries is compared by it, under its own names
+        # (`_paired`, `_made_here`), not here
+        made = self._made_there(db)
         st = {t for t in self._psql("src", db, self.USER_TABLES).splitlines()
-              if t and self._keep_tbl(db, t)}
+              if t and self._keep_tbl(db, t) and not self._paired(db, t)}
         dt = {t for t in self._psql("dst", db, self.USER_TABLES).splitlines()
-              if t and self._keep_tbl(db, t)}
+              if t and self._keep_tbl(db, t)
+              and not self._made_here(db, t, made)
+              and not self._paired(db, t)}
         bad += [f"{t} missing on target" for t in sorted(st - dt)]
         bad += [f"{t} extra on target" for t in sorted(dt - st)]
         if bad:
@@ -8671,32 +8736,44 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                  for side in ("src", "dst")}
         scheme, tables, unread = [], {}, []
         for t, (key, sub) in sorted(src.items()):
-            if t not in dst:
+            # under the name the hop gives the table there
+            sch, tbl = self._split(t)
+            there = ".".join(split_table("postgres", self.hop.target_table_in(
+                db, sch, tbl), sch))
+            if there not in dst:
                 scheme.append(f"{t}: not partitioned on target (was {key})"
-                              if t in plain["dst"] else
+                              if there in plain["dst"] else
                               f"{t}: missing on target (partitioned by {key}"
                               " on the source)")
                 continue
-            if dst[t][0] != key:
+            if dst[there][0] != key:
                 scheme.append(f"{t}: partition key differs"
-                              f" src({key}) dst({dst[t][0]})")
+                              f" src({key}) dst({dst[there][0]})")
             if sub:
                 # its leaves are read from the table at the top
                 continue
             try:
-                sc, dc, notes = self._comparable_columns(db, self, t, self, t)
+                sc, dc, notes = self._comparable_columns(db, self, t, self,
+                                                         there)
             except Exception as e:  # noqa: BLE001 - counted, then
                 sc, dc = [], []
                 notes = [str(e).splitlines()[-1][:90]]
             if notes:
                 unread.append(f"{t}: {'; '.join(notes)}")
-            sch, tbl = self._split(t)
+            # a masked column holds the target's own text: each leaf is
+            # held to its source by the columns the hop does not mask, and
+            # the masked ones by the pair, through the hop's transforms
+            masked = self.hop.masks(db, sch, tbl, columns=[n for n, _ in sc])
+            kept = [i for i, (n, _) in enumerate(sc) if n not in masked]
+            sc, dc = [sc[i] for i in kept], [dc[i] for i in kept]
             where = (self.row_filter(db, sch, tbl)
                      if hasattr(self.hop, "row_filter") else None)
             tables[t] = (self._partition_leaves("src", db, t, sc, where),
-                         self._partition_leaves("dst", db, t, dc, where))
+                         self._partition_leaves("dst", db, there, dc, where))
+        made = {".".join(split_table("postgres", self.hop.target_table_in(
+            db, *self._split(t)), self._split(t)[0])) for t in src}
         for t, (key, _) in sorted(dst.items()):
-            if t not in src and t in plain["src"]:
+            if t not in src and t not in made and t in plain["src"]:
                 scheme.append(f"{t}: partitioned on target ({key}), not on"
                               " source")
         return self._partitions_verdict(db, tables, scheme, "DEFAULT", unread)
@@ -10545,7 +10622,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         st = [l for l in self._psql("src", db,
                                     self.USER_TABLES).splitlines()
               if l and self._keep_tbl(db, l)
-              and not self.through_pair(db, l)]
+              and not self._paired(db, l)]
         dt = set(l for l in self._psql("dst", db,
                                        self.USER_TABLES).splitlines() if l)
         both = [t for t in st if t in dt]

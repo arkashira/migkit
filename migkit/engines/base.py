@@ -5828,7 +5828,10 @@ class Engine:
         """The schema results for the tables this engine's whole-database
         comparers leave to the pair machinery: their columns, compared
         through the mapping."""
-        tables = self.mapped_tables(db)
+        # a table only masked keeps its definition, which this engine's
+        # own comparers read
+        tables = [t for t in self.mapped_tables(db)
+                  if self.made_by_pair(db, t)]
         if not tables:
             return []
         return self.columns_pair().check_schema(db, only=tables)

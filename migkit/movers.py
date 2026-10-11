@@ -2453,10 +2453,20 @@ def excluded_tables(hop, db, tables, qualifier="public", roots=None):
     from .util import split_table
     out = []
     for ident in sorted(tables):
-        if hop.excluded(db, *_asked(hop, ident, roots)):
+        if _left_out(hop, db, ident, roots):
             schema, _ = split_table(_names_engine(hop), str(ident))
             out.append(str(ident) if schema else f"{qualifier}.{ident}")
     return out
+
+
+def _left_out(hop, db, ident, roots=None):
+    """Whether the hop leaves table `ident` out: by its own name, or - a
+    partition (`roots`) - as its table is, unless a rule names the
+    partition itself (`Hop.takes_partition`)."""
+    asked, own = _asked(hop, ident, roots), _asked(hop, ident)
+    if asked == own or not hasattr(hop, "takes_partition"):
+        return hop.excluded(db, *asked)
+    return not hop.takes_partition(db, own, asked)
 
 
 def _names_engine(hop):

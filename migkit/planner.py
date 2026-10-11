@@ -133,7 +133,7 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None,
         name = _name(ident, parts, qualifier)
         fact = facts.get(ident) or facts.get(name) or {}
         about = _about(fact)
-        if hop.excluded(db, *asked):
+        if movers._left_out(hop, db, ident, roots):
             need = (LEFT,)
         else:
             need = ("carried",) + (
