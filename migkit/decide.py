@@ -2131,7 +2131,7 @@ WAYS = {
             "mongodb", "mssql", "redis", "kafka", "sqlite", "parquet",
             "clickhouse", "db2", "db2i", "db2zos", "ase", "opensearch",
             "snowflake", "bigquery", "duckdb", "iceberg", "delta",
-            "hetero")},
+            "hetero", "teradata")},
         "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
                                      " under the 1 MB a scan page returns"),
         "cassandra": (NOT_APPLICABLE, "a row is written as one mutation, at"
@@ -2147,6 +2147,10 @@ WAYS = {
         **_NONE,
         "postgres": ("yes", "@check_deep"),
         "mysql": ("yes", "@check_deep"),
+        # a table partitioned by its primary index is read whole or by the
+        # hash of its rows like any other; the deep check holds its
+        # partitioning and each partition's rows to the source's
+        "teradata": ("yes", "@_deep_partitions"),
         "clickhouse": ("yes", "@_partitioned_by"),
         "kafka": ("yes", "@move_table"),
         "cassandra": (NOT_APPLICABLE, "every table is partitioned by its"

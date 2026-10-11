@@ -22,7 +22,7 @@ PROVES = [
                             "kafka", "clickhouse", "dynamodb", "oracle",
                             "db2", "opensearch", "cassandra", "redshift",
                             "bigquery", "kinesis", "pubsub", "cockroachdb",
-                            "dsql", "cosmosdb")),
+                            "dsql", "cosmosdb", "teradata")),
 ]
 
 #: every provider the owner named, and the vendors'

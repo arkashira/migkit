@@ -185,6 +185,12 @@ SIGNATURES = {
         ("redpanda", [("cluster_id", "redpanda.")], ""),
         ("kafka", [("cluster_id", "")], ""),
     ],
+    # `DBC.DBCInfoV` is a view only Teradata has: its release and version
+    # are the system's own, and an answer from it is the positive evidence
+    "teradata": [
+        ("teradata", [("dbc_release", ""), ("dbc_version", "")],
+         "dbc_version"),
+    ],
     "redis": [
         # Valkey says both, and says them in the Server section of INFO where
         # the engine is already looking.

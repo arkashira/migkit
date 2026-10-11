@@ -50,6 +50,16 @@ that holds what `HASHROW` cannot take (a LOB, JSON, XML) is folded in
 this process. Across engines every table is read and folded by migkit's
 own renderer; Teradata has no SHA-256 of its own.
 
+**Deep checks.** The two systems' tables are held to each other in DBC's
+views and in the tables (`check_deep`): keys, columns, secondary indexes,
+character sets, case rules, identity columns, narrower columns, NULL against
+empty, FLOAT sums, timestamps shifted as a whole, the objects beside the
+tables the hop takes, triggers, foreign keys, partitions, the primary index
+that spreads a table over the AMPs, rights and owners. A load disables the
+target's triggers on the tables it fills and enables them again, its way
+back saved to disk first (`load_window`); a repair is the pair's, each row it
+overwrites kept to be put back (`repair_plan`).
+
 Teradata keeps no change log a client can read, so a Teradata source moves
 by copies, each proved by check. Written 2026-10-01 without a Teradata
 system to run it against - no image of one runs in a container, and
@@ -59,12 +69,14 @@ statement's shape and what is made of the rows it returns
 x86 (`MIGKIT_TERADATA_HOST`) is where it is proved on a real system
 (`tests/test_teradata_against_a_server.py`).
 """
+import calendar
 import datetime
 import re
 import time
 from decimal import Decimal
 
-from .base import Engine, Result
+from .. import pieces
+from .base import Engine, RepairAction, Result, clauses
 from .dbapi import MARK, DbapiRows
 
 #: the port a Teradata system listens on
@@ -178,6 +190,60 @@ def _base(declared):
 def _kind(declared):
     """The declared type's first word: `varchar`, `interval`, `udt`."""
     return (_base(declared).split() or [""])[0]
+
+
+def _squeeze(text):
+    """A declared type or a default as one comparison reads it: upper
+    case, one space between words."""
+    return " ".join(str(text or "").upper().split())
+
+
+def plain_declared(declared):
+    """A declared type without its character set and case rule
+    (`VARCHAR(100) CHARACTER SET UNICODE` as `VARCHAR(100)`): what the
+    capacity tables (`canon.capacity`) read a length or a precision off."""
+    return re.sub(r"\s+(?:CHARACTER SET \w+|NOT CASESPECIFIC|CASESPECIFIC"
+                  r"|UPPERCASE)", "", str(declared or ""),
+                  flags=re.I).strip()
+
+
+def _charset_of(declared):
+    got = re.search(r"CHARACTER SET (\w+)", str(declared).upper())
+    return got.group(1) if got else None
+
+
+def _case_rule(declared):
+    """How a text column compares: `CASESPECIFIC`, `NOT CASESPECIFIC` or
+    `UPPERCASE` (`declared_of` writes the two it knows; none is the
+    first)."""
+    low = str(declared).upper()
+    if "NOT CASESPECIFIC" in low:
+        return "NOT CASESPECIFIC"
+    return "UPPERCASE" if "UPPERCASE" in low else "CASESPECIFIC"
+
+
+def _epoch(value):
+    """A timestamp as seconds since the epoch: an instant as it is, a wall
+    clock as the same digits read in UTC (both sides read alike, so a
+    faithful copy differs by none)."""
+    if value.tzinfo is not None:
+        return value.timestamp()
+    return calendar.timegm(value.timetuple()) + value.microsecond / 1e6
+
+
+#: `DBC.TablesV.TableKind` of the objects beside a table, with the kind of
+#: the hop's `objects` that takes each and what it is called
+OBJECT_KINDS = {
+    "V": ("view", "view"), "M": ("procedure", "macro"),
+    "P": ("procedure", "stored procedure"),
+    "E": ("procedure", "external stored procedure"),
+    "F": ("function", "function"), "A": ("function", "aggregate function"),
+    "R": ("function", "table function"),
+    "B": ("function", "aggregate and ordered analytic function"),
+    "S": ("function", "ordered analytic function"),
+    "G": ("trigger", "trigger"),
+    "I": ("materialized view", "join index"),
+    "N": ("materialized view", "hash index")}
 
 
 def interval_kind(declared):
@@ -296,6 +362,115 @@ def period_literal(text):
     return f"('{m.group(1)}', '{m.group(2)}')"
 
 
+_VIEW_HEAD = re.compile(r"^\s*(?:create|replace)\s+(?:recursive\s+)?view\s+"
+                        r".*?\bas\b\s*", re.I | re.S)
+
+
+def _view_select(text):
+    """The select a view is defined as: the text after the `AS` of its
+    `CREATE VIEW` (or `REPLACE VIEW`), as the catalogue keeps it; the whole
+    text where it does not begin that way."""
+    got = _VIEW_HEAD.match(str(text))
+    return str(text)[got.end():].rstrip(" \r\n\t;") if got else str(text)
+
+
+#: the file stem of the record of triggers a load disabled (`setaside`)
+TRIGGERS_ASIDE = "disabled-triggers"
+
+
+class _TriggerWindow:
+    """A load's window on a Teradata target: the enabled triggers on the
+    tables it fills disabled, and enabled again on the way out.
+
+    The statements that enable them are saved to disk before any is
+    disabled (`setaside`), so a process killed in between leaves a record
+    the next load enables from, and `check` names until then
+    (`TeradataEngine.set_aside`). Where the target's triggers cannot be
+    read, or the record cannot be written, nothing is disabled and the load
+    does not begin: a trigger that fires for every row written could
+    rewrite them, and it is not for a load to find that out afterwards."""
+
+    def __init__(self, eng, db, log, tables):
+        from ..setaside import SetAside
+        self.eng, self.db, self.log = eng, db, log
+        self.tables = (None if tables is None else
+                       {str(t).rpartition(".")[2].lower() for t in tables})
+        self.record = SetAside(eng.hop, db, TRIGGERS_ASIDE)
+        self.off = {}
+
+    def _say(self, text):
+        if self.log:
+            self.log(text)
+
+    def __enter__(self):
+        eng, db = self.eng, self.db
+        try:
+            rows = eng._rows(
+                "dst", db, "select DatabaseName, TriggerName, TableName,"
+                           " EnabledFlag from DBC.TriggersV where"
+                           f" SubjectTableDataBaseName = {MARK}",
+                (eng._d("dst", db),))
+        except Exception as e:  # noqa: BLE001 - nothing may be loaded blind
+            raise SystemExit(
+                f"{db}: the target's triggers could not be read ("
+                f"{(str(e).strip().splitlines() or [type(e).__name__])[0][:80]}"
+                "), and a trigger that fires for every row the load writes"
+                " could rewrite them. Nothing has been loaded.") from e
+        there = {f"{str(d).strip()}.{str(t).strip()}"
+                 for d, t, _, _ in rows}
+        mine = {f"{str(d).strip()}.{str(t).strip()}": (str(d).strip(),
+                                                         str(t).strip())
+                for d, t, on, flag in rows
+                if str(flag).strip().upper() == "Y"
+                and eng.in_scope(db, str(on).strip())
+                and (self.tables is None
+                     or str(on).strip().lower() in self.tables)}
+        left, stale = self.record.left_behind()
+        adopted = {n: s for n, s in left.items() if n in there}
+        if not mine and not adopted:
+            for path in stale:
+                path.unlink(missing_ok=True)
+            return self
+        defs = {n: eng._enable_trigger(d, t) for n, (d, t) in mine.items()}
+        if not self.record.save({**adopted, **defs}, stale):
+            raise SystemExit(
+                f"{db}: the statements that enable the target's triggers"
+                " again could not be saved, so none was disabled - and"
+                f" {len(mine)} would fire for every row the load writes."
+                " Nothing has been loaded.")
+        self.off = dict(adopted)
+        try:
+            for n, (d, t) in mine.items():
+                eng.neutral_create_code(
+                    "dst", db, f"alter trigger {eng._q(d)}.{eng._q(t)}"
+                               " disabled")
+                self.off[n] = defs[n]
+        except BaseException:
+            self._put_back()
+            raise
+        self._say(f"{len(self.off)} triggers disabled on the target for the"
+                  f" load; the statements that enable them are in"
+                  f" {self.record.path}")
+        return self
+
+    def _put_back(self):
+        failed = []
+        for n, statement in sorted(self.off.items()):
+            try:
+                self.eng.neutral_create_code("dst", self.db, statement)
+            except Exception as e:  # noqa: BLE001 - kept in the record
+                failed.append(n)
+                self._say(f"could not enable trigger {n}:"
+                          f" {(str(e).strip().splitlines() or [''])[0][:80]}")
+        self.off = {n: self.off[n] for n in failed}
+        if not failed:
+            self.record.done()
+
+    def __exit__(self, *exc):
+        self._put_back()
+        return False
+
+
 def _utc_time(value):
     """A TIME WITH TIME ZONE as the time it is in UTC: two values of one
     clock in two zones are two instants, which a rendering of the clock
@@ -313,8 +488,34 @@ def _is_driver_error(e):
 class TeradataEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "teradata"
+    ENGINE_FAMILY = "teradata"
     CHARSETS = True
-    SQL_DIALECT = None
+    #: what `assess` asks before anything moves (`Engine._preflight_items`):
+    #: rows the target's columns have no room for, a time that means an
+    #: instant on one side and a wall clock on the other, and text stored
+    #: twice as UTF-8
+    PREFLIGHT = ("_capacity_gaps", "_temporal_meaning", "_mojibake")
+    #: large values (`pieces`), sized where they lie: a byte value's length
+    #: as the server keeps it (`BYTES`), a character value's by
+    #: `OCTET_LENGTH`, a JSON or XML document's as the character large
+    #: object it casts to. They are read and written whole by the driver
+    #: (`lob_support`) in batches cut by bytes, never in pieces and never
+    #: hashed where they
+    #: lie: whether a LOB may sit under a CASE expression, and whether a
+    #: piece of one may be appended to a column, is not known without a
+    #: system, so neither is attempted
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, read and written whole in batches cut by bytes",
+        length={"blob": "bytes({c})", "byte": "bytes({c})",
+                "varbyte": "bytes({c})", "clob": "octet_length({c})",
+                "char": "octet_length({c})", "varchar": "octet_length({c})",
+                "json": "octet_length(cast({c} as clob))",
+                "xml": "octet_length(cast({c} as clob))"},
+        types=("blob", "clob", "byte", "varbyte", "char", "varchar", "json",
+               "xml"))
+    #: the SQL a hop's row filter is written and read in
+    #: (`HeteroEngine._row_scope_of`); without it a filter stops the hop
+    SQL_DIALECT = "teradata"
     FOLDED_BECAUSE = ("has no SHA-256 of its own to render a row with, so"
                       " its rows are read - in its own parallel sessions"
                       " where a table is large - and folded by migkit's"
@@ -404,7 +605,7 @@ class TeradataEngine(DbapiRows, Engine):
             side, db, "select TableName from DBC.TablesV where DatabaseName"
                       f" = {MARK} and TableKind in ('T', 'O') order by 1",
             (self._d(side, db),)))
-            if not self._own(t) and not self.hop.excluded(db, t)]
+            if not self._own(t) and self.in_scope(db, t)]
 
     def _catalog(self, side, db, table):
         """The table's `DBC.ColumnsV` rows, asked once a table."""
@@ -513,6 +714,30 @@ class TeradataEngine(DbapiRows, Engine):
 
     def _declared(self, side, db, table):
         return dict(self.neutral_columns(side, db, table))
+
+    def _scalar(self, side, db, sql):
+        """The first row of a statement, or None where it answers none -
+        what the base's count of rows a target has no room for asks."""
+        got = self._rows(side, db, sql)
+        return got[0] if got else None
+
+    def _capacity_probe(self, col, cap):
+        """(the rows that do not fit, the largest value) for a capacity, in
+        Teradata's SQL: a text length in characters, a byte value's in
+        bytes, an integer's range, a decimal's digits left of the point."""
+        kind = cap[0]
+        if kind == "chars":
+            return (f"character_length({col}) > {int(cap[1])}",
+                    f"max(character_length({col}))")
+        if kind == "bytes":
+            return f"bytes({col}) > {int(cap[1])}", f"max(bytes({col}))"
+        if kind == "int":
+            return (f"({col} < {int(cap[1])} or {col} > {int(cap[2])})",
+                    f"max(abs({col}))")
+        if kind == "numeric":
+            room = 10 ** max(int(cap[1]) - int(cap[2]), 0)
+            return f"abs({col}) >= {room}", f"max(abs({col}))"
+        raise ValueError(f"no capacity probe for kind {kind!r}")
 
     # ---- reading ------------------------------------------------------------
 
@@ -646,16 +871,17 @@ class TeradataEngine(DbapiRows, Engine):
 
     def neutral_batches(self, side, db, table, columns, size=1000,
                         where=None):
-        sql, args, _, names = self._read_query(side, db, table, columns,
-                                               None, None, where)
+        sql, args, key, names = self._read_query(side, db, table, columns,
+                                                 None, None, where)
         conn, cur = self._export(side, db, table, sql, args, names)
+        plan = self._read_plan(side, db, table, columns, key)
         try:
-            while True:
-                rows = cur.fetchmany(size)
-                if not rows:
-                    break
+            # in batches of `size` rows or `pieces.BATCH_BYTES`, whichever
+            # a batch reaches first: a table of wide rows never has many of
+            # them held at once
+            for rows in pieces.batches(cur, size, plan.size):
                 yield self._whole_times(side, db, table, names,
-                                        [list(r) for r in rows])
+                                        plan.finish([list(r) for r in rows]))
         finally:
             conn.close()
 
@@ -1147,9 +1373,42 @@ class TeradataEngine(DbapiRows, Engine):
         return f"mod(hashbucket({self._hashrow(exprs)}), {int(n)})"
 
     def check_deep(self, db):
-        """What a load left on the target (`_left_by_loads`), and text
-        stored twice as UTF-8 on the source."""
-        return self._left_by_loads(db) + [self._mojibake(db)]
+        """What a load left on the target (`_left_by_loads`), the triggers
+        a load took off it and has not put back (`set_aside`), text stored
+        twice as UTF-8 on the source, and the two systems' tables held to
+        each other: keys, columns, indexes, character sets, case rules,
+        identity columns, narrower columns, NULL against empty, floating
+        point sums, timestamps shifted as a whole, objects beside the
+        tables, triggers, foreign keys, partitions, the primary index that
+        spreads a table over the AMPs, rights and owners. A check that
+        cannot run says so as an error, never as a pass."""
+        out = self._left_by_loads(db) + [self._mojibake(db)]
+        aside = self.set_aside(db)
+        if aside is not None:
+            out.append(aside)
+        for check in (self._deep_keys, self._deep_columns,
+                      self._deep_indexes, self._deep_charset,
+                      self._deep_collation, self._deep_generated,
+                      self._deep_narrowing, self._deep_nullempty,
+                      self._deep_float, self._deep_timeshift,
+                      self._deep_boundary,
+                      self._deep_objects, self._deep_triggers,
+                      self._deep_foreign_keys, self._deep_partitions,
+                      self._deep_sharding, self._deep_grants,
+                      self._deep_ownership):
+            try:
+                got = check(db)
+            except SystemExit:
+                raise
+            except Exception as e:  # noqa: BLE001 - said, as the error
+                out.append(Result(
+                    "deep", f"{db} {check.__name__.replace('_deep_', '')}",
+                    "error", "could not run: "
+                    + (str(e).strip().splitlines() or [type(e).__name__])[0]
+                    [:120]))
+                continue
+            out += got if isinstance(got, list) else [got]
+        return out
 
     def _left_by_loads(self, db):
         """On the target: a bulk load's error tables or migkit's own stage
@@ -1193,6 +1452,678 @@ class TeradataEngine(DbapiRows, Engine):
                               "no table left mid-load, and nothing a load"
                               " left behind")]
 
+    # ---- the two systems' tables held to each other ------------------------
+    #
+    # Every statement below reads DBC's views or the tables themselves; none
+    # writes. Where a check reads only what `neutral_columns`, `neutral_key`
+    # and `neutral_indexes` already read, it adds no statement of its own.
+
+    def _shared(self, db):
+        """[(source name, target name)] of the tables in scope that both
+        systems hold, matched without case: Teradata compares names
+        without it."""
+        there = {t.lower(): t for t in self.neutral_tables("dst", db)}
+        return [(t, there[t.lower()]) for t in self.neutral_tables("src", db)
+                if t.lower() in there]
+
+    def _columns_of(self, side, db, table):
+        """{lower-cased name: (name, declared type)} of a table's
+        columns."""
+        return {n.lower(): (n, t)
+                for n, t in self.neutral_columns(side, db, table)}
+
+    def _deep_keys(self, db):
+        """Tables on the source that have no key to read, compare and
+        repair them by: a primary key, or a unique primary index over
+        columns that refuse NULL (`neutral_key`)."""
+        tables = self.neutral_tables("src", db)
+        keyless = [t for t in tables if not self.neutral_key("src", db, t)]
+        if keyless:
+            return Result(
+                "deep", f"{db} keys", "warn",
+                f"{len(keyless)} of {len(tables)} tables have no primary key"
+                " and no unique primary index of NOT NULL columns: "
+                + clauses(keyless, 5) + " - their rows are copied by hash"
+                " bucket and compared whole, and a row that differs cannot"
+                " be named by its key or repaired row by row", "",
+                "give each a primary key, or a unique primary index over"
+                " NOT NULL columns, where its rows are to be repaired one by"
+                " one")
+        return Result("deep", f"{db} keys", "ok",
+                      f"{len(tables)} tables, each with a key to read,"
+                      " compare and repair it by" if tables
+                      else "no tables in scope")
+
+    def _deep_columns(self, db):
+        """Each column of a table both systems hold, held to the source's:
+        its declared type, whether it takes NULL, its default and whether
+        it is an identity column."""
+        drift, compared = [], 0
+        for s, d in self._shared(db):
+            there = self._columns_of("dst", db, d)
+            mine = self.neutral_column_rules("src", db, s)
+            theirs = self.neutral_column_rules("dst", db, d)
+            for name, decl in self.neutral_columns("src", db, s):
+                compared += 1
+                got = there.get(name.lower())
+                if got is None:
+                    drift.append(f"{s}.{name}: not on the target")
+                    continue
+                other = got[1]
+                if _squeeze(decl) != _squeeze(other):
+                    drift.append(f"{s}.{name}: type {decl} -> {other}")
+                a, b = mine.get(name, {}), theirs.get(got[0], {})
+                for rule, word in (("null", "takes NULL"),
+                                   ("default", "default"),
+                                   ("identity", "identity")):
+                    x, y = a.get(rule), b.get(rule)
+                    if rule == "default":
+                        x, y = _squeeze(x or ""), _squeeze(y or "")
+                    if x != y:
+                        drift.append(f"{s}.{name}: {word} {x!r} -> {y!r}")
+        if drift:
+            out = self.hop.report_dir(db) / "deep-columns.diff"
+            out.write_text("\n".join(drift) + "\n")
+            return Result("deep", f"{db} columns", "diff",
+                          f"{len(drift)} differences in {compared} columns: "
+                          + clauses(drift, 4), str(out),
+                          "align the target's definition (type, NOT NULL,"
+                          " default, identity) with the source's")
+        return Result("deep", f"{db} columns", "ok",
+                      f"{compared} columns compared, identical")
+
+    def _deep_indexes(self, db):
+        """The source's secondary indexes the target lacks."""
+        missing, compared = [], 0
+        for s, d in self._shared(db):
+            have = {(tuple(c.lower() for c in cols), bool(unique))
+                    for _, unique, cols, _ in
+                    self.neutral_indexes("dst", db, d)}
+            for name, unique, cols, _ in self.neutral_indexes("src", db, s):
+                compared += 1
+                if (tuple(c.lower() for c in cols), bool(unique)) \
+                        not in have:
+                    missing.append(f"{s}.{name} ({', '.join(cols)}"
+                                   + (", unique)" if unique else ")"))
+        if missing:
+            return Result("deep", f"{db} indexes", "diff",
+                          f"{len(missing)} of {compared} secondary indexes"
+                          " are not on the target: " + clauses(missing, 4),
+                          "", "create them on the target once the rows are"
+                              " in (`migkit schema`)")
+        return Result("deep", f"{db} indexes", "ok",
+                      f"{compared} secondary indexes of the source, each on"
+                      " the target")
+
+    def _deep_boundary(self, db):
+        """A table whose key is one whole number: the target's largest
+        must not be past the source's. A target ahead of its source has been
+        written by someone else, or a change applied twice."""
+        ahead, behind, checked = [], [], 0
+        for s, d in self._shared(db):
+            key = self.neutral_key("src", db, s)
+            decl = dict(self.neutral_columns("src", db, s)).get(
+                key[0]) if len(key) == 1 else None
+            if decl is None or _kind(decl) not in (
+                    "byteint", "smallint", "integer", "bigint"):
+                continue
+            checked += 1
+            q = self._q(key[0])
+            a, b = (int(self._rows(side, db, f"select coalesce(max({q}), 0)"
+                                             f" from {self._qualified(side, db, t)}"
+                                   )[0][0] or 0)
+                    for side, t in (("src", s), ("dst", d)))
+            if b > a:
+                ahead.append(f"{s} source max={a} target max={b}")
+            elif b < a:
+                behind.append(s)
+        if ahead:
+            return Result("deep", f"{db} boundary", "diff",
+                          f"the target's largest key is AHEAD of the"
+                          f" source's on {len(ahead)} tables: "
+                          + clauses(ahead, 4), "",
+                          "rows were written on the target, or a change"
+                          " applied twice: find the writer before cutover")
+        return Result("deep", f"{db} boundary", "ok",
+                      f"largest key checked on {checked} tables, none ahead"
+                      " of the source"
+                      + (f"; {len(behind)} behind" if behind else ""))
+
+    def _text_pairs(self, db):
+        """[(table, column, source's type, target's type)] of the text
+        columns both systems hold."""
+        out = []
+        for s, d in self._shared(db):
+            there = self._columns_of("dst", db, d)
+            for name, decl in self.neutral_columns("src", db, s):
+                got = there.get(name.lower())
+                if got is not None and _kind(decl) in ("char", "varchar",
+                                                       "clob"):
+                    out.append((s, name, decl, got[1]))
+        return out
+
+    def _deep_charset(self, db):
+        """A text column whose character set the target holds narrower:
+        LATIN keeps the characters of the Latin alphabets and refuses or
+        replaces the rest, UNICODE keeps them all."""
+        lossy, compared = [], 0
+        for t, name, a, b in self._text_pairs(db):
+            x, y = _charset_of(a), _charset_of(b)
+            if not x or not y:
+                continue
+            compared += 1
+            if x != y and y != "UNICODE":
+                lossy.append(f"{t}.{name}: {x} -> {y}")
+        if lossy:
+            return Result("deep", f"{db} charset", "diff",
+                          f"{len(lossy)} text columns hold a narrower"
+                          " character set on the target: "
+                          + clauses(lossy, 4) + " - a character it has no"
+                          " code for is refused or replaced", "",
+                          "make the target column UNICODE, or the source's"
+                          " characters will not all arrive")
+        return Result("deep", f"{db} charset", "ok",
+                      f"{compared} text columns, none narrower on the"
+                      " target")
+
+    def _deep_collation(self, db):
+        """Teradata's case rule is a column's: CASESPECIFIC, NOT
+        CASESPECIFIC or UPPERCASE. Two keys that differ only in case are
+        two rows under one and a single one under the others."""
+        drift, compared = [], 0
+        for t, name, a, b in self._text_pairs(db):
+            compared += 1
+            x, y = _case_rule(a), _case_rule(b)
+            if x != y:
+                drift.append(f"{t}.{name}: {x} -> {y}")
+        if drift:
+            return Result("deep", f"{db} collation", "diff",
+                          f"{len(drift)} text columns compare by another"
+                          " case rule on the target: " + clauses(drift, 4),
+                          "", "declare the target column with the source's"
+                              " case rule, or rows that differ only in case"
+                              " merge in a key and sort and compare"
+                              " differently")
+        return Result("deep", f"{db} collation", "ok",
+                      f"{compared} text columns, each compared by the same"
+                      " case rule on both sides")
+
+    def _identity_kinds(self, side, db, table):
+        """{lower-cased column: "GA" | "GD"} of a table's identity columns:
+        GENERATED ALWAYS, which refuses a value written to it, and BY
+        DEFAULT, which takes one."""
+        return {str(r[0]).strip().lower(): str(r[9]).strip()
+                for r in self._catalog(side, db, table)
+                if str(r[9] or "").strip() in ("GA", "GD")}
+
+    def _deep_generated(self, db):
+        """Identity columns: one the target generates always refuses the
+        value the source holds; one on one side only is a counter the
+        other lacks."""
+        refused, lacks, compared = [], [], 0
+        for s, d in self._shared(db):
+            mine = self._identity_kinds("src", db, s)
+            theirs = self._identity_kinds("dst", db, d)
+            compared += len(mine) + len(set(theirs) - set(mine))
+            for col, kind in sorted(theirs.items()):
+                if kind == "GA":
+                    refused.append(f"{d}.{col}")
+            for col in sorted(set(mine) ^ set(theirs)):
+                lacks.append(f"{s}.{col} is an identity column on the "
+                             + ("source only" if col in mine
+                                else "target only"))
+        if refused:
+            return Result("deep", f"{db} generated", "diff",
+                          f"{len(refused)} identity columns are GENERATED"
+                          " ALWAYS on the target: " + clauses(refused, 4)
+                          + " - the target refuses the value the source"
+                            " holds, and makes its own", "",
+                          "declare them GENERATED BY DEFAULT AS IDENTITY on"
+                          " the target before the rows are written")
+        if lacks:
+            return Result("deep", f"{db} generated", "warn",
+                          clauses(lacks, 4) + " - a row written later gets"
+                          " no number where the target has none, and one"
+                          " the source does not make where it has", "",
+                          "give both sides the same identity columns")
+        return Result("deep", f"{db} generated", "ok",
+                      f"{compared} identity columns, the same on both sides"
+                      if compared else "no identity columns")
+
+    def _deep_narrowing(self, db):
+        """A target column narrower than the source's: a character length,
+        a number of digits or a range the source's values may not fit."""
+        from .. import verdict
+        narrow = []
+        for s, d in self._shared(db):
+            there = self._columns_of("dst", db, d)
+            for name, decl in self.neutral_columns("src", db, s):
+                got = there.get(name.lower())
+                if got is None:
+                    continue
+                why = verdict.narrowing(self.CANON_ENGINE, plain_declared(decl),
+                                        plain_declared(got[1]))
+                if why:
+                    narrow.append(f"{s}.{name}: {why}")
+        return verdict.narrowing_result(db, narrow)
+
+    def _text_columns(self, db, limit=30):
+        """[(table, source's name of the column, target's table and
+        column)] of the first text columns of the tables both hold."""
+        out = []
+        for s, d in self._shared(db):
+            there = self._columns_of("dst", db, d)
+            for name, decl in self.neutral_columns("src", db, s):
+                got = there.get(name.lower())
+                if got is not None and _kind(decl) in ("char", "varchar"):
+                    out.append((s, name, d, got[0]))
+        return out[:limit]
+
+    def _deep_nullempty(self, db):
+        """NULL and '' are two values in ANSI mode, and a mover swaps them
+        without a word: the count of each, per text column, held to the
+        source's."""
+        bad = []
+        cols = self._text_columns(db)
+        for s, name, d, other in cols:
+            got = []
+            for side, table, col in (("src", s, name), ("dst", d, other)):
+                q = self._q(col)
+                row = self._rows(
+                    side, db, "select sum(cast(case when " + q + " is null"
+                              " then 1 else 0 end as bigint)),"
+                              " sum(cast(case when " + q + " = '' then 1"
+                              " else 0 end as bigint)) from "
+                              + self._qualified(side, db, table))[0]
+                got.append((int(row[0] or 0), int(row[1] or 0)))
+            if got[0] != got[1]:
+                bad.append(f"{s}.{name}: source NULL|empty={got[0][0]}|"
+                           f"{got[0][1]}, target {got[1][0]}|{got[1][1]}")
+        if bad:
+            return Result("deep", f"{db} nullempty", "diff",
+                          f"{len(bad)} text columns split NULL and empty"
+                          " otherwise on the target: " + clauses(bad, 4),
+                          "", "decide which side is right, and load the"
+                              " other again (NULLIF(col, '') turns an empty"
+                              " value to NULL)")
+        return Result("deep", f"{db} nullempty", "ok",
+                      f"{len(cols)} text columns, NULL and empty counted"
+                      " alike on both sides" if cols
+                      else "no text columns on both sides")
+
+    def _deep_float(self, db):
+        """FLOAT is an approximation: its sum is held to the source's with
+        a tolerance, and its non-NULL count exactly."""
+        bad, cols = [], []
+        for s, d in self._shared(db):
+            there = self._columns_of("dst", db, d)
+            for name, decl in self.neutral_columns("src", db, s):
+                got = there.get(name.lower())
+                if got is not None and _kind(decl) == "float":
+                    cols.append((s, name, d, got[0]))
+        for s, name, d, other in cols[:30]:
+            seen = []
+            for side, table, col in (("src", s, name), ("dst", d, other)):
+                q = self._q(col)
+                seen.append(self._rows(
+                    side, db, f"select count({q}), coalesce(sum(cast({q} as"
+                              f" float)), 0), coalesce(max(abs({q})), 0) from"
+                              f" {self._qualified(side, db, table)}")[0])
+            (sn, ss, sm), (dn, ds, dm) = seen
+            if int(sn or 0) != int(dn or 0):
+                bad.append(f"{s}.{name}: non-NULL count source={sn}"
+                           f" target={dn}")
+                continue
+            ss, ds = float(ss or 0), float(ds or 0)
+            scale = max(abs(ss), abs(ds), float(sm or 0), float(dm or 0), 1.0)
+            if abs(ss - ds) > scale * 1e-9:
+                bad.append(f"{s}.{name}: sum source={ss!r} target={ds!r}")
+        if bad:
+            return Result("deep", f"{db} float", "diff",
+                          f"{len(bad)} FLOAT columns drift beyond"
+                          " tolerance: " + clauses(bad, 4), "",
+                          "compare the columns' definitions first: a change"
+                          " of precision on the way does this")
+        return Result("deep", f"{db} float", "ok",
+                      f"{min(len(cols), 30)} FLOAT columns within tolerance"
+                      if cols else "no FLOAT columns on both sides")
+
+    #: timestamp columns sampled for a shift, and rows read of each
+    SHIFT_COLUMNS, SHIFT_ROWS = 10, 200
+
+    def _deep_timeshift(self, db):
+        """A timestamp column every row of which the target holds shifted
+        by one offset: a mover's session in another zone, not rows
+        corrupted one by one (`verdict.uniform_shift`). Read by key, the
+        first rows of each column, as instants."""
+        from .. import canon, verdict
+        shifts, looked = [], 0
+        for s, d in self._shared(db):
+            key = self.neutral_key("src", db, s)
+            if len(key) != 1 or looked >= self.SHIFT_COLUMNS:
+                continue
+            there = self._columns_of("dst", db, d)
+            kclass = canon.type_class(self.CANON_ENGINE,
+                                      dict(self.neutral_columns(
+                                          "src", db, s))[key[0]])
+            for name, decl in self.neutral_columns("src", db, s):
+                got = there.get(name.lower())
+                if got is None or _kind(decl) != "timestamp" \
+                        or looked >= self.SHIFT_COLUMNS:
+                    continue
+                looked += 1
+                cols = [(key[0], kclass), (name, "timestamp")]
+                rows, _ = self.neutral_read("src", db, s, cols, None,
+                                            self.SHIFT_ROWS)
+                # a row by its key as text, the way the reads by key name it
+                a = {self._key_of(cols, [key[0]], r)[0]: _epoch(r[1])
+                     for r in rows if r[1] is not None}
+                found = self.neutral_rows_by_key(
+                    "dst", db, d, [(key[0], kclass), (got[0], "timestamp")],
+                    [key[0]], [(r[0],) for r in rows if r[1] is not None])
+                b = {k[0]: _epoch(r[1]) for k, r in found.items()
+                     if r[1] is not None}
+                line = verdict.uniform_shift(f"{s}.{name}", a, b)
+                if line:
+                    shifts.append(line)
+        return verdict.timeshift_result(db, shifts)
+
+    def _objects(self, side, db):
+        """{lower-cased name: (name, TableKind, the table a trigger is
+        on)} of the objects beside the tables that the hop's `objects`
+        takes (`takes`): views, macros, procedures, functions, triggers,
+        join and hash indexes."""
+        name = self._d(side, db)
+        kinds = ", ".join(f"'{k}'" for k in OBJECT_KINDS)
+        subject = {}
+        try:
+            subject = {str(t).strip(): str(on).strip() for t, on in
+                       self._rows(side, db,
+                                  "select TriggerName, TableName from"
+                                  f" DBC.TriggersV where"
+                                  f" SubjectTableDataBaseName = {MARK}",
+                                  (name,))}
+        except Exception:  # noqa: BLE001 - a trigger is then taken by name
+            pass
+        out = {}
+        for n, kind in self._rows(
+                side, db, "select TableName, TableKind from DBC.TablesV"
+                          f" where DatabaseName = {MARK} and TableKind in"
+                          f" ({kinds})", (name,)):
+            n, kind = str(n).strip(), str(kind).strip()
+            if self._own(n) or not self.takes(
+                    db, OBJECT_KINDS[kind][0], n, by=subject.get(n)):
+                continue
+            out[n.lower()] = (n, kind, subject.get(n))
+        return out
+
+    def _deep_objects(self, db):
+        """The objects beside the tables that the hop takes and the source
+        has: each on the target?"""
+        mine, there = self._objects("src", db), self._objects("dst", db)
+        missing = [f"{OBJECT_KINDS[kind][1]} {n}"
+                   for key, (n, kind, _) in sorted(mine.items())
+                   if key not in there]
+        if missing:
+            return Result("deep", f"{db} objects", "diff",
+                          f"{len(missing)} of {len(mine)} objects beside the"
+                          " tables are not on the target: "
+                          + clauses(missing, 5), "",
+                          "create them on the target (`migkit schema`), or"
+                          " leave their kind out of the hop's `objects`")
+        return Result("deep", f"{db} objects", "ok",
+                      f"{len(mine)} views, macros, procedures, functions,"
+                      " triggers and join indexes, each on the target"
+                      if mine else "no objects beside the tables")
+
+    def _deep_triggers(self, db):
+        """Triggers the target holds disabled: a trigger a load switched
+        off and nobody switched on again does nothing after the cutover.
+        (A load disables the target's triggers while it writes, and puts
+        them back: `load_window`.)"""
+        rows = self._rows(
+            "dst", db, "select TriggerName, TableName, EnabledFlag from"
+                       f" DBC.TriggersV where SubjectTableDataBaseName ="
+                       f" {MARK}", (self._d("dst", db),))
+        rows = [r for r in rows if self.takes(db, "trigger",
+                                              str(r[0]).strip(),
+                                              by=str(r[1]).strip())]
+        off = [f"{str(r[0]).strip()} on {str(r[1]).strip()}" for r in rows
+               if str(r[2]).strip().upper() == "N"]
+        if off:
+            return Result("deep", f"{db} triggers", "diff",
+                          f"{len(off)} of {len(rows)} triggers are disabled"
+                          " on the target: " + clauses(off, 5), "",
+                          'alter trigger "db"."name" enabled')
+        return Result("deep", f"{db} triggers", "ok",
+                      f"{len(rows)} triggers on the target, every one"
+                      " enabled" if rows else "no triggers on the target")
+
+    def _references(self, side, db):
+        """{(child, parent, name): (columns pairs, inconsistent)} of the
+        foreign keys among the database's tables (`foreign_keys`)."""
+        out = {}
+        for idx, name, child, ccol, pdb, parent, pcol, bad in self._rows(
+                side, db, "select IndexId, IndexName, ChildTable,"
+                          " ChildKeyColumn, ParentDB, ParentTable,"
+                          " ParentKeyColumn, InconsistencyFlag from"
+                          " DBC.All_RI_ChildrenV where ChildDB ="
+                          f" {MARK} order by IndexId",
+                (self._d(side, db),)):
+            child, parent = str(child).strip(), str(parent).strip()
+            if str(pdb).strip().lower() != self._d(side, db).lower() \
+                    or not self.in_scope(db, child):
+                continue
+            one = out.setdefault((child.lower(), parent.lower(), int(idx)),
+                                 {"pairs": [], "bad": False,
+                                  "name": str(name or "").strip() or None,
+                                  "child": child, "parent": parent})
+            one["pairs"].append((str(ccol).strip(), str(pcol).strip()))
+            one["bad"] = one["bad"] or str(bad).strip().upper() == "Y"
+        return out
+
+    def _deep_foreign_keys(self, db):
+        """The source's foreign keys the target lacks, and the target's
+        that Teradata flags inconsistent (a reference it could not
+        validate)."""
+        mine = self._references("src", db)
+        there = self._references("dst", db)
+        have = {(c, p, tuple(sorted((a.lower(), b.lower())
+                                    for a, b in v["pairs"])))
+                for (c, p, _), v in there.items()}
+        missing = [f"{v['child']} -> {v['parent']}"
+                   for (c, p, _), v in sorted(mine.items())
+                   if (c, p, tuple(sorted((a.lower(), b.lower())
+                                          for a, b in v["pairs"])))
+                   not in have]
+        bad = [f"{v['child']} -> {v['parent']}" for v in there.values()
+               if v["bad"]]
+        if missing or bad:
+            said = []
+            if missing:
+                said.append(f"{len(missing)} not on the target: "
+                            + clauses(missing, 4))
+            if bad:
+                said.append(f"{len(bad)} flagged inconsistent on the"
+                            " target: " + clauses(bad, 4))
+            return Result("deep", f"{db} fk", "diff", "; ".join(said), "",
+                          "create them on the target once the rows are in,"
+                          " and validate an inconsistent one")
+        return Result("deep", f"{db} fk", "ok",
+                      f"{len(mine)} foreign keys of the source, each on the"
+                      " target and consistent")
+
+    def _partitioned(self, side, db):
+        """{lower-cased table: (table, the partitioning expression)} of the
+        tables partitioned by their primary index (`IndexType` Q)."""
+        name = self._d(side, db)
+        tables = {str(t).strip() for (t,) in self._rows(
+            side, db, "select distinct TableName from DBC.IndicesV where"
+                      f" DatabaseName = {MARK} and IndexType = 'Q'",
+            (name,))}
+        text = {}
+        if tables:
+            text = {str(t).strip(): " ".join(str(x or "").split())
+                    for t, x in self._rows(
+                        side, db, "select TableName, ConstraintText from"
+                                  " DBC.PartitioningConstraintsV where"
+                                  f" DatabaseName = {MARK}", (name,))}
+        return {t.lower(): (t, text.get(t, "")) for t in tables
+                if self.in_scope(db, t)}
+
+    def _partition_rows(self, side, db, table):
+        """{partition number: {"rows", "bound"}}: the rows each partition
+        of a table holds, counted by the server."""
+        return {f"p{int(n)}": {"rows": int(c), "digest": None,
+                               "bound": None}
+                for n, c in self._rows(
+                    side, db, "select PARTITION, count(*) from "
+                              + self._qualified(side, db, table)
+                              + " group by 1")}
+
+    def _deep_partitions(self, db):
+        """Every table partitioned by its primary index, on either side:
+        its partitioning expression held to the source's, and each
+        partition's rows (`Engine._partitions_verdict`). A table migkit
+        makes is not partitioned (`neutral_create_sql`): its rows land in
+        one."""
+        src, dst = self._partitioned("src", db), self._partitioned("dst", db)
+        plain = {side: {t.lower() for t in self.neutral_tables(side, db)}
+                 for side in ("src", "dst")}
+        scheme, tables = [], {}
+        for key, (t, expr) in sorted(src.items()):
+            if key not in dst:
+                scheme.append(f"{t}: partitioned on the source ({expr}), "
+                              + ("not on the target" if key in plain["dst"]
+                                 else "missing on the target"))
+                continue
+            other = dst[key]
+            if " ".join(expr.lower().split()) != " ".join(
+                    other[1].lower().split()):
+                scheme.append(f"{t}: partitioning differs src({expr})"
+                              f" dst({other[1]})")
+            tables[t] = (self._partition_rows("src", db, t),
+                         self._partition_rows("dst", db, other[0]))
+        for key, (t, expr) in sorted(dst.items()):
+            if key not in src and key in plain["src"]:
+                scheme.append(f"{t}: partitioned on the target ({expr}),"
+                              " not on the source")
+        return self._partitions_verdict(db, tables, scheme, "NO RANGE")
+
+    def _primary_index(self, side, db, table):
+        """The columns a table is spread over the AMPs by - its primary
+        index, lower-cased and in order - or () for a table with no
+        primary index, whose rows are spread without one."""
+        return tuple(str(c).strip().lower() for (c,) in self._rows(
+            side, db, "select ColumnName from DBC.IndicesV where"
+                      f" DatabaseName = {MARK} and TableName = {MARK} and"
+                      " IndexType in ('P', 'Q') order by ColumnPosition",
+            (self._d(side, db), str(table))))
+
+    def _deep_sharding(self, db):
+        """Rows lie on the AMPs by the hash of the primary index: a target
+        spread by other columns - a table migkit makes is spread by its
+        key, or not at all - changes which AMP holds a row, how evenly,
+        and which joins stay on one AMP."""
+        moved, compared = [], 0
+        for s, d in self._shared(db):
+            compared += 1
+            a, b = (self._primary_index("src", db, s),
+                    self._primary_index("dst", db, d))
+            if a != b:
+                moved.append(f"{s}: ({', '.join(a) or 'no primary index'})"
+                             f" -> ({', '.join(b) or 'no primary index'})")
+        if moved:
+            return Result("deep", f"{db} sharding", "warn",
+                          f"{len(moved)} of {compared} tables are spread"
+                          " over the AMPs by other columns on the target: "
+                          + clauses(moved, 4), "",
+                          "create them with the source's primary index"
+                          " where joins and skew are to stay as they were")
+        return Result("deep", f"{db} sharding", "ok",
+                      f"{compared} tables, each spread by the same primary"
+                      " index on both sides")
+
+    def _rights(self, side, db):
+        """{(user, table, right)} the database's tables are granted, less
+        the system's and migkit's own."""
+        from .. import freeze
+        skip = set(freeze.TeradataHold.SYSTEM) | {
+            str(self._ep(side).user or "").strip().upper()}
+        out = set()
+        for user, table, right in self._rows(
+                side, db, "select UserName, TableName, AccessRight from"
+                          f" DBC.AllRightsV where DatabaseName = {MARK}",
+                (self._d(side, db),)):
+            user, table = str(user).strip(), str(table).strip()
+            if user.upper() in skip or self._own(table):
+                continue
+            if table.lower() != "all" and not self.in_scope(db, table):
+                continue
+            out.add((user.lower(), table.lower(), str(right).strip()))
+        return out
+
+    def _deep_grants(self, db):
+        """The rights on the database and its tables that the source
+        grants and the target does not: an application that could read
+        them there cannot here."""
+        mine, there = self._rights("src", db), self._rights("dst", db)
+        missing = sorted(mine - there)
+        if missing:
+            return Result("deep", f"{db} grants", "diff",
+                          f"{len(missing)} of {len(mine)} rights granted on"
+                          " the source are not on the target: "
+                          + clauses([f"{u} {r} on {t}"
+                                     for u, t, r in missing], 4), "",
+                          "`migkit users` compares and grants them")
+        return Result("deep", f"{db} grants", "ok",
+                      f"{len(mine)} rights on the source, each granted on"
+                      " the target" if mine else "no rights granted")
+
+    def _deep_ownership(self, db):
+        """The owner of the database, which writes everything in it by
+        implicit right, and who made each view, macro, procedure and
+        function: they run with the rights of the database that holds
+        them."""
+        owners = []
+        for side in ("src", "dst"):
+            got = self._rows(side, db, "select OwnerName from DBC.DatabasesV"
+                                       f" where DatabaseName = {MARK}",
+                             (self._d(side, db),))
+            owners.append(str(got[0][0]).strip() if got else None)
+        made, kinds = [], {}
+        for side in ("src", "dst"):
+            rows = self._rows(
+                side, db, "select TableName, CreatorName, TableKind from"
+                          f" DBC.TablesV where DatabaseName = {MARK} and"
+                          " TableKind in ('V', 'M', 'P', 'E', 'F', 'A', 'R',"
+                          " 'G')", (self._d(side, db),))
+            made.append({str(n).strip().lower(): str(c).strip()
+                         for n, c, _ in rows})
+            kinds.update({str(n).strip().lower(): str(k).strip()
+                          for n, _, k in rows})
+        changed = [f"{n}: made by {a} -> {made[1][n]}"
+                   for n, a in sorted(made[0].items())
+                   if n in made[1] and made[1][n].lower() != a.lower()
+                   and self.takes(db, OBJECT_KINDS[kinds[n]][0], n)]
+        said = []
+        if owners[0] and owners[1] and owners[0].lower() != owners[1].lower():
+            said.append(f"the database is owned by {owners[0]} on the source"
+                        f" and {owners[1]} on the target")
+        if changed:
+            said.append(f"{len(changed)} objects made by another account: "
+                        + clauses(changed, 3))
+        if said:
+            return Result("deep", f"{db} ownership", "diff", "; ".join(said),
+                          "", "an owner writes everything in its database,"
+                              " and a view or macro runs with the rights of"
+                              " the database that holds it: recreate them"
+                              " under the account the application expects")
+        return Result("deep", f"{db} ownership", "ok",
+                      f"the database is owned by {owners[0]} on both sides,"
+                      f" and {len(made[0])} views, macros, procedures and"
+                      " functions keep their creator")
+
     def settle_target(self, db, from_source=True):
         """The optimiser's statistics for every table the load wrote: a
         summary (its rows) for each, and its key's columns where it has
@@ -1212,6 +2143,301 @@ class TeradataEngine(DbapiRows, Engine):
                                + f") on {quoted}")
             done += 1
         return f"collected the target's statistics on {done} tables"
+
+    # ---- what a move reads of the schema ---------------------------------------
+
+    def foreign_keys(self, side, db):
+        """[(child, [columns], parent, [parent's columns])] of the foreign
+        keys among the database's tables (`DBC.All_RI_ChildrenV`, a row a
+        column pair): the order the copy writes tables in, and what the
+        target is held to. A reference to a table of another database is
+        not among them."""
+        return [(v["child"], [a for a, _ in sorted(v["pairs"])], v["parent"],
+                 [b for _, b in sorted(v["pairs"])])
+                for _, v in sorted(self._references(side, db).items())]
+
+    #: `DBC.TablesV.RequestText` is a VARCHAR(12500): a view whose text is
+    #: that long may be cut, and is not handed on
+    VIEW_TEXT = 12500
+
+    def _view_rows(self, side, db):
+        """([(view, its text)], [views whose text may be cut]) of the views
+        the hop takes (`takes`)."""
+        got, cut = [], []
+        for n, text in self._rows(
+                side, db, "select TableName, RequestText from DBC.TablesV"
+                          f" where DatabaseName = {MARK} and TableKind ="
+                          " 'V' order by 1", (self._d(side, db),)):
+            n, text = str(n).strip(), str(text or "")
+            if self._own(n) or not self.takes(db, "view", n):
+                continue
+            if len(text) >= self.VIEW_TEXT:
+                cut.append(n)
+            else:
+                got.append((n, text))
+        return got, cut
+
+    def neutral_views(self, side, db):
+        """[(name, the select it is defined as)]: the text after the `AS`
+        of its `CREATE VIEW`. A view whose text the catalogue may have cut
+        is not among them (`_view_rows`; `_handwork` names it)."""
+        return [(n, _view_select(text))
+                for n, text in self._view_rows(side, db)[0]]
+
+    # ---- the repair --------------------------------------------------------
+
+    def repair_plan(self, db, kind):
+        """The rows the last check found different, carried across by the
+        pair's one repair (each action keeps what it replaced, to be put
+        back: `repairlog`), and - off unless asked - text stored twice as
+        UTF-8, repaired row by row."""
+        out = []
+        if kind in ("rows", "all"):
+            out += self._as_pair().repair_plan(db, "rows")
+            text = self._mojibake_repair(db)
+            if text:
+                out.append(text)
+        return out
+
+    def apply(self, db, action):
+        if action.kind == "text":
+            return self._apply_text(db, action)
+        return self._as_pair().apply(db, action)
+
+    def create_missing(self, db, log=None):
+        """The tables the target lacks, made as the pair makes them, before
+        any is filled."""
+        return self._as_pair().create_missing(db, log)
+
+    def finish_created(self, db, log=None):
+        """The secondary indexes of the tables that were made, once their
+        rows are in."""
+        return self._as_pair().finish_created(db, log)
+
+    def load_window(self, db, log=None, tables=None):
+        """While a load writes: the target's enabled triggers on the tables
+        it fills are disabled, and enabled again on the way out whether the
+        load worked or not. A trigger fires for every row written - Teradata
+        has no way to keep one from firing for one session - and one that
+        sets a timestamp or writes an audit row rewrote what the source
+        held. What a load that died left disabled is enabled at the end of
+        the next (`set_aside`). Secondary indexes stay in place: whether
+        setting them aside pays has not been measured on Teradata."""
+        return _TriggerWindow(self, db, log, tables)
+
+    def set_aside(self, db):
+        """The triggers a load disabled on the target and has not enabled
+        again. Held by a load still running they are off on purpose; held
+        by one whose process is gone they are simply off, and the
+        application's cutover onto this target would run without them."""
+        from ..setaside import SetAside
+        held, lost, unread = [], [], []
+        for path, alive, defs in SetAside(self.hop, db,
+                                          TRIGGERS_ASIDE).records():
+            if defs is None:
+                unread.append(str(path))
+            elif alive:
+                held += sorted(defs)
+            else:
+                lost += [(n, str(path)) for n in sorted(defs)]
+        if lost:
+            off = {f"{d}.{t}".lower() for d, t, flag in self._triggers(
+                "dst", db) if flag == "N"}
+            lost = [(n, p) for n, p in lost if n.lower() in off]
+        scope = f"{db} triggers set aside"
+        if lost or unread:
+            said = []
+            if lost:
+                said.append(f"{len(lost)} triggers a load disabled on the"
+                            " target and never enabled again: "
+                            + ", ".join(n for n, _ in lost[:5])
+                            + " - the statements that enable them are in "
+                            + ", ".join(sorted({p for _, p in lost})))
+            if unread:
+                said.append("a record of triggers disabled cannot be read: "
+                            + ", ".join(unread))
+            return Result("deep", scope, "diff", "; ".join(said), "",
+                          "the next `migkit move` into this database enables"
+                          " them again; or run the statements in that file")
+        if held:
+            return Result("deep", scope, "ok",
+                          f"{len(held)} triggers are disabled on the target"
+                          " while a migkit load runs into it ("
+                          + ", ".join(held[:5]) + "); they are enabled"
+                          " again when it stops")
+        return None
+
+    def _enable_trigger(self, database, trigger):
+        return f"alter trigger {self._q(database)}.{self._q(trigger)} enabled"
+
+    def _triggers(self, side, db):
+        """[(the database a trigger is in, its name, EnabledFlag)] of the
+        triggers on this database's tables that the hop takes."""
+        return [(str(d).strip(), str(t).strip(), str(f).strip().upper())
+                for d, t, on, f in self._rows(
+                    side, db, "select DatabaseName, TriggerName, TableName,"
+                              " EnabledFlag from DBC.TriggersV where"
+                              f" SubjectTableDataBaseName = {MARK}",
+                    (self._d(side, db),))
+                if self.takes(db, "trigger", str(t).strip(),
+                              by=str(on).strip())]
+
+    # ---- the assessment ------------------------------------------------------
+
+    def _version_of(self, side, db):
+        """The system's version, as its driver says it."""
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute(NATIVE + DB_VERSION)
+            said = str((cur.fetchone() or [""])[0] or "").split(" ", 1)[0]
+        finally:
+            conn.close()
+        return said or None
+
+    def _server_versions(self):
+        """(the source's version, the target's), None for a side that would
+        not say: unknown, never clean."""
+        db = (self.hop.databases or [""])[0]
+        out = []
+        for side in ("src", "dst"):
+            try:
+                out.append(self._version_of(side, db))
+            except (Exception, SystemExit):  # noqa: BLE001 - not said
+                out.append(None)
+        return tuple(out)
+
+    def _brand_probes(self):
+        """What each system says of itself in `DBC.DBCInfoV`, which only
+        Teradata has: its release and its version."""
+        db = (self.hop.databases or [""])[0]
+        out = []
+        for side in ("src", "dst"):
+            fields = {}
+            try:
+                for key, data in self._rows(
+                        side, db, "select InfoKey, InfoData from"
+                                  " DBC.DBCInfoV"):
+                    key = str(key).strip().lower()
+                    if key in ("release", "version"):
+                        fields[f"dbc_{key}"] = str(data).strip()
+            except (Exception, SystemExit):  # noqa: BLE001 - not said
+                fields = {}
+            out.append(fields)
+        return tuple(out)
+
+    def free_bytes(self, side, db):
+        """The room the database has to grow into, from the space it may
+        take on each AMP (`DBC.DiskSpaceV`). Rows lie by the hash of the
+        primary index, so the AMP with the least room is the one that
+        refuses first: its headroom, for every AMP. None where the
+        database has no space of its own (it draws on its owner's)."""
+        got = self._rows(side, db,
+                         "select MaxPerm, CurrentPerm from DBC.DiskSpaceV"
+                         f" where DatabaseName = {MARK}",
+                         (self._d(side, db),))
+        if not got or any(int(m or 0) <= 0 for m, _ in got):
+            return None
+        return max(0, min(int(m) - int(c or 0) for m, c in got)) * len(got)
+
+    def stream_writers(self, db):
+        """Besides migkit's own tail, the accounts that may write this
+        database - a right to insert, update or delete on it, held directly
+        or by a role - and how many sessions each has open now (readable
+        only by an account that may read `DBC.SessionInfoV`; otherwise the
+        account is named without a count). Teradata keeps no change log a
+        client can read and shows no replication; a writer outside these
+        accounts is not seen."""
+        from .. import freeze
+        out = super().stream_writers(db)
+        name = self._d("dst", db)
+        me = str(self._ep("dst").user or "").strip().upper()
+        skip = set(freeze.TeradataHold.SYSTEM) | {me}
+        rights = {"I", "U", "D"}
+        who = {str(u).strip() for u, r in self._rows(
+            "dst", db, "select UserName, AccessRight from DBC.AllRightsV"
+                       f" where DatabaseName = {MARK}", (name,))
+            if str(r).strip() in rights}
+        roles = {str(r).strip() for r, a in self._rows(
+            "dst", db, "select RoleName, AccessRight from DBC.AllRoleRightsV"
+                       f" where DatabaseName = {MARK}", (name,))
+            if str(a).strip() in rights}
+        if roles:
+            who |= {str(g).strip() for r, g in self._rows(
+                "dst", db, "select RoleName, Grantee from DBC.RoleMembersV")
+                if str(r).strip() in roles}
+        who = {u for u in who if u.upper() not in skip}
+        open_ = {}
+        if who and self._sessions_readable("dst", db):
+            open_ = {str(u).strip().upper(): int(n) for u, n in self._rows(
+                "dst", db, "select UserName, count(*) from DBC.SessionInfoV"
+                           " group by 1")}
+        for u in sorted(who):
+            n = open_.get(u.upper())
+            out.append((f"{u} may write {name}"
+                        + (f" ({n} sessions open now)" if n is not None
+                           else ""), False))
+        return out
+
+    def _assess_extra(self):
+        inv = self._handwork()
+        return self.reach_items("src") + self.reach_items("dst") \
+            + inv.rows() + inv.summary()
+
+    def _handwork(self):
+        """The work the move will not do, counted and named
+        (`migkit.handwork`): tables with no key to repair them by, the
+        views, macros, procedures, functions and triggers that are not
+        carried, join and hash indexes, queue tables - which are not
+        copied - and the partitioning of a table, which a table migkit
+        makes does not have."""
+        from .. import handwork
+        inv = handwork.Inventory()
+        for db in self.databases():
+            try:
+                inv.add("no-row-key", db, "tables",
+                        [t for t in self.neutral_tables("src", db)
+                         if not self.neutral_key("src", db, t)])
+            except Exception as e:  # noqa: BLE001 - unknown, not zero
+                inv.unknown("no-row-key", db, f"catalogue query failed:"
+                                              f" {str(e)[:80]}")
+            try:
+                kinds = ", ".join(f"'{k}'" for k in OBJECT_KINDS)
+                found = {}
+                for n, kind in self._rows(
+                        "src", db, "select TableName, TableKind from"
+                                   f" DBC.TablesV where DatabaseName ="
+                                   f" {MARK} and TableKind in ({kinds}, 'Q')",
+                        (self._d("src", db),)):
+                    n, kind = str(n).strip(), str(kind).strip()
+                    if self._own(n):
+                        continue
+                    if kind == "Q":
+                        found.setdefault("not-carried", {}).setdefault(
+                            "queue tables (not copied)", []).append(n)
+                    elif self.takes(db, OBJECT_KINDS[kind][0], n):
+                        what = "join and hash indexes" \
+                            if kind in ("I", "N") else \
+                            f"{OBJECT_KINDS[kind][1]}s"
+                        found.setdefault(
+                            "not-carried" if kind in ("I", "N")
+                            else "server-side-code", {}).setdefault(
+                                what, []).append(n)
+                for kind, buckets in found.items():
+                    for what, names in buckets.items():
+                        inv.add(kind, db, what, names)
+                for n in self._view_rows("src", db)[1]:
+                    inv.unknown("server-side-code", db,
+                                f"the text of view {n} may be cut in the"
+                                " catalogue")
+                inv.add("decide-then-apply", db,
+                        "partitioned tables (a table migkit makes is not"
+                        " partitioned)",
+                        [t for t, _ in self._partitioned("src", db).values()])
+            except Exception as e:  # noqa: BLE001 - unknown, not zero
+                inv.unknown("server-side-code", db,
+                            f"catalogue query failed: {str(e)[:80]}")
+        return inv
 
     # ---- who it is -----------------------------------------------------------
 
@@ -1270,9 +2496,6 @@ class TeradataEngine(DbapiRows, Engine):
                                    " can read: the target is brought level"
                                    " by copies, each proved by check")
         return items
-
-    def _assess_extra(self):
-        return self.reach_items("src") + self.reach_items("dst")
 
 
 # ---- what migkit asks of Teradata's driver (backlog 0f) ---------------------

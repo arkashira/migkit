@@ -2823,6 +2823,9 @@ CHAR_TYPES = {
     # its length in characters as `DECLARED` writes it: an n-type's bytes
     # halved
     "mssql": ("varchar", "char", "nvarchar", "nchar"),
+    # as `engines.teradata.declared_of` writes them, less the character set
+    # and case rule (`plain_declared`): a length in characters
+    "teradata": ("varchar", "char"),
 }
 
 #: Types with no character limit worth counting. `("chars", None)` rather
@@ -2830,7 +2833,8 @@ CHAR_TYPES = {
 #: different answers and only one of them is safe to ignore. SQL Server's
 #: `(max)` is one: `varchar(max)` has no number to count against
 UNLIMITED_CHARS = {"postgres": ("text", "citext"),
-                   "mssql": ("varchar", "nvarchar", "text", "ntext")}
+                   "mssql": ("varchar", "nvarchar", "text", "ntext"),
+                   "teradata": ("clob",)}
 
 #: MySQL's TEXT family is limited in **bytes**, not characters, so a
 #: utf8mb4 string of 20,000 characters can overflow a 65,535-byte TEXT.
@@ -2845,6 +2849,7 @@ NUMERIC_TYPES = {
     "postgres": ("numeric", "decimal"),
     "mysql": ("decimal", "numeric"),
     "mssql": ("decimal", "numeric"),
+    "teradata": ("decimal", "numeric"),
 }
 
 
