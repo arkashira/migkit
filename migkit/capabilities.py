@@ -2078,9 +2078,9 @@ UNPROVED = {
                   "bigquery kinesis pubsub iceberg delta tidb cockroachdb "
                   "dsql couchbase cosmosdb sapodp saas"),
     "scope.row-filter": ("parquet clickhouse dynamodb oracle db2 db2i "
-                         "db2zos ase teradata opensearch cassandra redshift "
-                         "snowflake bigquery duckdb copybook iceberg delta "
-                         "tidb cockroachdb dsql couchbase cosmosdb"),
+                         "db2zos ase teradata opensearch cassandra "
+                         "snowflake copybook iceberg delta "
+                         "tidb couchbase cosmosdb"),
     "scope.names": ("sqlite parquet clickhouse dynamodb oracle db2 db2i "
                     "db2zos ase teradata opensearch cassandra redshift "
                     "snowflake bigquery duckdb copybook iceberg delta tidb "
@@ -2098,20 +2098,19 @@ UNPROVED = {
     "verify.table": ("mongodb parquet clickhouse "
                      "dynamodb oracle db2 db2i db2zos ase teradata "
                      "opensearch cassandra redshift snowflake bigquery "
-                     "duckdb copybook iceberg delta tidb cockroachdb dsql "
+                     "copybook iceberg delta tidb cockroachdb dsql "
                      "couchbase cosmosdb sapodp saas hetero"),
     "tail.follows": "db2i",
     "tail.table-states": ("mssql dynamodb oracle db2i tidb dsql couchbase "
                           "cosmosdb sapodp saas hetero"),
     "assess.versions": "mongodb",
-    "assess.engine-checks": ("db2i teradata snowflake tidb cockroachdb dsql "
-                             "couchbase cosmosdb sapodp saas"),
-    "assess.capacity": "clickhouse tidb hetero",
-    "schema.create": "db2i db2zos tidb dsql",
-    "schema.indexes": "sqlite teradata tidb cockroachdb dsql",
-    "schema.foreign-keys": "mssql oracle tidb",
-    "schema.defaults": "teradata tidb cockroachdb dsql sapodp",
-    "schema.views": "postgres tidb",
+    "assess.engine-checks": ("db2i snowflake "
+                             "sapodp "),
+    "schema.create": "db2i db2zos ",
+    "schema.indexes": "sqlite teradata ",
+    "schema.foreign-keys": "mssql oracle ",
+    "schema.defaults": "teradata sapodp",
+    "schema.views": "postgres ",
     "schema.routines": "tidb",
     "move.table-copy": "db2i db2zos snowflake bigquery dsql",
     "move.bulk": "hetero",
