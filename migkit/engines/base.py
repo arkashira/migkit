@@ -2758,6 +2758,10 @@ class Engine:
 
     # which family of client tools this engine uses, for the version check
     ENGINE_FAMILY = ""
+    #: the family `variants` names this engine's brand by, where its brand
+    #: is read from what the server says of itself but the engine has no
+    #: family of client tools (`ENGINE_FAMILY`)
+    BRAND_FAMILY = ""
 
     def _client_tool_versions(self, tools, server_version):
         """assess rows for client tools running ahead of the target server.
@@ -2840,7 +2844,7 @@ class Engine:
         cached = getattr(self, "_brand_cache", None)
         if cached is None:
             from .. import variants as _v
-            fam = self.ENGINE_FAMILY or ""
+            fam = self.BRAND_FAMILY or self.ENGINE_FAMILY or ""
             try:
                 s_raw, d_raw = self._brand_probes()
             except Exception:

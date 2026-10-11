@@ -592,7 +592,11 @@ def test_the_write_stream_is_given_each_value_as_its_column_takes_it():
 
 
 def test_migkits_own_tables_are_left_out_of_the_listing_and_named_by_assess():
+    from migkit import handwork
     eng = _engine("redshift")
+    # what a source's move leaves to hands is read from its catalogue
+    # (`test_warehouses_are_held_to_each_other_by_their_catalogues`)
+    eng._handwork = lambda side="src": handwork.Inventory()
     eng._rows = lambda side, db, sql, args=None: [
         ["orders"], ["_migkit_ledger"], ["_migkit_journal_orders_1a2b3c4d"]]
     assert eng.neutral_tables("dst", "sales") == ["orders"]
