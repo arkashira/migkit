@@ -47,7 +47,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 245, yes 476. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 244, yes 477. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -86,7 +86,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | snowflake | 0/10 | 0/33 | 0/6 | 0/7 | 1/6 | 0/6 | 1/7 | 1/1 | 0/1 | 0/1 | 3/78 |
 | sqlite | 2/9 | 4/27 | - | 2/7 | 2/5 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 17/59 |
 | teradata | 1/8 | 1/30 | - | 0/7 | 1/6 | 1/6 | 2/4 | 1/1 | 0/1 | 0/1 | 7/64 |
-| tidb | 0/10 | 1/31 | 3/6 | 0/7 | 0/6 | 2/7 | 4/6 | 0/1 | 0/1 | 0/1 | 10/76 |
+| tidb | 0/10 | 1/31 | 3/6 | 1/7 | 0/6 | 2/7 | 4/6 | 0/1 | 0/1 | 0/1 | 11/76 |
 
 Per item: the engines in each state - "test owed" is a way in the code whose test on that engine is not written (`UNPROVED`).
 
@@ -148,7 +148,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | tail.ddl | mysql postgres | - | the rest (25) | copybook db2zos duckdb hetero kinesis parquet pubsub sqlite teradata |
 | tail.renames | mysql postgres | - | the rest (20) | cassandra copybook cosmosdb couchbase db2zos duckdb dynamodb hetero kafka kinesis parquet pubsub sqlite teradata |
 | assess.versions | mysql opensearch postgres redis sqlite | mongodb | the rest (23) | copybook delta hetero iceberg kinesis parquet pubsub |
-| assess.brands | kafka mongodb mysql opensearch postgres redis | tidb | the rest (22) | copybook delta hetero iceberg kinesis parquet pubsub |
+| assess.brands | kafka mongodb mysql opensearch postgres redis tidb | - | the rest (22) | copybook delta hetero iceberg kinesis parquet pubsub |
 | assess.engine-checks | bigquery db2zos generic hetero kafka mongodb mysql oracle postgres redis redshift sqlite | cockroachdb cosmosdb couchbase db2i dsql saas sapodp snowflake teradata tidb | the rest (14) | - |
 | assess.preflight | postgres | - | the rest (31) | kinesis pubsub saas sapodp |
 | assess.capacity | mongodb mysql postgres | clickhouse hetero tidb | the rest (28) | saas sapodp |
