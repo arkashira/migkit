@@ -675,6 +675,11 @@ def room(src, db, token, needed, sample=None, sleep=time.sleep):
     if not got:
         return None, ("the source does not say how long it keeps its log"
                       " back to the seed's position")
+    if got.get("unknown"):
+        # said by the engine: why it cannot tell (an account without the
+        # right to read the service's retention) - never taken as enough
+        return None, ("how long the source keeps its log is not known: "
+                      f"{got['unknown']}")
     need = (f"the seed needs about {_took(needed)} from its position to the"
             " far end's first change" if needed else
             "the hop does not say how long the carrier takes to reach the"

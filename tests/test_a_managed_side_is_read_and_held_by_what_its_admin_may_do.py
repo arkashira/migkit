@@ -443,6 +443,8 @@ class Routines:
         self.hop = _hop("mysql", dst_host=host)
         self.REPLICA_PROCEDURES = MySQLEngine.REPLICA_PROCEDURES
         self.OWN_PURGE = MySQLEngine.OWN_PURGE
+        self.managed_retention = lambda side: MySQLEngine.managed_retention(
+            self, side)
 
     def _q(self, side, sql, args=None):
         if "routine_name in" in sql:
