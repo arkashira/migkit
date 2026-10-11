@@ -1543,10 +1543,26 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         return self._as_pair().check_schema(db)
 
     def check_counts(self, db):
-        return self._as_pair().check_counts(db)
+        """The pair's counts, the database's one answer saying how each
+        table it compared came out."""
+        pair = self._as_pair()
+        got = pair.check_counts(db)
+        outcome = pair.__dict__.get("_outcome", {}).get(db)
+        for found in got:
+            if found.scope == db and outcome:
+                found.tables = dict(outcome)
+        return got
 
     def check_data(self, db, table=None, stream=None):
-        return self._as_pair().check_data(db, table, stream)
+        """The pair's comparison; a table that differs says how many of its
+        rows are missing, extra and changed, counted where the pair walked
+        them all."""
+        pair = self._as_pair()
+        got = pair.check_data(db, table, stream)
+        for found in got:
+            if found.status == "diff":
+                found.rows_apart = pair._apart_of(db, found.scope)
+        return got
 
     def _compare_pks(self, db, table, keys):
         return self._as_pair()._compare_pks(db, table, keys)

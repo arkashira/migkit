@@ -637,6 +637,9 @@ class HeteroEngine(Engine):
         read (its log moved since `began`), the rows found from the leaves
         of its digest tree (`leaves.drill`)."""
         from .. import leaves
+        # counted again by whichever way finds the rows (`_apart_of`)
+        self.__dict__.setdefault("_apart", {}).pop(
+            (db, self._leaf(src_t)), None)
         scope = self._row_scope(db, src_t)
 
         def walk():
@@ -2626,6 +2629,8 @@ class HeteroEngine(Engine):
             return [Result("counts", db, "warn",
                            "no table on either side, so nothing was compared"
                            " - unknown, not clean")]
+        # kept for whoever says how each table came out (`_outcomes`)
+        self.__dict__.setdefault("_outcome", {})[db] = self._outcomes(rows)
         bad = [(scope, status, detail) for scope, status, detail, a, b in rows
                if status != "ok" or a != b]
         if bad:
@@ -2808,6 +2813,23 @@ class HeteroEngine(Engine):
         if with_counts:
             res = self._counts_rows(db, rows) + res
         return res
+
+    def _apart_of(self, db, scope):
+        """`Result.rows_apart` of a differing table: the rows missing,
+        extra and changed the walk counted, exact where it walked them
+        all - and {} where the rows were found another way or not found,
+        which counts none."""
+        got = self.__dict__.get("_apart", {}).get((db, scope[len(db) + 1:]))
+        return {self._named_as(scope): dict(got)} if got else {}
+
+    def _outcomes(self, rows):
+        """{table: ok | diff | error | skip} of the tables compared
+        (`Result.tables`), each as the source names it: one counted alike
+        and read whole is ok, one not compared at all is skipped."""
+        return {self._named_as(scope):
+                {"warn": "skip"}.get(status, status) if status != "ok"
+                else ("ok" if a == b else "diff")
+                for scope, status, _, a, b in rows}
 
     def _second_rows(self, db, scope):
         """The second reading of a differing table's rows, or None - read

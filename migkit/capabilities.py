@@ -1759,7 +1759,7 @@ DEPTH_GAPS = {
     },
     "verify.rows-apart": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "redis kafka parquet clickhouse dynamodb oracle db2 "
+                "redis kafka parquet clickhouse dynamodb db2 "
                 "db2i db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb copybook iceberg delta tidb "
                 "cockroachdb dsql couchbase cosmosdb sapodp saas hetero"),
@@ -1769,7 +1769,7 @@ DEPTH_GAPS = {
     "verify.tables": {
         **_each(NOT_YET, "P0-PARITY.verify",
                 "mysql mongodb redis kafka sqlite parquet clickhouse "
-                "dynamodb oracle db2 db2i db2zos ase teradata opensearch "
+                "dynamodb db2 db2i db2zos ase teradata opensearch "
                 "cassandra redshift snowflake bigquery duckdb copybook "
                 "iceberg delta tidb cockroachdb dsql couchbase cosmosdb "
                 "sapodp saas hetero"),
