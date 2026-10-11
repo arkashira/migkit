@@ -1016,17 +1016,18 @@ ENDPOINT_OPTIONS = {
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
                " authorities (https on OpenSearch, Cosmos DB and SAP)", "bool",
-               ("opensearch", "db2i", "couchbase", "cosmosdb", "sapodp")
-               + TLS_OWN),
+               ("opensearch", "db2i", "couchbase", "cosmosdb", "sapodp",
+                "oracle") + TLS_OWN),
     "tls_ca_file": Key("the authorities' certificates file", "str",
-                       ("db2i", "couchbase", "sapodp") + TLS_OWN),
+                       ("db2i", "couchbase", "sapodp", "oracle")
+                       + TLS_OWN),
     "tls_cert_file": Key("a client certificate file", "str", TLS_OWN),
     "tls_key_file": Key("a client key file", "str", ("redis", "cassandra")),
     "tls_crl_file": Key("a revocation list file", "str", ("mongodb",)),
     "tls_insecure": Key("TLS with nothing checked (an emulator's own"
                         " certificate)", "bool",
-                        ("db2i", "couchbase", "cosmosdb", "sapodp")
-                        + TLS_OWN),
+                        ("db2i", "couchbase", "cosmosdb", "sapodp",
+                         "oracle") + TLS_OWN),
     "encrypt": Key("require, request or off", "str|bool", ("mssql",),
                    choices=("require", "request", "off", "strict", "true",
                             "false", "yes", "no", "on"), fold=True),

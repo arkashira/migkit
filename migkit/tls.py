@@ -606,8 +606,9 @@ _POSTURE = {
     "cosmosdb": _cosmos,
     "db2i": _options("tls", "tls_ca_file", "tls_insecure",
                      fix="tls: true (tls_ca_file for the authority)"),
-    "oracle": _plain_always("the connection string asks for no TLS (a"
-                            " TCPS address is not written by migkit)"),
+    "oracle": _options("tls", "tls_ca_file", "tls_insecure",
+                       fix="tls: true (tls_ca_file for the authority), to"
+                           " the listener's TCPS port"),
     "db2": _plain_always("the connection string asks for no TLS"
                          " (SECURITY=SSL is not written by migkit)"),
     "db2zos": _plain_always("the connection string asks for no TLS"

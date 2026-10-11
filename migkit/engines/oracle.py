@@ -398,6 +398,27 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
                    or ep.options.get("service_name") or "FREEPDB1")
         return f"{ep.host}:{ep.port or 1521}/{service}"
 
+    def _tls(self, ep):
+        """What the endpoint's TLS asks of a connection (`tls`,
+        `tls_ca_file`, `tls_insecure`): the listener's TCPS port, the
+        server's certificate checked against the system's authorities or
+        the file's, and the name on it against the host's. Nothing is
+        checked only where `tls_insecure` says so (which `assess` fails
+        on); {} where none is asked, the connection plain as before."""
+        o = ep.options or {}
+        if not (o.get("tls") or o.get("tls_ca_file")
+                or o.get("tls_insecure")):
+            return {}
+        import ssl
+        ctx = ssl.create_default_context(
+            cafile=str(o["tls_ca_file"]) if o.get("tls_ca_file") else None)
+        insecure = bool(o.get("tls_insecure"))
+        if insecure:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return {"protocol": "tcps", "ssl_context": ctx,
+                "ssl_server_dn_match": not insecure}
+
     def _pool(self, side):
         """One pool per endpoint and process. A connection each statement
         made cost a round of logon and session setup per catalogue question
@@ -405,7 +426,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         import oracledb
         ep = self._endpoint(side)
         name = (os.getpid(), ep.host, ep.port, ep.user,
-                self._dsn(ep))
+                self._dsn(ep), bool(self._tls(ep)))
         with _POOLS_LOCK:
             pool = _POOLS.get(name)
             if pool is None:
@@ -413,7 +434,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
                     user=ep.user, password=ep.password, dsn=self._dsn(ep),
                     min=0, max=16, increment=1, session_callback=_session,
                     getmode=oracledb.POOL_GETMODE_WAIT,
-                    tcp_connect_timeout=15)
+                    tcp_connect_timeout=15, **self._tls(ep))
         return pool
 
     def _connect(self, side, db):
@@ -435,7 +456,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         conn = oracledb.connect(user=user or ep.user,
                                 password=password or ep.password,
                                 dsn=dsn or self._dsn(ep),
-                                tcp_connect_timeout=15)
+                                tcp_connect_timeout=15, **self._tls(ep))
         _session(conn)
         return conn
 
