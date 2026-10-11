@@ -847,6 +847,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * a row filter is SQL, and MongoDB takes none; narrow this collection another way
 
+* <...>.<...>: the hop masks columns of this collection (mask_on_write), and a MongoDB copy carries each document as stored, so the masked values would arrive unmasked. Nothing was copied; leave the collection out of this hop, or move it by a way that masks
+
 * <...>: migkit will not write documents without _id - there would be no way to write the same row twice without duplicating it
 
 * the server opened a change stream without saying where it stands, so there is no position to start the tail from before the copy

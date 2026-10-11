@@ -102,6 +102,55 @@ class MongoEngine(Engine):
         # BSON strings are UTF-8 by the format's own definition
         return {"UTF-8": 1}
 
+    def _there(self, db, name):
+        """A collection's name on the target: the one the hop's
+        `mapping.tables` or name rules give it, the source's own where it
+        says nothing (`Hop.target_table_in` - the one reading of it, which
+        the copy, the check, the repair and the tail all ask)."""
+        return self.hop.target_table_in(db, name)
+
+    def masked_on_the_way(self, db):
+        """The collections the hop masks on the way (`mask_on_write`),
+        which this engine's copier cannot (`move_table`)."""
+        from ..movers import mask_rules
+        return set(mask_rules(self.hop, db))
+
+    def _rows_of(self, db, name):
+        """The hop's row filter for a collection as a document query
+        (`rowfilter.to_mongo`, with SQL's NULL kept), or None where it has
+        none: the one filter the copy takes the documents by and the
+        counts and the comparison read both sides through."""
+        pred = self.hop.row_filter(db, name)
+        if not pred:
+            return None
+        from .. import rowfilter
+        return rowfilter.to_mongo(
+            pred, rowfilter.dialect_of(self.CANON_ENGINE))
+
+    @staticmethod
+    def _within(flt, rows):
+        """A query held to a row filter's documents."""
+        if not rows:
+            return flt
+        return {"$and": [flt, rows]} if flt else rows
+
+    def _taken(self, db):
+        """([(a collection the hop takes on the source, its name on the
+        target)], [the names only the target holds that the hop takes]):
+        the collections every check reads, asked of the one scope answer
+        (`Engine.in_scope`) and the hop's name rules (`_there`), so a
+        collection renamed on the way is compared by its new name and not
+        reported missing and extra."""
+        s = self._client("src")[db].list_collection_names()
+        t = set(self._client("dst")[self._d("dst", db)]
+                .list_collection_names())
+        mine = [(n, self._there(db, n)) for n in sorted(s)
+                if not n.startswith("system.") and self.in_scope(db, n)]
+        images = {b for _, b in mine}
+        only = sorted(n for n in t if not n.startswith("system.")
+                      and n not in images and self.in_scope(db, n))
+        return mine, only
+
     def list_move_tables(self, db):
         return [("", c) for c in self.neutral_tables("src", db)]
 
@@ -199,6 +248,16 @@ class MongoEngine(Engine):
 
         from ..wording import progress
         name = tbl or sch
+        if name in self.masked_on_the_way(db):
+            # the copy carries each document as the bytes the server sent,
+            # and a column the hop masks would arrive as it is: no copy
+            # that cannot mask is run for a collection that is to be
+            raise SystemExit(
+                f"{db}.{name}: the hop masks columns of this collection"
+                " (mask_on_write), and a MongoDB copy carries each"
+                " document as stored, so the masked values would arrive"
+                " unmasked. Nothing was copied; leave the collection out"
+                " of this hop, or move it by a way that masks")
         key = self.move_key(db, sch, tbl)
         st = ck.setdefault(key, {})
         if st.get("done") and self.recheck_done(db, name, st, log,
@@ -218,8 +277,10 @@ class MongoEngine(Engine):
         # under the name the hop gives it there (`mapping.tables`): it was
         # written under the source's, and the one the hop names stayed
         # empty
-        there = self.hop.target_table_in(db, name)
+        there = self._there(db, name)
         dst = target[there]
+        # only the documents the hop's row filter takes, if it has one
+        rows = self._rows_of(db, name)
         after = json_util.loads(st["last"]) if "last" in st else None
         started_here = after is None
         if started_here:
@@ -231,13 +292,14 @@ class MongoEngine(Engine):
                 log(f"{key}: emptied {gone:,} documents the target held"
                     " before the copy")
         moved = from_docs = int(st.get("moved", 0))
-        total = (self.table_facts("src", db).get(name) or {}).get("rows")
+        total = (src.count_documents(rows) if rows else
+                 (self.table_facts("src", db).get(name) or {}).get("rows"))
         batch = max(1, min(int(chunk), self.COPY_BATCH))
         began = time.monotonic()
         # `_id`s of one BSON type from the first to the last are all of
         # that type - BSON orders by type first - and then a plain `$gt`
         # is exact and takes the index
-        ends = [next(iter(src.find({}, {"_id": 1}).sort("_id", o)
+        ends = [next(iter(src.find(rows or {}, {"_id": 1}).sort("_id", o)
                           .limit(1)), None) for o in (1, -1)]
         one_type = all(ends) and type(ends[0]["_id"]) is \
             type(ends[1]["_id"])
@@ -245,7 +307,8 @@ class MongoEngine(Engine):
             flt = {} if after is None else (
                 {"_id": {"$gt": after}} if one_type else
                 {"$expr": {"$gt": ["$_id", {"$literal": after}]}})
-            docs = self._docs_until(src, flt, None, batch, raw=True)
+            docs = self._docs_until(src, self._within(flt, rows), None,
+                                    batch, raw=True)
             if not docs:
                 break
             try:
@@ -297,9 +360,12 @@ class MongoEngine(Engine):
             t = self._client("dst")[self._d("dst", db)]
             empty = []
             for c in self.neutral_tables("src", db):
-                if s[c].find_one({}, {"_id": 1}) is None:
+                # a collection whose filter takes no document has nothing
+                # to move
+                if s[c].find_one(self._rows_of(db, c) or {},
+                                 {"_id": 1}) is None:
                     continue
-                there = self.hop.target_table_in(db, c)
+                there = self._there(db, c)
                 if there not in dst or t[there].find_one(
                         {}, {"_id": 1}) is None:
                     empty.append(c)
@@ -1031,13 +1097,24 @@ class MongoEngine(Engine):
     #: documents per read of the digest pass
     DIGEST_CHUNK = 5000
 
-    def _shape(self, side, db):
+    def _shape(self, side, db, pairs=None):
+        """{collection: its indexes, type and options} of the ones the hop
+        takes, keyed by the source's name: `pairs` - (the source's name,
+        its name on this side) - says which are read and under what name
+        they are held here (a collection the hop renames), by default the
+        ones this side lists that the hop takes. A view the hop's
+        `objects` leaves out is no more read than a collection it
+        excludes."""
         d = self._client(side)[self._d(side, db)]
         shape = {}
+        listed = set(d.list_collection_names())
+        if pairs is None:
+            pairs = [(n, n) for n in sorted(listed) if self.in_scope(db, n)]
         # the collections and views the hop takes, with their indexes: one
         # it leaves out, on one side only, was "extra on target" every check
-        for name in sorted(n for n in d.list_collection_names()
-                           if self.in_scope(db, n)):
+        for source, name in pairs:
+            if name not in listed:
+                continue
             idx = {}
             for i in d[name].list_indexes():
                 spec = {k: (str(v) if k == "key" else v)
@@ -1049,9 +1126,11 @@ class MongoEngine(Engine):
             o = {k: v for k, v in opts.get("options", {}).items()
                  if k not in ("storageEngine", "autoIndexId")
                  and not (k == "capped" and not v)}
-            shape[name] = {"indexes": idx,
-                           "type": opts.get("type", "collection"),
-                           "options": repr(sorted(o.items(), key=str))}
+            kind = opts.get("type", "collection")
+            if kind == "view" and not self.takes(db, "view", source):
+                continue
+            shape[source] = {"indexes": idx, "type": kind,
+                             "options": repr(sorted(o.items(), key=str))}
         return shape
 
     def _shape_diff(self, name, a, b):
@@ -1072,7 +1151,9 @@ class MongoEngine(Engine):
         return out
 
     def check_schema(self, db):
-        src, dst = self._shape("src", db), self._shape("dst", db)
+        mine, only = self._taken(db)
+        src = self._shape("src", db, [(a, a) for a, _ in mine])
+        dst = self._shape("dst", db, mine + [(b, b) for b in only])
         bad = []
         for name in sorted(set(src) | set(dst)):
             if name not in dst:
@@ -1129,38 +1210,43 @@ class MongoEngine(Engine):
         whichever store is underneath.
         """
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
-
-        def collections(side):
-            return {c for c in side.list_collection_names()
-                    if not c.startswith("system.")
-                    and not self.hop.excluded(db, c)}
-
-        src_names, dst_names = collections(s), collections(t)
+        # the collections the hop takes, each by the name it has on the
+        # target (`_taken`), and counted through the hop's row filter
+        mine, only = self._taken(db)
+        there = set(t.list_collection_names())
+        missing = [a for a, b in mine if b not in there]
         res = []
-        if src_names - dst_names:
+        if missing:
             res.append(Result("counts", db, "diff",
                               "missing collections on target:"
-                              f" {sorted(src_names - dst_names)}", "",
+                              f" {missing}", "",
                               "create and load them before cutover"))
-        if dst_names - src_names:
+        if only:
             res.append(Result("counts", db, "diff",
                               "extra collections on target:"
-                              f" {sorted(dst_names - src_names)}"))
-        bad = []
-        names = sorted(src_names & dst_names)
+                              f" {only}"))
+        bad, outcomes = [], {}
+        names = [(a, b) for a, b in mine if b in there]
         total_a = total_b = 0
-        for name in names:
-            a = s[name].count_documents({})
-            b = t[name].count_documents({})
+        for name, other in names:
+            rows = self._rows_of(db, name) or {}
+            a = s[name].count_documents(rows)
+            b = t[other].count_documents(rows)
             total_a += a
             total_b += b
+            outcomes[name] = "ok" if a == b else "diff"
             if a != b:
                 bad.append(f"{name} src={a} dst={b}")
+        outcomes.update({a: "diff" for a in missing})
         if bad:
             res.append(Result("counts", db, "diff", "; ".join(bad)))
-        return res or [Result("counts", db, "ok",
-                              f"{len(names)} collections, docs"
-                              f" {total_a:,}=={total_b:,}")]
+        res = res or [Result("counts", db, "ok",
+                             f"{len(names)} collections, docs"
+                             f" {total_a:,}=={total_b:,}")]
+        # how each collection came out, said by every finding it is in
+        for r in res:
+            r.tables = dict(outcomes)
+        return res
 
     def check_params(self, db):
         def pull(side):
@@ -1235,13 +1321,19 @@ class MongoEngine(Engine):
         """(source, target) `dbHash` per collection, or (None, None) where
         either side will not give it - a mongos, a user without the
         privilege, a service that leaves the command out."""
+        # `names` are the source's; the target is asked for each under the
+        # name the hop gives it there, and answers by that name
         cmd = {"dbHash": 1}
         if names:
             cmd["collections"] = list(names)
+            there = dict(cmd, collections=[self._there(db, n)
+                                           for n in names])
+        else:
+            there = cmd
         try:
             return (self._client("src")[db].command(cmd)["collections"],
                     self._client("dst")[self._d("dst", db)]
-                    .command(cmd)["collections"])
+                    .command(there)["collections"])
         except Exception:
             return None, None
 
@@ -1257,11 +1349,12 @@ class MongoEngine(Engine):
 
     def check_data(self, db, table=None, stream=None, with_counts=False):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
-        a, b = self._db_hashes(db)
-        sn = set(s.list_collection_names())
-        tn = set(t.list_collection_names())
-        names = [table] if table else sorted(c for c in sn & tn
-                                             if not self.hop.excluded(db, c))
+        # the collections the hop takes, each by the name it has on the
+        # target (`_taken`)
+        mine, only = self._taken(db)
+        there = set(t.list_collection_names())
+        names = [table] if table else [a for a, b in mine if b in there]
+        a, b = self._db_hashes(db, names)
         # dbHash and the id drilldown are both full scans, so the same rule
         # as the other engines applies: stop adding load to a deployment that
         # is already struggling.
@@ -1272,7 +1365,13 @@ class MongoEngine(Engine):
         for name in names:
             if name.startswith("system."):
                 continue
-            ha, hb = self._server_hash(a, name), self._server_hash(b, name)
+            ha, hb = self._server_hash(a, name), self._server_hash(
+                b, self._there(db, name))
+            if self._rows_of(db, name):
+                # a hash of the whole collection says nothing of the
+                # documents the hop's filter takes: they are walked, the
+                # filter read as the copy read it
+                ha = hb = None
             if ha and ha == hb:
                 if stream:
                     stream(f"{name}: ok")
@@ -1307,17 +1406,21 @@ class MongoEngine(Engine):
         note = gate.line()
         if note and stream:
             stream(f"# {note}")
+        # each finding says how the collection it compared came out
+        for r in res:
+            if r.check == "data" and "." in r.scope:
+                r.tables = {r.scope.split(".", 1)[1]: r.status}
         if with_counts:
             # equal hashes imply equal counts; only diffed colls pay to count
-            bad = [f"{c} missing on target" for c in sorted(sn - tn)
-                   if not c.startswith("system.")]
-            bad += [f"{c} extra on target" for c in sorted(tn - sn)
-                    if not c.startswith("system.")]
+            bad = [f"{a} missing on target" for a, b in mine
+                   if b not in there]
+            bad += [f"{c} extra on target" for c in only]
             for r in res:
                 if r.check == "data" and r.status != "ok":
                     name = r.scope.split(".", 1)[1]
-                    ca = s[name].count_documents({})
-                    cb = t[name].count_documents({})
+                    rows = self._rows_of(db, name) or {}
+                    ca = s[name].count_documents(rows)
+                    cb = t[self._there(db, name)].count_documents(rows)
                     if ca != cb:
                         bad.append(f"{name} src={ca} dst={cb}")
             if bad:
@@ -1337,7 +1440,8 @@ class MongoEngine(Engine):
         from bson.json_util import dumps, loads
         ids = [loads(k) for k in keys]
         src = self._raw(self._client("src")[db][table])
-        dst = self._raw(self._client("dst")[self._d("dst", db)][table])
+        dst = self._raw(self._client("dst")[self._d("dst", db)]
+                        [self._there(db, table)])
 
         def read(coll):
             out = {}
@@ -1517,8 +1621,9 @@ class MongoEngine(Engine):
             plan += [(ty, lo, hi) for lo, hi in _cp.plan_from_boundaries(bounds)]
         return plan
 
-    def _coverage_ok(self, coll, plan, docs):
-        """Do these ranges actually account for every document?
+    def _coverage_ok(self, coll, plan, docs, rows=None):
+        """Do these ranges actually account for every document - of the
+        ones the hop's row filter (`rows`) takes?
 
         A plan is only worth using if it does. Cheap to verify - one indexed
         count per range - and it turns a silent hole into a fallback.
@@ -1530,11 +1635,12 @@ class MongoEngine(Engine):
         if plan == [(None, None, None)]:
             return True
         try:
-            seen = sum(coll.count_documents(self._range_filter(ty, lo, hi))
-                       for ty, lo, hi in plan)
+            seen = sum(coll.count_documents(
+                self._within(self._range_filter(ty, lo, hi), rows))
+                for ty, lo, hi in plan)
         except Exception:
             return False
-        return seen == coll.count_documents({})
+        return seen == coll.count_documents(rows or {})
 
     @staticmethod
     def _range_filter(ty, lo, hi):
@@ -1612,7 +1718,8 @@ class MongoEngine(Engine):
         if r.status != "ok" or not told:
             return r
         a, b = self._db_hashes(db, [name])
-        ha, hb = self._server_hash(a, name), self._server_hash(b, name)
+        ha, hb = self._server_hash(a, name), self._server_hash(
+            b, self._there(db, name))
         if ha and ha == hb:
             return Result("data", r.scope, "ok",
                           f"{r.detail}; dbHash, different at first, is"
@@ -1658,10 +1765,14 @@ class MongoEngine(Engine):
         scope = f"{db}.{name}"
         mark = f"{scope} by bytes" if exact else scope
         hashes = self._client_hashes if exact else self._range_hashes
-        s, t = self._client("src")[db][name], self._client("dst")[self._d("dst", db)][name]
-        docs = s.count_documents({})
+        s = self._client("src")[db][name]
+        t = self._client("dst")[self._d("dst", db)][self._there(db, name)]
+        # both sides read through the hop's row filter, as the copy read
+        # the source (`_rows_of`)
+        rows = self._rows_of(db, name)
+        docs = s.count_documents(rows or {})
         ranges = self._id_plan(s, docs)
-        if not self._coverage_ok(s, ranges, docs):
+        if not self._coverage_ok(s, ranges, docs, rows):
             # better one slow pass than a fast answer about part of the data
             ranges = [(None, None, None)]
         cp = _cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
@@ -1670,7 +1781,9 @@ class MongoEngine(Engine):
         # rather than squeezing three things into two and hoping.
         keyed = [((f"{ty}|{lo}", f"{hi}"), (ty, lo, hi)) for ty, lo, hi in ranges]
         by_key = dict(keyed)
-        todo_keys = cp.begin(mark, "bson md5" if exact else "toHashedIndexKey",
+        todo_keys = cp.begin(mark, ("bson md5" if exact
+                                    else "toHashedIndexKey")
+                             + (repr(rows) if rows else ""),
                              [k for k, _ in keyed])
         todo = [by_key[k] for k in todo_keys]
         done_before = cp.resumed(mark)
@@ -1678,7 +1791,7 @@ class MongoEngine(Engine):
         d = self.hop.report_dir(db)
         found = {"missing": [], "extra": [], "changed": []}
         for ty, lo, hi in todo:
-            flt = self._range_filter(ty, lo, hi)
+            flt = self._within(self._range_filter(ty, lo, hi), rows)
             src = hashes(s, flt)
             dst = hashes(t, flt)
             found["missing"] += [src[k][0] for k in src if k not in dst]
@@ -1811,22 +1924,25 @@ class MongoEngine(Engine):
 
     def check_deep(self, db):
         s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
-        names = sorted(n for n in set(s.list_collection_names())
-                       & set(t.list_collection_names())
-                       if self.in_scope(db, n))
+        # the collections the hop takes that both sides hold, each by the
+        # name it has on the target (`_taken`)
+        mine, _ = self._taken(db)
+        held = set(t.list_collection_names())
+        tn = {a: b for a, b in mine if b in held}
+        names = sorted(tn)
 
-        def newest(coll):
-            d = coll.find_one(sort=[("_id", -1)], projection={"_id": 1})
+        def newest(coll, rows=None):
+            d = coll.find_one(rows or {}, sort=[("_id", -1)],
+                              projection={"_id": 1})
             return d["_id"] if d else None
 
         res = []
         ahead, behind = [], []
         n = 0
         for name in names:
-            if name.startswith("system."):
-                continue
             n += 1
-            na, nb = newest(s[name]), newest(t[name])
+            rows = self._rows_of(db, name)
+            na, nb = newest(s[name], rows), newest(t[tn[name]], rows)
             try:
                 if nb is not None and (na is None or nb > na):
                     ahead.append(name)
@@ -1868,7 +1984,7 @@ class MongoEngine(Engine):
         for name in names:
             if name.startswith("system."):
                 continue
-            sf, df = field_types(s[name]), field_types(t[name])
+            sf, df = field_types(s[name]), field_types(t[tn[name]])
             for f, sty in sorted(sf.items()):
                 dty = df.get(f)
                 if dty and dty != sty:
@@ -1887,7 +2003,7 @@ class MongoEngine(Engine):
         for name in names:
             if name.startswith("system."):
                 continue
-            sc, tc = s[name], t[name]
+            sc, tc = s[name], t[tn[name]]
             fields = (set(field_types(sc)) | set(field_types(tc))) - {"_id"}
             for f in sorted(fields)[:40]:
                 sn = sc.count_documents({f: {"$type": "null"}})
@@ -1909,7 +2025,7 @@ class MongoEngine(Engine):
         topts = {c["name"]: c.get("options", {}) for c in t.list_collections()}
         cap = []
         for name in names:
-            so, to = sopts.get(name, {}), topts.get(name, {})
+            so, to = sopts.get(name, {}), topts.get(tn[name], {})
             if not so.get("capped") and not to.get("capped"):
                 continue
             if bool(so.get("capped")) != bool(to.get("capped")):
@@ -1936,7 +2052,7 @@ class MongoEngine(Engine):
         for name in names:
             if name.startswith("system."):
                 continue
-            si, di = indexes(s[name]), indexes(t[name])
+            si, di = indexes(s[name]), indexes(t[tn[name]])
             for ixn, spec in si.items():
                 if ixn == "_id_":
                     continue
@@ -2022,7 +2138,7 @@ class MongoEngine(Engine):
                 if name.startswith("system."):
                     continue
                 with asked.reading(f"{name} duplicate _id"):
-                    r = list(t[name].aggregate(
+                    r = list(t[tn[name]].aggregate(
                         [{"$group": {"_id": "$_id", "n": {"$sum": 1}}},
                          {"$match": {"n": {"$gt": 1}}}, {"$count": "c"}],
                         allowDiskUse=True))
@@ -2036,7 +2152,345 @@ class MongoEngine(Engine):
             res.append(Result("deep", f"{db} sharding", status, detail, "",
                               "cleanupOrphaned / dedupe and stop the"
                               " balancer before cutover" if sh else ""))
+        res += self._value_checks(db, tn)
+        res.append(self._grants(db, tn))
         return res
+
+    # --- what a value became, and who may read it ---------------------------
+
+    #: a value of the first BSON type held as the second keeps fewer of its
+    #: digits, and what is lost
+    LOSES_DIGITS = {
+        ("decimal", "double"): "a decimal128 keeps 34 digits, a double 15"
+                               " to 17",
+        ("decimal", "long"): "the fraction is cut",
+        ("decimal", "int"): "the fraction is cut",
+        ("double", "long"): "the fraction is cut",
+        ("double", "int"): "the fraction is cut",
+        ("long", "double"): "past 2^53 a double cannot tell one 64-bit"
+                            " integer from the next"}
+    #: types whose text is what they are: every other type is rendered
+    #: (`_renderings`) by a rule of the driver that reads it
+    PLAIN_TYPES = frozenset({"string", "int", "long", "double", "bool",
+                             "null", "object", "array", "objectId",
+                             "binData"})
+    #: fields a deep check samples at most - a bound that is said where
+    #: it cuts
+    DEEP_FIELDS = 20
+
+    def _value_checks(self, db, tn):
+        """The deep checks of what a document's values became on the
+        target, each over the types of every field of every collection
+        (`field_types` - the whole collection, never a sample, so a field
+        in one document of a million is read too): a 64-bit integer held as
+        a 32-bit one (narrowing), a decimal128 or a long past 2^53 held as
+        a double (precision), a collation changed (collation), the text of
+        the types a driver renders by its own rule (rendering), dates moved
+        by a zone's offset (time zone) and replacement characters a lossy
+        transcode left (character set). A collection whose types could not
+        be read is said, never passed."""
+        from .. import verdict
+        types, unread = {}, []
+        for name in sorted(tn):
+            try:
+                types[name] = (self.field_types("src", db, name),
+                               self.field_types("dst", db, tn[name]))
+            except Exception as e:  # noqa: BLE001 - a view, or not allowed
+                unread.append(f"{name} ({str(e).splitlines()[0][:60]})")
+        out = [verdict.narrowing_result(db, self._narrowed(types)),
+               self._precision(db, types), self._collation(db, tn),
+               self._renderings(db, tn, types),
+               verdict.timeshift_result(db, self._shifted(db, tn, types)),
+               self._replacement(db, tn, types)]
+        if unread:
+            out.append(Result("deep", f"{db} narrowing", "warn",
+                              "the types of the fields of "
+                              + ", ".join(unread[:5]) + " could not be"
+                              " read, so narrowing, precision, rendering,"
+                              " time shift and replacement characters were"
+                              " not judged there"))
+        return out
+
+    def _narrowed(self, types):
+        """Lines naming a field the source holds as a 64-bit integer that
+        the target holds only as a 32-bit one (`verdict.narrowing`, the
+        reasoning every engine's check asks, over `canon.INT_RANGES`)."""
+        from .. import verdict
+        out = []
+        for name, (sf, df) in sorted(types.items()):
+            for field, (stypes, _, _) in sorted(sf.items()):
+                there = set((df.get(field) or ([], 0, 0))[0]) - {"null"}
+                for have in sorted(set(stypes) - {"null"} - there):
+                    for held in sorted(there):
+                        why = verdict.narrowing("mongodb", have, held)
+                        if why:
+                            out.append(f"{name}.{field}: {why}")
+        return out
+
+    def _precision(self, db, types):
+        """A field whose values the target holds in a type with fewer
+        digits (`LOSES_DIGITS`): a decimal128 as a double, a long as a
+        double. The row comparison sees the bytes change; this names the
+        field and says what was lost."""
+        lost = []
+        for name, (sf, df) in sorted(types.items()):
+            for field, (stypes, _, _) in sorted(sf.items()):
+                there = set((df.get(field) or ([], 0, 0))[0]) - {"null"}
+                for have in sorted(set(stypes) - there):
+                    for held in sorted(there):
+                        why = self.LOSES_DIGITS.get((have, held))
+                        if why:
+                            lost.append(f"{name}.{field}: {have} -> {held}"
+                                        f" ({why})")
+        if lost:
+            return Result("deep", f"{db} float", "diff", "; ".join(lost[:6]),
+                          "", "keep the type: move the field as a decimal128"
+                              " or a long, not through a double")
+        return Result("deep", f"{db} float", "ok",
+                      f"no field holds fewer digits on the target, over"
+                      f" the types of {len(types)} collections")
+
+    def _collation(self, db, tn):
+        """A collection's default collation, or an index's, that is not the
+        source's: it orders, compares and de-duplicates text another way
+        (the ICU version a server reports is its own and is not compared)."""
+        s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
+        sopts = {c["name"]: c.get("options", {})
+                 for c in s.list_collections()}
+        topts = {c["name"]: c.get("options", {})
+                 for c in t.list_collections()}
+
+        def spec(got):
+            return {k: v for k, v in (got or {}).items() if k != "version"}
+        bad = []
+        for name in sorted(tn):
+            a = spec(sopts.get(name, {}).get("collation"))
+            b = spec(topts.get(tn[name], {}).get("collation"))
+            if a != b:
+                bad.append(f"{name}: default collation src={a or 'binary'}"
+                           f" dst={b or 'binary'}")
+            si = {ix["name"]: spec(ix.get("collation"))
+                  for ix in s[name].list_indexes()}
+            di = {ix["name"]: spec(ix.get("collation"))
+                  for ix in t[tn[name]].list_indexes()}
+            for ixn in sorted(set(si) & set(di)):
+                if si[ixn] != di[ixn]:
+                    bad.append(f"{name}.{ixn}: index collation"
+                               f" src={si[ixn] or 'binary'}"
+                               f" dst={di[ixn] or 'binary'}")
+        if bad:
+            return Result("deep", f"{db} collation", "diff",
+                          "; ".join(bad[:6]), "",
+                          "create the collection and its indexes on the"
+                          " target with the source's collation")
+        return Result("deep", f"{db} collation", "ok",
+                      f"default and index collations match on {len(tn)}"
+                      " collections")
+
+    def _renderings(self, db, tn, types):
+        """The text of a few values of each type a driver renders by a rule
+        of its own (a decimal128's scale, a date, a UUID's byte order, a
+        regular expression, a timestamp), as Extended JSON, asked of both
+        sides for the same `_id`s: a value the target would show another
+        way is named. A sample of five documents of each of at most
+        `DEEP_FIELDS` fields - the row comparison, by the stored bytes, is
+        the one that is exact."""
+        from bson.json_util import CANONICAL_JSON_OPTIONS, dumps
+        s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
+
+        def show(value):
+            return dumps(value, json_options=CANONICAL_JSON_OPTIONS)
+        fields = [(name, field, ty) for name in sorted(types)
+                  for field, (stypes, _, _) in sorted(types[name][0].items())
+                  for ty in stypes if ty not in self.PLAIN_TYPES]
+        drifts, audited = [], 0
+        for name, field, ty in fields[:self.DEEP_FIELDS]:
+            kind = "binData" if ty == "uuid" or ty.startswith("binData") \
+                else ty
+            got = {repr(d["_id"]): (d["_id"], d[field])
+                   for d in s[name].find({field: {"$type": kind}},
+                                         {field: 1}).limit(5)
+                   if field in d}
+            if not got:
+                continue
+            audited += 1
+            ids = [i for i, _ in got.values()]
+            held = {repr(d["_id"]): d[field]
+                    for d in t[tn[name]].find({"_id": {"$in": ids}},
+                                              {field: 1}) if field in d}
+            for key, (_, value) in got.items():
+                if key in held and show(held[key]) != show(value):
+                    drifts.append(
+                        f"{name}.{field}: renders differently (src"
+                        f" {show(value)[:40]!r} dst {show(held[key])[:40]!r})")
+                    break
+        cut = max(len(fields) - self.DEEP_FIELDS, 0)
+        if drifts:
+            return Result("deep", f"{db} render", "diff",
+                          "; ".join(drifts[:5]), "",
+                          "check how the target's driver and version read"
+                          " and write these types")
+        return Result("deep", f"{db} render", "ok",
+                      (f"{audited} fields of types a driver renders by its"
+                       " own rule sampled, rendering identical"
+                       if audited else "no field of a type a driver"
+                                       " renders by its own rule")
+                      + (f"; {cut} more fields not sampled" if cut else ""))
+
+    @staticmethod
+    def _epoch(moment):
+        """A BSON date as seconds since 1970: a date is an instant in UTC,
+        which the driver reads without a zone."""
+        import calendar
+        return calendar.timegm(moment.utctimetuple()) \
+            + moment.microsecond / 1e6
+
+    def _shifted(self, db, tn, types):
+        """Lines naming a date field every document of which the target
+        holds shifted by the same number of seconds (or by two, an hour
+        apart: a zone with daylight saving) - a mover that wrote a local
+        wall clock where a UTC instant belongs (`verdict.uniform_shift`).
+        The first 200 documents of at most ten fields are compared by
+        `_id`."""
+        from .. import verdict
+        s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
+        fields = [(name, field) for name in sorted(types)
+                  for field, (stypes, _, _) in sorted(types[name][0].items())
+                  if "date" in stypes
+                  and "date" in (types[name][1].get(field) or ([], 0, 0))[0]]
+        shifts = []
+        for name, field in fields[:10]:
+            try:
+                src = {repr(d["_id"]): (d["_id"], self._epoch(d[field]))
+                       for d in s[name].find(
+                           {field: {"$type": "date"}}, {field: 1})
+                       .sort("_id", 1).limit(200)}
+                ids = [i for i, _ in src.values()]
+                dst = {repr(d["_id"]): self._epoch(d[field])
+                       for d in t[tn[name]].find(
+                           {"_id": {"$in": ids}, field: {"$type": "date"}},
+                           {field: 1})}
+            except (OverflowError, ValueError):
+                continue    # a date past what the driver can read
+            line = verdict.uniform_shift(
+                f"{name}.{field}", {k: v for k, (_, v) in src.items()}, dst)
+            if line:
+                shifts.append(line)
+        return shifts
+
+    def _replacement(self, db, tn, types):
+        """U+FFFD, the replacement character a lossy transcode leaves for
+        what it could not read: strings are UTF-8 by the format's own
+        definition, so there is no character set to differ - an excess of
+        the character on the target over the source is the damage. Each
+        top-level string field of at most `DEEP_FIELDS * 2` is counted by
+        the documents it is in."""
+        s, t = self._client("src")[db], self._client("dst")[self._d("dst", db)]
+        fields = [(name, field) for name in sorted(types)
+                  for field, (stypes, _, _) in sorted(types[name][0].items())
+                  if "string" in stypes]
+        bad = []
+        for name, field in fields[:self.DEEP_FIELDS * 2]:
+            query = {field: {"$regex": "�"}}
+            was = s[name].count_documents(query)
+            now = t[tn[name]].count_documents(query)
+            if now > was:
+                bad.append(f"{name}.{field}: {now - was} more documents"
+                           " with a replacement character on the target")
+        cut = max(len(fields) - self.DEEP_FIELDS * 2, 0)
+        if bad:
+            return Result("deep", f"{db} encoding", "diff",
+                          "; ".join(bad[:6]), "",
+                          "copy the affected documents again with a reader"
+                          " that does not transcode")
+        return Result("deep", f"{db} encoding", "ok",
+                      f"no more replacement characters on the target, over"
+                      f" {min(len(fields), self.DEEP_FIELDS * 2)} top-level"
+                      " string fields"
+                      + (f"; {cut} more fields not counted" if cut else ""))
+
+    def _role_privileges(self, side, db, tn):
+        """{role: {(collection, action)}} the roles made in the database
+        hold on its collections the hop takes ("" - the whole database):
+        what `rolesInfo` shows of the privileges of the roles that are not
+        built in. A collection is named as the source names it."""
+        name = self._d(side, db)
+        got = self._client(side)[name].command(
+            "rolesInfo", 1, showPrivileges=True, showBuiltinRoles=False)
+        names = {b: a for a, b in tn.items()} if side == "dst" \
+            else {a: a for a in tn}
+        out = {}
+        for role in got.get("roles", []):
+            held = set()
+            for priv in role.get("privileges", []):
+                resource = priv.get("resource") or {}
+                if resource.get("db") != name:
+                    continue
+                coll = resource.get("collection", "")
+                if coll and coll not in names:
+                    continue
+                held.update((names.get(coll, ""), a)
+                            for a in priv.get("actions", []))
+            out[role["role"]] = held
+        return out
+
+    def _grants(self, db, tn):
+        """What may be done with the collections, which MongoDB keeps as
+        roles on resources and not as grants on a table: the accounts that
+        hold a role on this database (or on every one) and the privileges
+        of the roles made in it, source against target. A role or a
+        privilege the source has and the target lacks is the gap; one the
+        target holds beyond the source is the target's own. Only the
+        accounts and roles the hop's `objects` carries (`roles`) are
+        compared."""
+        from .. import users
+        tdb = self._d("dst", db)
+        try:
+            mine = users._mongo_users(self.hop.source)
+            there = users._mongo_users(self.hop.target)
+            owned = self._role_privileges("src", db, tn)
+            held = self._role_privileges("dst", db, tn)
+        except Exception as e:  # noqa: BLE001 - not allowed, or no command
+            return Result("deep", f"{db} grants", "skip",
+                          "the accounts and roles could not be read: "
+                          + str(e).splitlines()[0][:100])
+        gaps, compared = [], 0
+        for (udb, user), roles in sorted(mine.items()):
+            reach = sorted({(r, tdb if d == db else d) for r, d in roles
+                            if d in (db, "admin")})
+            key = tdb if udb == db else udb
+            if not reach or not users.role_taken(self.hop, f"{udb}.{user}"):
+                continue
+            compared += 1
+            if (key, user) not in there:
+                gaps.append(f"{user}: holds {[r for r, _ in reach]} on the"
+                            " source and is missing on the target")
+                continue
+            short = users._mongo_role_gap(reach, there[(key, user)])
+            if short:
+                gaps.append(f"{user}: lacks {sorted(r for r, _ in short)}"
+                            " on the target")
+        for role, privileges in sorted(owned.items()):
+            if not self.hop.takes_object("roles", role):
+                continue
+            compared += 1
+            if role not in held:
+                gaps.append(f"role {role}: missing on the target")
+                continue
+            short = sorted(privileges - held[role])
+            if short:
+                gaps.append(f"role {role}: lacks "
+                            + ", ".join(f"{a} on {c or 'every collection'}"
+                                        for c, a in short[:4])
+                            + (f" and {len(short) - 4} more"
+                               if len(short) > 4 else "") + " on the target")
+        if gaps:
+            return Result("deep", f"{db} grants", "diff", "; ".join(gaps[:6]),
+                          "", "grant the target's accounts and roles what"
+                              " the source's hold (migkit users create)")
+        return Result("deep", f"{db} grants", "ok",
+                      f"{compared} accounts and roles hold on the target"
+                      " what they hold on the source over these collections")
 
     # delta verify: re-check only _ids touched since the saved change-stream
     # token, which advances only on a clean verify (idempotent)
@@ -2097,7 +2551,8 @@ class MongoEngine(Engine):
                     end_token = ev["_id"]
                     coll = ev.get("ns", {}).get("coll")
                     key = ev.get("documentKey", {}).get("_id")
-                    if coll and key is not None:
+                    # only the collections the hop takes are compared
+                    if coll and key is not None and self.in_scope(db, coll):
                         touched.setdefault(coll, {})[repr(key)] = key
         except OperationFailure as e:
             msg = str(e).lower()
@@ -2129,7 +2584,8 @@ class MongoEngine(Engine):
             apart = {"missing": [], "extra": [], "changed": []}
             # by the stored bytes: decoded, 5 == 5.0 == NumberLong(5) and
             # 1 == True in Python, and two dicts equal in any field order
-            one, two = self._raw(src[coll]), self._raw(dst[coll])
+            one = self._raw(src[coll])
+            two = self._raw(dst[self._there(db, coll)])
             for _id in ids.values():
                 a = one.find_one({"_id": _id})
                 b = two.find_one({"_id": _id})
@@ -2231,7 +2687,7 @@ class MongoEngine(Engine):
         name = action.statements[0].split()[3]
         d = self.hop.report_dir(db)
         s = self._client("src")[db][name]
-        t = self._client("dst")[self._d("dst", db)][name]
+        t = self._client("dst")[self._d("dst", db)][self._there(db, name)]
         undo = d / "undo"
         undo.mkdir(exist_ok=True)
 
@@ -2287,8 +2743,8 @@ class MongoEngine(Engine):
         if head.get("form") != "document":
             return super().repair_io(db, head)
         return repairlog.DocumentIO(
-            self._client("dst")[self._d("dst", db)][head["table"]],
-            head["table"])
+            self._client("dst")[self._d("dst", db)]
+            [self._there(db, head["table"])], head["table"])
 
     def _newer_docs(self, name, src, dst, changed, report):
         """The changed `_id`s to overwrite under `newer_wins`: a document
@@ -2493,6 +2949,39 @@ class MongoEngine(Engine):
     #: position is saved (`tail_apply`)
     TAIL_BATCH = 1000
 
+    def _tail_event(self, db, dst, ev, go):
+        """One row change of the stream applied to the target, only if the
+        hop carries that kind of change for the collection (`mapping.ops`,
+        `Hop.carries`: a move told to keep what the source deletes does not
+        delete). A replace is a document written whole - an update of one
+        the target holds, an insert of one it does not. A document is
+        written to the collection under the name the hop gives it there,
+        by `_id`, so the same event twice leaves it as it was. Without
+        `go` nothing is written. 1 where the event is one the hop carries,
+        0 where it leaves it be - the position moves on either way, and
+        the check holds the collection to what is carried."""
+        op = ev["operationType"]
+        coll = (ev.get("ns") or {}).get("coll")
+        carried = self.hop.carries(db, coll)
+        key = ev.get("documentKey", {})
+        into = dst[self._there(db, coll)]
+        if op == "delete":
+            if "delete" not in carried:
+                return 0
+            if go:
+                into.delete_one(key)
+            return 1
+        doc = ev.get("fullDocument")
+        # an update writes the document it made; one the target lacks is
+        # put there only where inserts are carried too
+        kinds = {"insert": {"insert"}, "update": {"update"},
+                 "replace": {"update", "insert"}}[op]
+        if not kinds & carried:
+            return 0
+        if go and doc is not None:
+            into.replace_one(key, doc, upsert="insert" in carried)
+        return 1
+
     def tail_apply(self, db, go, token_path, log):
         """Same-engine change tail, carrying each document as BSON, round
         the loop every tail goes round (`tailctl.run_loop`): up to
@@ -2560,20 +3049,13 @@ class MongoEngine(Engine):
                 read += 1
                 op = ev["operationType"]
                 coll = (ev.get("ns") or {}).get("coll")
-                if coll and self.hop.excluded(db, coll):
+                if coll and not self.in_scope(db, coll):
                     after = ev["_id"]
                     continue
                 if op not in self.STREAM_OPS:
                     raise self._not_a_row_change(op, ev)
                 n += 1
-                key = ev.get("documentKey", {})
-                if go:
-                    if op in ("insert", "update", "replace"):
-                        doc = ev.get("fullDocument")
-                        if doc is not None:
-                            dst[coll].replace_one(key, doc, upsert=True)
-                    else:
-                        dst[coll].delete_one(key)
+                self._tail_event(db, dst, ev, go)
                 after = ev["_id"]
             if n:
                 s.n += n

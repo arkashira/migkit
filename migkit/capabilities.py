@@ -1302,7 +1302,7 @@ _ONE_PAUSE = ("migkit sets up no replication of the server's own into its"
 DEPTH_GAPS = {
     "scope.listings": {
         **_each(NOT_YET, "P0-PARITY.scope",
-                "mongodb redis sqlite parquet clickhouse dynamodb db2 "
+                "redis sqlite parquet clickhouse dynamodb db2 "
                 "db2i db2zos teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb copybook iceberg delta couchbase "
                 "cosmosdb sapodp saas hetero"),
@@ -1349,7 +1349,7 @@ DEPTH_GAPS = {
     },
     "scope.objects": {
         **_each(NOT_YET, "P0-PARITY.scope",
-                "mongodb mssql sqlite clickhouse db2 db2i db2zos ase "
+                "mssql sqlite clickhouse db2 db2i db2zos ase "
                 "teradata opensearch cassandra redshift snowflake bigquery "
                 "duckdb iceberg delta tidb cockroachdb dsql couchbase "
                 "cosmosdb hetero"),
@@ -1361,13 +1361,13 @@ DEPTH_GAPS = {
     },
     "scope.ops": {
         **_each(NOT_YET, "P0-PARITY.scope",
-                "mongodb kafka clickhouse db2 ase opensearch cassandra"),
+                "kafka clickhouse db2 ase opensearch cassandra"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
     "scope.row-filter": {
         **_each(NOT_YET, "P0-PARITY.scope",
-                "mongodb mssql redis kafka sapodp saas"),
+                "mssql redis kafka sapodp saas"),
         **_as("schema", "kinesis pubsub"),
         **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
@@ -1383,7 +1383,7 @@ DEPTH_GAPS = {
     },
     "scope.names": {
         **_each(NOT_YET, "P0-PARITY.scope",
-                "mongodb mssql redis kafka sapodp saas"),
+                "mssql redis kafka sapodp saas"),
         **_as("schema", "kinesis pubsub"),
         **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
@@ -1418,7 +1418,7 @@ DEPTH_GAPS = {
     },
     "verify.access.table-grants": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mongodb mssql redis clickhouse oracle db2 db2i "
+                "mssql redis clickhouse oracle db2 db2i "
                 "db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery tidb cockroachdb dsql couchbase hetero"),
         **_as("users",
@@ -1650,7 +1650,7 @@ DEPTH_GAPS = {
     "verify.value.charset": {
         **_each(NOT_APPLICABLE, _COPIED_AS_BYTES, "kafka"),
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mongodb mssql redis sqlite parquet clickhouse "
+                "mssql redis sqlite parquet clickhouse "
                 "dynamodb oracle db2 db2i db2zos ase teradata opensearch "
                 "cassandra redshift snowflake bigquery duckdb copybook "
                 "iceberg delta tidb cockroachdb dsql couchbase cosmosdb "
@@ -1661,7 +1661,7 @@ DEPTH_GAPS = {
     },
     "verify.value.collation": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mongodb mssql sqlite clickhouse oracle db2 db2i db2zos ase "
+                "mssql sqlite clickhouse oracle db2 db2i db2zos ase "
                 "teradata opensearch redshift snowflake bigquery duckdb "
                 "delta tidb cockroachdb dsql hetero"),
         **_each(NOT_APPLICABLE, _BYTES,
@@ -1685,7 +1685,7 @@ DEPTH_GAPS = {
     },
     "verify.value.narrowing": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mongodb mssql sqlite parquet clickhouse dynamodb oracle "
+                "mssql sqlite parquet clickhouse dynamodb oracle "
                 "db2 db2i db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb copybook iceberg delta tidb "
                 "cockroachdb dsql couchbase cosmosdb hetero"),
@@ -1707,7 +1707,7 @@ DEPTH_GAPS = {
     },
     "verify.value.precision": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mongodb mssql sqlite parquet clickhouse dynamodb oracle "
+                "mssql sqlite parquet clickhouse dynamodb oracle "
                 "db2 db2i db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb copybook iceberg delta tidb "
                 "cockroachdb dsql couchbase cosmosdb hetero"),
@@ -1718,7 +1718,7 @@ DEPTH_GAPS = {
     },
     "verify.value.rendering": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mysql mongodb mssql sqlite parquet clickhouse dynamodb "
+                "mysql mssql sqlite parquet clickhouse dynamodb "
                 "oracle db2 db2i db2zos ase teradata opensearch cassandra "
                 "redshift snowflake bigquery duckdb copybook iceberg delta "
                 "tidb cockroachdb dsql couchbase cosmosdb hetero"),
@@ -1729,7 +1729,7 @@ DEPTH_GAPS = {
     },
     "verify.value.timezone": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mongodb mssql sqlite parquet clickhouse dynamodb oracle "
+                "mssql sqlite parquet clickhouse dynamodb oracle "
                 "db2 db2i db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb copybook iceberg delta tidb "
                 "cockroachdb dsql couchbase cosmosdb hetero"),
@@ -1777,7 +1777,7 @@ DEPTH_GAPS = {
     },
     "verify.tables": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mysql mongodb redis sqlite parquet clickhouse "
+                "mysql redis sqlite parquet clickhouse "
                 "dynamodb oracle db2 db2i db2zos ase teradata opensearch "
                 "cassandra redshift snowflake bigquery duckdb copybook "
                 "iceberg delta tidb cockroachdb dsql couchbase cosmosdb "
@@ -2080,8 +2080,8 @@ DEPTH_GAPS = {
 #: Such a cell is "not yet": a way is one only once a test proves it
 UNPROVED = {
     "scope.listings": "oracle ase ",
-    "scope.deep": "mongodb db2i db2zos ase hetero",
-    "scope.copy": "mongodb mssql oracle ase ",
+    "scope.deep": "db2i db2zos ase hetero",
+    "scope.copy": "mssql oracle ase ",
     "scope.repair": "oracle tidb cockroachdb dsql couchbase cosmosdb",
     "scope.ops": ("mssql redis dynamodb oracle db2i redshift snowflake "
                   "bigquery kinesis pubsub iceberg delta tidb cockroachdb "
@@ -2094,18 +2094,19 @@ UNPROVED = {
                     "db2zos ase teradata opensearch cassandra redshift "
                     "snowflake bigquery duckdb copybook iceberg delta tidb "
                     "cockroachdb dsql couchbase cosmosdb"),
-    "verify.movement.target-ahead": "mongodb",
     "verify.value.type-drift": "kafka",
+    # `rolesInfo` (the privileges of the roles made in a database) and a
+    # `$regex` count of U+FFFD have not been run against a server
+    "verify.access.table-grants": "mongodb",
+    "verify.value.charset": "mongodb",
     "verify.delta": "db2i tidb cockroachdb dsql couchbase cosmosdb",
     "verify.fence": "db2i",
     "verify.confirm": ("clickhouse dynamodb db2i opensearch "
                        "cassandra tidb cockroachdb dsql couchbase cosmosdb"),
-    "verify.users": "mongodb",
     "verify.repair": "mssql tidb cockroachdb dsql couchbase cosmosdb",
     "verify.repair-undo": ("mssql oracle tidb cockroachdb dsql couchbase "
                            "cosmosdb"),
-    "verify.rows-apart": "mongodb",
-    "verify.table": ("mongodb parquet clickhouse "
+    "verify.table": ("parquet clickhouse "
                      "dynamodb oracle db2 db2i db2zos ase teradata "
                      "opensearch cassandra redshift snowflake bigquery "
                      "copybook iceberg delta tidb cockroachdb dsql "
