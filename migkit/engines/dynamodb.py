@@ -24,6 +24,7 @@ from decimal import Decimal
 
 from ..decide import Need, Rung
 from .base import Engine, NeutralCopier, Result
+from .base import clauses as clauses_of
 
 class RawAttr(str):
     """A DynamoDB value with no neutral class - a map, a list, a set -
@@ -115,18 +116,23 @@ class DynamoDBEngine(NeutralCopier, Engine):
 
     # ---- what a table is -------------------------------------------------
 
-    def neutral_tables(self, side, db):
+    def scope_tables(self, side, db):
+        """Every table under the database's prefix, those the hop leaves
+        out too: what its include and exclude entries may name."""
         client, pre = self._client(side), self._prefix(side, db)
         out, start = [], None
         while True:
             got = client.list_tables(**({"ExclusiveStartTableName": start}
                                         if start else {}))
             out += [n[len(pre):] for n in got.get("TableNames", [])
-                    if n.startswith(pre) and not self.hop.excluded(
-                        db, n[len(pre):])]
+                    if n.startswith(pre)]
             start = got.get("LastEvaluatedTableName")
             if not start:
                 return sorted(out)
+
+    def neutral_tables(self, side, db):
+        return [t for t in self.scope_tables(side, db)
+                if self.in_scope(db, t)]
 
     #: where the description of a table migkit made is kept
     #: (`neutral_create`, read by `_described`)
@@ -516,7 +522,14 @@ class DynamoDBEngine(NeutralCopier, Engine):
         return self._as_pair().check_counts(db)
 
     def check_data(self, db, table=None, stream=None):
-        return self._as_pair().check_data(db, table, stream)
+        return self.tallied(db, self._as_pair().check_data(db, table,
+                                                           stream))
+
+    def repair_plan(self, db, kind):
+        return self._as_pair().repair_plan(db, kind)
+
+    def apply(self, db, action):
+        return self._as_pair().apply(db, action)
 
     def check_deep(self, db):
         """Every table in scope active, and the target's with point-in-time
@@ -563,6 +576,97 @@ class DynamoDBEngine(NeutralCopier, Engine):
                     " has no point to go back to", "",
                     "turn point-in-time recovery on for those tables"
                     " before the cutover"))
+        return out + self._deep_items(db)
+
+    # ---- what the comparison of items does not see --------------------------
+
+    #: the table settings that decide how items are kept, billed, expire or
+    #: are followed (`_settings`); time to live is the one that deletes
+    OPTIONS = ("billing", "stream", "encryption", "class",
+               "deletion_protection", "ttl")
+
+    def _shape_of(self, side, db, table):
+        """What a table's items hold, read item by item: how many, whether
+        every one was read, and per attribute how many hold each kind of
+        value, how many hold it empty (`""`, an empty map or list) - the
+        service keeps a NULL, an empty value and an absent attribute as
+        three things."""
+        from collections import Counter
+        kinds, empty, n, whole = {}, Counter(), 0, True
+        for item in self._scan(side, db, table):
+            n += 1
+            for name, value in item.items():
+                kind, raw = next(iter(value.items()))
+                kinds.setdefault(name, Counter())[kind] += 1
+                if kind in ("S", "B", "L", "M") and not raw:
+                    empty[name] += 1
+            if n >= self.DEEP_MOST:
+                whole = False
+                break
+        return {"items": n, "whole": whole, "kinds": kinds, "empty": empty}
+
+    #: the kind a stored NULL has in `_shape`
+    NULL_KIND = "NULL"
+    #: what its records are called, in a finding
+    ITEM_NOUN = "items"
+
+    def _deep_items(self, db):
+        """The findings only a read of the items makes - an attribute that
+        was NULL on the source and is absent on the target, an attribute
+        that holds another kind of value - and the tables' indexes and
+        options, as `_settings` reads them."""
+        try:
+            both = sorted(set(self.neutral_tables("src", db))
+                          & set(self.neutral_tables("dst", db)))
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [Result("deep", f"{db} item shapes", "error",
+                           "could not list the tables: "
+                           f"{str(e).splitlines()[0][:90]}")]
+        return self._item_shape_results(db, both) + \
+            self._settings_items(db, both)
+
+    def _settings_items(self, db, both):
+        """The tables' secondary indexes and their options, both sides,
+        from the one reading of their settings (`_settings`)."""
+        try:
+            s, d = self._settings("src", db), self._settings("dst", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [Result("deep", f"{db} indexes", "error",
+                           "could not read the tables' settings: "
+                           f"{str(e).splitlines()[0][:90]}")]
+        out = []
+        idx = [f"{t}: {s[f'{t}.indexes'] or 'none'} on the source,"
+               f" {d.get(f'{t}.indexes') or 'none'} on the target"
+               for t in both
+               if s.get(f"{t}.indexes") != d.get(f"{t}.indexes")]
+        out.append(Result(
+            "deep", f"{db} indexes", "diff" if idx else "ok",
+            clauses_of(idx) if idx else
+            f"{len(both)} tables, secondary indexes equal", "",
+            "make the indexes on the target (they are not made by the item"
+            " copy)" if idx else ""))
+        unasked, odd, expires = [], [], []
+        for t in both:
+            for opt in self.OPTIONS:
+                a, b = s.get(f"{t}.{opt}"), d.get(f"{t}.{opt}")
+                if str(a).startswith("not answered") or \
+                        str(b).startswith("not answered"):
+                    unasked.append(f"{t}.{opt}")
+                elif a != b:
+                    (expires if opt == "ttl" else odd).append(
+                        f"{t}.{opt}: {a} on the source, {b} on the target")
+        found = expires + odd
+        out.append(Result(
+            "deep", f"{db} table options",
+            "diff" if expires else "warn" if found or unasked else "ok",
+            (clauses_of(found) if found else
+             f"{len(both)} tables, options equal")
+            + (f"; {len(unasked)} setting{'s' if len(unasked) != 1 else ''}"
+               " the endpoint would not answer were not compared"
+               if unasked else ""), "",
+            "give the target the source's time to live before cutover; it"
+            " expires other items" if expires else "",
+            category="structure.collection-options"))
         return out
 
     # ---- the change log: DynamoDB Streams ----------------------------------
@@ -677,6 +781,45 @@ class DynamoDBEngine(NeutralCopier, Engine):
     def log_position(self, side, db):
         return self.change_point(side, db)
 
+    #: a stream is read without being consumed, from any record it still
+    #: holds: a table that left a tail comes back with its changes since
+    REREADS_FROM_A_POSITION = True
+
+    def position_lost(self, side, db, token):
+        """Why a saved position can no longer be read on from, or None:
+        a table's stream turned off and on (its records between are gone),
+        a table dropped, a shard the service no longer holds, a record it
+        trimmed after its 24 hours. Every table of the position is asked,
+        each shard asked for the records after its sequence."""
+        client = self._streams(side)
+        for t, st in sorted((token.get("streams") or {}).items()):
+            try:
+                arn, _ = self._stream_of(side, db, t)
+            except SystemExit:
+                return f"{t} has no stream on any more"
+            except Exception as e:  # noqa: BLE001 - by what it says
+                if self._vanished(e):
+                    return f"{t} is no longer there"
+                raise
+            if st.get("arn") != arn:
+                return (f"{t} has a new stream since: its records between"
+                        " are gone")
+            done = set(st.get("done") or [])
+            for shard, seq in sorted((st.get("shards") or {}).items()):
+                if seq is None or shard in done:
+                    continue
+                try:
+                    client.get_shard_iterator(
+                        StreamArn=arn, ShardId=shard,
+                        ShardIteratorType="AFTER_SEQUENCE_NUMBER",
+                        SequenceNumber=seq)
+                except client.exceptions.TrimmedDataAccessException:
+                    return (f"the stream of {t} no longer holds the records"
+                            f" after {seq} of {shard}: its 24 hours passed")
+                except client.exceptions.ResourceNotFoundException:
+                    return f"{shard} of {t} is no longer held by the service"
+        return None
+
     @staticmethod
     def position_reached(have, want):
         """Whether a tail at `have` has read every record `want` holds:
@@ -700,47 +843,76 @@ class DynamoDBEngine(NeutralCopier, Engine):
         shard read only once its parent is finished - as the item is now:
         the image the stream carries, or the item itself read where the
         stream keeps keys only. A table whose stream was turned off and on
-        since has lost the records between, and is refused."""
+        since has lost the records between, and a table dropped is gone:
+        each is a DDL of the log (`canon.ddl`), told to the tail with the
+        changes before it."""
         from .. import canon
         if token is None:
             return [], self.change_point(side, db)
         state = json.loads(json.dumps(token.get("streams") or {}))
         found = []
+        # a table the position holds that the service no longer lists was
+        # dropped (one the hop merely leaves out is still listed)
+        listed = set(self.scope_tables(side, db))
+        for t in sorted(set(state) - listed):
+            found.append(canon.ddl(t, "drop"))
+            state.pop(t)
         for t in self.neutral_tables(side, db):
-            arn, view = self._stream_of(side, db, t)
-            st = state.setdefault(t, {"arn": arn, "shards": {}, "done": []})
-            if st.get("arn") != arn:
-                raise SystemExit(
-                    f"{self._name(side, db, t)} has a new stream since the"
-                    " saved position: the stream was turned off and on, and"
-                    " the records between are gone. Move again with --mode"
-                    " full+cdc")
-            declared = self._declared(side, db, t)
-            key = self._key_schema(side, db, t)
-            done = set(st.get("done") or [])
-            shards = self._shards(side, arn)
-            held = {s["ShardId"] for s in shards}
-            for s in shards:
-                sid = s["ShardId"]
-                if sid in done:
-                    continue
-                parent = s.get("ParentShardId")
-                if parent and parent in held and parent not in done:
-                    continue    # its parent is not finished yet
-                room = limit - len(found)
-                if room <= 0:
-                    break
-                recs, closed = self._records(side, arn, sid,
-                                             st["shards"].get(sid), room)
-                for r in recs:
-                    found.append(self._change_of(side, db, t, r, view,
-                                                 declared, key, canon))
-                    st["shards"][sid] = r["dynamodb"]["SequenceNumber"]
-                if closed and len(recs) < room:
-                    done.add(sid)
-                    st["shards"].setdefault(sid, None)
-            st["done"] = sorted(done)
+            try:
+                self._table_changes(side, db, t, state, found, limit, canon)
+            except Exception as e:  # noqa: BLE001 - by what it says
+                if not self._vanished(e):
+                    raise
+                # dropped between the listing and the read
+                found.append(canon.ddl(t, "drop"))
+                state.pop(t, None)
         return found, {"streams": state}
+
+    @staticmethod
+    def _vanished(error):
+        """Whether the service says a table or stream is not there."""
+        got = getattr(error, "response", None) or {}
+        return (got.get("Error") or {}).get("Code") == \
+            "ResourceNotFoundException"
+
+    def _table_changes(self, side, db, t, state, found, limit, canon):
+        """One table's writes after its place in `state`, added to `found`
+        and the place moved on; its stream made again is a `reload`."""
+        arn, view = self._stream_of(side, db, t)
+        st = state.setdefault(t, {"arn": arn, "shards": {}, "done": []})
+        if st.get("arn") != arn:
+            # the stream was turned off and on, or the table made
+            # again: the records between are gone, and its rows are
+            # copied again (`reload`, or the hop's `ddl` policy stops
+            # the tail), the new stream read from its start
+            found.append(canon.ddl(t, "reload"))
+            state[t] = {"arn": arn, "shards": {}, "done": []}
+            return
+        declared = self._declared(side, db, t)
+        key = self._key_schema(side, db, t)
+        done = set(st.get("done") or [])
+        shards = self._shards(side, arn)
+        held = {s["ShardId"] for s in shards}
+        for s in shards:
+            sid = s["ShardId"]
+            if sid in done:
+                continue
+            parent = s.get("ParentShardId")
+            if parent and parent in held and parent not in done:
+                continue    # its parent is not finished yet
+            room = limit - len(found)
+            if room <= 0:
+                break
+            recs, closed = self._records(side, arn, sid,
+                                         st["shards"].get(sid), room)
+            for r in recs:
+                found.append(self._change_of(side, db, t, r, view,
+                                             declared, key, canon))
+                st["shards"][sid] = r["dynamodb"]["SequenceNumber"]
+            if closed and len(recs) < room:
+                done.add(sid)
+                st["shards"].setdefault(sid, None)
+        st["done"] = sorted(done)
 
     def _change_of(self, side, db, table, record, view, declared, key,
                    canon):
@@ -817,6 +989,355 @@ class DynamoDBEngine(NeutralCopier, Engine):
 
     def delta_verify(self, db, limit=20000, log=None):
         return self._as_pair().delta_verify(db, limit, log)
+
+    # ---- indexes -----------------------------------------------------------
+
+    def neutral_indexes(self, side, db, table):
+        """[(name, unique, [key attributes], plain)]: the table's global
+        and local secondary indexes. None is unique - the service keeps no
+        unique index - and one is plain where it projects every attribute."""
+        got = self._client(side).describe_table(
+            TableName=self._name(side, db, table))["Table"]
+        order = {"HASH": 0, "RANGE": 1}
+        return sorted(
+            (i["IndexName"], False,
+             [k["AttributeName"] for k in
+              sorted(i["KeySchema"], key=lambda k: order[k["KeyType"]])],
+             (i.get("Projection") or {}).get("ProjectionType") == "ALL")
+            for i in (got.get("GlobalSecondaryIndexes") or [])
+            + (got.get("LocalSecondaryIndexes") or []))
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        """The index as a statement of migkit's own for `execute_ddl`: the
+        service takes calls, not SQL."""
+        return json.dumps({"table": self._name(side, db, table),
+                           "leaf": table, "index": name,
+                           "unique": bool(unique), "columns": list(columns)})
+
+    #: seconds a global index may take to fill from a table's items
+    INDEX_WAIT = 3600
+
+    def execute_ddl(self, side, db, sql):
+        """A global secondary index made on a table that holds its items
+        (`UpdateTable`), waited for until it is active. A unique index is
+        refused - the service enforces none - and so is one over more than a
+        partition and a sort attribute."""
+        self._target_only(side, "change a schema")
+        spec = json.loads(sql)
+        cols = spec["columns"]
+        if spec["unique"]:
+            raise RuntimeError(f"{spec['index']} is unique, and the service"
+                               " enforces no unique index: the table's key"
+                               " is the only uniqueness it keeps")
+        if not 1 <= len(cols) <= 2:
+            raise RuntimeError(f"{spec['index']} is over {len(cols)}"
+                               " attributes, and an index is keyed by a"
+                               " partition attribute and at most one sort"
+                               " attribute")
+        from .. import canon
+        declared = self._declared(side, db, spec["leaf"])
+        client = self._client(side)
+        name = spec["table"]
+        got = client.describe_table(TableName=name)["Table"]
+        have = {a["AttributeName"] for a in got["AttributeDefinitions"]}
+        defs = []
+        for c in cols:
+            if c in have:
+                continue
+            cls = canon.type_class("dynamodb", declared.get(c, ""))
+            kind = ("N" if cls in ("integer", "decimal", "float") else
+                    "B" if cls == "bytes" else "S")
+            if cls in (None, "json") and c not in declared:
+                raise RuntimeError(f"{c} is not an attribute the table"
+                                   " holds with a kind to key an index by")
+            defs.append({"AttributeName": c, "AttributeType": kind})
+        index = {"IndexName": spec["index"],
+                 "KeySchema": [{"AttributeName": c, "KeyType": t}
+                               for c, t in zip(cols, ("HASH", "RANGE"))],
+                 "Projection": {"ProjectionType": "ALL"}}
+        billing = (got.get("BillingModeSummary") or {}).get(
+            "BillingMode", "PROVISIONED")
+        if billing == "PROVISIONED":
+            p = got.get("ProvisionedThroughput") or {}
+            index["ProvisionedThroughput"] = {
+                "ReadCapacityUnits": int(p.get("ReadCapacityUnits") or 5),
+                "WriteCapacityUnits": int(p.get("WriteCapacityUnits") or 5)}
+        client.update_table(
+            TableName=name,
+            **({"AttributeDefinitions": defs} if defs else {}),
+            GlobalSecondaryIndexUpdates=[{"Create": index}])
+        end = time.monotonic() + self.INDEX_WAIT
+        while time.monotonic() < end:
+            now = client.describe_table(TableName=name)["Table"]
+            status = {i["IndexName"]: i.get("IndexStatus", "ACTIVE")
+                      for i in now.get("GlobalSecondaryIndexes") or []}
+            if status.get(spec["index"]) == "ACTIVE":
+                return
+            time.sleep(2)
+        raise RuntimeError(f"{spec['index']} was not active after"
+                           f" {self.INDEX_WAIT} seconds")
+
+    # ---- the move: made, sized ---------------------------------------------
+
+    def create_missing(self, db, log=None):
+        return self._as_pair().create_missing(db, log)
+
+    def finish_created(self, db, log=None):
+        return self._as_pair().finish_created(db, log)
+
+    @staticmethod
+    def _item_bytes(item):
+        """An item's size as the service counts it against its 400 KB: each
+        attribute's name and value, a number by its significant digits, a
+        map or list with its framing."""
+        def number(raw):
+            t = Decimal(raw).normalize().as_tuple()
+            return (len(t.digits) + 1) // 2 + 1 + (1 if t.sign else 0)
+
+        def size(v):
+            kind, raw = next(iter(v.items()))
+            if kind == "S":
+                return len(raw.encode())
+            if kind == "B":
+                return len(bytes(raw))
+            if kind in ("BOOL", "NULL"):
+                return 1
+            if kind == "N":
+                return number(raw)
+            if kind == "SS":
+                return sum(len(x.encode()) for x in raw)
+            if kind == "BS":
+                return sum(len(bytes(x)) for x in raw)
+            if kind == "NS":
+                return sum(number(x) for x in raw)
+            if kind == "L":
+                return 3 + sum(1 + size(x) for x in raw)
+            return 3 + sum(1 + len(k.encode()) + size(x)
+                           for k, x in raw.items())
+        return sum(len(k.encode()) + size(v) for k, v in item.items())
+
+    def row_sizes(self, side, db, tables=None):
+        """Each table's items sized where they lie, as the service counts
+        them (`_item_bytes`): the first `SIZE_SAMPLE` items of a table, or
+        every one where it holds no more - `exact` only then, since the
+        largest of a sample is no bound on the rest (an item is 400 KB at
+        most, which the copy's memory is set from where this is not
+        exact)."""
+        from .base import sizes_of
+        client, out = self._client(side), {}
+        for t in (tables if tables is not None
+                  else self.neutral_tables(side, db)):
+            lengths, whole = [], True
+            try:
+                for item in self._scan(side, db, t):
+                    lengths.append(self._item_bytes(item))
+                    if len(lengths) >= self.SIZE_SAMPLE:
+                        whole = False
+                        break
+                held = client.describe_table(
+                    TableName=self._name(side, db, t))["Table"].get(
+                        "ItemCount")
+            except Exception:  # noqa: BLE001 - that table is not sized
+                continue
+            if lengths:
+                out[t] = sizes_of(lengths, exact=whole,
+                                  rows=int(held) if held and not whole
+                                  else len(lengths))
+        return out
+
+    # ---- the assessment ------------------------------------------------------
+
+    #: what the target's account can give a move, asked of the service
+    def capacity(self, side, db):
+        """The account's room for tables that are billed by provisioned
+        throughput: `read_units_free` and `write_units_free`, its quota
+        (`DescribeLimits`) less what its tables provision, and the
+        `table_read_units_most` and `table_write_units_most` one table may
+        be given. A table that bills by request takes none of the room.
+        The free units are left out where the account holds more than
+        `ACCOUNT_TABLES` tables - not summed from some of them."""
+        client = self._client(side)
+        lim = client.describe_limits()
+        out = {"table_read_units_most": lim.get("TableMaxReadCapacityUnits"),
+               "table_write_units_most":
+                   lim.get("TableMaxWriteCapacityUnits")}
+        names, start = [], None
+        while True:
+            got = client.list_tables(**({"ExclusiveStartTableName": start}
+                                        if start else {}))
+            names += got.get("TableNames", [])
+            start = got.get("LastEvaluatedTableName")
+            if not start or len(names) > self.ACCOUNT_TABLES:
+                break
+        if len(names) <= self.ACCOUNT_TABLES:
+            rcu = wcu = 0
+            for n in names:
+                d = client.describe_table(TableName=n)["Table"]
+                for p in [d.get("ProvisionedThroughput")] + [
+                        i.get("ProvisionedThroughput") for i in
+                        d.get("GlobalSecondaryIndexes") or []]:
+                    rcu += int((p or {}).get("ReadCapacityUnits") or 0)
+                    wcu += int((p or {}).get("WriteCapacityUnits") or 0)
+            out["read_units_free"] = max(
+                0, int(lim["AccountMaxReadCapacityUnits"]) - rcu)
+            out["write_units_free"] = max(
+                0, int(lim["AccountMaxWriteCapacityUnits"]) - wcu)
+        return {k: v for k, v in out.items() if v is not None}
+
+    #: tables of an account whose provisioned throughput is summed
+    ACCOUNT_TABLES = 250
+
+    def _provisioned(self, side, db):
+        """(read units, write units) the database's tables provision,
+        indexes included."""
+        client, rcu, wcu = self._client(side), 0, 0
+        for t in self.neutral_tables(side, db):
+            d = client.describe_table(TableName=self._name(side, db, t))[
+                "Table"]
+            for p in [d.get("ProvisionedThroughput")] + [
+                    i.get("ProvisionedThroughput") for i in
+                    d.get("GlobalSecondaryIndexes") or []]:
+                rcu += int((p or {}).get("ReadCapacityUnits") or 0)
+                wcu += int((p or {}).get("WriteCapacityUnits") or 0)
+        return rcu, wcu
+
+    def stream_writers(self, db):
+        """Besides migkit's own tail, what writes into the target's tables
+        and cannot be paused: another region's replica of a global table,
+        and the service expiring items by a time to live."""
+        out = list(super().stream_writers(db))
+        client = self._client("dst")
+        for t in self.neutral_tables("dst", db):
+            name = self._name("dst", db, t)
+            d = client.describe_table(TableName=name)["Table"]
+            regions = [r["RegionName"] for r in d.get("Replicas") or []]
+            if regions:
+                out.append((f"{t} is a global table, replicated to and"
+                            f" from {', '.join(regions)}", False))
+            try:
+                ttl = client.describe_time_to_live(TableName=name)[
+                    "TimeToLiveDescription"]
+            except Exception:  # noqa: BLE001 - an endpoint without it
+                continue
+            if ttl.get("TimeToLiveStatus") in ("ENABLED", "ENABLING"):
+                out.append((f"the service deleting {t}'s expired items"
+                            f" (time to live on {ttl.get('AttributeName')})",
+                            False))
+        return out
+
+    #: the deep checks that predict what the move will do
+    PREFLIGHT = ("_follow_readiness",)
+
+    def _follow_readiness(self, db):
+        """Whether every source table in scope has the stream its changes
+        are followed from: found before the copy, not at the first read of
+        the tail."""
+        client, off, keys = self._client("src"), [], []
+        for t in self.neutral_tables("src", db):
+            d = client.describe_table(TableName=self._name("src", db, t))[
+                "Table"]
+            spec = d.get("StreamSpecification") or {}
+            if not spec.get("StreamEnabled"):
+                off.append(t)
+            elif spec.get("StreamViewType") == "KEYS_ONLY":
+                keys.append(t)
+        if off:
+            return Result(
+                "deep", f"{db} change streams", "warn",
+                f"{len(off)} source tables have no stream on "
+                f"({', '.join(off[:5])}): they copy, and following their "
+                "changes is refused until their stream is on", "",
+                "turn the stream on (NEW_IMAGE or NEW_AND_OLD_IMAGES) "
+                "before a hop that follows changes")
+        return Result(
+            "deep", f"{db} change streams", "ok",
+            "every source table has its stream on"
+            + (f"; {', '.join(keys[:5])} keep keys only, so each change is "
+               "read back from the table" if keys else ""))
+
+    def _handwork(self):
+        """What the move leaves for a person, counted and named
+        (`handwork`): the settings of a source table that no item copy
+        gives the target's table."""
+        from .. import handwork
+        inv = handwork.Inventory()
+        for db in self.databases():
+            try:
+                got = self._settings("src", db)
+            except Exception as e:  # noqa: BLE001 - unknown, not none
+                inv.unknown("not-carried", db, "cannot read the tables'"
+                            f" settings: {str(e).splitlines()[0][:90]}")
+                continue
+            tables = sorted({k.rsplit(".", 1)[0] for k in got})
+
+            def with_(setting, off):
+                return [t for t in tables
+                        if str(got.get(f"{t}.{setting}")) not in off]
+            for setting, off, kind, what in (
+                    ("ttl", ("off",), "not-carried",
+                     "time to live, which expires items"),
+                    ("stream", ("off",), "not-carried",
+                     "streams, the change log of a way back"),
+                    ("pitr", ("DISABLED",), "decide-then-apply",
+                     "point-in-time recovery"),
+                    ("deletion_protection", ("False",), "decide-then-apply",
+                     "deletion protection"),
+                    ("class", ("STANDARD",), "decide-then-apply",
+                     "table classes other than standard"),
+                    ("encryption", ("owned",), "decide-then-apply",
+                     "encryption by a key other than the service's own")):
+                unasked = [t for t in tables if str(got.get(
+                    f"{t}.{setting}")).startswith("not answered")]
+                if unasked:
+                    inv.unknown(kind, db, f"{what} of {', '.join(unasked[:4])}"
+                                " was not answered by the endpoint")
+                inv.add(kind, db, what, [t for t in with_(setting, off)
+                                         if t not in unasked])
+        return inv
+
+    def _assess_extra(self):
+        """The readiness of the tables, what the move leaves for a person,
+        and whether the target account has the provisioned throughput the
+        source's tables hold."""
+        from .. import handwork  # noqa: F401 - the inventory's wording
+        inv = self._handwork()
+        rows = inv.rows() + inv.summary()
+        for db in self.databases():
+            try:
+                want = self._provisioned("src", db)
+                room = self.capacity("dst", db)
+            except Exception as e:  # noqa: BLE001 - unknown, not clean
+                rows.append({"level": "warn", "scope": db,
+                             "item": "the target's room for provisioned"
+                                     " throughput",
+                             "detail": "could not ask: "
+                                       f"{str(e).splitlines()[0][:90]}"
+                                       " - unknown, not clean"})
+                continue
+            if "read_units_free" not in room:
+                rows.append({"level": "warn", "scope": db,
+                             "item": "the target's room for provisioned"
+                                     " throughput",
+                             "detail": "the account holds too many tables to"
+                                       " sum what they provision - unknown,"
+                                       " not clean"})
+                continue
+            short = [f"{n} {w:,} units against {room[k]:,} free"
+                     for n, w, k in (("read", want[0], "read_units_free"),
+                                     ("write", want[1], "write_units_free"))
+                     if w > room[k]]
+            rows.append({
+                "level": "fail" if short else "pass", "scope": db,
+                "item": "the target's room for provisioned throughput",
+                "detail": ("; ".join(short) + " - the target's account "
+                           "cannot give the tables the throughput the "
+                           "source provisions" if short else
+                           f"the source provisions {want[0]:,} read and "
+                           f"{want[1]:,} write units; the target's account "
+                           f"has {room['read_units_free']:,} and "
+                           f"{room['write_units_free']:,} free")})
+        return rows
 
     # ---- settings, snapshot ------------------------------------------------
 

@@ -2134,6 +2134,9 @@ WAYS = {
             "hetero")},
         "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
                                      " under the 1 MB a scan page returns"),
+        "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, read whole"
+                                     " and handed on in batches cut by"
+                                     " bytes"),
         "cassandra": (NOT_APPLICABLE, "a row is written as one mutation, at"
                                       " most half a commit-log segment:"
                                       " 16 MB by default"),

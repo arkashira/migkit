@@ -40,7 +40,7 @@ import concurrent.futures
 import hashlib
 import json
 
-from .base import Engine, NeutralCopier, Result
+from .base import Engine, NeutralCopier, Result, clauses
 
 #: operations in one transactional batch, as the service allows
 BATCH_OPS = 100
@@ -204,10 +204,15 @@ class CosmosEngine(NeutralCopier, Engine):
 
     # ---- what a container is ---------------------------------------------
 
-    def neutral_tables(self, side, db):
+    def scope_tables(self, side, db):
+        """Every container of the database, those the hop leaves out too:
+        what its include and exclude entries may name."""
         return sorted(c["id"] for c in self._database(side, db)
-                      .list_containers()
-                      if not self.hop.excluded(db, c["id"]))
+                      .list_containers())
+
+    def neutral_tables(self, side, db):
+        return [t for t in self.scope_tables(side, db)
+                if self.in_scope(db, t)]
 
     def _pk_fields(self, side, db, table):
         """The fields a container's partition key is read from - a top-level
@@ -352,16 +357,15 @@ class CosmosEngine(NeutralCopier, Engine):
         classes = self._classes(side, db, table)
         described = self._described(side, db, table)
         names = [n for n, _ in columns]
-        batch = []
         container = self._container(side, db, table)
-        for rng in container.read_feed_ranges():
-            for item in self._items(side, db, table, rng):
-                batch.append(self._row(names, classes, item, described))
-                if len(batch) >= size:
-                    yield batch
-                    batch = []
-        if batch:
-            yield batch
+        from .. import pieces
+        # an item is 2 MB at most: handed on in batches of `size` items or
+        # `pieces.BATCH_BYTES`, whichever is reached first
+        yield from pieces.by_bytes(
+            (self._row(names, classes, item, described)
+             for rng in container.read_feed_ranges()
+             for item in self._items(side, db, table, rng)),
+            most_rows=int(size))
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):
@@ -439,7 +443,223 @@ class CosmosEngine(NeutralCopier, Engine):
         return {t: {"rows": None, "bytes": None, "key": True}
                 for t in self.neutral_tables(side, db)}
 
+    def row_sizes(self, side, db, tables=None):
+        """Each container's items sized as the service holds them - the
+        bytes of the item's JSON, its own fields only: the first
+        `SIZE_SAMPLE` items of a container, or every one where it holds no
+        more, and `exact` only then (an item is 2 MB at most, which the
+        copy's memory is set from where this is not exact)."""
+        from .base import sizes_of
+        out = {}
+        for t in (tables if tables is not None
+                  else self.neutral_tables(side, db)):
+            lengths, whole = [], True
+            try:
+                for item in self._items(side, db, t):
+                    lengths.append(len(json.dumps(
+                        item, separators=(",", ":"),
+                        ensure_ascii=False).encode()))
+                    if len(lengths) >= self.SIZE_SAMPLE:
+                        whole = False
+                        break
+            except Exception:  # noqa: BLE001 - that container is not sized
+                continue
+            if lengths:
+                out[t] = sizes_of(lengths, exact=whole)
+        return out
+
+    # ---- indexes: composite ones, and the unique keys a container is made with
+
+    def neutral_indexes(self, side, db, table):
+        """[(name, unique, [fields], plain)]: the container's composite
+        indexes and its unique keys. A path inside an object is not a
+        field another side has, and is not plain."""
+        props = self._container(side, db, table).read()
+        out = []
+        for i, group in enumerate(self._indexing(props)["composite"]):
+            paths = [c["path"] for c in json.loads(group)]
+            out.append((f"composite_{i + 1}", False,
+                        [p.strip("/") for p in paths],
+                        all(p.count("/") == 1 for p in paths)))
+        for i, key in enumerate((props.get("uniqueKeyPolicy") or {})
+                                .get("uniqueKeys") or []):
+            paths = key.get("paths") or []
+            out.append((f"unique_{i + 1}", True,
+                        [p.strip("/") for p in paths],
+                        all(p.count("/") == 1 for p in paths)))
+        return out
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        return json.dumps({"leaf": table, "index": name,
+                           "unique": bool(unique), "columns": list(columns)})
+
+    def execute_ddl(self, side, db, sql):
+        """A composite index made by replacing the container's indexing
+        policy with one that holds it (a single field is in the default
+        policy already). A unique key is refused: it is set when the
+        container is made and cannot be added to one."""
+        self._target_only(side, "change a schema")
+        spec = json.loads(sql)
+        if spec["unique"]:
+            raise RuntimeError(f"{spec['index']} is a unique key, which a"
+                               " container takes only when it is made")
+        from azure.cosmos import PartitionKey
+        container = self._container(side, db, spec["leaf"])
+        props = container.read()
+        policy = dict(props.get("indexingPolicy") or {})
+        fields = [f"/{c}" for c in spec["columns"]]
+        if len(fields) == 1:
+            have = [p.get("path") for p in policy.get("includedPaths") or []]
+            if policy.get("indexingMode") == "none" or "/*" in have or \
+                    f"{fields[0]}/?" in have or f"{fields[0]}/*" in have:
+                return
+            policy["includedPaths"] = list(policy.get("includedPaths")
+                                           or []) + [{"path": fields[0]
+                                                      + "/?"}]
+        else:
+            want = [{"path": f, "order": "ascending"} for f in fields]
+            composite = list(policy.get("compositeIndexes") or [])
+            if want in composite:
+                return
+            policy["compositeIndexes"] = composite + [want]
+        key = props["partitionKey"]
+        paths = key.get("paths") or []
+        self._database(side, db).replace_container(
+            container, partition_key=PartitionKey(
+                path=paths[0] if len(paths) == 1 else paths,
+                kind=key.get("kind") or "Hash"),
+            indexing_policy=policy, default_ttl=props.get("defaultTtl"),
+            conflict_resolution_policy=props.get("conflictResolutionPolicy"))
+
+    # ---- the assessment ---------------------------------------------------------
+
+    PREFLIGHT = ("_follow_readiness",)
+
+    def _follow_readiness(self, db):
+        """Whether the account serves the change feed the hop follows by:
+        found before the copy, not at the first read of the tail."""
+        said = str(self.hop.source.options.get("change_feed") or "").lower()
+        if said in ("latest", "latest_version"):
+            return Result(
+                "deep", f"{db} change feed", "warn",
+                "the hop follows the latest-version change feed, which "
+                "carries no delete and no expiry by time to live: each is "
+                "found by check, not followed", "",
+                "turn on continuous backup and the all-versions-and-deletes "
+                "feature to follow deletes")
+        bad = []
+        for t in self.neutral_tables("src", db):
+            try:
+                self._mode("src", db, self._container("src", db, t))
+            except SystemExit as e:
+                bad.append(f"{t}: {str(e)[:100]}")
+                break
+        if bad:
+            return Result("deep", f"{db} change feed", "warn", bad[0], "",
+                          "turn on continuous backup and the "
+                          "all-versions-and-deletes feature, or say "
+                          "change_feed: latest in the source's options")
+        return Result("deep", f"{db} change feed", "ok",
+                      "the account serves the all-versions-and-deletes "
+                      "change feed: creates, replaces, deletes and expiries "
+                      "are followed")
+
+    #: the policy a container has when nothing was set
+    DEFAULT_INDEXING = {"mode": "consistent", "included": ["/*"],
+                        "excluded": [], "composite": [], "spatial": [],
+                        "vector": []}
+
+    def _handwork(self):
+        """What the move leaves for a person, counted and named
+        (`handwork`): what a container is made with and a copy of its items
+        does not give the one on the target."""
+        from .. import handwork
+        inv = handwork.Inventory()
+        for db in self.databases():
+            try:
+                tables = self.neutral_tables("src", db)
+                props = {t: self._container("src", db, t).read()
+                         for t in tables}
+            except Exception as e:  # noqa: BLE001 - unknown, not none
+                inv.unknown("not-carried", db, "cannot read the containers:"
+                            f" {str(e).splitlines()[0][:90]}")
+                continue
+            inv.add("target-prereq", db, "unique keys, set only when a"
+                    " container is made",
+                    [t for t in tables if (props[t].get("uniqueKeyPolicy")
+                                           or {}).get("uniqueKeys")])
+            inv.add("not-carried", db, "default time to live, which expires"
+                    " items",
+                    [t for t in tables
+                     if props[t].get("defaultTtl") is not None])
+            inv.add("not-carried", db, "indexing policies other than the"
+                    " default",
+                    [t for t in tables if self._indexing(props[t])
+                     != self.DEFAULT_INDEXING])
+            inv.add("not-carried", db, "computed properties",
+                    [t for t in tables if props[t].get("computedProperties")])
+            try:
+                for t in tables:
+                    got = self._scripts("src", db, t)
+                    for kind in ("procedures", "functions", "triggers"):
+                        inv.add("server-side-code", db, f"{kind} ",
+                                [f"{t}.{n}" for n in got[kind]
+                                 if self.takes(db, kind, f"{t}.{n}", by=t)])
+            except Exception as e:  # noqa: BLE001 - unknown, not none
+                inv.unknown("server-side-code", db, "cannot list the"
+                            " scripts: " + str(e).splitlines()[0][:90])
+        return inv
+
+    def capacity(self, side, db):
+        """The request units per second the database's containers provision
+        (`request_units_per_second`, the autoscale ceiling where a
+        container scales) and how many provision any (`provisioned`): a
+        container on shared or serverless throughput has none of its own
+        and is left out."""
+        total, n = 0, 0
+        for t in self.neutral_tables(side, db):
+            try:
+                got = self._container(side, db, t).get_throughput()
+            except Exception:  # noqa: BLE001 - none of its own
+                continue
+            ru = getattr(got, "offer_throughput", None) or getattr(
+                got, "auto_scale_max_throughput", None)
+            if ru:
+                total, n = total + int(ru), n + 1
+        return {"request_units_per_second": total, "provisioned": n} \
+            if n else {}
+
+    def stream_writers(self, db):
+        """Besides migkit's own tail, what writes into the target's
+        containers and cannot be paused: the service expiring items by a
+        default time to live, and an account that takes writes in more than
+        one region."""
+        out = list(super().stream_writers(db))
+        for t in self.neutral_tables("dst", db):
+            ttl = self._container("dst", db, t).read().get("defaultTtl")
+            if ttl is not None:
+                out.append((f"the service expiring {t}'s items (default"
+                            f" time to live {ttl})", False))
+        acct = self._client("dst").get_database_account()
+        if getattr(acct, "EnableMultipleWritableLocations", False):
+            out.append(("other regions writing to the account (it takes"
+                        " writes in more than one)", False))
+        return out
+
     # ---- writing -------------------------------------------------------------
+
+    @staticmethod
+    def _declared_of(col):
+        """A column's kind as the container's description keeps it: the
+        source's own kind where both sides are Cosmos DB (`canon.OWN`), else
+        its class, a decimal with its scale."""
+        from .. import canon
+        if col[1] == canon.OWN and col[2]:
+            return str(col[2][0])
+        return col[1] + (f"({col[2][0]},{col[2][1]})"
+                         if col[1] == "decimal" and len(col[2] or ()) == 2
+                         else "")
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         if not key:
@@ -452,9 +672,7 @@ class CosmosEngine(NeutralCopier, Engine):
                 f"{table} has a column named id outside its key, and a"
                 " Cosmos DB item's id is made from its key: rename the"
                 " column with mapping.columns")
-        cols = [[c[0], c[1] + (f"({c[2][0]},{c[2][1]})"
-                               if c[1] == "decimal" and len(c[2] or ()) == 2
-                               else "")] for c in columns]
+        cols = [[c[0], self._declared_of(c)] for c in columns]
         if KEY in key:
             # Cosmos DB's own model: the rest of the key its partition key
             pk = [f"/{k}" for k in key if k != KEY] or [f"/{KEY}"]
@@ -599,7 +817,14 @@ class CosmosEngine(NeutralCopier, Engine):
         return self._as_pair().check_counts(db)
 
     def check_data(self, db, table=None, stream=None):
-        return self._as_pair().check_data(db, table, stream)
+        return self.tallied(db, self._as_pair().check_data(db, table,
+                                                           stream))
+
+    def create_missing(self, db, log=None):
+        return self._as_pair().create_missing(db, log)
+
+    def finish_created(self, db, log=None):
+        return self._as_pair().finish_created(db, log)
 
     def repair_plan(self, db, kind):
         return self._as_pair().repair_plan(db, kind)
@@ -634,9 +859,12 @@ class CosmosEngine(NeutralCopier, Engine):
         except Exception as e:  # noqa: BLE001 - said, as the error
             return [Result("params", db, "error", "could not read the"
                            f" containers' settings: {str(e)[:90]}")]
-        return [self._param_result(db, src, dst, self.CRITICAL_PARAMS,
-                                   "set the target container's settings as"
-                                   " the source's")]
+        # a setting is named for its container: "orders partition key"
+        crit = sorted(n for n in set(src) | set(dst)
+                      if " ".join(n.split(" ")[-2:]) in self.CRITICAL_PARAMS)
+        return self._param_result(db, src, dst, crit,
+                                  "set the target container's settings as"
+                                  " the source's")
 
     def check_deep(self, db):
         """Writes in conflict on either side (a multi-region write
@@ -659,6 +887,199 @@ class CosmosEngine(NeutralCopier, Engine):
                 f"{n} writes in conflict between regions" if n
                 else "no write in conflict", "",
                 "resolve them before the cutover" if n else ""))
+        return out + self._deep_items(db)
+
+    # ---- what the comparison of items does not see ----------------------------
+
+    NULL_KIND = "null"
+    ITEM_NOUN = "items"
+
+    def _shape_of(self, side, db, table):
+        """What a container's items hold, read item by item: how many,
+        whether every one was read, and per field how many hold each kind
+        of value and how many hold it empty - a JSON null, an empty value
+        and an absent field are three things."""
+        from collections import Counter
+
+        from .couchbase import _kind
+        kinds, empty, n, whole = {}, Counter(), 0, True
+        for item in self._items(side, db, table):
+            n += 1
+            for name, value in item.items():
+                kinds.setdefault(name, Counter())[_kind(value)] += 1
+                if value in ("", [], {}):
+                    empty[name] += 1
+            if n >= self.DEEP_MOST:
+                whole = False
+                break
+        return {"items": n, "whole": whole, "kinds": kinds, "empty": empty}
+
+    def _deep_items(self, db):
+        """A field that was null on the source and is absent on the target
+        (or the other way), a field holding another kind of value, and the
+        containers' indexing, options, partition keys, computed fields and
+        scripts, both sides."""
+        try:
+            both = sorted(set(self.neutral_tables("src", db))
+                          & set(self.neutral_tables("dst", db)))
+            props = {side: {t: self._container(side, db, t).read()
+                            for t in both} for side in ("src", "dst")}
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [Result("deep", f"{db} item shapes", "error",
+                           "could not read the containers: "
+                           f"{str(e).splitlines()[0][:90]}")]
+        return (self._item_shape_results(db, both)
+                + self._property_results(db, both, props)
+                + self._script_results(db, both))
+
+    @staticmethod
+    def _indexing(props):
+        """A container's indexing policy as what it indexes: its mode, the
+        paths included and excluded (the service's own `_etag` left out),
+        and its composite, spatial and vector indexes."""
+        pol = props.get("indexingPolicy") or {}
+
+        def paths(key):
+            return sorted(p["path"] for p in pol.get(key) or []
+                          if p.get("path") and p["path"] != '/"_etag"/?')
+
+        def each(key):
+            return sorted(json.dumps(x, sort_keys=True)
+                          for x in pol.get(key) or [])
+        return {"mode": pol.get("indexingMode"),
+                "included": paths("includedPaths"),
+                "excluded": paths("excludedPaths"),
+                "composite": each("compositeIndexes"),
+                "spatial": each("spatialIndexes"),
+                "vector": each("vectorIndexes")}
+
+    #: the container properties that say how its items are kept or expire
+    OPTIONS = ("defaultTtl", "analyticalStorageTtl", "conflictResolutionPolicy",
+               "changeFeedPolicy", "geospatialConfig")
+
+    def _property_results(self, db, both, props):
+        """Indexes, options, partition keys and computed fields of the
+        containers on both sides, from one reading of their properties."""
+        src, dst = props["src"], props["dst"]
+        out = []
+        idx = []
+        for t in both:
+            a, b = self._indexing(src[t]), self._indexing(dst[t])
+            idx += [f"{t}: {k} {json.dumps(a[k])} on the source,"
+                    f" {json.dumps(b[k])} on the target"
+                    for k in a if a[k] != b[k]]
+        out.append(Result(
+            "deep", f"{db} indexes", "diff" if idx else "ok",
+            clauses(idx) if idx else
+            f"{len(both)} containers, indexing policies equal", "",
+            "give the target container the source's indexing policy" if idx
+            else ""))
+        odd, expires = [], []
+        for t in both:
+            for opt in self.OPTIONS:
+                a, b = src[t].get(opt), dst[t].get(opt)
+                if a != b:
+                    (expires if opt == "defaultTtl" else odd).append(
+                        f"{t}.{opt}: {json.dumps(a)} on the source,"
+                        f" {json.dumps(b)} on the target")
+        found = expires + odd
+        out.append(Result(
+            "deep", f"{db} container options",
+            "diff" if expires else "warn" if found else "ok",
+            clauses(found) if found else
+            f"{len(both)} containers, options equal", "",
+            "give the target the source's default time to live before"
+            " cutover; it expires other items" if expires else "",
+            category="structure.collection-options"))
+        keys = [f"{t}: {json.dumps(src[t].get('partitionKey'))} on the"
+                f" source, {json.dumps(dst[t].get('partitionKey'))} on the"
+                " target" for t in both
+                if {k: (src[t].get("partitionKey") or {}).get(k)
+                    for k in ("paths", "kind")}
+                != {k: (dst[t].get("partitionKey") or {}).get(k)
+                    for k in ("paths", "kind")}]
+        out.append(Result(
+            "deep", f"{db} sharding", "diff" if keys else "ok",
+            clauses(keys) if keys else
+            f"{len(both)} containers, partition keys equal", "",
+            "an item is placed by its partition key: make the target"
+            " container with the source's" if keys else ""))
+        comp = [f"{t}: {json.dumps(src[t].get('computedProperties'))} on the"
+                f" source, {json.dumps(dst[t].get('computedProperties'))}"
+                " on the target" for t in both
+                if sorted(json.dumps(x, sort_keys=True) for x in
+                          src[t].get("computedProperties") or [])
+                != sorted(json.dumps(x, sort_keys=True) for x in
+                          dst[t].get("computedProperties") or [])]
+        out.append(Result(
+            "deep", f"{db} generated", "diff" if comp else "ok",
+            clauses(comp) if comp else
+            f"{len(both)} containers, computed properties equal", "",
+            "a computed property is a query the container answers with:"
+            " define it on the target" if comp else ""))
+        return out
+
+    # ---- stored procedures, triggers and functions of a container ---------------
+
+    def _scripts(self, side, db, table):
+        """{"procedures": {id: body}, "functions": {id: body}, "triggers":
+        {id: (type, operation, body)}} of one container, as its scripts
+        collection lists them."""
+        scripts = self._container(side, db, table).scripts
+        return {
+            "procedures": {p["id"]: p.get("body") for p in
+                           scripts.list_stored_procedures()},
+            "functions": {f["id"]: f.get("body") for f in
+                          scripts.list_user_defined_functions()},
+            "triggers": {t["id"]: (t.get("triggerType"),
+                                   t.get("triggerOperation"), t.get("body"))
+                         for t in scripts.list_triggers()}}
+
+    def _script_results(self, db, both):
+        """Two findings: the stored procedures and functions, and the
+        triggers, each by name and body, of the containers the hop takes
+        and the kinds of object it carries (`objects`)."""
+        try:
+            found = {side: {t: self._scripts(side, db, t) for t in both}
+                     for side in ("src", "dst")}
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            said = f"could not list the scripts: {str(e).splitlines()[0][:90]}"
+            return [Result("deep", f"{db} objects", "error", said),
+                    Result("deep", f"{db} triggers", "error", said)]
+        out = []
+        for scope, kinds in ((f"{db} objects", ("procedures", "functions")),
+                             (f"{db} triggers", ("triggers",))):
+            apart, n = [], 0
+            for t in both:
+                for kind in kinds:
+                    have = {name: body for name, body in
+                            found["src"][t][kind].items()
+                            if self.takes(db, kind, f"{t}.{name}",
+                                          by=t)}
+                    got = found["dst"][t][kind]
+                    n += len(have)
+                    for name, body in sorted(have.items()):
+                        if name not in got:
+                            apart.append(f"{t}: {kind[:-1]} {name} is not on"
+                                         " the target")
+                        elif got[name] != body:
+                            apart.append(f"{t}: {kind[:-1]} {name} differs on"
+                                         " the target")
+            if scope.endswith("objects"):
+                out.append(Result(
+                    "deep", f"{db} objects", "diff" if apart else "ok",
+                    clauses(apart) if apart else
+                    f"{n} stored procedures and functions, each on the target"
+                    " as on the source", "",
+                    "a script is not copied with its container: make it on"
+                    " the target" if apart else ""))
+            else:
+                out.append(Result(
+                    "deep", f"{db} triggers", "diff" if apart else "ok",
+                    clauses(apart) if apart else
+                    f"{n} triggers, each on the target as on the source", "",
+                    "a trigger is not copied with its container: make it on"
+                    " the target" if apart else ""))
         return out
 
     # ---- the change feed -------------------------------------------------------
@@ -747,12 +1168,57 @@ class CosmosEngine(NeutralCopier, Engine):
                 return False
         return True
 
+    #: a feed range's position is a continuation, read again from any
+    #: container's feed as often as asked: a container that left a tail
+    #: comes back with its changes since
+    REREADS_FROM_A_POSITION = True
+
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Each item the change feed says was created, replaced or
-        deleted, in its range's order."""
+        deleted, in its range's order - and a container dropped, or made
+        since the tail began (one the saved position has no range of), as
+        the DDLs of the feed (`canon.ddl`): the tail follows the containers
+        of the database as they are, the reader made again for them."""
         if token is None:
             return [], self.change_point(side, db)
-        return self._follower(db).changes(token, limit)
+        from .. import canon
+        out = []
+        held = self.__dict__.get("_followers", {}).get(db)
+        if held is not None:
+            known = set(held.lanes.by)
+            listed = set(self.scope_tables(side, db))
+            taken = set(self.neutral_tables(side, db))
+            followed = {lane.partition("|")[0]
+                        for lane in (token.get("at") or {})}
+            out += [canon.ddl(t, "drop") for t in sorted(known - listed)]
+            out += [canon.ddl(t, "create")
+                    for t in sorted(taken - known - followed)]
+            if known != taken:
+                # a reader of the containers there are now; its place is
+                # the position's, which every range of the old one is in
+                self.release_changes()
+        got, after = self._follower(db).changes(token, limit)
+        return out + got, after
+
+    def position_lost(self, side, db, token):
+        """Why a saved position can no longer be read on from, or None:
+        a range's continuation the service no longer takes (the feed's
+        retention passed, or the container was made again). Every container
+        still there is asked, each range for a page after its position."""
+        listed = set(self.scope_tables(side, db))
+        for lane, cont in sorted((token.get("at") or {}).items()):
+            t = lane.partition("|")[0]
+            if t not in listed or not cont:
+                continue
+            try:
+                feed = self._container(side, db, t) \
+                    .query_items_change_feed(continuation=cont,
+                                             max_item_count=1)
+                next(iter(feed.by_page()), None)
+            except Exception as e:  # noqa: BLE001 - said, as the error
+                return (f"the change feed of {t} no longer takes its saved"
+                        f" position: {str(e).splitlines()[0][:80]}")
+        return None
 
     def release_changes(self):
         for f in self.__dict__.pop("_followers", {}).values():
@@ -811,7 +1277,31 @@ class CosmosEngine(NeutralCopier, Engine):
         return items
 
     def _assess_extra(self):
-        return self.reach_items("src")
+        """Where the data is read and written, what the move leaves for a
+        person, and the throughput the target containers provision."""
+        inv = self._handwork()
+        rows = self.reach_items("src") + inv.rows() + inv.summary()
+        for db in self.databases():
+            try:
+                got = self.capacity("dst", db)
+            except Exception as e:  # noqa: BLE001 - unknown, not clean
+                rows.append({"level": "warn", "scope": db,
+                             "item": "the target's request units",
+                             "detail": "could not ask: "
+                                       f"{str(e).splitlines()[0][:90]}"
+                                       " - unknown, not clean"})
+                continue
+            rows.append({
+                "level": "pass" if got else "warn", "scope": db,
+                "item": "the target's request units",
+                "detail": (f"{got['provisioned']} target containers provision"
+                           f" {got['request_units_per_second']:,} request"
+                           " units a second between them; a request over it"
+                           " is throttled and waited out" if got else
+                           "no target container provisions throughput of its"
+                           " own (shared, serverless, or not made yet) - the"
+                           " rate of the copy is the database's")})
+        return rows
 
 
 def _register():

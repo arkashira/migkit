@@ -6588,3 +6588,104 @@ class NeutralCopier:
 
     def moved_nothing(self, db):
         return self._as_pair().moved_nothing(db)
+
+    #: records of a table read for the shape checks, at most: a table with
+    #: more on either side is named as not covered, never half-read and
+    #: called clean
+    DEEP_MOST = 500_000
+    #: the kind `_shape` counts a stored NULL as, and what a record is
+    #: called in a finding
+    NULL_KIND = "null"
+    ITEM_NOUN = "documents"
+
+    @staticmethod
+    def _counted_as(shape, name, null_kind):
+        """(NULL, empty, absent) a field is in a table's records."""
+        held = shape["kinds"].get(name) or {}
+        return (held.get(null_kind, 0), shape["empty"].get(name, 0),
+                shape["items"] - sum(held.values()))
+
+    def _item_shape_results(self, db, both):
+        """Two findings from a read of every record of the tables on both
+        sides (`_shape_of(side, db, table)`: {"items", "whole", "kinds":
+        {field: {kind: n}}, "empty": {field: n}}): a field that was NULL,
+        empty or absent on the source and is another of the three on the
+        target - the three are kept apart, and a copy turns one into
+        another - and a field that holds another kind of value. A table
+        too large to read whole, or holding another number of records, is
+        named as not compared."""
+        nulls, drift, apart, unread = [], [], [], []
+        nk = self.NULL_KIND
+        for t in both:
+            a, b = self._shape_of("src", db, t), self._shape_of("dst", db, t)
+            if not (a["whole"] and b["whole"]):
+                unread.append(t)
+                continue
+            if a["items"] != b["items"]:
+                apart.append(f"{t} ({a['items']:,} {self.ITEM_NOUN} against"
+                             f" {b['items']:,})")
+                continue
+            for name in sorted(set(a["kinds"]) | set(b["kinds"])):
+                got = (self._counted_as(a, name, nk),
+                       self._counted_as(b, name, nk))
+                if got[0] != got[1]:
+                    nulls.append(f"{t}.{name}: null/empty/absent"
+                                 f" {'/'.join(map(str, got[0]))} on the"
+                                 f" source, {'/'.join(map(str, got[1]))} on"
+                                 " the target")
+                have = {k: set(c) - {nk} for k, c in
+                        (("src", a["kinds"].get(name) or {}),
+                         ("dst", b["kinds"].get(name) or {}))}
+                if have["src"] and have["src"] != have["dst"]:
+                    drift.append(
+                        f"{t}.{name}: {'+'.join(sorted(have['src']))} ->"
+                        f" {'+'.join(sorted(have['dst'])) or 'absent'}")
+        note = ""
+        if unread or apart:
+            note = ("; not compared: " + "; ".join(
+                ([f"{', '.join(unread[:4])} (more than {self.DEEP_MOST:,}"
+                  f" {self.ITEM_NOUN}, not read whole)"] if unread else [])
+                + ([f"{', '.join(apart[:4])} (a different number of"
+                    f" {self.ITEM_NOUN} - the data check names them)"]
+                   if apart else [])))
+        done = len(both) - len(unread) - len(apart)
+        return [
+            Result("deep", f"{db} null-missing",
+                   "diff" if nulls else "warn" if note else "ok",
+                   (clauses(nulls) if nulls else
+                    f"{done} tables' {self.ITEM_NOUN} read whole on both"
+                    " sides, no field changed between NULL, empty and"
+                    " absent") + note, "",
+                   "copy the records as the store holds them, or accept the"
+                   " field as it arrived" if nulls else "",
+                   category="value.null-empty"),
+            Result("deep", f"{db} field types",
+                   "diff" if drift else "warn" if note else "ok",
+                   (clauses(drift) if drift else
+                    f"{done} tables' {self.ITEM_NOUN} read whole on both"
+                    " sides, every field holds the kinds of value it did")
+                   + note, "",
+                   "copy the records as the store holds them" if drift
+                   else "", category="value.type-drift")]
+
+    def tallied(self, db, found):
+        """The pair's data findings, each with the rows apart of its table
+        counted from the drilldown the check wrote (`Result.rows_apart`),
+        and every finding with how each table it compared came out
+        (`Result.tables`). Counted one by one - `exact` - unless the walk
+        stopped at its cap, which the finding says."""
+        pair = self._as_pair()
+        came = {r.table: r.status for r in found if r.table}
+        for r in found:
+            if not r.table or r.status != "diff":
+                continue
+            leaf = pair._leaf(r.table)
+            n = [len(pair._read_drill(db, leaf, kind))
+                 for kind in ("missing", "extra", "changed")]
+            if any(n):
+                r.rows_apart = rows_counted(
+                    r.table, *n, exact="stopped after" not in r.detail)
+        for r in found:
+            if came:
+                r.tables = dict(came)
+        return found
