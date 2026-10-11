@@ -126,7 +126,9 @@ def identity(hop, eng, side, db):
     # label taken from the hop called the source itself another database
     database = (named(side, db) if named and db else
                 hop.target_db(db) if side == "dst" and db else db)
-    out = {"engine": getattr(e, "CANON_ENGINE", "")
+    # a service on another's API is named as itself (`PAIR_ENGINE`)
+    out = {"engine": getattr(e, "PAIR_ENGINE", "")
+           or getattr(e, "CANON_ENGINE", "")
            or type(e).__name__.removesuffix("Engine").lower(),
            "address": _address(ep), "database": str(database)}
     ask = getattr(e, "server_identity", None)

@@ -57,7 +57,18 @@ KINDS = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
          "tidb": "TiDB", "dsql": "Aurora DSQL", "cosmosdb": "Cosmos DB",
          "snowflake": "Snowflake", "teradata": "Teradata",
          "kinesis": "a Kinesis stream",
-         "pubsub": "a Pub/Sub topic"}
+         "pubsub": "a Pub/Sub topic",
+         # the cloud-native services' own engines
+         "spanner": "Spanner", "bigtable": "Bigtable",
+         "firestore": "Firestore", "datastore": "Firestore in Datastore mode",
+         "gaussdb": "GaussDB", "oceanbase": "OceanBase (MySQL mode)",
+         "oceanbase-oracle": "OceanBase (Oracle mode)",
+         "polardbx": "PolarDB-X", "dcdb": "TDSQL (distributed)",
+         "keyspaces": "Keyspaces", "neptune": "Neptune",
+         "timestream": "Timestream", "lindorm": "Lindorm",
+         "geminidb-cassandra": "GeminiDB's Cassandra API",
+         "geminidb-redis": "GeminiDB's Redis API",
+         "geminidb-mongo": "GeminiDB's MongoDB API"}
 
 #: what `clouds` calls an endpoint of a service, and the service it is
 ENDPOINTS = {"aurora-reader": "aurora", "rds-proxy": "rds"}

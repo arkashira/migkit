@@ -339,6 +339,9 @@ class PgWireEngine(DbapiRows, Engine):
     def tail_start(self, db, token_path):
         return self._as_pair().tail_start(db, token_path)
 
+    #: its change tail is the pair's (`Engine.tail_masks`)
+    TAILS_THROUGH_PAIR = True
+
     def tail_apply(self, db, go, token_path, log):
         return self._as_pair().tail_apply(db, go, token_path, log)
 

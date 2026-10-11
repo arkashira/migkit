@@ -175,6 +175,9 @@ class Redactor:
             opts = getattr(hop, "options", None) or {}
             got += _option_secrets(opts)
             got += _receivers(opts.get("notify"))
+            # the masking key once this run has read it (`Hop.mask_key`):
+            # a statement that hashes on the server holds it as a literal
+            got.append(getattr(hop, "_mask_key", None) or "")
         got += envkeys.secrets(self.environ)
         return [s for s in dict.fromkeys(str(s) for s in got) if s]
 

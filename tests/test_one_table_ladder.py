@@ -332,28 +332,34 @@ def test_the_straight_copy_alone_falls_back_only_where_it_cannot_run(
     assert {c.rung for c in got.values()} == {ROWS}, got
 
 
-def test_a_masked_table_goes_by_the_dump_whatever_is_faster(tmp_path,
-                                                            monkeypatch):
+def test_a_masked_table_goes_by_a_way_that_masks_it(tmp_path, monkeypatch):
+    """Only the ways that mask carry a masked table: the dump, where it
+    says the transform itself, and the table copier, which carries it
+    through the pair and its transforms - never the straight copy or the
+    servers passing the rows between them."""
     opts = {"mask_on_write": {"narrow.b": "null"}}
     eng = _my(tmp_path, monkeypatch, options=opts)
     _costs(monkeypatch, {PLAIN: 1e6, BINARY: 1e6}, FAST, FAST, FAST)
     got = _choose(eng)
-    assert got["narrow"].rung == DL
+    assert got["narrow"].rung in (DL, ROWS), got["narrow"]
     assert "masked on the way" in got["narrow"].reason
     eng = _my(tmp_path, monkeypatch, options=opts,
               installed=("mysqlsh", "mysql"))
-    none = _choose(eng)
-    assert none["narrow"].rung == "" and "not installed" in \
-        none["narrow"].reason
-    # the dump started for one table alone masks nothing: a masked table
-    # the copier would carry has no way, and says why - large enough to
-    # repay starting the dump for it, so only the masking holds it back
+    got = _choose(eng)
+    assert got["narrow"].rung == ROWS, got["narrow"]
+    # the dump started for one table alone masks nothing: the copier
+    # carries it - large enough to repay starting the dump for it, so only
+    # the masking holds the dump back
     monkeypatch.setattr(MySQLEngine, "STREAM_FROM", 1)
     eng = _my(tmp_path, monkeypatch, options=opts)
     got = tableway.choose(eng, "appdb", "builtin", ["narrow"], FACTS)
-    assert got["narrow"].rung == "", got["narrow"]
-    assert "applies neither its row filter nor its masking" in \
-        got["narrow"].reason
+    assert got["narrow"].rung == ROWS, got["narrow"]
+    # a hash is no function of the dump's: never the dump's, whatever it
+    # costs
+    eng = _my(tmp_path, monkeypatch, options={
+        "mask_on_write": {"narrow.b": "truncate 2"}})
+    assert eng.masked_on_the_way("appdb", ["narrow"]) == set()
+    assert eng.through_pair("appdb", "narrow")
 
 
 # ---- one decision: the plan, the copy and the record read it ----------------
@@ -642,7 +648,7 @@ def test_a_program_the_move_runs_hands_its_tables_to_the_copier(
     """The move's program fails as it runs: its tables are the copier's
     after the move, each climbed again without it, and the move's kept
     choice says so for the copier that reads it; a table masked on the way
-    has no other way, and the move stops instead."""
+    falls to the copier too, which carries it through the pair."""
     eng = _my(tmp_path, monkeypatch)
     _costs(monkeypatch, FAST, SLOW, SLOW, {PLAIN: 50e6, BINARY: 50e6})
     hop = eng.hop
@@ -664,12 +670,14 @@ def test_a_program_the_move_runs_hands_its_tables_to_the_copier(
     assert kept["narrow"].rung == ROWS and kept["wide"].rung == ROWS, kept
     assert kept["tiny"].rung == DL
     assert "the parallel dump and load does not:" in kept["narrow"].reason
-    # masked: the copier would carry the values the hop hides
+    # masked: the copier carries it through the pair, which writes it
+    # through the hop's transforms (`Engine.through_pair`)
     eng = _my(tmp_path, monkeypatch,
               options={"mask_on_write": {"narrow.b": "null"}})
-    with pytest.raises(decide.Exhausted):
-        tableway.batch_or_copier(eng, "appdb", DL, ["narrow"], dies,
-                                 said.append, masked={"narrow"})
+    assert eng.through_pair("appdb", "narrow")
+    assert tableway.batch_or_copier(eng, "appdb", DL, ["narrow"], dies,
+                                    said.append, masked={"narrow"}) == \
+        ["narrow"]
 
 
 # ---- PostgreSQL: the copier's ways, each measured once ----------------------

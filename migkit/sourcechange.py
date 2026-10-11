@@ -403,6 +403,49 @@ DEFINITIONS = {d.name: d for d in (
     Definition(
         "whole_entries", "db2i", "a journal that keeps whole entries",
         make=lambda c: [_cl(f"CHGJRN JRN({c.name}) MINENTDTA(*NONE)")]),
+    # -- the cloud-native services (P0-CLOUDS part 2) -----------------------
+    # `c.name` the change stream, slot or instance; `c.tables` the tables
+    Definition(
+        "spanner_change_stream", "spanner",
+        "a change stream watching every table in scope",
+        make=lambda c: [f"create change stream {c.name} for all options"
+                        " (retention_period = '1d');"],
+        undo=lambda c: [f"drop change stream {c.name};"]),
+    Definition(
+        "bigtable_change_stream", "bigtable",
+        "a change stream on every table in scope",
+        make=lambda c: [f"gcloud bigtable instances tables update {t}"
+                        f" --instance={c.db} --change-stream-retention-period"
+                        "=1d" for t in c.tables],
+        undo=lambda c: [f"gcloud bigtable instances tables update {t}"
+                        f" --instance={c.db} --clear-change-stream-retention"
+                        "-period" for t in c.tables]),
+    Definition(
+        "keyspaces_cdc", "keyspaces", "a CDC stream on every table in scope",
+        make=lambda c: [f"alter table {c.db}.{t} with cdc = true and"
+                        " custom_properties = {'cdc_specification':"
+                        " {'view_type': 'NEW_IMAGE'}};" for t in c.tables],
+        undo=lambda c: [f"alter table {c.db}.{t} with cdc = false;"
+                        for t in c.tables]),
+    Definition(
+        "neptune_streams", "neptune", "Neptune Streams on for the cluster",
+        make=lambda c: [], restart=True,
+        outside=lambda c: ["set neptune_streams to 1 in the cluster's DB"
+                           " cluster parameter group, and reboot its"
+                           " writer"]),
+    Definition(
+        "gauss_wal_level", "gaussdb",
+        "a log that carries rows (wal_level logical)",
+        make=lambda c: [] if c.cloud else
+        ["alter system set wal_level = logical;"], restart=True,
+        outside=lambda c: ["set wal_level to logical in the instance's"
+                           " parameters on the console, and restart it"]
+        if c.cloud else []),
+    Definition(
+        "gauss_replication", "gaussdb",
+        "the right to read the change log (replication)",
+        make=lambda c: [f"alter role {c.who} with replication;"],
+        undo=lambda c: [f"alter role {c.who} with noreplication;"]),
     # -- an archive's (`archive`): rows, not a setting ---------------------
     # the rows a hop's rule archives, removed from the source once the
     # archive holds them proved; put back from the archive by the hop's

@@ -16,7 +16,7 @@ from decimal import Decimal
 
 import pytest
 
-from migkit import bsontype, canon, geo, intervals, vectors
+from migkit import bsontype, canon, commercial, geo, intervals, vectors
 
 
 # ---- intervals ------------------------------------------------------------
@@ -236,11 +236,16 @@ def test_shape_types_by_engine():
                              "geometry") == ("geography",)
     assert canon.ddl_type("postgres", "geometry", ("geography",)) \
         == "geography"
-    with pytest.raises(ValueError):
-        canon.ddl_type("mssql", "geometry")
-    # a SQL Server shape made by hand is not written by the row copy
+    # SQL Server builds both, and is written through each type's own
+    # constructor (`commercial.mssql_shape_mark`); its geography reads a
+    # polygon by the order of its rings' points, which is asked first
+    assert canon.ddl_type("mssql", "geometry") == "geometry"
+    assert canon.ddl_type("mssql", "geometry", ("geography",)) \
+        == "geography"
+    assert canon.unfit("postgres", "geometry", "mssql", "geometry") == []
     assert canon.unfit("postgres", "geometry", "mssql", "geography") \
-        == [("no-writer", "shape")]
+        == [("ring-orientation", commercial.RING_RULES[("mssql",
+                                                        "geography")])]
     assert canon.unfit_value("no-writer", POINT, "shape") is True
     assert canon.unfit_value("no-writer", None, "shape") is False
 

@@ -180,7 +180,9 @@ def side_engine(hop, eng, side):
     own = getattr(eng, "src_engine" if side == "src" else "dst_engine", None)
     e = own if own is not None else eng
     from .engines import ALIASES
-    kind = getattr(e, "CANON_ENGINE", "") or _engine(hop)
+    # a service on another's API is held as itself (`Engine.PAIR_ENGINE`)
+    kind = (getattr(e, "PAIR_ENGINE", "") or getattr(e, "CANON_ENGINE", "")
+            or _engine(hop))
     return ALIASES.get(kind, kind), e
 
 
@@ -628,7 +630,10 @@ SCOPE = {"pg_server": "server", "pg_database": "database",
          "db2_grants": "database", "ase_grants": "database",
          "td_grants": "database", "rs_grants": "database",
          "sf_grants": "database", "cb_roles": "database",
-         "ddb_policy": "database", "bq_access": "database"}
+         "ddb_policy": "database", "bq_access": "database",
+         # a group's sides, each held its own way (`GroupHold`)
+         "group_server": "server", "group_database": "database",
+         "group_kept": "database"}
 
 
 def _read(fn):
@@ -777,11 +782,140 @@ class Hold:
         return []
 
 
+#: the kind of a group of sides (`reshard._Sides`): every source of a
+#: reshard, a split or a consolidation, or every target of one
+GROUP = "group"
+
+
+class GroupHold(Hold):
+    """The writes of a group of sides held together - every source of a
+    reshard, a split or a consolidation at its one cutover, or every
+    target kept from the application (`reshard.Cluster`) - each side by
+    its own engine's hold, the way that side allows, under the hop that
+    side is moved by: the group holds where every side does, and is let
+    go side by side from each side's own record."""
+
+    def _sides(self):
+        """[(name, hop, engine, database)] of the group's sides."""
+        return self.eng.parts
+
+    def _say(self, say, name):
+        return lambda m: say(f"{name}: {m}")
+
+    def rungs(self):
+        from .decide import Need, Rung
+
+        def every(scope):
+            return Need(f"every side held {scope}-wide",
+                        lambda f, s=scope: not f["sides unheld"][s],
+                        lambda f, s=scope: "; ".join(f["sides unheld"][s]))
+        return (Rung("group_server", "every side's whole server held, each"
+                     " its own way", gives=frozenset({SERVER}),
+                     needs=(every("server"),),
+                     because="every side holds the hop's databases alone"),
+                Rung("group_database", "every side's databases held, each"
+                     " its own way", gives=frozenset({DATABASE}),
+                     needs=(every("database"),), footprint=1,
+                     because="per database, on every side"))
+
+    def keep_rungs(self):
+        from .decide import Need, Rung
+        return (Rung("group_kept", "every target kept from the application,"
+                     " each its own way", gives=frozenset(KEEP),
+                     needs=(Need("every target kept",
+                                 lambda f: not f["sides unheld"]["kept"],
+                                 lambda f: "; ".join(
+                                     f["sides unheld"]["kept"])),),
+                     because="every target keeps migkit's own account"
+                             " writing"),)
+
+    def facts(self, dbs):
+        from .decide import Facts
+        return Facts(**{"sides unheld": self._unheld})
+
+    def _unheld(self):
+        """{"server" | "database" | "kept": [why a side is not held so]}:
+        each side's own ladder climbed, as its own hold would be."""
+        out = {"server": [], "database": [], "kept": []}
+        for name, hop, eng, db in self._sides():
+            asks = (("server", "server"), ("database", "database")) \
+                if self.side == "src" else (("kept", "auto"),)
+            for scope, how in asks:
+                try:
+                    got = choose(hop, eng, [db], how, side=self.side)
+                    why = None if got.rung is not None else got.reason
+                except Exception as e:  # noqa: BLE001 - said as the reason
+                    why = str(e).strip()[:160] or type(e).__name__
+                if why:
+                    out[scope].append(f"{name}: {why}")
+        return out
+
+    def hold(self, dbs, way, say):
+        # the group's own record first, so a thaw of the group reaches
+        # every side whatever the run reached
+        for d in dbs:
+            _save(self.hop, d, {"way": way, "group": True}, self.side)
+        for name, hop, eng, db in self._sides():
+            freeze_source(hop, eng, [db], self._say(say, name),
+                          SCOPE.get(way, way))
+
+    def keep(self, db, way, say):
+        _save(self.hop, db, {"way": way, "group": True}, "dst")
+        for name, hop, eng, sdb in self._sides():
+            freeze(hop, eng, sdb, self._say(say, name), side="dst")
+
+    def release(self, db, record, say):
+        for name, hop, eng, sdb in self._sides():
+            if self.side == "src":
+                thaw_source(hop, eng, [sdb], self._say(say, name))
+            else:
+                thaw(hop, eng, sdb, self._say(say, name), side="dst")
+
+    def held(self, db, way):
+        return [(ok, f"{name}: {what}")
+                for name, hop, eng, sdb in self._sides()
+                for ok, what in proof(hop, eng, sdb, SCOPE.get(way, way))]
+
+    def kept(self, db, record):
+        out = []
+        for name, hop, eng, sdb in self._sides():
+            mine = state(hop, sdb, "dst")
+            if not mine:
+                out.append((False, f"{name}: nothing keeps it"))
+                continue
+            out += [(ok, f"{name}: {what}") for ok, what in
+                    hold_for(hop, eng, "dst").kept(sdb, mine)]
+        return out
+
+    def exempt(self, db, way):
+        return [f"{name}: {line}" for name, hop, eng, sdb in self._sides()
+                for line in bypass(hop, eng, sdb)]
+
+    def writes(self, db):
+        total = 0
+        for _, hop, eng, sdb in self._sides():
+            got = writes_seen(hop, eng, sdb, self.side)
+            if got is None:
+                return None
+            total += got
+        return total
+
+    def open(self, db, older_than):
+        return [f"{name}: {line}" for name, hop, eng, sdb in self._sides()
+                for line in open_work(hop, eng, sdb, self.side, older_than)]
+
+    def cannot(self, db, way=None):
+        return [f"{name}: {line}" for name, hop, eng, sdb in self._sides()
+                for line in cannot(hop, eng, sdb)]
+
+
 def hold_for(hop, eng, side="src"):
     """The hold of one side, as its engine does it: a source's as the
     cutover freezes it (`HOLDS`), a target's as `protect_target` keeps it
-    (`KEEPS`)."""
+    (`KEEPS`), a group's side by side (`GroupHold`)."""
     kind = side_engine(hop, eng, side)[0]
+    if kind == GROUP:
+        return GroupHold(hop, eng, side)
     return (HOLDS if side == "src" else KEEPS).get(kind, Hold)(hop, eng, side)
 
 
@@ -2068,7 +2202,10 @@ class MySQLHold(Hold):
             out.append(f"XA RECOVER could not be read ({e})")
         age = "" if older_than is None else \
             f" and t.trx_started < now() - interval {float(older_than)} second"
-        got = eng._q(side,
+        # in the server's own zone: it keeps a transaction's start in its
+        # process's, and migkit's sessions are in UTC
+        got = eng._q_server_zone(
+                     side,
                      "select p.user, t.trx_mysql_thread_id,"
                      " timestampdiff(second, t.trx_started, now())"
                      " from information_schema.innodb_trx t join"
@@ -2190,7 +2327,7 @@ class TiDBHold(MySQLHold):
     def open(self, db, older_than):
         age = "" if older_than is None else \
             f" and start_time < now() - interval {float(older_than)} second"
-        got = self.eng._q(
+        got = self.eng._q_server_zone(
             self.side, "select user, session_id, timestampdiff(second,"
                        " start_time, now()) from"
                        " information_schema.cluster_tidb_trx where"
@@ -6387,6 +6524,81 @@ class BigQueryHold(Hold):
                 " says"]
 
 
+# Lindorm's wide tables: a user's rights are READ, WRITE, ADMIN, TRASH or
+# SYSTEM on the whole instance, a database or a table (`SHOW PRIVILEGES`),
+# given and taken back by GRANT and REVOKE - WRITE writes and TRASH
+# deletes. Nothing in Lindorm ends another's session or shows what one
+# holds open, so a target is kept and a source is held by its operator.
+
+class LindormHold(_Grants):
+    WAY = "lindorm_grants"
+    SAID = ("the application's users' rights to write and delete in the"
+            " database and its tables revoked")
+    #: the rights that write or delete
+    WRITES = ("WRITE", "TRASH", "ALL")
+
+    def _privileges(self):
+        """[(user, right, its scope, what it is on)] as Lindorm says them."""
+        from .users import _ld_part
+        return [(str(_ld_part(r, "user") or ""),
+                 str(_ld_part(r, "privilege") or "").upper(),
+                 str(_ld_part(r, "scope") or "GLOBAL").upper(),
+                 _ld_part(r, "on"))
+                for r in self.eng._answered(self.side, "", "show privileges")]
+
+    def _here(self, db, scope, on):
+        """Whether a right on `on` reaches this database: on it, or on one
+        of its tables the hop takes."""
+        name, on = self.name(db), str(on or "")
+        if scope in ("DATABASE", "SCHEMA"):
+            return on == name
+        if scope == "TABLE":
+            there, _, table = on.rpartition(".")
+            return there in ("", name) and self.eng.in_scope(db, table)
+        return False
+
+    def _mine(self):
+        return str(self.eng._ep(self.side).user or "")
+
+    def accounts(self, db):
+        from .users import system_principal
+        got = sorted({u for u, p, s, o in self._privileges()
+                      if p in self.WRITES and self._here(db, s, o)
+                      and u != self._mine()
+                      and not system_principal("lindorm", u)})
+        return self.named_only(got)
+
+    def grants(self, db, who):
+        return [[p, s, o] for u, p, s, o in self._privileges()
+                if u == who and p in self.WRITES and self._here(db, s, o)]
+
+    def take(self, db, who, grant):
+        from .users import _ld_on
+        p, s, o = grant
+        return [f"revoke {p.lower()} on {s.lower()} {_ld_on(self.eng, s, o)}"
+                f" from {self.eng._q(who)}"]
+
+    def give(self, db, who, grant):
+        from .users import _ld_on
+        p, s, o = grant
+        return [f"grant {p.lower()} on {s.lower()} {_ld_on(self.eng, s, o)}"
+                f" to {self.eng._q(who)}"]
+
+    def said(self, grant):
+        return f"{grant[1].lower()} {grant[2]} ({grant[0].lower()})"
+
+    def wider(self, db):
+        """A right on the whole instance reaches every database: revoked
+        here, it would be taken from every other one too - named, not
+        taken."""
+        from .users import system_principal
+        return [(f"{u} may {p.lower()} in every database (a right on the"
+                 " whole instance): named, not taken", True)
+                for u, p, s, _ in self._privileges()
+                if s == "GLOBAL" and p in self.WRITES and u != self._mine()
+                and not system_principal("lindorm", u)]
+
+
 #: the hold each engine has (`Hold`); the engines not here are held by
 #: their operator, and `decide.WAYS["writes held"]` says why
 HOLDS = {"postgres": PostgresHold, "mysql": MySQLHold, "mongodb": MongoHold,
@@ -6395,7 +6607,17 @@ HOLDS = {"postgres": PostgresHold, "mysql": MySQLHold, "mongodb": MongoHold,
          "tidb": TiDBHold, "cockroachdb": PgWireHold,
          "clickhouse": ClickHouseHold, "oracle": OracleHold, "db2": Db2Hold,
          "ase": AseHold, "teradata": TeradataHold, "redshift": RedshiftHold,
-         "snowflake": SnowflakeHold, "couchbase": CouchbaseHold}
+         "snowflake": SnowflakeHold, "couchbase": CouchbaseHold,
+         # services held as the API they speak is (P0-CLOUDS): GaussDB's
+         # roles as PostgreSQL's, the distributed MySQL-wire services'
+         # accounts as MySQL's, OceanBase's Oracle mode's grants as
+         # Oracle's, GeminiDB's APIs as their engines'; each way's needs
+         # are read off the service before it is taken
+         "gaussdb": PostgresHold, "oceanbase": MySQLHold,
+         "polardbx": MySQLHold, "dcdb": MySQLHold,
+         "oceanbase-oracle": OracleHold,
+         "geminidb-cassandra": CassandraHold, "geminidb-redis": RedisHold,
+         "geminidb-mongo": MongoHold}
 #: the sources the cutover freezes itself; any other is frozen by its
 #: operator (`freeze: operator`) and proved by migkit
 FREEZES = tuple(HOLDS)
@@ -6404,6 +6626,6 @@ FREEZES = tuple(HOLDS)
 #: `decide.WAYS["read-only target"]` says why
 KEEPS = {**HOLDS, "dsql": PgWireHold, "db2zos": Db2ZosHold,
          "db2i": Db2iHold, "dynamodb": DynamoDBHold,
-         "bigquery": BigQueryHold}
+         "bigquery": BigQueryHold, "lindorm": LindormHold}
 #: the ways whose server switch is lifted before the databases' records
 _SERVER_FIRST = ("os_cluster",)

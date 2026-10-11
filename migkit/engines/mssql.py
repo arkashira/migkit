@@ -1,7 +1,7 @@
 import re
 import time
 
-from .. import canon, decide, pieces
+from .. import canon, commercial, decide, pieces
 from .base import Engine, RepairAction, Result, clauses, rows_counted
 from .dbapi import MARK, DbapiRows
 
@@ -817,6 +817,8 @@ class MSSQLEngine(DbapiRows, Engine):
                               " row's hash equal both sides" + again + said,
                               tables=outcomes,
                               table=str(table) if table else ""))
+        for t in masked:
+            res += self.columns_pair().check_data(db, t, stream)
         return res
 
     #: CLR types a row hash reads through their own rendering: `FOR JSON`
@@ -862,7 +864,11 @@ class MSSQLEngine(DbapiRows, Engine):
             if int(system) == 189:
                 left.append(f"{t}.{name} (rowversion)")
                 continue
-            if assembly and kind in self.CLR_RENDERED:
+            if int(system) == 98:
+                # a sql_variant as its base type and value: as its value
+                # alone, an `int` 5 and a `bigint` 5 were one
+                c = commercial.VARIANT_SQL.format(c=c)
+            elif assembly and kind in self.CLR_RENDERED:
                 c = self.CLR_RENDERED[kind].format(c=c)
             elif assembly:
                 c = f"cast({c} as varbinary(max))"
@@ -2710,8 +2716,12 @@ class MSSQLEngine(DbapiRows, Engine):
                       " a T-SQL one nobody has run")
 
     #: the declared type as the catalog holds it, with the numbers a
-    #: counterpart needs: precision and scale, a length in characters
-    DECLARED = ("type_name({c}.system_type_id) + case"
+    #: counterpart needs: precision and scale, a length in characters, the
+    #: schema collection an `xml` is typed by. A CLR type by its own name -
+    #: `hierarchyid`, `geography`, a user's assembly type - which its
+    #: `system_type_id`, 240 for every one of them, does not say
+    DECLARED = ("type_name(case when {c}.system_type_id = 240 then"
+                " {c}.user_type_id else {c}.system_type_id end) + case"
                 " when type_name({c}.system_type_id) in ('decimal', 'numeric')"
                 " then '(' + cast({c}.precision as varchar(4)) + ','"
                 " + cast({c}.scale as varchar(4)) + ')'"
@@ -2724,6 +2734,11 @@ class MSSQLEngine(DbapiRows, Engine):
                 " cast({c}.max_length / 2 as varchar(6)) end + ')'"
                 " when type_name({c}.system_type_id) in ('datetime2', 'time')"
                 " then '(' + cast({c}.scale as varchar(2)) + ')'"
+                " when type_name({c}.system_type_id) = 'xml' and"
+                " {c}.xml_collection_id <> 0 then '(' + (select"
+                " schema_name(x.schema_id) + '.' + x.name from"
+                " sys.xml_schema_collections x where x.xml_collection_id ="
+                " {c}.xml_collection_id) + ')'"
                 " else '' end")
 
     PARAMSTYLE = "pyformat"
@@ -2781,11 +2796,15 @@ class MSSQLEngine(DbapiRows, Engine):
                                        "db_name(), 'Collation') as"
                                        " nvarchar(128))")
             return {None: {"null": True, "collation": got[0][0]}}
-        return {str(n): {"null": bool(null), "collation": co}
-                for n, null, co in self._rows(
+        # and whether its bytes are kept in the FILESTREAM store, which a
+        # table built elsewhere holds in itself (`commercial.built_without`)
+        return {str(n): {"null": bool(null), "collation": co,
+                         "filestream": bool(fs)}
+                for n, null, co, fs in self._rows(
                     side, db, "select c.name, c.is_nullable,"
-                              " c.collation_name from sys.columns c where"
-                              f" c.object_id = object_id({MARK})",
+                              " c.collation_name, c.is_filestream from"
+                              " sys.columns c where c.object_id ="
+                              f" object_id({MARK})",
                     (self._qualified(side, db, table),))}
 
     def key_merges(self, side, db, columns, batches, examples=3):
@@ -2842,14 +2861,34 @@ class MSSQLEngine(DbapiRows, Engine):
         """A `geography` or a `geometry` as its SRID and its well-known
         binary with Z and M (`geo`), the same rendering the row hash reads
         it by (`CLR_RENDERED`): the driver hands back SQL Server's own
-        serialisation of it, which no other engine reads."""
+        serialisation of it, which no other engine reads. A `sql_variant`
+        as its base type and value (`commercial.Variant`), a `hierarchyid`
+        as its path, a `datetimeoffset` as the server's text of it, every
+        digit and the offset kept - the driver hands back the first two as
+        bytes and the base value alone, the last at six digits."""
         from .. import canon, geo
         name = canon._split_declared(declared)[0]
+        if name == "sql_variant":
+            return (commercial.VARIANT_SQL.format(c=quoted),
+                    commercial.variant_of)
+        if name == "hierarchyid":
+            return (f"{quoted}.ToString()", str)
+        if name == "datetimeoffset":
+            return (f"convert(varchar(34), {quoted}, 121)",
+                    commercial.offset_time)
         if name not in ("geography", "geometry"):
             return None
         return (f"case when {quoted} is null then null else "
                 + self.CLR_RENDERED[name].format(c=quoted) + " end",
                 geo.of)
+
+    def _value_marks(self, side, db, table, names):
+        """A `sql_variant` written as its base type, a shape through its
+        type's constructor, a `datetimeoffset` from its text with its
+        offset (`commercial.mssql_mark`), by the target column's type."""
+        declared = self._shape(side, db, table)["declared"]
+        got = [commercial.mssql_mark(declared.get(n)) for n in names]
+        return got if any(got) else None
 
     def _nanos_text(self, quoted, declared):
         """A `datetime2` or `time` of seven digits as the server writes

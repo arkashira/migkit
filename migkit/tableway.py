@@ -498,7 +498,7 @@ def choose(eng, db, via, tables=None, facts=None, quick=False, fresh=False,
     order = [r.name for r in rungs]
     if given:
         rungs = _given(rungs, given)
-    masked = set(eng.masked_on_the_way(db))
+    masked = set(eng.masked_on_the_way(db, names))
     facts_for = eng.table_way_facts(db, via, quick=quick, known=known,
                                     sizes=facts)
     m = model(eng, db)
@@ -684,7 +684,8 @@ def carry(eng, job):
     unit = _unit(fact)
     f = eng.table_way_facts(job.db, "builtin")(job.name, fact)
     need = _needs(eng, job.db, job.name,
-                  eng.way_name(job.name) in eng.masked_on_the_way(job.db),
+                  eng.way_name(job.name) in eng.masked_on_the_way(
+                      job.db, [eng.way_name(job.name)]),
                   not job.fresh)
     trials = _trials(eng, job.db, rungs, job.log)
     m = trials.model
@@ -755,15 +756,18 @@ def batch_or_copier(eng, db, name, tables, run, log, masked=(), picks=None,
     tables are the table copier's after the move, each on the way its own
     climb gives without it - said, never asked, never on a verdict (a
     checksum that differs stops the move as before). A table masked on the
-    way (`masked`) has no other way: the move stops there instead. The
-    move's choice (`picks`, kept for the copier) takes each fallen table's
-    new way. Returns the tables that fell to the copier, [] where the
-    program carried them."""
+    way (`masked`) falls to the copier too: the copier carries a masked
+    table through the pair, which writes it through the hop's transforms
+    (`Engine.through_pair`). The move's choice (`picks`, kept for the
+    copier) takes each fallen table's new way. Returns the tables that fell
+    to the copier, [] where the program carried them."""
     w = way(eng, name)
     copier = decide.Rung(
         "copier", "the table copier, each table on the way its climb gives",
         gives=frozenset(set().union(*(x.gives for x in eng.TABLE_WAYS
-                                      if not x.batch))))
+                                      if not x.batch))
+                        | ({"masked on the way"} if eng.copier_masks()
+                           else set())))
     fell, why = [], {}
 
     def go(choice):

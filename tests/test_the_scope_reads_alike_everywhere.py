@@ -12,9 +12,6 @@ from migkit import hopkeys
 from migkit.config import (Endpoint, Hop, build_hop, name_matches,
                            parse_ops, scope_patterns)
 
-#: what this module proves, item by engine (`capabilities.proofs`)
-PROVES = [("scope.objects", "mysql")]
-
 
 def _hop(engine="postgres", **kw):
     return Hop(name="h", engine=engine, source=Endpoint(), target=Endpoint(),
@@ -304,19 +301,11 @@ def test_a_name_rule_that_cannot_be_turned_round_is_refused():
             there.reversed()
 
 
-#: the hop's rules asked with a table's parts: a listed name is split
-#: for them one way (`Hop.parts_of`)
-ASKED_BY_PARTS = ("excluded", "carries", "row_filter", "row_filter_zone",
-                  "column_rules", "target_table_in", "takes_object",
-                  "tolerance")
-
-
 def test_a_listed_table_is_asked_of_the_scope_one_way():
     """A table's listed name is split once, the way names are
-    (`Hop.parts_of`, `Hop.takes_table`, `Engine.in_scope`): split by hand
-    beside them, `public."v1.orders"` broke at the wrong dot and a bare
-    PostgreSQL name was asked outside its schema - by the scope, the row
-    filter, the changes carried and every other rule."""
+    (`Hop.takes_table`, `Engine.in_scope`): split by hand beside them,
+    `public."v1.orders"` broke at the wrong dot and a bare PostgreSQL name
+    was asked outside its schema."""
     import ast
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1] / "migkit"
@@ -325,25 +314,19 @@ def test_a_listed_table_is_asked_of_the_scope_one_way():
         for node in ast.walk(ast.parse(f.read_text())):
             if not (isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in ASKED_BY_PARTS):
+                    and node.func.attr == "excluded"):
                 continue
             for arg in node.args:
                 inner = arg.value if isinstance(arg, ast.Starred) else None
                 if inner is None:
                     continue
                 for sub in ast.walk(inner):
-                    by_dot = (isinstance(sub, ast.Call)
-                              and isinstance(sub.func, ast.Attribute)
-                              and sub.func.attr == "split"
-                              and (not sub.args or (
-                                  isinstance(sub.args[0], ast.Constant)
-                                  and sub.args[0].value == ".")))
-                    if by_dot or (isinstance(sub, ast.Attribute)
-                                  and sub.attr == "_split"):
+                    if isinstance(sub, ast.Attribute) and sub.attr in (
+                            "split", "_split"):
                         bad.append(f"{f.relative_to(root)}:{node.lineno}")
-    # a pattern checked against itself, and the generic engine's own
-    # names, each said where it is
-    allowed = {"hopkeys.py", "engines/generic.py"}
+    # a pattern checked against itself, a listing already in parts, and
+    # the generic engine's own names, each said where it is
+    allowed = {"hopkeys.py", "engines/postgres.py", "engines/generic.py"}
     assert [b for b in bad if b.split(":")[0] not in allowed] == []
 
 
@@ -356,3 +339,266 @@ def test_a_quoted_or_bare_name_is_taken_as_the_engine_names_it():
     my = _hop("mysql", include=["shop.orders"])
     assert my.takes_table("shop", "orders")
     assert not my.takes_table("crm", "orders")
+
+
+# ---- two names that become one (backlog P0-SCOPE 7, item 4) ----------------
+
+def test_names_that_become_one_on_the_target_are_found():
+    listed = [("appdb", "public.app_orders"), ("appdb", "public.orders"),
+              ("appdb", "public.people")]
+    hop = _hop(mapping={"names": {"tables": {"strip_prefix": "app_"}}})
+    assert hop.name_collisions(listed) == {"appdb.public.orders": [
+        "appdb.public.app_orders", "appdb.public.orders"]}
+    hop = _hop(mapping={"tables": {"public.people": "orders"}})
+    assert list(hop.name_collisions(listed)) == ["appdb.public.orders"]
+    # left out, a table lands nowhere
+    hop = _hop(mapping={"tables": {"public.people": "orders"}},
+               exclude=["public.orders"])
+    assert hop.name_collisions(listed) == {}
+    assert _hop().name_collisions(listed) == {}
+
+
+def test_names_that_differ_by_case_are_one_where_the_target_has_none():
+    listed = [("appdb", "Orders"), ("appdb", "orders")]
+    pair = _hop("hetero", options={"source_engine": "mysql",
+                                   "target_engine": "mssql"})
+    assert pair.target_folds_case()
+    assert len(pair.name_collisions(listed)) == 1
+    same = _hop("hetero", options={"source_engine": "mysql",
+                                   "target_engine": "postgres"})
+    assert same.name_collisions(listed) == {}
+    upper = _hop("mysql", mapping={"names": {"tables": {"case": "upper"}}})
+    assert len(upper.name_collisions(listed)) == 1
+
+
+def test_two_databases_into_one_collide_unless_that_is_the_goal():
+    listed = [("a", "public.orders"), ("b", "public.orders")]
+    hop = _hop(db_map={"a": "t", "b": "t"})
+    assert list(hop.name_collisions(listed)) == ["t.public.orders"]
+    hop.goal = "consolidate"
+    assert hop.name_collisions(listed) == {}
+    # read off the rules alone: two databases' tables onto one name land
+    # apart unless the databases do too
+    rules = {"a.public.orders": "x", "b.public.orders": "x"}
+    assert _hop(mapping={"tables": rules}).ambiguous_mapping() == {}
+    assert _hop(mapping={"tables": rules},
+                db_map={"a": "t", "b": "t"}).ambiguous_mapping()
+
+
+def test_the_hop_file_refuses_two_rules_onto_one_name():
+    from migkit import hopkeys
+    raw = {"source": "postgres://u@db.example.com/appdb",
+           "target": "postgres://u@db2.example.com/appdb",
+           "mapping": {"tables": {"public.a": "public.x",
+                                  "public.b": "public.x"}}}
+    got = [p for p in hopkeys.check_hop("h", raw) if p.level == "error"
+           and p.where.endswith("mapping.tables")]
+    assert got and "land on public.x" in got[0].text, got
+    raw["goal"] = "consolidate"
+    assert not [p for p in hopkeys.check_hop("h", raw)
+                if p.where.endswith("mapping.tables")]
+
+
+def test_every_check_and_write_is_refused_on_a_collision():
+    from migkit import cli
+
+    class Eng:
+        def neutral_tables(self, side, db):
+            return ["public.app_orders", "public.orders"]
+    hop = _hop(mapping={"names": {"tables": {"strip_prefix": "app_"}}})
+    said = cli._collided(hop, Eng(), ["appdb"])
+    assert "onto appdb.public.orders" in said, said
+    assert cli._collided(_hop(), Eng(), ["appdb"]) == ""
+
+
+# ---- a check narrower than the move (item 5) --------------------------------
+
+def _logged(tmp_path, **kw):
+    hop = _hop(**kw)
+    hop.report_dir = lambda db=None, _p=tmp_path: (
+        _p / db if db else _p)
+    (tmp_path / "appdb").mkdir(exist_ok=True)
+    return hop
+
+
+def test_a_check_narrower_than_the_move_is_said_as_narrowed(tmp_path,
+                                                            monkeypatch):
+    from migkit import cli, verdict
+
+    class Eng:
+        def __init__(self, hop):
+            self.hop = hop
+
+        def neutral_tables(self, side, db):
+            return [t for t in ("public.orders", "public.log")
+                    if self.hop.takes_table(db, t)]
+    monkeypatch.setattr(cli, "get_engine", Eng)
+    moved = _logged(tmp_path)
+    assert moved.log_scope("appdb", "0/16B3748", "move")
+    now = _logged(tmp_path, exclude=["public.log"])
+    got = cli._narrower_than_moved(now, ["appdb"])
+    assert got == ["appdb.public.log (left out since the move)"], got
+    decided = verdict.decide([{"check": "data", "scope": "appdb",
+                               "status": "ok"}], now,
+                             {"narrower than the move": got})
+    assert decided.status == "incomplete", decided
+    filtered = _logged(tmp_path, mapping={"where": {"orders": "id > 5"}})
+    assert cli._narrower_than_moved(filtered, ["appdb"]) == [
+        "appdb.public.orders (rows filtered otherwise than moved)"]
+    # the scope the move took is the scope now: nothing narrowed
+    assert cli._narrower_than_moved(moved, ["appdb"]) == []
+
+
+def test_a_watch_of_counts_alone_is_never_same(tmp_path, monkeypatch):
+    from migkit import cli
+    import migkit.config as cfg
+    hop = _logged(tmp_path)
+    monkeypatch.setattr(cfg, "get_hop", lambda name: hop)
+    monkeypatch.setattr(cli, "get_hop", lambda name: hop, raising=False)
+    monkeypatch.setattr(cli, "_require_configured", lambda h: None)
+    monkeypatch.setattr(cli, "get_engine",
+                        lambda h: type("E", (), {
+                            "checks": ["counts", "data"],
+                            "planned_checks": lambda self: [],
+                            "databases": lambda self: ["appdb"]})())
+    monkeypatch.setattr(cli, "run_checks", lambda *a, **k: (
+        [{"check": "counts", "scope": "appdb", "status": "ok",
+          "detail": "src=3 dst=3"}], {}))
+    monkeypatch.setattr(cli, "_watched", lambda *a, **k: None)
+    got = cli._monitor("h", "appdb", 1, "counts", 1)
+    assert got.status == "incomplete", got
+
+
+# ---- every scope change kept with its position (item 7) ---------------------
+
+def test_a_scope_change_is_logged_once_with_its_position(tmp_path):
+    hop = _logged(tmp_path)
+    assert hop.log_scope("appdb", "0/10", "move")
+    assert not hop.log_scope("appdb", "0/20", "tail"), "the same scope"
+    wider = _logged(tmp_path, exclude=["public.log"])
+    assert wider.log_scope("appdb", "0/30", "tail")
+    log = hop.scope_log("appdb")
+    assert [(e["by"], e["position"]) for e in log] == [("move", "0/10"),
+                                                       ("tail", "0/30")]
+    assert log[1]["scope"]["exclude"] == ["public.log"]
+
+    def reached(have, want):
+        return int(have.split("/")[1], 16) >= int(want.split("/")[1], 16)
+    # which scope a position was taken under
+    assert hop.scope_at("appdb", "0/18", reached).exclude == []
+    assert hop.scope_at("appdb", "0/40", reached).exclude == ["public.log"]
+    assert hop.scope_at("appdb", by="move").exclude == []
+    assert _logged(tmp_path / "x").scope_at("appdb") is None
+
+
+def test_a_delta_keeps_the_position_its_scope_took_effect_at(tmp_path):
+    from migkit.engines.base import Engine
+
+    class Delta(Engine):
+        CANON_ENGINE = "postgres"
+
+        def delta_verify(self, db, limit=20000, log=None):
+            return []
+
+        def log_position(self, side, db):
+            return "0/2A"
+    hop = _logged(tmp_path)
+    Delta(hop).delta_in_scope("appdb")
+    import json
+    kept = json.loads((tmp_path / "appdb" / Engine.DELTA_SCOPE).read_text())
+    assert kept["position"] == "0/2A", kept
+    assert hop.scope_log("appdb")[-1]["by"] == "delta"
+    assert hop.scope_log("appdb")[-1]["position"] == "0/2A"
+
+
+# ---- partitions, by their table or by their own name (item 6) ---------------
+
+def test_a_partition_goes_by_its_table_unless_a_rule_names_it():
+    root, leaf = ["public", "orders"], ["public", "orders_2020"]
+    # by its table: left out with it, taken with it
+    assert not _hop(exclude=["public.orders"]).takes_partition(
+        "appdb", leaf, root)
+    assert _hop(include=["public.orders"]).takes_partition("appdb", leaf,
+                                                           root)
+    # by its own name: one partition left out, its table taken
+    assert not _hop(exclude=["orders_2020"]).takes_partition(
+        "appdb", leaf, root)
+    assert _hop(exclude=["orders_2019"]).takes_partition("appdb", leaf,
+                                                         root)
+    # one partition taken, its table not
+    assert _hop(include=["orders_2020"]).takes_partition("appdb", leaf,
+                                                         root)
+    # a rule naming both is about tables: its table's answer stands
+    assert not _hop(include=["public.*"], exclude=["public.orders"]
+                    ).takes_partition("appdb", leaf, root)
+
+
+def test_the_move_and_the_check_read_a_partition_one_way(monkeypatch):
+    from migkit import movers, planner
+    from migkit.engines.postgres import PostgresEngine
+    roots = {"public.orders_2020": "public.orders",
+             "public.orders_2021": "public.orders"}
+    hop = _hop(exclude=["orders_2020"])
+    eng = PostgresEngine(hop)
+    monkeypatch.setattr(PostgresEngine, "partition_roots",
+                        lambda self, side, db, ask=None: roots)
+    assert not eng.in_scope("appdb", "public.orders_2020")
+    assert eng.in_scope("appdb", "public.orders_2021")
+    assert eng.in_scope("appdb", "public.orders")
+    assert movers._left_out(hop, "appdb", "public.orders_2020", roots)
+    assert not movers._left_out(hop, "appdb", "public.orders_2021", roots)
+    got = {d.table: d.path for d in planner.plan(
+        hop, "appdb", "pgdump", ["public.orders", "public.orders_2020",
+                                 "public.orders_2021"], roots=roots,
+        choice={})}
+    assert got["public.orders_2020"] == planner.LEFT, got
+    assert got["public.orders_2021"] != planner.LEFT, got
+
+
+def test_a_partition_of_a_masked_table_is_compared_by_the_pair(monkeypatch):
+    from migkit.engines.postgres import PostgresEngine
+    hop = _hop(options={"mask_on_write": {"public.orders.email": "null"}})
+    eng = PostgresEngine(hop)
+    monkeypatch.setattr(PostgresEngine, "partition_roots",
+                        lambda self, side, db, ask=None: {
+                            "public.orders_2020": "public.orders"})
+    # asked by its own name it matched no rule, and was compared here
+    assert not eng.through_pair("appdb", "public.orders_2020")
+    assert eng._paired("appdb", "public.orders_2020")
+    assert not eng._paired("appdb", "public.people")
+
+
+@needs_docker
+def test_postgres_a_masked_partitioned_table_is_proved_by_its_table(
+        pg_pair, tmp_path):
+    from migkit import cli
+    from migkit.engines.postgres import PostgresEngine
+    from tests.conftest import psql
+    ddl = ("drop table if exists parted; create table parted (id int, at"
+           " date, email text, primary key (id, at)) partition by range"
+           " (at); create table parted_a partition of parted for values"
+           " from ('2020-01-01') to ('2021-01-01'); create table parted_b"
+           " partition of parted for values from ('2021-01-01') to"
+           " ('2022-01-01')")
+    for port in (pg_pair["src"], pg_pair["dst"]):
+        assert psql(port, ddl).returncode == 0
+    psql(pg_pair["src"], "insert into parted values (1, '2020-05-01',"
+                         " 'a@example.com'), (2, '2021-05-01',"
+                         " 'b@example.com')")
+    hop = Hop(name="parted", engine="postgres",
+              source=Endpoint(host="127.0.0.1", port=pg_pair["src"],
+                              user="postgres", password="test"),
+              target=Endpoint(host="127.0.0.1", port=pg_pair["dst"],
+                              user="postgres", password="test"),
+              databases=["postgres"], include=["public.parted"],
+              options={"mask_on_write": {"parted.email": "null"}})
+    hop.report_dir = lambda db=None, _p=tmp_path: _p
+    eng = PostgresEngine(hop)
+    ck = cli._checkpoint(hop, tmp_path / "move.json")
+    cli._copy_table_by(eng, "postgres", "public", "parted", 100, ck,
+                       lambda m: None)
+    assert psql(pg_pair["dst"], "select count(*) from parted_b where email"
+                                " is null").stdout.strip() == "1"
+    got = eng.check_data("postgres") + eng.check_counts("postgres")
+    assert got and all(r.status == "ok" for r in got), \
+        [(r.scope, r.status, r.detail) for r in got]

@@ -62,7 +62,12 @@ def test_parameters_are_marked_as_each_driver_reads_them():
     ("timestamp with time zone", "timestamp"),
     ("timestamp with local time zone", "timestamp"), ("VARCHAR2(20)", "text"),
     ("CHAR(5)", "text"), ("BLOB", "bytes"), ("BINARY_DOUBLE", "float"),
-    ("INTERVAL DAY(2) TO SECOND(6)", None)])
+    ("INTERVAL DAY(2) TO SECOND(6)", "interval"),
+    # a NUMBER of binary precision, never a double
+    ("FLOAT(126)", "decimal"), ("XMLTYPE", "xml"),
+    ("SDO_GEOMETRY", "geometry"), ("BFILE", "bytes"), ("JSON", "json"),
+    ("BOOLEAN", "boolean"), ('"APP"."ADDRESS_T"', "json"),
+    ("ROWID", None), ("ANYDATA", None)])
 def test_types(declared, cls):
     from migkit import canon
     assert canon.type_class("oracle", declared) == cls

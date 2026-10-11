@@ -43,9 +43,19 @@ everything committed before a moment once it holds a token of a request
 made after it (`position_reached`); a token of another shape cannot say,
 and says so. The subscription is the SAP user's: two hops reading one
 extractor as one user would take each other's deltas, which `assess`
-says; it stays on the system after the follow ends, to be ended in
-ODQMON or by `TerminateDeltasFor<entity set>` - migkit changes nothing
-there itself.
+says. It is the one thing of migkit's own on the SAP system: once the
+follow ends for good - the cutover's point of no return - each
+subscription the follow opened is ended by the service's
+`TerminateDeltasFor<entity set>` (`follow_left`), and one the service
+offers no way to end is said, left for ODQMON.
+
+**The database under it.** A database bought through SAP is used under a
+runtime licence, which allows no program that is not SAP's to read or
+write it: a side of Oracle, SQL Server, Db2, ASE or HANA holding an SAP
+system's tables (its clients and its data dictionary, `T000` and `DD02L`)
+is refused before anything reads it, unless the hop says the database's
+licence is full-use (`sap_licence`, `licence_rows`) - in `assess`, the
+gate before a step, and every check.
 
 **Proved.** A comparison reads the whole entity set again, without
 tracking changes, through migkit's own renderer - there is no digest on
@@ -876,8 +886,9 @@ class SapOdpEngine(Engine):
         add("info", "the SAP user", "the delta subscriptions are this SAP"
                                     " user's: two hops reading one extractor"
                                     " as one user take each other's deltas;"
-                                    " end a subscription in ODQMON after the"
-                                    " follow")
+                                    " the ones this hop's follow opens are"
+                                    " ended at the cutover's point of no"
+                                    " return")
         add("info", "users and authorisations", "SAP authorisations are the"
                                                 " system's roles (PFCG), not"
                                                 " carried")
@@ -885,6 +896,199 @@ class SapOdpEngine(Engine):
 
     def _assess_extra(self):
         return self.reach_items("src")
+
+    # ---- the subscription ended with the follow (backlog ER6) --------------
+
+    def _function_import(self, side, db, name):
+        """(the HTTP method, the name) of a function import the service's
+        metadata lists, or None where it lists none of that name."""
+        client, _ = self._service(side, db)
+        for fi in getattr(client.schema, "function_imports", ()) or ():
+            if getattr(fi, "name", None) == name:
+                return str(getattr(fi, "http_method", None) or "POST") \
+                    .upper(), name
+        return None
+
+    def _call(self, side, db, method, name):
+        """A function import called: a POST carries the CSRF token Gateway
+        hands out to a GET that asks for one."""
+        url = self._root(side, db) + name
+        s = self._session(side)
+        if method == "GET":
+            got = s.get(url, params=self._params(side), timeout=120)
+        else:
+            head = s.get(self._root(side, db), params=self._params(side),
+                         headers={"X-CSRF-Token": "Fetch"}, timeout=60)
+            token = head.headers.get("x-csrf-token") or ""
+            got = s.post(url, params=self._params(side),
+                         headers={"X-CSRF-Token": token}, timeout=120)
+        if got.status_code >= 400:
+            raise Refused(got.status_code, got.text)
+
+    def follow_left(self, db):
+        """The delta subscriptions this hop's follow opened on the SAP
+        system, ended now that the follow is ended for good - at the
+        cutover's point of no return (`cutover.no_return`): each entity
+        set whose delta initialisation the follow made (`_initial`) and
+        whose service offers `TerminateDeltasFor<entity set>`. The one
+        thing migkit ends on an SAP system, and only its own: left, the
+        subscription keeps filling the delta queue for a reader that is
+        gone. ([ended], [left with why]); a subscription the service
+        offers no way to end is left for ODQMON, and said."""
+        ended, left = [], []
+        for table, entry in sorted(self._initial(db).items()):
+            if not (entry or {}).get("token") or entry.get("ended"):
+                continue
+            name = f"TerminateDeltasFor{table}"
+            try:
+                fi = self._function_import("src", db, name)
+                if fi is None:
+                    left.append(f"{table}: the service offers no way to end"
+                                " its subscription - end it in ODQMON")
+                    continue
+                self._call("src", db, *fi)
+            except (Refused, OSError) as e:
+                left.append(f"{table}: {str(e).splitlines()[0][:160]}")
+                continue
+            got = self._initial(db)
+            got.setdefault(table, {})["ended"] = datetime.datetime.now(
+                datetime.timezone.utc).isoformat()
+            self._keep_initial(db, got)
+            ended.append(table)
+        return ended, left
+
+
+# ---- the database under an SAP system (backlog ER6) -------------------------
+#
+# A database bought through SAP comes with a runtime licence, which allows
+# the SAP system's own access and its administration - not a program that
+# is not SAP's reading or writing its tables (SAP Note 581312 for Oracle,
+# and as much for SQL Server, Db2, ASE and HANA bought that way). A side
+# that holds an SAP system's tables is said before anything reads it, and
+# read only where the hop says the licence was bought apart from SAP
+# (`sap_licence: full-use`); the application data is read through its ODP
+# services otherwise (engine: sapodp).
+
+#: the statement each engine an SAP system runs on answers with the schemas
+#: that hold an SAP system: its clients (`T000`) and its data dictionary
+#: (`DD02L`) together, which no application but SAP's keeps both of
+SYSTEM_SQL = {
+    "oracle": ("select owner from all_tables where table_name in ('T000',"
+               " 'DD02L') group by owner having count(*) = 2"),
+    "mssql": ("select schema_name(schema_id) from sys.tables where name in"
+              " ('T000', 'DD02L') group by schema_id having count(*) = 2"),
+    "db2": ("select tabschema from syscat.tables where tabname in ('T000',"
+            " 'DD02L') group by tabschema having count(*) = 2"),
+    "db2i": ("select table_schema from qsys2.systables where table_name in"
+             " ('T000', 'DD02L') group by table_schema having count(*) = 2"),
+    "db2zos": ("select creator from sysibm.systables where name in ('T000',"
+               " 'DD02L') group by creator having count(*) = 2"),
+    "ase": ("select user_name(uid) from sysobjects where type = 'U' and name"
+            " in ('T000', 'DD02L') group by uid having count(*) = 2"),
+    "hana": ("select schema_name from sys.tables where table_name in"
+             " ('T000', 'DD02L') group by schema_name having count(*) = 2"),
+}
+LICENCES = ("full-use", "runtime")
+LICENCE_SCOPE = "the SAP licence"
+
+
+def _side_engines(hop, eng):
+    """[(side, its engine's name, the engine reading it)] of the sides an
+    SAP system can run on."""
+    from . import canonical, engine_named
+    if hop.engine == "hetero":
+        o = hop.options or {}
+        names = {"src": canonical(o.get("source_engine") or ""),
+                 "dst": canonical(o.get("target_engine") or "")}
+    else:
+        names = {"src": canonical(hop.engine), "dst": canonical(hop.engine)}
+    out = []
+    for side, name in names.items():
+        if name in SYSTEM_SQL:
+            mine = eng if getattr(eng, "CANON_ENGINE", "") == name \
+                else engine_named(name, hop)
+            out.append((side, name, mine))
+    return out
+
+
+def sap_systems(hop, eng):
+    """{side: [the schemas holding an SAP system]} of the hop's sides
+    whose engine an SAP system can run on - read from each side's
+    catalogue once a run; a side whose catalogue cannot be read is not
+    named (its own errors say why, on the read that needs it)."""
+    known = eng.__dict__.setdefault("_sap_systems", {}) \
+        if hasattr(eng, "__dict__") else {}
+    if "found" in known:
+        return known["found"]
+    found = {}
+    for side, name, reader in _side_engines(hop, eng):
+        schemas = set()
+        for db in hop.databases or [""]:
+            try:
+                rows = reader._rows(side, db, SYSTEM_SQL[name])
+            except Exception:  # noqa: BLE001 - not readable: not named
+                continue
+            schemas.update(str(r[0]).strip() for r in rows if r and r[0])
+        if schemas:
+            found[side] = sorted(schemas)
+    known["found"] = found
+    return found
+
+
+def licence(hop):
+    """The hop's `sap_licence`: "full-use", "runtime", or "" where it says
+    none."""
+    got = str((hop.options or {}).get("sap_licence") or "").strip().lower()
+    got = got.replace("_", "-").replace(" ", "-")
+    if got and got not in LICENCES:
+        raise SystemExit(f"sap_licence: {got} - full-use or runtime")
+    return got
+
+
+def licence_rows(hop, eng):
+    """What `assess` and the gate before a step say of a side that holds
+    an SAP system: refused under a runtime licence, or where the hop says
+    none; said and gone on from where it says the licence is full-use."""
+    found = sap_systems(hop, eng)
+    if not found:
+        return []
+    said = licence(hop)
+    rows = []
+    for side, schemas in sorted(found.items()):
+        where = (f"the {'source' if side == 'src' else 'target'} holds an"
+                 f" SAP system's tables (schema {', '.join(schemas[:3])})")
+        if said == "full-use":
+            rows.append({"level": "pass", "scope": LICENCE_SCOPE,
+                         "item": f"{'source' if side == 'src' else 'target'}"
+                                 ": a direct read", "detail":
+                         f"{where}; the hop says its database licence is"
+                         " full-use, bought apart from SAP, so reading it"
+                         " directly is the customer's to do"})
+            continue
+        rows.append({"level": "fail", "scope": LICENCE_SCOPE,
+                     "item": f"{'source' if side == 'src' else 'target'}:"
+                             " a direct read",
+                     "detail": f"{where}: a database bought through SAP is"
+                               " used under a runtime licence, which allows"
+                               " no program that is not SAP's to read or"
+                               " write it"
+                               + (" (sap_licence: runtime)" if said else "")
+                               + "  [fix] read the application's data"
+                                 " through its ODP services (engine: hetero,"
+                                 " source_engine: sapodp); where the"
+                                 " database's licence was bought apart from"
+                                 " SAP, say so with sap_licence: full-use"})
+    return rows
+
+
+def refuse_runtime(hop, eng):
+    """Stop before a direct read of a side that holds an SAP system, where
+    the hop does not say its licence is full-use (`licence_rows`)."""
+    bad = [r for r in licence_rows(hop, eng) if r["level"] == "fail"]
+    if bad:
+        raise SystemExit(f"{hop.name}: nothing was read - "
+                         + "; ".join(f"{r['item']}: {r['detail']}"
+                                     for r in bad))
 
 
 def _counted(n):

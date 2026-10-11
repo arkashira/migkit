@@ -22,7 +22,7 @@ Written 2026-09-30 without a z/OS to run it against; IBM Z Xplore gives a
 free shared z/OS with Db2 for a manual proof.
 """
 from .base import Result
-from .db2 import Db2Engine, large_values
+from .db2 import Db2Engine, granted, large_values
 from .dbapi import MARK
 
 #: the declared type from `SYSIBM.SYSCOLUMNS`, with the numbers a
@@ -40,6 +40,8 @@ DECLARED = ("case when coltype = 'DECIMAL' then 'DECIMAL(' ||"
             " rtrim(char(scale)) || ')'"
             " when coltype = 'FLOAT' and length = 4 then 'REAL'"
             " when coltype = 'FLOAT' then 'DOUBLE'"
+            " when coltype = 'DECFLOAT' then 'DECFLOAT(' || case when"
+            " length = 8 then '16' else '34' end || ')'"
             " else rtrim(coltype) end")
 
 #: why a z/OS source is not followed, in the words `assess` and the
@@ -49,6 +51,130 @@ NO_OPEN_LOG = ("Db2 for z/OS hands its log out only to licensed code: a"
                " the change tables IBM's replication product fills - no"
                " open reader exists, so a z/OS source moves by copies, each"
                " proved by check")
+
+#: the codes of `SYSCOLUMNS.DEFAULT` a column the server fills itself
+#: carries - a ROWID, a row change timestamp, a period's row begin or
+#: end, a transaction start id - beside a plain default (Y, B, N, ...)
+#: and an identity (I, J), which the counters read
+_GENERATED = ("'A'", "'D'", "'E'", "'F'", "'K'", "'M'", "'Q'", "'R'",
+              "'X'")
+
+#: Db2 for z/OS's catalogue (`SYSIBM`), as IBM documents it, answering
+#: `sqlcatalog.QUESTIONS`
+CATALOGUE = {
+    "keyless": (
+        "select t.name from sysibm.systables t where t.creator = {schema}"
+        " and t.type = 'T' and not exists (select 1 from sysibm.sysindexes"
+        " i where i.tbcreator = t.creator and i.tbname = t.name and"
+        " i.uniquerule in ('P', 'U', 'C', 'R', 'N')) order by 1"),
+    "fks": (
+        "select r.tbname, r.relname, f.colname, r.reftbname, k.colname,"
+        " r.enforced from sysibm.sysrels r join sysibm.sysforeignkeys f on"
+        " f.creator = r.creator and f.tbname = r.tbname and f.relname ="
+        " r.relname join sysibm.syskeys k on k.ixcreator = r.ixowner and"
+        " k.ixname = r.ixname and k.colseq = f.colseq where r.creator ="
+        " {schema} order by r.tbname, r.relname, f.colseq"),
+    # a trigger on z/OS cannot be switched off: one there fires
+    "triggers": (
+        "select tbname, name, 'Y' from sysibm.systriggers where tbowner ="
+        " {schema} order by 1, 2"),
+    # an index left rebuild pending is in the database's exception table,
+    # which only a command shows: the catalogue keeps no state to read
+    "indexes": (
+        "select i.tbname, i.name, case when i.uniquerule = 'D' then 'N'"
+        " else 'Y' end, k.colname, '' from sysibm.sysindexes i join"
+        " sysibm.syskeys k on k.ixcreator = i.creator and k.ixname ="
+        " i.name where i.tbcreator = {schema} order by i.tbname, i.name,"
+        " k.colseq"),
+    "checks": (
+        "select c.tbname, c.checkname, 'check', case when t.checkflag ="
+        " 'C' then 'check pending' else '' end from sysibm.syschecks c"
+        " join sysibm.systables t on t.creator = c.tbowner and t.name ="
+        " c.tbname where c.tbowner = {schema} union all select r.tbname,"
+        " r.relname, 'foreign key', case when r.enforced = 'N' then 'not"
+        " enforced' when t.checkflag = 'C' then 'check pending' else ''"
+        " end from sysibm.sysrels r join sysibm.systables t on t.creator ="
+        " r.creator and t.name = r.tbname where r.creator = {schema}"),
+    # a partition's rows as the real-time statistics keep them, which the
+    # server updates as it writes and externalizes every few minutes
+    "partitions": (
+        "select t.name, rtrim(char(p.partition)), p.limitkey,"
+        " s.totalrows from sysibm.systables t join sysibm.systablepart p on"
+        " p.dbname = t.dbname and p.tsname = t.tsname left join"
+        " sysibm.systablespacestats s on s.dbname = p.dbname and s.name ="
+        " p.tsname and s.partition = p.partition where t.creator = {schema}"
+        " and t.type = 'T' and p.partition > 0 order by 1, p.partition"),
+    "matviews": (
+        "select v.name, case when v.refresh_time is null or"
+        " year(v.refresh_time) = 1 then 'not populated' else '' end, ''"
+        " from sysibm.sysviews v join sysibm.systables t on t.creator ="
+        " v.creator and t.name = v.name where v.creator = {schema} and"
+        " t.type = 'M' order by 1"),
+    "rls": (
+        "select c.tbname, c.name || case c.control_type when 'R' then ' (row"
+        " permission)' else ' (column mask)' end, case when c.enable = 'Y'"
+        " and ((c.control_type = 'R' and t.control in ('R', 'B')) or"
+        " (c.control_type = 'M' and t.control in ('C', 'B'))) then 'Y' else"
+        " 'N' end from sysibm.syscontrols c join sysibm.systables t on"
+        " t.creator = c.tbschema and t.name = c.tbname where c.tbschema ="
+        " {schema} order by 1, 2"),
+    "generated": (
+        "select tbname, name, \"DEFAULT\" from sysibm.syscolumns where"
+        f" tbcreator = {{schema}} and \"DEFAULT\" in ({', '.join(_GENERATED)})"
+        " order by 1, 2"),
+    # z/OS keeps no collation of a column: text sorts by the table's
+    # encoding scheme (EBCDIC, ASCII or Unicode), which orders it otherwise
+    "collation": (
+        "select name, '', encoding_scheme from sysibm.systables where"
+        " creator = {schema} and type = 'T' order by 1"),
+    "charset": (
+        "select tbname, name, rtrim(char(ccsid)) from sysibm.syscolumns"
+        " where tbcreator = {schema} and coltype in ('CHAR', 'VARCHAR',"
+        " 'LONGVAR', 'CLOB', 'GRAPHIC', 'VARG', 'DBCLOB') order by 1, 2"),
+    "owners": (
+        "select case type when 'V' then 'view' else 'table' end, name,"
+        " owner from sysibm.systables where creator = {schema} and type in"
+        " ('T', 'V', 'M') union all select case routinetype when 'P' then"
+        " 'procedure' else 'function' end, name, owner from"
+        " sysibm.sysroutines where schema = {schema} union all select"
+        " 'sequence', name, owner from sysibm.syssequences where schema ="
+        " {schema} and seqtype = 'S'"),
+    "grants": granted("sysibm.systabauth", "tcreator", "ttname", (
+        ("alterauth", "ALTER"), ("deleteauth", "DELETE"),
+        ("indexauth", "INDEX"), ("insertauth", "INSERT"),
+        ("selectauth", "SELECT"), ("updateauth", "UPDATE"),
+        ("refauth", "REFERENCES"), ("triggerauth", "TRIGGER"))),
+    "seq_grants": granted("sysibm.syssequenceauth", "schema", "name", (
+        ("useauth", "USAGE"), ("alterauth", "ALTER"))),
+    # the largest value the server has handed out, and the step after it;
+    # a counter that has handed out none starts where it was made to
+    "sequences": (
+        "select name, coalesce(maxassignedval + increment, start) from"
+        " sysibm.syssequences where schema = {schema} and seqtype = 'S'"),
+    "identity": (
+        "select d.dname, d.dcolname, coalesce(s.maxassignedval +"
+        " s.increment, s.start) from sysibm.syssequences s join"
+        " sysibm.syssequencesdep d on d.bsequenceid = s.sequenceid where"
+        " d.dcreator = {schema} and s.seqtype = 'I'"),
+    "objects": (
+        "select case type when 'V' then 'view' else 'alias' end, name, ''"
+        " from sysibm.systables where creator = {schema} and type in ('V',"
+        " 'A') union all select case routinetype when 'P' then 'procedure'"
+        " else 'function' end, specificname, '' from sysibm.sysroutines"
+        " where schema = {schema} union all select 'trigger', name, tbname"
+        " from sysibm.systriggers where tbowner = {schema} union all select"
+        " 'sequence', name, '' from sysibm.syssequences where schema ="
+        " {schema} and seqtype = 'S'"),
+    "options": " union all ".join(
+        f"select name, '{word}', {col} from sysibm.systables where creator"
+        " = {schema} and type = 'T'" for word, col in (
+            ("data capture", "datacapture"), ("append", "append"),
+            ("encoding scheme", "encoding_scheme"),
+            ("audit", "audittype"))),
+    "ids": (
+        "select name, rtrim(char(dbid)) || '.' || rtrim(char(obid)) from"
+        " sysibm.systables where creator = {schema} and type = 'T'"),
+}
 
 
 class Db2ZosEngine(Db2Engine):

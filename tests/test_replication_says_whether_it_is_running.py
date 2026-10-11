@@ -190,7 +190,7 @@ def test_named_rows_pair_values_with_the_columns_they_came_from():
     class Cur:
         description = (("Replica_IO_Running",), ("Last_IO_Error",))
 
-        def execute(self, sql):
+        def execute(self, sql, args=None):
             self.sql = sql
 
         def fetchall(self):
@@ -203,6 +203,8 @@ def test_named_rows_pair_values_with_the_columns_they_came_from():
             return False
 
     class Conn:
+        open = True
+
         def cursor(self):
             return Cur()
 
@@ -214,7 +216,8 @@ def test_named_rows_pair_values_with_the_columns_they_came_from():
               target=Endpoint(host="t", port=3306, user="u", password="p"),
               databases=["appdb"])
     eng = MySQLEngine(hop)
-    eng._conn = lambda side: Conn()
+    # a statement that reads is asked on the connection a thread keeps
+    eng._kept = lambda side, fresh=False: Conn()
     assert eng._q_named("dst", "show replica status") == [
         {"Replica_IO_Running": "Connecting", "Last_IO_Error": "boom"}]
 

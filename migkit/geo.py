@@ -18,6 +18,7 @@ little-endian, x the longitude. Two sides holding the same shape write
 the same bytes, and `text` is them with the SRID in front.
 """
 import json
+import math
 import struct
 
 #: ISO type codes; +1000 Z, +2000 M, +3000 ZM
@@ -29,6 +30,14 @@ CODES = {v: k for k, v in KINDS.items()}
 #: stores and reads that way: the geographic ones. Asked of the server
 #: where it can be (`mysql_axis`); these are the ones every server has
 LAT_FIRST = {4326, 4258, 4269, 4230, 4283, 4617, 4674, 4759, 4148}
+
+#: Oracle's own numbers for coordinate systems EPSG numbers too, from
+#: Oracle Spatial's catalogue (`MDSYS.CS_SRS`, its "Longitude / Latitude"
+#: systems): one system, two numbers, so a shape Oracle keeps at 8307
+#: meets the same shape PostGIS keeps at 4326. Both are longitude first.
+#: Written into any other engine at the EPSG number, which is the one
+#: those engines know; into Oracle as it was read
+EPSG = {8307: 4326, 8265: 4269, 8267: 4267}
 
 
 class Shape(tuple):
@@ -285,7 +294,104 @@ def ewkb_hex(value):
     return bytes(raw).hex().upper()
 
 
-def text(value):
-    """The canonical text: `SRID=4326;` and the ISO WKB in capitals."""
+def as_epsg(value):
+    """The shape at the EPSG number of its coordinate system, where its
+    SRID is Oracle's own number for one (`EPSG`)."""
     s = of(value)
+    srid = EPSG.get(s.srid)
+    return s if srid is None else Shape(srid, s[1], s[2], s[3], s[4])
+
+
+def text(value):
+    """The canonical text: `SRID=4326;` and the ISO WKB in capitals - the
+    SRID as EPSG numbers it (`EPSG`)."""
+    s = as_epsg(value)
     return f"SRID={s.srid};{wkb(s).hex().upper()}"
+
+
+def wkt(value):
+    """Well-known text of a shape as SQL Server reads it, which takes Z
+    and M from text and not from binary: each number the shortest text
+    that reads back as the same double, a point's Z and M after its X and
+    Y - `NULL` for the Z of one with an M and no Z - and a point with no
+    coordinates `EMPTY`."""
+    s = of(value)
+
+    def pt(p, z, m):
+        parts = [repr(float(p[0])), repr(float(p[1]))]
+        if z or m:
+            parts.append(repr(float(p[2])) if z else "NULL")
+        if m:
+            parts.append(repr(float(p[2 + z])))
+        return " ".join(parts)
+
+    def ring(points, z, m):
+        return "(" + ", ".join(pt(p, z, m) for p in points) + ")"
+
+    def one(kind, z, m, body):
+        name = kind.upper()
+        if kind == "Point":
+            if not body or all(math.isnan(float(v)) for v in body[:2]):
+                return "POINT EMPTY"
+            return f"POINT ({pt(body, z, m)})"
+        if not body:
+            return f"{name} EMPTY"
+        if kind == "LineString":
+            return f"{name} {ring(body, z, m)}"
+        if kind == "Polygon":
+            return f"{name} (" + ", ".join(ring(r, z, m) for r in body) + ")"
+        if kind == "MultiPoint":
+            inner = [f"({pt(pb, pz, pm)})" for _, pz, pm, pb in body]
+        elif kind == "MultiLineString":
+            inner = [ring(pb, pz, pm) for _, pz, pm, pb in body]
+        elif kind == "MultiPolygon":
+            inner = ["(" + ", ".join(ring(r, pz, pm) for r in pb) + ")"
+                     for _, pz, pm, pb in body]
+        else:
+            inner = [one(pk, pz, pm, pb) for pk, pz, pm, pb in body]
+        return f"{name} (" + ", ".join(inner) + ")"
+    return one(s.kind, s[2], s[3], s[4])
+
+
+def _turn(points):
+    """Twice the area a ring encloses, positive where it runs
+    counter-clockwise, with x the longitude: each step across the
+    antimeridian taken the short way, so a ring around the date line is
+    the small ring it is."""
+    xs, ys, shift = [], [], 0.0
+    for p in points:
+        x, y = float(p[0]), float(p[1])
+        if xs:
+            step = x + shift - xs[-1]
+            if step > 180:
+                shift -= 360
+            elif step < -180:
+                shift += 360
+        xs.append(x + shift)
+        ys.append(y)
+    return sum(xs[i] * ys[(i + 1) % len(xs)] - xs[(i + 1) % len(xs)] * ys[i]
+               for i in range(len(xs)))
+
+
+def _polygons(kind, body):
+    if kind == "Polygon":
+        yield body
+    elif kind in ("MultiPolygon", "GeometryCollection"):
+        for pk, _, _, pb in body:
+            yield from _polygons(pk, pb)
+
+
+def misoriented(value):
+    """Whether a shape holds a polygon whose outer ring runs clockwise, or
+    a hole that runs counter-clockwise (`_turn`). PostGIS and MySQL take
+    a polygon's rings either way round; SQL Server's `geography` takes
+    the inside of a ring to be on its left, so an outer ring drawn
+    clockwise is the rest of the globe there, and Oracle holds a polygon
+    so drawn as not valid."""
+    s = of(value)
+    for rings in _polygons(s.kind, s[4]):
+        for i, r in enumerate(rings):
+            area = _turn(r)
+            if (i == 0 and area < 0) or (i > 0 and area > 0):
+                return True
+    return False

@@ -58,6 +58,8 @@ import json
 from .. import decide, nanotime, pieces
 from . import warehouse_sql
 from .base import Engine, Result
+from .bigquery_changes import BigQueryChanges
+from .bigquery_checks import BigQueryChecks
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 
 #: the declared type from `information_schema.columns`, with the numbers a
@@ -217,7 +219,7 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
 
     def neutral_tables(self, side, db):
         return [t for t in self._table_names(side, db)
-                if not self._own(t) and not self.hop.excluded(db, t)]
+                if not self._own(t) and self.in_scope(db, t)]
 
     def _assess_extra(self):
         return self.reach_items("dst")
@@ -2158,7 +2160,7 @@ class SnowflakeEngine(FoldsToCapitals, _CatalogWarehouse):
             conn.close()
 
 
-class BigQueryEngine(_Warehouse):
+class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
     """Google BigQuery. The endpoint's `database` option is the project,
     a hop's databases its datasets, and `location` the datasets' region
     where it is not the default; `credentials_file` a service account's
@@ -2168,6 +2170,9 @@ class BigQueryEngine(_Warehouse):
     true` signs in as nobody, which only an emulator takes."""
     READS_BILLED = True
     CANON_ENGINE = "bigquery"
+    #: the SQL a hop's row filter and defaults are written in and
+    #: translated to (sqlglot's name for it)
+    SQL_DIALECT = "bigquery"
     DIGEST_DIALECT = "bigquery"
     #: large values - a row holds up to 100 MB: sized from the free listing
     #: of rows (`row_sizes`), never a billed scan; hashed where they lie in
@@ -2752,7 +2757,9 @@ class BigQueryEngine(_Warehouse):
         history, and the tables migkit keeps here."""
         items = super().reach_items(side)
         if side != "dst":
-            return items
+            # a source's inventory of what a copy leaves (`_handwork`),
+            # and what following it takes
+            return items + self._source_items() + self._tail_items()
         try:
             left = self._loads_left(side)
         except Exception:  # noqa: BLE001 - said, not a stop

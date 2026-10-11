@@ -8,7 +8,8 @@ with {"error": ...} for a refusal. It imports nothing of migkit's.
 
 The request:
 
-    {"service": "rds" | "dds" | "iam" | "credentials",
+    {"service": "rds" | "dds" | "gaussdb" | "geminidb" | "iam" |
+                "credentials",
      "action": the client's method (`list_instances`),
      "request": {the request model's field: value, nested as the models
                  nest},
@@ -28,7 +29,15 @@ SERVICES = {"rds": ("huaweicloudsdkrds.v3", "RdsClient",
             "dds": ("huaweicloudsdkdds.v3", "DdsClient",
                     "region.dds_region", "DdsRegion"),
             "iam": ("huaweicloudsdkiam.v3", "IamClient",
-                    "region.iam_region", "IamRegion")}
+                    "region.iam_region", "IamRegion"),
+            "gaussdb": ("huaweicloudsdkgaussdbforopengauss.v3",
+                        "GaussDBforopenGaussClient",
+                        "region.gaussdbforopengauss_region",
+                        "GaussDBforopenGaussRegion"),
+            "geminidb": ("huaweicloudsdkgaussdbfornosql.v3",
+                         "GaussDBforNoSQLClient",
+                         "region.gaussdbfornosql_region",
+                         "GaussDBforNoSQLRegion")}
 
 PLAIN = ("str", "int", "float", "bool", "object", "date", "datetime")
 

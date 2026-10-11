@@ -73,6 +73,8 @@ DECLARED = ("case when data_type in ('DECIMAL', 'NUMERIC') then data_type"
             " rtrim(char(coalesce(datetime_precision, 6))) || ')'"
             " when data_type = 'FLOAT' and length = 4 then 'REAL'"
             " when data_type = 'FLOAT' then 'DOUBLE'"
+            " when data_type = 'DECFLOAT' then 'DECFLOAT(' ||"
+            " rtrim(char(coalesce(numeric_precision, 34))) || ')'"
             " else data_type end")
 
 #: the journal entries a follow reads: a row put (PT; PX at a given
@@ -462,6 +464,7 @@ class Db2iEngine(Db2Engine):
         for t in tables:
             where = pair._row_scope(db, t)
             if where[0] or where[1] or self.hop.column_rules(db, t) or \
+                    self.hop.masks(db, t) or \
                     self.hop.target_table(db, t) != f"{db}.{t}":
                 rest.append(t)
                 continue
@@ -919,6 +922,9 @@ class Db2iEngine(Db2Engine):
 
     def tail_seed(self, db, token_path, point):
         return self._as_pair().tail_seed(db, token_path, point)
+
+    #: its change tail is the pair's (`Engine.tail_masks`)
+    TAILS_THROUGH_PAIR = True
 
     def tail_apply(self, db, go, token_path, log):
         return self._as_pair().tail_apply(db, go, token_path, log)

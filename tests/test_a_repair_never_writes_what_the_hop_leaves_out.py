@@ -338,18 +338,21 @@ def test_mysql_grants_on_tables_left_out_are_neither_compared_nor_replayed(
     assert got == {"app@%": {"GRANT SELECT ON <db>.* TO app@%",
                              "GRANT SELECT (a) ON <db>.orders TO app@%"}}
 
-    held = {"src": {"app@%": {"GRANT SELECT ON <db>.orders TO app@%",
-                              "GRANT SELECT ON <db>.audit_log TO app@%"}},
+    # what the grant tables hold (`_privileges`): the account on both
+    # sides, a grant on a table the hop takes and one on a table it leaves
+    held = {"src": {"app@%": {("table", "appdb", "orders", "SELECT"),
+                              ("table", "appdb", "audit_log", "SELECT")}},
             "dst": {}}
-    raw = {("app@%", g): g.replace("<db>", "`appdb`") + ";"
-           for g in held["src"]["app@%"]}
 
-    def grants_for_db(side, dbn):
-        eng._grant_raw = {"src": raw}
-        eng._grant_users = {"dst": {"app@%"}}
-        return held[side], ""
-    eng._grants_for_db = grants_for_db
+    def privileges(side, fresh=False):
+        return {"accounts": {"app@%"}, "roles": set(), "items": held[side],
+                "default": {}, "error": ""}
+    eng._privileges = privileges
     act = eng._grant_repair("appdb")
-    assert len(act.statements) == 1 and "orders" in act.statements[0]
+    assert len(act.statements) == 1 and "orders" in act.statements[0], \
+        act.statements
+    assert act.statements[0] == \
+        "GRANT SELECT ON `appdb`.`orders` TO 'app'@'%';", act.statements
+    assert act.undo == ["REVOKE SELECT ON `appdb`.`orders` FROM 'app'@'%';"]
     check = eng._check_grants("appdb")
     assert "audit_log" not in check[0].detail, check[0].detail

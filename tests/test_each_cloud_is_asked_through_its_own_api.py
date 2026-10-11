@@ -34,14 +34,15 @@ from migkit.cloudapi import NotOffered, RestorePoint
 #: every product each provider's adapter answers for
 PRODUCTS = {
     "aws": {"rds", "docdb", "elasticache", "memorydb", "redshift", "dynamodb",
-            "opensearch", "msk"},
-    "gcp": {"cloudsql", "alloydb", "memorystore", "bigquery"},
+            "opensearch", "msk", "neptune", "keyspaces"},
+    "gcp": {"cloudsql", "alloydb", "memorystore", "bigquery", "spanner",
+            "firestore"},
     "azure": {"flexible-postgres", "flexible-mysql", "sql", "cosmosdb",
               "redis"},
     "tencent": {"cdb", "postgres", "mongodb", "redis", "cynosdb", "sqlserver",
                 "mariadb"},
-    "alibaba": {"rds", "dds", "polardb", "kvstore"},
-    "huawei": {"rds", "dds"},
+    "alibaba": {"rds", "dds", "polardb", "kvstore", "polardbx"},
+    "huawei": {"rds", "dds", "gaussdb", "geminidb"},
     "oracle": {"mysql", "autonomous"},
     "ibm": {"icd"},
 }
@@ -152,7 +153,9 @@ NOT_OFFERED = [
     ("gcp", "bigquery", "clone"), ("azure", "redis", "clone"),
     ("azure", "sql", "parameters"), ("tencent", "sqlserver", "clone"),
     ("tencent", "mariadb", "restore_point"), ("huawei", "dds", "parameters"),
-    ("oracle", "autonomous", "parameters")]
+    ("oracle", "autonomous", "parameters"), ("aws", "keyspaces",
+                                             "parameters"),
+    ("gcp", "spanner", "parameters"), ("gcp", "firestore", "parameters")]
 
 
 @pytest.mark.parametrize("provider,product,what", NOT_OFFERED)
@@ -436,6 +439,158 @@ def test_a_docdb_cluster_snapshot_is_made_and_waited_for(monkeypatch):
         got = _aws("docdb", "docs").restore_point("rp", lambda m: None)
         stub.assert_no_pending_responses()
     assert (got.id, got.kind, got.ready) == ("rp", "snapshot", True)
+
+
+def test_a_neptune_cluster_snapshot_is_made_and_its_cluster_found_as_its_own(
+        monkeypatch):
+    """Neptune's API is RDS's in shape and lists every engine's clusters:
+    an address is looked for among Neptune's alone."""
+    stub = _stubbed(monkeypatch, "neptune")
+    stub.add_response("create_db_cluster_snapshot", {"DBClusterSnapshot": {
+        "DBClusterSnapshotIdentifier": "rp", "Status": "creating"}},
+        {"DBClusterSnapshotIdentifier": "rp", "DBClusterIdentifier": "graph"})
+    for status in ("creating", "available"):
+        stub.add_response("describe_db_cluster_snapshots", {
+            "DBClusterSnapshots": [{"DBClusterSnapshotIdentifier": "rp",
+                                    "Status": status}]},
+            {"DBClusterSnapshotIdentifier": "rp"})
+    engine = {"Filters": [{"Name": "engine", "Values": ["neptune"]}]}
+    stub.add_response("describe_db_clusters", {"DBClusters": [{
+        "DBClusterIdentifier": "graph", "Engine": "neptune", "Port": 8182,
+        "Endpoint": "graph.cluster-abc.eu-west-1.neptune.amazonaws.com",
+        "ReaderEndpoint": "graph.cluster-ro-abc.eu-west-1.neptune.amazonaws"
+                          ".com"}]}, engine)
+    with stub:
+        a = _aws("neptune", "graph")
+        got = a.restore_point("rp", lambda m: None)
+        assert a.find("graph.cluster-abc.eu-west-1.neptune.amazonaws.com",
+                      8182) == "graph"
+        stub.assert_no_pending_responses()
+    assert (got.id, got.kind, got.ready) == ("rp", "snapshot", True)
+
+
+def test_a_neptune_copy_is_a_cluster_cloned_with_a_writer_of_its_own(
+        monkeypatch):
+    stub = _stubbed(monkeypatch, "neptune")
+    cluster = {"DBClusterIdentifier": "graph", "Engine": "neptune",
+               "Status": "available", "DBClusterParameterGroup": "g1",
+               "DBClusterMembers": [{"DBInstanceIdentifier": "graph-1",
+                                     "IsClusterWriter": True}]}
+    stub.add_response("describe_db_clusters", {"DBClusters": [cluster]},
+                      {"DBClusterIdentifier": "graph"})
+    stub.add_response("describe_db_instances", {"DBInstances": [{
+        "DBInstanceIdentifier": "graph-1", "DBInstanceClass": "db.r6g.large",
+        "Engine": "neptune"}]}, {"DBInstanceIdentifier": "graph-1"})
+    stub.add_response("restore_db_cluster_to_point_in_time", {"DBCluster": {
+        "DBClusterIdentifier": "graph-copy"}}, {
+        "DBClusterIdentifier": "graph-copy",
+        "SourceDBClusterIdentifier": "graph", "RestoreType": "copy-on-write",
+        "UseLatestRestorableTime": True})
+    stub.add_response("describe_db_clusters", {"DBClusters": [{
+        "DBClusterIdentifier": "graph-copy", "Status": "available"}]},
+        {"DBClusterIdentifier": "graph-copy"})
+    stub.add_response("create_db_instance", {"DBInstance": {
+        "DBInstanceIdentifier": "graph-copy-1"}}, {
+        "DBInstanceIdentifier": "graph-copy-1",
+        "DBClusterIdentifier": "graph-copy", "Engine": "neptune",
+        "DBInstanceClass": "db.r6g.large"})
+    stub.add_response("describe_db_instances", {"DBInstances": [{
+        "DBInstanceIdentifier": "graph-copy-1",
+        "DBInstanceStatus": "available"}]},
+        {"DBInstanceIdentifier": "graph-copy-1"})
+    stub.add_response("describe_db_clusters", {"DBClusters": [{
+        "DBClusterIdentifier": "graph-copy", "Status": "available",
+        "Endpoint": "graph-copy.cluster-abc.example.com", "Port": 8182}]},
+        {"DBClusterIdentifier": "graph-copy"})
+    with stub:
+        got = _aws("neptune", "graph").clone("graph-copy", None,
+                                             lambda m: None)
+        stub.assert_no_pending_responses()
+    assert got == {"host": "graph-copy.cluster-abc.example.com",
+                   "port": 8182, "id": "graph-copy", "kind": "cluster"}
+
+
+def _ks_table(name, pitr="ENABLED", at=None, status="ACTIVE"):
+    got = {"keyspaceName": "shop", "tableName": name, "status": status,
+           "resourceArn": f"arn:aws:cassandra:{REGION}:000000000000:"
+                          f"/keyspace/shop/table/{name}",
+           "pointInTimeRecovery": {"status": pitr}}
+    if at:
+        got["pointInTimeRecovery"]["earliestRestorableTimestamp"] = at
+    return got
+
+
+def test_a_keyspace_without_point_in_time_recovery_has_no_restore_point(
+        monkeypatch):
+    stub = _stubbed(monkeypatch, "keyspaces")
+    stub.add_response("list_tables", {"tables": [
+        {"keyspaceName": "shop", "tableName": t,
+         "resourceArn": f"arn:aws:cassandra:{REGION}:000000000000:/"
+                        f"keyspace/shop/table/{t}"}
+        for t in ("orders", "items")]}, {"keyspaceName": "shop"})
+    stub.add_response("get_table", _ks_table("orders"),
+                      {"keyspaceName": "shop", "tableName": "orders"})
+    stub.add_response("get_table", _ks_table("items", "DISABLED"),
+                      {"keyspaceName": "shop", "tableName": "items"})
+    with stub, pytest.raises(SystemExit, match="off on items"):
+        _aws("keyspaces", "shop").restore_point("rp", lambda m: None)
+
+
+def test_a_keyspace_is_copied_table_by_table_at_one_time(monkeypatch):
+    stub = _stubbed(monkeypatch, "keyspaces")
+    early = datetime.datetime(2026, 9, 30, 10, 0,
+                              tzinfo=datetime.timezone.utc)
+    later = datetime.datetime(2026, 10, 1, 9, 0,
+                              tzinfo=datetime.timezone.utc)
+    listing = {"tables": [
+        {"keyspaceName": "shop", "tableName": t,
+         "resourceArn": f"arn:aws:cassandra:{REGION}:000000000000:/"
+                        f"keyspace/shop/table/{t}"}
+        for t in ("orders", "items")]}
+    # the restore points: the latest of the tables' earliest times
+    stub.add_response("list_tables", listing, {"keyspaceName": "shop"})
+    stub.add_response("get_table", _ks_table("orders", at=early))
+    stub.add_response("get_table", _ks_table("items", at=later))
+    # the copy
+    stub.add_response("list_tables", listing, {"keyspaceName": "shop"})
+    stub.add_response("get_table", _ks_table("orders", at=early))
+    stub.add_response("get_table", _ks_table("items", at=later))
+    stub.add_response("create_keyspace", {
+        "resourceArn": f"arn:aws:cassandra:{REGION}:000000000000:/keyspace/"
+                       "shop_copy_20261001"},
+        {"keyspaceName": "shop_copy_20261001"})
+    stub.add_client_error("get_keyspace",
+                          service_error_code="ResourceNotFoundException",
+                          http_status_code=404)
+    stub.add_response("get_keyspace", {
+        "keyspaceName": "shop_copy_20261001",
+        "resourceArn": f"arn:aws:cassandra:{REGION}:000000000000:/keyspace/"
+                       "shop_copy_20261001",
+        "replicationStrategy": "SINGLE_REGION"})
+    at = datetime.datetime(2026, 10, 1, 10, 0, tzinfo=datetime.timezone.utc)
+    for t in ("orders", "items"):
+        stub.add_response("restore_table", {
+            "restoredTableARN": f"arn:aws:cassandra:{REGION}:000000000000:/"
+                                f"keyspace/shop_copy_20261001/table/{t}"},
+            {"sourceKeyspaceName": "shop", "sourceTableName": t,
+             "targetKeyspaceName": "shop_copy_20261001",
+             "targetTableName": t, "restoreTimestamp": at})
+    for t in ("orders", "items"):
+        stub.add_response("get_table", {**_ks_table(t, status="RESTORING"),
+                                        "keyspaceName": "shop_copy_20261001"})
+        stub.add_response("get_table", {**_ks_table(t),
+                                        "keyspaceName": "shop_copy_20261001"})
+    with stub:
+        a = _aws("keyspaces", "shop")
+        assert a.restore_points() == [RestorePoint(
+            "2026-10-01T09:00:00Z", "point in time", "",
+            "2026-10-01T09:00:00Z", True)]
+        got = a.clone("shop-copy-20261001", AT, lambda m: None)
+        stub.assert_no_pending_responses()
+    assert got == {"host": f"cassandra.{REGION}.amazonaws.com", "port": 9142,
+                   "id": "shop_copy_20261001", "kind": "keyspace"}
+    with pytest.raises(NotOffered):
+        a.set_parameters({"x": 1}, lambda m: None)
 
 
 def test_a_parameter_of_the_providers_default_group_is_never_changed(
@@ -749,6 +904,147 @@ def test_an_alloydb_backup_is_made_and_its_operation_waited_for():
         "name": "x", "done": True, "error": {"message": "no room"}}
     with pytest.raises(SystemExit, match="failed: no room"):
         _gcp("alloydb", api).restore_point("rp", lambda m: None)
+
+
+SPANNER = "projects/proj/instances/main"
+
+
+def test_a_spanner_backup_is_made_at_a_version_time_and_waited_for(
+        monkeypatch):
+    monkeypatch.setattr(cloudapi, "_now", lambda: datetime.datetime(
+        2026, 10, 1, 10, 0, tzinfo=datetime.timezone.utc))
+    backup = {"name": f"{SPANNER}/backups/rp", "database":
+              f"{SPANNER}/databases/shop", "versionTime": AT}
+    api = Discovery("spanner.v1.json", {
+        "projects.instances.backups.create": {
+            "name": f"{SPANNER}/backups/rp/operations/o1"},
+        "projects.instances.backups.get": [
+            {**backup, "state": "CREATING"}, {**backup, "state": "READY"}],
+        "projects.instances.backups.list": {"backups": [
+            {**backup, "state": "READY"}]}})
+    a = _gcp("spanner", api, id="main/shop", keep_days=3)
+    got = a.restore_point("rp", lambda m: None)
+    assert got == RestorePoint("rp", "backup", "READY", AT, True)
+    made = api.asked("projects.instances.backups.create")[0]
+    assert (made["parent"], made["backupId"]) == (SPANNER, "rp")
+    assert made["body"] == {"database": f"{SPANNER}/databases/shop",
+                            "versionTime": AT,
+                            "expireTime": "2026-10-04T10:00:00Z"}
+    assert len(api.asked("projects.instances.backups.get")) == 2
+    assert [p.id for p in a.restore_points()] == ["rp"]
+    assert api.asked("projects.instances.backups.list")[0]["filter"] == \
+        f'database:"{SPANNER}/databases/shop"'
+    with pytest.raises(NotOffered, match="ALTER DATABASE"):
+        a.set_parameters({"version_retention_period": "7d"}, lambda m: None)
+    with pytest.raises(SystemExit, match="<instance>/<database>"):
+        _gcp("spanner", api, id="main").restore_point("rp", lambda m: None)
+
+
+def test_a_spanner_copy_at_a_time_is_a_backup_at_that_time_restored(
+        monkeypatch):
+    """Spanner restores only a backup: a copy asked for at a time is a
+    backup made at that version time first - and a name it does not take
+    is made one it takes."""
+    backup = {"name": f"{SPANNER}/backups/x", "versionTime": AT,
+              "state": "READY"}
+    api = Discovery("spanner.v1.json", {
+        "projects.instances.backups.create": {"name": "op"},
+        "projects.instances.backups.get": lambda kw: {
+            **backup, "name": kw["name"]},
+        "projects.instances.databases.restore": {"name": "op2"},
+        "projects.instances.databases.get": [{"state": "CREATING"},
+                                             {"state": "READY_OPTIMIZING"}]})
+    a = _gcp("spanner", api, id="main/shop")
+    got = a.clone("Shop_Copy.2026", AT, lambda m: None)
+    made = api.asked("projects.instances.backups.create")[0]
+    assert made["backupId"] == "shop-copy-2026-at"
+    assert made["body"]["versionTime"] == AT
+    restored = api.asked("projects.instances.databases.restore")[0]
+    assert restored == {"parent": SPANNER, "body": {
+        "databaseId": "shop-copy-2026",
+        "backup": f"{SPANNER}/backups/shop-copy-2026-at"}}
+    assert got == {"host": "spanner.googleapis.com", "port": 443,
+                   "id": "main/shop-copy-2026", "kind": "database"}
+    # from a backup it keeps: no backup made first
+    api.calls.clear()
+    a.clone("again", RestorePoint("rp", "backup", ready=True),
+            lambda m: None)
+    assert not api.asked("projects.instances.backups.create")
+    assert api.asked("projects.instances.databases.restore")[0]["body"][
+        "backup"] == f"{SPANNER}/backups/rp"
+    assert len(cloudapi._fit("migkit-" + "h" * 40 + "-source-20261001100000",
+                             30)) == 30
+
+
+FIRESTORE = {"name": "projects/proj/databases/(default)",
+             "locationId": "eur3", "type": "FIRESTORE_NATIVE",
+             "earliestVersionTime": "2026-09-24T10:00:00Z",
+             "pointInTimeRecoveryEnablement":
+                 "POINT_IN_TIME_RECOVERY_ENABLED"}
+
+
+def test_a_firestore_restore_point_is_a_time_held_only_with_seven_days():
+    off = {**FIRESTORE, "pointInTimeRecoveryEnablement":
+           "POINT_IN_TIME_RECOVERY_DISABLED"}
+    api = Discovery("firestore.v1.json", {"projects.databases.get": off})
+    with pytest.raises(SystemExit, match="kept an hour only"):
+        _gcp("firestore", api, id="").restore_point("rp", lambda m: None)
+    api = Discovery("firestore.v1.json", {
+        "projects.databases.get": FIRESTORE,
+        "projects.locations.backups.list": {"backups": [
+            {"name": "projects/proj/locations/eur3/backups/b1",
+             "database": FIRESTORE["name"], "state": "READY",
+             "snapshotTime": AT},
+            {"name": "projects/proj/locations/eur3/backups/other",
+             "database": "projects/proj/databases/other", "state": "READY",
+             "snapshotTime": AT}]}})
+    a = _gcp("firestore", api, id="")
+    got = a.restore_point("rp", lambda m: None)
+    assert got.kind == "point in time" and got.ready
+    assert api.asked("projects.databases.get") == [
+        {"name": "projects/proj/databases/(default)"}]
+    assert [(p.id, p.kind) for p in a.restore_points()] == [
+        ("2026-09-24T10:00:00Z", "point in time"), ("b1", "backup")]
+    assert api.asked("projects.locations.backups.list")[0] == {
+        "parent": "projects/proj/locations/eur3"}
+
+
+def test_a_firestore_copy_is_cloned_at_a_time_or_restored_from_a_backup(
+        monkeypatch):
+    monkeypatch.setattr(cloudapi, "_now", lambda: datetime.datetime(
+        2026, 10, 1, 12, 0, tzinfo=datetime.timezone.utc))
+    api = Discovery("firestore.v1.json", {
+        "projects.databases.get": FIRESTORE,
+        "projects.databases.clone": {"name": "projects/proj/databases/"
+                                             "copy/operations/o1"},
+        "projects.databases.restore": {"name": "projects/proj/databases/"
+                                               "copy2/operations/o2"},
+        "projects.databases.operations.get": [{"done": False},
+                                              {"done": True}]})
+    a = _gcp("firestore", api, id="")
+    said, log = _log()
+    got = a.clone("copy", "2026-10-01T09:30:20Z", log)
+    sent = api.asked("projects.databases.clone")[0]
+    assert sent == {"parent": "projects/proj", "body": {
+        "databaseId": "copy", "pitrSnapshot": {
+            "database": FIRESTORE["name"],
+            "snapshotTime": "2026-10-01T09:30:00Z"}}}
+    assert any("whole minute" in s for s in said), said
+    assert got == {"host": "firestore.googleapis.com", "port": 443,
+                   "id": "copy", "kind": "database"}
+    # within the hour, the time as it is asked
+    api.answers["projects.databases.operations.get"] = {"done": True}
+    a.clone("copy", "2026-10-01T11:30:20Z", log)
+    assert api.asked("projects.databases.clone")[1]["body"]["pitrSnapshot"][
+        "snapshotTime"] == "2026-10-01T11:30:20Z"
+    a.clone("copy2", RestorePoint("b1", "backup", ready=True), log)
+    assert api.asked("projects.databases.restore")[0]["body"] == {
+        "databaseId": "copy2",
+        "backup": "projects/proj/locations/eur3/backups/b1"}
+    api.answers["projects.databases.operations.get"] = {
+        "done": True, "error": {"message": "no room"}}
+    with pytest.raises(SystemExit, match="failed: no room"):
+        a.clone("copy3", None, log)
 
 
 ADC = {"type": "authorized_user", "client_id": "id.example.com",
@@ -1617,6 +1913,102 @@ def test_an_alibaba_rds_instance_is_found_by_its_address():
     assert _alibaba("rds", api).find("10.0.0.99") is None
 
 
+PXC = {"DBInstance": {
+    "Id": "pxc-1", "Engine": "polarx", "EngineVersion": "5.7",
+    "CnNodeClassCode": "polarx.x4.medium.2e", "CnNodeCount": 2,
+    "DnNodeClassCode": "mysql.n4.medium.25", "DnNodeCount": 2,
+    "TopologyType": "3azones", "Series": "enterprise", "Status": "Running",
+    "PrimaryZone": "cn-hangzhou-g", "SecondaryZone": "cn-hangzhou-h",
+    "TertiaryZone": "cn-hangzhou-i", "ZoneId": "cn-hangzhou-g",
+    "VPCId": "vpc-1", "VSwitchId": "vsw-1", "MaintainStartTime": "18:00Z",
+    "MaintainEndTime": "19:00Z", "StorageUsed": 1 << 30,
+    "ConnAddrs": [{"Type": "VPC", "Port": "3306",
+                   "ConnectionString": "pxc-1.polarx.rds.example.com"}]}}
+
+
+def test_a_polardbx_backup_set_is_made_and_waited_for_by_its_status_code():
+    api = AlibabaApi("polardbx", {
+        "CreateBackup": {"Success": True, "Data": {"BackupSetId": "77"}},
+        "DescribeBackupSetList": [
+            {"Success": True, "Data": [{"BackupSetId": 77, "Status": 0,
+                                        "EndTime": 0}]},
+            {"Success": True, "Data": [{"BackupSetId": 77, "Status": 1,
+                                        "EndTime": 1790848800000}]}],
+        "DescribeDBInstanceAttribute": PXC})
+    a = _alibaba("polardbx", api, ident="pxc-1")
+    got = a.restore_point("rp", lambda m: None)
+    assert got == RestorePoint("77", "backup", "success",
+                               "2026-10-01T10:00:00Z", True)
+    assert api.asked("CreateBackup") == [{"DBInstanceName": "pxc-1",
+                                          "BackupType": "0",
+                                          "RegionId": "cn-hangzhou"}]
+    assert len(api.asked("DescribeBackupSetList")) == 2
+    api.answers["DescribeBackupSetList"] = {"Success": True, "Data": [
+        {"BackupSetId": 78, "Status": 2}]}
+    api.answers["CreateBackup"] = {"Success": True,
+                                   "Data": {"BackupSetId": "78"}}
+    with pytest.raises(SystemExit, match="the backup rp is failed"):
+        a.restore_point("rp", lambda m: None)
+    got = a.instance()
+    assert (got.engine, got.host, got.port, got.status) == (
+        "polardbx", "pxc-1.polarx.rds.example.com", 3306, "Running")
+
+
+def test_a_polardbx_copy_is_a_clone_to_a_time_or_from_a_backup_set():
+    states = ["Creating", "Running"]
+    api = AlibabaApi("polardbx", {
+        "DescribeDBInstanceAttribute": lambda sent: PXC if sent[
+            "DBInstanceName"] == "pxc-1" else {"DBInstance": {
+                **PXC["DBInstance"], "Status": states.pop(0) if len(states)
+                > 1 else states[0]}},
+        "RestoreDBInstance": {"DBInstanceName": "pxc-copy"}})
+    a = _alibaba("polardbx", api, ident="pxc-1")
+    got = a.clone("pxc-copy", AT, lambda m: None)
+    sent = api.asked("RestoreDBInstance")[0]
+    assert sent["RecoveryTypeCode"] == "Clone"
+    assert sent["CloneInstanceName"] == "pxc-1"
+    assert sent["RestoreTime"] == AT and "BackupSetId" not in sent
+    assert (sent["TopologyType"], sent["CNNodeCount"], sent["DnClass"]) == (
+        "3azones", "2", "mysql.n4.medium.25")
+    assert got["id"] == "pxc-copy" and got["kind"] == "instance"
+    a.clone("pxc-copy", RestorePoint("77", "backup", ready=True),
+            lambda m: None)
+    sent = api.asked("RestoreDBInstance")[1]
+    assert sent["BackupSetId"] == "77" and "RestoreTime" not in sent
+
+
+def test_a_polardbx_parameter_is_set_at_the_level_it_lives_at():
+    compute = {"Data": {"RunningParameters": [
+        {"ParameterName": "XA_RECOVER_INTERVAL", "ParameterValue": "5"}]}}
+    storage = {"Data": {"RunningParameters": [
+        {"ParameterName": "innodb_lock_wait_timeout",
+         "ParameterValue": "50"}]}}
+    changed = {"XA_RECOVER_INTERVAL": "5", "innodb_lock_wait_timeout": "50"}
+
+    def describe(sent):
+        rows = compute if sent["ParamLevel"] == "compute" else storage
+        level = rows["Data"]["RunningParameters"]
+        return {"Data": {"RunningParameters": [
+            {**r, "ParameterValue": changed[r["ParameterName"]]}
+            for r in level]}}
+
+    def modify(sent):
+        changed.update(json.loads(sent["Parameters"]))
+        return {"RequestId": "r"}
+    api = AlibabaApi("polardbx", {"DescribeParameters": describe,
+                                  "ModifyParameter": modify})
+    a = _alibaba("polardbx", api, ident="pxc-1")
+    before = a.set_parameters({"XA_RECOVER_INTERVAL": 9,
+                               "innodb_lock_wait_timeout": 120},
+                              lambda m: None)
+    assert before == {"XA_RECOVER_INTERVAL": "5",
+                      "innodb_lock_wait_timeout": "50"}
+    asked = {s["ParamLevel"]: json.loads(s["Parameters"])
+             for s in api.asked("ModifyParameter")}
+    assert asked == {"compute": {"XA_RECOVER_INTERVAL": "9"},
+                     "storage": {"innodb_lock_wait_timeout": "120"}}
+
+
 def _tea(monkeypatch, answer):
     """The SDK's own HTTP call stood in for: `answer(request)` gives the
     status and the body."""
@@ -1748,6 +2140,31 @@ HUAWEI_FIELDS = {
     ("dds", "restore_new_instance"): {"body"},
     ("dds", "show_job_detail"): {"id"},
     ("iam", "create_temporary_access_key_by_agency"): {"body"},
+    ("gaussdb", "list_instances"): {
+        "x_language", "id", "name", "type", "datastore_type", "vpc_id",
+        "subnet_id", "offset", "limit", "tags", "charge_mode"},
+    ("gaussdb", "show_instance_configuration"): {"x_language",
+                                                 "instance_id"},
+    ("gaussdb", "update_instance_configuration"): {"x_language",
+                                                   "instance_id", "body"},
+    ("gaussdb", "create_manual_backup"): {"x_language", "body"},
+    ("gaussdb", "list_backups"): {
+        "x_language", "instance_id", "backup_id", "backup_type", "offset",
+        "limit", "begin_time", "end_time"},
+    ("gaussdb", "create_restore_instance"): {"x_language", "body"},
+    ("gaussdb", "show_job_detail"): {"id"},
+    ("geminidb", "list_instances"): {"id", "name", "datastore_type", "mode",
+                                     "vpc_id", "subnet_id", "offset",
+                                     "limit"},
+    ("geminidb", "show_instance_configuration"): {"instance_id"},
+    ("geminidb", "update_instance_configuration"): {"instance_id", "body"},
+    ("geminidb", "create_back"): {"instance_id", "body"},
+    ("geminidb", "list_backups"): {
+        "instance_id", "datastore_type", "backup_id", "backup_type", "type",
+        "limit", "offset", "begin_time", "end_time"},
+    ("geminidb", "create_instance"): {"body"},
+    ("geminidb", "list_jobs"): {"id", "start_time", "end_time", "status",
+                                "name", "offset", "limit"},
 }
 HUAWEI_BODIES = {
     ("rds", "update_instance_configuration"): {"values"},
@@ -1769,6 +2186,34 @@ HUAWEI_BODIES = {
         "enterprise_project_id", "ssl_option", "dss_pool_id",
         "server_group_policies", "restore_point", "charge_info"},
     ("iam", "create_temporary_access_key_by_agency"): {"auth"},
+    ("gaussdb", "update_instance_configuration"): {"values"},
+    ("gaussdb", "create_manual_backup"): {"instance_id", "name",
+                                          "description"},
+    ("gaussdb", "create_restore_instance"): {
+        "name", "availability_zone", "flavor_ref", "volume",
+        "disk_encryption_id", "vpc_id", "subnet_id", "security_group_id",
+        "password", "charge_info", "restore_point", "backup_strategy",
+        "enable_parallel_restore", "configuration_id",
+        "enterprise_project_id", "port", "time_zone", "enable_force_switch"},
+    ("geminidb", "update_instance_configuration"): {"values"},
+    ("geminidb", "create_back"): {"name", "description", "database_tables"},
+    ("geminidb", "create_instance"): {
+        "name", "datastore", "region", "availability_zone", "vpc_id",
+        "subnet_id", "security_group_id", "password", "mode",
+        "product_type", "flavor", "disk_encryption_id", "configuration_id",
+        "backup_strategy", "enterprise_project_id", "dedicated_resource_id",
+        "ssl_option", "charge_info", "restore_info", "dr_info", "port",
+        "availability_zone_detail", "lb_access_control_settings"},
+}
+#: the nested models the program builds a GaussDB or GeminiDB request
+#: from, as 3.1.216 has them
+HUAWEI_NESTED = {
+    ("gaussdb", "restore_point"): {"instance_id", "backup_id"},
+    ("gaussdb", "volume"): {"type", "size"},
+    ("geminidb", "datastore"): {"type", "version", "storage_engine"},
+    ("geminidb", "flavor"): {"num", "storage", "size", "spec_code"},
+    ("geminidb", "restore_info"): {"backup_id", "source_instance_id",
+                                   "restore_time"},
 }
 
 
@@ -1917,6 +2362,143 @@ def test_a_huawei_rds_instance_is_found_by_its_address(monkeypatch):
         "total_count": 1}})
     a = _huawei("rds", run, monkeypatch, ident="")
     assert a.find("10.0.0.9", 5432) == "i-1"
+    assert a.find("10.0.0.99") is None
+
+
+def _nested(product, body):
+    """Each nested model of a request's body held to its recorded fields."""
+    for key, fields in HUAWEI_NESTED.items():
+        if key[0] == product and key[1] in body:
+            for one in (body[key[1]] if isinstance(body[key[1]], list)
+                        else [body[key[1]]]):
+                assert set(one) <= fields, (key, one)
+
+
+HW_GAUSS = {"id": "g-1", "status": "ACTIVE", "private_ips": ["10.0.0.21"],
+            "port": 8000, "datastore": {"type": "GaussDB", "version": "8.201"},
+            "flavor_ref": "gaussdb.opengauss.ee.dn.m6.2xlarge.8.in",
+            "flavor_info": {"vcpu": 8, "mem": 64},
+            "volume": {"type": "ULTRAHIGH", "size": 480},
+            "maintenance_window": "02:00-06:00", "time_zone": "UTC+08:00",
+            "nodes": [{"availability_zone": "ap-southeast-1a"},
+                      {"availability_zone": "ap-southeast-1b"}],
+            "vpc_id": "vpc-1", "subnet_id": "subnet-1",
+            "security_group_id": "sg-1"}
+
+
+def test_a_gaussdb_backup_is_made_and_a_copy_made_from_one_only(monkeypatch):
+    run = HuaweiRun({
+        "list_instances": lambda req: {"instances": [
+            HW_GAUSS if req["id"] == "g-1" else
+            {**HW_GAUSS, "id": req["id"], "private_ips": ["10.0.0.22"]}],
+            "total_count": 1},
+        "create_manual_backup": {"backup": {"id": "b9",
+                                            "status": "BUILDING"},
+                                 "job_id": "j0"},
+        "list_backups": [
+            {"backups": [{"id": "b9", "status": "BUILDING"}],
+             "total_count": 1},
+            {"backups": [{"id": "b9", "status": "COMPLETED",
+                          "end_time": "2026-10-01T10:00:00Z"}],
+             "total_count": 1}],
+        "create_restore_instance": {"instance": {"id": "g-2"},
+                                    "job_id": "j1"},
+        "show_job_detail": [{"job": {"status": "Running"}},
+                            {"job": {"status": "Completed"}}],
+        "show_instance_configuration": _hw_config()})
+    a = _huawei("gaussdb", run, monkeypatch, ident="g-1")
+    got = a.restore_point("migkit-" + "h" * 70, lambda m: None)
+    assert (got.id, got.ready) == ("b9", True)
+    sent = run.asked("create_manual_backup")[0]["body"]
+    assert sent["instance_id"] == "g-1" and len(sent["name"]) == 64
+    facts = a.instance(["work_mem"])
+    assert (facts.engine, facts.cpu, facts.memory_gb, facts.storage_gb,
+            facts.host, facts.port) == ("gaussdb", 8, 64, 480, "10.0.0.21",
+                                        8000)
+    assert facts.parameters == {"work_mem": cloudapi.Param("4MB", True,
+                                                           False)}
+    # a copy at a time is refused: its API restores a backup only
+    with pytest.raises(NotOffered, match="restore point it keeps"):
+        a.clone("g-copy", AT, lambda m: None)
+    copy = a.clone("g-copy", RestorePoint("b9", "backup", ready=True),
+                   lambda m: None)
+    body = run.asked("create_restore_instance")[0]["body"]
+    _nested("gaussdb", body)
+    assert body["restore_point"] == {"instance_id": "g-1",
+                                     "backup_id": "b9"}
+    assert body["availability_zone"] == "ap-southeast-1a,ap-southeast-1b"
+    assert body["volume"] == {"type": "ULTRAHIGH", "size": 480}
+    assert copy == {"host": "10.0.0.22", "port": 8000, "id": "g-2",
+                    "kind": "instance"}
+    assert run.asked("show_job_detail")[0] == {"id": "j1"}
+
+
+HW_GEMINI = {"id": "c-1", "status": "normal", "port": "8635",
+             "datastore": {"type": "cassandra", "version": "3.11"},
+             "mode": "Cluster", "availability_zone": "ap-southeast-1a",
+             "vpc_id": "vpc-1", "subnet_id": "subnet-1",
+             "security_group_id": "sg-1",
+             "groups": [{"id": "g", "volume": {"size": "500"}, "nodes": [
+                 {"id": "n1", "private_ip": "10.0.0.31", "role": "",
+                  "spec_code": "geminidb.cassandra.xlarge.4",
+                  "availability_zone": "ap-southeast-1a"},
+                 {"id": "n2", "private_ip": "10.0.0.32", "role": "",
+                  "spec_code": "geminidb.cassandra.xlarge.4",
+                  "availability_zone": "ap-southeast-1a"},
+                 {"id": "n3", "private_ip": "10.0.0.33", "role": "",
+                  "spec_code": "geminidb.cassandra.xlarge.4",
+                  "availability_zone": "ap-southeast-1a"}]}]}
+
+
+def test_a_geminidb_backup_and_copy_keep_the_instances_api_and_nodes(
+        monkeypatch):
+    run = HuaweiRun({
+        "list_instances": lambda req: {"instances": [
+            HW_GEMINI if req.get("id") == "c-1" else
+            {**HW_GEMINI, "id": req.get("id"), "lb_ip_address": "10.0.0.40",
+             "lb_port": "8635"}], "total_count": 1},
+        "create_back": {"job_id": "j0", "backup_id": "bk1"},
+        "list_backups": {"backups": [{"id": "bk1", "status": "COMPLETED",
+                                      "end_time": "2026-10-01 10:00:00"}],
+                         "total_count": 1},
+        "create_instance": {"id": "c-2", "job_id": "j2"},
+        "list_jobs": [{"jobs": [{"id": "j2", "status": "Running"}],
+                       "total_count": 1},
+                      {"jobs": [{"id": "j2", "status": "Completed"}],
+                       "total_count": 1}],
+        "show_instance_configuration": _hw_config()})
+    a = _huawei("geminidb", run, monkeypatch, ident="c-1")
+    got = a.restore_point("rp", lambda m: None)
+    assert (got.id, got.ready) == ("bk1", True)
+    assert run.asked("create_back")[0] == {
+        "instance_id": "c-1", "body": {"name": "rp",
+                                       "description": "a restore point"}}
+    facts = a.instance()
+    assert (facts.engine, facts.host, facts.port, facts.storage_gb) == (
+        "geminidb-cassandra", "10.0.0.31", 8635, 500)
+    copy = a.clone("c-copy", AT, lambda m: None)
+    body = run.asked("create_instance")[0]["body"]
+    _nested("geminidb", body)
+    assert body["restore_info"] == {
+        "source_instance_id": "c-1",
+        "restore_time": int(cloudapi._time(AT).timestamp() * 1000)}
+    assert body["flavor"] == [{"num": "3", "storage": "ULTRAHIGH",
+                               "size": "500",
+                               "spec_code": "geminidb.cassandra.xlarge.4"}]
+    assert body["datastore"]["type"] == "cassandra"
+    assert copy == {"host": "10.0.0.40", "port": 8635, "id": "c-2",
+                    "kind": "instance"}
+    a.clone("c-copy", RestorePoint("bk1", "backup", ready=True),
+            lambda m: None)
+    assert run.asked("create_instance")[1]["body"]["restore_info"] == {
+        "backup_id": "bk1"}
+    # found by any node's address or its load balancer's
+    listed = HuaweiRun({"list_instances": lambda req: {
+        "instances": [{**HW_GEMINI, "lb_ip_address": "10.0.0.40"}]
+        if req["offset"] == 0 else [], "total_count": 1}})
+    a = _huawei("geminidb", listed, monkeypatch, ident="")
+    assert a.find("10.0.0.32") == "c-1"
+    assert a.find("10.0.0.40") == "c-1"
     assert a.find("10.0.0.99") is None
 
 
@@ -2596,7 +3178,8 @@ def test_the_huawei_sdk_gets_an_environment_of_its_own_counted_not_named(
     assert ran[0] == ["/x/uv", "venv", "-q", "--python", "3.12",
                       str(home_env)]
     assert ran[1][:3] == ["/x/uv", "pip", "install"]
-    assert ran[1][-4:] == list(tools.HUAWEI_SDK_PACKAGES)
+    assert ran[1][-len(tools.HUAWEI_SDK_PACKAGES):] == list(
+        tools.HUAWEI_SDK_PACKAGES)
     assert ran[1][ran[1].index("--python") + 1] == str(home_env / "bin" /
                                                       "python")
     # a program the machine does not have is a failed install, said so

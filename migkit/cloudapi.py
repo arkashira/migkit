@@ -194,6 +194,18 @@ def _num(value):
     return int(got) if got.is_integer() else got
 
 
+def _fit(name, most):
+    """A name a product takes for what migkit makes: lower case, letters,
+    digits and hyphens, a letter first, at most `most` long - its end (the
+    time it was made at) kept where it is cut."""
+    name = re.sub(r"[^a-z0-9-]+", "-", str(name).lower()).strip("-")
+    if not name[:1].isalpha():
+        name = "m-" + name
+    if len(name) > most:
+        name = name[:most - 15].rstrip("-") + "-" + name[-14:]
+    return name
+
+
 def _host(url):
     """The host of an endpoint written as a URL, or the text itself."""
     from urllib.parse import urlparse
@@ -331,8 +343,11 @@ def _pages(call, key, **kw):
 
 
 class Aws(Adapter):
-    """RDS and Aurora, DocumentDB, ElastiCache, MemoryDB, Redshift,
-    DynamoDB, OpenSearch and MSK through their API. A client comes from
+    """RDS and Aurora, DocumentDB, Neptune, ElastiCache, MemoryDB,
+    Redshift, DynamoDB, Keyspaces, OpenSearch and MSK through their API.
+    A Keyspaces side's id is its keyspace: the restore point is a time,
+    held only where every table keeps one, and a copy restores every table
+    to it in a keyspace of its own. A client comes from
     migkit's one AWS client (`config._aws_client`: the CLI's chain, the
     hop's role assumed); a profile the hop names, through its session."""
     provider, WHO = "aws", "AWS"
@@ -352,8 +367,13 @@ class Aws(Adapter):
         "opensearch": {"restore_point": "", "clone": False,
                        "parameters": False},
         "msk": {"restore_point": "", "clone": False, "parameters": False},
+        "neptune": {"restore_point": "snapshot", "clone": True,
+                    "parameters": True},
+        "keyspaces": {"restore_point": "point in time", "clone": True,
+                      "parameters": False},
     }
     WHY = {
+        ("keyspaces", "parameters"): "a keyspace has no server parameters",
         ("opensearch", "restore_point"):
             "a domain's snapshots are taken through the domain's own"
             " endpoint, into a repository registered there",
@@ -374,7 +394,11 @@ class Aws(Adapter):
     SERVICE = {"rds": "rds", "docdb": "docdb", "elasticache": "elasticache",
                "memorydb": "memorydb", "redshift": "redshift",
                "dynamodb": "dynamodb", "opensearch": "opensearch",
-               "msk": "kafka"}
+               "msk": "kafka", "neptune": "neptune",
+               "keyspaces": "keyspaces"}
+    #: the products whose clusters are RDS's in shape - the same calls, on
+    #: an API that lists every engine's clusters, each its own named
+    CLUSTERS = ("docdb", "neptune")
     #: the waits' words for a status that will not become ready
     FAILED = ("failed", "incompatible-restore", "incompatible-parameters",
               "deleting", "deleted", "inaccessible-encryption-credentials")
@@ -468,11 +492,14 @@ class Aws(Adapter):
                     "groups": [("cluster", it["DBClusterParameterGroup"])]
                     + [("db", g["DBParameterGroupName"]) for g
                        in writer.get("DBParameterGroups") or ()]}
-        if p == "docdb":
+        if p in self.CLUSTERS:
             it = c.describe_db_clusters(DBClusterIdentifier=self.id)[
                 "DBClusters"][0]
             return {"kind": "cluster", "it": it, "writer": self._writer(it),
                     "groups": [("cluster", it["DBClusterParameterGroup"])]}
+        if p == "keyspaces":
+            return {"kind": "keyspace", "groups": [], "it": c.get_keyspace(
+                keyspaceName=self.id)}
         if p == "elasticache":
             it = c.describe_replication_groups(ReplicationGroupId=self.id)[
                 "ReplicationGroups"][0]
@@ -520,7 +547,7 @@ class Aws(Adapter):
         d = self._describe()
         it, w, p = d["it"], d.get("writer") or {}, self.product
         got = Instance(self.provider, p, self.id)
-        if p in ("rds", "docdb"):
+        if p in ("rds",) + self.CLUSTERS:
             got.engine, got.version = it.get("Engine", ""), it.get(
                 "EngineVersion", "")
             got.klass = w.get("DBInstanceClass", "")
@@ -535,8 +562,14 @@ class Aws(Adapter):
                 got.host = (it.get("Endpoint") or {}).get("Address", "")
                 got.port = (it.get("Endpoint") or {}).get("Port")
                 got.status = it.get("DBInstanceStatus", "")
-            if not str(got.engine).startswith(("aurora", "docdb")):
+            if not str(got.engine).startswith(("aurora", "docdb",
+                                               "neptune")):
                 got.storage_gb = _num(it.get("AllocatedStorage"))
+        elif p == "keyspaces":
+            got.engine, got.status = "keyspaces", "active"
+            got.klass = it.get("replicationStrategy", "")
+            got.host = f"cassandra.{self._region()}.amazonaws.com"
+            got.port = 9142
         elif p == "elasticache":
             got.klass = it.get("CacheNodeType", "")
             got.engine, got.version = w.get("Engine", ""), w.get(
@@ -681,9 +714,9 @@ class Aws(Adapter):
         def at(address, their_port):
             return address == host and (port is None or their_port is None
                                         or int(their_port) == int(port))
-        if p in ("rds", "docdb"):
-            kw = ({"Filters": [{"Name": "engine", "Values": ["docdb"]}]}
-                  if p == "docdb" else {})
+        if p in ("rds",) + self.CLUSTERS:
+            kw = ({"Filters": [{"Name": "engine", "Values": [p]}]}
+                  if p in self.CLUSTERS else {})
             for x in _pages(c.describe_db_clusters, "DBClusters", **kw):
                 if at(x.get("Endpoint"), x.get("Port")) or at(
                         x.get("ReaderEndpoint"), x.get("Port")):
@@ -737,7 +770,7 @@ class Aws(Adapter):
                 DBSnapshotIdentifier=name)["DBSnapshots"][0]), what, log,
                 ("available",), self.FAILED)
             return self._snap(got)
-        if p in ("rds", "docdb"):
+        if p in ("rds",) + self.CLUSTERS:
             c.create_db_cluster_snapshot(DBClusterSnapshotIdentifier=name,
                                          DBClusterIdentifier=self.id)
             log(f"{what} of {self.id} asked for")
@@ -777,8 +810,11 @@ class Aws(Adapter):
 
     @staticmethod
     def _status(x):
-        return (x.get("Status") or x.get("SnapshotStatus")
-                or x.get("BackupStatus") or ""), x
+        # an instance says its status as DBInstanceStatus, a cluster and a
+        # snapshot as Status
+        return (x.get("Status") or x.get("DBInstanceStatus")
+                or x.get("SnapshotStatus") or x.get("BackupStatus")
+                or ""), x
 
     def _snap(self, x):
         """A RestorePoint of what the product lists as one."""
@@ -800,9 +836,16 @@ class Aws(Adapter):
         if p == "rds" and self._rds()[0] == "instance":
             got = _pages(c.describe_db_snapshots, "DBSnapshots",
                          DBInstanceIdentifier=self.id)
-        elif p in ("rds", "docdb"):
+        elif p in ("rds",) + self.CLUSTERS:
             got = _pages(c.describe_db_cluster_snapshots,
                          "DBClusterSnapshots", DBClusterIdentifier=self.id)
+        elif p == "keyspaces":
+            first = max((t["pointInTimeRecovery"].get(
+                "earliestRestorableTimestamp") for t in self._pitr()),
+                default=None)
+            return [RestorePoint(id=_stamp(first), kind="point in time",
+                                 at=_stamp(first), ready=True)] \
+                if first else []
         elif p == "elasticache":
             got = _pages(c.describe_snapshots, "Snapshots",
                          ReplicationGroupId=self.id)
@@ -839,10 +882,80 @@ class Aws(Adapter):
             describe(**{field_name: ident})[key][0]), what, log,
             ("available", "active"), self.FAILED)
 
+    # Keyspaces: a keyspace's tables, each restored to a time of its own ----
+
+    def _region(self):
+        return self.region or self.client().meta.region_name or ""
+
+    def _tables(self, keyspace=None):
+        c, out, kw = self.client(), [], {"keyspaceName": keyspace or self.id}
+        while True:
+            got = c.list_tables(**kw)
+            out += [t["tableName"] for t in got.get("tables") or ()]
+            if not got.get("nextToken"):
+                return out
+            kw["nextToken"] = got["nextToken"]
+
+    def _pitr(self):
+        """Each table of the keyspace as the API describes it - refused
+        where any keeps no point in time to restore to."""
+        c = self.client()
+        got = [c.get_table(keyspaceName=self.id, tableName=t)
+               for t in self._tables()]
+        off = [t["tableName"] for t in got if str((t.get(
+            "pointInTimeRecovery") or {}).get("status")).upper() != "ENABLED"]
+        if off:
+            raise SystemExit(
+                f"{self.id}: point-in-time recovery is off on"
+                f" {', '.join(sorted(off))} - a table without it has no time"
+                " to be restored to; turn it on (ALTER TABLE ... WITH"
+                " custom_properties = {'point_in_time_recovery':"
+                " {'status': 'enabled'}})")
+        return got
+
+    def restore_point(self, name, log):
+        if self.product == "keyspaces":
+            self._pitr()
+        return super().restore_point(name, log)
+
+    def _clone_keyspace(self, c, name, point, log):
+        """Every table of the keyspace restored, at the one time, into a
+        keyspace of its own."""
+        tables = [t["tableName"] for t in self._pitr()]
+        target = re.sub(r"[^A-Za-z0-9_]", "_", name)[:48]
+        c.create_keyspace(keyspaceName=target)
+
+        def made():
+            try:
+                c.get_keyspace(keyspaceName=target)
+            except Exception as e:  # noqa: BLE001 - not there yet
+                if _aws_code(e) != "ResourceNotFoundException":
+                    raise
+                return None
+            return True
+        until(made, f"the keyspace {target}", log)
+        at = _time(point.at) if point is not None and point.at else _now()
+        for t in tables:
+            c.restore_table(sourceKeyspaceName=self.id, sourceTableName=t,
+                            targetKeyspaceName=target, targetTableName=t,
+                            restoreTimestamp=at)
+        log(f"the copy {target} of {self.id} asked for, table by table, at"
+            f" {_stamp(at)}")
+        for t in tables:
+            _ready(lambda t=t: (c.get_table(keyspaceName=target,
+                                            tableName=t)["status"], True),
+                   f"the copy of {t}", log, ("active",),
+                   ("deleting", "deleted", "inaccessible_encryption_"
+                    "credentials"))
+        return {"host": f"cassandra.{self._region()}.amazonaws.com",
+                "port": 9142, "id": target, "kind": "keyspace"}
+
     def _clone(self, name, point, log):
         c, p = self.client(), self.product
-        if p in ("rds", "docdb"):
+        if p in ("rds",) + self.CLUSTERS:
             return self._clone_rds(c, name, point, log)
+        if p == "keyspaces":
+            return self._clone_keyspace(c, name, point, log)
         if p == "dynamodb":
             if point is not None and point.kind == "backup":
                 c.restore_table_from_backup(TargetTableName=name,
@@ -1042,7 +1155,7 @@ class Aws(Adapter):
         groups are applied: in-sync, applying, pending-reboot."""
         d, p = self._describe(), self.product
         it, w = d["it"], d.get("writer") or {}
-        if p in ("rds", "docdb"):
+        if p in ("rds",) + self.CLUSTERS:
             states = [g.get("ParameterApplyStatus") for g in
                       w.get("DBParameterGroups") or ()]
             if d["kind"] == "cluster":
@@ -1075,9 +1188,13 @@ def _flag(value):
 
 
 class Gcp(Adapter):
-    """Cloud SQL, AlloyDB, Memorystore and BigQuery through their
-    discovery-built clients, as `cloudseed.Google` builds Cloud SQL's. A
-    call is named by its resource path (`backupRuns.insert`)."""
+    """Cloud SQL, AlloyDB, Memorystore, BigQuery, Spanner and Firestore
+    through their discovery-built clients, as `cloudseed.Google` builds
+    Cloud SQL's. A call is named by its resource path
+    (`backupRuns.insert`). A Spanner side's id is `<instance>/<database>`:
+    its restore point a backup at a version time, a copy a database
+    restored from one; a Firestore side's its database, whose restore point
+    is a time held only where point-in-time recovery keeps seven days."""
     provider, WHO = "gcp", "Google Cloud"
     PRODUCTS = {
         "cloudsql": {"restore_point": "backup", "clone": True,
@@ -1088,6 +1205,10 @@ class Gcp(Adapter):
                         "parameters": True},
         "bigquery": {"restore_point": "point in time", "clone": False,
                      "parameters": False},
+        "spanner": {"restore_point": "backup", "clone": True,
+                    "parameters": False},
+        "firestore": {"restore_point": "point in time", "clone": True,
+                      "parameters": False},
     }
     WHY = {
         ("memorystore", "restore_point"):
@@ -1097,9 +1218,17 @@ class Gcp(Adapter):
         ("bigquery", "clone"):
             "a dataset is copied table by table, not as a whole",
         ("bigquery", "parameters"): "a dataset has no server parameters",
+        ("spanner", "parameters"):
+            "a database's options are set by its own statements (ALTER"
+            " DATABASE ... SET OPTIONS), which the DBA's script carries",
+        ("firestore", "parameters"): "a database has no server parameters",
     }
     API = {"cloudsql": ("sqladmin", "v1beta4"), "alloydb": ("alloydb", "v1"),
-           "memorystore": ("redis", "v1"), "bigquery": ("bigquery", "v2")}
+           "memorystore": ("redis", "v1"), "bigquery": ("bigquery", "v2"),
+           "spanner": ("spanner", "v1"), "firestore": ("firestore", "v1")}
+    #: how long a backup made as a restore point is kept, where the side
+    #: names no `keep_days`
+    KEEP_DAYS = 7
     PORTS = {"postgres": 5432, "mysql": 3306, "sqlserver": 1433}
 
     def __init__(self, conf):
@@ -1313,6 +1442,31 @@ class Gcp(Adapter):
                 "state", ""), "", False
             configs = it.get("redisConfigs") or {}
             got.parameters = {n: Param(configs.get(n)) for n in names}
+        elif p == "spanner":
+            inst, db = self._spanner_names()
+            it = self._call("projects.instances.get", name=inst)
+            d = self._call("projects.instances.databases.get", name=db)
+            got.engine = "spanner"
+            got.version = str(d.get("databaseDialect") or "").lower()
+            units = it.get("processingUnits") or (
+                int(it.get("nodeCount") or 0) * 1000) or None
+            got.klass = (f"{it.get('config', '').rsplit('/', 1)[-1]},"
+                         f" {units} processing units") if units else \
+                it.get("config", "").rsplit("/", 1)[-1]
+            got.host, got.port = "spanner.googleapis.com", 443
+            got.status = d.get("state", "")
+            got.parameters = {n: Param(d.get(n), False, False)
+                              for n in names}
+        elif p == "firestore":
+            d = self._call("projects.databases.get", name=self._firestore())
+            got.engine = ("datastore" if d.get("type") == "DATASTORE_MODE"
+                          else "firestore")
+            got.version = d.get("databaseEdition", "")
+            got.host, got.port = "firestore.googleapis.com", 443
+            got.status = "available" if not d.get("deleteTime") else \
+                "deleted"
+            got.parameters = {n: Param(d.get(n), False, False)
+                              for n in names}
         else:
             it = self._call("datasets.get", projectId=self._project(),
                             datasetId=self.id)
@@ -1370,8 +1524,70 @@ class Gcp(Adapter):
                                       or b.get("createTime")),
                             ready=b.get("state") == "READY")
 
+    # Spanner and Firestore ---------------------------------------------------
+
+    def _spanner_names(self, database=None):
+        """(the instance's name, the database's), from the side's id
+        `<instance>/<database>`."""
+        inst, _, db = self.id.partition("/")
+        if not inst or not (db or database):
+            raise SystemExit(f"a Spanner side's id is <instance>/<database>;"
+                             f" {self.id!r} is not")
+        whole = f"projects/{self._project()}/instances/{inst}"
+        return whole, f"{whole}/databases/{database or db}"
+
+    def _firestore(self, database=None):
+        return f"projects/{self._project()}/databases/" \
+               f"{database or self.id or '(default)'}"
+
+    @staticmethod
+    def _spanner_backup(b):
+        return RestorePoint(id=b["name"].rsplit("/", 1)[-1], kind="backup",
+                            status=b.get("state", ""),
+                            at=_stamp(b.get("versionTime")
+                                      or b.get("createTime")),
+                            ready=b.get("state") == "READY")
+
+    def _spanner_make(self, name, at, log):
+        """A backup of the database as it stood at `at` (within its version
+        retention), waited for until it is ready."""
+        inst, db = self._spanner_names()
+        name = _fit(name, 60)
+        keep = int(self.conf.get("keep_days") or self.KEEP_DAYS)
+        self._call("projects.instances.backups.create", parent=inst,
+                   backupId=name, body={
+                       "database": db, "versionTime": _stamp(at),
+                       "expireTime": _stamp(_now() + datetime.timedelta(
+                           days=keep))})
+        log(f"the backup {name} of {self.id} asked for, kept {keep} days")
+        return _ready(lambda: (lambda b: (b.get("state", ""),
+                                          self._spanner_backup(b)))(
+            self._call("projects.instances.backups.get",
+                       name=f"{inst}/backups/{name}")),
+            f"the backup {name}", log, ("ready",), ())
+
+    def _firestore_pitr(self):
+        """The database, refused as a restore point where its versions are
+        kept an hour only (point-in-time recovery off): the way back would
+        be gone before most cutovers end."""
+        d = self._call("projects.databases.get", name=self._firestore())
+        if d.get("pointInTimeRecoveryEnablement") != \
+                "POINT_IN_TIME_RECOVERY_ENABLED":
+            raise SystemExit(
+                f"{self.id or '(default)'}: point-in-time recovery is off, so"
+                " its versions are kept an hour only - turn it on (seven"
+                " days) for a restore point that outlasts the cutover")
+        return d
+
+    def restore_point(self, name, log):
+        if self.product == "firestore":
+            self._firestore_pitr()
+        return super().restore_point(name, log)
+
     def _make(self, name, log):
         what = f"the backup {name}"
+        if self.product == "spanner":
+            return self._spanner_make(name, _now(), log)
         if self.product == "cloudsql":
             op = self._call("backupRuns.insert", project=self._project(),
                             instance=self.id, body={"description": name})
@@ -1420,13 +1636,102 @@ class Gcp(Adapter):
             first = _stamp(_now() - datetime.timedelta(hours=hours))
             return [RestorePoint(id=first, kind="point in time", at=first,
                                  ready=True)]
+        if p == "spanner":
+            inst, db = self._spanner_names()
+            out, kw = [], {"parent": inst, "filter": f'database:"{db}"'}
+            while True:
+                page = self._call("projects.instances.backups.list", **kw)
+                out += [self._spanner_backup(b) for b in
+                        page.get("backups") or ()]
+                if not page.get("nextPageToken"):
+                    return sorted(out, key=lambda r: r.at)
+                kw["pageToken"] = page["nextPageToken"]
+        if p == "firestore":
+            d = self._call("projects.databases.get", name=self._firestore())
+            first = _stamp(d.get("earliestVersionTime"))
+            out = [RestorePoint(id=first, kind="point in time", at=first,
+                                ready=True)] if first else []
+            where = f"projects/{self._project()}/locations/" \
+                    f"{d.get('locationId') or self.region}"
+            for b in self._call("projects.locations.backups.list",
+                                parent=where).get("backups") or ():
+                if b.get("database") == d.get("name"):
+                    out.append(RestorePoint(
+                        id=b["name"].rsplit("/", 1)[-1], kind="backup",
+                        status=b.get("state", ""),
+                        at=_stamp(b.get("snapshotTime")),
+                        ready=b.get("state") == "READY"))
+            return sorted(out, key=lambda r: r.at)
         self._offered("restore_point")
         return []
 
     # copies ----------------------------------------------------------------
 
+    def _spanner_clone(self, name, point, log):
+        """A new database restored from a backup - one made at the time
+        asked for (within the version retention), where the copy is asked
+        for at a time or the latest."""
+        inst, _ = self._spanner_names()
+        if point is None or point.kind != "backup":
+            at = _time(point.at) if point is not None and point.at \
+                else _now()
+            point = self._spanner_make(f"{name}-at", at, log)
+        new = _fit(name, 30)
+        self._call("projects.instances.databases.restore", parent=inst,
+                   body={"databaseId": new,
+                         "backup": f"{inst}/backups/{point.id}"})
+        log(f"the copy {new} of {self.id} asked for, from {point.id}")
+        _ready(lambda: (self._call("projects.instances.databases.get",
+                                   name=f"{inst}/databases/{new}").get(
+            "state", ""), True), f"the copy {new}", log,
+            ("ready", "ready_optimizing"), ())
+        return {"host": "spanner.googleapis.com", "port": 443,
+                "id": f"{inst.rsplit('/', 1)[-1]}/{new}", "kind": "database"}
+
+    def _firestore_clone(self, name, point, log):
+        """A new database cloned at a time - exact within the last hour,
+        whole minutes before it, as the service takes them - or restored
+        from one of its scheduled backups."""
+        d = self._call("projects.databases.get", name=self._firestore())
+        new = _fit(name, 63)
+        parent = f"projects/{self._project()}"
+        if point is not None and point.kind == "backup":
+            where = f"{parent}/locations/{d.get('locationId') or self.region}"
+            op = self._call("projects.databases.restore", parent=parent,
+                            body={"databaseId": new,
+                                  "backup": f"{where}/backups/{point.id}"})
+        else:
+            at = _time(point.at) if point is not None and point.at \
+                else _now()
+            if _now() - at > datetime.timedelta(hours=1):
+                at = at.replace(second=0, microsecond=0)
+                log(f"a copy of {self.id or '(default)'} older than an hour"
+                    f" is taken at a whole minute: {_stamp(at)}")
+            op = self._call("projects.databases.clone", parent=parent,
+                            body={"databaseId": new, "pitrSnapshot": {
+                                "database": d["name"],
+                                "snapshotTime": _stamp(at)}})
+        log(f"the copy {new} of {self.id or '(default)'} asked for")
+
+        def done():
+            got = self._call("projects.databases.operations.get",
+                             name=op["name"])
+            if not got.get("done"):
+                return None
+            if got.get("error"):
+                raise SystemExit(f"the copy {new} failed:"
+                                 f" {got['error'].get('message', '')}")
+            return got
+        until(done, f"the copy {new}", log)
+        return {"host": "firestore.googleapis.com", "port": 443, "id": new,
+                "kind": "database"}
+
     def _clone(self, name, point, log):
         what = f"the copy {name}"
+        if self.product == "spanner":
+            return self._spanner_clone(name, point, log)
+        if self.product == "firestore":
+            return self._firestore_clone(name, point, log)
         if self.product == "cloudsql":
             if point is not None and point.kind == "backup":
                 raise NotOffered(
@@ -2816,7 +3121,12 @@ class Tencent(Adapter):
 ALIBABA = {"rds": "alibabacloud_rds20140815",
            "dds": "alibabacloud_dds20151201",
            "polardb": "alibabacloud_polardb20170801",
-           "kvstore": "alibabacloud_r_kvstore20150101"}
+           "kvstore": "alibabacloud_r_kvstore20150101",
+           "polardbx": "alibabacloud_polardbx20200202"}
+
+#: a PolarDB-X backup set's status, as its API writes it (0 backing up,
+#: 1 done, 2 failed)
+POLARDBX_BACKUP = {0: "running", 1: "success", 2: "failed"}
 
 
 def _snake(action):
@@ -2838,8 +3148,9 @@ def _ali_time(when):
 
 
 class Alibaba(Adapter):
-    """ApsaraDB RDS, ApsaraDB for MongoDB (dds), PolarDB and Tair / Redis
-    (kvstore) through Alibaba Cloud's API. A call is named by its action
+    """ApsaraDB RDS, ApsaraDB for MongoDB (dds), PolarDB, Tair / Redis
+    (kvstore) and PolarDB-X through Alibaba Cloud's API. A call is named
+    by its action
     (`DescribeDBInstanceAttribute`) and its fields are the request
     model's own - a name the model does not have is refused before
     anything is sent."""
@@ -2853,7 +3164,12 @@ class Alibaba(Adapter):
                     "parameters": True},
         "kvstore": {"restore_point": "backup", "clone": True,
                     "parameters": True},
+        "polardbx": {"restore_point": "backup", "clone": True,
+                     "parameters": True},
     }
+    #: PolarDB-X's parameters, by the level they live at: its compute
+    #: nodes' first, then its storage nodes'
+    LEVELS = ("compute", "storage")
     CLI_FILE = Path(".aliyun") / "config.json"
     SDK_FILE = Path(".alibabacloud") / "credentials.ini"
 
@@ -3023,6 +3339,10 @@ class Alibaba(Adapter):
         elif p == "polardb":
             got = [self._call("DescribeDBClusterAttribute",
                               DBClusterId=self.id)]
+        elif p == "polardbx":
+            got = _items(self._call("DescribeDBInstanceAttribute",
+                                    DBInstanceName=self.id,
+                                    RegionId=self.region), "DBInstance")
         else:
             got = _items(self._call("DescribeInstanceAttribute",
                                     InstanceId=self.id),
@@ -3059,6 +3379,15 @@ class Alibaba(Adapter):
                                            _flag(r.get("IsModifiable")),
                                            _flag(r.get("ForceRestart")))
             return out
+        if p == "polardbx":
+            for level in reversed(self.LEVELS):
+                for r in _items(self._call(
+                        "DescribeParameters", DBInstanceId=self.id,
+                        ParamLevel=level, RegionId=self.region), "Data",
+                        "RunningParameters"):
+                    out[r["ParameterName"]] = (r.get("ParameterValue"), None,
+                                               None)
+            return out
         for r in _items(self._call("DescribeParameters",
                                    DBInstanceId=self.id),
                         "RunningParameters", "Parameter"):
@@ -3087,6 +3416,11 @@ class Alibaba(Adapter):
                         return a.get("ConnectionString", ""), _num(
                             a.get("Port"))
             return "", None
+        if p == "polardbx":
+            addrs = _items(self._one(), "ConnAddrs")
+            a = next((a for a in addrs if a.get("Type") == "VPC"),
+                     addrs[0] if addrs else {})
+            return a.get("ConnectionString", ""), _num(a.get("Port"))
         return "", None
 
     def instance(self, names=()):
@@ -3143,6 +3477,17 @@ class Alibaba(Adapter):
                                else "")
             got.status = it.get("DBClusterStatus", "")
             got.host, got.port = self._address()
+        elif p == "polardbx":
+            got.engine = "polardbx"
+            got.version = it.get("EngineVersion") or it.get("DBVersion", "")
+            got.klass = it.get("CnNodeClassCode") or it.get("DBNodeClass", "")
+            got.storage_gb = _gb(it.get("StorageUsed"), 1 << 30)
+            got.maintenance = (
+                f"every day {it['MaintainStartTime']}-"
+                f"{it.get('MaintainEndTime')} UTC".replace("Z", "")
+                if it.get("MaintainStartTime") else "")
+            got.status = it.get("Status", "")
+            got.host, got.port = self._address()
         else:
             got.engine, got.version = str(it.get("InstanceType", "redis")) \
                 .lower(), it.get("EngineVersion", "")
@@ -3190,6 +3535,17 @@ class Alibaba(Adapter):
                                     ConnectionString=host),
                          "Items", "DBCluster")
             return got[0]["DBClusterId"] if got else None
+        if p == "polardbx":
+            for i in self._pages("DescribeDBInstances", "DBInstances",
+                                 RegionId=self.region):
+                name = i.get("DBInstanceName")
+                it = _items(self._call("DescribeDBInstanceAttribute",
+                                       DBInstanceName=name,
+                                       RegionId=self.region), "DBInstance")
+                if any(host == a.get("ConnectionString") for a in _items(
+                        (it or [{}])[0], "ConnAddrs")):
+                    return name
+            return None
         for i in self._pages("DescribeInstances", "Instances",
                              "KVStoreInstance"):
             if host in (i.get("ConnectionDomain"), i.get("PrivateIp")):
@@ -3209,6 +3565,14 @@ class Alibaba(Adapter):
         if p == "polardb":
             return self._pages("DescribeBackups", "Items", "Backup",
                                DBClusterId=self.id, **fields)
+        if p == "polardbx":
+            return [{"BackupId": b.get("BackupSetId"),
+                     "BackupStatus": POLARDBX_BACKUP.get(b.get("Status"),
+                                                         b.get("Status")),
+                     "BackupEndTime": b.get("EndTime")}
+                    for b in self._pages("DescribeBackupSetList", "Data",
+                                         DBInstanceName=self.id,
+                                         RegionId=self.region)]
         it = self._one()
         born = it.get("CreationTime") or it.get("CreateTime")
         span = {"StartTime": _time(born).astimezone(datetime.timezone.utc)
@@ -3254,6 +3618,12 @@ class Alibaba(Adapter):
             log(f"{what} of {self.id} asked for")
         elif p == "polardb":
             self._call("CreateBackup", DBClusterId=self.id, Comment=name)
+            log(f"{what} of {self.id} asked for")
+        elif p == "polardbx":
+            made = str(next(iter(_items(self._call(
+                "CreateBackup", DBInstanceName=self.id, BackupType="0",
+                RegionId=self.region), "Data")), {}).get("BackupSetId")
+                or "")
             log(f"{what} of {self.id} asked for")
         else:
             job = str(self._call("CreateBackup",
@@ -3334,6 +3704,25 @@ class Alibaba(Adapter):
                 ZoneId=str(it.get("ZoneIds") or "").split(",")[0] or None,
                 VPCId=vpc, VSwitchId=subnet, ClusterNetworkType="VPC",
                 DBClusterDescription=name)["DBClusterId"]
+        elif p == "polardbx":
+            made = self._call(
+                "RestoreDBInstance", RegionId=self.region, PayType="POSTPAY",
+                RecoveryTypeCode="Clone", CloneInstanceName=self.id,
+                BackupSetId=point.id if backup else None,
+                RestoreTime=None if backup else when,
+                BackupSetRegion=self.region, SourceInstanceRegion=self.region,
+                EngineVersion=it.get("EngineVersion"),
+                TopologyType=it.get("TopologyType"),
+                Series=it.get("Series"),
+                CnClass=self.conf.get("spec") or it.get("CnNodeClassCode"),
+                DnClass=it.get("DnNodeClassCode"),
+                CNNodeCount=str(it.get("CnNodeCount") or "") or None,
+                DNNodeCount=str(it.get("DnNodeCount") or "") or None,
+                PrimaryZone=it.get("PrimaryZone"),
+                SecondaryZone=it.get("SecondaryZone"),
+                TertiaryZone=it.get("TertiaryZone"), ZoneId=it.get("ZoneId"),
+                NetworkType="vpc", VPCId=vpc, VSwitchId=subnet)[
+                "DBInstanceName"]
         else:
             if point is None:
                 point, backup = self._latest(None), True
@@ -3351,7 +3740,7 @@ class Alibaba(Adapter):
         clone = Alibaba({**self.conf, "id": made})
         clone._found, clone._client = self._found, self._client
         status = {"dds": "DBInstanceStatus", "polardb": "DBClusterStatus",
-                  "kvstore": "InstanceStatus"}[p]
+                  "kvstore": "InstanceStatus", "polardbx": "Status"}[p]
         _ready(lambda: (clone._one().get(status), True), what, log,
                ("running", "normal"), ("deleting", "released", "deleted"))
         got = clone.instance()
@@ -3380,6 +3769,18 @@ class Alibaba(Adapter):
         elif p == "polardb":
             self._call("ModifyDBClusterParameters", DBClusterId=self.id,
                        Parameters=body)
+        elif p == "polardbx":
+            compute = {r["ParameterName"] for r in _items(self._call(
+                "DescribeParameters", DBInstanceId=self.id,
+                ParamLevel=self.LEVELS[0], RegionId=self.region), "Data",
+                "RunningParameters")}
+            for level in self.LEVELS:
+                part = {n: v for n, v in wanted.items()
+                        if (n in compute) == (level == self.LEVELS[0])}
+                if part:
+                    self._call("ModifyParameter", DBInstanceId=self.id,
+                               ParamLevel=level, Parameters=json.dumps(part),
+                               RegionId=self.region)
         else:
             self._call("ModifyInstanceConfig", InstanceId=self.id,
                        Config=body)
@@ -3395,21 +3796,34 @@ class Alibaba(Adapter):
 # --- Huawei Cloud ------------------------------------------------------------
 
 class Huawei(Adapter):
-    """RDS and DDS through Huawei Cloud's API. Its SDK pins libraries older
-    than migkit's, so it runs in an environment of its own and is driven as
-    a program (`huawei_sdk`): one request in, one answer out. The
-    credentials are the keys found, passed to it with each request; none,
-    where the instance's own agency answers."""
+    """RDS, DDS, GaussDB and GeminiDB through Huawei Cloud's API. Its SDK
+    pins libraries older than migkit's, so it runs in an environment of its
+    own and is driven as a program (`huawei_sdk`): one request in, one
+    answer out. The credentials are the keys found, passed to it with each
+    request; none, where the instance's own agency answers. A GaussDB copy
+    is made from a backup only - its API restores no time into a new
+    instance."""
     provider, WHO = "huawei", "Huawei Cloud"
     PRODUCTS = {
         "rds": {"restore_point": "backup", "clone": True,
                 "parameters": True},
         "dds": {"restore_point": "backup", "clone": True,
                 "parameters": False},
+        "gaussdb": {"restore_point": "backup", "clone": True,
+                    "parameters": True},
+        "geminidb": {"restore_point": "backup", "clone": True,
+                     "parameters": True},
     }
     WHY = {("dds", "parameters"):
            "a DDS instance's parameters are set per node group through its"
            " parameter templates"}
+    #: each API of GeminiDB's, as its instances name it, and the engine
+    #: migkit moves it as
+    GEMINI = {"cassandra": "geminidb-cassandra", "redis": "geminidb-redis",
+              "mongodb": "geminidb-mongo"}
+    #: the job each product's long work is followed by
+    JOBS = {"rds": "list_job_info", "dds": "show_job_detail",
+            "gaussdb": "show_job_detail", "geminidb": "list_jobs"}
     CLI_DIR = ".hcloud"
     #: the CLI's configuration: its name and its profiles' fields are the
     #: CLI's documentation's, not read off a build here - the CLI is a
@@ -3590,10 +4004,23 @@ class Huawei(Adapter):
             got.host = ((it.get("private_ips") or [""])[0]
                         or (it.get("private_dns_names") or [""])[0])
             got.port = _num(it.get("port"))
-            if names:
-                rows = self._rds_rows()
-                got.parameters = {n: Param(*rows[n]) if n in rows
-                                  else Param() for n in names}
+        elif p == "gaussdb":
+            got.engine, got.klass = "gaussdb", it.get("flavor_ref", "")
+            flavor = it.get("flavor_info") or {}
+            got.cpu, got.memory_gb = _num(flavor.get("vcpu")), _num(
+                flavor.get("mem"))
+            got.storage_gb = _num((it.get("volume") or {}).get("size"))
+            got.host = (it.get("private_ips") or [""])[0]
+            got.port = _num(it.get("port"))
+        elif p == "geminidb":
+            kind = str((it.get("datastore") or {}).get("type", "")).lower()
+            got.engine = self.GEMINI.get(kind, kind)
+            got.host, got.port, node = self._gemini_address(it)
+            got.klass = f"{it.get('mode', '')} {node.get('spec_code', '')}" \
+                .strip()
+            got.storage_gb = _num(next((g["volume"].get("size") for g in
+                                        it.get("groups") or ()
+                                        if g.get("volume")), None))
         else:
             got.engine, got.klass = "mongodb", it.get("mode", "")
             got.host, got.port, node = self._dds_address(it)
@@ -3601,7 +4028,19 @@ class Huawei(Adapter):
                                         it.get("groups") or ()
                                         if g.get("volume")), None))
             got.klass = f"{got.klass} {node.get('spec_code', '')}".strip()
+        if names and self.PRODUCTS[p]["parameters"]:
+            rows = self._rds_rows()
+            got.parameters = {n: Param(*rows[n]) if n in rows
+                              else Param() for n in names}
         return got
+
+    @classmethod
+    def _gemini_address(cls, it):
+        """A GeminiDB instance's address: its load balancer's where it has
+        one, else its first node's."""
+        _, _, node = cls._dds_address(it)
+        return (it.get("lb_ip_address") or node.get("private_ip", ""),
+                _num(it.get("lb_port") or it.get("port")), node)
 
     def find(self, host, port=None):
         host, offset = str(host), 0
@@ -3609,9 +4048,13 @@ class Huawei(Adapter):
             page = self._call("list_instances", offset=offset, limit=100).get(
                 "instances") or []
             for it in page:
-                if self.product == "rds":
+                if self.product in ("rds", "gaussdb"):
                     here = (it.get("private_ips") or []) + (
                         it.get("private_dns_names") or [])
+                elif self.product == "geminidb":
+                    here = [it.get("lb_ip_address")] + [
+                        n.get("private_ip") for g in it.get("groups") or ()
+                        for n in g.get("nodes") or ()]
                 else:
                     here = [n.get("private_ip") for g in it.get("groups")
                             or () for n in g.get("nodes") or ()]
@@ -3647,10 +4090,14 @@ class Huawei(Adapter):
 
     def _make(self, name, log):
         what = f"the backup {name}"
-        if self.product == "rds":
+        if self.product in ("rds", "gaussdb"):
             made = self._call("create_manual_backup", body={
-                "instance_id": self.id, "name": name,
+                "instance_id": self.id, "name": _fit(name, 64),
                 "description": "a restore point"})["backup"]["id"]
+        elif self.product == "geminidb":
+            made = self._call("create_back", instance_id=self.id, body={
+                "name": _fit(name, 64),
+                "description": "a restore point"})["backup_id"]
         else:
             made = self._call("create_manual_backup", body={"backup": {
                 "instance_id": self.id, "name": name,
@@ -3664,14 +4111,48 @@ class Huawei(Adapter):
     # copies ----------------------------------------------------------------
 
     def _job(self, job, what, log):
-        action = "list_job_info" if self.product == "rds" \
-            else "show_job_detail"
-        return _ready(lambda: ((self._call(action, id=job).get("job") or {})
-                               .get("status", ""), True), what, log,
-                      ("completed",), ("failed",))
+        action = self.JOBS[self.product]
+
+        def status():
+            got = self._call(action, id=job)
+            one = got.get("job") or next(iter(got.get("jobs") or ()), {})
+            return (one or {}).get("status", ""), True
+        return _ready(status, what, log, ("completed",), ("failed",))
+
+    def _gemini_clone(self, name, it, point, net):
+        """A new GeminiDB instance of the source's API, mode and nodes,
+        restored from a backup or to a time."""
+        nodes = [n for g in it.get("groups") or () for n in
+                 g.get("nodes") or ()]
+        size = self.conf.get("storage") or next(
+            (g["volume"].get("size") for g in it.get("groups") or ()
+             if g.get("volume")), None)
+        store = it.get("datastore") or {}
+        restore = {"backup_id": point.id} if point is not None and \
+            point.kind == "backup" else {
+            "source_instance_id": self.id,
+            "restore_time": int(_time(point.at if point else _now())
+                                .timestamp() * 1000)}
+        got = self._call("create_instance", body={
+            "name": name, "region": self.region,
+            "availability_zone": it.get("availability_zone") or next(
+                (n.get("availability_zone") for n in nodes
+                 if n.get("availability_zone")), None),
+            "datastore": {"type": store.get("type"),
+                          "version": store.get("version"),
+                          "storage_engine": "rocksDB"},
+            "mode": it.get("mode"),
+            "flavor": [{"num": str(len(nodes) or 1), "storage": "ULTRAHIGH",
+                        "size": str(size), "spec_code": self.conf.get("spec")
+                        or (nodes[0] if nodes else {}).get("spec_code")}],
+            "restore_info": restore, **net})
+        return got["id"], got.get("job_id")
 
     def _clone(self, name, point, log):
         it, what = self._one(), f"the copy {name}"
+        if self.product == "gaussdb":
+            # its API restores a backup into a new instance, never a time
+            point = self._latest(self._no_time(point))
         backup = point is not None and point.kind == "backup"
         restore = {"instance_id": self.id, "type": "backup",
                    "backup_id": point.id} if backup else {
@@ -3698,6 +4179,22 @@ class Huawei(Adapter):
                     it.get("ha") or {}).get("replication_mode")}
             got = self._call("create_restore_instance", body=body)
             made, job = got["instance"]["id"], got.get("job_id")
+        elif self.product == "gaussdb":
+            nodes = it.get("nodes") or ()
+            zones = sorted({n.get("availability_zone") for n in nodes
+                            if isinstance(n, dict) and n.get(
+                                "availability_zone")})
+            got = self._call("create_restore_instance", body={
+                "name": _fit(name, 64), "availability_zone": ",".join(zones),
+                "flavor_ref": self.conf.get("spec") or it["flavor_ref"],
+                "volume": {"type": it["volume"]["type"],
+                           "size": int(self.conf.get("storage")
+                                       or it["volume"]["size"])},
+                "restore_point": {"instance_id": self.id,
+                                  "backup_id": point.id}, **net})
+            made, job = got["instance"]["id"], got.get("job_id")
+        elif self.product == "geminidb":
+            made, job = self._gemini_clone(_fit(name, 64), it, point, net)
         else:
             restore["restore_time"] = str(restore.get("restore_time")) \
                 if not backup else None
@@ -3727,9 +4224,11 @@ class Huawei(Adapter):
         new = _ready(lambda: (lambda i: (i.get("status", ""), i))(
             self._one(made)), what, log, ("active", "normal"),
             ("failed", "abnormal"))
-        if self.product == "rds":
+        if self.product in ("rds", "gaussdb"):
             host, port = (new.get("private_ips") or [""])[0], _num(
                 new.get("port"))
+        elif self.product == "geminidb":
+            host, port, _ = self._gemini_address(new)
         else:
             host, port, _ = self._dds_address(new)
         return {"host": host, "port": port, "id": made, "kind": "instance"}
@@ -4339,6 +4838,15 @@ SDKS = {
                  " create_db_cluster_snapshot, describe_db_cluster_snapshots,"
                  " restore_db_cluster_from_snapshot,"
                  " restore_db_cluster_to_point_in_time, create_db_instance",
+        "neptune": "describe_db_clusters, describe_db_instances,"
+                   " describe_db_cluster_parameters,"
+                   " modify_db_cluster_parameter_group,"
+                   " create_db_cluster_snapshot,"
+                   " describe_db_cluster_snapshots,"
+                   " restore_db_cluster_from_snapshot,"
+                   " restore_db_cluster_to_point_in_time, create_db_instance",
+        "keyspaces": "get_keyspace, list_tables, get_table, create_keyspace,"
+                     " restore_table",
         "elasticache": "describe_replication_groups, describe_cache_clusters,"
                        " describe_cache_parameters,"
                        " modify_cache_parameter_group, create_snapshot,"
@@ -4370,7 +4878,10 @@ SDKS = {
         "opensearch update_domain_config: a domain's settings are read"
         " here, never changed",
         "msk get_bootstrap_brokers: the brokers' addresses are the hop's"
-        " own, not the provider's")),
+        " own, not the provider's",
+        "neptune reboot_db_instance: " + RESTART,
+        "keyspaces update_table: a table's point-in-time recovery is the"
+        " operator's to turn on; it is read here, never changed")),
     "google-api-client": ("Apache-2.0", {
         "cloudsql": "instances.get, instances.list, instances.clone,"
                     " instances.patch, backupRuns.insert, backupRuns.list,"
@@ -4390,9 +4901,23 @@ SDKS = {
                        " projects.locations.instances.list,"
                        " projects.locations.instances.patch,"
                        " projects.locations.operations.get",
-        "bigquery": "datasets.get"}, (
+        "bigquery": "datasets.get",
+        "spanner": "projects.instances.get,"
+                   " projects.instances.databases.get,"
+                   " projects.instances.databases.restore,"
+                   " projects.instances.backups.create,"
+                   " projects.instances.backups.get,"
+                   " projects.instances.backups.list",
+        "firestore": "projects.databases.get, projects.databases.clone,"
+                     " projects.databases.restore,"
+                     " projects.databases.operations.get,"
+                     " projects.locations.backups.list"}, (
         "cloudsql instances.restoreBackup: a backup is restored only into an"
         " instance that exists; a copy is a clone to a time",
+        "spanner projects.instances.backups.copy: a backup copied to another"
+        " instance is the seed's own step",
+        "firestore projects.databases.exportDocuments: an export is files"
+        " in a bucket - the move's own copy, not a restore point",
         "cloudsql instances.restart: " + RESTART,
         "alloydb projects.locations.clusters.instances.restart: " + RESTART,
         "memorystore projects.locations.instances.export: an export is a"
@@ -4480,6 +5005,9 @@ SDKS = {
         "kvstore": "DescribeInstanceAttribute, DescribeInstances,"
                    " DescribeParameters, ModifyInstanceConfig, CreateBackup,"
                    " DescribeBackupTasks, DescribeBackups, CreateInstance",
+        "polardbx": "DescribeDBInstanceAttribute, DescribeDBInstances,"
+                    " DescribeParameters, ModifyParameter, CreateBackup,"
+                    " DescribeBackupSetList, RestoreDBInstance",
         "credentials": "StaticAKCredentialsProvider,"
                        " StaticSTSCredentialsProvider,"
                        " OIDCRoleArnCredentialsProvider,"
@@ -4492,20 +5020,30 @@ SDKS = {
         "rds RecoveryDBInstance: a backup is restored into an instance that"
         " exists, not copied",
         "dds RestoreDBInstance: " + IN_PLACE,
-        "polardb RestartDBNode: " + RESTART)),
+        "polardb RestartDBNode: " + RESTART,
+        "polardbx RestartDBInstance: " + RESTART)),
     "huaweicloud-sdk": ("Apache-2.0", {
         "rds": "list_instances, show_instance_configuration,"
                " update_instance_configuration, create_manual_backup,"
                " list_backups, create_restore_instance, list_job_info",
         "dds": "list_instances, create_manual_backup, list_backups,"
                " restore_new_instance, show_job_detail",
+        "gaussdb": "list_instances, show_instance_configuration,"
+                   " update_instance_configuration, create_manual_backup,"
+                   " list_backups, create_restore_instance, show_job_detail",
+        "geminidb": "list_instances, show_instance_configuration,"
+                    " update_instance_configuration, create_back,"
+                    " list_backups, create_instance, list_jobs",
         "iam": "create_temporary_access_key_by_agency"}, (
         "rds restore_to_existing_instance: a backup is restored into an"
         " instance that exists, not copied",
         "rds start_instance_restart_action: " + RESTART,
         "dds restore_instance: " + IN_PLACE,
         "dds update_entity_configuration: a node group's parameters are set"
-        " through its templates, not here")),
+        " through its templates, not here",
+        "gaussdb restore_instance: " + IN_PLACE,
+        "geminidb restore_existing_instance: a backup is restored into an"
+        " instance that exists, not copied")),
     "oci-sdk": ("UPL-1.0 OR Apache-2.0", {
         "mysql": "get_db_system, list_db_systems, create_db_system,"
                  " update_db_system, create_backup, get_backup, list_backups,"

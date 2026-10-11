@@ -321,31 +321,124 @@ def test_oracle_digests_every_row_its_whole_read_reads(monkeypatch):
         assert f"nvl2({column}," in mark, column
 
 
+#: one answer for each of the MySQL catalogue's reads, by what it reads
+_MY_SHAPE = {
+    "information_schema.tables": [("t", "BASE TABLE")],
+    "information_schema.columns": [("t", "id", "int", "NO", "int", None,
+                                    "", None, None, 1),
+                                   ("t", "v", "varchar(9)", "YES",
+                                    "varchar", "x", "",
+                                    "utf8mb4_bin", None, 2)],
+    "information_schema.statistics": [("t", "PRIMARY", 1, "id", 0, None,
+                                       "A", "BTREE", None, "YES"),
+                                      ("t", "t_v", 1, "v", 1, 4, "D",
+                                       "BTREE", None, "NO")],
+    "information_schema.key_column_usage": [],
+    "check_constraints": [("t", "(`id` > 0)", "NO")],
+    "information_schema.triggers": [("t", "t_bi", "BEFORE", "INSERT", 1,
+                                     "set new.v = 'y'")],
+}
+
+
+def _my_shape_engine(monkeypatch, refuse=()):
+    """A MySQL engine whose server answers `_MY_SHAPE`, refusing as an
+    unknown column a statement holding any of `refuse`."""
+    import types
+
+    import pymysql
+
+    from migkit.engines.mysql import MySQLEngine
+    eng = _engine(MySQLEngine, "mysql")
+    monkeypatch.setattr(MySQLEngine, "_side_brand",
+                        lambda self, side: types.SimpleNamespace(
+                            name="mysql"))
+    asked = []
+
+    def q(self, side, sql, args=None, fresh=False):
+        asked.append((sql, args))
+        if any(r in sql for r in refuse):
+            raise pymysql.err.OperationalError(1054, "Unknown column")
+        return next(rows for where, rows in _MY_SHAPE.items()
+                    if where in sql)
+    monkeypatch.setattr(MySQLEngine, "_q", q)
+    return eng, asked
+
+
 def test_mysql_and_tidb_digest_every_row_their_whole_read_reads(
         monkeypatch):
+    """Every statement the whole shape is read in is the one the digest
+    asks over, every column of it, the way this server answers it. The
+    digest was over a column's table, name, type and place alone, while
+    the shape a tail compares holds its null, default and collation and
+    every index, foreign key, check and trigger: a change to any of them
+    kept the mark, and the tail the shape it read before."""
     from migkit.engines.mysql import MySQLEngine
     from migkit.engines.tidb import TiDBEngine
     # TiDB's feed hands its DDL to the shape check: the same digest asks
     assert TiDBEngine.shape_mark is MySQLEngine.shape_mark
     assert TiDBEngine.column_catalog is MySQLEngine.column_catalog
-    eng = _engine(MySQLEngine, "mysql")
-    asked = []
+    for _, _, width, ways in MySQLEngine._SHAPE_READS:
+        for way in ways:
+            # every column named, and the width the digest takes them by
+            assert _aliases(way) == list(range(width)), way[:60]
+            assert way.count("%s") == 1, way[:60]
+    # a server without an index's expression and visibility (MySQL 5.7)
+    eng, asked = _my_shape_engine(monkeypatch, refuse=("expression c8",))
+    cat = eng.catalog("src", "app")
+    assert [c.name for c in cat.columns["t"]] == ["id", "v"]
+    assert cat.keys["t"] == ("id",)
+    assert cat.indexes["t"][0].columns == ("v(4) desc",)
+    assert cat.others["t"][0] == "check (`id` > 0) not enforced"
+    assert cat.others["t"][1].startswith("trigger t_bi before insert"
+                                         " order 1 ")
+    reads = eng._shape_reads("src")
+    ran = [sql for sql, _ in asked if "expression c8" not in sql]
+    assert len(ran) == len(reads) == 6
+    for (_, sql, order, _), got in zip(reads, ran):
+        assert got == f"{sql} order by {order}"
+    # the way it answered is kept: the next read asks it first
+    assert "expression c8" not in reads[2][1]
+    assert "null c8, case when ignored" in reads[2][1]
+    asked.clear()
     monkeypatch.setattr(MySQLEngine, "_q",
                         lambda self, side, q, args=None, fresh=False:
-                        asked.append((q, args)) or [("t", "id", "int", 1)])
-    assert eng.column_catalog("src", "app") == {"t": [("id", "int")]}
-    assert asked[-1][0] == MySQLEngine._CATALOG_READS
-    monkeypatch.setattr(MySQLEngine, "_q",
-                        lambda self, side, q, args=None, fresh=False:
-                        asked.append((q, args)) or [(4, 77)])
-    assert eng.shape_mark("src", "app") == "4:77"
-    mark, args = asked[-1]
-    assert f"from ({MySQLEngine._CATALOG_READS}) q" in mark
-    assert args == asked[0][1]
-    for column in ("ct", "cn", "cd", "cp"):
-        assert f"char_length(q.{column}), q.{column}" in mark, column
+                        asked.append((q, args)) or [tuple(["3:9"] * 6)])
+    assert eng.shape_mark("src", "app") == "/".join(["3:9"] * 6)
+    (mark, args), = asked
+    assert args == ("app",) * 6
+    start = 0
+    for _, sql, _, width in reads:
+        # each statement's own part, in order: its rows hashed over every
+        # column it names, a missing value apart, and no more
+        end = mark.index(f"from ({sql}) q)", start)
+        part = mark[start:end]
+        for n in range(width):
+            assert f"coalesce(concat(char_length(q.c{n}), ':', q.c{n})," \
+                   " '-')" in part, (n, sql[:60])
+        assert f"q.c{width})" not in part
+        start = end + len(sql)
     # a sum of each row's hash: no string of every row a length cuts
     assert "group_concat" not in mark
+
+
+def test_mysql_a_read_no_way_answers_is_never_read_as_empty(monkeypatch):
+    import pymysql
+    eng, _ = _my_shape_engine(monkeypatch, refuse=("information_schema"
+                                                   ".triggers",))
+    with pytest.raises(pymysql.err.OperationalError):
+        eng.catalog("src", "app")
+    # what is not a missing column or table is the server's refusal,
+    # not a way to try next
+    from migkit.engines.mysql import MySQLEngine
+
+    def denied(self, side, sql, args=None, fresh=False):
+        raise pymysql.err.OperationalError(1142, "SELECT command denied")
+    monkeypatch.setattr(MySQLEngine, "_q", denied)
+    eng.forget_shapes()
+    with pytest.raises(pymysql.err.OperationalError):
+        eng.catalog("src", "app")
+    assert eng._shape_reads("src")[0][1] == \
+        MySQLEngine._SHAPE_READS[0][3][0]
 
 
 def test_sqlite_digests_its_schema_and_any_change_moves_it(tmp_path):
@@ -457,7 +550,24 @@ def test_mysql_digests_its_catalogue_and_a_change_moves_it(my):
             "alter table sm add w int",
             "create table sn (id int)",
             # a column's place, its definition the same
-            "alter table sm modify w int after id"))
+            "alter table sm modify w int after id",
+            # what the shape compares beyond a column's name and type
+            "alter table sm modify v varchar(20) not null",
+            "alter table sm alter v set default 'x'",
+            "alter table sm modify v varchar(20) collate utf8mb4_bin not"
+            " null default 'x'",
+            "create index sm_v on sm (v)",
+            "alter table sm alter index sm_v invisible",
+            "alter table sn add primary key (id)",
+            "alter table sm add constraint sm_f foreign key (w)"
+            " references sn (id)",
+            "alter table sm add constraint sm_c check (id > 0)",
+            "alter table sm alter check sm_c not enforced",
+            "create trigger sm_t before insert on sm for each row"
+            " set new.w = 1"))
+    # and the whole shape it stands for reads as before
+    assert [c.name for c in eng.shape_catalog("src", db).columns[
+        "sm"]] == ["id", "w", "v"]
 
 
 def test_the_row_filters_translation_is_made_once_a_table(monkeypatch):

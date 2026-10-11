@@ -1584,7 +1584,9 @@ def _after_flip(hop, dbs, leg, rec, say):
 #              takes reaches the old source - the point itself
 #   left       what the cutover left on the old source run or taken away
 #              (the statements its frozen source refused, the mark's
-#              table), now that it is written again
+#              table), now that it is written again, and what the
+#              follow opened there ended (an SAP system's delta
+#              subscriptions, `_follow_left`)
 #   origin     migkit's own batch table taken off the target where the
 #              hop asks (`origin_table: drop`), once no tail runs
 # Each is recorded before it acts. Up to the stream back's drop every step
@@ -1684,7 +1686,8 @@ def no_return(hop, eng, dbs, go, leg, say, approve, rec=None,
             drainmark.drop(hop, eng, d)
         except Exception as e:  # noqa: BLE001 - said, kept
             kept.append(f"{d}: the mark's table - {str(e).strip()[:120]}")
-    done("left", kept=kept or None)
+    ended = _follow_left(hop, eng, dbs, kept, s)
+    done("left", kept=kept or None, ended=ended or None)
     phase("origin")
     if leg.origin is not None:
         for d in dbs:
@@ -1705,12 +1708,42 @@ def no_return(hop, eng, dbs, go, leg, say, approve, rec=None,
     return rec
 
 
+def _follow_left(hop, eng, dbs, kept, say):
+    """What the forward stream's follow opened on the old source and ends
+    with it (`Engine.follow_left` of the source's engine: an SAP system's
+    delta subscriptions), each database's; what could not be ended added
+    to `kept`. {database: [ended]}."""
+    from . import freeze
+    src = freeze.side_engine(hop, eng, "src")[1]
+    ends = getattr(src, "follow_left", None)
+    if not callable(ends):
+        return {}
+    out = {}
+    for d in dbs:
+        try:
+            done, left = ends(d)
+        except Exception as e:  # noqa: BLE001 - said, kept
+            kept.append(f"{d}: the follow's subscriptions -"
+                        f" {str(e).strip()[:120]}")
+            continue
+        if done:
+            out[d] = list(done)
+            say(f"{d}: the follow's subscriptions on the old source ended:"
+                f" {', '.join(done[:6])}")
+        kept += [f"{d}: {x}" for x in left]
+    return out
+
+
 def _no_return_plan(hop, dbs, leg, flipped, back):
     from .hopkeys import origin_dropped
     out = []
     if leg.end is not None:
         out.append("the forward stream: ended for good - it carries nothing"
                    " since the flip")
+    if (hop.options or {}).get("source_engine") == "sapodp":
+        out.append("old source: the delta subscriptions the follow opened"
+                   " on the SAP system ended, so its delta queue stops"
+                   " filling for a reader that is gone")
     out.append("old source: its writes given back - exactly what the freeze"
                " took")
     out.append("the stream back: dropped - from here nothing the target"

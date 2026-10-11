@@ -2033,6 +2033,8 @@ SHAPES = {
     "slow link": "a link too slow for one stream",
     "writes held": "a side whose writes are held and let go again, read"
                    " back - the source at cutover",
+    "spread target": "a target that spreads a table across nodes of its"
+                     " own, its rows placed and loaded as it places them",
 }
 
 _BY_KEY_ORDER = ("read by {}, never in key order, so the key's shape does"
@@ -2053,6 +2055,19 @@ _COMPARES_ONLY = ("it compares two databases and writes to neither: nothing"
 _NONE = {**{n: (NOT_APPLICABLE, STREAM_ONLY.format(said, n))
             for n, said in (("kinesis", "Kinesis"), ("pubsub", "Pub/Sub"))},
          "generic": (NOT_YET, "33")}
+#: the cloud-native services held - a source at cutover, a target kept -
+#: by the hold of the API or the wire they speak (`freeze.HOLDS`)
+_HELD_AS = (("gaussdb", "PostgresHold"), ("oceanbase", "MySQLHold"),
+            ("polardbx", "MySQLHold"), ("dcdb", "MySQLHold"),
+            ("oceanbase-oracle", "OracleHold"),
+            ("geminidb-cassandra", "CassandraHold"),
+            ("geminidb-redis", "RedisHold"), ("geminidb-mongo", "MongoHold"))
+#: and those whose writes the cloud's access policies allow
+_BY_POLICY = ("spanner", "bigtable", "firestore", "datastore", "keyspaces",
+              "neptune", "timestream")
+_CLOUD_POLICIES = ("its writes are allowed by the cloud's access policies,"
+                   " outside the database, which migkit does not change: its"
+                   " operator holds them")
 
 #: {shape: {engine or "*": ("yes", where) | (NOT_YET, item) |
 #: (NOT_APPLICABLE, why)}}; "*" is what an engine not named gets
@@ -2073,6 +2088,24 @@ WAYS = {
         "couchbase": (NOT_APPLICABLE, "every document is kept by its key"),
         "cosmosdb": (NOT_APPLICABLE, "every item carries an id within its"
                                      " partition key"),
+        # the cloud-native services (P0-CLOUDS part 2): the SQL ones read a
+        # keyless table in one pass through their DB-API or MySQL reader;
+        # the rest keep every row by a key of their own
+        **{n: ("yes", "@neutral_batches")
+           for n in ("gaussdb", "oceanbase", "oceanbase-oracle", "polardbx",
+                     "dcdb", "keyspaces", "geminidb-cassandra")},
+        "spanner": (NOT_APPLICABLE, "every Spanner table has a primary key"),
+        "bigtable": (NOT_APPLICABLE, "every row is filed under its row key"),
+        "firestore": (NOT_APPLICABLE, "every document is kept by its name"),
+        "datastore": (NOT_APPLICABLE, "every entity is kept by its key"),
+        "neptune": (NOT_APPLICABLE, "every vertex and edge is kept by its id,"
+                                    " and every quad is its own key"),
+        "timestream": (NOT_APPLICABLE, "every record is kept by its"
+                                       " dimensions, measure name and time"),
+        "lindorm": (NOT_APPLICABLE, "every wide table keeps its rows by a"
+                                    " primary key"),
+        "geminidb-redis": (NOT_APPLICABLE, "every value is under its key"),
+        "geminidb-mongo": (NOT_APPLICABLE, "every document carries an _id"),
         "copybook": ("yes", "@position_spans"),
         "teradata": ("yes", "@row_bucket_sql"),
         **{n: ("yes", "@neutral_batches") for n in _READ_ONLY},
@@ -2092,6 +2125,23 @@ WAYS = {
             "the key-value range scan")),
         "cosmosdb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("feed ranges")),
         "cassandra": (NOT_APPLICABLE, _BY_KEY_ORDER.format("token ranges")),
+        **{n: ("yes", "@neutral_read")
+           for n in ("spanner", "gaussdb", "oceanbase", "oceanbase-oracle",
+                     "polardbx", "dcdb", "lindorm")},
+        "geminidb-mongo": ("yes", "@move_table"),
+        **{n: (NOT_APPLICABLE, _BY_KEY_ORDER.format("token ranges"))
+           for n in ("keyspaces", "geminidb-cassandra")},
+        "bigtable": (NOT_APPLICABLE, "a row key is one string of bytes, read"
+                                     " in its own order"),
+        "firestore": (NOT_APPLICABLE, "a document's name is one path, read"
+                                      " in its own order"),
+        "datastore": (NOT_APPLICABLE, "an entity's key is one path, read in"
+                                      " its own order"),
+        "neptune": (NOT_APPLICABLE, _BY_KEY_ORDER.format(
+            "one pass of the graph")),
+        "timestream": (NOT_APPLICABLE, _BY_KEY_ORDER.format("time")),
+        "geminidb-redis": (NOT_APPLICABLE, "a key is one string, read by the"
+                                           " scan's cursor"),
         "dynamodb": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scan segments")),
         "opensearch": (NOT_APPLICABLE, _BY_KEY_ORDER.format("scroll slices")),
         **{n: (NOT_APPLICABLE, _BY_KEY_ORDER.format("a file at a time"))
@@ -2161,6 +2211,9 @@ WAYS = {
         "tidb": ("yes", "@_deep_partitions"),
         "teradata": ("yes", "@_deep_partitions"),
         "clickhouse": ("yes", "@_partitioned_by"),
+        # partitions and clusters read from the table's metadata, every
+        # partition held to its own row count (`INFORMATION_SCHEMA.PARTITIONS`)
+        "bigquery": ("yes", "@check_deep"),
         "kafka": ("yes", "@move_table"),
         "redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
                                   " partitioned ones"),
@@ -2187,6 +2240,23 @@ WAYS = {
         "cosmosdb": (NOT_APPLICABLE, "a container's physical partitions are"
                                      " its own layout; it is read feed range"
                                      " by feed range"),
+        "spanner": (NOT_APPLICABLE, "Spanner splits a table by its key"
+                                    " itself; there are no partitions to"
+                                    " carry"),
+        "bigtable": (NOT_APPLICABLE, "Bigtable splits a table into tablets"
+                                     " by its row keys itself"),
+        **{n: (NOT_APPLICABLE, "a collection is spread by the service"
+                               " itself; there are no partitions to carry")
+           for n in ("firestore", "datastore")},
+        **{n: (NOT_APPLICABLE, "every table is partitioned by its key; the"
+                               " copy goes by token ranges")
+           for n in ("keyspaces", "geminidb-cassandra")},
+        "geminidb-mongo": (NOT_APPLICABLE, "collections are sharded, not"
+                                           " partitioned; read as one"),
+        "neptune": (NOT_APPLICABLE, "a graph is not partitioned; it is read"
+                                    " whole"),
+        "timestream": (NOT_APPLICABLE, "a table is partitioned by the service"
+                                       " by its dimensions; it is read whole"),
         "sqlite": (NOT_APPLICABLE, "SQLite has no partitioned tables"),
         "duckdb": (NOT_APPLICABLE, "DuckDB has no partitioned tables"),
         "cockroachdb": (NOT_APPLICABLE, "a partition only labels rows of"
@@ -2257,6 +2327,9 @@ WAYS = {
                                      " writer of a change"),
         **{n: (NOT_APPLICABLE, "it is read, never written") for n in
            _READ_ONLY},
+        **{n: ("yes", f"freeze.{c}") for n, c in _HELD_AS
+           + (("lindorm", "LindormHold"),)},
+        **{n: (NOT_APPLICABLE, _CLOUD_POLICIES) for n in _BY_POLICY},
         "*": (NOT_YET, "R13"),
     },
     "slow link": {
@@ -2321,12 +2394,57 @@ WAYS = {
                                " interface, which migkit only reads; its"
                                " operator stops the application")
            for n in _READ_ONLY},
+        # the cloud-native services held by the hold of the API they speak;
+        # those whose writes are allowed by the cloud's access policies
+        # are held by their operator
+        **{n: ("yes", f"freeze.{c}") for n, c in _HELD_AS},
+        **{n: (NOT_APPLICABLE, _CLOUD_POLICIES) for n in _BY_POLICY},
+        "lindorm": (NOT_APPLICABLE, "nothing in Lindorm ends another's"
+                                    " session or shows what one holds open,"
+                                    " so a source's writes are stopped by"
+                                    " its operator (freeze: operator) and"
+                                    " proved by migkit"),
         "*": (NOT_YET, "F2"),
     },
 }
 # the copier reads a table whose only index is not unique as one with no
 # key: `neutral_key` answers the primary key or nothing
 WAYS["no unique index"] = dict(WAYS["keyless"])
+#: a reshard's one target that is a cluster (`reshard`): its own
+#: distribution read and each row placed and loaded as it places it
+#: (`Engine.distribution`); where the cluster places every row itself
+#: whatever a client does, there is nothing of it to honour
+_KEY_SPANS = ("it spreads a table by spans of its key and every server of"
+              " it is a gateway to every span: the copy writes a table in"
+              " key order, a batch a span, the order its spans are laid out"
+              " in")
+_ROUTES = ("the {} places each item it is given by its own key, and no"
+           " node of it is addressed by a client")
+WAYS["spread target"] = {
+    **_NONE,
+    # Citus, the nodes' own parts written directly where they are reached
+    "postgres": ("yes", "@distribution"),
+    # Vitess, through its gate by its vindex
+    "mysql": ("yes", "@distribution"),
+    "mongodb": ("yes", "@distribution"),
+    "cassandra": ("yes", "@distribution"),
+    # a pair's target is asked as its own engine is
+    "hetero": ("yes", "reshard._spread"),
+    "generic": (NOT_APPLICABLE, _COMPARES_ONLY),
+    "tidb": (NOT_APPLICABLE, _KEY_SPANS),
+    "cockroachdb": (NOT_APPLICABLE, _KEY_SPANS),
+    "dsql": (NOT_APPLICABLE, _KEY_SPANS),
+    "clickhouse": (NOT_APPLICABLE, "a Distributed table splits every block"
+                                   " it is given by its own sharding key and"
+                                   " sends each shard its rows"),
+    **{n: (NOT_APPLICABLE, _ROUTES.format(said)) for n, said in (
+        ("dynamodb", "service"), ("cosmosdb", "service"),
+        ("bigquery", "service"), ("snowflake", "service"),
+        ("redshift", "cluster's leader"), ("couchbase", "client"),
+        ("opensearch", "cluster"), ("kafka", "producer"),
+        ("redis", "cluster client"))},
+    "*": (NOT_APPLICABLE, "one server holds every row of a table"),
+}
 
 
 def resolves(engine, where):

@@ -12,6 +12,63 @@ SKIP_DBS = {"admin", "local", "config"}
 DRILL_RANGE_DOCS = 200_000
 
 
+def _bound_kind(bound):
+    """"min", "max", "number", "text", or None - how a chunk's bound is
+    held to a key's value; None for a type BSON orders by type first."""
+    name = type(bound).__name__
+    if name == "MinKey":
+        return "min"
+    if name == "MaxKey":
+        return "max"
+    if isinstance(bound, bool):
+        return None
+    if isinstance(bound, (int, float)) or name == "Decimal128":
+        return "number"
+    if isinstance(bound, str):
+        return "text"
+    return None
+
+
+def chunk_of(text, ranges):
+    """The part of the chunk whose range [min, max) holds a shard key's
+    value given as its canonical text, or None where it cannot be said
+    here: `ranges` [(min, max, part)], each bound a value of the key's
+    one field. The value is read as a number where every bound but the
+    ends is one, as text where every one is text; bounds of other types,
+    or of both, are ordered by type first in BSON, and are the router's
+    to place."""
+    from decimal import Decimal, InvalidOperation
+    if text is None:
+        return None
+    kinds = {_bound_kind(b) for lo, hi, _ in ranges for b in (lo, hi)}
+    kinds -= {"min", "max"}
+    if not kinds:
+        # one chunk, from the lowest key to the highest: it holds them all
+        return ranges[0][2] if len(ranges) == 1 else None
+    if kinds == {"number"}:
+        try:
+            value = Decimal(str(text))
+        except (InvalidOperation, ValueError):
+            return None
+
+        def held(b):
+            return Decimal(str(b.to_decimal() if hasattr(b, "to_decimal")
+                               else b))
+    elif kinds == {"text"}:
+        value = str(text)
+
+        def held(b):
+            return str(b)
+    else:
+        return None
+    for lo, hi, part in ranges:
+        above = _bound_kind(lo) == "min" or held(lo) <= value
+        below = _bound_kind(hi) == "max" or value < held(hi)
+        if above and below:
+            return part
+    return None
+
+
 class MongoEngine(Engine):
     checks = ("schema", "counts", "data")
     counts_from_data = True
@@ -116,6 +173,11 @@ class MongoEngine(Engine):
         from ..movers import mask_rules
         return set(mask_rules(self.hop, db))
 
+
+    def row_query(self, db, table):
+        """The hop's row filter for collection `table` as a MongoDB query
+        doc, or None."""
+        return self._rows_of(db, table)
     def _rows_of(self, db, name):
         """The hop's row filter for a collection as a document query
         (`rowfilter.to_mongo`, with SQL's NULL kept), or None where it has
@@ -713,6 +775,50 @@ class MongoEngine(Engine):
     def neutral_key(self, side, db, table):
         """`_id`, which MongoDB guarantees on every document."""
         return ["_id"]
+
+    def distribution(self, side, db, table):
+        """MongoDB's spread of a collection (`base.Spread`), read through a
+        sharded cluster's router from its own catalogue: the shard key
+        (`config.collections`) and each chunk's range and shard
+        (`config.chunks`, by the collection's uuid since 5.0, by its
+        namespace before). A document's shard is its key's chunk
+        (`chunk_of`) where the key is ranged on one field; a hashed key's
+        hash, and a compound key's order, are the server's - those
+        documents are the router's to place. Written through the router:
+        a shard takes the cluster's writes from nothing else."""
+        from .base import Spread
+        client = self._client(side)
+        try:
+            if client.admin.command("hello").get("msg") != "isdbgrid":
+                return None
+            ns = f"{self._d(side, db)}.{table}"
+            coll = client["config"]["collections"].find_one(
+                {"_id": ns, "dropped": {"$ne": True}})
+            if coll is None:
+                return None
+            key = list(dict(coll.get("key") or {}).items())
+            how = ({"uuid": coll["uuid"]} if coll.get("uuid") is not None
+                   else {"ns": ns})
+            chunks = [(c["min"], c["max"], c["shard"]) for c in
+                      client["config"]["chunks"].find(
+                          how, {"min": 1, "max": 1, "shard": 1}).sort(
+                          "min", 1)]
+        finally:
+            client.close()
+        shards = sorted({str(s) for _, _, s in chunks})
+        at = {s: k for k, s in enumerate(shards)}
+        field = key[0][0] if len(key) == 1 and key[0][1] in (1, -1) else None
+        ranges = ([(lo.get(field), hi.get(field), at[str(s)])
+                   for lo, hi, s in chunks] if field else [])
+
+        def owners(texts):
+            return [chunk_of(t[0] if t else None, ranges) if field else None
+                    for t in texts]
+        return Spread([f for f, _ in key],
+                      f"MongoDB's {'ranges' if field else 'hash'} of"
+                      f" {', '.join(f for f, _ in key)} across"
+                      f" {len(shards)} shards",
+                      [(s, table) for s in shards], owners)
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):

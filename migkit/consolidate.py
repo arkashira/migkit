@@ -217,7 +217,7 @@ def _key_texts(s, eng, table):
         return key, None
     cls = _classes(src, "src", s.db, table)
     read = [(k, cls.get(k)) for k in key]
-    where = s.hop.row_filter(s.db, *s.hop.parts_of(table))
+    where = src.row_filter(s.db, *s.hop.parts_of(table))
     out = set()
     for rows in src._every_row("src", s.db, table, read, where):
         for r in rows:
@@ -583,10 +583,11 @@ def move(hop, eng, dbs, mode, table, go, log):
     raised after, and proved; a plan without `go`."""
     from . import decide
     if mode != "full":
-        raise SystemExit(f"{hop.name}: a consolidation is carried once"
-                         " (--mode full): each source's changes followed"
-                         " into one target under its value is not a way"
-                         " migkit has. Nothing has been started")
+        raise SystemExit(f"{hop.name}: a consolidation's rows are carried"
+                         " here once (--mode full); its changes are"
+                         " followed by its group, every source in one loop"
+                         " (`reshard.follow`, --mode cdc or full+cdc)."
+                         " Nothing has been started")
     if table:
         raise SystemExit(f"{hop.name}: a consolidation is carried whole -"
                          " its keys are shifted and proved across every"
@@ -663,6 +664,102 @@ def move(hop, eng, dbs, mode, table, go, log):
             f" {me.value!r}")
 
 
+def follow_plan(me, group_):
+    """{table: (its TablePlan, the offsets its copy shifted by, the range
+    a shifted key of it stays in or None)} of source `me`, for its
+    group's follow (`reshard.follow`): the plans and offsets its copy took
+    (`table_plans`, `offset_of`), so a change lands where the copy put
+    its row; and, where keys are shifted, the range below the next
+    source's offset - a key that outgrows it would land among another
+    source's keys."""
+    from .engines import get_engine
+    hop = me.hop
+    eng = get_engine(hop)
+    plans, wrong = table_plans(hop, eng, me.db, group_)
+    if wrong:
+        raise SystemExit(f"{me.name}: its changes cannot be followed - "
+                         + "; ".join(wrong))
+    offsets = {p.table: offset_of(hop, eng, me, group_, [p.table])
+               for p in plans}
+    out = {}
+    for p in plans:
+        rng = None
+        if p.way == "offset":
+            lo = offsets[p.table]
+            others = sorted(offset_of(hop, eng, s, group_, [p.table])
+                            for s in group_ if s != me)
+            rng = (lo, next((o for o in others if o > lo), None))
+        out[p.table] = (p, offsets, rng)
+    return out
+
+
+def follow_changes(shape, pair, me, changes):
+    """Source `me`'s changes as the target holds its rows - the one
+    shaping of a row the copy does (`_shift`), done to a change: its key,
+    and the columns naming another table's shifted key, shifted by the
+    offsets its copy used, the tenant column given its value, and led by
+    it where the target's key is (`tenant`). Stopped, before anything of
+    the batch is applied: a shifted key past its range, and - where keys
+    are kept as they are - a key arrived since the move that the target
+    holds under another source's value."""
+    column = settings(me.hop)["column"]
+    out, apart = [], {}
+
+    def shifted(values, p, offsets):
+        names = list(values)
+        return dict(zip(names, _shift([values[n] for n in names], names, p,
+                                      offsets)))
+    for c in changes:
+        got = shape.get(c["table"])
+        if got is None:
+            out.append(c)
+            continue
+        p, offsets, rng = got
+        rec = {**c, "key": shifted(c["key"], p, offsets)}
+        if c["op"] != "delete":
+            rec["values"] = {**shifted(c.get("values") or {}, p, offsets),
+                             column: me.value}
+            if p.way == "apart":
+                apart.setdefault(c["table"], (p, []))[1].append(rec["key"])
+        if rng is not None:
+            lo, hi = rng
+            for k in p.key:
+                v = rec["key"].get(k)
+                if v is not None and (int(v) < lo or (hi is not None
+                                                      and int(v) >= hi)):
+                    raise SystemExit(
+                        f"{p.table}: a key of {me.name} arrived since the"
+                        f" move ({v - offsets[p.table]:,}, shifted to"
+                        f" {v:,}) past its range ({lo:,} up to"
+                        f" {hi - 1 if hi is not None else 'the column'}) -"
+                        " it would land among another source's keys. The"
+                        " follow stops before it, its position kept:"
+                        " offsets further apart, and the consolidation"
+                        " carried again")
+        if p.way == "tenant":
+            rec["key"] = {column: me.value, **rec["key"]}
+        out.append(rec)
+    dst = pair.dst_engine
+    for table, (p, keys) in apart.items():
+        cls = _classes(dst, "dst", me.db, p.target)
+        got = dst.neutral_rows_by_key(
+            "dst", me.db, p.target,
+            [(k, cls.get(k)) for k in p.key] + [(column, cls.get(column))],
+            p.key, [tuple(k[c] for c in p.key) for k in keys])
+        theirs = [k for k, row in got.items()
+                  if row[-1] is not None and str(row[-1]) != str(me.value)]
+        if theirs:
+            raise SystemExit(
+                f"{table}: {len(theirs):,} keys of {me.name} arrived since"
+                f" the move that another source holds on the target"
+                f" ({_keys([tuple(k) for k in theirs])}) - its keys are kept"
+                " as they are, and these two rows would be one. The follow"
+                " stops before them, its position kept: consolidate: {keys:"
+                " tenant, offset or remap}, and the consolidation carried"
+                " again")
+    return out
+
+
 def _carry(hop, pair, db, p, me, offsets, log):
     """One table of one source: read through its row filter, shifted,
     the tenant value added, written a batch at a time."""
@@ -675,7 +772,7 @@ def _carry(hop, pair, db, p, me, offsets, log):
     names = [n for n, _ in src_cols]
     cls, _ = _tenant_column(me.value)
     columns = list(dst_cols) + [(got["column"], cls)]
-    where = hop.row_filter(db, *hop.parts_of(p.table))
+    where = src.row_filter(db, *hop.parts_of(p.table))
     n = 0
     for rows in src._every_row("src", db, p.table, src_cols, where):
         batch = [_shift(r, names, p, offsets) + [me.value] for r in rows]
@@ -740,7 +837,7 @@ def prove(hop, eng, db):
             offsets = {t.table: offset_of(hop, eng, s, group_, [t.table])
                        for t in plans}
             from collections import Counter
-            where = hop.row_filter(db, *hop.parts_of(p.table))
+            where = pair.src_engine.row_filter(db, *hop.parts_of(p.table))
             # by key; a table without one as a multiset of rows, so a row
             # there twice on one side is not one row
             a, b = ({}, {}) if key else (Counter(), Counter())
@@ -904,6 +1001,7 @@ def check(hop, eng, db):
 
 def plan_lines(hop, eng, db):
     """The plan's line of a consolidation, or []."""
+    from . import reshard
     got = settings(hop)
     if got is None or not db:
         return []
@@ -915,4 +1013,4 @@ def plan_lines(hop, eng, db):
             f" {hop.target_db(db)}, each under {got['column']}"
             f" ({', '.join(repr(s.value) for s in group_[:5])}), keys kept"
             f" apart by {got['keys']}; every source's rows proved by its"
-            " value"]
+            " value"] + reshard.follow_lines(hop, db)

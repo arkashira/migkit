@@ -31,11 +31,12 @@ stops the plan before anything is written, named.
 chance: the same rule over the same source takes the same rows every run,
 so a test that failed on one copy fails on the next.
 
-**Masked on the way.** The hop's `mask_on_write` (null, constant) is
-applied to the rows before they are written, on any pair - never on a
-key or a column a reference runs through (the copy would no longer line
-up) and never as a random value (nothing could be proved of it); the rule
-is held as the parallel dump holds it (`movers.mask_plan`).
+**Masked on the way.** The hop's `mask_on_write` (null, a constant, a
+keyed hash, a cut: `transforms`) is applied to the rows as they are read,
+on any pair - never on a key or a column a reference runs through (the
+copy would no longer line up) and never as a random value (nothing could
+be proved of it); the rule is held as every way holds it
+(`movers.mask_refused`).
 
 **Proved.** Each table's keys are kept (`subset-keys/`), and after the
 write every row is read back from the target by them and compared, value
@@ -380,46 +381,29 @@ def plan(hop, eng, db, log=None):
 # --- masking -------------------------------------------------------------------
 
 def masks(hop, pair, db, plan_):
-    """{table: {column: (kind, value)}} of the hop's `mask_on_write` for the
-    subset's tables, held to the rules the parallel dump holds it to
-    (`movers.mask_plan`): SystemExit naming every rule that cannot be
-    applied as asked."""
+    """{table: {column: (kind, argument)}} of the hop's `mask_on_write` for
+    the subset's tables (`movers.mask_rules`), held to what every way holds
+    it to (`movers.mask_refused`, asked of the pair: never on a key or a
+    column a reference runs through, never a hash without a key):
+    SystemExit naming every rule that cannot be applied as asked. The rows
+    themselves are read masked - the pair reads its source as the target
+    is to hold it (`hetero._Masks`) - so what is written, what is kept for
+    the proof and what the proof compares are the masked values alike."""
     from . import movers
-    rules = movers.mask_rules(hop, db)
-    if not rules:
+    if not movers._masks_here(hop, db):
         return {}
-    keys, columns = {}, {}
-    leaf = {str(t).split(".")[-1]: t for t in plan_.columns}
-    src = pair.src_engine
-    tables = src.neutral_tables("src", db)
-    for name in rules:
-        # a rule's table the subset does not take is asked of the source
-        # all the same: a rule naming a column it lacks hides nothing
-        t = leaf.get(name) or _named(name, tables)
-        if t is None:
-            continue
-        cols = plan_.columns.get(t) or _classes(src, db, t)
-        columns[name] = {n for n, _ in cols}
-        keys[name] = set(plan_.keys.get(t) or src.neutral_key("src", db, t)
-                         or [])
+    rules = movers.mask_rules(hop, db, list(plan_.columns))
+    refused = pair.masks_refused(db)
+    keys = {}
     for c, cc, pt, pc in plan_.edges:
-        keys.setdefault(str(c).split(".")[-1], set()).update(cc)
-        keys.setdefault(str(pt).split(".")[-1], set()).update(pc)
-    _, refused = movers.mask_plan(hop, db, keys, columns)
+        keys.setdefault(c, set()).update(cc)
+        keys.setdefault(pt, set()).update(pc)
+    refused += [r for r in movers.mask_refused(hop, rules, keys)
+                if r not in refused]
     if refused:
         raise SystemExit(f"{db}: nothing was written - "
                          + "; ".join(f"{n}: {why}" for n, why in refused))
-    return {leaf[t]: cols for t, cols in rules.items() if t in leaf}
-
-
-def _masked(row, names, rules):
-    if not rules:
-        return row
-    out = list(row)
-    for col, (kind, value) in rules.items():
-        if col in names:
-            out[names.index(col)] = None if kind == "null" else value
-    return out
+    return rules
 
 
 # --- the move ------------------------------------------------------------------
@@ -472,7 +456,7 @@ def move(hop, eng, dbs, mode, table, go, log):
         rules = masks(hop, pair, d, p)
         for t, cols in rules.items():
             log(f"{t}: masked on the way - " + ", ".join(
-                f"{c} {'null' if k == 'null' else 'a constant'}"
+                f"{c} {'a constant' if k == 'constant' else k}"
                 for c, (k, _) in sorted(cols.items())))
         if not go:
             log(f"[{d}] dry-run: {p.total():,} rows in"
@@ -531,8 +515,7 @@ def _write(pair, db, src_t, dst_t, p, rules, log):
         log(f"{src_t}: {n}")
     names = [n for n, _ in p.columns[src_t]]
     at = [names.index(n) for n, _ in src_cols]
-    rows = [_masked(r, names, rules) for r in p.rows[src_t].values()]
-    rows = [[r[i] for i in at] for r in rows]
+    rows = [[r[i] for i in at] for r in p.rows[src_t].values()]
     done = 0
     for i in range(0, len(rows), BATCH * 5):
         done += pair.dst_engine.neutral_write("dst", db, dst_t, dst_cols,
@@ -606,8 +589,7 @@ def _keep(hop, db, p, rules, targets, kept):
         names = [n for n, _ in p.columns[t]]
         with (where / _file(t)).open("w") as f:
             for r in rows.values():
-                got = ([r[names.index(k)] for k in key] if key else
-                       _masked(r, names, rules.get(t) or {}))
+                got = [r[names.index(k)] for k in key] if key else r
                 f.write(json.dumps([keep_value(v) for v in got]) + "\n")
         rec["tables"][t] = {"rows": len(rows), "key": key,
                             "columns": names,
@@ -682,7 +664,6 @@ def prove(hop, eng, db, p=None):
                 cols = [n for n, _ in p.columns[t]]
                 a = {}
                 for r in p.rows[t].values():
-                    r = _masked(r, cols, masked)
                     row = [r[cols.index(n)] for n in names]
                     a[pair._key_of(sc, key, row)] = row
             else:
@@ -690,7 +671,6 @@ def prove(hop, eng, db, p=None):
                 for i in range(0, len(kept), BATCH):
                     a.update(src.neutral_rows_by_key(
                         "src", db, t, sc, key, kept[i:i + BATCH]))
-                a = {k: _masked(r, names, masked) for k, r in a.items()}
             b = {}
             for i in range(0, len(kept), BATCH):
                 b.update(dst.neutral_rows_by_key(

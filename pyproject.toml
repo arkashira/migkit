@@ -125,6 +125,7 @@ dependencies = [
     "alibabacloud_dds20151201",
     "alibabacloud_polardb20170801",
     "alibabacloud_r_kvstore20150101",
+    "alibabacloud_polardbx20200202",
     "oci",
     "ibm-cloud-sdk-core",
     # the passwords `migkit init` keeps, in the OS keychain
@@ -134,6 +135,16 @@ dependencies = [
     # in all-versions-and-deletes mode (4.9.1b1 and later)
     "couchbase>=4.3",
     "azure-cosmos>=4.9.1",
+    # the cloud-native services as sides of a pair: Spanner (both dialects,
+    # change streams, partitioned reads), Bigtable (its change streams),
+    # Firestore in both modes, Neptune's property graph by traversal, and
+    # Amazon Keyspaces signed in to by AWS's own signature
+    "google-cloud-spanner>=3.71",
+    "google-cloud-bigtable>=2.48",
+    "google-cloud-firestore>=2.33",
+    "google-cloud-datastore>=2.26",
+    "gremlinpython>=3.8",
+    "cassandra-sigv4>=4.0",
     # the team told wherever it is: one scheme for each of about a
     # hundred services, behind migkit's own `notify`
     "apprise>=2.0",

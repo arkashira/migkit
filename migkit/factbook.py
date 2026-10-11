@@ -358,6 +358,25 @@ for _name, _what, _group, _how in (
      READ),
     ("integer", "whether a table's key is one whole-number column",
      "table", READ),
+    # --- a group: a reshard, a split's parts, a consolidation (`reshard`) --
+    ("group", "the kind of group the hop is one of: reshard, split or"
+     " consolidate", "context", GIVEN),
+    ("shard by", "the function a reshard places rows by", "context",
+     GIVEN),
+    ("shard targets", "how many targets a group writes", "context",
+     GIVEN),
+    ("shared", "whether the hop lists a table every target takes whole",
+     "table", GIVEN),
+    ("filtered", "whether a consolidation's source reads a table through"
+     " a row filter", "table", GIVEN),
+    ("distributed", "whether the one target cluster spreads a table"
+     " across nodes of its own", "table", READ),
+    ("reference", "whether the one target cluster keeps a table whole on"
+     " every node", "table", READ),
+    ("node address", "whether the target cluster names an address a"
+     " node's own part is written at", "side", READ),
+    ("sides unheld", "why each side of a group cannot be held each way",
+     "side", READ),
 ):
     declare(_name, _what, _group, _how)
 

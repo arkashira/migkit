@@ -312,6 +312,10 @@ class MySQLEngine(Engine):
 
     CANON_ENGINE = "mysql"
     OWN_PATHS_READ_COLUMN_MAPPING = False
+    #: the settings the binlog is read with FULL, each asked of the server
+    #: first (`neutral_changes`); a binlog another component writes - a
+    #: distributed server's binlog service - names its own
+    BINLOG_FULL = ("binlog_row_metadata", "binlog_row_image")
     #: a binlog position only says where to read from: the tail may read
     #: the next batch before the one before it is applied
     READS_AHEAD = True
@@ -492,6 +496,59 @@ class MySQLEngine(Engine):
     def neutral_key(self, side, db, table):
         return [r[0] for r in self._q(side, self.PK_SQL,
                                       (self._d(side, db), table))]
+
+    def distribution(self, side, db, table):
+        """Vitess's spread of a table (`base.Spread`), read through its gate
+        - a MySQL server says nothing of one: the table's primary vindex
+        (the first `SHOW VSCHEMA VINDEXES ON` names), the keyspace's shards
+        (`SHOW VITESS_SHARDS`), and a row's shard asked of the vindex
+        itself, read through the gate as a table of its own (`select id,
+        shard from <vindex> where id in (...)`) - the keyspace id is
+        Vitess's, never worked out here. Written through the gate, which
+        routes each row by the same vindex; a value the gate does not
+        answer for is the router's to place."""
+        from .base import Spread
+        try:
+            said = str(self._q(side, "select @@version")[0][0])
+        except Exception:  # noqa: BLE001 - not a server that says
+            return None
+        if "vitess" not in said.lower():
+            return None
+        ks = self._d(side, db)
+        q = self._quote_ident
+        got = self._q(side, f"show vschema vindexes on {q(ks)}.{q(table)}")
+        if not got:
+            return None
+        columns = [c.strip() for c in str(got[0][0]).split(",")]
+        vindex = str(got[0][1])
+        shards = sorted(str(r[0]).split("/", 1)[1]
+                        for r in self._q(side, "show vitess_shards")
+                        if str(r[0]).startswith(f"{ks}/"))
+        if len(shards) < 2:
+            return None
+        at = {s: k for k, s in enumerate(shards)}
+
+        def owners(texts):
+            vals = [t[0] if t else None for t in texts]
+            asked = sorted({str(v) for v in vals if v is not None})
+            if not asked:
+                return [None] * len(vals)
+            given = [int(v) if v.lstrip("-").isdigit() else v
+                     for v in asked]
+            try:
+                rows = self._q(side, f"select id, shard from {q(ks)}."
+                                     f"{q(vindex)} where id in ("
+                               + ", ".join(["%s"] * len(given)) + ")",
+                               tuple(given))
+            except Exception:  # noqa: BLE001 - the router's to place
+                return [None] * len(vals)
+            shard_of = {str(i): str(s) for i, s in rows}
+            return [at.get(shard_of.get(str(v))) if v is not None else None
+                    for v in vals]
+        return Spread(columns, f"Vitess's vindex {vindex} of"
+                               f" {', '.join(columns)} across"
+                               f" {len(shards)} shards",
+                      [(s, table) for s in shards], owners)
 
     def json_rewritten(self, side, db, numbers):
         """Asked of this server: the numbers go in as one JSON array and
@@ -1740,6 +1797,8 @@ class MySQLEngine(Engine):
                  " that replaces the bytes it cannot decode, which is worse"
                  " than stopping"),
                 ):
+            if name not in self.BINLOG_FULL:
+                continue
             got = self._q(side, f"select @@{name}")
             value = str(got[0][0]) if got else "?"
             if value.upper() != "FULL":
@@ -2128,6 +2187,15 @@ class MySQLEngine(Engine):
             return None
         return {"seconds": max(int(closed + expire - time.time()), 0)}
 
+    def _binlog_settings(self, side):
+        """How a binlog reader signs in to one side, the hop's TLS with it
+        (`Endpoint.tls_forms`): the change stream was read in clear text
+        from a side every other connection to was encrypted (audit
+        2026-10-01, SEC2)."""
+        ep = self._ep(side)
+        return {"host": ep.host, "port": ep.port, "user": ep.user,
+                "passwd": ep.password, **ep.tls_forms("mysql")["driver"]}
+
     OWN_PURGE = OWN_PURGE
 
     def managed_retention(self, side):
@@ -2347,16 +2415,29 @@ class MySQLEngine(Engine):
             time.sleep(0.05)
         return False
 
-    def neutral_digest(self, side, db, table, columns, where=None):
+    #: `neutral_digest` takes columns computed in the server's SQL in place
+    #: of the table's own (`computed`: a masked column as its transform)
+    DIGESTS_COMPUTED = True
+
+    def neutral_digest(self, side, db, table, columns, where=None,
+                       computed=None):
+        """(rows, digest) of a table as canon renders its rows, summed by the
+        server; `computed` is {column: SQL} read in place of a column - a
+        masked one as its transform makes it (`transforms.sql`)."""
         from .. import canon
         if any(canon.folded_here(c) for _, c in columns):
             return canon.fold_batches(columns, self.neutral_batches(
                 side, db, table, columns, 5000, where=where))
         row = canon.row_expr("mysql", columns)
+        source = f"`{self._d(side, db)}`.`{table}`" + self._where(where)
+        if computed:
+            q = self._quote_ident
+            inner = ", ".join(f"{computed[n]} as {q(n)}" if n in computed
+                              else q(n) for n, _ in columns)
+            source = f"(select {inner} from {source}) s"
         r = self._q(side, f"select count(*),"
                           f" {canon.digest_expr('mysql', row)}"
-                          f" from `{self._d(side, db)}`.`{table}`"
-                          + self._where(where))
+                          f" from {source}")
         return (int(r[0][0]), str(r[0][1]))
 
     def purge_backlog(self, side):
@@ -2484,23 +2565,65 @@ class MySQLEngine(Engine):
         left = [f"--ignore-table={pdb}.{t}"
                 for t in sorted(self._left_out_of_schema(db, side)
                                 | self._objects_not_taken(side, db))]
+        # a kind the hop's `objects` does not carry at all is not dumped;
+        # one it carries by name has the rest taken out of the text
+        # (`_without_objects_not_taken`)
+        from ..config import objects_of
+        said = objects_of(self.hop)
+        kinds = [("--routines", "--skip-routines", ("functions",
+                                                    "procedures")),
+                 ("--triggers", "--skip-triggers", ("triggers",)),
+                 ("--events", "--skip-events", ("events",))]
+        flags = [off if all(said.get(k, True) is False for k in ks) else on
+                 for on, off, ks in kinds]
         # the password in the environment: on the command line every
         # process listing on the machine could read it
         p = run(["mysqldump", "-h", ep.host, "-P", str(ep.port), "-u", ep.user,
-                 "--no-data", "--routines", "--triggers",
-                 "--events", "--skip-comments", "--skip-dump-date",
+                 "--no-data", *flags, "--skip-comments", "--skip-dump-date",
                  "--column-statistics=0",
                  f"--ignore-table={pdb}.migkit_changelog", *left, pdb],
                 check=False, env={"MYSQL_PWD": ep.password})
         if p.returncode != 0:
             raise RuntimeError(p.stderr.strip())
-        text = self._canon_ddl(p.stdout)
+        text = self._without_objects_not_taken(db, self._canon_ddl(p.stdout))
         lines = [l for l in text.splitlines()
                  if not l.startswith("--")
                  and "GTID_PURGED" not in l
                  and "SQL_LOG_BIN" not in l
                  and l.strip()]
         return "\n".join(lines) + "\n"
+
+    #: a routine's, a trigger's or an event's statement in a schema dump:
+    #: its kind and its name, and for a trigger the table it is on
+    _CODE_DDL = re.compile(r"\b(FUNCTION|PROCEDURE|TRIGGER|EVENT)\s+`([^`]+)`"
+                           r"(?:.*?\bON\s+`([^`]+)`)?", re.I | re.S)
+
+    def _without_objects_not_taken(self, db, text):
+        """A schema dump's text without the routines, triggers and events
+        the hop's `objects` leaves out by name (`takes`): each is a block
+        of its own between the dump's `DELIMITER ;;` and `DELIMITER ;`.
+        A block whose object cannot be read is kept, and so compared."""
+        from ..config import objects_of
+        if not any(isinstance(v, list) for v in objects_of(self.hop)
+                   .values()):
+            return text
+        out, block = [], None
+        for line in str(text).splitlines():
+            if block is None and line.strip() == "DELIMITER ;;":
+                block = [line]
+                continue
+            if block is not None:
+                block.append(line)
+                if line.strip() == "DELIMITER ;":
+                    m = self._CODE_DDL.search("\n".join(block))
+                    if m is None or self.takes(
+                            db, m.group(1), f"{m.group(3)}.{m.group(2)}"
+                            if m.group(3) else m.group(2), m.group(3)):
+                        out += block
+                    block = None
+                continue
+            out.append(line)
+        return "\n".join(out + (block or []))
 
     def _left_out_of_schema(self, db, side):
         """The tables on this side the whole-database schema comparers
@@ -2509,7 +2632,10 @@ class MySQLEngine(Engine):
         through the mapping (`_mapped_schema`)."""
         out = {t for t in self._all_tables(side, db)
                if not self.in_scope(db, t)}
+        # a table only masked keeps its definition, and is compared here
         for t in self.mapped_tables(db):
+            if not self.made_by_pair(db, t):
+                continue
             leaf = t.rpartition(".")[2]
             out.add(self.hop.target_table(db, leaf).rpartition(".")[2]
                     if side == "dst" else leaf)
@@ -3061,7 +3187,7 @@ class MySQLEngine(Engine):
                 if renamed and side == "dst"
                 and hasattr(self.hop, "target_table_in") else t)
         qt = f"`{self._d(side, db)}`.`{name}`"
-        pred = (self.hop.row_filter(db, t)
+        pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         return f"(select * from {qt} where {pred}) t" if pred else f"{qt} t"
 
@@ -3069,7 +3195,7 @@ class MySQLEngine(Engine):
         """Target rows the hop's row filter excludes, or None without one.
         The move puts no row outside the filter on the target, so any count
         above zero is said; `is not true` counts a NULL predicate too."""
-        pred = (self.hop.row_filter(db, t)
+        pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         if not pred:
             return None
@@ -3145,7 +3271,7 @@ class MySQLEngine(Engine):
                "--bisection-threshold", str(rung["bisection_threshold"])]
         for k in pks:
             cmd += ["-k", k]
-        pred = (self.hop.row_filter(db, t)
+        pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
         if pred:
             cmd += ["--where", pred]
@@ -3215,7 +3341,7 @@ class MySQLEngine(Engine):
         # folded by XOR, recorded are not mixed in; a resumed run hashes
         # with the salt its partials were taken with; and partials taken
         # under another row filter are not added in
-        pred = self.hop.row_filter(db, t) if col else None
+        pred = self.row_filter(db, t) if col else None
         todo = cp.begin(scope, "md5-64:" + expr + (f" where {pred}" if pred
                                                    else ""),
                         pk_ranges) if col else pk_ranges
@@ -3978,7 +4104,7 @@ class MySQLEngine(Engine):
         empty = []
         for t in names:
             mine = str(self.hop.target_table_in(db, t)).rpartition(".")[2]
-            pred = self.hop.row_filter(db, t)
+            pred = self.row_filter(db, t)
             try:
                 has_src = bool(self._q("src", "select 1 from"
                                        f" {self._scope('src', db, t)} limit 1"))
@@ -5308,11 +5434,13 @@ class MySQLEngine(Engine):
         plain = {side: set(self._all_tables(side, db))
                  for side in ("src", "dst")}
         scheme, tables = [], {}
+        # each under the name the hop gives it there
+        there = {t: self.hop.target_table_in(db, t) or t for t in sp}
         for t, si in sorted(sp.items()):
-            di = dp.get(t)
+            di = dp.get(there[t])
             if not di:
                 scheme.append(f"{t}: partitioned on source, not on target"
-                              if t in plain["dst"] else
+                              if there[t] in plain["dst"] else
                               f"{t}: missing on target (partitioned by"
                               f" {si['m']} on the source)")
                 continue
@@ -5321,29 +5449,39 @@ class MySQLEngine(Engine):
                               f" src({si['m']} {si['e']})"
                               f" dst({di['m']} {di['e']})")
             tables[t] = (self._partition_rows("src", db, t, si["p"]),
-                         self._partition_rows("dst", db, t, di["p"]))
+                         self._partition_rows("dst", db, t, di["p"],
+                                              there[t]))
         for t, di in sorted(dp.items()):
-            if t not in sp and t in plain["src"]:
+            if t not in sp and t not in there.values() and t in plain["src"]:
                 scheme.append(f"{t}: partitioned on target ({di['m']}"
                               f" {di['e']}), not on source")
         return self._partitions_verdict(db, tables, scheme, "MAXVALUE")
 
-    def _partition_rows(self, side, db, t, parts):
+    def _partition_rows(self, side, db, t, parts, there=None):
         """{partition: {"rows", "digest", "bound", "catchall"}} of one
-        table on one side, every partition's count and digest (the same
-        row text and sum the data check folds a table with) in one
-        statement. A side the source's row text cannot be read on - a
-        column the target lacks - is counted, and its digest left None."""
+        table on one side - the target's under the name the hop gives it
+        there (`there`) - every partition's count and digest (the same row
+        text and sum the data check folds a table with) in one statement.
+        A side the source's row text cannot be read on - a column the
+        target lacks - is counted, and its digest left None. A column the
+        hop masks is left out of the digest: it holds the target's own
+        text, which the pair proves through the hop's transforms."""
+        from .. import rowtext
         try:
-            return self._partition_read(side, db, t, parts,
-                                        self._row_expr(db, t))
+            cols = self._cols(db, t)
+            masked = self.hop.masks(db, t, columns=list(cols))
+            expr = (rowtext.mysql_row([c for c in cols if c not in masked])
+                    if masked else self._row_expr(db, t))
+            return self._partition_read(side, db, t, parts, expr, there)
         except Exception:  # noqa: BLE001 - counted, then
-            return self._partition_read(side, db, t, parts, None)
+            return self._partition_read(side, db, t, parts, None, there)
 
-    def _partition_read(self, side, db, t, parts, expr):
+    def _partition_read(self, side, db, t, parts, expr, there=None):
         dbn = self._d(side, db)
-        pred = (self.hop.row_filter(db, t)
+        # the source's table's filter, read of the table it names there
+        pred = (self.row_filter(db, t)
                 if hasattr(self.hop, "row_filter") else None)
+        t = there or t
         names = list(parts)
         out = {}
         for at in range(0, len(names), self.PARTITIONS_PER_READ):
@@ -5851,10 +5989,16 @@ class MySQLEngine(Engine):
         neither compares nor replays a grant on a table that is the
         target's own."""
         def taken(grant):
-            got = re.search(r"\sON\s+(?:(?:TABLE|FUNCTION|PROCEDURE)\s+)?"
+            got = re.search(r"\sON\s+(?:(TABLE|FUNCTION|PROCEDURE)\s+)?"
                             r"<db>\s*\.\s*(\S+)", grant, re.I)
-            return not got or got.group(1) == "*" \
-                or self.in_scope(db, got.group(1))
+            if not got or got.group(2) == "*":
+                return True
+            # a grant on a routine goes with it, as the hop's `objects`
+            # carries functions and procedures (`takes`)
+            what = str(got.group(2)).strip("`")
+            if got.group(1) and got.group(1).upper() != "TABLE":
+                return self.takes(db, got.group(1), what)
+            return self.in_scope(db, what)
         out = {}
         for who, privs in grants.items():
             kept = {g for g in privs if taken(g)}
@@ -6018,14 +6162,15 @@ class MySQLEngine(Engine):
 
     def _events(self, side, db):
         """{event: (time_zone, sql_mode, CREATE EVENT)} as the server shows
-        each one, of the events the hop takes (`in_scope`): the repair
-        made every source event on the target, one the hop leaves out too."""
+        each one, of the events the hop takes - by its name and as its
+        `objects` carries events (`takes`): the repair made every source
+        event on the target, one the hop leaves out too."""
         name = self._d(side, db)
         out = {}
         for (ev,) in self._q(side, "select event_name from"
                                    " information_schema.events where"
                                    " event_schema = %s", (name,)):
-            if not self.in_scope(db, str(ev)):
+            if not self.takes(db, "event", str(ev)):
                 continue
             row = self._q(side, f"show create event {self._my_ident(name)}"
                                 f".{self._my_ident(ev)}")[0]
@@ -7836,7 +7981,7 @@ class MySQLEngine(Engine):
         t = tbl if tbl else sch
         key = self.move_key(db, sch, tbl)
         st = ck.setdefault(key, {})
-        rf = (self.hop.row_filter(db, t)
+        rf = (self.row_filter(db, t)
               if hasattr(self.hop, "row_filter") else None)
         if st.get("done") and self.recheck_done(db, t, st, log, rf,
                                                 label=key):
@@ -8180,9 +8325,12 @@ class MySQLEngine(Engine):
             run="_copy_ranges", start="copier",
             startup=PASS_BENCH["startup"],
             rates={PLAIN: PASS_BENCH[PLAIN], BINARY: PASS_BENCH[BINARY]}),
+        # a masked table the copier takes is carried by the pair, which
+        # writes it through the hop's transforms (`through_pair`)
         Way("rows", "the table copier's rows", short="the table copier's rows",
             gives=frozenset({"row filter", "resume by chunk", "keyless",
-                             "large values", "resume by key"}),
+                             "large values", "resume by key",
+                             "masked on the way"}),
             needs=(Need("a move not asked to copy straight across",
                         lambda f: not f["straight_only"],
                         "the move is asked to copy straight across"),),
@@ -8193,9 +8341,13 @@ class MySQLEngine(Engine):
     def way_name(self, table):
         return str(table).rsplit(".", 1)[-1]
 
-    def masked_on_the_way(self, db):
-        from ..movers import mask_rules
-        return set(mask_rules(self.hop, db))
+    def masked_on_the_way(self, db, tables):
+        """The tables of `tables` the parallel dump masks itself
+        (`movers.DUMP_MASKS`); one with a hash or a cut is the table
+        copier's (`planner`)."""
+        from ..movers import dump_masks, mask_rules
+        return {t for t, r in mask_rules(self.hop, db, tables).items()
+                if dump_masks(r)}
 
     def table_way_facts(self, db, via, quick=False, known=None, sizes=None):
         """What `TABLE_WAYS`' needs read, for a move of `db` by `via`: the
@@ -8225,8 +8377,7 @@ class MySQLEngine(Engine):
                 lambda: movers._my_target_loads_files(self.hop)),
             direct=lambda: batch and movers._shell_direct(self.hop, db,
                                                           sizes or {}),
-            columns=columns if batch else (lambda: None),
-            masks=lambda: self.masked_on_the_way(db))
+            columns=columns if batch else (lambda: None))
         shared["straight_only"] = lambda: (
             via == "mysqlsh" and shared["shell"]
             and shared["local_infile"] is True)
@@ -8260,7 +8411,7 @@ class MySQLEngine(Engine):
                                    and shared["local_infile"]
                                    and getattr(self, "_loads_ok", None)
                                    is not False),
-                masked=lambda: t in shared["masks"],
+                masked=lambda: t in self.masked_on_the_way(db, [t]),
                 unfit=lambda: unfit(t))
         return facts_for
 

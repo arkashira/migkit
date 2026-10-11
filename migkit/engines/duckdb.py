@@ -250,7 +250,8 @@ class DuckDBEngine(DigestsInSQL, DbapiRows, Engine):
                           f" where schema_name = {MARK}",
                 (self._schema(side, db),)):
             m = re.search(r"\bSTART (?:WITH )?(-?\d+)", str(sql or ""))
-            if m:
+            # one the hop's `objects` does not carry is not compared
+            if m and self.takes(db, "sequence", name):
                 out[name] = int(m.group(1))
         return out
 
@@ -277,16 +278,21 @@ class DuckDBEngine(DigestsInSQL, DbapiRows, Engine):
     def _objects(self, side, db):
         """{kind: {name: definition}} - indexes, constraints and views."""
         sch = (self._schema(side, db),)
-        idx = {n: str(sql or "") for n, sql in self._rows(
-            side, db, "select index_name, sql from duckdb_indexes() where"
-                      f" schema_name = {MARK}", sch)}
+        # an index and a constraint of a table the hop takes, a view its
+        # `objects` carries (`in_scope`, `takes`)
+        idx = {n: str(sql or "") for n, t, sql in self._rows(
+            side, db, "select index_name, table_name, sql from"
+                      f" duckdb_indexes() where schema_name = {MARK}", sch)
+            if self.in_scope(db, t)}
         cons = {f"{t} {typ} {txt}": txt for t, typ, txt in self._rows(
             side, db, "select table_name, constraint_type, constraint_text"
                       " from duckdb_constraints() where schema_name ="
-                      f" {MARK} and constraint_type <> 'NOT NULL'", sch)}
+                      f" {MARK} and constraint_type <> 'NOT NULL'", sch)
+            if self.in_scope(db, t)}
         views = {n: " ".join(str(sql or "").split()) for n, sql in self._rows(
             side, db, "select view_name, sql from duckdb_views() where not"
-                      f" internal and schema_name = {MARK}", sch)}
+                      f" internal and schema_name = {MARK}", sch)
+            if self.takes(db, "view", n)}
         return {"index": idx, "constraint": cons, "view": views}
 
     def check_deep(self, db):
@@ -349,12 +355,27 @@ class DuckDBEngine(DigestsInSQL, DbapiRows, Engine):
                 "select sequence_name from duckdb_sequences() where"
                 " database_name = ? and schema_name = ?",
                 (here, dsch)).fetchall()}
+            # the sequences the hop's `objects` carries, and the ones a
+            # table it carries draws on - without which that table is not
+            # made - said as made for it
+            drawn = " ".join(str(d or "") for (d,) in conn.execute(
+                "select column_default from duckdb_columns() where"
+                " database_name = 'migkit_source' and schema_name = ? and"
+                " column_default like '%nextval%' and table_name in"
+                f" ({', '.join('?' for _ in tables) or 'null'})",
+                (ssch, *tables)).fetchall())
             for name, sql in conn.execute(
                     "select sequence_name, sql from duckdb_sequences() where"
                     " database_name = 'migkit_source' and schema_name = ?",
                     (ssch,)).fetchall():
-                if name not in have:
-                    conn.execute(sql)
+                needed = f"'{name}'" in drawn
+                if name in have or not (needed or self.takes(
+                        db, "sequence", name)):
+                    continue
+                if needed and not self.takes(db, "sequence", name) and log:
+                    log(f"{name}: made, though the hop's objects leave"
+                        " sequences out - a table it carries draws on it")
+                conn.execute(sql)
             for t in tables:
                 there = conn.execute(
                     "select count(*) from duckdb_tables() where"

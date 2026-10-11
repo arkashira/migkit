@@ -132,6 +132,16 @@ def _unheld():
                 " refused by the target")
 
 
+def _unmasked():
+    """Not a table the hop masks (`Hop.masks`): the way passes the values
+    between the servers as the source holds them, where the table copier
+    writes each masked one through the hop's transforms."""
+    from .decide import Need
+    return Need("no masked column", lambda f: not f["masked"],
+                "{rung} passes the values as the source holds them, and the"
+                " hop masks columns of this table")
+
+
 def _installed():
     from .decide import Need
     return Need("its extensions installed",
@@ -167,7 +177,7 @@ def ways():
     from .decide import Rung
     return (
         Rung(RENDERED, "the source rendering the target's load format",
-             needs=(_unheld(), _need_pair(RENDERED_PAIRS,
+             needs=(_unheld(), _unmasked(), _need_pair(RENDERED_PAIRS,
                                "the source renders the target's load format"
                                " between MySQL and PostgreSQL only"),
                     _held_whole(), _carries(lambda f: f["rendered"]),
@@ -175,7 +185,7 @@ def ways():
              because="measured fastest here: both servers do the work, and"
                      " the bytes between them are only passed on"),
         Rung(COMPILED, "the compiled mover",
-             needs=(_unheld(), _need_pair(_compiled_pairs(),
+             needs=(_unheld(), _unmasked(), _need_pair(_compiled_pairs(),
                                "the compiled mover does not join these two"
                                " engines"),
                     _held_whole(), _carries(lambda f: f["compiled"]),
@@ -224,6 +234,8 @@ def _facts(eng, db, src_t, dst_t):
     return Facts(
         {"pair": (eng.src_engine.CANON_ENGINE, eng.dst_engine.CANON_ENGINE)},
         held=lambda: fencing.armed(eng.hop) is not None,
+        masked=lambda: bool(getattr(eng, "_masks", None)
+                            and eng._masks(db, src_t)),
         unproved=lambda: cols()[1],
         compiled=lambda: compiled_refuses(eng, db, src_t, cols()[0]),
         rendered=lambda: loadtext.refused(

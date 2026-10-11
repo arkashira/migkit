@@ -1025,3 +1025,103 @@ def key_text(cls, value):
         return canon.render_value(cls or "text", value)
     except Exception:  # noqa: BLE001 - a class the renderer does not take
         return str(value)
+
+
+# ---- the cloud-native services' own feeds (P0-CLOUDS part 2) ---------------
+#
+# Each engine's lanes hand these a record already read off the service's
+# own client, as a dict; `{"mark": version}` is a lane saying nothing at or
+# below it is still to come.
+
+class SpannerChanges(Envelope):
+    """A Spanner change stream's data change records, as `SpannerLanes`
+    reads them from either dialect: the commit timestamp in nanoseconds
+    (TrueTime, one clock for every partition), the table, what was done,
+    and each changed row's key. A partition's records come in commit
+    order, so each is also a mark just below its own time; its heartbeats
+    and the end of a window it was read through are marks too."""
+    name = "spanner-change-stream"
+    READ_BACK = True
+    LOSES = ("nothing: each changed row is read back from Spanner as it"
+             " stood at its batch's commit timestamp, within the database's"
+             " version retention")
+
+    def decode(self, key, value, topic=None):
+        if not value:
+            return []
+        if "mark" in value:
+            return [Mark(value["mark"])]
+        ts = int(value["commit_ns"])
+        op = "delete" if value.get("mod_type") == "DELETE" else "upsert"
+        out = [Row(None, value.get("table_name"), op, dict(m["keys"]), None,
+                   ts, txn=ts) for m in value.get("mods") or []]
+        return out + [Mark(ts - 1)]
+
+
+class BigtableChanges(Envelope):
+    """A Bigtable change stream's data changes, as `BigtableLanes` reads
+    them: the row's key (base64), its commit time in microseconds, and the
+    partition's low watermark - below which every change of the partition
+    has been sent - as the partition's mark. A garbage collector's
+    deletion is a change as any other. The rows are read back as they are
+    when the change is read: Bigtable reads no row as it stood at a
+    moment, and a later change brings it level again."""
+    name = "bigtable-change-stream"
+    READ_BACK = True
+    LOSES = ("nothing a later change does not bring level again: each row"
+             " is read back as it is when its change is read")
+
+    def decode(self, key, value, topic=None):
+        if not value:
+            return []
+        if "mark" in value:
+            return [Mark(value["mark"])]
+        ts = int(value["commit_us"])
+        return [Row(None, topic, "changed", {"row_key": value["row_key"]},
+                    None, ts, txn=ts), Mark(ts - 1)]
+
+
+class KeyspacesChanges(Envelope):
+    """An Amazon Keyspaces CDC stream's records, as `KeyspacesLanes` reads
+    them from the stream's shards: a row's key columns, its new image
+    where the stream carries one, the operation, and its sequence number
+    in the shard - the order of a key's changes, which one shard holds.
+    A stream of keys only has its rows read back as they are."""
+    name = "keyspaces-cdc"
+    ORDER = LANE
+    LOSES = ("with a stream of keys only, the values between two reads,"
+             " which a copy does not need; with new images, nothing")
+
+    def decode(self, key, value, topic=None):
+        if not value:
+            return []
+        op = "delete" if value.get("op") == "delete" else "upsert"
+        return [Row(None, value.get("table"), op, dict(value["key"]),
+                    value.get("image") if op == "upsert" else None,
+                    int(value["sequence"]))]
+
+
+class NeptuneChanges(Envelope):
+    """Neptune's stream, as `NeptuneLanes` reads it: one log for the whole
+    cluster, each change at its commit and its place in it (`commitNum`
+    and `opNum` as one number). A property graph's change names an
+    element - a vertex or an edge - which is read back as it is; an RDF
+    change is a quad added or removed, which is the whole of it."""
+    name = "neptune-stream"
+    LOSES = ("between two reads, the states of an element a later change"
+             " brings level again: Neptune reads no element as it stood at"
+             " a commit")
+
+    def decode(self, key, value, topic=None):
+        if not value:
+            return []
+        if "mark" in value:
+            return [Mark(value["mark"])]
+        version = int(value["version"])
+        return [Row(None, value["table"], value["op"], dict(value["key"]),
+                    value.get("values"), version, txn=value.get("commit")),
+                Mark(version - 1)]
+
+
+ENVELOPES.update({e.name: e for e in (SpannerChanges, BigtableChanges,
+                                      KeyspacesChanges, NeptuneChanges)})

@@ -971,6 +971,9 @@ class DynamoDBEngine(NeutralCopier, Engine):
     def tail_seed(self, db, token_path, point):
         return self._as_pair().tail_seed(db, token_path, point)
 
+    #: its change tail is the pair's (`Engine.tail_masks`)
+    TAILS_THROUGH_PAIR = True
+
     def tail_apply(self, db, go, token_path, log):
         return self._as_pair().tail_apply(db, go, token_path, log)
 

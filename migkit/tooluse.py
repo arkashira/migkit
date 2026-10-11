@@ -56,7 +56,10 @@ CONTRIBUTORS = ["migkit.movers", "migkit.verifiers",
                 "migkit.engines.saas", "migkit.engines.saas_salesforce",
                 "migkit.shared", "migkit.anchor", "migkit.seedtools", "migkit.cloudapi",
                 "migkit.web.uses", "migkit.storedcode.appscan",
-                "migkit.storedcode.indexadvice"]
+                "migkit.storedcode.indexadvice",
+                "migkit.engines.spanner", "migkit.engines.bigtable",
+                "migkit.engines.firestore", "migkit.engines.keyspaces",
+                "migkit.engines.neptune", "migkit.engines.timestream"]
 
 _HERE = Path(__file__).parent
 

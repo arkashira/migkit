@@ -1155,15 +1155,26 @@ def judge(said, parting, held, counted, where):
 
 def _columns(bench):
     """[(rank, source table, column, target table, target column)] of
-    every text column of the fixture's tables: keys first, then unique
-    columns - a collation that takes two keys for one loses a row - then
-    the rest."""
+    every text column of the fixture's tables: keys and the columns the
+    hop's row filter compares as text first (`rowfilter.text_compared` - a
+    collation that compares them otherwise takes other rows through the
+    filter on each side, and the move carries one set while the check
+    compares another), then unique columns - a collation that takes two
+    keys for one loses a row - then the rest."""
+    from .. import rowfilter
     out = []
     for t, _ in bench.tables.items():
         wa, wb = bench.a.watched.get(t), bench.b.watched.get(t)
         if wa is None or wb is None:
             continue
         key = set(wa.key or [])
+        pred = bench.pair.hop.row_filter(bench.db, t)
+        if pred:
+            try:
+                key |= set(rowfilter.text_compared(
+                    pred, bench.pair.src_engine.filter_dialect()))
+            except SystemExit:
+                pass
         try:
             unique = {c for _, u, cols, _ in
                       bench.pair.src_engine.neutral_indexes("src", bench.db,

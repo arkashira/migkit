@@ -381,6 +381,7 @@ def prove(hop, eng, db):
 
 def plan_lines(hop, eng, db):
     """The plan's line of a split, or []."""
+    from . import reshard
     got = settings(hop)
     if got is None or not db:
         return []
@@ -393,4 +394,5 @@ def plan_lines(hop, eng, db):
             " part's rule (mapping.where), counted before the move and"
             " proved exactly once after it"
             + ("; the rows no part takes stay on the source"
-               if got["rest"] == "stays" else "")]
+               if got["rest"] == "stays" else "")] + reshard.follow_lines(
+                   hop, db)

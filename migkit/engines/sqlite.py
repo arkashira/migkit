@@ -663,10 +663,13 @@ class SQLiteEngine(NeutralCopier, Engine):
                                  " coalesce(sql, '') from sqlite_master"
                                  " where name not like 'sqlite_%'"
                                  " order by type, name")
-            # an excluded table's indexes and triggers go with it; a table
-            # whose columns the hop maps is compared through the mapping
+            # an excluded table's indexes and triggers go with it, a view or
+            # a trigger the hop's `objects` does not carry is left out
+            # (`takes`); a table whose columns the hop maps is compared
+            # through the mapping
             return "\n".join(f"{t} {n}\n{s};" for t, n, owner, s in rows
-                             if not self.hop.excluded("main", owner)
+                             if self.takes(db, t, n if t == "view"
+                                           else f"{owner}.{n}", owner)
                              and owner not in mapped)
 
         mapped = {t for t in self._tables("src")
@@ -753,7 +756,7 @@ class SQLiteEngine(NeutralCopier, Engine):
             # a table the hop filters is counted through its filter on both
             # sides, as it is copied and compared: counted whole, a filtered
             # move read as rows missing on the target
-            pred = self.hop.row_filter(db, t)
+            pred = self.row_filter(db, t)
             where = f" where ({pred})" if pred else ""
             a = self._q("src", f'select count(*) from "{t}"{where}')[0][0]
             b = self._q("dst", f'select count(*) from "{t}"{where}')[0][0]
@@ -969,11 +972,12 @@ class SQLiteEngine(NeutralCopier, Engine):
                                   "create and copy the table, sqlite files"
                                   " are cheap", table=str(t)))
                 continue
-            if self.hop.column_rules(db, t) or self.hop.row_filter(db, t):
+            if self.hop.column_rules(db, t) or self.hop.row_filter(db, t) \
+                    or self.hop.masks(db, t):
                 # the whole-row hash cannot know a column was dropped or
-                # renamed on purpose, or that a row is outside the hop's
-                # filter; the pair's comparison reads both, as the copier
-                # that moved the rows did
+                # renamed on purpose, that a row is outside the hop's
+                # filter, or that a value was masked; the pair's comparison
+                # reads them all, as the copier that moved the rows did
                 res += [r for r in self._as_pair().check_data(db, t, stream)
                         if r.check == "data"]
                 continue
@@ -1129,10 +1133,15 @@ class SQLiteEngine(NeutralCopier, Engine):
                                     " type = 'table' and name = ?",
                                     (t,)).fetchone()
                 if not there:
-                    for (sql,) in dst.execute(
-                            "select sql from source.sqlite_master where"
-                            " tbl_name = ? and sql is not null order by"
+                    for kind, name, sql in dst.execute(
+                            "select type, name, sql from source.sqlite_master"
+                            " where tbl_name = ? and sql is not null order by"
                             " type = 'table' desc, type", (t,)).fetchall():
+                        # a trigger the hop's `objects` does not carry is
+                        # not made with its table (`takes`)
+                        if kind == "trigger" and not self.takes(
+                                db, "trigger", f"{t}.{name}", t):
+                            continue
                         dst.execute(sql)
             for t in tables:
                 q = '"' + str(t).replace('"', '""') + '"'
@@ -1154,11 +1163,14 @@ class SQLiteEngine(NeutralCopier, Engine):
                     dst.execute(f"insert into main.{q} ({cols}) select"
                                 f" {cols} from source.{q}")
                     if not there:
-                        for (sql,) in dst.execute(
-                                "select sql from source.sqlite_master where"
-                                " tbl_name = ? and type in ('index',"
-                                " 'trigger') and sql is not null order by"
-                                " type", (t,)).fetchall():
+                        for kind, name, sql in dst.execute(
+                                "select type, name, sql from"
+                                " source.sqlite_master where tbl_name = ? and"
+                                " type in ('index', 'trigger') and sql is not"
+                                " null order by type", (t,)).fetchall():
+                            if kind == "trigger" and not self.takes(
+                                    db, "trigger", f"{t}.{name}", t):
+                                continue
                             dst.execute(sql)
                     dst.execute("commit")
                 except BaseException:

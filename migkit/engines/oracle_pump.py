@@ -119,7 +119,11 @@ def ways():
     return (
         Rung("pump", "the target's Data Pump over a database link",
              gives=frozenset({"consistent as of"}),
-             needs=(Need("Data Pump and what it needs on both sides",
+             needs=(Need("every trigger of a table carried with it",
+                         lambda f: f["triggers"],
+                         "{rung} brings each table's triggers with it, and"
+                         " the hop's objects leave some out"),
+                    Need("Data Pump and what it needs on both sides",
                          lambda f: f["why not"] is None,
                          lambda f: f["why not"]),),
              because="the target pulls every table as of one SCN, no row"
@@ -131,8 +135,12 @@ def ways():
 def bulk(eng, db, tables, go, log, shape_only=()):
     """Steps said, and with `go` the tables copied - by Data Pump where it
     can run, by the table copier otherwise."""
+    from ..config import objects_of
     from ..decide import Facts, climb
-    way = climb(db, ways(), Facts(**{"why not": lambda: why_not(eng, db)}))
+    # a trigger the hop's `objects` leaves out would arrive with its table
+    triggers = objects_of(eng.hop).get("triggers", True) is True
+    way = climb(db, ways(), Facts({"triggers": triggers},
+                                  **{"why not": lambda: why_not(eng, db)}))
     if way.path == "copier":
         steps = [f"{t}: copied table by table ({way.reason})"
                  for t in tables]

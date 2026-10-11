@@ -155,15 +155,15 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * share_tables needs the s3 state backend (options.state.backend: s3): the machines sharing a move find each other's tables there
 
-* <...> masks columns on the way, and a repair of rows writes the source's values as they are, unmasked: move those tables again with --mode full, which masks them; --kind sequences or --kind schema repairs the rest. Nothing has been started
+* <...> masks columns on the way, and this engine's change stream would carry their real values into the target: a hop that masks is copied here (--mode full), not followed. Nothing has been started
 
-* <...> masks columns on the way, and a change stream would carry their real values into the target: a hop that masks is copied (--mode full), not followed. Nothing has been started
+* <...> masks columns on the way, and a repair of rows on this engine writes the source's values as they are, unmasked: --kind sequences or --kind schema repairs the rest. Nothing has been started
+
+* <...>: <...>: the hop asks to mask <...>. Nothing has been started
 
 * <...>: <...> not configured yet fill host/user/password in conf/hops.yaml, then: migkit doctor
 
 * <...> already exists (use --force to overwrite)
-
-* no playbook for service '<...>', have: <...>
 
 * --convert is for hetero hops, same-engine hops use migkit schema HOP
 
@@ -172,6 +172,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * --migration supports postgres and mysql hops
 
 * generating migration DDL needs a component that is not installed on this machine: migkit doctor --install puts it in place
+
+* <...>: <...>
 
 * --drill needs --db and --table (schema.table)
 
@@ -183,6 +185,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * --only <...>: not a check of this hop's engine; its checks are <...>
 
+* <...>: <...>. Nothing has been compared
+
 * on_conflict: <...> - source-wins or keep-target
 
 * run migkit check first, then sync uses its diffs
@@ -190,8 +194,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: <...> is writing to this target, and a row repair beside it would race it - the row that survives is whichever lands last. Nothing was applied. Stop it, repair, and start it again, or let it catch up and check again.
 
 * <...>: <...> did not pause within <...>s (hop option repair_window), so nothing was applied. It has been told to carry on.
-
-* <...>: <...>
 
 * --kind picks what a repair of the last check's differences puts right; --mode <...> runs a whole flow and repairs whatever it finds
 
@@ -215,7 +217,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * topology: two_way - <...>. Nothing was set up.
 
-* the hop maps columns or renames tables (mapping.columns, mapping.tables), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
+* the hop maps or masks columns or renames tables (mapping.columns, mask_on_write, mapping.tables), and the server's own replication carries whole rows under the source's names, as the source holds them. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
 
 * <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which reads the hop's scope and mapping for every change.
 
@@ -246,6 +248,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the programs installed here do not take options the move passes them - migkit doctor --install puts builds that do in place
 
 * no way to follow a <...> source is set up on this machine - <...> | ; migkit doctor says what is missing
+
+* <...>: a group's changes are followed whole - leave out --table
+
+* <...>: the follow of a group runs one database a process - --db one of <...>
 
 * <...>: the change tail did not end
 
@@ -333,7 +339,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the hop maps row filters onto <...>, and nothing on this <...> path can apply one: neither its bulk copy nor its table copier takes a row predicate. Moving anyway would copy every row and leave `check` comparing a filtered source against a full target for good. Drop the filters, or narrow the source with a view the hop points at instead.
 
-* the hop masks <...> on the way, and only the parallel dump of a MySQL hop can: this path would copy the values as they are. Nothing has been copied. Install it with migkit doctor --install, or drop the masking rule
+* the hop masks <...> on the way, and this engine's copy writes what it reads, as it reads it - no way of it takes the hop's transforms. Nothing has been copied. Drop the masking rule to copy the values as they are
+
+* the hop masks <...> on the way, and this path carries whole tables as they are and cannot leave a masked one to the table copier, which masks it. Nothing has been copied. Move by another way, or drop the masking rule
+
+* <...>: the hop asks to mask <...>. Nothing has been copied: fix the rule, or drop it to copy the values as they are
 
 * <...> would be emptied anyway: the table references one of the tables this move replaces, and emptying a table empties everything pointing at it. the hop excludes it, which says its rows are written here and not carried, so they cannot be put back afterwards. either it is not target-owned after all - take it out of the hop's exclude list and let the move carry it - or the reference has to go before the move can run. | <...> the hop carries only the rows its filter selects into it, and the rows outside the filter are the target's own, so they cannot be put back afterwards. Either the filter goes, or the reference has to go before the move can run. | <...> the source has no such table, so the move does not carry it and its rows are the target's own, which cannot be put back afterwards. Either the reference goes before the move can run, or the hop leaves out the table it points at. | <...>
 
@@ -349,7 +359,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the copy's own checksum of <...> tables differs from the source's: <...> ... | <...>. Nothing has been marked as moved; the load reported <...> warnings, the likely cause | <...>. A source written to while it was copied differs by what changed - move with --mode full+cdc for that; otherwise `migkit sync` puts the rows right
 
-* <...>: the tables masked on the way are not what the hop's rule makes them: <...>
+* <...>: the tables masked on the way are not what the hop's transforms make them: <...>
+
+* <...>: the online sync carried collections the hop leaves out: <...> ... | <...>. They are on the target now; nothing has been marked as moved - drop them there, or move this hop by the dump
 
 * MIGKIT_CDC=<...> is not one of native, follow. native = the database's own replication, which needs the target to dial the source; follow = a leg driven from where migkit runs, which connects out to both sides instead
 
@@ -687,6 +699,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * users: the target still differs from the source after create - <...>
 
+* users: <...> step(s) failed, each named above and in <...>
+
+* users: accounts are carried into <...> only from another <...>: its own accounts are read in a shape no other engine's meet
+
 * users: <...>
 
 * users: <...> could not be created
@@ -786,6 +802,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * two_way: a tail applies into <...> under a replication origin of migkit's (<...>), and <...> applies into it too. Leaving out what migkit applied there would leave out what the other applies, and those changes would never reach the other side. Tear the two-way tail into this side down (move --mode cdc --drop), or the other; its next start chooses another way to mark what it applies
 
 * no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance(<...>, pg_current_wal_lsn()); -- skips everything pending, including this
+
+* <...>: the schema fix would make or drop trigger <...> on <...>, which the hop's objects leave out, in a statement that is not one line - nothing is applied; make the target's schema by hand or carry the trigger
 
 * <...>: the key column <...> has no text both sides render, so the repair could not be recorded row by row. Nothing was repaired on this table.
 
@@ -1333,7 +1351,137 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the account does not serve the all-versions-and-deletes change feed (<...>), and the latest-version one carries no delete: turn on continuous backup and the all-versions-and-deletes feature, or say change_feed: latest in the source's options - every delete is then found by check instead of followed
 
+## Google Cloud Spanner
+
+* a Spanner side names its instance: options: {instance: ...}, or spanner://project/instance/database
+
+* <...> has no key, and Spanner keeps every row by its primary key: give the table one, or leave it out of this hop
+
+* <...> already exists on the target - migkit will not alter or replace a table that is already there
+
+* <...>: no change stream watches every table in scope, and Spanner hands its changes out only through one. Have the DBA make one (`create change stream migkit_<...> for all options (retention_period = '1d')`), or name one in the source's options (change_stream: <name>)
+
+* <...>: the change stream names its changes by <...>, and its primary key is <...>: the stream's table is not the table here
+
+* <...>.<...>: the change stream says the row keyed <...> was <...> by <...>, and Spanner as it stood then <...> it: the key as the stream names it is not the key here. Nothing of this batch was applied
+
+## Google Cloud Bigtable
+
+* <...>: a row filter is SQL, and a Bigtable table takes none
+
+* <...> is read by its row key alone
+
+* <...> has no key, and a Bigtable row is filed under its key: give the table one, or leave it out of this hop
+
+* <...> already exists on the target - migkit will not alter or replace a table that is already there
+
+* <...>: the target refused <...> rows: <...>
+
+* <...>: <...> were made by migkit from another engine's rows, and are followed from that engine, not from here
+
+## Firestore (native mode) and Firestore in Datastore mode
+
+* <...> has no key, and a document is kept by its name: a table without one has nowhere to go
+
+* <...>: a row filter is SQL, and a collection takes none
+
+* <...>: the target refused <...> documents: <...>
+
+* <...>: the target refused <...> deletes
+
+* <...>: <...> were made by migkit from another engine's rows, and are followed from that engine, not from here
+
+* <...>: a Firestore listener cannot be resumed by another process, and the documents the target holds that the source no longer does can be found only on a Firestore target. Move the group again (full and follow) in one run
+
+* <...>: the listener sent no first snapshot in two minutes
+
+## GaussDB (openGauss)
+
+* the <...> is not GaussDB (<...>): name its engine postgres
+
+* <...> was emptied on the source, which its log carries as no row: move the table again
+
+## OceanBase (MySQL mode) and OceanBase (Oracle mode)
+
+* OceanBase answers no binlog position here (<...>): its binlog is written by its binlog service and served through OBProxy. Reach the tenant through a proxy that names the service (binlog_service_ip), with the binlog service running for the tenant, to follow its changes
+
+* the <...> is not an OceanBase Oracle-mode tenant (<...>)
+
+## PolarDB-X and TDSQL (distributed)
+
+* the <...> is not <...> (<...>, <...>): name its engine mysql
+
+* PolarDB-X answers no binlog position (<...>): its global binlog is written by its CDC component, which the instance must have running (and the account REPLICATION SLAVE and REPLICATION CLIENT) before its changes can be followed
+
+* <...> has no key to shard by: give it one, or say shardkey: none for it on the target
+
+* TDSQL's proxy keeps no binlog: each set keeps its own. Name every set's primary in the source's options - sets: [host:port, ...] - with an account that may read its binlog (REPLICATION SLAVE, REPLICATION CLIENT)
+
+## Amazon Keyspaces
+
+* the <...> <...> did not become ACTIVE in ten minutes
+
+* <...>: a row filter is SQL, and Keyspaces takes none
+
+* <...>.<...> has no CDC stream, and turning one on is a change to the source's table, which migkit does not make: alter table ... with cdc = true (a view of new images, or of new and old), then move again with --mode full+cdc
+
+* the shards of <...>'s stream name each other as parents
+
+## Amazon Neptune
+
+* a stream statement of <...> terms: <...>
+
+* a stream statement migkit cannot read: <...>
+
+* <...>: a Neptune side's databases are graph (its property graph) and rdf (its RDF store)
+
+* graph_api: <...> - gremlin or opencypher
+
+* <...>: a row filter is SQL, and a graph takes none
+
+* <...>: a graph holds vertices and edges, an RDF store quads - another engine's table has no place in either
+
+* edges go from or to vertices the target does not hold (<...>): copy the vertices first
+
+* a property graph is written through Gremlin: give the target graph_api: gremlin
+
+* <...>: the target's load <...> ended <...>: <...> records, <...> that could not be read
+
+* Neptune Streams no longer holds the saved position: its retention (neptune_streams_expiry_days) passed, and what changed then is carried by nothing
+
+## Amazon Timestream
+
+* <...> has no timestamp column named time, which a Timestream record is kept at
+
+* <...>: <...> holds values Timestream keeps no measure of
+
+* <...> already exists on the target - migkit will not alter or replace a table that is already there
+
+* <...>: a row without its time
+
+* <...>: a single-measure record holds <...> values
+
+* <...>: the target refused <...> records: <...>
+
+* <...>: Timestream deletes no record
+
+* <...>: Timestream deletes no record, so a part of a table cannot be emptied
+
+* <...>: the batch load <...> ended <...>: <...> (its report: s3://<...>/<...>/report)
+
+## Lindorm
+
+* <...> has no key, and a Lindorm wide table keeps every row by its primary key: give the table one, or leave it out of this hop
+
+## GeminiDB (Cassandra API), GeminiDB (Redis API) and GeminiDB (MongoDB API)
+
+* <...>: GeminiDB's Cassandra API keeps no change log a client can read, so its changes cannot be followed. Stop writes on the source and move it, then prove it with migkit check
+
 ## SAP application data (ODP)
+
+* sap_licence: <...> - full-use or runtime
+
+* <...>: nothing was read - <...>
 
 * the <...> service <...> refused its metadata (<...>): the SAP user needs the service (S_SERVICE) and ODP extraction of its data sources
 
@@ -1491,6 +1639,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way.delta: <...> cannot add to a value where it stands
 
+* <...> cannot be followed: <...>; and <...> more | <...>
+
+* <...>: <...>
+
+* <...> has no declared key: it cannot be followed
+
+* <...>: the target holds <...> rows and the source <...>: migkit will not replace a table that is already there
+
+* <...>: the copy job was refused: <...>
+
 * <...> already exists on the target - migkit will not alter or replace a table that is already there
 
 ## Elsewhere in migkit
@@ -1561,6 +1719,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * no AWS credentials: looked in the environment (AWS_ACCESS_KEY_ID), the CLI's credentials and config files (profile <...>), its single sign-on login, a web identity token, the container's role and the instance's role
 
+* <...>: point-in-time recovery is off on <...> - a table without it has no time to be restored to; turn it on (ALTER TABLE ... WITH custom_properties = {'point_in_time_recovery': {'status': 'enabled'}})
+
 * <...> has no parameter <...> in its parameter groups
 
 * <...> cannot be changed on <...>
@@ -1575,7 +1735,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> has no primary instance
 
+* a Spanner side's id is <instance>/<database>; <...> is not
+
+* <...>: point-in-time recovery is off, so its versions are kept an hour only - turn it on (seven days) for a restore point that outlasts the cutover
+
 * <...> was made, and the provider does not list it
+
+* the copy <...> failed: <...>
 
 * <...> is no flag the provider lets <...> set
 
@@ -1663,11 +1829,17 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> refers to <...> by <...>: only a one-column reference to a shifted key is shifted with it
 
-* <...>: a consolidation is carried once (--mode full): each source's changes followed into one target under its value is not a way migkit has. Nothing has been started
+* <...>: a consolidation's rows are carried here once (--mode full); its changes are followed by its group, every source in one loop (`reshard.follow`, --mode cdc or full+cdc). Nothing has been started
 
 * <...>: a consolidation is carried whole - its keys are shifted and proved across every table. Leave out --table
 
 * <...>: the consolidation is not what it was to hold - <...>
+
+* <...>: its changes cannot be followed - <...>
+
+* <...>: <...> keys of <...> arrived since the move that another source holds on the target (<...>) - its keys are kept as they are, and these two rows would be one. The follow stops before them, its position kept: consolidate: {keys: tenant, offset or remap}, and the consolidation carried again
+
+* <...>: a key of <...> arrived since the move (<...>, shifted to <...>) past its range (<...> up to <...>) - it would land among another source's keys. The follow stops before it, its position kept: offsets further apart, and the consolidation carried again
 
 * <...>: <...> is not something migkit sends; one of <...>, or none
 
@@ -1691,11 +1863,71 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...>: <...>:<...> is no instance the provider's API lists for these credentials - name it under the side's managed option (id)
 
+* reshard: is a mapping - with, by, key, shared, ranges, values, lookup, default
+
+* reshard: by: <...> - one of <...>
+
+* reshard: key is {table: column or [columns]}
+
+* reshard: <...>
+
+* <...>: the split does not hold together - <...>
+
+* <...>: the reshard does not hold together - <...>
+
+* <...>: <...> holds other columns of it than <...> - the targets of a reshard hold one schema. Nothing more was written
+
+* <...>: the shard key <...> is not carried, so a row cannot be placed by it. Nothing more was written
+
+* <...>: a row no target takes arrived since the rows were counted (<...>, by its shard key <...>) - name a target for its value, or reshard: {default: <hop>}. The tables written so far are kept, and the next run goes on
+
+* <...>: target_rows: keep leaves <...> as they are, and a reshard places and proves every row of every table - target_rows: replace, or empty them. Nothing was written
+
+* <...>: the reshard is not what its function places - <...>
+
+* <...>.<...>: nothing was written - no way places its rows: <...>
+
+* <...>: a reshard is carried whole - every row is placed and proved across every target. Leave out --table
+
+* <...>: the follow of a group runs one database a process - --db one of <...>
+
+* <...>.<...>: no way places its rows - <...>
+
+* <...>: <...> on every source - a change the group's follow does not make on its targets: it stops before it, every position kept. Make it on every target, then move again (--mode full+cdc)
+
+* <...>: every source changed it, and <...> cannot take the change at its place in the log (<...>) - the follow stops before it, every position kept: make it on every target, then move again (--mode cdc)
+
+* <...>: the group's follow already runs - one follow a group
+
+* <...>: the group's follow did not pause
+
+* <...>: the group's follow did not end
+
+* <...>: a group is cut over one database at a time - --db one of <...>
+
+* <...>: a group has no stream back - its targets hold other rows than each of its sources
+
+* <...>: its group is cut over as one, and <...> say cutover: otherwise than <...> - say it alike on every hop of the group. Nothing was written
+
 * <...> is not a time zone - an offset (+07:00) or a zone name (Asia/Bangkok)
 
 * the row filter <...> is not SQL the source reads: <...>
 
 * the row filter <...> has no translation into the target's SQL: <...>
+
+* <...> never happens in <...> (its clock goes forward over it): write the time with its offset
+
+* <...> happens twice in <...> (its clock goes back over it): write the time with its offset
+
+* <...> is compared with a column holding a point in time, and is not a time
+
+* <...> holds a point in time, and the filter reads it through <...>, which each server reads in its own session's zone: compare the column itself with a time
+
+* <...> holds a point in time, and this engine's SQL has no way migkit writes one exactly: write the times with their offset, or drop tz
+
+* <...> holds a time whose meaning on this engine is not measured, so a time read in <...> has no exact match: write it with its offset, or drop tz
+
+* <...> holds a time whose meaning on this engine is not measured
 
 * <...> is not a column - a document store is asked of its fields only
 
@@ -1762,8 +1994,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * split: is a mapping - with, shared, rest
 
 * split: rest: <...> - refuse, or stays
-
-* <...>: the split does not hold together - <...>
 
 * table_engine: <...> - an engine, or {to, accept, foreign_keys}}
 

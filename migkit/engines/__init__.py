@@ -5,6 +5,10 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "opensearch", "cassandra", "redshift", "snowflake", "bigquery",
          "kinesis", "pubsub", "duckdb", "copybook", "iceberg", "delta",
          "tidb", "cockroachdb", "dsql", "couchbase", "cosmosdb",
+         "spanner", "bigtable", "firestore", "datastore", "gaussdb",
+         "oceanbase", "oceanbase-oracle", "polardbx", "dcdb", "keyspaces",
+         "neptune", "timestream", "lindorm", "geminidb-cassandra",
+         "geminidb-redis", "geminidb-mongo",
          "sapodp", "saas", "hetero", "generic")
 
 #: every other name an engine goes by - a brand on its wire (`mariadb`,
@@ -30,14 +34,30 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "aurora-dsql": "dsql", "cosmos": "cosmosdb",
            "cosmosdb-nosql": "cosmosdb", "azure-cosmos": "cosmosdb",
            "td": "teradata", "vantage": "teradata",
-           "sap-odp": "sapodp", "odp": "sapodp", "program": "saas"}
+           "sap-odp": "sapodp", "odp": "sapodp", "program": "saas",
+           # the cloud-native services (P0-CLOUDS part 2)
+           "cloud-spanner": "spanner", "spanner-pg": "spanner",
+           "cloud-bigtable": "bigtable", "firestore-native": "firestore",
+           "firestore-datastore": "datastore",
+           "cloud-datastore": "datastore", "opengauss": "gaussdb",
+           "gaussdb-opengauss": "gaussdb", "oceanbase-mysql": "oceanbase",
+           "polardb-x": "polardbx", "drds": "polardbx",
+           "tdsql-distributed": "dcdb", "tdsql-shard": "dcdb",
+           "tdsql-c": "mysql", "amazon-keyspaces": "keyspaces",
+           "aws-keyspaces": "keyspaces", "amazon-neptune": "neptune",
+           "amazon-timestream": "timestream",
+           "geminidb": "geminidb-cassandra"}
 
 #: engines reached over another's wire protocol, whose values a driver
 #: hands over, a table is built and a value written as that one's are
 #: (`canon.dialect`): TiDB over MySQL's, CockroachDB and Aurora DSQL over
 #: PostgreSQL's. Everything else - the catalogue, the change feed, what a
 #: transaction may hold - is the engine's own
-WIRE = {"tidb": "mysql", "cockroachdb": "postgres", "dsql": "postgres"}
+WIRE = {"tidb": "mysql", "cockroachdb": "postgres", "dsql": "postgres",
+        "gaussdb": "postgres", "oceanbase": "mysql",
+        "oceanbase-oracle": "oracle", "polardbx": "mysql", "dcdb": "mysql",
+        "keyspaces": "cassandra", "geminidb-cassandra": "cassandra",
+        "geminidb-redis": "redis", "geminidb-mongo": "mongodb"}
 
 #: what an address's scheme says beyond the engine's name: the way it is
 #: reached (`mongodb+srv`, `rediss`, a place on S3, an SAP sandbox over
@@ -84,6 +104,13 @@ PORTS = {
     "oracle": 1521, "clickhouse": 8123, "cassandra": 9042,
     "opensearch": 9200, "redshift": 5439, "db2": 50000, "db2zos": 446,
     "db2i": 8076, "ase": 5000, "teradata": 1025,
+    # the cloud-native services, each at its managed service's own port:
+    # GaussDB's 8000, OceanBase through its proxy, TDSQL's proxy,
+    # Keyspaces' TLS port, Lindorm's MySQL-protocol port, GeminiDB's APIs
+    "gaussdb": 8000, "oceanbase": 2883, "oceanbase-oracle": 2883,
+    "polardbx": 3306, "dcdb": 3306, "keyspaces": 9142, "neptune": 8182,
+    "lindorm": 33060, "geminidb-cassandra": 8635, "geminidb-redis": 6379,
+    "geminidb-mongo": 8635,
 }
 
 
@@ -206,7 +233,49 @@ def _class_for(name):
     if name == "hetero":
         from .hetero import HeteroEngine
         return HeteroEngine
-    return None
+    return _cloud_class(name)
+
+
+#: the cloud-native services' engines (P0-CLOUDS part 2): module, class
+CLOUD = {"spanner": ("spanner", "SpannerEngine"),
+         "bigtable": ("bigtable", "BigtableEngine"),
+         "firestore": ("firestore", "FirestoreEngine"),
+         "datastore": ("firestore", "DatastoreEngine"),
+         "gaussdb": ("gaussdb", "GaussEngine"),
+         "oceanbase": ("oceanbase", "OceanBaseEngine"),
+         "oceanbase-oracle": ("oceanbase", "OceanBaseOracleEngine"),
+         "polardbx": ("distmysql", "PolarDBXEngine"),
+         "dcdb": ("distmysql", "TdsqlEngine"),
+         "keyspaces": ("keyspaces", "KeyspacesEngine"),
+         "neptune": ("neptune", "NeptuneEngine"),
+         "timestream": ("timestream", "TimestreamEngine"),
+         "lindorm": ("lindorm", "LindormEngine"),
+         "geminidb-cassandra": ("geminidb", "GeminiCassandraEngine"),
+         "geminidb-redis": ("geminidb", "GeminiRedisEngine"),
+         "geminidb-mongo": ("geminidb", "GeminiMongoEngine")}
+
+
+def _cloud_class(name):
+    import importlib
+    got = CLOUD.get(name)
+    if got is None:
+        return None
+    return getattr(importlib.import_module(f"{__name__}.{got[0]}"), got[1])
+
+
+def same_engine(eng):
+    """Whether `eng`'s hop moves between two sides of its own engine - as
+    the hop names it, or as the pair a same-engine hop is carried by
+    names both of its sides (`Engine._as_pair`)."""
+    name = getattr(eng, "PAIR_ENGINE", "") or getattr(eng, "CANON_ENGINE",
+                                                      "")
+    hop = eng.hop
+    own = ALIASES.get(hop.engine, hop.engine)
+    if own != "hetero":
+        return own == name
+    opts = hop.options or {}
+    sides = (opts.get("source_engine"), opts.get("target_engine"))
+    return all(ALIASES.get(e, e) == name for e in sides)
 
 
 #: what each engine is called where a person reads it - the manual, the
@@ -228,6 +297,18 @@ TITLES = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
           "tidb": "TiDB", "cockroachdb": "CockroachDB",
           "dsql": "Aurora DSQL", "couchbase": "Couchbase",
           "cosmosdb": "Cosmos DB for NoSQL",
+          "spanner": "Google Cloud Spanner", "bigtable": "Google Cloud Bigtable",
+          "firestore": "Firestore (native mode)",
+          "datastore": "Firestore in Datastore mode",
+          "gaussdb": "GaussDB (openGauss)",
+          "oceanbase": "OceanBase (MySQL mode)",
+          "oceanbase-oracle": "OceanBase (Oracle mode)",
+          "polardbx": "PolarDB-X", "dcdb": "TDSQL (distributed)",
+          "keyspaces": "Amazon Keyspaces", "neptune": "Amazon Neptune",
+          "timestream": "Amazon Timestream", "lindorm": "Lindorm",
+          "geminidb-cassandra": "GeminiDB (Cassandra API)",
+          "geminidb-redis": "GeminiDB (Redis API)",
+          "geminidb-mongo": "GeminiDB (MongoDB API)",
           "sapodp": "SAP application data (ODP)",
           "saas": "SaaS applications, read by a connector program",
           "hetero": "Any pair of two engines",
@@ -264,8 +345,59 @@ def engine_named(name, hop):
     return cls(hop)
 
 
+#: a name that stands for more than one engine, the server saying which:
+#: name -> the engine it is where its server says so (the engine's
+#: `server_says_so`); where the server says not, or cannot be asked, the
+#: name's alias's. `tdsql` names TDSQL-C, a TDSQL instance of one set and
+#: a distributed one alike
+BY_SERVER = {"tdsql": "dcdb"}
+
+
+def may_be(name):
+    """Every engine `name` may be moved as: its alias's, and the one its
+    server may say it is (`BY_SERVER`)."""
+    said = str(name or "").strip().lower()
+    got = {canonical(said) or said}
+    if said in BY_SERVER:
+        got.add(BY_SERVER[said])
+    return got
+
+
+def said_by_server(hop):
+    """Puts the engine the server says it is in place of a name that
+    stands for more than one (`BY_SERVER`) - the hop's engine, or a
+    cross-engine hop's side's - asked once a hop, of the sides the name
+    is. A server that cannot be asked leaves the name: its alias's
+    engine."""
+    asked = hop.__dict__.setdefault("_said_by_server", set())
+    opts = hop.options if hop.options is not None else {}
+    wanted = []
+    if hop.engine in BY_SERVER:
+        wanted.append((None, hop.engine, ("src", "tgt")))
+    elif hop.engine == "hetero":
+        for key, side in (("source_engine", "src"),
+                          ("target_engine", "tgt")):
+            if opts.get(key) in BY_SERVER:
+                wanted.append((key, opts[key], (side,)))
+    for key, name, sides in wanted:
+        if (key, name) in asked:
+            continue
+        asked.add((key, name))
+        cls = _class_for(BY_SERVER[name])
+        try:
+            yes = any(cls.server_says_so(hop, side) for side in sides)
+        except Exception:  # noqa: BLE001 - not asked: the alias stands
+            continue
+        got = BY_SERVER[name] if yes else canonical(name) or name
+        if key is None:
+            hop.engine = got
+        else:
+            opts[key] = got
+
+
 def get_engine(hop):
     # a server reached through a tunnel is reached through its open end
     from ..tunnel import through
     through(hop)
+    said_by_server(hop)
     return engine_named(hop.engine, hop)

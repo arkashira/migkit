@@ -161,7 +161,8 @@ class DbapiRows(NeutralCopier):
             ands = [f"{self._q(k)} = {MARK}" for k in key[:i]]
             ands.append(f"{self._q(key[i])} > {MARK}")
             ors.append("(" + " and ".join(ands) + ")")
-            args += [canon.sql_value(v) for v in after[:i + 1]]
+            args += [canon.write_value(self.CANON_ENGINE, None, v)
+                     for v in after[:i + 1]]
         return "(" + " or ".join(ors) + ")", args
 
     def _select(self, cols, source, cond, order, limit):
@@ -269,7 +270,8 @@ class DbapiRows(NeutralCopier):
             found += plan.finish(self._rows(
                 side, db, f"select {plan.select} from"
                           f" {self._qualified(side, db, table)} where {cond}",
-                [canon.sql_value(v) for k in part for v in k]))
+                [canon.write_value(self.CANON_ENGINE, None, v)
+                 for k in part for v in k]))
         return self._by_key_map(columns, key, self._whole_times(
             side, db, table, [n for n, _ in columns], found))
 
@@ -352,11 +354,27 @@ class DbapiRows(NeutralCopier):
             if pieces.wider_than(rows):
                 rows = pieces.written_in_pieces(self, cur, side, db, table,
                                                 columns, key, rows)
-            insert = self._sql(
-                f"insert into {quoted}"
-                f" ({', '.join(self._q(n) for n in names)}) values"
-                f" ({', '.join([MARK] * len(names))})", True)
-            if rows:
+            marks = self._value_marks(side, db, table, names)
+            if rows and marks:
+                # a statement for each way the batch's values are placed:
+                # one, unless a column takes some through an expression of
+                # its own (a sql_variant of its base type)
+                by = {}
+                for r in rows:
+                    got = [self._bound(m, c, v)
+                           for m, (_, c), v in zip(marks, columns, r)]
+                    by.setdefault(tuple(p for p, _ in got), []).append(
+                        tuple(a for _, a in got))
+                for places, part in by.items():
+                    cur.executemany(self._sql(
+                        f"insert into {quoted}"
+                        f" ({', '.join(self._q(n) for n in names)}) values"
+                        f" ({', '.join(places)})", True), part)
+            elif rows:
+                insert = self._sql(
+                    f"insert into {quoted}"
+                    f" ({', '.join(self._q(n) for n in names)}) values"
+                    f" ({', '.join([MARK] * len(names))})", True)
                 cur.executemany(insert, [tuple(
                     canon.write_value(self.CANON_ENGINE, c, v)
                     for (_, c), v in zip(columns, r)) for r in rows])
@@ -379,21 +397,48 @@ class DbapiRows(NeutralCopier):
         self._target_only(side, "apply changes")
         return self._connect(side, db)
 
+    def _value_marks(self, side, db, table, names):
+        """[how each of `names` takes a value written into `table`, or
+        None], or None where every one is a plain parameter: f(value)
+        giving (its place in the statement, `{}` where the parameter goes;
+        what is bound there), or None from f where the value goes in as a
+        parameter after all. An engine whose types take some values only
+        through an expression of their own says so here: SQL Server's
+        `sql_variant` of its base type, its shapes through their
+        constructors (`commercial.mssql_mark`)."""
+        return None
+
+    def _bound(self, mark, cls, value):
+        """(where one value goes in a statement, what is bound there):
+        through its column's own expression (`_value_marks`) where that
+        takes it, as a parameter `canon.write_value` writes otherwise."""
+        from .. import canon
+        got = mark(value) if mark is not None and value is not None \
+            else None
+        if got is None:
+            return MARK, canon.write_value(self.CANON_ENGINE, cls, value)
+        return got[0].format(MARK), got[1]
+
     def _where_key(self, key):
         from .. import canon
         return (" and ".join(f"{self._q(k)} = {MARK}" for k in key),
-                [canon.sql_value(v) for v in key.values()])
+                [canon.write_value(self.CANON_ENGINE, None, v)
+                 for v in key.values()])
 
     def _upsert_one(self, cur, side, db, table, key, values):
-        from .. import canon
         quoted = self._qualified(side, db, table)
         where, kargs = self._where_key(key)
         sets = [n for n in values if n not in key]
+        marks = dict(zip(sets, self._value_marks(side, db, table, sets)
+                         or ()))
         if sets:
+            placed = [self._bound(marks.get(n), None, values[n])
+                      for n in sets]
             self._run(cur, f"update {quoted} set "
-                           + ", ".join(f"{self._q(n)} = {MARK}"
-                                       for n in sets) + f" where {where}",
-                      [canon.sql_value(values[n]) for n in sets] + kargs)
+                           + ", ".join(f"{self._q(n)} = {p}"
+                                       for n, (p, _) in zip(sets, placed))
+                           + f" where {where}",
+                      [a for _, a in placed] + kargs)
             if cur.rowcount is not None and cur.rowcount > 0:
                 return
         if not sets or cur.rowcount is None or cur.rowcount < 0:
@@ -403,10 +448,13 @@ class DbapiRows(NeutralCopier):
             if cur.fetchone()[0]:
                 return
         row = {**key, **values}
+        marks = dict(zip(row, self._value_marks(side, db, table, list(row))
+                         or ()))
+        placed = [self._bound(marks.get(n), None, v) for n, v in row.items()]
         self._run(cur, f"insert into {quoted}"
                        f" ({', '.join(self._q(n) for n in row)}) values"
-                       f" ({', '.join([MARK] * len(row))})",
-                  [canon.sql_value(v) for v in row.values()])
+                       f" ({', '.join(p for p, _ in placed)})",
+                  [a for _, a in placed])
 
     def _apply_upserts(self, side, db, table, rows):
         with self._writer(side, db) as conn:

@@ -46,10 +46,16 @@ ICEBERG_REST = ("iceberg+http", "iceberg+https")
 #: engines whose first path segment names what to connect to, and the
 #: second the hop's databases (their schemas)
 CONNECTS_TO = {"oracle": "service", "db2": "database", "db2zos": "database",
-               "redshift": "database", "snowflake": "database"}
+               "redshift": "database", "snowflake": "database",
+               # spanner://project/instance/database
+               "spanner": "instance"}
 #: engines that sign in without a user and password of the address's own
 NO_SIGN_IN = ("sqlite", "duckdb", "parquet", "copybook", "bigquery",
-              "pubsub", "iceberg", "delta", "saas")
+              "pubsub", "iceberg", "delta", "saas", "spanner", "bigtable",
+              "firestore", "datastore")
+#: engines whose address's host is the region a service is in, or an
+#: endpoint of its own (`dynamodb://us-east-1/table`)
+REGIONAL = ("dynamodb", "kinesis", "timestream")
 #: a program source's scheme is its kind, and what follows it the program
 #: (`engines.saas`): `singer://tap-github?config=...`
 #: an AWS region, as a host naming where a service is rather than a server
@@ -191,7 +197,7 @@ def parse(text, side="source"):
     dbs = []
     if engine == "mongodb" and scheme == "mongodb+srv":
         hosts, params = _srv(hostlist, params)
-    if engine in ("dynamodb", "kinesis"):
+    if engine in REGIONAL:
         (host, port), = hosts or [("", None)]
         if REGION.match(host or ""):
             endpoint["region"] = host
@@ -420,7 +426,7 @@ def render(engine, endpoint, dbs=(), default_port=0):
         if not where or auth:
             return None
         return f"{scheme}://{where}" + _query(engine, ep)
-    if engine in ("dynamodb", "kinesis"):
+    if engine in REGIONAL:
         region, url = ep.pop("region", ""), ep.pop("endpoint_url", "")
         if host or port or (region and url):
             return None

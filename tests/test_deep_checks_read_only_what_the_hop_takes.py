@@ -265,14 +265,21 @@ def test_mysql_rows_of_a_listing_are_kept_by_their_table(tmp_path):
 
 
 def test_mysql_text_and_float_columns_are_the_hops(tmp_path):
+    asked = []
+
     def answer(side, sql):
+        asked.append(sql)
         if "information_schema.columns" in sql:
             return [("event_log", "body"), ("orders", "note")]
+        if "information_schema.tables" in sql:
+            return [("event_log",), ("orders",)]
         return [(0, 0, 0)]
     eng = _my(tmp_path, answer, exclude=["event_log"])
-    assert eng._text_columns("appdb") == [("orders", "note")]
+    assert eng._deep_columns("appdb", eng.TEXTY) == {"orders": ["note"]}
     got = eng._deep_float("appdb", "appdb")
     assert got[0].status == "ok" and "1 float" in got[0].detail, got
+    # the table the hop leaves out is never read
+    assert not [q for q in asked if "event_log" in q], asked
 
 
 def test_mysql_a_check_not_enforced_on_a_table_left_out_is_not_a_finding(

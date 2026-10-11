@@ -1,6 +1,7 @@
 """The canonical text of a row, and the digest over it, in a warehouse's own
 SQL: BigQuery, Snowflake, Redshift, and DuckDB - a DuckDB file's own, and
-the Iceberg and Delta tables it reads.
+the Iceberg and Delta tables it reads - and in the SQL of every engine that
+speaks a dialect of its own from its module (`Dialect`, `speak`).
 
 `canon.render_value` renders a value in this process; PostgreSQL and MySQL
 render it in their own SQL (`canon.expr`). This does the same for the
@@ -35,7 +36,7 @@ on a real account.
 from .. import canon, rowtext
 from ..decide import Need, Rung
 
-DIALECTS = ("bigquery", "snowflake", "redshift", "duckdb")
+DIALECTS = ("bigquery", "snowflake", "redshift", "duckdb", "spanner")
 
 #: the classes each dialect renders as migkit does, before the declared
 #: type is looked at (`column_text`)
@@ -48,11 +49,128 @@ RENDERED = {
                  "bytes", "date", "timestamp", "time"},
     "duckdb": {"integer", "decimal", canon.NUMBER, "float", "boolean",
                "text", "bytes", "date", "timestamp", "time", "uuid"},
+    # Spanner's GoogleSQL: BigQuery's, without a BIGNUMERIC to write a
+    # float's fixed places in, and without DATETIME or TIME
+    "spanner": {"integer", canon.NUMBER, "boolean", "text", "bytes", "date",
+                "timestamp"},
 }
 
 #: the scale a float's fixed rendering carries, and where it gives way to
 #: the shortest text (canon's bands)
 _ZEROS = "0" * canon.FLOAT_SCALE
+
+
+class Dialect:
+    """A server's SQL for what this module writes, spoken by an engine
+    whose module says it (`speak`): the canonical text of a column
+    (`column`), and the pieces a row, its hash and the sum are built of.
+    Each piece is the standard SQL most servers take; an engine's own
+    replaces the ones its SQL spells otherwise. What it renders is proved
+    on each table's first rows before it is trusted, as every dialect's
+    is (`DigestsInSQL._proved`): a rendering of its that is wrong folds
+    the table here, never gives another number."""
+    #: the classes rendered as migkit renders them, before the declared
+    #: type is looked at (`column`)
+    rendered = frozenset()
+
+    def column(self, c, cls, declared):
+        """SQL for the canonical text of column `c` of this class and
+        declared type, NULL where it is NULL; None where it is not known
+        to be migkit's."""
+        return None
+
+    def concat(self, parts):
+        return " || ".join(parts)
+
+    def text(self, e):
+        """An integer's text."""
+        return f"CAST({e} AS VARCHAR)"
+
+    def length(self, e):
+        """A text's length in characters, as `rowtext` counts them."""
+        return f"LENGTH({e})"
+
+    def octets(self, e, blob=False):
+        """A value's length in bytes."""
+        return f"OCTET_LENGTH({e})"
+
+    def md5_hex(self, e):
+        """The md5 of a text, as 32 hexadecimal digits in small letters."""
+        return f"LOWER(MD5({e}))"
+
+    def sha256_hex(self, e):
+        return None
+
+    def from_hex(self, hexed, n):
+        """The first `n` hexadecimal digits of `hexed` as an integer."""
+        raise ValueError(f"no hexadecimal reading in {type(self).__name__}")
+
+    def summed(self, value):
+        """The exact sum of `value` over the rows, as text; 0 for none."""
+        return (f"CAST(COALESCE(SUM(CAST({value} AS DECIMAL(38,0))), 0) AS"
+                " VARCHAR(40))")
+
+    def exact_sum(self, value):
+        return f"SUM(CAST({value} AS DECIMAL(38,0)))"
+
+    def shifted(self, value, bits):
+        """`value >> bits` of a non-negative integer, by division where a
+        dialect has no shift."""
+        return self.divided(value, 2 ** int(bits))
+
+    def divided(self, value, by):
+        return f"FLOOR(({value}) / ({by}))"
+
+    def literal(self, text):
+        return "'" + str(text).replace("'", "''") + "'"
+
+    def unit_separator(self):
+        """The character `canon` marks a value it does not write out with
+        (`canon.WIDE_MARK`, `canon.uncomparable`): code point 31."""
+        return "CHR(31)"
+
+    def wide(self, c, text, blob=False):
+        """`text`, the column's own rendering, except for a value wider
+        than `canon.WIDE` bytes: its length and md5, hashed where it lies,
+        as `canon.digest_value` writes them."""
+        rest = canon.WIDE_MARK[1:]
+        if canon.WIDE_MARK[0] != chr(31) or "'" in rest:
+            raise ValueError(f"canon's wide mark {canon.WIDE_MARK!r} is not"
+                             " one this SQL writes")
+        n = self.octets(c, blob)
+        said = self.concat([self.unit_separator(), self.literal(rest),
+                            self.text(n), "':'", self.md5_hex(c)])
+        return f"CASE WHEN {n} > {canon.WIDE} THEN {said} ELSE {text} END"
+
+    def row_text(self, parts):
+        """`rowtext.encode` in this SQL."""
+        null, sep = rowtext.NULL_LEN, rowtext.SEP
+        pieces = []
+        for e in parts:
+            if pieces:
+                pieces.append(f"'{sep}'")
+            pieces.append("(" + self.concat([
+                f"COALESCE({self.text(self.length(e))}, '{null}')", "':'",
+                f"COALESCE({e}, '')"]) + ")")
+        return self.concat(pieces)
+
+    def hash_hex(self, text, name):
+        got = self.md5_hex(text) if name == "md5" else \
+            self.sha256_hex(text)
+        if got is None:
+            raise ValueError(f"no {name} in {type(self).__name__}")
+        return got
+
+
+#: the dialects engines speak from their own modules (`speak`), by name
+SPOKEN = {}
+
+
+def speak(name, dialect):
+    """Register `dialect` (a `Dialect`) as the SQL `name` is written in:
+    an engine's module says it once, where it is loaded."""
+    SPOKEN[name] = dialect
+    return dialect
 
 
 def canon_hash():
@@ -242,8 +360,33 @@ def _duckdb(c, cls, declared):
     return None
 
 
+def _spanner(c, cls, declared):
+    base, _ = _base(declared)
+    if cls == "integer":
+        # an ENUM's text is its name, not its number
+        return f"CAST({c} AS STRING)" if base == "INT64" else None
+    if cls == canon.NUMBER:
+        # a NUMERIC printed with its own digits and no more
+        return f"CAST({c} AS STRING)" if base == "NUMERIC" else None
+    if cls == "boolean":
+        return f"CASE WHEN {c} IS NULL THEN NULL WHEN {c} THEN '1' ELSE '0' END"
+    if cls == "text":
+        return c if base == "STRING" else None
+    if cls == "bytes":
+        return f"UPPER(TO_HEX({c}))" if base == "BYTES" else None
+    if cls == "date":
+        return f"FORMAT_DATE('%Y-%m-%d', {c})"
+    if cls == "timestamp":
+        # nine digits, the last three only where they are not all zeros
+        # (`canon.FRACTION`): at six, a copy that lost them compared equal
+        text = f"FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%E9S', {c}, 'UTC')"
+        return (f"CASE WHEN ENDS_WITH({text}, '000') THEN SUBSTR({text}, 1,"
+                f" LENGTH({text}) - 3) ELSE {text} END")
+    return None
+
+
 _COLUMN = {"bigquery": _bigquery, "snowflake": _snowflake,
-           "redshift": _redshift, "duckdb": _duckdb}
+           "redshift": _redshift, "duckdb": _duckdb, "spanner": _spanner}
 
 
 def _wide(dialect, c, text, blob=False):
@@ -381,6 +524,10 @@ def column_text(dialect, c, cls, declared):
     class and declared type, NULL where it is NULL - or None where this
     dialect's text of it is not known to be migkit's, and the table is
     folded in this process instead."""
+    spoken = SPOKEN.get(dialect)
+    if spoken is not None:
+        return spoken.column(c, cls, declared) if cls in spoken.rendered \
+            else None
     if cls not in RENDERED.get(dialect, ()):
         return None
     return _COLUMN[dialect](c, cls, declared)
@@ -391,8 +538,10 @@ def column_text(dialect, c, cls, declared):
 def row_text(dialect, parts):
     """`rowtext.encode` in SQL: each value's length (or `N` for NULL), a
     colon, the value; joined by the separator."""
+    if dialect in SPOKEN:
+        return SPOKEN[dialect].row_text(parts)
     null, sep = rowtext.NULL_LEN, rowtext.SEP
-    if dialect == "bigquery":
+    if dialect in ("bigquery", "spanner"):
         frags = [f"COALESCE(CAST(LENGTH({e}) AS STRING), '{null}'), ':',"
                  f" COALESCE({e}, '')" for e in parts]
         return "CONCAT(" + f", '{sep}', ".join(frags) + ")"
@@ -411,7 +560,9 @@ def row_text(dialect, parts):
 
 
 def _hash_hex(dialect, text, name):
-    if dialect == "bigquery":
+    if dialect in SPOKEN:
+        return SPOKEN[dialect].hash_hex(text, name)
+    if dialect in ("bigquery", "spanner"):
         return f"TO_HEX({'MD5' if name == 'md5' else 'SHA256'}({text}))"
     if dialect == "snowflake":
         return f"MD5({text})" if name == "md5" else f"SHA2({text}, 256)"
@@ -424,7 +575,9 @@ def _hash_hex(dialect, text, name):
 
 def _prefix_int(dialect, hexed):
     n = canon.DIGEST_HEX
-    if dialect == "bigquery":
+    if dialect in SPOKEN:
+        return SPOKEN[dialect].from_hex(hexed, n)
+    if dialect in ("bigquery", "spanner"):
         return f"CAST(CONCAT('0x', SUBSTR({hexed}, 1, {n})) AS INT64)"
     if dialect == "snowflake":
         return f"TO_NUMBER(UPPER(SUBSTR({hexed}, 1, {n})), '{'X' * n}')"
@@ -436,8 +589,14 @@ def _prefix_int(dialect, hexed):
 
 
 def _summed(dialect, value):
+    if dialect in SPOKEN:
+        return SPOKEN[dialect].summed(value)
     if dialect == "bigquery":
         return f"CAST(COALESCE(SUM(CAST({value} AS BIGNUMERIC)), 0) AS STRING)"
+    if dialect == "spanner":
+        # a NUMERIC holds 29 digits before its point: 2**60 a row over
+        # 10**10 rows stays below that
+        return f"CAST(COALESCE(SUM(CAST({value} AS NUMERIC)), 0) AS STRING)"
     if dialect == "snowflake":
         return f"TO_VARCHAR(COALESCE(SUM({value}), 0))"
     if dialect == "redshift":
@@ -493,7 +652,9 @@ def salted_hash(dialect, text, salt):
     """SQL for `leaves.text_hash`: the first `canon.DIGEST_HEX` hex digits
     of md5(salt || text), as an integer."""
     lit = "'" + str(salt).replace("'", "''") + "'"
-    if dialect == "bigquery":
+    if dialect in SPOKEN:
+        joined = SPOKEN[dialect].concat([lit, text])
+    elif dialect in ("bigquery", "spanner"):
         joined = f"CONCAT({lit}, {text})"
     else:
         joined = f"{lit} || {text}"
@@ -503,8 +664,12 @@ def salted_hash(dialect, text, salt):
 def exact_sum(dialect, value):
     """A sum of 60-bit hashes that does not wrap: BigQuery's INT64 and
     Redshift's BIGINT sum would."""
+    if dialect in SPOKEN:
+        return SPOKEN[dialect].exact_sum(value)
     if dialect == "bigquery":
         return f"SUM(CAST({value} AS BIGNUMERIC))"
+    if dialect == "spanner":
+        return f"SUM(CAST({value} AS NUMERIC))"
     if dialect == "redshift":
         return f"SUM(CAST({value} AS DECIMAL(38,0)))"
     return f"SUM({value})"
@@ -512,6 +677,8 @@ def exact_sum(dialect, value):
 
 def shifted(dialect, value, bits):
     """`value >> bits`, a non-negative integer's top bits."""
+    if dialect in SPOKEN:
+        return SPOKEN[dialect].shifted(value, bits)
     if dialect == "snowflake":
         return f"BITSHIFTRIGHT({value}, {int(bits)})"
     return f"({value} >> {int(bits)})"
@@ -519,7 +686,9 @@ def shifted(dialect, value, bits):
 
 def divided(dialect, value, by):
     """A non-negative integer divided by another, the fraction dropped."""
-    if dialect == "bigquery":
+    if dialect in SPOKEN:
+        return SPOKEN[dialect].divided(value, by)
+    if dialect in ("bigquery", "spanner"):
         return f"DIV({value}, {by})"
     if dialect == "snowflake":
         return f"TRUNC(({value}) / ({by}))"

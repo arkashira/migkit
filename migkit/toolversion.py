@@ -76,12 +76,19 @@ def major(text, tool):
     return int(m.group(1).split(".")[0]) if m else None
 
 
+def server_version(text):
+    """The server's version from what the engine reported, as numbers -
+    `8.4.2` of `8.4.2` and of `11.8.2-MariaDB-ubu2404` alike, (8, 4, 2) -
+    or () where it starts with none: the one reading of a version every
+    other is held to (audit 2026-10-01, DU23)."""
+    m = re.match(r"\s*(\d+(?:\.\d+)*)", str(text or ""))
+    return tuple(int(p) for p in m.group(1).split(".")) if m else ()
+
+
 def server_major(text):
     """The server's major version from what the engine reported."""
-    if not text:
-        return None
-    m = re.match(r"\s*(\d+)", str(text))
-    return int(m.group(1)) if m else None
+    got = server_version(text)
+    return got[0] if got else None
 
 
 def skew(client, server):

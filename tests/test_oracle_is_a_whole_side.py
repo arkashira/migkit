@@ -971,10 +971,13 @@ def _pair_hop(src, dst):
     pgep = Endpoint(host="127.0.0.1", port=PG_PORT, user="postgres",
                     password="test")
     if src == "oracle":
+        # a time written in a named zone keeps its instant on PostgreSQL
+        # and not its zone, which the hop accepts (`commercial`)
         return Hop(name="o2p", engine="hetero", source=_ep(SRC),
                    target=pgep, databases=["app"], db_map={"app": "shop"},
                    options={"source_engine": "oracle",
-                            "target_engine": "postgres"})
+                            "target_engine": "postgres",
+                            "accept_changes": ["cust.tz"]})
     return Hop(name="p2o", engine="hetero", source=pgep, target=_ep(DST),
                databases=["shop"], db_map={"shop": "app"},
                options={"source_engine": "postgres",

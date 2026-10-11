@@ -335,22 +335,32 @@ def _interlock(hop, eng, d, go):
                                           f"  {_esc(m)}"))
 
 
-def _refuse_unmasked(hop, stream):
-    """What a write that carries rows as the source holds them does to a
-    hop that masks columns on the way: refused, in its words."""
+def _refuse_unmasked(hop, eng, dbs, stream):
+    """What a write that carries rows - a change stream (`stream`) or a
+    repair of rows - asks of a hop that masks columns on the way: a stream
+    only where migkit's own tail writes each change through the hop's
+    transforms (`Engine.tail_masks`), a repair only where it writes the
+    rows so (`Engine.copier_masks` - the pair reads the source as masked),
+    and every rule one any way can apply (`masks_refused`). Refused in its
+    words otherwise."""
     from .verdict import Refused
-    if stream:
-        # the masking is the dump's; a change read after it is the
-        # source's own row, and would land unmasked
-        raise Refused(f"{hop.name} masks columns on the way, and a change"
-                      " stream would carry their real values into the"
-                      " target: a hop that masks is copied (--mode full),"
-                      " not followed. Nothing has been started")
-    raise Refused(f"{hop.name} masks columns on the way, and a repair of"
-                  " rows writes the source's values as they are, unmasked:"
-                  " move those tables again with --mode full, which masks"
-                  " them; --kind sequences or --kind schema repairs the"
-                  " rest. Nothing has been started")
+    if stream and not eng.tail_masks():
+        raise Refused(f"{hop.name} masks columns on the way, and this"
+                      " engine's change stream would carry their real"
+                      " values into the target: a hop that masks is copied"
+                      " here (--mode full), not followed. Nothing has been"
+                      " started")
+    if not stream and not eng.copier_masks():
+        raise Refused(f"{hop.name} masks columns on the way, and a repair of"
+                      " rows on this engine writes the source's values as"
+                      " they are, unmasked: --kind sequences or --kind"
+                      " schema repairs the rest. Nothing has been started")
+    for d in dbs:
+        refused = eng.masks_refused(d)
+        if refused:
+            raise Refused(f"{hop.name}: {d}: the hop asks to mask "
+                          + "; ".join(f"{n} ({why})" for n, why in refused)
+                          + ". Nothing has been started")
 
 
 def _guard_write(hop, eng, what, dbs, go, mode="", drop=False, step=None,
@@ -387,10 +397,19 @@ def _guard_write(hop, eng, what, dbs, go, mode="", drop=False, step=None,
             hopkeys.refuse_writes(hop, what)
     except Refused as e:
         stop(str(e.code))
+    if preflight is None and not drop and dbs != [""]:
+        # two tables onto one name on the target: whichever is written
+        # second overwrites the first (`Hop.name_collisions`); a move asks
+        # it with the rest of its gate (`ready`)
+        clash = _collided(hop, eng, dbs or ([db] if db else
+                                            eng.databases()))
+        if clash:
+            stop(f"{hop.name}: {clash}. Nothing has been written")
     stream = mode in ("cdc", "full+cdc") and not drop
     if (hop.options or {}).get("mask_on_write") and (stream or carries_rows):
         try:
-            _refuse_unmasked(hop, stream)
+            _refuse_unmasked(hop, eng, dbs or ([db] if db else
+                                               eng.databases()), stream)
         except Refused as e:
             stop(str(e.code))
     if preflight is not None:
@@ -1431,45 +1450,12 @@ def _convert_schema(hop_name, db, do_apply):
 
 def _create_converted(eng, d, todo):
     """([name made], [why each failed], whether it was one transaction):
-    the converted statements run on the target. A PostgreSQL target takes
-    them in one transaction on one connection, each under a savepoint so
-    every failure is named, and keeps none of them where one fails - it
-    took each on a connection of its own and kept half a schema. A target
-    whose DDL commits as it runs (MySQL) takes them one by one."""
-    target = eng.dst_engine
-
-    def said(e):
-        return (str(e).strip().splitlines() or [""])[0]
-    if getattr(target, "CANON_ENGINE", "") != "postgres" or \
-            not hasattr(target, "_conn"):
-        made, failed = [], []
-        for name, stmt in todo:
-            try:
-                target.neutral_create_code("dst", d, stmt)
-                made.append(name)
-            except Exception as e:  # noqa: BLE001 - listed by the caller
-                failed.append(f"{name}: {said(e)}")
-        return made, failed, False
-    made, failed = [], []
-    conn = target._conn("dst", target._d("dst", d))
-    try:
-        with conn.cursor() as cur:
-            for i, (name, stmt) in enumerate(todo):
-                cur.execute(f"savepoint migkit_convert_{i}")
-                try:
-                    cur.execute(stmt)
-                    made.append(name)
-                except Exception as e:  # noqa: BLE001 - listed, then undone
-                    cur.execute(f"rollback to savepoint migkit_convert_{i}")
-                    failed.append(f"{name}: {said(e)}")
-        if failed:
-            conn.rollback()
-            made = []
-        else:
-            conn.commit()
-    finally:
-        conn.close()
-    return made, failed, True
+    the converted statements run on the target the way it takes them
+    (`neutral_create_codes`) - a PostgreSQL target in one transaction,
+    each under a savepoint so every failure is named, keeping none where
+    one fails; a MySQL one on one connection, its DDL committing as it
+    runs; any other one by one."""
+    return eng.dst_engine.neutral_create_codes("dst", d, todo)
 
 
 def _record_built(hop, eng, d, made):
@@ -1510,7 +1496,11 @@ def _gen_migration(hop_name, db, out):
     ts = time.strftime("%Y%m%d%H%M%S")
     made = 0
     for d in ([db] if db else eng.databases()):
-        fwd, undo = eng.migration_pair(d)
+        try:
+            fwd, undo = eng.migration_pair(d)
+        except RuntimeError as e:
+            # a comparison that did not run is never "already in sync"
+            raise SystemExit(f"{d}: {e}") from None
         if fwd is None:
             raise SystemExit(
                 "generating migration DDL needs a component that is not"
@@ -1725,7 +1715,11 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
     more."""
     from . import drift, traces
     from . import verdict as _verdict
+    from .engines import sapodp
     from .engines.base import Engine
+    # a side that holds an SAP system's tables is read only where the hop
+    # says its database licence allows it (backlog ER6)
+    sapodp.refuse_runtime(hop, eng)
     scope = (hop.scope_fingerprint()
              if hasattr(hop, "scope_fingerprint") else None)
     prev = {k: r for k, r in (prev or {}).items()
@@ -1748,14 +1742,14 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
             console.print(f"  {_esc('[' + str(d) + ']')} {_esc(line)}")
         return s
 
-    from . import archive, consolidate, rehearsal, subset
+    from . import archive, consolidate, rehearsal, reshard, subset
 
     def run_db(d):
         if subset.settings(hop) is not None:
             # a copy for testing holds the rows chosen, not the source's
             # every row: it is proved against what it was to hold
             return [r.__dict__ for r in subset.check(hop, eng, d)]
-        for goal in (consolidate, archive):
+        for goal in (consolidate, reshard, archive):
             if goal.settings(hop) is not None:
                 # the target holds other sources' rows, or rows the source
                 # no longer has: each is proved against what it holds
@@ -1898,6 +1892,66 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
     return results, timings
 
 
+def _collided(hop, eng, dbs):
+    """The tables of `dbs` the hop lands on one name on the target
+    (`Hop.name_collisions`), in words, or "" - what every check and write
+    is refused on before it runs. A source that cannot be listed is
+    asked of the hop's rules alone (`Hop.ambiguous_mapping`)."""
+    try:
+        listed = [(d, t) for d in dbs for t in eng.neutral_tables("src", d)]
+        clash = hop.name_collisions(listed)
+    except Exception:  # noqa: BLE001 - the rules alone, then
+        clash = hop.ambiguous_mapping()
+    if not clash:
+        return ""
+    return ("the hop lands more than one table on one name on the target - "
+            + "; ".join(f"{', '.join(srcs)} onto {dst}" for dst, srcs in
+                        sorted(clash.items())[:4])
+            + (f" and {len(clash) - 4} more" if len(clash) > 4 else "")
+            + ": whichever is copied second overwrites the first, and the"
+              " check compares one source against a target holding the"
+              " other. Give them separate names on the target (mapping."
+              "tables, mapping.names)")
+
+
+def _narrower_than_moved(hop, dbs):
+    """[what] the last move of each database carried that a check under
+    the hop's scope now leaves out: tables it takes no more, rows its
+    filters take otherwise, columns chosen or masked otherwise, objects
+    no longer carried - read from the scope that move took (`Hop.scope_at`,
+    the database's scope log). Such a check is not a whole check of what
+    was moved, and is said as narrowed (`verdict.decide`), never `same`.
+    Empty where no move logged its scope, or it is the scope now."""
+    out = []
+    now = hop.scope_fingerprint()
+    for d in dbs:
+        moved = hop.scope_at(d, by="move")
+        if moved is None or moved.scope_fingerprint() == now:
+            continue
+        try:
+            tables = get_engine(moved).neutral_tables("src", d)
+        except Exception:  # noqa: BLE001 - said as unknown
+            out.append(f"{d}: the scope it was moved under (its tables"
+                       " could not be listed to compare)")
+            continue
+        for t in tables:
+            # split the one way names are (`Hop._names`)
+            parts = hop._names(t)
+            if not hop.takes_table(d, t):
+                out.append(f"{d}.{t} (left out since the move)")
+            elif hop.row_filter(d, *parts) and hop.row_filter(
+                    d, *parts) != moved.row_filter(d, *parts):
+                out.append(f"{d}.{t} (rows filtered otherwise than moved)")
+            elif hop.column_rules(d, *parts) != moved.column_rules(d,
+                                                                   *parts):
+                out.append(f"{d}.{t} (columns chosen otherwise than moved)")
+            elif hop.masks(d, *parts) != moved.masks(d, *parts):
+                out.append(f"{d}.{t} (values masked otherwise than moved)")
+        if (hop.objects or {}) != (moved.objects or {}):
+            out.append(f"{d}: objects carried otherwise than moved")
+    return out
+
+
 def _check(hop, db, table, only, do_deep, consistent, workers, resume,
            exclude, hints=True):
     """`check`: the checks run, their answers kept (`summary.json`,
@@ -1911,6 +1965,12 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     eng = get_engine(hop)
     checks, allowed = _checks_for(eng, only, do_deep)
     dbs = [db] if db else eng.databases()
+    # before anything is read: two tables onto one name on the target
+    # leave nothing to compare the one with (`Hop.name_collisions`)
+    clash = _collided(hop, eng, dbs)
+    if clash:
+        from .verdict import Refused
+        raise Refused(f"{hop_name}: {clash}. Nothing has been compared")
     if workers:
         # asked for on the command line: a ceiling, as a hop's own is
         hop.workers, hop.workers_set = int(workers), True
@@ -2006,6 +2066,17 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     if exclude:
         coverage["exclude"] = [p.strip() for p in exclude.split(",")
                                if p.strip()]
+    # what the environment left out of this run (`MIGKIT_EXCLUDE`), which
+    # the hop's definition does not
+    if getattr(hop, "run_exclude", None):
+        coverage["exclude"] = coverage.get("exclude", []) + [
+            p for p in hop.run_exclude if p not in coverage.get("exclude",
+                                                                [])]
+    # a check under a scope narrower than the one the move took is not a
+    # whole check of what was moved (`_narrower_than_moved`)
+    narrower = _narrower_than_moved(hop, dbs)
+    if narrower:
+        coverage["narrower than the move"] = narrower
     decided = _verdict.decide(results, hop, coverage or None)
     verdict_path, env = _verdict.write(
         hop, results, engine=eng.__class__.__name__,
@@ -2438,7 +2509,7 @@ def sync(hop_name, db, kind, mode, do_apply, go, serve, interval,
     stand in for a managed migration service on a trusted VM - the same
     move, the same repair and the same check as the commands of their
     own, and the exit code the last check's."""
-    from . import archive, consolidate, subset
+    from . import archive, consolidate, reshard, subset
     from .verdict import Usage
     if kind != "all" and mode != "reconcile" and _given("kind"):
         raise Usage(f"--kind picks what a repair of the last check's"
@@ -2463,7 +2534,7 @@ def sync(hop_name, db, kind, mode, do_apply, go, serve, interval,
                          f" {hop_name} --mode full --go, and proved by"
                          f" migkit check {hop_name}; sync makes a target"
                          " equal to the whole source. Nothing was written")
-    for goal in (consolidate, archive):
+    for goal in (consolidate, reshard, archive):
         if mode != "verify" and goal.settings(get_hop(hop_name)) is not None:
             # the target holds other sources' rows, or rows the source no
             # longer has: made equal to this source it would lose them
@@ -3145,17 +3216,15 @@ def _held_to_the_source(hop, eng, d, log):
     called complete: a program that loads a database can say it did and
     leave rows out or change them, and the table copier checks every range
     as it writes where a program copying on its own cannot be asked to.
-    Skipped where the hop says `verify_batches: false`."""
+    Skipped where the hop says `verify_batches: false`. A table the hop
+    masks on the way is compared too, with its source taken through the
+    hop's transforms (`Engine.through_pair`): it is not left out as a
+    table that is not a copy of its source."""
     if not (hop.options or {}).get("verify_batches", True):
         return
     log("comparing what arrived with the source")
-    from .movers import masked_tables
-    # a table the hop masks on the way is not a copy of its source: the
-    # move held it to the masking rule and counted its rows already
-    masked = masked_tables(hop, d)
     bad = [r for r in eng.check_data(d)
-           if r.check == "data" and r.status in ("diff", "error")
-           and r.scope not in masked]
+           if r.check == "data" and r.status in ("diff", "error")]
     if not bad:
         return
     raise SystemExit(
@@ -3615,9 +3684,10 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
         # column the target does not have, or lands in the wrong one - and
         # a renamed table's in the table it was renamed from
         raise SystemExit(
-            "the hop maps columns or renames tables (mapping.columns,"
-            " mapping.tables), and the server's own replication carries"
-            " whole rows under the source's names."
+            "the hop maps or masks columns or renames tables"
+            " (mapping.columns, mask_on_write, mapping.tables), and the"
+            " server's own replication carries whole rows under the"
+            " source's names, as the source holds them."
             " Nothing was set up. `migkit move --mode cdc` follows this hop"
             " with migkit's own change tail, which applies the mapping.")
     refused = "" if do_drop else _own_refused(hop, eng, db)
@@ -3822,6 +3892,9 @@ def _record_copy(hop, d, before):
     # it came from goes (`durable`)
     durable.write_json(_copy_record_path(hop, d), rec)
     dumped.unlink(missing_ok=True)
+    # the scope the copy took, from the position taken before it, in the
+    # database's scope log (`Hop.log_scope`)
+    hop.log_scope(d, before, "move")
     shared = _shared(hop, d)
     if shared:
         shared.push(force=True)
@@ -4207,6 +4280,8 @@ def _protect_target(hop, eng, db, release=False, go=True, again=False):
     stream is torn down at cutover (or on `rollback --apply`). Without
     `go`, what it would do is said and nothing is changed; `again`, after
     a copy, takes in what the copy made, where it was taken before."""
+    import sys
+
     from . import freeze
     if not (hop.options or {}).get("protect_target"):
         return
@@ -4411,7 +4486,13 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         return subset.move(hop, eng, [db] if db else eng.databases(),
                            mode, table, go,
                            lambda m: console.print(f"  {m}"))
-    from . import archive, consolidate
+    from . import archive, consolidate, reshard
+    if reshard.settings(hop) is not None:
+        return reshard.move(hop, eng, [db] if db else eng.databases(),
+                            mode, table, go,
+                            lambda m: console.print(f"  {_esc(m)}"))
+    if mode in ("cdc", "full+cdc") and reshard.follows(hop):
+        return _follow_group(hop, eng, db, mode, table, chunk, go)
     if consolidate.settings(hop) is not None:
         return consolidate.move(hop, eng, [db] if db else eng.databases(),
                                 mode, table, go,
@@ -4795,16 +4876,54 @@ def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
     return facts, rungs
 
 
+def _follow_group(hop, eng, db, mode, table, chunk, go):
+    """`move --mode cdc` or `full+cdc` of a split's part or a
+    consolidation's source: the whole group's changes followed in one loop
+    (`reshard.follow`) - a row a rule moves between parts removed from one
+    before it is written on the other, which a tail a part could not
+    order. With `full+cdc`, every source's position is taken first, then
+    each part or source copied by its own hop's move, then the follow."""
+    from . import reshard
+    if table:
+        raise SystemExit(f"{hop.name}: a group's changes are followed whole"
+                         " - leave out --table")
+    dbs = [db] if db else eng.databases()
+    if len(dbs) != 1:
+        raise SystemExit(f"{hop.name}: the follow of a group runs one"
+                         " database a process - --db one of"
+                         f" {', '.join(dbs)}")
+
+    def say(m):
+        console.print(f"  {_esc(m)}")
+    g = reshard.group(hop, dbs[0])
+    say(f"[{dbs[0]}] its group: {len(g.sources)} sources"
+        f" ({', '.join(s.name for s in g.sources)}) onto {len(g.targets)}"
+        f" targets ({', '.join(t.name for t in g.targets)})")
+    if mode == "full+cdc":
+        reshard.begin(g, go, say)
+        for name, d in reshard.copies(g):
+            console.print(f"\n[bold]{_esc(name)}[/bold] - its copy, before"
+                          " the group's changes are followed")
+            _move(name, d, "", "full", chunk, False, go)
+    reshard.follow(g, go, say)
+
+
 def _cutover(hop, eng, db, go, engine):
     """`move --mode cdc --drop`: the cutover, as `migkit.cutover` runs it
-    - and once one has flipped, its point of no return."""
-    from . import approvals, cutover
+    - and once one has flipped, its point of no return. A reshard's, a
+    split's or a consolidation's hop cuts its whole group over at once
+    (`reshard.cut_over`)."""
+    from . import approvals, cutover, reshard
     dbs = [db] if db else eng.databases()
 
     def approve(detail, step="cutover"):
         return approvals.require(hop, step, db,
                                  lambda m: console.print(f"  {m}"),
                                  detail=detail)
+    if reshard.kind_of(hop) is not None:
+        from . import rehearsal
+        rehearsal.mark(hop)
+        return reshard.cut_over(hop, dbs, go, console.print, approve)
     leg = _stream_leg(hop, eng, db, dbs, engine)
     from . import rehearsal
     rehearsal.mark(hop)
@@ -5332,7 +5451,7 @@ def _monitor(hop_name, db, interval, only, cycles):
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    checks, _ = _checks_for(eng, only)
+    checks, allowed = _checks_for(eng, only)
     dbs = [db] if db else eng.databases()
     n, got = 0, None
     while True:
@@ -5341,7 +5460,7 @@ def _monitor(hop_name, db, interval, only, cycles):
             # each cycle checks what the hop takes now (`_hop_again`)
             hop, eng, dbs, moved = _hop_again(hop_name, hop, eng, db, dbs)
             if moved:
-                checks, _ = _checks_for(eng, only)
+                checks, allowed = _checks_for(eng, only)
         stamp = time.strftime("%H:%M:%S")
         all_results, _ = run_checks(hop, eng, dbs, checks,
                                     workers=hop.workers, whole=False)
@@ -5363,7 +5482,10 @@ def _monitor(hop_name, db, interval, only, cycles):
                     statuses.append(f"[green]{c}:ok[/green]")
             console.print(f"{stamp} cycle {n} {_esc(d)}: "
                           + "  ".join(statuses))
-        got = _verdict.decide(all_results, hop)
+        # counts alone, as the watch asks by default, are not a check of
+        # the rows: a narrowed run is said as narrowed, never `same`
+        got = _verdict.decide(all_results, hop, {"checks": sorted(checks)}
+                              if set(checks) < set(allowed) else None)
         try:
             (hop.report_dir() / WATCH_SUMMARY).write_text(
                 json.dumps(all_results, indent=1, default=str))
@@ -5785,10 +5907,18 @@ def rollback(hop_name, db, state_ts, do_apply):
     eng = get_engine(hop)
     from . import cutover, freeze, repairlog
     _guard_write(hop, eng, "a rollback", [db], do_apply, step="rollback")
+    # a reshard's, a split's or a consolidation's hop goes back as the
+    # group it was cut over as: its first hop's record, every source's
+    # freeze given back side by side (`reshard.Cluster`)
+    from . import reshard
+    lead, held = hop, eng
+    if reshard.kind_of(hop) is not None:
+        group_ = reshard.group(hop, db)
+        lead, held = group_.lead, reshard.Cluster(group_)
     # read before the target's own counters are put back: the new
     # primary's as they stand clear every key it handed out, even one
     # whose row it deleted since
-    back = cutover.back_plan(hop, eng, db, console.print)
+    back = cutover.back_plan(lead, held, db, console.print)
     # the row repairs since the state gone back to, or the last run's where
     # none was saved, each by its statement-level record (`repairlog`)
     from .state import get_store
@@ -5810,7 +5940,8 @@ def rollback(hop_name, db, state_ts, do_apply):
                         path, eng.repair_io(db, repairlog.read(path)[0]),
                         log=lambda m: console.print(f"  {_esc(m)}"))
         if back is not None:
-            cutover.back_apply(hop, eng, db, back, do_apply, console.print)
+            cutover.back_apply(lead, held, db, back, do_apply,
+                               console.print)
         if freeze.state(hop, db):
             # what migkit took from the application's roles comes back
             # last: given back first, they wrote while the rest was put

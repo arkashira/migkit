@@ -150,6 +150,31 @@ class RepairAction:
     table: str = ""
 
 
+@dataclass
+class Spread:
+    """How a target that is a cluster spreads one table across its nodes,
+    as its own engine reads it (`Engine.distribution`) - what a reshard
+    places rows by and loads them along (`reshard`).
+
+    `columns` the columns it spreads the table by; `said` whose function
+    of them, in an operator's words; `parts` [(node, the part's own table
+    there)] - a shard, a chunk's shard, a token range's replica; `owners`
+    [shard key texts, or None] -> [part index, or None where the cluster
+    cannot say], asked of the cluster's own function, a batch at once;
+    `reference` - every node holds the whole table; `address` part index
+    -> (host, port) where migkit writes the part's own table on its node
+    directly, or None where only the cluster's router is written;
+    `session`, the session settings a connection to a node reads and
+    writes a part's own table under."""
+    columns: list
+    said: str
+    parts: list
+    owners: object
+    reference: bool = False
+    address: object = None
+    session: str = ""
+
+
 #: the kind of a repair action that carries nothing out and only says
 #: what the repair leaves alone - a drilldown the last check left for a
 #: table the hop no longer takes (`Engine._drills_in_scope`). Printed with
@@ -226,6 +251,54 @@ class Engine:
         return self.hop.takes_table(
             db, table, self.CANON_ENGINE or getattr(self.hop, "engine", ""))
 
+    #: the SQL a row filter handed to this engine's readers is written in,
+    #: for an engine that speaks none and reads a filter as a query of its
+    #: own (`rowfilter.to_mongo`); an engine with SQL reads its own
+    FILTER_DIALECT = None
+
+    def filter_dialect(self):
+        """The SQL this engine's readers take a row filter in: its own, or
+        the one it reads as a query of its own (`FILTER_DIALECT`); None
+        where it takes none."""
+        return getattr(self, "SQL_DIALECT", None) or self.FILTER_DIALECT
+
+    def row_filter(self, db, *parts, side="src"):
+        """The hop's row filter of this table as this engine's SQL reads it:
+        as written (`Hop.row_filter`) - or, where the hop says the zone its
+        times are read in (`where: {expr, tz}`), with every time it compares
+        a column holding a point in time written as that point
+        (`rowfilter.zone_free`, each column's meaning read off this
+        engine's catalogue, `time_kinds`). So every reader - the copy, the
+        check, the tail, a program handed the predicate - takes the same
+        rows whatever zone its session is in. None without a filter; a
+        filter that cannot be made exact is refused (SystemExit)."""
+        pred = self.hop.row_filter(db, *parts)
+        tz = self.hop.row_filter_zone(db, *parts) if pred else None
+        if not tz:
+            return pred
+        from .. import rowfilter
+        table = ".".join(str(p) for p in parts if p not in (None, ""))
+        return rowfilter.zone_free(
+            pred, rowfilter.dialect_of(self.CANON_ENGINE or self.hop.engine),
+            tz, self.time_kinds(side, db, table))
+
+    def time_kinds(self, side, db, table):
+        """{column: rowfilter.INSTANT | WALL | UNKNOWN} of a table's time
+        columns, by what this engine means by each one's type
+        (`canon.time_meaning`): what a filter's time is read against."""
+        from .. import canon, rowfilter
+        out = {}
+        eng = self.CANON_ENGINE or getattr(self.hop, "engine", "")
+        for name, typ in self.neutral_columns(side, db, table):
+            if canon.type_class(eng, typ) not in ("timestamp", "date",
+                                                  "time"):
+                continue
+            got = canon.time_meaning(eng, typ)
+            out[name] = (rowfilter.INSTANT if got == canon.INSTANT else
+                         rowfilter.WALL if got == canon.WALL else
+                         rowfilter.UNKNOWN)
+        return out
+
     def _scoped_rows(self, db, rows, at=0):
         """The rows of a catalogue listing whose `at`th value is a table
         the hop takes (`in_scope`). Every deep check, inventory and repair
@@ -243,19 +316,37 @@ class Engine:
         left one for a table that is now the target's own: a repair read
         from it deleted the rows the target keeps there. A table the hop
         no longer takes is never acted on, and the plan says so
-        (`LEFT_OUT`)."""
-        tables = list(tables)
+        (`LEFT_OUT`). Nor is one the pair carries now (`through_pair` - a
+        table the hop masks, renames or maps the columns of since): this
+        engine's own repair would write the source's rows as they are,
+        and the pair repairs it from its own drilldown
+        (`_mapped_repairs`). An engine whose rows repair is its own, not
+        the pair's (`REPAIRS_MASKED`), leaves a table the hop masks as it
+        is and says so: it would write the values the hop hides."""
+        tables = [t for t in tables if not self.through_pair(db, t)]
+        masked = [] if self.REPAIRS_MASKED else sorted(
+            t for t in tables if self.hop.masks(db, t))
         gone = sorted(t for t in tables if not self.in_scope(db, t))
-        if not gone:
+        if not gone and not masked:
             return tables, None
-        left = set(gone)
+        left = set(gone) | set(masked)
+        said = ([f"{len(gone)} {what} the last check found different are"
+                 f" ones the hop no longer takes: {', '.join(gone[:5])}"
+                 + (" ..." if len(gone) > 5 else "")
+                 + " - left as the target has them; the check that named"
+                   " them ran under another scope"] if gone else []) + (
+            [f"{len(masked)} {what} the hop masks are not repaired by rows"
+             f" here: {', '.join(masked[:5])}"
+             + (" ..." if len(masked) > 5 else "")
+             + " - this engine's repair writes the source's values as they"
+               " are; a move of the table copies it again, masked"]
+            if masked else [])
         return [t for t in tables if t not in left], RepairAction(
-            db, LEFT_OUT, [], [],
-            f"{len(gone)} {what} the last check found different are ones"
-            f" the hop no longer takes: {', '.join(gone[:5])}"
-            + (" ..." if len(gone) > 5 else "")
-            + " - left as the target has them; the check that named them"
-              " ran under another scope")
+            db, LEFT_OUT, [], [], "; ".join(said))
+
+    #: whether this engine's repair of rows writes them through the hop's
+    #: transforms: the pair's does, reading its source as masked
+    REPAIRS_MASKED = False
 
     def check_schema(self, db):
         raise NotImplementedError
@@ -1838,6 +1929,87 @@ class Engine:
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]
 
+    # ---- accounts, read and written by the engine itself (`users`) -------
+    #
+    # One shape for every engine that reads its own accounts, so `users`
+    # compares, carries and takes them back one way, and a pair of two such
+    # engines - or one of them beside PostgreSQL, MySQL, SQL Server or
+    # Oracle, whose accounts `users` reads in the same shape - carries them
+    # across (`users.across`).
+
+    #: the attributes of an account compared besides its grants, roles and
+    #: password (`accounts`' "attrs")
+    ACCOUNT_ATTRS = ()
+    #: what a comparison of this engine's accounts says of their passwords:
+    #: whether they are read as stored, and what `create` does instead
+    ACCOUNT_PASSWORDS = ""
+
+    def accounts(self, side):
+        """Every account on `side` that is not the server's own, in one
+        shape: {"user:<name>" | "role:<name>": {"login": whether it signs
+        in, "roles": [the roles it holds], "grants": ["<PRIVILEGE> ON
+        <database>.<table or *>"], "hash": its password as the server
+        keeps it where that can be read and set again (else None),
+        "attrs": {name: value} of `ACCOUNT_ATTRS`}}. A grant names the
+        hop's database by its source name and a table by its own name on
+        either side - the target's read back through the hop's mapping -
+        so the two sides compare, and two engines' too; a privilege is
+        said in capitals, in the words `users.PRIVILEGES` holds where it
+        is one of theirs."""
+        raise self._no_canon("read accounts")
+
+    def account_steps(self, src, dst, passwords):
+        """(steps, skipped) that make the target's accounts the source's
+        (`accounts` of each side): each step {"key": the account,
+        "shown": what the operator reads (no password in it), "run" and
+        "undo": what `account_run` does and takes back - a statement, or
+        what the engine's own interface is asked, as JSON - "made": it
+        makes the account, "given": its password is the passwords
+        file's}; `skipped` [(account, why)]. Nothing here runs: `users`
+        shows the plan, runs it on --apply, and records each step so a
+        rollback undoes it."""
+        raise self._no_canon("write accounts")
+
+    def account_run(self, what):
+        """One step's `run` or `undo` (`account_steps`) done on the
+        target."""
+        raise self._no_canon("write accounts")
+
+    def account_grant(self, side, privilege, db, table=None):
+        """A grant as `accounts` says it: `<PRIVILEGE> ON <db>.<table>` -
+        `db` the hop's database as the source names it, the table by its
+        own name without its schema, a target's named back through the
+        hop's mapping (`Hop.source_table_in`) so both sides say one table
+        one way - or `<db>.*` for the whole database."""
+        priv = " ".join(str(privilege).split()).upper()
+        if table in (None, "", "*"):
+            return f"{priv} ON {db}.*"
+        parts = self.hop.parts_of(str(table), self.CANON_ENGINE or None,
+                                  bare_in="")
+        if side == "dst":
+            back = self.hop.source_table_in(db, *parts)
+            if back:
+                parts = list(back)
+        return f"{priv} ON {db}.{parts[-1]}"
+
+    def account_target(self, grant):
+        """(privilege, the target's database, the target's table as its
+        listings name it - None for the whole database) of a grant
+        `accounts` said; None where the table is not on the target."""
+        priv, _, on = str(grant).partition(" ON ")
+        db, _, leaf = on.partition(".")
+        there = self.hop.target_db(db)
+        if leaf in ("", "*"):
+            return priv, there, None
+        want = self.hop.parts_of(self.hop.target_table_in(db, leaf),
+                                 self.CANON_ENGINE or None, bare_in="")[-1]
+        for t in self.neutral_tables("dst", db):
+            got = self.hop.parts_of(str(t), self.CANON_ENGINE or None,
+                                    bare_in="")
+            if got[-1] == want:
+                return priv, there, t
+        return None
+
     def move_key(self, db, sch, tbl):
         """What a table's entry in the copy's checkpoint is called: the one
         name the copier writes under and the plan reads back."""
@@ -2019,6 +2191,14 @@ class Engine:
         nothing."""
         import contextlib
         return contextlib.nullcontext()
+
+    def distribution(self, side, db, table):
+        """How this side spreads `table` across nodes of its own (`Spread`),
+        read from the server; None where one server holds every row, or
+        the table is not spread. Asked by a reshard whose one target is a
+        cluster (`reshard.function`), to place rows as the cluster does
+        and load them to the node that owns them."""
+        return None
 
     def create_missing(self, db, log=None):
         """Make on the target the tables in scope it lacks, from the
@@ -2229,6 +2409,11 @@ class Engine:
                                                       or {})
             if rules.get("keep"):
                 drop |= {n for n, _ in cols} - set(rules["keep"])
+            # a masked column is the target's own text: the second reading
+            # reads both sides as they are, and the first proves it through
+            # the hop's transforms
+            drop |= set(self.hop.masks(db, *parts,
+                                       columns=[n for n, _ in cols]))
             drop = sorted(drop)
             where = self._reader_where(db, s_)
             validations += sr.aggregates(
@@ -2400,6 +2585,12 @@ class Engine:
     #: (`LEGACY_AUTHORITY`) is read as it
     AUTHORITIES = ("schema-aware", "every-reading")
     LEGACY_AUTHORITY = "atlas"
+    #: the scopes of an engine's readings that compare its schema by its
+    #: objects - triggers, views and routines among them, which the
+    #: schema-aware reading does not inspect: where an engine has them, the
+    #: text's difference is cosmetic only where each of them found nothing
+    #: either (audit 2026-10-01, SC16)
+    STRUCTURAL_SCOPES = ()
 
     def _atlas_authoritative(self, res):
         """When the schema-aware reading says clean, demote the noisier
@@ -2407,12 +2598,23 @@ class Engine:
         to informational, so the database's verdict follows the reading that
         understands what a schema *is* rather than how it is spelled. The
         object inventory still stands, and so does the structural diff: that
-        one compares objects rather than text and is never demoted. Opt out
-        with `options.schema_authority: every-reading`."""
+        one compares objects rather than text and is never demoted. The
+        schema-aware reading says clean only of what it inspects - tables,
+        their columns, keys and indexes - where the text also holds
+        triggers, views and routines: an engine whose structural readings
+        compare those (`STRUCTURAL_SCOPES`) demotes nothing unless they are
+        clean too - a routine's or a trigger's body that differed read ok
+        behind it. Opt out with `options.schema_authority:
+        every-reading`."""
         said = str(self.hop.options.get("schema_authority")
                    or "schema-aware").strip().lower()
         if said not in ("schema-aware", self.LEGACY_AUTHORITY):
             return res
+        if self.STRUCTURAL_SCOPES:
+            structural = [r for r in res
+                          if r.scope.endswith(self.STRUCTURAL_SCOPES)]
+            if not structural or any(r.status != "ok" for r in structural):
+                return res
         if not any(r.scope.endswith(self.AUTHORITY_SCOPE) and r.status == "ok"
                    for r in res):
             return res
@@ -3461,10 +3663,28 @@ class Engine:
         feature is one people learn to scroll past.
         """
         hop = self.hop
-        if not getattr(hop, "mapping", None):
+        merged = getattr(hop, "db_map", None) or {}
+        if not getattr(hop, "mapping", None) and len(
+                {hop.target_db(d) for d in merged}) == len(merged):
+            # no mapping, and no two databases into one
             return []
         items = []
-        for dst, srcs in sorted(hop.ambiguous_mapping().items()):
+        ids, why, listed = [], None, []
+        try:
+            for db in self.databases():
+                # named from the database down, so a rule that names its
+                # database is matched, and one naming another is not
+                got = self.neutral_tables("src", db)
+                ids += [f"{db}.{t}" for t in got]
+                listed += [(db, t) for t in got]
+        except Exception as e:
+            why = str(e).splitlines()[-1][:90]
+        # two tables onto one name on the target: of the source's own
+        # tables, renames, name rules and database names all read
+        # (`name_collisions`); of the rules alone where it cannot be listed
+        clash = (hop.ambiguous_mapping() if why is not None
+                 else hop.name_collisions(listed))
+        for dst, srcs in sorted(clash.items()):
             items.append({
                 "level": "fail", "scope": "before the move",
                 "item": "mapping", "detail":
@@ -3473,14 +3693,8 @@ class Engine:
                     " overwrites the first, and the check would then"
                     " compare one source against a target holding the"
                     " other  [fix] give them separate names on the target"})
-        ids, why = [], None
-        try:
-            for db in self.databases():
-                # named from the database down, so a rule that names its
-                # database is matched, and one naming another is not
-                ids += [f"{db}.{t}" for t in self.neutral_tables("src", db)]
-        except Exception as e:
-            why = str(e).splitlines()[-1][:90]
+        if not getattr(hop, "mapping", None):
+            return items
         if why is not None:
             items.append({
                 "level": "warn", "scope": "before the move",
@@ -3496,6 +3710,7 @@ class Engine:
                         " source - that table is not renamed, not filtered,"
                         " and will move exactly as it is"
                         "  [fix] correct the name or drop the rule"})
+        items += self._filter_collation_items()
         if not items:
             items.append({
                 "level": "pass", "scope": "before the move",
@@ -3504,6 +3719,78 @@ class Engine:
                     f" {len((hop.mapping or {}).get('where') or {})} row"
                     " filters, every rule matching a table that exists"})
         return items
+
+    def _filter_collation_items(self):
+        """A row filter that compares text the two sides compare otherwise:
+        the columns it compares as text (`rowfilter.text_compared`), each
+        side's collation of them (`column_facts`). Two collations that
+        differ take other rows through the one filter - `name = 'abc'`
+        takes `ABC` under one without case - so the copy carries one set
+        and the check compares another: said before the move, as a failure
+        where both are known and differ, and a warning where a side does
+        not say its collation and the two engines differ. The collation
+        proof asks those columns first (`storedcode.collations`)."""
+        from .. import rowfilter
+        from ..util import _canonical
+        if not (self.hop.mapping or {}).get("where"):
+            return []
+        src = getattr(self, "src_engine", None) or self
+        dst = getattr(self, "dst_engine", None) or self
+        apart, unread = [], []
+        try:
+            for db in self.databases():
+                for t in src.neutral_tables("src", db):
+                    pred = self.hop.row_filter(db, t)
+                    if not pred:
+                        continue
+                    cols = rowfilter.text_compared(pred,
+                                                   src.filter_dialect())
+                    if not cols:
+                        continue
+                    there = self.hop.target_table_in(db, t)
+                    rename = self.hop.column_rules(db, t).get("rename") or {}
+                    a = src.column_facts("src", db, t) or {}
+                    try:
+                        b = dst.column_facts("dst", db, there) or {}
+                    except Exception:  # noqa: BLE001 - not made yet
+                        b = {}
+                    for c in cols:
+                        ca = (a.get(c) or {}).get("collation")
+                        cb = (b.get(rename.get(c, c)) or {}).get("collation")
+                        if ca and cb and ca != cb:
+                            apart.append(f"{t}.{c} ({ca} / {cb})")
+                        elif not (ca and cb) and _canonical(
+                                src.CANON_ENGINE or "") != _canonical(
+                                    dst.CANON_ENGINE or ""):
+                            unread.append(f"{t}.{c}")
+        except Exception as e:  # noqa: BLE001 - said, never passed
+            return [{"level": "warn", "scope": "before the move",
+                     "item": "row filter", "detail":
+                         "whether the two sides compare the text the row"
+                         " filters read alike could not be asked:"
+                         f" {str(e).splitlines()[-1][:90]}"}]
+        out = []
+        if apart:
+            out.append({
+                "level": "fail", "scope": "before the move",
+                "item": "row filter", "detail":
+                    "the row filter compares text the two sides collate"
+                    " differently, so it takes other rows on each: "
+                    + ", ".join(apart[:6])
+                    + "  [fix] write the filter so it does not hang on"
+                      " case or accents (compare upper() of both, or the"
+                      " key), or give the target column the source's"
+                      " collation"})
+        if unread:
+            out.append({
+                "level": "warn", "scope": "before the move",
+                "item": "row filter", "detail":
+                    "the row filter compares text, and whether the two"
+                    " engines compare it alike is not known: "
+                    + ", ".join(unread[:6])
+                    + "  [fix] the collation proof asks these first"
+                      " (migkit check --deep)"})
+        return out
 
     def _preflight_items(self):
         """The predictive deep checks, as `assess` rows.
@@ -3815,13 +4102,22 @@ class Engine:
         reports, because the row text is positional and two servers agreeing
         on a set of columns says nothing about the order they list them in.
         """
-        from .. import canon
+        from .. import canon, commercial
         out = {"pairs": [], "unreadable": [],
                "only_src": sorted(set(src_types) - set(dst_types)),
                "only_dst": sorted(set(dst_types) - set(src_types))}
         same = (src_engine.CANON_ENGINE == dst_engine.CANON_ENGINE
                 and canon.renders(src_engine.CANON_ENGINE))
         for name in sorted(set(src_types) & set(dst_types)):
+            said = (commercial.not_data(src_engine.CANON_ENGINE,
+                                        src_types[name])
+                    or commercial.not_data(dst_engine.CANON_ENGINE,
+                                           dst_types[name]))
+            if said:
+                # a row version or a row's address: what the target writes
+                # of its own, never what the source held (`commercial`)
+                out["unreadable"].append((name, said))
+                continue
             scls, swhy = canon.comparable(src_engine.CANON_ENGINE,
                                           src_types[name])
             dcls, dwhy = canon.comparable(dst_engine.CANON_ENGINE,
@@ -3886,6 +4182,11 @@ class Engine:
                 base = str(typ).split("(")[0].strip().lower()
                 if base in eng.TEXT_HOLDS_BYTES:
                     scls = dcls = "bytes"
+            # the commercial engines' own: an offset both keep, a
+            # sql_variant kept as JSON, sixteen bytes beside a UUID
+            scls, dcls = canon.pair_classes(
+                src_engine.CANON_ENGINE, src_types[name], scls,
+                dst_engine.CANON_ENGINE, dst_types[name], dcls)
             out["pairs"].append((name, scls, dcls))
         out["src_types"], out["dst_types"] = src_types, dst_types
         # how each compared column is compared, exactly or by value, and
@@ -3916,7 +4217,7 @@ class Engine:
 
     def _reader_where(self, db, src_t):
         """The hop's row filter on each side, in each side's SQL."""
-        pred = self.hop.row_filter(db, *self.hop.parts_of(src_t))
+        pred = self.row_filter(db, *self.hop.parts_of(src_t))
         return pred, pred
 
     def _can_read_twice(self):
@@ -5333,6 +5634,22 @@ class Engine:
         raise NotImplementedError(
             f"{type(self).__name__} cannot create converted objects")
 
+    def neutral_create_codes(self, side, db, todo):
+        """([names made], [why each failed], whether they were one
+        transaction) of converted `create` statements `[(name,
+        statement)]` run on the target: here one by one
+        (`neutral_create_code`). An engine that takes them on one
+        connection, or in one transaction, says so in its own."""
+        made, failed = [], []
+        for name, stmt in todo:
+            try:
+                self.neutral_create_code(side, db, stmt)
+                made.append(name)
+            except Exception as e:  # noqa: BLE001 - listed by the caller
+                failed.append(f"{name}: "
+                              + (str(e).strip().splitlines() or [""])[0])
+        return made, failed, False
+
     def neutral_empty(self, side, db, table, where=None):
         """Remove every row of `table` on the target, keeping the table.
         Returns how many went.
@@ -5480,7 +5797,23 @@ class Engine:
         tables made for a load - and the check then compared it under that
         name on both sides, so the table it was renamed to was never filled
         and nothing said so. The pair renames it (`HeteroEngine._rename`)
-        in its copy, comparison, repair and tail alike."""
+        in its copy, comparison, repair and tail alike.
+
+        A table whose columns the hop masks (`Hop.masks`) goes through the
+        pair too: it writes each masked value through the hop's transforms
+        and compares the source taken through them, where this engine's
+        own paths copy and hash the values as they are."""
+        if self.OWN_PATHS_READ_COLUMN_MAPPING:
+            return False
+        parts = [p for p in str(table).split(".") if p]
+        return self.made_by_pair(db, table) or bool(self.hop.masks(db,
+                                                                   *parts))
+
+    def made_by_pair(self, db, table):
+        """Whether the pair's copier makes this table on the target, under
+        the names the hop's mapping gives it: a table it renames or maps
+        the columns of. One it only masks keeps the source's own
+        definition, made as every other table is."""
         if self.OWN_PATHS_READ_COLUMN_MAPPING:
             return False
         from ..movers import _renamed
@@ -5490,11 +5823,52 @@ class Engine:
 
     def maps_columns(self):
         """Whether any table of this hop goes through the pair machinery:
-        it maps columns or renames tables (`through_pair`)."""
-        from ..movers import renames_any
+        it maps or masks columns, or renames tables (`through_pair`)."""
+        from ..movers import _mask_said, renames_any
         return (not self.OWN_PATHS_READ_COLUMN_MAPPING
                 and bool((self.hop.mapping or {}).get("columns")
-                         or renames_any(self.hop)))
+                         or renames_any(self.hop) or _mask_said(self.hop)))
+
+    def copier_masks(self):
+        """Whether this engine's table copier writes a masked table through
+        the hop's transforms: the pair's copier does, so every engine that
+        copies through it does, and one that hands it its masked tables
+        (`through_pair`). An engine whose own copy writes what it reads
+        does not, and a move of a hop that masks is refused on it before
+        anything is written (`movers.refuse_unmasked`)."""
+        return not self.OWN_PATHS_READ_COLUMN_MAPPING
+
+    def copier_filters(self):
+        """Whether this engine's table copier applies the hop's row filter
+        on both ends - reading only what it takes, replacing only that on
+        the target: the same-engine copiers that read it in their own SQL,
+        and a document store that reads it as its own query
+        (`FILTER_DIALECT`). A bulk path that cannot filter hands such a
+        table to it (`movers.routed_to_copier`); one this says no to is
+        refused before anything is copied
+        (`movers.refuse_unpushable_filters`)."""
+        return not self.OWN_PATHS_READ_COLUMN_MAPPING or bool(
+            self.FILTER_DIALECT)
+
+    #: whether this engine's change tail is the pair's, run as a pair of
+    #: itself (`tail_apply` handing over to `_as_pair()`)
+    TAILS_THROUGH_PAIR = False
+
+    def tail_masks(self):
+        """Whether migkit's own change tail of this engine writes each
+        change through the hop's transforms: the pair's does
+        (`HeteroEngine._masked_change`), so an engine whose tail is the
+        pair's does, and one that hands it a hop's masked tables
+        (`maps_columns`). The servers' own replication never does
+        (`movers.stream_cannot_carry`)."""
+        return bool(self.TAILS_THROUGH_PAIR
+                    or not self.OWN_PATHS_READ_COLUMN_MAPPING)
+
+    def masks_refused(self, db):
+        """[(table.column, why)] of the hop's masking of `db` no way can
+        apply as asked, asked of the pair every masked table goes through
+        (`HeteroEngine.masks_refused`)."""
+        return self._as_pair().masks_refused(db)
 
     def _as_pair(self, within=None):
         """This hop seen as a pair of the same engine, so the machinery
@@ -5641,11 +6015,23 @@ class Engine:
         got = list(self.delta_verify(db, limit, log))
         fp = self.hop.scope_fingerprint()
         if kept.get("scope_fingerprint") != fp:
-            now = {"scope_fingerprint": fp, "at": time.time()}
+            # the source's position the scope took effect at, beside its
+            # fingerprint and in the database's scope log (`log_scope`)
+            try:
+                import json
+                at = self.log_position("src", db)
+                # a position as plain data: a document store's is a BSON
+                # timestamp
+                at = json.loads(json.dumps(at, default=str))
+            except Exception:  # noqa: BLE001 - kept without one
+                at = None
+            now = {"scope_fingerprint": fp, "at": time.time(),
+                   **({"position": at} if at is not None else {})}
             if changed:
                 now["scope_changed_from"] = kept["scope_fingerprint"]
             durable.write_json(self.hop.report_dir(db) / self.DELTA_SCOPE,
                                now)
+            self.hop.log_scope(db, at, "delta")
             kept = now
         if changed:
             got.append(Result(
@@ -5668,7 +6054,10 @@ class Engine:
         """The schema results for the tables this engine's whole-database
         comparers leave to the pair machinery: their columns, compared
         through the mapping."""
-        tables = self.mapped_tables(db)
+        # a table only masked keeps its definition, which this engine's
+        # own comparers read
+        tables = [t for t in self.mapped_tables(db)
+                  if self.made_by_pair(db, t)]
         if not tables:
             return []
         return self.columns_pair().check_schema(db, only=tables)
@@ -6139,9 +6528,10 @@ class Engine:
     def _sized(self, db):
         return self.table_facts("src", db)
 
-    def masked_on_the_way(self, db):
-        """The tables the hop masks on the way, which only a way that masks
-        may carry."""
+    def masked_on_the_way(self, db, tables):
+        """The tables of `tables` the hop masks on the way that this
+        engine's own ways must mask: none here, where a masked table goes
+        through the pair (`through_pair`)."""
         return set()
 
     def table_way_facts(self, db, via, quick=False, known=None, sizes=None):
@@ -6604,6 +6994,15 @@ class NeutralCopier:
     def move_table(self, db, sch, tbl, chunk, ck, log):
         return self._as_pair().move_table(db, sch, tbl, chunk, ck, log)
 
+    def copier_masks(self):
+        """The pair's copier, which writes through the hop's transforms."""
+        return True
+
+    def copier_filters(self):
+        """The pair's copier, which reads the filter in this engine's own
+        SQL on both ends (`HeteroEngine._row_scope`) - where it has one."""
+        return bool(self.filter_dialect())
+
     def moved_nothing(self, db):
         return self._as_pair().moved_nothing(db)
 
@@ -6707,3 +7106,23 @@ class NeutralCopier:
             if came:
                 r.tables = dict(came)
         return found
+
+    #: the rows a range of the copier reads at once where a native ladder
+    #: hands it a table
+    COPIER_CHUNK = 50_000
+
+    def copy_by_copier(self, db, table, log, held):
+        """One table by the one copier every pair shares, resumable by its
+        key: the last rung of an engine's own ladder (`tableway.each`),
+        which no missing program or service refusal stops. `held` keeps
+        the move's one checkpoint across the ladder's tables, begun
+        afresh."""
+        if not held:
+            from ..cli import _Checkpoint
+            held.append(_Checkpoint(self.hop.report_dir(db)
+                                    / "move-rows.json"))
+            held[0].clear()
+            held[0].discard()
+        from ..util import split_table
+        sch, tbl = split_table(self.CANON_ENGINE or self.hop.engine, table)
+        return self.move_table(db, sch, tbl, self.COPIER_CHUNK, held[0], log)

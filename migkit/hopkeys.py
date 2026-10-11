@@ -230,7 +230,7 @@ CLOSURE = ("warn", "accept")
 HOP_KEYS = {
     "goal": Key("what the hop is for - copy, cutover, verify, two-way,"
                 " keep-in-sync, rehearse, upgrade, subset, consolidate,"
-                " split or archive", "str"),
+                " split, reshard or archive", "str"),
     "engine": Key("the engine both sides run, or hetero - read from the"
                   " addresses when they are addresses", "str"),
     "source": Key("where the data is: an address or the long form",
@@ -243,10 +243,10 @@ HOP_KEYS = {
                    " names and patterns, or databases each with all, its"
                    " tables or its schemas", "list|dict"),
     "objects": Key("the kinds of object beside the tables carried: views,"
-                   " routines, triggers, events, sequences, roles - each"
-                   " all (the default), none, or a list of names; one not"
-                   " carried is out of scope as an excluded table is",
-                   "dict"),
+                   " routines, triggers, events, sequences, dictionaries,"
+                   " roles - each all (the default), none, or a list of"
+                   " names; one not carried is out of scope as an excluded"
+                   " table is", "dict"),
     "include": Key("the only databases, schemas or tables taken - moved,"
                    " followed, checked and repaired - the rest left alone"
                    " as if excluded; exclude wins where both name one."
@@ -358,6 +358,16 @@ HOP_OPTIONS = {
                  " shared - tables every part takes whole, rest - refuse"
                  " or stays (the rows no part takes stay on the source)",
                  "dict", subs=("with", "shared", "rest")),
+    "reshard": Key("goal reshard: with - the other hops of the group (their"
+                   " sources and targets the group's), by - auto, hash,"
+                   " range, list, lookup or target (the one target"
+                   " cluster's own distribution), key - {table: shard key"
+                   " columns}, shared - tables every target takes whole,"
+                   " ranges - {target hop: upper bound or null}, values -"
+                   " {target hop: [values]}, lookup - {value: target hop},"
+                   " default - the target hop of a value not named",
+                   "dict", subs=("with", "by", "key", "shared", "ranges",
+                                 "values", "lookup", "default")),
     "table_engine": Key("the storage engine the target's tables are made"
                         " in - a name, or {to, accept: [group numbering,"
                         " remote rows], foreign_keys: {child.column:"
@@ -500,8 +510,15 @@ HOP_OPTIONS = {
     "lob_scan_seconds": Key("the budget of the large-value scan", "int",
                             ("mysql",)),
     "mask": Key("values reports show as salted hashes", "str|list|bool"),
-    "mask_on_write": Key("table.column -> null or constant <text>: masked"
-                         " on the way into the target", "dict", ("mysql",)),
+    "mask_on_write": Key("[db.][schema.]table.column (names or patterns) ->"
+                         " null, constant <text>, hash or truncate <n>:"
+                         " written so into the target by every way that"
+                         " carries the table, and proved as written",
+                         "dict"),
+    "mask_key": Key("the key a hash in mask_on_write is taken with - a"
+                    " reference to a secret (env:, file:, vault:, ...);"
+                    " the same value gives the same digest on every run",
+                    "str"),
     "max_message_bytes": Key("the largest message a stream takes", "int",
                              STREAMS),
     "mongodb_entitlement": Key("atlas or enterprise: the MongoDB licence"
@@ -651,6 +668,14 @@ HOP_OPTIONS = {
                  check="migkit.rules:configured"),
     "sample": Key("how many keys or messages are compared", "int",
                   ("redis", "kafka")),
+    "sap_licence": Key("the licence of a database that holds an SAP system:"
+                       " full-use (bought apart from SAP, so a direct read"
+                       " is the customer's) or runtime (bought through SAP,"
+                       " which allows no direct read)", "str",
+                       ("oracle", "mssql", "db2", "db2i", "db2zos", "ase",
+                        "hana", "hetero"),
+                       choices=("full-use", "runtime"), fold=True,
+                       check="migkit.engines.sapodp:licence"),
     "schedule": Key("when the hop runs by itself", "dict",
                     subs={"cron": Key("five fields of cron", "str"),
                           "timezone": Key("a zone of the tz database",
@@ -1017,7 +1042,7 @@ ENDPOINT_OPTIONS = {
     "tls": Key("TLS, the certificate checked against the system's"
                " authorities (https on OpenSearch, Cosmos DB and SAP)", "bool",
                ("opensearch", "db2i", "couchbase", "cosmosdb", "sapodp",
-                "oracle") + TLS_OWN),
+                "oracle", "neptune") + TLS_OWN),
     "tls_ca_file": Key("the authorities' certificates file", "str",
                        ("db2i", "couchbase", "sapodp", "oracle")
                        + TLS_OWN),
@@ -1252,40 +1277,89 @@ GOALS = {
                     "options": {}, "writes": True,
                     "next": ["migkit assess {hop}",
                              "migkit move {hop} --mode full",
-                             "migkit move {hop} --mode full --go",
-                             "migkit check {hop}"],
+                             "migkit move {hop} --mode full+cdc --go",
+                             "migkit check {hop}",
+                             "migkit move {hop} --mode cdc --drop --go"],
                     "source": "read, never written: each table through its"
-                              " row filter",
+                              " row filter, and its changes followed with"
+                              " every other source's in one loop; frozen"
+                              " with every other source at the cutover"
+                              " only where the hop turns cutover: on",
                     "target": "one database the sources share: this"
                               " source's rows there replaced by its own,"
                               " under its value, keys shifted where the"
                               " rule shifts them; the other sources' rows"
-                              " left as they are; the counters raised past"
-                              " every source's keys",
+                              " left as they are; each change after the"
+                              " copy shifted and under its value the same"
+                              " way; the counters raised past every"
+                              " source's keys",
                     "guarantees": "keys two sources hold found before"
                                   " anything is written and refused, or kept"
                                   " apart by the rule (tenant, offset,"
-                                  " remap); every source's rows proved in"
+                                  " remap); a key arrived since that would"
+                                  " meet another source's stops the follow"
+                                  " before it; every source's rows proved in"
                                   " the target under its value; no row"
-                                  " under a value no source has"},
+                                  " under a value no source has; every"
+                                  " source cut over at once"},
     "split": {"what": "one database into many - a service extracted, a"
                       " database split by region: each part's rows by its"
-                      " rule, every row placed exactly once, proved",
+                      " rule, every row placed exactly once, proved, and"
+                      " followed until every part is cut over at once",
               "options": {}, "writes": True,
               "next": ["migkit assess {hop}",
                        "migkit move {hop} --mode full",
-                       "migkit move {hop} --mode full --go",
-                       "migkit check {hop}"],
+                       "migkit move {hop} --mode full+cdc --go",
+                       "migkit check {hop}",
+                       "migkit move {hop} --mode cdc --drop --go"],
               "source": "read, never written: every row counted against"
-                        " every part's rule before the move",
+                        " every part's rule before the move, its changes"
+                        " followed for every part in one loop; frozen at"
+                        " the cutover only where the hop turns cutover: on",
               "target": "this part's tables (the hop's scope) filled with"
-                        " the rows its rule takes (mapping.where)",
+                        " the rows its rule takes (mapping.where), and"
+                        " kept so: a row a change moves out of its rule"
+                        " removed here before it is written on the part"
+                        " it moves to",
               "guarantees": "rows no part takes and rows two parts take"
                             " found before the move and refused (rest:"
                             " stays, shared); each key in exactly one"
                             " part's target, the targets together the"
-                            " source's; references across the split"
+                            " source's; no row on two parts at once while"
+                            " followed; references across the split"
                             " counted and said"},
+    "reshard": {"what": "N sources onto M targets by one shard function -"
+                        " shards split or merged, a new shard key, a"
+                        " cluster's own distribution - every row placed"
+                        " exactly once, proved, followed until every"
+                        " source and target is cut over at once",
+                "options": {}, "writes": True,
+                "next": ["migkit assess {hop}",
+                         "migkit move {hop} --mode full",
+                         "migkit move {hop} --mode full+cdc --go",
+                         "migkit check {hop}",
+                         "migkit move {hop} --mode cdc --drop --go"],
+                "source": "read, never written: every row placed by the"
+                          " function before the move, every change of"
+                          " every source followed in one loop; frozen"
+                          " together at the cutover only where the hop"
+                          " turns cutover: on",
+                "target": "the rows the function places there: hash,"
+                          " range, list or lookup of the shard key, or the"
+                          " target cluster's own distribution - each batch"
+                          " sent to the node that owns its rows where"
+                          " migkit reaches it; a row whose key moves it"
+                          " removed from the target it left before it is"
+                          " written on the one it reaches",
+                "guarantees": "rows no target takes, keys two sources hold"
+                              " and tables with no key found before the"
+                              " move and refused; each key on exactly the"
+                              " target its key places it, as its source has"
+                              " it, the targets together the sources - per"
+                              " target and across them, before the copy"
+                              " ends and inside the cutover; no row on two"
+                              " targets at once while followed; each"
+                              " target's batch one numbered transaction"},
     "archive": {"what": "old rows to cheaper storage: the rows each rule"
                         " picks added to an archive and proved there, then"
                         " removed from the source only once proved and"
@@ -1645,10 +1719,13 @@ WRITING = ("reverse", "topology", "two_way", "protect_target", "cutover",
 #: options that stream, which a one-off copy contradicts
 STREAMING = ("reverse", "topology", "two_way")
 #: the goals that move the data once
-ONCE = ("copy", "subset", "consolidate", "split", "archive")
+ONCE = ("copy", "subset", "archive")
+#: the goals whose targets hold other rows than each of their sources
+#: (`reshard.group`): followed one way, never streamed back
+GROUPS = ("consolidate", "split", "reshard")
 #: each goal's own setting, read by no other goal
 GOAL_OPTION = {"subset": "subset", "consolidate": "consolidate",
-               "split": "split", "archive": "archive"}
+               "split": "split", "reshard": "reshard", "archive": "archive"}
 
 
 def goal_options(hop, goal):
@@ -2304,6 +2381,71 @@ def _where_problems(where, mapping, engine):
     return out
 
 
+def _collision_problems(where, raw, engine, opts):
+    """Two rules of `mapping.tables` that land on one name on the target
+    (`Hop.ambiguous_mapping`, without case where the target's names have
+    none), read off the rules before anything is listed: whichever is
+    written second overwrites the first. The source's own tables, name
+    rules and all, are asked before anything runs (`Hop.name_collisions`)."""
+    from .config import Endpoint, Hop
+    mapping = raw.get("mapping")
+    if not isinstance(mapping, dict) or not isinstance(
+            mapping.get("tables"), dict):
+        return []
+    probe = Hop(name="", engine=engine or "", source=Endpoint(),
+                target=Endpoint(), mapping={"tables": mapping["tables"]},
+                db_map=raw.get("db_map") if isinstance(raw.get("db_map"),
+                                                       dict) else {},
+                options={k: v for k, v in opts.items()
+                         if k in ("source_engine", "target_engine")})
+    try:
+        clash = probe.ambiguous_mapping()
+    except Exception:  # noqa: BLE001 - said by the rules' own checks
+        return []
+    return [Problem("error", f"{where}.mapping.tables",
+                    f"{', '.join(srcs)} all land on {dst} on the target -"
+                    " whichever is written second overwrites the first;"
+                    " give them separate names")
+            for dst, srcs in sorted(clash.items())]
+
+
+def _mask_problems(where, opts):
+    """`mask_on_write` said wrong, before anything is written: a key that
+    names no table, a rule that is not a transform (`transforms.parse`),
+    a hash with no `mask_key` - a digest without a key is a dictionary
+    away from the value - and a key written out in the file."""
+    from . import addresses, transforms
+    rules = opts.get("mask_on_write")
+    out = []
+    key = opts.get("mask_key")
+    if isinstance(key, str) and key and not addresses.is_reference(key) \
+            and key != "CHANGE_ME":
+        out.append(Problem(
+            "warn", f"{where}.options.mask_key",
+            "written in plain text - whoever reads the file can take every"
+            " digest back to its value; write a reference: env:NAME,"
+            " file:/path, vault:path#key, keyring:name"))
+    if not isinstance(rules, dict):
+        return out
+    for col, rule in rules.items():
+        at = f"{where}.options.mask_on_write.{col}"
+        table, _, column = str(col).rpartition(".")
+        if not table or not column:
+            out.append(Problem("error", at, "names no table - write"
+                               " table.column, or a pattern for the table"))
+            continue
+        try:
+            kind, _ = transforms.parse(rule)
+        except SystemExit as e:
+            out.append(Problem("error", at, str(e)))
+            continue
+        if kind == "hash" and not key:
+            out.append(Problem("error", at, "hash needs the hop's mask_key"
+                               " (a secret reference): a digest without a"
+                               " key is a dictionary away from the value"))
+    return out
+
+
 def _names_problems(where, mapping):
     """`mapping.names` said wrong: a level that is not one, a rule that
     is not one, a case that is neither lower nor upper."""
@@ -2476,6 +2618,9 @@ def _contradictions(where, raw, opts, goal, engine):
     out += _ops_problems(where, mapping)
     out += _objects_problems(where, raw)
     out += _names_problems(where, mapping)
+    if raw.get("goal") != "consolidate":
+        out += _collision_problems(where, raw, engine, opts)
+    out += _mask_problems(where, opts)
     out += _where_problems(where, mapping, opts.get("source_engine")
                            if engine == "hetero" else engine)
     if goal in GOALS and not GOALS[goal]["writes"]:
@@ -2493,6 +2638,14 @@ def _contradictions(where, raw, opts, goal, engine):
                     f"goal {goal} moves the data once, and {k} keeps a"
                     " stream running - make the goal cutover or two-way,"
                     " or drop the option"))
+    if goal in GROUPS:
+        for k in STREAMING:
+            if opts.get(k):
+                out.append(Problem(
+                    "error", f"{where}.options.{k}",
+                    f"goal {goal}'s targets hold other rows than each of"
+                    f" its sources, and {k} streams one target back into"
+                    " one source - drop the option"))
     out += _goal_settings(where, opts, goal, engine)
     out += _source_changes(where, opts, goal)
     out += _ship(where, opts)
@@ -2589,17 +2742,18 @@ def _goal_settings(where, opts, goal, engine):
 def _scenario_settings(where, opts, goal):
     """The settings of the scenarios a hop may say, each read as its own
     module reads it (`charsets`, `tableengine`, `consolidate`, `split`,
-    `archive`) - one reading, so what loads is what runs - and what a
-    goal needs of its own: a consolidation's column."""
+    `reshard`, `archive`) - one reading, so what loads is what runs - and
+    what a goal needs of its own: a consolidation's column."""
     from types import SimpleNamespace
 
-    from . import archive, charsets, consolidate, split, tableengine
+    from . import archive, charsets, consolidate, reshard, split, tableengine
     out = []
     probe = SimpleNamespace(goal=goal, options=opts)
     for key, read in (("charset", charsets.settings),
                       ("table_engine", tableengine.settings),
                       ("consolidate", consolidate.settings),
                       ("split", split.settings),
+                      ("reshard", reshard.settings),
                       ("archive", archive.settings)):
         try:
             read(probe)
