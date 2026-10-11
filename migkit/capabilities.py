@@ -1457,7 +1457,7 @@ DEPTH_GAPS = {
     },
     "verify.structure.collection-options": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "postgres mysql mssql kafka sqlite clickhouse dynamodb "
+                "postgres mssql kafka sqlite clickhouse dynamodb "
                 "oracle db2 db2i db2zos ase teradata opensearch cassandra "
                 "redshift snowflake bigquery duckdb iceberg delta tidb "
                 "cockroachdb dsql couchbase cosmosdb hetero"),
@@ -1588,7 +1588,7 @@ DEPTH_GAPS = {
     },
     "verify.structure.schema-diff": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mysql mssql sqlite parquet clickhouse oracle db2 db2i "
+                "mssql sqlite parquet clickhouse oracle db2 db2i "
                 "db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb copybook iceberg delta tidb "
                 "cockroachdb dsql hetero"),
@@ -1616,7 +1616,7 @@ DEPTH_GAPS = {
     },
     "verify.structure.triggers": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mysql sqlite oracle db2 db2i db2zos ase teradata cassandra "
+                "sqlite oracle db2 db2i db2zos ase teradata cassandra "
                 "cockroachdb couchbase cosmosdb hetero"),
         **_each(NOT_APPLICABLE, _NO_TRIGGER,
                 "mongodb redis kafka parquet clickhouse dynamodb opensearch "
@@ -1709,7 +1709,7 @@ DEPTH_GAPS = {
     },
     "verify.value.rendering": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mysql mongodb mssql sqlite parquet clickhouse dynamodb "
+                "mongodb mssql sqlite parquet clickhouse dynamodb "
                 "oracle db2 db2i db2zos ase teradata opensearch cassandra "
                 "redshift snowflake bigquery duckdb copybook iceberg delta "
                 "tidb cockroachdb dsql couchbase cosmosdb hetero"),
@@ -1768,7 +1768,7 @@ DEPTH_GAPS = {
     },
     "verify.tables": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mysql mongodb redis kafka sqlite parquet clickhouse "
+                "mongodb redis kafka sqlite parquet clickhouse "
                 "dynamodb oracle db2 db2i db2zos ase teradata opensearch "
                 "cassandra redshift snowflake bigquery duckdb copybook "
                 "iceberg delta tidb cockroachdb dsql couchbase cosmosdb "
@@ -1860,10 +1860,10 @@ DEPTH_GAPS = {
     },
     "assess.preflight": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mysql mongodb mssql redis kafka sqlite parquet clickhouse "
+                "mongodb mssql redis kafka sqlite parquet clickhouse "
                 "dynamodb oracle db2 db2i db2zos ase teradata opensearch "
                 "cassandra redshift snowflake bigquery duckdb copybook "
-                "iceberg delta tidb cockroachdb dsql couchbase cosmosdb "
+                "iceberg delta cockroachdb dsql couchbase cosmosdb "
                 "hetero"),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
@@ -2093,6 +2093,11 @@ UNPROVED = {
     "verify.confirm": ("postgres clickhouse dynamodb db2i opensearch "
                        "cassandra tidb cockroachdb dsql couchbase cosmosdb"),
     "verify.users": "mongodb",
+    # the catalogue reads of these are written and have not run against a
+    # server (`_deep_triggers`, `_deep_render`, `_deep_table_options`)
+    "verify.structure.triggers": "mysql",
+    "verify.structure.collection-options": "mysql",
+    "verify.value.rendering": "mysql",
     "verify.repair": "mssql tidb cockroachdb dsql couchbase cosmosdb",
     "verify.repair-undo": ("mssql oracle tidb cockroachdb dsql couchbase "
                            "cosmosdb"),
@@ -2109,6 +2114,8 @@ UNPROVED = {
     "tail.readded": "mssql tidb",
     "tail.renames": "postgres",
     "assess.versions": "mysql mongodb",
+    # TiDB runs MySQL's `assess`, which now asks the pre-flight
+    "assess.preflight": "tidb",
     "assess.brands": "tidb",
     "assess.engine-checks": ("db2i teradata snowflake tidb cockroachdb dsql "
                              "couchbase cosmosdb sapodp saas"),
@@ -2125,7 +2132,7 @@ UNPROVED = {
     "move.sized": ("oracle db2i db2zos teradata redshift snowflake tidb "
                    "cockroachdb dsql"),
     "move.load-window": "tidb",
-    "cutover.rollback": "mysql mongodb copybook",
+    "cutover.rollback": "mongodb copybook",
     "cutover.freeze": ("oracle db2 ase teradata redshift snowflake couchbase"
                        " hetero"),
     "cutover.read-only-target": "mssql db2i db2zos dsql hetero",

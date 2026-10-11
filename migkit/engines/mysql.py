@@ -2530,12 +2530,16 @@ class MySQLEngine(Engine):
         q = ("select table_name, auto_increment from information_schema.tables"
              " where table_schema=%s and auto_increment is not null")
         rows = self._q("dst", q, (self._d("dst", db),), fresh=True)
-        (state_dir / "dst-autoinc.txt").write_text(
-            "".join(f"{t}|{v}\n" for t, v in sorted(rows)))
+        # what a rollback puts back: whole or not at all, and on the disk
+        # before the repair it undoes begins (`durable`)
+        from ..durable import write_atomic
+        write_atomic(state_dir / "dst-autoinc.txt",
+                     "".join(f"{t}|{v}\n" for t, v in sorted(rows)))
         # sequence-only repair rolls back from the auto_increment snapshot alone
         if kind == "sequences":
             return
-        (state_dir / "dst-schema.sql").write_text(self._dump_schema("dst", db))
+        write_atomic(state_dir / "dst-schema.sql",
+                     self._dump_schema("dst", db))
 
     def _schema_urls(self, db):
         """(source, target) as the schema comparison's URLs."""
@@ -2589,7 +2593,8 @@ class MySQLEngine(Engine):
                 (self.hop.report_dir(db) / stale).unlink(missing_ok=True)
             return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "ok",
                           "the two schemas match, compared as schemas"
-                          " rather than as text")
+                          " rather than as text",
+                          category="structure.schema-diff")
         out = self.hop.report_dir(db) / "schema-fix.sql"
         out.write_text(text + "\n")
         detail = (f"{len(text.splitlines())} lines of DDL would bring the"
@@ -2615,7 +2620,8 @@ class MySQLEngine(Engine):
         detail += self._backfill_clause(db, text)
         return Result("schema", f"{db} {self.AUTHORITY_SCOPE}", "diff", detail,
                       str(out), "review schema-fix.sql, then apply it to"
-                      " the target; schema-fix.revert.sql undoes it")
+                      " the target; schema-fix.revert.sql undoes it",
+                      category="structure.schema-diff")
 
     def _all_tables(self, side, db):
         """Every base table on a side, the hop's exclusions included.
@@ -2876,6 +2882,9 @@ class MySQLEngine(Engine):
                 second = self._second_rows(db, t)
                 if second:
                     res.append(second)
+            # how the table it compared came out, said by the finding
+            # (`Result.tables`), under the name its source gives it
+            r.tables = {str(t): r.status}
             res.append(r)
             rows_a += ra
             rows_b += rb
@@ -2889,14 +2898,20 @@ class MySQLEngine(Engine):
         if with_counts:
             bad_counts += [f"{t} missing on target" for t in sorted(st - dt)]
             bad_counts += [f"{t} extra on target" for t in sorted(dt - st)]
+            # each table the count compared, and each one only a side has,
+            # as the count came out (`Result.tables`)
+            counted = {str(t): ("ok" if per[t][1] == per[t][2] else "diff")
+                       for t in tables if t in per}
+            counted.update({str(t): "diff" for t in sorted(st ^ dt)})
             if bad_counts:
                 cres = Result("counts", db, "diff",
-                              "; ".join(bad_counts[:10]))
+                              "; ".join(bad_counts[:10]), tables=counted)
             else:
                 cres = Result("counts", db, "ok",
                               f"{len(tables)} tables, rows"
                               f" {rows_a:,}=={rows_b:,}"
-                              " (from the checksum pass, no extra scan)")
+                              " (from the checksum pass, no extra scan)",
+                              tables=counted)
             res.insert(0, cres)
         return res
 
@@ -3983,6 +3998,15 @@ class MySQLEngine(Engine):
     TEXT_TYPES = ("char", "varchar", "tinytext", "text", "mediumtext",
                   "longtext")
 
+    #: What `assess` asks before anything moves: the deep checks about the
+    #: move that is about to happen (rows the target has no room for, a
+    #: column that changes what a time means, zone rules that differ, text
+    #: already double-encoded on the source). Not here: the checks that
+    #: compare what is on the target, which is empty before a move, and
+    #: `_collation_versions`, which only says MySQL cannot have its problem
+    PREFLIGHT = ("_capacity_gaps", "_temporal_meaning", "_time_zone_rules",
+                 "_mojibake")
+
     def _mojibake(self, db):
         """The same sampling as PostgreSQL, through a driver instead of a
         client: `length <> char_length` is the same "has a non-ASCII
@@ -5006,6 +5030,9 @@ class MySQLEngine(Engine):
         res += self._deep_unenforced_checks(db, ddb)
         res += self._check_grants(db)
         res += self._deep_ownership(db, ddb)
+        res += self._deep_triggers(db, ddb)
+        res.append(self._deep_render(db, ddb))
+        res.append(self._deep_table_options(db, ddb))
         res += [r for r in (self.set_aside(db),) if r]
         return res
 
@@ -5281,6 +5308,283 @@ class MySQLEngine(Engine):
         return [Result("deep", f"{db} ownership", "diff", detail, "",
                        f"{note}; recreate with the intended DEFINER before"
                        " the application depends on it")]
+
+    #: a trigger as the server keeps it, after the table it is on (which
+    #: decides its scope)
+    TRIGGER_Q = ("select event_object_table, trigger_name, action_timing,"
+                 " event_manipulation, action_orientation, action_order,"
+                 " action_statement, sql_mode"
+                 " from information_schema.triggers"
+                 " where trigger_schema = %s")
+
+    @staticmethod
+    def _trigger_body(text, *schemas):
+        """A trigger's body as its meaning is compared: the database it
+        names itself by taken out (a target in another database names its
+        own), spacing and the closing semicolon not counted."""
+        text = str(text or "")
+        for schema in schemas:
+            text = text.replace(f"`{schema}`.", "")
+        return re.sub(r"\s+", " ", text).strip().rstrip(";").strip()
+
+    def _triggers_of(self, side, db):
+        """{(table, trigger): facts} of the triggers on a side the hop
+        takes - not an online schema change's, nor those of a table whose
+        columns the hop maps, which the pair compares through the mapping."""
+        from .. import drift
+        sdb = self._d(side, db)
+        left = self._left_out_of_schema(db, side)
+        out = {}
+        for tbl, name, timing, event, orient, order, body, mode in \
+                self._q(side, self.TRIGGER_Q, (sdb,)):
+            if not self.takes(db, "trigger", str(name), str(tbl)) \
+                    or drift.transient_trigger(name) or str(tbl) in left:
+                continue
+            out[(str(tbl), str(name))] = {
+                "timing": str(timing).upper(), "event": str(event).upper(),
+                "for each": str(orient).upper(), "order": int(order or 0),
+                "body": self._trigger_body(body, sdb, db),
+                "sql_mode": str(mode or "")}
+        return out
+
+    def _deep_triggers(self, db, ddb):
+        """Each trigger the hop takes, source against target: when it fires
+        (timing and event), for each row or statement, in what order among
+        its table's triggers, and what it does (its body). A trigger that
+        differs fires differently on the application's writes after the
+        cutover - an audit row not written, a column set another way - and
+        every row count and checksum still agrees. A trigger on one side
+        only is the object check's finding as well; it is said here too, so
+        a reader holding triggers finds every difference in one place. The
+        definer is `_deep_ownership`'s, said once; the SQL mode a trigger
+        was made under is a note, not a mismatch, as a server's modes
+        differ for reasons of their own."""
+        try:
+            src = self._triggers_of("src", db)
+            dst = self._triggers_of("dst", db)
+        except Exception as e:
+            return [Result("deep", f"{db} triggers", "warn",
+                           f"cannot read the triggers: {str(e)[:90]} -"
+                           " unknown, not clean")]
+        diff, notes = [], []
+        for key in sorted(set(src) & set(dst)):
+            a, b = src[key], dst[key]
+            parts = []
+            for field in ("timing", "event", "for each"):
+                if a[field] != b[field]:
+                    parts.append(f"{field} {a[field]} -> {b[field]}")
+            # MariaDB numbers none of them; an order is held only where
+            # both servers say one
+            if a["order"] and b["order"] and a["order"] != b["order"]:
+                parts.append(f"order {a['order']} -> {b['order']}")
+            if a["body"] != b["body"]:
+                parts.append("the body differs")
+            if parts:
+                diff.append(f"{key[0]}.{key[1]}: " + ", ".join(parts))
+            elif a["sql_mode"] != b["sql_mode"]:
+                notes.append(f"{key[0]}.{key[1]}")
+        for label, only in (("on the source only",
+                             sorted(set(src) - set(dst))),
+                            ("on the target only",
+                             sorted(set(dst) - set(src)))):
+            if only:
+                diff.append(label + ": " + ", ".join(
+                    f"{t}.{n}" for t, n in only))
+        if diff:
+            out = self.hop.report_dir(db) / "deep-triggers.diff"
+            out.write_text("\n".join(diff) + "\n")
+            return [Result("deep", f"{db} triggers", "diff",
+                           f"{len(diff)} of {len(set(src) | set(dst))}"
+                           " triggers differ: "
+                           + "; ".join(d for d in diff[:4]), str(out),
+                           "recreate the trigger on the target from the"
+                           " source's definition (schema-src.sql) before"
+                           " the application writes to it")]
+        if notes:
+            return [Result("deep", f"{db} triggers", "warn",
+                           f"{len(src)} triggers match, but "
+                           f"{len(notes)} were made under another SQL mode"
+                           " on the target: " + ", ".join(notes[:4]), "",
+                           "set the SQL mode they were made under, then"
+                           " recreate them, if their statements read it")]
+        return [Result("deep", f"{db} triggers", "ok",
+                       f"{len(src)} triggers, each fires on the same event"
+                       " with the same body on both sides" if src
+                       else "no triggers on either side")]
+
+    #: the types whose text a client reads another way when the value was
+    #: carried by a path that rewrote it - a decimal's scale, a float's
+    #: digits, a JSON document's spacing and key order, a set's order, a
+    #: time's fraction - and the SQL that renders each as the client reads it
+    RENDERED = {"decimal": "cast({c} as char)", "float": "cast({c} as char)",
+                "double": "cast({c} as char)", "json": "cast({c} as char)",
+                "enum": "cast({c} as char)", "set": "cast({c} as char)",
+                "time": "cast({c} as char)", "year": "cast({c} as char)",
+                "bit": "hex({c})", "geometry": "st_astext({c})",
+                "point": "st_astext({c})", "linestring": "st_astext({c})",
+                "polygon": "st_astext({c})"}
+
+    @staticmethod
+    def _rendered(value):
+        return value.decode("utf-8", "replace") if isinstance(
+            value, (bytes, bytearray)) else str(value)
+
+    def _deep_render(self, db, ddb):
+        """The same value rendered the same on both sides. A checksum over
+        a row's columns can agree while the text a client reads does not -
+        a decimal kept as 1.50 on one side and 1.5 on the other, a JSON
+        document respaced, a set's members reordered - so a few rows of
+        each such column are read from the source, the same rows from the
+        target, and the text each side renders compared. A row that moved
+        on the source meanwhile is read again and not counted."""
+        place = ", ".join(["%s"] * len(self.RENDERED))
+        try:
+            cols = self._scoped_rows(db, self._q(
+                "src", "select c.table_name, c.column_name, c.data_type"
+                       " from information_schema.columns c"
+                       " join information_schema.tables t"
+                       " on t.table_schema = c.table_schema"
+                       " and t.table_name = c.table_name"
+                       " where c.table_schema = %s"
+                       " and t.table_type in ('BASE TABLE',"
+                       " 'SYSTEM VERSIONED')"
+                       " and c.table_name not like 'migkit%%'"
+                       f" and c.data_type in ({place}) order by 1, 2",
+                (db, *self.RENDERED)))[:20]
+        except Exception as e:
+            return Result("deep", f"{db} render", "warn",
+                          f"cannot list the columns: {str(e)[:90]} -"
+                          " unknown, not clean")
+        q = self._quote_ident
+        drifts, audited = [], 0
+        for table, column, kind in cols:
+            pks = self._pk_cols(db, table)
+            if not pks:
+                continue
+            shown = self.RENDERED[str(kind).lower()].format(c=q(column))
+            head = ", ".join(q(p) for p in pks)
+
+            def read(side, dbn, keys=None, limit=5):
+                where = f"{q(column)} is not null"
+                args = ()
+                if keys:
+                    one = "(" + ", ".join(["%s"] * len(pks)) + ")" \
+                        if len(pks) > 1 else "%s"
+                    where += (f" and ({head}) in ("
+                              + ", ".join([one] * len(keys)) + ")")
+                    args = tuple(v for k in keys for v in k)
+                got = self._q(side, f"select {head}, {shown} from"
+                                    f" {q(dbn)}.{q(table)} where {where}"
+                                    + ("" if keys else
+                                       f" order by {head} limit {limit}"),
+                              args or None)
+                return {tuple(r[:len(pks)]): self._rendered(r[len(pks)])
+                        for r in got}
+            try:
+                seen = read("src", db)
+            except Exception:
+                continue
+            if not seen:
+                continue
+            audited += 1
+            try:
+                there = read("dst", ddb, list(seen))
+            except Exception:
+                drifts.append(f"{table}.{column}: unreadable on target")
+                continue
+            for key, text in seen.items():
+                if key not in there or there[key] == text:
+                    continue
+                try:
+                    now = read("src", db, [key]).get(key)
+                except Exception:
+                    now = None
+                if now != text:
+                    continue
+                drifts.append(f"{table}.{column}: renders differently"
+                              f" (src {text[:40]!r} dst {there[key][:40]!r})")
+                break
+        return Result("deep", f"{db} render", "diff" if drifts else "ok",
+                      "; ".join(drifts[:5]) if drifts
+                      else (f"{audited} columns of types that render"
+                            " differently sampled, rendering identical"
+                            if audited else "no such columns with rows"),
+                      "", "check how the value was carried (a dump, a"
+                          " converter) and the column's type and scale on"
+                          " the target" if drifts else "")
+
+    #: a table's options as the catalogue keeps them
+    TABLE_OPTIONS_Q = ("select table_name, engine, row_format,"
+                       " coalesce(create_options, '')"
+                       " from information_schema.tables"
+                       " where table_schema = %s"
+                       " and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')"
+                       " and table_name not like 'migkit%%'")
+
+    @staticmethod
+    def _create_options(text):
+        """The options a table was made with, as a set to compare: what
+        `create_options` lists, less `partitioned` (the partitions check's
+        own) and `row_format=` (the row format is compared as it is)."""
+        return {w for w in str(text).split() if w.lower() != "partitioned"
+                and not w.lower().startswith("row_format=")}
+
+    def _deep_table_options(self, db, ddb):
+        """What a table is stored with, source against target: its storage
+        engine (a MyISAM table takes no transaction, enforces no foreign
+        key and survives a crash another way), its row format (the key
+        length an index may have), and the options it was made with -
+        compression, key block size, statistics, checksum. The first two
+        change what the table can do and are a difference; the rest change
+        its size and speed and are a note."""
+        from .. import drift
+        try:
+            got = {}
+            for side, dbn in (("src", db), ("dst", ddb)):
+                working = drift.transient_among(self._all_tables(side, db))
+                got[side] = {
+                    str(r[0]): (str(r[1] or "").lower(),
+                                str(r[2] or "").lower(),
+                                self._create_options(r[3]))
+                    for r in self._scoped_rows(db, self._q(
+                        side, self.TABLE_OPTIONS_Q, (dbn,)))
+                    if str(r[0]) not in working}
+        except Exception as e:
+            return Result("deep", f"{db} table options", "warn",
+                          f"cannot read the tables' options: {str(e)[:90]}"
+                          " - unknown, not clean",
+                          category="structure.collection-options")
+        diff, notes = [], []
+        for t in sorted(set(got["src"]) & set(got["dst"])):
+            (se, sr, so), (de, dr, do) = got["src"][t], got["dst"][t]
+            if se != de:
+                diff.append(f"{t}: engine {se} -> {de}")
+            if sr != dr:
+                diff.append(f"{t}: row format {sr} -> {dr}")
+            if so != do:
+                notes.append(f"{t}: options "
+                             + (" ".join(sorted(so)) or "(none)") + " -> "
+                             + (" ".join(sorted(do)) or "(none)"))
+        compared = len(set(got["src"]) & set(got["dst"]))
+        hint = ("make the target's tables with the source's engine, row"
+                " format and options (alter table ... engine=..."
+                " row_format=...)")
+        if diff:
+            out = self.hop.report_dir(db) / "deep-table-options.diff"
+            out.write_text("\n".join(diff + notes) + "\n")
+            return Result("deep", f"{db} table options", "diff",
+                          f"{len(diff)} of {compared} tables are stored"
+                          " another way: " + "; ".join(diff[:4]), str(out),
+                          hint, category="structure.collection-options")
+        if notes:
+            return Result("deep", f"{db} table options", "warn",
+                          f"{len(notes)} of {compared} tables were made"
+                          " with other options (same engine and row format): "
+                          + "; ".join(notes[:3]), "", hint,
+                          category="structure.collection-options")
+        return Result("deep", f"{db} table options", "ok",
+                      f"{compared} tables: engine, row format and options"
+                      " identical", category="structure.collection-options")
 
     # ---- checks PostgreSQL already had and MySQL did not ----
 
@@ -6569,6 +6873,8 @@ class MySQLEngine(Engine):
         items += self._packet_items()
         items += self._collations_unknown()
         items += self._fork_objects()
+        # the deep checks about the move ahead rather than the one behind
+        items += self._preflight_items()
         items += self._scope_items()
         return items
 
