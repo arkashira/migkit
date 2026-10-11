@@ -940,7 +940,9 @@ def doctor(install):
         # every hop at once, and each hop's two sides at once: a host that
         # does not answer costs its connect wait once, not once for every
         # side of every hop after it; what each says is kept to its hop
-        with ThreadPoolExecutor(max_workers=min(8, len(hops))) as pool:
+        from . import decide
+        with ThreadPoolExecutor(
+                max_workers=decide.probe_width(len(hops), 8)) as pool:
             said = list(pool.map(
                 lambda item: _doctor_hop(item[0], item[1],
                                          raw.get(item[0]) or {}),
@@ -1289,10 +1291,10 @@ def _link_line(got, name):
 def advise(hop_name):
     """Show the migration playbook for this hop's service."""
     hop = get_hop(hop_name)
-    pb = advisors.playbook(hop.service or "native")
-    if not pb:
-        raise SystemExit(f"no playbook for service '{hop.service}',"
-                         f" have: {', '.join(advisors.PLAYBOOKS)}")
+    service, why = advisors.pick(hop)
+    if service == "native" and hop.service:
+        console.print(f"[yellow]{why}; migkit's own route:[/yellow]")
+    pb = advisors.playbook(service)
     console.print(pb)
 
 

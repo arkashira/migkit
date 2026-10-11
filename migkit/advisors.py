@@ -156,3 +156,23 @@ def playbook(service):
         lines.append(phase)
         lines.extend(f"  - {i}" for i in items)
     return "\n".join(lines)
+
+
+def pick(hop):
+    """(the service whose playbook fits the hop, why): the one it names
+    where there is one, else migkit's own route, said - never a refusal
+    that leaves the operator with no steps."""
+    from . import decide
+    named = getattr(hop, "service", None)
+    facts = decide.Facts({"named": named})
+    own = decide.Rung(
+        "named", f"the playbook for {named}",
+        needs=(decide.Need(
+            "a playbook for the named service",
+            lambda f: bool(f["named"]) and f["named"] in PLAYBOOKS,
+            lambda f: f"no playbook for service '{f['named']}'"
+                      if f["named"] else "the hop names no service"),))
+    native = decide.Rung("native", "migkit's own route")
+    got = decide.climb(f"advising {getattr(hop, 'name', 'the hop')}",
+                       (own, native), facts)
+    return (named if got.path == "named" else "native"), got.reason

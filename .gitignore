@@ -15,3 +15,5 @@ deploy/.env
 # written on every commit for the next session (tools/gen_codemap.py)
 .codemap/
 tags
+
+.claude/settings.local.json
