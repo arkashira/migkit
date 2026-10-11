@@ -38,6 +38,8 @@ import time
 from ..decide import Need, Rung
 from .base import Engine, RepairAction, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
+from .oracle_catalog import OracleCatalog
+from .oracle_deep import OracleDeep
 
 #: the declared type, with the numbers a counterpart needs
 DECLARED = ("case when data_type like '%WITH LOCAL TIME ZONE' then"
@@ -350,9 +352,15 @@ WRITE_WAYS = (
          because="deleted by key and inserted, one round trip each"))
 
 
-class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
+class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
+                   Engine):
     checks = ("schema", "counts", "autoinc", "data")
     CANON_ENGINE = "oracle"
+    OWN_PREFIX = OWN_PREFIX
+    BRAND_FAMILY = "oracle"
+    #: what `assess` asks before anything moves: the tables no key names a
+    #: row of, and text stored twice as UTF-8 on the source
+    PREFLIGHT = ("_deep_keys", "_mojibake")
     CHARSETS = True
     SQL_DIALECT = "oracle"
     FOLDED_BECAUSE = ("holds a column this table has that Oracle's SQL"
@@ -1579,9 +1587,11 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                           if loose else "every constraint enabled and"
                                         " validated", "",
                           "alter table ... enable validate constraint ..."
-                          if loose else ""))
+                          if loose else "",
+                          category="structure.unvalidated-constraints"))
         out.append(self._deep_partitions(db))
         out.append(self._mojibake(db))
+        out += self._deep_more(db)
         return out
 
     # ---- partitions ------------------------------------------------------
@@ -2156,7 +2166,9 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         items = []
         for db in self.databases():
             items += oracle_logminer.assess(self, "src", db)
-        return items
+        # what the move will not do, counted and named
+        inv = self._handwork()
+        return items + inv.rows() + inv.summary()
 
     # ---- Oracle to Oracle, server to server ------------------------------
 
