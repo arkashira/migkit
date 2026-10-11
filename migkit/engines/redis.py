@@ -3,7 +3,8 @@ import time
 from .. import pieces
 from ..config import scoped
 from ..decide import Need, Rung
-from .base import Engine, RepairAction, Result
+from .base import (LEFT_OUT, Engine, RepairAction, Result, clauses,
+                   rows_counted)
 
 
 class RedisEngine(Engine):
@@ -213,7 +214,62 @@ class RedisEngine(Engine):
                 f"source uses {used:,} bytes, target caps at"
                 f" {dmax or 'unlimited'}"
                 + (f" (source caps at {smax:,})" if smax else ""))
+        inv = self._handwork()
+        items += inv.rows() + inv.summary()
         return items
+
+    def _handwork(self):
+        """What a key-by-key copy leaves behind, counted and named
+        (`migkit.handwork`): keys in databases the hop does not name, the
+        accounts (`migkit users` carries them) and the functions, which
+        are code stored in the server and not keys at all. A probe that
+        could not run is unknown, never none."""
+        from .. import handwork, users
+        inv = handwork.Inventory()
+        scope = "instance"
+        src = self._client("src")
+        try:
+            named = {str(d) for d in self.databases()}
+            held = src.info("keyspace")
+            inv.add("not-carried", scope,
+                    "keys in databases the hop does not name",
+                    [f"{d} ({int(v.get('keys') or 0):,} keys)"
+                     for d, v in sorted(held.items())
+                     if d[2:] not in named])
+        except Exception as e:  # noqa: BLE001 - said, not counted as none
+            inv.unknown("not-carried", scope,
+                        f"cannot list the source's databases:"
+                        f" {str(e)[:80]}")
+        try:
+            inv.add("not-carried", scope,
+                    "accounts, which `migkit users` carries",
+                    sorted(users._redis_users(self.hop.source)))
+        except Exception as e:  # noqa: BLE001
+            inv.unknown("not-carried", scope,
+                        f"cannot read the source's accounts: {str(e)[:80]}")
+        try:
+            # a map of fields, or - on the older protocol - a flat list of
+            # name, value, name, value
+            libraries = []
+            for lib in src.function_list():
+                lib = lib if isinstance(lib, dict) else dict(
+                    zip(lib[::2], lib[1::2]))
+                libraries.append(str(lib.get("library_name",
+                                             lib.get(b"library_name"))))
+            inv.add("server-side-code", scope,
+                    "function libraries, stored in the server and not keys",
+                    libraries)
+        except Exception as e:  # noqa: BLE001
+            if "unknown command" in str(e).lower():
+                # before Redis 7 there are no functions to leave behind
+                inv.add("server-side-code", scope,
+                        "function libraries, stored in the server and not"
+                        " keys", [])
+            else:
+                inv.unknown("server-side-code", scope,
+                            f"cannot list the source's functions:"
+                            f" {str(e)[:80]}")
+        return inv
 
     def _health(self, side):
         """What this server says about its own load, for the throttle.
@@ -265,6 +321,116 @@ class RedisEngine(Engine):
         return Health(busy_ratio=busy,
                       note="rewriting to disk" if busy >= BUSY_RATIO else "")
 
+    def capacity(self, side, db):
+        """What the server says of its room for a move's connections, from
+        the one INFO the throttle reads (`_health_from`): the clients it
+        will still take, and whether it is a replica. Commands run one at
+        a time, so there is no count of sessions busy or CPUs to give."""
+        info = self._client(side).info()
+        out = {}
+        ceiling = int(info.get("maxclients") or 0)
+        if ceiling:
+            out["free_connections"] = max(
+                0, ceiling - int(info.get("connected_clients") or 0))
+        if info.get("role"):
+            out["replica"] = info.get("role") == "slave"
+        return out
+
+    def free_bytes(self, side, db):
+        """What a side has free to hold keys. A Redis keeps its dataset in
+        memory, so its room is the memory under `maxmemory` it has not
+        used; None where it sets no limit - the machine's memory is shared
+        with whatever else runs on it, and a guess would be worse than the
+        plan saying nobody knows."""
+        info = self._client(side).info()
+        limit = int(info.get("maxmemory") or 0)
+        if not limit:
+            return None
+        return max(limit - int(info.get("used_memory") or 0), 0)
+
+    #: what `assess` asks before anything moves (`Engine.PREFLIGHT`)
+    PREFLIGHT = ("_database_on_target", "_keys_the_copy_removes")
+
+    def _database_on_target(self, db):
+        """Whether the target has the database the keys are going to: a
+        server holds `databases` of them (16 by default) and refuses a
+        number past that, and a Redis Cluster has database 0 only - the
+        copy would stop on its first key."""
+        scope = f"db{db} target database"
+        try:
+            n = int(self.side_database("dst", db))
+            if self._cluster("dst"):
+                if n:
+                    return Result("deep", scope, "diff",
+                                  f"the target is a Redis Cluster, which has"
+                                  f" database 0 only: db{db} cannot be"
+                                  " selected there", "",
+                                  "move this database's keys to database 0"
+                                  " of the cluster")
+                return Result("deep", scope, "ok",
+                              "the target is a Redis Cluster; database 0 is"
+                              " the one it has")
+            have = int(self._client("dst").config_get("databases")
+                       .get("databases") or 0)
+        except Exception as e:  # noqa: BLE001 - said, never assumed
+            return Result("deep", scope, "error",
+                          "the target's databases could not be read: "
+                          + (str(e).splitlines() or [type(e).__name__])[-1]
+                          [:80])
+        if have and n >= have:
+            return Result("deep", scope, "diff",
+                          f"the target has {have} databases (0 to"
+                          f" {have - 1}) and the keys are for db{db}", "",
+                          f"set `databases` to more than {n} on the target"
+                          " before the copy")
+        return Result("deep", scope, "ok",
+                      f"db{db} is one of the target's {have or '?'}"
+                      " databases")
+
+    def _keys_the_copy_removes(self, db):
+        """The keys the target holds in this database that the hop takes:
+        a copy begins afresh by removing them (`empty_target`), and a
+        target filled by mistake is better known before than after."""
+        scope = f"db{db} held on target"
+        held = self.rows_held(db, [f"db{db}"])
+        if held is None:
+            return Result("deep", scope, "error",
+                          "the target's keys could not be read, so whether"
+                          " the copy removes any is not known")
+        if held:
+            return Result(
+                "deep", scope, "warn",
+                f"the target already holds keys in db{db} that the hop"
+                " takes; the copy removes them before it writes the"
+                " source's", "",
+                "empty the database yourself if they matter, or leave them"
+                " out of the hop with `exclude`")
+        return Result("deep", scope, "ok",
+                      f"the target holds no key in db{db} that a copy would"
+                      " remove")
+
+    #: what a hop may ask of a table's rows and columns that a keyspace
+    #: has no meaning for: a key is taken or left by its name (`include`,
+    #: `exclude`) and carried as it is
+    UNREAD_BY_KEYS = ("row_filters", "column_rules", "values_masked",
+                      "renamed", "names_ruled")
+
+    def _refuse_unread_mapping(self):
+        """Stop a copy or a check of a hop that asks for a row filter, a
+        column rule, a masked value, a renamed table or a rule for names:
+        this engine reads none of them, and the keys would be carried and
+        compared whole, under their own names, as if the hop had not said
+        so."""
+        from ..config import narrowed_by
+        said = [k.replace("_", " ") for k, v in narrowed_by(self.hop).items()
+                if v and k in self.UNREAD_BY_KEYS]
+        if said:
+            raise SystemExit(
+                f"the hop asks for {', '.join(said)}, which this engine does"
+                " not read: its keys are taken or left by name (`include`,"
+                " `exclude`) and carried as they are. Nothing was read or"
+                " written; take the rule out of the hop")
+
     def _kept(self, db, keys):
         """The keys migkit verifies and repairs: all but the ones the hop
         excludes, matched as `db.key` and as `key`. This engine used to
@@ -272,7 +438,7 @@ class RedisEngine(Engine):
         repaired away, like any other."""
         if not scoped(self.hop):
             return keys
-        return [k for k in keys if not self.hop.excluded(str(db), k)]
+        return [k for k in keys if self.in_scope(db, k)]
 
     def _count(self, side, db):
         if not scoped(self.hop):
@@ -282,8 +448,10 @@ class RedisEngine(Engine):
         return sum(len(b) for b in self._scan_batches(side, 0, True, db))
 
     def list_move_tables(self, db):
-        """A keyspace is the unit: it has no tables inside it."""
-        return [("", str(db))]
+        """A keyspace is the unit: it has no tables inside it. One the hop
+        leaves out whole is none; the keys it leaves out of the others are
+        left at the copy (`_raw_kept`)."""
+        return [("", str(db))] if self.in_scope(db, "") else []
 
     def move_key(self, db, sch, tbl):
         return f"db{db}"
@@ -344,6 +512,7 @@ class RedisEngine(Engine):
         target holds that the hop does not leave out: it is not this
         copy's."""
         from ..wording import progress
+        self._refuse_unread_mapping()
         key = self.move_key(db, sch, tbl)
         st = ck.setdefault(key, {})
         if st.get("done"):
@@ -857,11 +1026,17 @@ class RedisEngine(Engine):
             "align the target's settings - eviction first - before cutover")
 
     def check_counts(self, db):
+        self._refuse_unread_mapping()
         a = self._count("src", db)
         b = self._count("dst", db)
+        # a database's keys are the one table a Redis has: named as the
+        # copy names it (`move_key`), so a rule and a finding meet on it
+        table = f"db{db}"
         if a != b:
-            return [Result("counts", f"db{db}", "diff", f"src={a} dst={b}")]
-        return [Result("counts", f"db{db}", "ok", f"keys {a:,}=={b:,}")]
+            return [Result("counts", table, "diff", f"src={a} dst={b}",
+                           table=table, tables={table: "diff"})]
+        return [Result("counts", table, "ok", f"keys {a:,}=={b:,}",
+                       table=table, tables={table: "ok"})]
 
     def _batch_compare(self, s, t, keys):
         """Pipelined type-aware compare: two round trips per batch per
@@ -1002,6 +1177,7 @@ class RedisEngine(Engine):
         does not.
         """
         from ..throttle import Throttle
+        self._refuse_unread_mapping()
         s = self._keys("src", db)
         t = self._keys("dst", db)
         sample = int(self.hop.options.get("sample", 5000))
@@ -1053,6 +1229,16 @@ class RedisEngine(Engine):
         bad = len(missing) + len(changed)
         mode = "full scan" if deep else f"sample {checked}"
         res = []
+        table = f"db{db}"
+        state = {table: "diff" if bad or extra else "ok"}
+
+        def counted(**only):
+            """The rows apart this finding is about, counted key by key
+            where both sides were read whole, the least there are of a
+            sample."""
+            got = {"missing": 0, "extra": 0, "changed": 0, **only}
+            return rows_counted(table, got["missing"], got["extra"],
+                                got["changed"], exact=deep)
         if bad:
             parts = []
             if missing:
@@ -1065,7 +1251,10 @@ class RedisEngine(Engine):
                               + (f"; still so once the replica had caught"
                                  f" up ({proof})" if proof else ""), "",
                               f"migkit sync {self.hop.name} --db {db}"
-                              " --kind rows --apply"))
+                              " --kind rows --apply", table=table,
+                              rows_apart=counted(missing=len(missing),
+                                                 changed=len(changed)),
+                              tables=state))
         if extra:
             shown = ", ".join(sorted(extra)[:6])
             more = f" (+{len(extra) - 6} more)" if len(extra) > 6 else ""
@@ -1078,13 +1267,15 @@ class RedisEngine(Engine):
                 "a target still holding keys from an earlier attempt:"
                 f" migkit sync {self.hop.name} --db {db} --kind rows --apply"
                 " removes them, with the old values written to the undo file"
-                " first; the key count can match while this is true"))
+                " first; the key count can match while this is true",
+                table=table, rows_apart=counted(extra=len(extra)),
+                tables=state))
         return res or [Result(
             "data", f"db{db}", "ok",
             f"{checked} keys value-equal, {seen_dst} target keys all present"
             f" on the source ({mode}, pipelined)"
             + (f"; the difference was still arriving ({proof})"
-               if proof else ""))]
+               if proof else ""), table=table, tables=state)]
 
     def _write_drilldown(self, db, **kinds):
         """The keys behind the counts, through the shared writer.
@@ -1102,8 +1293,12 @@ class RedisEngine(Engine):
                              for kind, keys in kinds.items()})
 
     def in_scope(self, db, table):
-        """A key as `_kept` reads it, the one scope answer here."""
-        return bool(self._kept(db, [table]))
+        """Whether the hop takes a key of a database, matched as `db.key`
+        and as `key` - the one scope answer here, which `_kept` asks of
+        every key a check, a copy or a repair reads. A key of "" is the
+        keyspace itself: one the hop leaves out whole (`exclude: ["5"]`)."""
+        return not scoped(self.hop) or \
+            not self.hop.excluded(str(db), table)
 
     def _read_drilldown(self, db, kind, kept=True):
         """The keys the last check named, of the ones the hop takes
@@ -1113,6 +1308,16 @@ class RedisEngine(Engine):
         keys = [json.loads(line) for line in
                 self._read_drill(db, f"db{db}", kind)]
         return self._kept(db, keys) if kept else keys
+
+    def _drilled(self, db, held=True):
+        """{kind: keys} the last check named, of the keys the hop takes -
+        and, with `held`, of the kinds it does not keep: where the hop does
+        not carry deletes the target's extra keys are its own, where it
+        carries no inserts the missing ones stay missing, and no updates,
+        the changed ones stay as they are (`_repairable`)."""
+        found = {kind: self._read_drilldown(db, kind)
+                 for kind in ("missing", "changed", "extra")}
+        return self._repairable(db, f"db{db}", found) if held else found
 
     def repair_plan(self, db, kind):
         """What `migkit sync --kind rows` would do to this database.
@@ -1127,9 +1332,14 @@ class RedisEngine(Engine):
             k for found in ("missing", "changed", "extra")
             for k in self._read_drilldown(db, found, kept=False)}), "keys")
         out = [said] if said else []
-        missing = self._read_drilldown(db, "missing")
-        changed = self._read_drilldown(db, "changed")
-        extra = self._read_drilldown(db, "extra")
+        found = self._drilled(db)
+        missing, changed, extra = (found["missing"], found["changed"],
+                                   found["extra"])
+        left = self._kept_said(self._drilled(db, held=False), found)
+        if left:
+            out.append(RepairAction(f"db{db}", LEFT_OUT, [], [],
+                                    f"left as they are, the hop keeps"
+                                    f" them: {left}"))
         if not (missing or changed or extra):
             return out
         statements = []
@@ -1193,9 +1403,9 @@ class RedisEngine(Engine):
         undo_dir = self.hop.report_dir(db) / "undo"
         undo_dir.mkdir(parents=True, exist_ok=True)
         undo = undo_dir / f"db{db}.keys.jsonl"
-        missing = self._read_drilldown(db, "missing")
-        changed = self._read_drilldown(db, "changed")
-        extra = self._read_drilldown(db, "extra")
+        found = self._drilled(db)
+        missing, changed, extra = (found["missing"], found["changed"],
+                                   found["extra"])
         if changed and self.newer_wins_column():
             changed = self._newer_keys(db, raw_s, raw_t, changed)
         # every statement written down before any lands (`repairlog`): each
@@ -1301,18 +1511,24 @@ class RedisEngine(Engine):
         no_ttl = []
         drifted = []
         big = []
+        streams = []
         for keys in self._scan_batches("src", sample, False, db):
             if keys:
                 ps = s.pipeline(transaction=False)
                 pt = t.pipeline(transaction=False)
                 pm = s.pipeline(transaction=False)
+                py = s.pipeline(transaction=False)
                 for k in keys:
                     ps.pttl(k)
                     pt.pttl(k)
                     pm.memory_usage(k, samples=0)
-                for k, a, b, mem in zip(keys, ps.execute(), pt.execute(),
-                                        pm.execute()):
+                    py.type(k)
+                for k, a, b, mem, kind in zip(
+                        keys, ps.execute(), pt.execute(), pm.execute(),
+                        py.execute()):
                     seen += 1
+                    if kind == "stream":
+                        streams.append(k)
                     if mem:
                         big.append((mem, k))
                     if a is None or a < 0:
@@ -1353,7 +1569,88 @@ class RedisEngine(Engine):
                                       for mem, k in top), "",
                           "big keys often exceed proxy/mover limits,"
                           " copy them explicitly" if missing_big else ""))
+        res.append(self._boundary(db, s, t, streams))
+        res.append(self._key_grants(db))
         return res
+
+    @staticmethod
+    def _stream_id(stamp):
+        """A stream entry's id (`1700000000000-3`) as the pair it orders
+        by, or None where it is none."""
+        try:
+            ms, _, seq = str(stamp).partition("-")
+            return int(ms), int(seq or 0)
+        except ValueError:
+            return None
+
+    def _boundary(self, db, s, t, streams):
+        """Whether the target is ahead of the source. The one thing a
+        Redis counts forward on its own is a stream's ids: a target whose
+        stream has handed out an id the source's has not was added to
+        there - by a writer on the target, or an entry applied twice.
+        Read from `XINFO STREAM`, which keeps the last id handed out even
+        after its entry is deleted."""
+        ahead, behind, read = [], 0, 0
+        for k in streams:
+            try:
+                a = self._stream_id(s.xinfo_stream(k)["last-generated-id"])
+                b = self._stream_id(t.xinfo_stream(k)["last-generated-id"])
+            except Exception:  # noqa: BLE001 - not on the target, or moved
+                continue
+            if a is None or b is None:
+                continue
+            read += 1
+            if b > a:
+                ahead.append(k)
+            elif b < a:
+                behind += 1
+        if ahead:
+            return Result(
+                "deep", f"db{db} boundary", "diff",
+                f"target stream ids AHEAD of the source on {len(ahead)}"
+                f" of {read} streams: {', '.join(sorted(ahead)[:4])}", "",
+                "writes landing on the target or entries applied twice,"
+                " find the writer before cutover")
+        note = f"; {behind} behind (replication lag)" if behind else ""
+        return Result("deep", f"db{db} boundary", "ok",
+                      f"last stream ids checked on {read} sampled streams,"
+                      f" none ahead of the source{note}")
+
+    def _key_grants(self, db):
+        """The key patterns each account may read and write, held to the
+        target's: an account present on both with other patterns reaches
+        other keys there. Read through the one reader of accounts
+        (`users`, from `ACL LIST`); the accounts themselves and their
+        passwords are `migkit users`'s."""
+        from .. import users
+        try:
+            src = users._redis_users(self.hop.source)
+            dst = users._redis_users(self.hop.target)
+        except Exception as e:  # noqa: BLE001 - no ACL, or not allowed
+            return Result("deep", f"db{db} grants", "warn",
+                          "the accounts could not be read, so the key"
+                          " patterns they may reach were not compared: "
+                          + (str(e).splitlines() or [type(e).__name__])[-1]
+                          [:80])
+
+        def reach(user):
+            return sorted(r for r in user["rules"]
+                          if r.startswith(("~", "%"))
+                          or r in ("allkeys", "resetkeys"))
+        both = sorted(set(src) & set(dst))
+        differ = [f"{u} src({' '.join(reach(src[u])) or 'no keys'})"
+                  f" dst({' '.join(reach(dst[u])) or 'no keys'})"
+                  for u in both if reach(src[u]) != reach(dst[u])]
+        if differ:
+            return Result(
+                "deep", f"db{db} grants", "diff",
+                f"{len(differ)} of {len(both)} accounts reach other keys"
+                f" on the target: {clauses(differ, 4)}", "",
+                f"migkit users {self.hop.name} test lists the accounts"
+                " that differ; set the target's rules as the source's")
+        return Result("deep", f"db{db} grants", "ok",
+                      f"{len(both)} accounts on both sides reach the same"
+                      " key patterns")
 
     def watch_sample(self, db):
         return {"db": f"db{db}", "ts": time.time(),
@@ -1389,6 +1686,15 @@ class RedisEngine(Engine):
             return ("the hop leaves keys out, and a Redis replica carries"
                     " every key of the source: its first sync empties the"
                     " target, the keys left out with it")
+        from ..config import BY_NAME, narrowed_by
+        other = sorted(k for k, v in narrowed_by(self.hop).items()
+                       if v and k not in BY_NAME)
+        if other:
+            return ("the hop asks for more than every key, whole, as the"
+                    " source has it ("
+                    + ", ".join(k.replace("_", " ") for k in other)
+                    + "), and a Redis replica applies every change of the"
+                    " source as it is")
         for side in ("src", "dst"):
             if self._client(side).info("cluster").get("cluster_enabled"):
                 return (f"the {'source' if side == 'src' else 'target'} is"
@@ -1601,11 +1907,32 @@ class RedisEngine(Engine):
                 f"{s.port} - an address the target cannot route to, or a"
                 " source it cannot sign in to")
 
+    def log_position(self, side, db):
+        """Where a side's replication stream is now - its replication id
+        and the offset in it, `id:offset`. After the cutover's freeze this
+        is the point the drain waits for the target to reach."""
+        r = self._client(side).info("replication")
+        offset = int(r.get("master_repl_offset") or 0)
+        return f"{r.get('master_replid')}:{offset}"
+
+    @staticmethod
+    def position_reached(have, want):
+        """Whether a stream at `have` has applied at least as far as
+        `want`: offsets compare only within one replication id, and
+        another id (a failover, a restart) cannot say."""
+        try:
+            h_id, _, h_off = str(have).rpartition(":")
+            w_id, _, w_off = str(want).rpartition(":")
+            if not h_id or h_id != w_id:
+                return None
+            return int(h_off) >= int(w_off)
+        except ValueError:
+            return None
+
     def src_lsn(self, db):
         """Where the source's replication stream is now: its replication
         id and offset."""
-        r = self._client("src").info("replication")
-        return f"{r.get('master_replid')}:{int(r.get('master_repl_offset') or 0)}"
+        return self.log_position("src", db)
 
     def fence_wait(self, db, at, timeout=300):
         """Wait until the target's replica has applied the source's stream
