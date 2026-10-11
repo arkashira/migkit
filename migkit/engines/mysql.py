@@ -5153,9 +5153,9 @@ class MySQLEngine(Engine):
         res += self._deep_unenforced_checks(db, ddb)
         res += self._check_grants(db)
         res += self._deep_ownership(db, ddb)
-        res += self._deep_triggers(db, ddb)
-        res.append(self._deep_render(db, ddb))
-        res.append(self._deep_table_options(db, ddb))
+        res += self._deep_triggers(db, ddb) or []
+        res += [r for r in (self._deep_render(db, ddb),
+                            self._deep_table_options(db, ddb)) if r]
         res += [r for r in (self.set_aside(db),) if r]
         return res
 

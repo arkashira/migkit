@@ -30,6 +30,9 @@ def asked(monkeypatch):
     def q(self, side, sql, args=None, fresh=False):
         log.append((side, " ".join(sql.split()), tuple(args or ())))
         low = sql.lower()
+        if "key_column_usage" in low or "information_schema.columns" in low \
+                and "auto_increment%" not in low:
+            return []
         if "count(" in low:
             return [(3,)]
         if "auto_increment%" in low:
@@ -84,7 +87,9 @@ def test_the_counts_the_data_and_the_schema_read_the_same_tables(
 def test_the_deep_check_asks_the_server_only_of_the_taken_tables(
         tmp_path, asked):
     got = _engine(tmp_path).check_deep("d")
-    assert [(r.scope, r.status) for r in got] == [
+    # beside the MySQL wire's own findings (`test_tidb_deep_check_finds_...`)
+    assert [(r.scope, r.status) for r in got
+            if r.scope in ("d target indexes", "d partitions")] == [
         ("d target indexes", "ok"), ("d partitions", "ok")]
     checks = [s[1] for s in asked if s[1].startswith("admin check table")]
     assert checks == ["admin check table `d`.`orders`"]
@@ -95,5 +100,5 @@ def test_the_deep_check_asks_the_server_only_of_the_taken_tables(
 
 def test_the_counters_are_only_of_the_taken_tables(tmp_path, asked):
     got = _engine(tmp_path).check_autoinc("d")
-    assert [r.scope for r in got] == ["d.orders"]
+    assert [r.scope for r in got] == ["d.orders", "d usable"]
     assert _names(asked, "`audit`") == []
