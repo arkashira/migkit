@@ -204,7 +204,7 @@ def test_the_stricter_of_the_environment_and_the_hop_wins(tmp_path,
     got = {k: egress.decide(hop, k, "https://hooks.example.com/x")[0]
            for k in egress.KINDS}
     assert got == {"notify": True, "traces": False, "assist": False,
-                   "evidence": False}, got
+                   "evidence": False, "anchor": False}, got
     # a host must be in every list that names hosts
     assert not egress.decide(hop, "notify", "https://10.0.0.7/x")[0]
     assert not egress.decide(hop, "notify", "https://mm.example.com/x")[0]

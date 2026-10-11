@@ -25,6 +25,12 @@ Two holes are closed (audit 2026-10-01, ST16, SEC15):
   (`older`); a record that begins with a rotated part's head
   (`runlog.rotate`) has nothing before it, and its head is checked
   against the part before it there (`runlog.verify_parts`).
+
+The chain alone shows a changed entry, not a record rewritten whole from
+its start by someone who can write the file. A checkpoint - the head and
+the number of entries it stands at - is kept where they cannot, in an
+object-locked bucket (`anchor`), and `anchor.verify` holds the record
+against those copies.
 """
 import getpass
 import hashlib
@@ -154,6 +160,29 @@ def head(path):
         return _chain_state(fd)[0]
     finally:
         os.close(fd)
+
+
+def hashes(path):
+    """The hash of each whole line of the record, in order - None for a
+    line that has none or is not a record - so a checkpoint that names
+    entry N (`anchor`) is held against the entry now at N. A last line
+    without its newline is a write a crash cut, and is not counted, as in
+    `verify`."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    if raw and not raw.endswith(b"\n"):
+        raw = raw[:raw.rfind(b"\n") + 1]
+    out = []
+    for line in (raw.split(b"\n")[:-1] if raw else []):
+        try:
+            got = json.loads(line)
+        except ValueError:
+            got = None
+        h = got.get("hash") if isinstance(got, dict) else None
+        out.append(h if isinstance(h, str) and h else None)
+    return out
 
 
 def verify(path, torn=None):

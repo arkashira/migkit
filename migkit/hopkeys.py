@@ -529,9 +529,42 @@ HOP_OPTIONS = {
                                       " (the default) only its kind",
                                       "bool")}),
     "egress": Key("what may leave the machine for this hop - none, or"
-                  " the kinds that may (notify, traces, assist, evidence),"
+                  " the kinds that may (notify, traces, assist, evidence,"
+                  " anchor),"
                   " or {allow, to}: the kinds and the hosts they may go"
                   " to", "str|list|dict|bool", subs=("allow", "to")),
+    "anchor": Key("the audit record's signed checkpoints, kept in a bucket"
+                  " whose Object Lock holds them unchangeable so a record"
+                  " rewritten later shows - the bucket, a prefix, a"
+                  " retention {mode: GOVERNANCE or COMPLIANCE, days}, and"
+                  " required: true to stop a writing command that cannot"
+                  " anchor (credentials are the machine's own, never here)",
+                  "dict", check="migkit.anchor:settings",
+                  subs={"bucket": Key("the bucket, made with Object Lock"
+                                      " enabled", "str"),
+                        "prefix": Key("the prefix in it", "str"),
+                        "region": Key("its region", "str"),
+                        "endpoint_url": Key("an S3-compatible endpoint",
+                                            "str"),
+                        "retention": Key("how long each checkpoint is held",
+                                         "dict",
+                                         subs={"mode": Key(
+                                             "GOVERNANCE or COMPLIANCE",
+                                             "str",
+                                             choices=("GOVERNANCE",
+                                                      "COMPLIANCE"),
+                                             fold=True),
+                                             "days": Key("whole days", "int",
+                                                         least=1)}),
+                        "required": Key("true: a writing command is refused"
+                                        " when the bucket cannot hold an"
+                                        " anchor, and ends with the reason"
+                                        " when one cannot be written",
+                                        "bool"),
+                        "allowed_signers": Key("an allowed signers file the"
+                                               " checkpoints' signatures"
+                                               " are checked against",
+                                               "str")}),
     "evidence": Key("the evidence export: {sign: a private SSH key} it is"
                     " signed with", "dict", subs=("sign",)),
     "offset_header": Key("each message the copy carries keeps its source"
