@@ -371,11 +371,14 @@ class FakeDatabase:
         return [n for n, c in self.colls.items()
                 if not getattr(c, "created_empty", False) or c.docs]
 
-    def list_collections(self):
+    def list_collections(self, filter=None, **kw):
         return iter([{"name": n, "type": "view" if c.view else "collection",
                       "options": c.options}
                      for n, c in self.colls.items()
-                     if n in self.list_collection_names()])
+                     if n in self.list_collection_names()
+                     and all(("view" if c.view else "collection") == v
+                             for k, v in (filter or {}).items()
+                             if k == "type")])
 
     def command(self, cmd, *args, **kw):
         if isinstance(cmd, dict):

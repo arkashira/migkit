@@ -1912,7 +1912,7 @@ DEPTH_GAPS = {
     },
     "assess.preflight": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb sqlite parquet "
+                "sqlite parquet "
                 "dynamodb db2 db2i db2zos ase teradata "
                 "redshift snowflake bigquery duckdb copybook "
                 "iceberg delta cockroachdb dsql couchbase cosmosdb "
@@ -1932,7 +1932,7 @@ DEPTH_GAPS = {
     },
     "assess.writers": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb sqlite parquet dynamodb "
+                "sqlite parquet dynamodb "
                 "db2 db2i db2zos ase teradata cassandra "
                 "redshift snowflake bigquery duckdb copybook iceberg delta "
                 "tidb cockroachdb dsql couchbase cosmosdb sapodp saas "
@@ -1959,7 +1959,7 @@ DEPTH_GAPS = {
     },
     "schema.indexes": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb dynamodb db2 db2i db2zos "
+                "dynamodb db2 db2i db2zos "
                 "ase snowflake bigquery duckdb couchbase cosmosdb"),
         **_each(NOT_APPLICABLE, _NO_INDEX,
                 "redis kafka parquet opensearch redshift copybook iceberg "
@@ -1996,7 +1996,7 @@ DEPTH_GAPS = {
     },
     "schema.views": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb sqlite db2 db2i db2zos ase teradata "
+                "sqlite db2 db2i db2zos ase teradata "
                 "opensearch redshift snowflake bigquery duckdb iceberg "
                 "cockroachdb dsql couchbase"),
         **_each(NOT_APPLICABLE, _NO_VIEW,
@@ -2009,7 +2009,7 @@ DEPTH_GAPS = {
     },
     "schema.routines": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb redis clickhouse db2 db2i db2zos ase teradata "
+                "redis clickhouse db2 db2i db2zos ase teradata "
                 "opensearch cassandra redshift snowflake bigquery duckdb "
                 "cockroachdb dsql couchbase cosmosdb"),
         **_each(NOT_APPLICABLE, _NO_CODE,
@@ -2028,7 +2028,7 @@ DEPTH_GAPS = {
     },
     "move.load-window": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb sqlite dynamodb db2 db2i db2zos "
+                "sqlite dynamodb db2 db2i db2zos "
                 "ase teradata duckdb cockroachdb dsql "
                 "couchbase cosmosdb"),
         **_each(NOT_APPLICABLE, _NOTHING_SLOWS,
@@ -2148,24 +2148,24 @@ UNPROVED = {
     "tail.follows": "db2i",
     "tail.table-states": ("mssql dynamodb oracle db2i tidb dsql couchbase "
                           "cosmosdb sapodp saas hetero"),
-    "assess.versions": "mongodb clickhouse mssql oracle cassandra",
+    "assess.versions": "clickhouse mssql oracle cassandra",
     "verify.structure.partitions": "mssql oracle tidb clickhouse",
     "move.partitioned": "mssql oracle tidb",
     "assess.engine-checks": "db2i snowflake sapodp clickhouse opensearch mssql cassandra",
     "schema.create": "db2i db2zos kafka",
     "assess.capacity": "kafka opensearch mssql oracle cassandra",
-    "assess.writers": "kafka clickhouse opensearch mssql oracle",
+    "assess.writers": "kafka clickhouse opensearch mssql oracle mongodb",
     "move.create-missing": "kafka clickhouse mssql cassandra",
     "schema.indexes": "sqlite teradata clickhouse mssql oracle cassandra",
     "schema.defaults": "teradata sapodp clickhouse mssql oracle",
     # TiDB runs MySQL's `assess`, which now asks the pre-flight
     "assess.preflight": "tidb clickhouse opensearch mssql oracle cassandra",
-    "schema.routines": "tidb",
+    "schema.routines": "tidb mongodb",
     "move.table-copy": "db2i db2zos snowflake bigquery dsql",
     "move.bulk": "hetero",
     "move.large-values": "db2i db2zos snowflake bigquery",
     "move.sized": "oracle db2i db2zos teradata redshift snowflake tidb cockroachdb dsql cassandra",
-    "move.load-window": "tidb clickhouse mssql cassandra",
+    "move.load-window": "tidb clickhouse mssql cassandra mongodb",
     "cutover.rollback": "mongodb copybook",
     "cutover.freeze": ("oracle db2 ase teradata redshift snowflake couchbase"
                        " hetero"),
@@ -2187,7 +2187,7 @@ UNPROVED = {
     "verify.value.timezone": "clickhouse opensearch mssql oracle",
     "assess.handwork": "clickhouse opensearch mssql oracle cassandra",
     "cutover.jobs": "clickhouse mssql oracle",
-    "schema.views": "clickhouse",
+    "schema.views": "clickhouse mongodb",
     "verify.movement.target-ahead": "clickhouse opensearch oracle",
     "verify.structure.indexes": "clickhouse mssql oracle cassandra",
     "assess.brands": "clickhouse mssql oracle cassandra",

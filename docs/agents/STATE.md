@@ -47,7 +47,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 900, not yet 1231, test owed 311, yes 654. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 900, not yet 1225, test owed 314, yes 657. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -71,7 +71,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | iceberg | 0/9 | 0/23 | 0/6 | 0/5 | 1/3 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/58 |
 | kafka | 5/9 | 15/16 | 5/5 | 5/7 | 0/1 | 5/6 | 4/5 | 1/1 | 1/1 | 0/1 | 41/52 |
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
-| mongodb | 8/9 | 21/23 | 1/6 | 4/7 | 0/3 | 4/5 | 3/5 | 1/1 | 1/1 | 0/1 | 43/61 |
+| mongodb | 8/9 | 21/23 | 1/6 | 6/7 | 1/3 | 4/5 | 3/5 | 1/1 | 1/1 | 0/1 | 46/61 |
 | mssql | 7/10 | 17/34 | 3/6 | 0/7 | 4/6 | 4/7 | 5/7 | 0/1 | 1/1 | 0/1 | 41/80 |
 | mysql | 9/10 | 28/31 | 6/6 | 7/7 | 6/6 | 7/7 | 8/8 | 1/1 | 1/1 | 1/1 | 74/78 |
 | opensearch | 7/9 | 17/24 | 1/6 | 2/7 | 2/4 | 6/6 | 4/6 | 1/1 | 1/1 | 0/1 | 41/65 |
@@ -147,25 +147,25 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | tail.readded | kafka mssql mysql oracle tidb | - | the rest (22) | copybook db2zos duckdb hetero kinesis parquet pubsub sqlite teradata |
 | tail.ddl | kafka mysql postgres | oracle | the rest (23) | copybook db2zos duckdb hetero kinesis parquet pubsub sqlite teradata |
 | tail.renames | mysql postgres | mssql oracle | the rest (18) | cassandra copybook cosmosdb couchbase db2zos duckdb dynamodb hetero kafka kinesis parquet pubsub sqlite teradata |
-| assess.versions | kafka mysql opensearch postgres redis sqlite | cassandra clickhouse mongodb mssql oracle | the rest (18) | copybook delta hetero iceberg kinesis parquet pubsub |
+| assess.versions | kafka mongodb mysql opensearch postgres redis sqlite | cassandra clickhouse mssql oracle | the rest (18) | copybook delta hetero iceberg kinesis parquet pubsub |
 | assess.brands | kafka mongodb mysql opensearch postgres redis tidb | cassandra clickhouse mssql oracle | the rest (18) | copybook delta hetero iceberg kinesis parquet pubsub |
 | assess.engine-checks | the rest (19) | cassandra clickhouse db2i mssql opensearch sapodp snowflake | ase copybook db2 delta duckdb dynamodb iceberg kinesis parquet pubsub | - |
-| assess.preflight | kafka mysql postgres redis | cassandra clickhouse mssql opensearch oracle tidb | the rest (22) | kinesis pubsub saas sapodp |
+| assess.preflight | kafka mongodb mysql postgres redis | cassandra clickhouse mssql opensearch oracle tidb | the rest (21) | kinesis pubsub saas sapodp |
 | assess.capacity | clickhouse hetero mongodb mysql postgres redis tidb | cassandra kafka mssql opensearch oracle | the rest (22) | saas sapodp |
-| assess.writers | mysql postgres redis | clickhouse kafka mssql opensearch oracle | the rest (26) | kinesis pubsub |
+| assess.writers | mysql postgres redis | clickhouse kafka mongodb mssql opensearch oracle | the rest (25) | kinesis pubsub |
 | assess.handwork | kafka mongodb mysql postgres redis | cassandra clickhouse mssql opensearch oracle | the rest (22) | copybook kinesis parquet pubsub |
 | schema.create | the rest (25) | db2i db2zos kafka | generic | hetero kinesis mongodb pubsub redis saas sapodp |
-| schema.indexes | cockroachdb dsql mysql postgres tidb | cassandra clickhouse mssql oracle sqlite teradata | ase bigquery cosmosdb couchbase db2 db2i db2zos duckdb dynamodb generic mongodb snowflake | the rest (13) |
+| schema.indexes | cockroachdb dsql mongodb mysql postgres tidb | cassandra clickhouse mssql oracle sqlite teradata | ase bigquery cosmosdb couchbase db2 db2i db2zos duckdb dynamodb generic snowflake | the rest (13) |
 | schema.foreign-keys | mssql mysql oracle postgres tidb | - | ase bigquery cockroachdb db2 db2i db2zos duckdb generic redshift snowflake sqlite teradata | the rest (19) |
 | schema.defaults | cockroachdb dsql mysql opensearch postgres sqlite tidb | clickhouse mssql oracle sapodp teradata | the rest (13) | cassandra cosmosdb couchbase dynamodb hetero kafka kinesis mongodb pubsub redis saas |
-| schema.views | mssql mysql oracle postgres tidb | clickhouse | the rest (17) | cassandra copybook cosmosdb delta dynamodb hetero kafka kinesis parquet pubsub redis saas sapodp |
-| schema.routines | mssql mysql oracle postgres | tidb | the rest (19) | copybook delta dynamodb hetero iceberg kafka kinesis parquet pubsub saas sapodp sqlite |
+| schema.views | mssql mysql oracle postgres tidb | clickhouse mongodb | the rest (16) | cassandra copybook cosmosdb delta dynamodb hetero kafka kinesis parquet pubsub redis saas sapodp |
+| schema.routines | mssql mysql oracle postgres | mongodb tidb | the rest (18) | copybook delta dynamodb hetero iceberg kafka kinesis parquet pubsub saas sapodp sqlite |
 | move.table-copy | the rest (26) | bigquery db2i db2zos dsql snowflake | generic | kinesis pubsub saas sapodp |
 | move.bulk | the rest (15) | hetero | ase bigquery cockroachdb cosmosdb couchbase db2 db2i db2zos delta generic iceberg redshift snowflake tidb | dsql kinesis pubsub saas sapodp teradata |
 | move.large-values | the rest (17) | bigquery db2i db2zos snowflake | cockroachdb cosmosdb couchbase dsql generic teradata tidb | cassandra copybook dynamodb kinesis pubsub redshift saas sapodp |
 | move.partitioned | clickhouse kafka mysql postgres | mssql oracle tidb | ase bigquery cockroachdb db2 db2i db2zos delta dsql generic hetero iceberg parquet teradata | the rest (16) |
 | move.sized | the rest (14) | cassandra cockroachdb db2i db2zos dsql oracle redshift snowflake teradata tidb | copybook cosmosdb couchbase delta dynamodb generic iceberg parquet saas sapodp | kinesis pubsub |
-| move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse mssql tidb | the rest (14) | bigquery copybook delta iceberg kafka kinesis parquet pubsub redis redshift saas sapodp snowflake |
+| move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse mongodb mssql tidb | the rest (13) | bigquery copybook delta iceberg kafka kinesis parquet pubsub redis redshift saas sapodp snowflake |
 | move.create-missing | hetero mysql opensearch oracle postgres tidb | cassandra clickhouse kafka mssql | the rest (20) | kinesis mongodb pubsub redis saas sapodp |
 | cutover.freeze | cassandra clickhouse cockroachdb kafka mongodb mssql mysql opensearch postgres redis tidb | ase couchbase db2 hetero oracle redshift snowflake teradata | - | the rest (17) |
 | cutover.read-only-target | the rest (20) | db2i db2zos dsql hetero | - | copybook cosmosdb delta duckdb generic iceberg kinesis parquet pubsub saas sapodp sqlite |

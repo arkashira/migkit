@@ -857,6 +857,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * this server is a standalone, and a change stream needs a replica set - the oplog a stream reads does not exist otherwise. A single node is enough: mongod --replSet rs0 mongosh --eval 'rs.initiate()'
 
+* <...>: the target's TTL indexes could not be saved before holding them for the load, so nothing was loaded
+
+* <...>: <...> TTL indexes were not put back: <...>. Their values are in <...>
+
 ## SQL Server
 
 * mssql cannot apply a <...> action
