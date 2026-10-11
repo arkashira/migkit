@@ -1031,6 +1031,14 @@ def _doctor_hop(name, hop, raw_hop):
             why = (str(e).splitlines() or [type(e).__name__])[-1]
             out.append(f"{_esc(name)}: what the servers allow could not"
                        f" be asked - {_esc(_clean(why, raw=True)[:160])}")
+    # the way the whole database moves, the way its changes are followed,
+    # what each leaves, and how deeply each table's changes can be read:
+    # from the decision engine's ladders, read-only (`waysaid`)
+    if reached:
+        from . import waysaid
+        for line in waysaid.lines(hop, eng, _stream_climb,
+                                  "src" in reached, len(reached) == 2):
+            out.append(f"{_esc(name)}: {_esc(line)}")
     # what the commands will refuse on this engine, from the table they
     # refuse by (`capabilities`) - not from the programs installed here
     cannot = [capabilities.CAPABILITIES[c] for c in capabilities.CAPABILITIES
@@ -4646,20 +4654,18 @@ def _bulk_or_copier(hop, eng, d, v, table, chunk, engine, go=True):
                    record=go)
 
 
-def _cdc(hop, eng, db, do_drop, go, engine):
-    """The hop's change stream set up, or torn down, on the way the
-    ladder of ways gives (`movers.stream_ways`)."""
-    from . import movers
+def _stream_climb(hop, eng, db, do_drop, engine=None):
+    """(facts, rungs, where, work) of the ways this hop's changes may
+    follow its source, read as `_cdc` reads them and as `doctor` says
+    them (`waysaid`): one reading, so the two cannot disagree. Facts a
+    server gives are asked only if a rung still in the running needs
+    them, read-only. `where` is the stream's position file, `work` its
+    name in the decision record."""
+    from . import decide
+    from .engines import ALIASES
+    engine = engine or ALIASES.get(hop.engine, hop.engine)
     has_repl = hasattr(eng, "replicate_sql")
     has_tail = hasattr(eng, "tail_apply")
-    if eng.maps_columns():
-        # the servers' own replication carries whole rows; the pair's tail
-        # applies the mapping to every change (`_replicate` says the same)
-        tailer = _tail_pair(eng)
-        if tailer is None:
-            capabilities.require(hop.engine, "stream")
-        return _tail(hop, tailer, db, go)
-    from . import decide
 
     def risk():
         # a table taken into a running publication below the fixed minor
@@ -4694,6 +4700,24 @@ def _cdc(hop, eng, db, do_drop, go, engine):
     facts["own replication failed"] = any(
         n in decide.given_up(where, work) for n in ("subscription",
                                                     "replica"))
+    return facts, rungs, where, work
+
+
+def _cdc(hop, eng, db, do_drop, go, engine):
+    """The hop's change stream set up, or torn down, on the way the
+    ladder of ways gives (`movers.stream_ways`)."""
+    from . import movers
+    has_repl = hasattr(eng, "replicate_sql")
+    has_tail = hasattr(eng, "tail_apply")
+    if eng.maps_columns():
+        # the servers' own replication carries whole rows; the pair's tail
+        # applies the mapping to every change (`_replicate` says the same)
+        tailer = _tail_pair(eng)
+        if tailer is None:
+            capabilities.require(hop.engine, "stream")
+        return _tail(hop, tailer, db, go)
+    from . import decide
+    facts, rungs, where, work = _stream_climb(hop, eng, db, do_drop, engine)
 
     def undo(rung, error):
         if rung.name in ("subscription", "replica"):

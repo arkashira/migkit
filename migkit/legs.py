@@ -334,7 +334,12 @@ def rungs():
         prove=lambda f: (prove_pull(f["hop"], f.get("db"))
                          if f.get("go") else None),
         because="the rows cross the network once, from server to server",
-        footprint=1)
+        footprint=1,
+        leaves="on the target, while it runs: a foreign server, a user"
+               " mapping with the source's credentials and a schema of"
+               " foreign tables for each of the source's schemas, and the"
+               " extension where migkit made it - all taken away when it"
+               " ends; nothing on the source")
     subscribe = Rung(
         "pgsubscribe", "a temporary subscription on the target",
         needs=(_moves("pgsubscribe"), leave, dial, far, asked,
@@ -371,7 +376,9 @@ def rungs():
                          if f.get("go") else None),
         because="the rows cross the network once, in the servers' own"
                 " binary form",
-        footprint=2, changes=(PUBLICATION,))
+        footprint=2, changes=(PUBLICATION,),
+        leaves="a publication and a slot on the source, and a subscription"
+               " on the target - all taken away when the copy ends")
     return (pull, subscribe)
 
 
