@@ -2105,7 +2105,7 @@ UNPROVED = {
     "tail.follows": "db2i",
     "tail.table-states": ("mssql dynamodb oracle db2i tidb dsql couchbase "
                           "cosmosdb sapodp saas hetero"),
-    "tail.added": "mysql mssql tidb",
+    "tail.added": "mssql tidb",
     "tail.readded": "mssql tidb",
     "assess.versions": "mongodb",
     "assess.brands": "tidb",
