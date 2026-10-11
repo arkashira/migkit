@@ -22,6 +22,12 @@ from .base import (Engine, NeutralCopier, Result, clauses,
 
 SKIP_DBS = {"system", "information_schema", "INFORMATION_SCHEMA"}
 
+#: the target views a load in this process holds off, by the record that
+#: names them (`ClickHouseEngine.load_window`): the engines of one hop - its
+#: own and a pair's - share it, so a window inside a window leaves what the
+#: outer one holds alone
+_VIEWS_OFF = {}
+
 
 def _unwrap(declared):
     """`LowCardinality(Nullable(String))` -> `String`: what a value is,
@@ -1123,6 +1129,9 @@ class ClickHouseEngine(NeutralCopier, Engine):
 
     def _deep_rls(self, db, src, dst):
         def policies(side):
+            # an account that may not see the policies is shown none, and
+            # "none" would read as a pass: asked first, it is refused
+            self._rows(side, None, "show row policies")
             return {(str(t), str(n)): (self._plain(f), bool(r), bool(all_),
                                        tuple(sorted(a or [])),
                                        tuple(sorted(x or [])))
@@ -1133,7 +1142,14 @@ class ClickHouseEngine(NeutralCopier, Engine):
                                   " system.row_policies where database ="
                                   " {d:String}", {"d": self._d(side, db)})
                     if self.in_scope(db, str(t))}
-        a, b = policies("src"), policies("dst")
+        try:
+            a, b = policies("src"), policies("dst")
+        except Exception as e:  # noqa: BLE001 - unknown, not clean
+            return [Result("deep", f"{db} rls", "warn",
+                           "could not read the row policies (the account"
+                           " needs SHOW ROW POLICIES): "
+                           f"{str(e).splitlines()[0][:90]} - unknown, not"
+                           " clean")]
         lines = [f"{t}: policy {n} is not on the target (its rows are open"
                  " to everyone the grants allow)" for t, n in sorted(a)
                  if (t, n) not in b]
@@ -1448,6 +1464,9 @@ class ClickHouseEngine(NeutralCopier, Engine):
         on the database, on a table of it, or on the whole server (`*.*`),
         from the server's grants."""
         out = {}
+        # an account that may not see the grants is shown none: asked
+        # first, it is refused
+        self._rows(side, None, "show users")
         for user, role, access, base, table, column, partial, option in \
                 self._rows(
                     side, db, "select user_name, role_name, access_type,"
@@ -2297,10 +2316,11 @@ class ClickHouseEngine(NeutralCopier, Engine):
                 ck[0].clear()
                 ck[0].discard()
             return self.move_table(db, "", t, self.COPIER_CHUNK, ck[0], log)
-        for t in pulled + [t for t, _ in copied]:
-            self._attempt(t, self._ways(),
-                          lambda choice, t=t: run(choice, t), facts[t],
-                          log=log)
+        with self.load_window(db, log, set(pulled) | {t for t, _ in copied}):
+            for t in pulled + [t for t, _ in copied]:
+                self._attempt(t, self._ways(),
+                              lambda choice, t=t: run(choice, t), facts[t],
+                              log=log)
         return steps
 
     # ---- following the source by the partitions that changed ---------------
@@ -2737,6 +2757,123 @@ class ClickHouseEngine(NeutralCopier, Engine):
                 {**ask, "u": self.hop.target.user or "default"}):
             out.append((f"{n} insert(s) running now from {user}", False))
         return out
+
+    # ---- a load that does not fire the target's views ----------------------
+
+    def _journal_of_views(self, db):
+        return self.hop.report_dir(db) / "views-detached.json"
+
+    def _view_there(self, db, view):
+        return bool(self._rows(
+            "dst", db, "select 1 from system.tables where database ="
+                       " {d:String} and name = {n:String}",
+            {"d": view[0], "n": view[1]}))
+
+    def _run_on_target(self, db, statement):
+        client = self._client("dst", db)
+        try:
+            client.command(statement)
+        finally:
+            client.close()
+
+    def _fed_views(self, db, tables):
+        """[(database, view)] of the target's materialized views that read
+        a table of this load: every row written into the table is inserted
+        into them as well, and the table they write into is a table the
+        move copies too."""
+        out = set()
+        for name, dbs, tbls in self._rows(
+                "dst", db, "select name, dependencies_database,"
+                           " dependencies_table from system.tables where"
+                           " database = {d:String} and"
+                           " notEmpty(dependencies_table)",
+                {"d": self._d("dst", db)}):
+            if (tables is None or str(name) in tables) \
+                    and self.in_scope(db, str(name)):
+                out |= {(str(a), str(b)) for a, b in zip(dbs, tbls)}
+        return sorted(v for v in out if self._engine_of_view(db, v))
+
+    def _engine_of_view(self, db, view):
+        """Whether it is a materialized view that is there to be held off."""
+        got = self._rows("dst", db, "select engine from system.tables where"
+                                    " database = {d:String} and name ="
+                                    " {n:String}",
+                         {"d": view[0], "n": view[1]})
+        return bool(got) and str(got[0][0]) == "MaterializedView"
+
+    def _put_views_back(self, db, log):
+        """The views an earlier load took off and did not put back (the
+        record is written before the first is detached): of those no load
+        in this process holds, asked of the server which are still off,
+        and attached."""
+        from .. import durable
+        path = self._journal_of_views(db)
+        held = _VIEWS_OFF.get(str(path), set())
+        left = [tuple(v) for v in durable.read_state(path, "journal") or []]
+        for view in [v for v in left if v not in held]:
+            if not self._view_there(db, view):
+                self._run_on_target(
+                    db, f"attach table {self._q(view[0])}.{self._q(view[1])}")
+                log(f"{view[1]}: put back, an earlier load took it off")
+        if not held:
+            path.unlink(missing_ok=True)
+
+    def load_window(self, db, log=None, tables=None):
+        """The target's materialized views held off while rows are
+        written into the tables they read, which fire them for every row
+        the load writes: a view's own table then holds the rows twice
+        - once as the view wrote them, once as the move copies the table.
+        Each is detached (`DETACH TABLE`, which keeps its definition and
+        its table) and attached again when the load is over, whether or
+        not it succeeded; the list is written before the first is detached,
+        so a load that was killed has its views put back by the next."""
+        import contextlib
+
+        from .. import durable
+        log = log or (lambda m: None)
+        if self.target_missing(db):
+            return contextlib.nullcontext()
+        path = self._journal_of_views(db)
+        off = _VIEWS_OFF.setdefault(str(path), set())
+        self._put_views_back(db, log)
+        held = [v for v in self._fed_views(db, tables) if v not in off]
+        if not held:
+            return contextlib.nullcontext()
+
+        @contextlib.contextmanager
+        def window():
+            durable.write_json(path, [list(v) for v in sorted(off | set(
+                held))])
+            gone = []
+            try:
+                for v in held:
+                    self._run_on_target(
+                        db, f"detach table {self._q(v[0])}.{self._q(v[1])}")
+                    gone.append(v)
+                    off.add(v)
+                log(f"{len(held)} materialized views held off the load: "
+                    + ", ".join(v[1] for v in held[:4]))
+                yield
+            finally:
+                failed = []
+                for v in reversed(gone):
+                    try:
+                        self._run_on_target(
+                            db, f"attach table {self._q(v[0])}."
+                                f"{self._q(v[1])}")
+                        off.discard(v)
+                    except Exception as e:  # noqa: BLE001 - said below
+                        failed.append(f"{v[1]}: "
+                                      f"{str(e).splitlines()[0][:80]}")
+                if failed:
+                    # the record stays: the next load puts them back
+                    raise SystemExit(
+                        "materialized views taken off for the load could"
+                        " not be attached again: " + "; ".join(failed)
+                        + ". `ATTACH TABLE` each, or run the move again")
+                if not off:
+                    path.unlink(missing_ok=True)
+        return window()
 
     # ---- scheduled jobs: views that refresh themselves -------------------
 

@@ -1979,7 +1979,7 @@ DEPTH_GAPS = {
     },
     "move.load-window": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb mssql sqlite clickhouse dynamodb db2 db2i db2zos "
+                "mongodb mssql sqlite dynamodb db2 db2i db2zos "
                 "ase teradata opensearch cassandra duckdb cockroachdb dsql "
                 "couchbase cosmosdb"),
         **_each(NOT_APPLICABLE, _NOTHING_SLOWS,
@@ -2127,7 +2127,7 @@ UNPROVED = {
     "move.large-values": "db2i db2zos snowflake bigquery",
     "move.sized": ("oracle db2i db2zos teradata redshift snowflake tidb "
                    "cockroachdb dsql"),
-    "move.load-window": "tidb",
+    "move.load-window": "tidb clickhouse",
     "cutover.rollback": "mysql mongodb copybook",
     "cutover.freeze": ("oracle db2 ase teradata redshift snowflake couchbase"
                        " hetero"),

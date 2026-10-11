@@ -537,7 +537,7 @@ def test_a_hop_that_carries_no_accounts_does_not_compare_their_grants(pair):
 def test_a_check_whose_catalogue_cannot_be_read_is_an_error_not_a_pass(
         monkeypatch, tmp_path):
     def rows(eng, side, db, sql, params=None, settings=None):
-        if "system.row_policies" in sql:
+        if "system.functions" in sql:
             raise RuntimeError("not enough privileges")
         return []
     monkeypatch.setattr(ClickHouseEngine, "_rows", rows)
@@ -545,9 +545,28 @@ def test_a_check_whose_catalogue_cannot_be_read_is_an_error_not_a_pass(
               target=Endpoint(), databases=["app"])
     hop.report_dir = lambda db=None: tmp_path
     got = {r.scope: r for r in ClickHouseEngine(hop).check_deep("app")}
-    assert got["app rls"].status == "error"
-    assert "not enough privileges" in got["app rls"].detail
+    assert got["app objects"].status == "error"
+    assert "not enough privileges" in got["app objects"].detail
     assert got["app columns"].status == "ok"
+
+
+def test_an_account_that_may_not_see_the_policies_or_grants_is_not_shown_none(
+        monkeypatch, tmp_path):
+    """An empty answer from an account that was not allowed to look reads
+    as a pass: it is asked first with the statement that refuses it."""
+    def rows(eng, side, db, sql, params=None, settings=None):
+        if sql in ("show row policies", "show users"):
+            raise RuntimeError("ACCESS_DENIED: not enough privileges")
+        return []
+    monkeypatch.setattr(ClickHouseEngine, "_rows", rows)
+    hop = Hop(name="ch", engine="clickhouse", source=Endpoint(),
+              target=Endpoint(), databases=["app"])
+    hop.report_dir = lambda db=None: tmp_path
+    got = {r.scope: r for r in ClickHouseEngine(hop).check_deep("app")}
+    for word, need in (("rls", "SHOW ROW POLICIES"), ("grants", "")):
+        assert got[f"app {word}"].status == "warn", got[f"app {word}"]
+        assert "ACCESS_DENIED" in got[f"app {word}"].detail
+        assert need in got[f"app {word}"].detail
 
 
 # ---- the assessment ---------------------------------------------------------
@@ -848,3 +867,147 @@ def test_a_refreshing_view_that_writes_only_what_the_hop_leaves_out_stays(
     assert jobs.inventory(hop, eng, "app", "src") == [("nightly", True)]
     assert jobs.left_alone(hop, eng, "app", "src") == ["audit_roll"]
     assert sent == []
+
+
+# ---- a load that does not fire the target's views ---------------------------
+
+class TargetWithViews:
+    """A target holding `orders`, read by the materialized views `totals`
+    and `daily` (and by a plain view, which writes nothing), and what it was
+    sent."""
+
+    def __init__(self, monkeypatch, tmp_path):
+        self.sent, self.missing = [], False
+        self.there = {"orders": "MergeTree", "totals": "MaterializedView",
+                      "daily": "MaterializedView", "plain": "View"}
+        self.fail_attach = False
+        server = self
+
+        def rows(eng, side, db, sql, params=None, settings=None):
+            params = params or {}
+            if "from system.databases" in sql:
+                return [(int(not server.missing),)]
+            if "dependencies_table from system.tables" in sql:
+                return [("orders", ["app", "app", "app"],
+                         [v for v in ("daily", "plain", "totals")
+                          if v in server.there])]
+            if "select engine from system.tables" in sql:
+                got = server.there.get(params["n"])
+                return [(got,)] if got else []
+            if "select 1 from system.tables" in sql:
+                return [(1,)] if params["n"] in server.there else []
+            return []
+
+        class Client:
+            def command(self, sql, parameters=None, settings=None):
+                server.sent.append(sql)
+                name = sql.rpartition(".")[2].strip("`")
+                if sql.startswith("detach"):
+                    server.detached = getattr(server, "detached", {})
+                    server.detached[name] = server.there.pop(name)
+                elif server.fail_attach:
+                    raise RuntimeError("DB::Exception: cannot attach")
+                else:
+                    server.there[name] = server.detached.pop(name)
+
+            def close(self):
+                pass
+        monkeypatch.setattr(ClickHouseEngine, "_rows", rows)
+        monkeypatch.setattr(ClickHouseEngine, "_client",
+                            lambda self, side, db=None, wait=None: Client())
+        hop = Hop(name="ch", engine="clickhouse",
+                  source=Endpoint(host="10.0.0.1", port=8123, user="u",
+                                  password="CHANGE_ME"),
+                  target=Endpoint(host="10.0.0.2", port=8123, user="u",
+                                  password="CHANGE_ME"), databases=["app"])
+        hop.report_dir = lambda db=None: tmp_path
+        self.hop, self.tmp = hop, tmp_path
+        self.eng = ClickHouseEngine(hop)
+
+    @property
+    def journal(self):
+        return self.tmp / "views-detached.json"
+
+
+@pytest.fixture
+def target(monkeypatch, tmp_path):
+    from migkit.engines import clickhouse
+    clickhouse._VIEWS_OFF.clear()
+    return TargetWithViews(monkeypatch, tmp_path)
+
+
+def test_a_load_does_not_fire_the_views_that_read_the_table(target):
+    said = []
+    with target.eng.load_window("app", said.append, {"orders"}):
+        # recorded before the first was taken off, and off while it runs
+        assert target.journal.exists()
+        assert target.sent == ["detach table `app`.`daily`",
+                               "detach table `app`.`totals`"]
+        assert "plain" in target.there
+    assert target.sent[2:] == ["attach table `app`.`totals`",
+                               "attach table `app`.`daily`"]
+    assert set(target.there) == {"orders", "totals", "daily", "plain"}
+    assert not target.journal.exists()
+    assert "2 materialized views held off the load: daily, totals" in said[0]
+
+
+def test_the_views_are_put_back_when_the_load_fails(target):
+    with pytest.raises(RuntimeError, match="the load failed"):
+        with target.eng.load_window("app", None, {"orders"}):
+            raise RuntimeError("the load failed")
+    assert set(target.there) == {"orders", "totals", "daily", "plain"}
+    assert not target.journal.exists()
+
+
+def test_a_window_inside_a_window_leaves_the_views_the_outer_one_holds(
+        target):
+    inner_engine = ClickHouseEngine(target.hop)
+    with target.eng.load_window("app", None, {"orders"}):
+        before = list(target.sent)
+        with inner_engine.load_window("app", None, {"orders"}):
+            pass
+        assert target.sent == before and "totals" not in target.there
+        assert target.journal.exists()
+    assert "totals" in target.there and not target.journal.exists()
+
+
+def test_a_load_that_was_killed_has_its_views_put_back_by_the_next(target):
+    import json
+    target.there.pop("totals")
+    target.there.pop("daily")
+    target.journal.write_text(json.dumps([["app", "daily"],
+                                          ["app", "totals"]]))
+    target.detached = {"daily": "MaterializedView",
+                       "totals": "MaterializedView"}
+    said = []
+    with target.eng.load_window("app", said.append, {"orders"}):
+        pass
+    assert "attach table `app`.`daily`" in target.sent
+    assert "attach table `app`.`totals`" in target.sent
+    assert any("daily: put back, an earlier load took it off" in m
+               for m in said)
+    assert "totals" in target.there and "daily" in target.there
+
+
+def test_nothing_is_taken_off_where_no_view_reads_the_tables(target):
+    target.there = {"orders": "MergeTree"}
+    with target.eng.load_window("app", None, {"orders"}):
+        pass
+    with target.eng.load_window("app", None, {"lines"}):
+        pass
+    assert target.sent == [] and not target.journal.exists()
+    target.missing = True
+    with target.eng.load_window("app", None, None):
+        pass
+    assert target.sent == []
+
+
+def test_a_view_that_cannot_be_attached_again_is_said_and_kept_in_the_record(
+        target):
+    target.fail_attach = True
+    with pytest.raises(SystemExit) as stopped:
+        with target.eng.load_window("app", None, {"orders"}):
+            pass
+    said = str(stopped.value)
+    assert "totals" in said and "daily" in said and "ATTACH TABLE" in said
+    assert target.journal.exists()
