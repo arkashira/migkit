@@ -14,8 +14,11 @@ follow copies again the partitions whose parts changed (`native_bulk`,
 `tail_apply`); each partition is held to the source's by the fingerprint
 both servers compute.
 """
+import re
+
 from .. import pieces
-from .base import Engine, NeutralCopier, Result
+from .base import (Engine, NeutralCopier, Result, clauses,
+                   rows_counted)
 
 SKIP_DBS = {"system", "information_schema", "INFORMATION_SCHEMA"}
 
@@ -48,7 +51,13 @@ def _nullable(declared):
 class ClickHouseEngine(NeutralCopier, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "clickhouse"
+    #: the family `variants` names the builds of; its version is its own
+    #: (`case.FAMILY_NUMBERED`)
+    ENGINE_FAMILY = "clickhouse"
     SQL_DIALECT = "clickhouse"
+    #: the checks that predict what a move will meet, run before it
+    #: (`assess`): rows the source holds that a read does not give
+    PREFLIGHT = ("_source_unsettled",)
     FOLDED_BECAUSE = ("is rendered by migkit's own renderer rather than by"
                       " a ClickHouse one nobody has measured")
     OVER_NETWORK = True
@@ -176,7 +185,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
                       " {d:String} and not is_temporary and engine not in"
                       " ('View', 'MaterializedView', 'LiveView')"
                       " order by name", {"d": self._d(side, db)})
-            if not self.hop.excluded(db, t)]
+            if self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         return [(n, _unwrap(t)) for n, t in self._rows(
@@ -379,15 +388,25 @@ class ClickHouseEngine(NeutralCopier, Engine):
     # ---- writing --------------------------------------------------------
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
+        """A MergeTree ordered by the key. A column takes NULL unless it is
+        in the key or the source says it does not (`rule["null"]`); one
+        the source gives a default is given it. The rule is the source's:
+        a column left Nullable that the source declares NOT NULL would
+        take the NULL it never held."""
         from .. import canon
         defs = []
         for col in columns:
             t = canon.ddl_type("clickhouse", col[1], col[2])
+            rule = (col[3] if len(col) > 3 else None) or {}
             # an Array cannot be Nullable: its NULLs are counted before the
             # move (`canon.unfit`), as an empty array is what it writes
-            defs.append(f"{self._q(col[0])} "
-                        + (t if col[0] in key or t.startswith("Array(")
-                           else f"Nullable({t})"))
+            keeps = (col[0] in key or t.startswith("Array(")
+                     or rule.get("null") is False)
+            default = rule.get("default")
+            defs.append(f"{self._q(col[0])} " + (t if keeps
+                                                 else f"Nullable({t})")
+                        + (f" default {default}" if default is not None
+                           and not rule.get("identity") else ""))
         order = (", ".join(self._q(k) for k in key)) if key else "tuple()"
         return (f"create table {self._qualified(side, db, table)}"
                 f" ({', '.join(defs)}) engine = MergeTree order by ({order})")
@@ -524,6 +543,43 @@ class ClickHouseEngine(NeutralCopier, Engine):
             client.close()
         return gone
 
+    def _apply_delete(self, side, db, table, key):
+        """Remove the row at that key, whether or not it is there: what a
+        repair deletes, and what putting a repaired row back deletes. A
+        lightweight delete the statement waits for
+        (`lightweight_deletes_sync`), addressed as `neutral_rows_by_key`
+        addresses a row - by the same typed values - and never without a
+        key: a delete with nothing to match would empty the table."""
+        from .. import canon
+        self._target_only(side, "delete a row")
+        if not key:
+            raise SystemExit(f"{table}: a row is deleted by its key, and"
+                             " none was given")
+        params, tests = {}, []
+        for i, (name, value) in enumerate(key.items()):
+            params[f"k{i}"] = canon.sql_value(value)
+            tests.append(f"{self._q(name)} = "
+                         f"{{k{i}:{self._param_type(value)}}}")
+        client = self._client(side, db)
+        try:
+            client.command(f"delete from {self._qualified(side, db, table)}"
+                           f" where {' and '.join(tests)}",
+                           parameters=params,
+                           settings={"lightweight_deletes_sync": 2})
+        finally:
+            client.close()
+
+    def repair_plan(self, db, kind):
+        """The rows the last check found apart, carried across by the pair
+        every engine's rows are repaired by: the source's rows written
+        again and the target's own removed, each target row this touches
+        recorded first, so it can be put back (`repairlog`). Only the
+        tables the hop takes (`Engine._drills_in_scope`)."""
+        return self._as_pair().repair_plan(db, kind)
+
+    def apply(self, db, action):
+        return self._as_pair().apply(db, action)
+
     def run_rule(self, side, db, sql):
         return self._rows(side, db, sql, settings={"readonly": 1})
 
@@ -535,10 +591,10 @@ class ClickHouseEngine(NeutralCopier, Engine):
     def check_counts(self, db):
         return self._as_pair().check_counts(db)
 
-    def check_deep(self, db):
-        """Parts a merge or an insert left broken, and mutations - the
-        deletes a restart runs - that have not finished: the rows a check
-        reads are not settled until they have."""
+    def _mutations(self, db):
+        """Mutations - the deletes a restart runs - that have not
+        finished, on each side: the rows a check reads are not settled
+        until they have."""
         out = []
         for side, who in (("src", "source"), ("dst", "target")):
             try:
@@ -569,6 +625,832 @@ class ClickHouseEngine(NeutralCopier, Engine):
                                   f"no change still being applied on the"
                                   f" {who}"))
         return out
+
+    # ---- the deep checks that hold both sides' catalogues to each other ------
+
+    #: what a table of each of these engines is: an object whose rows come
+    #: from a query or from a source of its own, not rows it holds
+    OBJECT_ENGINES = {"View": "view", "MaterializedView": "matview",
+                      "LiveView": "view", "WindowView": "view",
+                      "Dictionary": "dictionary"}
+    #: a column ClickHouse computes rather than stores (or reads from the
+    #: insert and never keeps)
+    GENERATED = ("MATERIALIZED", "ALIAS", "EPHEMERAL")
+    #: tables that read a stream, and write what they read through a view
+    QUEUE_ENGINES = ("Kafka", "RabbitMQ", "NATS", "S3Queue", "AzureQueue",
+                     "FileLog")
+    #: text columns whose bytes the charset check reads, and temporal
+    #: columns the time check samples - each read is a pass over a column
+    TEXT_COLUMNS, TIME_COLUMNS, TIME_ROWS = 30, 10, 200
+
+    @staticmethod
+    def _plain(text):
+        """A definition without the white space it is laid out with."""
+        return " ".join(str(text or "").split())
+
+    def _written(self, db, name, lines):
+        """Every line of a finding, in a file beside the other deep
+        findings; its path."""
+        path = self.hop.report_dir(db) / f"deep-{name}.diff"
+        path.write_text("\n".join(lines) + "\n")
+        return str(path)
+
+    def _catalogue(self, side, db):
+        """{name: facts} of every table, view and dictionary of the
+        database that the hop takes, from the catalogue in three reads:
+        what each is made of, its columns and its data-skipping indexes."""
+        ask = {"d": self._d(side, db)}
+        cat = {}
+        for (name, engine, part, order, prim, full, policy, create,
+             query) in self._rows(
+                side, db, "select name, engine, partition_key, sorting_key,"
+                          " primary_key, engine_full, storage_policy,"
+                          " create_table_query, as_select from system.tables"
+                          " where database = {d:String} and not"
+                          " is_temporary and not startsWith(name, '.inner')",
+                ask):
+            if self.in_scope(db, name):
+                cat[str(name)] = {
+                    "engine": str(engine), "partition": str(part or ""),
+                    "sorting": str(order or ""), "primary": str(prim or ""),
+                    "full": str(full or ""), "policy": str(policy or ""),
+                    "create": str(create or ""), "query": str(query or ""),
+                    "object": self.OBJECT_ENGINES.get(str(engine), ""),
+                    "columns": {}, "indexes": {}}
+        for table, name, typ, kind, expr, codec in self._rows(
+                side, db, "select table, name, type, default_kind,"
+                          " default_expression, compression_codec from"
+                          " system.columns where database = {d:String}"
+                          " order by table, position", ask):
+            if str(table) in cat:
+                cat[str(table)]["columns"][str(name)] = (
+                    str(typ), str(kind or ""), str(expr or ""),
+                    str(codec or ""))
+        for table, name, kind, expr, grain in self._rows(
+                side, db, "select table, name, type, expr, granularity from"
+                          " system.data_skipping_indices where database ="
+                          " {d:String}", ask):
+            if str(table) in cat:
+                cat[str(table)]["indexes"][str(name)] = (
+                    str(kind), self._plain(expr), int(grain or 0))
+        return cat
+
+    def _stored(self, src, dst):
+        """The tables (not views or dictionaries) both sides hold, by
+        name."""
+        return [t for t in sorted(set(src) & set(dst))
+                if not src[t]["object"] and not dst[t]["object"]]
+
+    def _both_columns(self, src, dst):
+        """(table, column, the source's facts, the target's) of every
+        column of a stored table that both sides hold."""
+        for t in self._stored(src, dst):
+            a, b = src[t]["columns"], dst[t]["columns"]
+            for c in sorted(set(a) & set(b)):
+                yield t, c, a[c], b[c]
+
+    def check_deep(self, db):
+        """What the two servers' catalogues say of the database held
+        against each other - its columns, keys, partitions, indexes,
+        views, row policies, sharding and grants - the mutations that have
+        not finished, and, where a catalogue cannot show it, the values
+        themselves: their text, their times, their NULLs. Only the tables
+        and objects the hop takes."""
+        out = self._mutations(db)
+        try:
+            src, dst = self._catalogue("src", db), self._catalogue("dst", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return out + [Result("deep", f"{db} objects", "error",
+                                 "could not read the catalogues:"
+                                 f" {str(e).splitlines()[0][:90]}")]
+        for word, check in (
+                ("columns", self._deep_columns),
+                ("generated", self._deep_generated),
+                ("narrowing", self._deep_narrowing),
+                ("float", self._deep_float),
+                ("nullempty", self._deep_nullempty),
+                ("keys", self._deep_keys),
+                ("partitions", self._deep_partitions),
+                ("indexes", self._deep_indexes),
+                ("objects", self._deep_objects),
+                ("matviews", self._deep_matviews),
+                ("ownership", self._deep_ownership),
+                ("rls", self._deep_rls),
+                ("sharding", self._deep_sharding),
+                ("table options", self._deep_options),
+                ("boundary", self._deep_boundary),
+                ("charset", self._deep_charset),
+                ("timeshift", self._deep_timeshift)):
+            try:
+                out += check(db, src, dst)
+            except Exception as e:  # noqa: BLE001 - said, as the error
+                out.append(Result(
+                    "deep", f"{db} {word}", "error",
+                    f"could not be read: {str(e).splitlines()[0][:90]}"
+                    " - unknown, not clean"))
+        out += self._deep_grants(db)
+        return out
+
+    # the catalogue checks, one finding each, its scope ending in the word
+    # a category is read from (`base.CATEGORIES`)
+
+    def _deep_columns(self, db, src, dst):
+        drift = []
+        for t in self._stored(src, dst):
+            a, b = src[t]["columns"], dst[t]["columns"]
+            drift += [f"{t}.{c}: on the source only" for c in sorted(set(a)
+                                                                    - set(b))]
+            drift += [f"{t}.{c}: on the target only" for c in sorted(set(b)
+                                                                    - set(a))]
+        n = 0
+        for t, c, (ta, ka, ea, ca), (tb, kb, eb, cb) in self._both_columns(
+                src, dst):
+            n += 1
+            if ka in self.GENERATED or kb in self.GENERATED:
+                continue
+            if _unwrap(ta) != _unwrap(tb):
+                drift.append(f"{t}.{c}: {ta} on the source, {tb} on the"
+                             " target")
+            elif ka != kb or self._plain(ea) != self._plain(eb):
+                drift.append(f"{t}.{c}: default {self._plain(ea) or 'none'}"
+                             f" on the source, {self._plain(eb) or 'none'}"
+                             " on the target")
+            elif ca != cb:
+                drift.append(f"{t}.{c}: compressed with {ca or 'the default'}"
+                             f" on the source and {cb or 'the default'} on"
+                             " the target")
+        if not drift:
+            return [Result("deep", f"{db} columns", "ok",
+                           f"{n} columns compared, type, default and codec"
+                           " identical")]
+        return [Result("deep", f"{db} columns", "diff",
+                       f"{len(drift)} columns drift: " + clauses(drift, 4),
+                       self._written(db, "columns", drift),
+                       "align the target's columns with the source's before"
+                       " trusting a row verdict")]
+
+    def _deep_generated(self, db, src, dst):
+        drift, n = [], 0
+        for t in self._stored(src, dst):
+            a, b = src[t]["columns"], dst[t]["columns"]
+            for c in sorted(set(a) | set(b)):
+                ka, ea = a.get(c, ("", "", "", ""))[1:3]
+                kb, eb = b.get(c, ("", "", "", ""))[1:3]
+                if ka not in self.GENERATED and kb not in self.GENERATED:
+                    continue
+                n += 1
+                if (ka, self._plain(ea)) != (kb, self._plain(eb)):
+                    drift.append(
+                        f"{t}.{c}: " + (f"{ka} {self._plain(ea)}" if ka in
+                                        self.GENERATED else "stored")
+                        + " on the source, "
+                        + (f"{kb} {self._plain(eb)}" if kb in self.GENERATED
+                           else "stored" if c in b else "absent")
+                        + " on the target")
+        if not drift:
+            return [Result("deep", f"{db} generated", "ok",
+                           f"{n} computed columns, defined alike on both"
+                           " sides" if n else "no computed column")]
+        return [Result("deep", f"{db} generated", "diff",
+                       f"{len(drift)} computed columns differ: "
+                       + clauses(drift, 4),
+                       self._written(db, "generated", drift),
+                       "a column the source computes is not written, and"
+                       " must be computed by the same definition on the"
+                       " target")]
+
+    def _deep_narrowing(self, db, src, dst):
+        from .. import verdict
+        narrow = []
+        for t, c, (ta, *_), (tb, *_) in self._both_columns(src, dst):
+            why = verdict.narrowing("clickhouse", _unwrap(ta), _unwrap(tb))
+            if why:
+                narrow.append(f"{t}.{c}: {why}")
+        return [verdict.narrowing_result(db, narrow)]
+
+    _DECIMAL = re.compile(r"^Decimal(?:(32|64|128|256))?\(\s*(\d+)"
+                          r"(?:\s*,\s*(\d+))?\s*\)$")
+    _DECIMAL_DIGITS = {"32": 9, "64": 18, "128": 38, "256": 76}
+
+    @classmethod
+    def _decimal(cls, declared):
+        """(digits, scale) of a Decimal column, or None."""
+        m = cls._DECIMAL.match(str(declared).strip())
+        if not m:
+            return None
+        if m.group(1):
+            return cls._DECIMAL_DIGITS[m.group(1)], int(m.group(2))
+        return int(m.group(2)), int(m.group(3) or 0)
+
+    def _deep_float(self, db, src, dst):
+        """A column that holds fewer digits than the source's: a float of
+        fewer bits, a time of coarser ticks, a decimal of a smaller scale."""
+        less = []
+        for t, c, (ta, *_), (tb, *_) in self._both_columns(src, dst):
+            a, b = _unwrap(ta), _unwrap(tb)
+            wa, wb = self._digits(a), self._digits(b)
+            da, dd = self._decimal(a), self._decimal(b)
+            if a.startswith("Float64") and b.startswith("Float32"):
+                less.append(f"{t}.{c}: Float64 -> Float32 (about 7 digits"
+                            " kept of 15)")
+            elif wa and wb and wa[0] > wb[0]:
+                less.append(f"{t}.{c}: {a} -> {b} (ticks of 10^-{wa[0]} s"
+                            f" rounded to 10^-{wb[0]} s)")
+            elif wa and b.startswith("DateTime") and not wb:
+                less.append(f"{t}.{c}: {a} -> {b} (the fraction of a second"
+                            " is dropped)")
+            elif da and dd and dd[1] < da[1]:
+                less.append(f"{t}.{c}: {a} -> {b} (scale {da[1]} ->"
+                            f" {dd[1]}: rounds)")
+        if less:
+            return [Result("deep", f"{db} float", "diff",
+                           f"{len(less)} target columns hold fewer digits"
+                           " than the source's: " + clauses(less, 4),
+                           self._written(db, "float", less),
+                           "widen the target column to the source's"
+                           " precision before loading")]
+        return [Result("deep", f"{db} float", "ok",
+                       "no target column holds fewer digits than the"
+                       " source's")]
+
+    def _deep_nullempty(self, db, src, dst):
+        """A column that takes NULL on the source and not on the target
+        stores the type's zero or '' for the NULL it is given
+        (`input_format_null_as_default`): counted on the source."""
+        risky = [(t, c) for t, c, (ta, *_), (tb, *_) in
+                 self._both_columns(src, dst)
+                 if _nullable(ta) and not _nullable(tb)]
+        if not risky:
+            return [Result("deep", f"{db} nullempty", "ok",
+                           "every column that takes NULL on the source"
+                           " takes it on the target")]
+        held, unread = [], []
+        for t, c in risky[:20]:
+            try:
+                n = int(self._rows(
+                    "src", db, f"select countIf(isNull({self._q(c)})) from"
+                               f" {self._qualified('src', db, t)}")[0][0])
+            except Exception:  # noqa: BLE001 - one column fewer counted
+                unread.append(f"{t}.{c}")
+                continue
+            if n:
+                held.append(f"{t}.{c}: {n:,} rows hold NULL")
+        left = [f"{t}.{c}" for t, c in risky]
+        if held:
+            return [Result("deep", f"{db} nullempty", "diff",
+                           "NULL on the source arrives as 0 or '' on the"
+                           f" target - {clauses(held, 4)}", "",
+                           "make the target column Nullable, or decide what"
+                           " those rows hold, before the move")]
+        return [Result("deep", f"{db} nullempty", "warn",
+                       f"{len(left)} columns take NULL on the source and not"
+                       " on the target ("
+                       + ", ".join(left[:4]) + ")"
+                       + (f"; {len(unread)} could not be counted"
+                          if unread else "; none holds one now")
+                       + " - a NULL written later arrives as 0 or ''", "",
+                       "make the target column Nullable")]
+
+    def _deep_keys(self, db, src, dst):
+        keyless, drift = [], []
+        for t in sorted(src):
+            s = src[t]
+            if s["object"] or not s["engine"].endswith("MergeTree"):
+                continue
+            if not s["sorting"].strip():
+                keyless.append(t)
+            d = dst.get(t)
+            if d and not d["object"] and d["engine"].endswith("MergeTree") \
+                    and (self._plain(s["sorting"]) != self._plain(
+                        d["sorting"]) or self._plain(s["primary"])
+                         != self._plain(d["primary"])):
+                drift.append(f"{t}: ordered by ({s['sorting'] or 'nothing'})"
+                             f" on the source, ({d['sorting'] or 'nothing'})"
+                             " on the target")
+        if drift:
+            return [Result("deep", f"{db} keys", "diff",
+                           f"{len(drift)} tables are ordered by another key"
+                           " on the target: " + clauses(drift, 4),
+                           self._written(db, "keys", drift),
+                           "give the target table the source's ORDER BY"
+                           " and PRIMARY KEY - rows are found, merged and"
+                           " repaired by them")]
+        if keyless:
+            return [Result("deep", f"{db} keys", "warn",
+                           f"{len(keyless)} tables have no sorting key"
+                           f" ({', '.join(keyless[:5])}): they are copied"
+                           " and checked by whole-row hashes, and a row"
+                           " cannot be named to be repaired", "",
+                           "order the table by a column that identifies a"
+                           " row")]
+        return [Result("deep", f"{db} keys", "ok",
+                       "every MergeTree table has a sorting key, the same on"
+                       " both sides")]
+
+    def _partition_rows(self, side, db):
+        """{table: {partition id: rows}} of the active parts, for the
+        tables the hop takes."""
+        out = {}
+        for t, p, n in self._rows(
+                side, db, "select table, partition_id, sum(rows) from"
+                          " system.parts where database = {d:String} and"
+                          " active group by table, partition_id",
+                {"d": self._d(side, db)}):
+            if self.in_scope(db, str(t)):
+                out.setdefault(str(t), {})[str(p)] = int(n)
+        return out
+
+    def _deep_partitions(self, db, src, dst):
+        names = [t for t in self._stored(src, dst)
+                 if src[t]["partition"] or dst[t]["partition"]]
+        if not names:
+            return [self._partitions_verdict(db, {}, [], "catch-all")]
+        held = {side: self._partition_rows(side, db)
+                for side in ("src", "dst")}
+        scheme, tables = [], {}
+        for t in names:
+            a, b = src[t]["partition"], dst[t]["partition"]
+            if self._plain(a) != self._plain(b):
+                scheme.append(f"{t}: partitioned by {a or 'nothing'} on the"
+                              f" source and {b or 'nothing'} on the target")
+                continue
+            tables[t] = tuple(
+                {p: {"rows": n, "digest": None}
+                 for p, n in held[side].get(t, {}).items()}
+                for side in ("src", "dst"))
+        return [self._partitions_verdict(db, tables, scheme, "catch-all")]
+
+    def _deep_indexes(self, db, src, dst):
+        drift, extra, n = [], 0, 0
+        for t in self._stored(src, dst):
+            a, b = src[t]["indexes"], dst[t]["indexes"]
+            extra += len(set(b) - set(a))
+            for name in sorted(a):
+                n += 1
+                if name not in b:
+                    drift.append(f"{t}.{name}: not on the target")
+                elif a[name] != b[name]:
+                    drift.append(f"{t}.{name}: {a[name][0]} on {a[name][1]}"
+                                 f" (granularity {a[name][2]}) on the source,"
+                                 f" {b[name][0]} on {b[name][1]}"
+                                 f" (granularity {b[name][2]}) on the target")
+        if drift:
+            return [Result("deep", f"{db} indexes", "diff",
+                           f"{len(drift)} data-skipping indexes of {n} are"
+                           " missing or differ on the target: "
+                           + clauses(drift, 4),
+                           self._written(db, "indexes", drift),
+                           "add the index to the target and materialize it:"
+                           " until then every read of the table scans it"
+                           " whole")]
+        return [Result("deep", f"{db} indexes", "ok",
+                       f"{n} data-skipping indexes, the same on both sides"
+                       + (f"; {extra} more on the target" if extra else ""))]
+
+    def _functions(self, side):
+        """{name: definition} of the SQL functions its users wrote."""
+        return {str(n): self._plain(q) for n, q in self._rows(
+            side, None, "select name, create_query from system.functions"
+                        " where origin = 'SQLUserDefined'")}
+
+    def _deep_objects(self, db, src, dst):
+        """Views and dictionaries, and the functions users wrote: each one
+        the hop takes (`takes`) is there on the target, and a view is
+        defined by the same query."""
+        lines, n = [], 0
+        for kind in ("view", "dictionary"):
+            held = [{t for t, c in cat.items() if c["object"] == kind
+                     and self.takes(db, kind, t)} for cat in (src, dst)]
+            n += len(held[0])
+            lines += [f"{kind} {t}: not on the target"
+                      for t in sorted(held[0] - held[1])]
+            lines += [f"{kind} {t}: on the target only"
+                      for t in sorted(held[1] - held[0])]
+            if kind == "view":
+                lines += [f"view {t}: defined by another query on the target"
+                          for t in sorted(held[0] & held[1])
+                          if self._plain(src[t]["query"])
+                          != self._plain(dst[t]["query"])]
+        a, b = self._functions("src"), self._functions("dst")
+        mine = [f for f in a if self.takes(db, "function", f)]
+        n += len(mine)
+        lines += [f"function {f}: not on the target" for f in sorted(mine)
+                  if f not in b]
+        lines += [f"function {f}: defined another way on the target"
+                  for f in sorted(mine) if f in b and a[f] != b[f]]
+        if lines:
+            return [Result("deep", f"{db} objects", "diff",
+                           f"{len(lines)} of {n} views, dictionaries and"
+                           " functions are missing or differ on the target: "
+                           + clauses(lines, 4),
+                           self._written(db, "objects", lines),
+                           "create them on the target - a data move carries"
+                           " none")]
+        return [Result("deep", f"{db} objects", "ok",
+                       f"{n} views, dictionaries and functions, each on the"
+                       " target and defined alike")]
+
+    def _deep_matviews(self, db, src, dst):
+        """Materialized views: each is on the target, over the same query
+        and into the same table. A view fires only for the rows inserted
+        after it exists, so one made late leaves what came before out."""
+        lines = []
+        held = [{t for t, c in cat.items() if c["object"] == "matview"
+                 and self.takes(db, "matview", t)} for cat in (src, dst)]
+        lines += [f"{t}: not on the target" for t in sorted(held[0]
+                                                           - held[1])]
+        lines += [f"{t}: on the target only" for t in sorted(held[1]
+                                                            - held[0])]
+        for t in sorted(held[0] & held[1]):
+            if self._plain(src[t]["query"]) != self._plain(dst[t]["query"]):
+                lines.append(f"{t}: defined by another query on the target")
+            into = [self._into(cat[t]["create"]) for cat in (src, dst)]
+            if into[0] and into[1] and into[0] != into[1]:
+                lines.append(f"{t}: writes into {into[0]} on the source and"
+                             f" {into[1]} on the target")
+        if lines:
+            return [Result("deep", f"{db} matviews", "diff",
+                           f"{len(lines)} materialized views are missing or"
+                           " differ on the target: " + clauses(lines, 4),
+                           self._written(db, "matviews", lines),
+                           "create them on the target after its tables hold"
+                           " the rows - a view only sees rows inserted once"
+                           " it exists")]
+        return [Result("deep", f"{db} matviews", "ok",
+                       f"{len(held[0])} materialized views, each on the"
+                       " target over the same query")]
+
+    @staticmethod
+    def _into(create):
+        """The table a materialized view writes into, as its statement
+        names it (`TO table`), without its database - or ''."""
+        m = re.search(r"\bTO\s+((?:`[^`]+`|[\w$]+)(?:\.(?:`[^`]+`|[\w$]+))?)",
+                      str(create))
+        return m.group(1).split(".")[-1].strip("`") if m else ""
+
+    _DEFINER = re.compile(r"DEFINER\s*=\s*(\S+)", re.I)
+    _SECURITY = re.compile(r"SQL\s+SECURITY\s+(\w+)", re.I)
+
+    def _definition_owner(self, create):
+        """`definer/security` of a view as its statement says it, or ''."""
+        a, b = self._DEFINER.search(create), self._SECURITY.search(create)
+        return "/".join(m.group(1) for m in (a, b) if m)
+
+    def _deep_ownership(self, db, src, dst):
+        """The account a view runs with, which a definition compared as
+        text does not show."""
+        from .. import ownership
+        rows = [(f"{src[t]['object']} {t}",
+                 self._definition_owner(src[t]["create"]),
+                 self._definition_owner(dst[t]["create"]))
+                for t in sorted(set(src) & set(dst))
+                if src[t]["object"] in ("view", "matview")
+                and dst[t]["object"] in ("view", "matview")]
+        if not rows:
+            return [Result("deep", f"{db} ownership", "ok",
+                           "no view or materialized view on both sides")]
+        changes = ownership.group(rows)
+        if not changes:
+            return [Result("deep", f"{db} ownership", "ok",
+                           f"{len(rows)} views keep their definer and"
+                           " security mode")]
+        return [Result("deep", f"{db} ownership", "diff",
+                       f"{ownership.total(changes)} of {len(rows)}: "
+                       + ownership.describe(changes), "",
+                       "recreate them with the intended DEFINER and SQL"
+                       " SECURITY before the application depends on them")]
+
+    def _deep_rls(self, db, src, dst):
+        def policies(side):
+            return {(str(t), str(n)): (self._plain(f), bool(r), bool(all_),
+                                       tuple(sorted(a or [])),
+                                       tuple(sorted(x or [])))
+                    for t, n, f, r, all_, a, x in self._rows(
+                        side, db, "select table, short_name, select_filter,"
+                                  " is_restrictive, apply_to_all,"
+                                  " apply_to_list, apply_to_except from"
+                                  " system.row_policies where database ="
+                                  " {d:String}", {"d": self._d(side, db)})
+                    if self.in_scope(db, str(t))}
+        a, b = policies("src"), policies("dst")
+        lines = [f"{t}: policy {n} is not on the target (its rows are open"
+                 " to everyone the grants allow)" for t, n in sorted(a)
+                 if (t, n) not in b]
+        lines += [f"{t}: policy {n} filters another way on the target"
+                  for t, n in sorted(a) if (t, n) in b and a[(t, n)]
+                  != b[(t, n)]]
+        lines += [f"{t}: policy {n} is on the target only"
+                  for t, n in sorted(b) if (t, n) not in a]
+        if lines:
+            return [Result("deep", f"{db} rls", "diff",
+                           f"{len(lines)} row policies differ: "
+                           + clauses(lines, 4), self._written(db, "rls",
+                                                              lines),
+                           "create the policies on the target before anyone"
+                           " but the move reads it")]
+        return [Result("deep", f"{db} rls", "ok",
+                       f"{len(a)} row policies, the same on both sides"
+                       if a else "no row policy")]
+
+    @staticmethod
+    def _engine_args(full, engine):
+        """The arguments of `engine(...)` in an engine definition, split
+        at the commas outside quotes and brackets, each stripped of its
+        quotes; [] where the engine is not named."""
+        at = str(full).find(engine + "(")
+        if at < 0:
+            return []
+        out, depth, quote, cur = [], 0, "", ""
+        for ch in str(full)[at + len(engine) + 1:]:
+            if quote:
+                cur += ch
+                quote = "" if ch == quote else quote
+            elif ch in "'`\"":
+                cur, quote = cur + ch, ch
+            elif ch in "([":
+                depth, cur = depth + 1, cur + ch
+            elif ch in ")]" and depth:
+                depth, cur = depth - 1, cur + ch
+            elif ch == ")":
+                break
+            elif ch == "," and not depth:
+                out.append(cur.strip())
+                cur = ""
+            else:
+                cur += ch
+        out.append(cur.strip())
+        return [a.strip("'`\"") if a[:1] in "'`\"" else a for a in out]
+
+    def _deep_sharding(self, db, src, dst):
+        """Distributed tables: each is on the target, over a cluster the
+        target defines, sharded by the same key."""
+        def ways(cat):
+            out = {}
+            for t, c in cat.items():
+                if c["engine"] == "Distributed":
+                    args = self._engine_args(c["full"], "Distributed")
+                    out[t] = (args[0], self._plain(args[3])) \
+                        if len(args) > 3 else (args[0] if args else "?", "")
+            return out
+        a, b = ways(src), ways(dst)
+        lines = [f"{t}: not on the target" for t in sorted(a) if t not in b]
+        for t in sorted(a):
+            if t in b and a[t] != b[t]:
+                lines.append(f"{t}: cluster {a[t][0]} sharded by"
+                             f" {a[t][1] or 'nothing'} on the source,"
+                             f" cluster {b[t][0]} sharded by"
+                             f" {b[t][1] or 'nothing'} on the target")
+        for cluster in sorted({c for c, _ in b.values() if c != "?"}):
+            if not int(self._rows(
+                    "dst", db, "select count() from system.clusters where"
+                               " cluster = {c:String}",
+                    {"c": cluster})[0][0]):
+                lines.append(f"cluster {cluster} is not defined on the"
+                             " target, so the tables over it read nothing")
+        if lines:
+            return [Result("deep", f"{db} sharding", "diff",
+                           f"{len(lines)} Distributed tables differ: "
+                           + clauses(lines, 4),
+                           self._written(db, "sharding", lines),
+                           "define the cluster in the target's configuration"
+                           " and create the tables over it")]
+        return [Result("deep", f"{db} sharding", "ok",
+                       f"{len(a)} Distributed tables, the same cluster and"
+                       " sharding key on both sides" if a
+                       else "no Distributed table")]
+
+    def _options(self, facts):
+        """(engine, TTL, SETTINGS, storage policy) of a table as its
+        definition says them."""
+        full = facts["full"]
+        ttl = re.search(r"\bTTL\b(.*?)(?=\bSETTINGS\b|\bCOMMENT\b|$)", full,
+                        re.S)
+        settings = re.search(r"\bSETTINGS\b(.*?)(?=\bCOMMENT\b|$)", full,
+                             re.S)
+        return (facts["engine"], self._plain(ttl.group(1)) if ttl else "",
+                self._plain(settings.group(1)) if settings else "",
+                facts["policy"])
+
+    def _deep_options(self, db, src, dst):
+        """A table's engine, its time to live (which deletes rows), its
+        storage policy and its settings."""
+        diff, soft = [], []
+        for t in self._stored(src, dst):
+            (ea, ta, sa, pa), (eb, tb, sb, pb) = (self._options(src[t]),
+                                                  self._options(dst[t]))
+            if ea != eb:
+                diff.append(f"{t}: engine {ea} on the source, {eb} on the"
+                            " target")
+            if ta != tb:
+                diff.append(f"{t}: TTL {ta or 'none'} on the source,"
+                            f" {tb or 'none'} on the target")
+            if pa != pb:
+                soft.append(f"{t}: storage policy {pa} -> {pb}")
+            if sa != sb:
+                soft.append(f"{t}: settings {sa or 'none'} -> {sb or 'none'}")
+        if diff:
+            return [Result("deep", f"{db} table options", "diff",
+                           f"{len(diff)} options differ: "
+                           + clauses(diff + soft, 4),
+                           self._written(db, "options", diff + soft),
+                           "give the target table the source's engine and"
+                           " TTL: a TTL that is missing keeps rows the"
+                           " source deletes, one that is added deletes rows"
+                           " the source keeps",
+                           category="structure.collection-options")]
+        if soft:
+            return [Result("deep", f"{db} table options", "warn",
+                           f"{len(soft)} settings differ: "
+                           + clauses(soft, 4),
+                           self._written(db, "options", soft), "",
+                           category="structure.collection-options")]
+        return [Result("deep", f"{db} table options", "ok",
+                       "engine, TTL, storage policy and settings alike on"
+                       " both sides",
+                       category="structure.collection-options")]
+
+    def _deep_boundary(self, db, src, dst):
+        """A target whose largest key runs past the source's: rows written
+        on it by something else, or applied twice."""
+        keys = []
+        for t in self._stored(src, dst):
+            key = [k.strip().strip("`") for k in src[t]["sorting"].split(",")
+                   if k.strip()]
+            col = src[t]["columns"].get(key[0]) if len(key) == 1 else None
+            if col and re.match(r"U?Int\d+$", _unwrap(col[0])) \
+                    and dst[t]["engine"].endswith("MergeTree"):
+                keys.append((t, key[0]))
+        if not keys:
+            return [Result("deep", f"{db} boundary", "ok",
+                           "no table keyed by one integer column to"
+                           " boundary-check")]
+        ahead, behind = [], 0
+
+        def top(side, t, k):
+            return int(self._rows(
+                side, db, f"select coalesce(max({self._q(k)}), 0) from"
+                          f" {self._qualified(side, db, t)}")[0][0])
+        for t, k in keys:
+            a, b = top("src", t, k), top("dst", t, k)
+            if b > a:
+                ahead.append(f"{t} src_max={a} dst_max={b}")
+            elif b < a:
+                behind += 1
+        if ahead:
+            return [Result("deep", f"{db} boundary", "diff",
+                           f"target max(key) AHEAD of source on"
+                           f" {len(ahead)}: {'; '.join(ahead[:4])}", "",
+                           "writes landing on the target or applied twice,"
+                           " find the writer before cutover")]
+        return [Result("deep", f"{db} boundary", "ok",
+                       f"max(key) checked on {len(keys)} tables, none ahead"
+                       " of the source"
+                       + (f"; {behind} behind (still copying)"
+                          if behind else ""))]
+
+    def _text_columns(self, src, dst):
+        """(table, column) of the String columns both sides hold, in the
+        tables' order."""
+        return [(t, c) for t, c, (ta, *_), (tb, *_) in
+                self._both_columns(src, dst)
+                if _unwrap(ta) == "String" and _unwrap(tb) == "String"]
+
+    def _deep_charset(self, db, src, dst):
+        """A String is bytes, and meant as UTF-8: bytes that are not, and
+        the replacement character a lossy conversion leaves, are counted
+        on both sides for the first text columns of the tables the hop
+        takes - one pass over each column."""
+        cols = self._text_columns(src, dst)
+        asked, bad = cols[:self.TEXT_COLUMNS], []
+        read = 0
+        def counted(side, t, c):
+            return self._rows(
+                side, db, f"select countIf(not isValidUTF8({self._q(c)})),"
+                          f" sum(countSubstrings({self._q(c)}, char(239,"
+                          f" 191, 189))) from {self._qualified(side, db, t)}",
+                settings={"max_execution_time": 300})[0]
+        for t, c in asked:
+            try:
+                a, b = counted("src", t, c), counted("dst", t, c)
+            except Exception:  # noqa: BLE001 - one column fewer read
+                continue
+            read += 1
+            if int(b[0] or 0) > int(a[0] or 0):
+                bad.append(f"{t}.{c}: {int(b[0]) - int(a[0]):,} more values"
+                           " that are not UTF-8 on the target")
+            if int(b[1] or 0) > int(a[1] or 0):
+                bad.append(f"{t}.{c}: {int(b[1]) - int(a[1]):,} more U+FFFD"
+                           " replacement characters on the target")
+        said = (f"{read} of {len(cols)} text columns read"
+                if len(cols) > len(asked) or read < len(asked)
+                else f"{read} text columns read")
+        if bad:
+            return [Result("deep", f"{db} charset", "diff",
+                           f"{said}: " + clauses(bad, 4), "",
+                           "load the affected rows again over a connection"
+                           " that sends UTF-8")]
+        return [Result("deep", f"{db} charset", "ok",
+                       f"{said}: no excess of bytes that are not UTF-8 or of"
+                       " replacement characters on the target")]
+
+    def _deep_timeshift(self, db, src, dst):
+        """A time column every row of which the target holds shifted by a
+        zone's offset: the first rows of each, read by key, as epoch
+        seconds, which a faithful copy holds equal."""
+        from .. import verdict
+        cols = [(t, c) for t, c, (ta, *_), (tb, *_) in
+                self._both_columns(src, dst)
+                if _unwrap(ta).startswith(("DateTime", "DateTime64"))
+                and _unwrap(tb).startswith("DateTime")]
+        shifts = []
+        for t, c in cols[:self.TIME_COLUMNS]:
+            key = [k.strip().strip("`") for k in src[t]["sorting"].split(",")
+                   if k.strip()]
+            if len(key) != 1 or key[0] not in src[t]["columns"]:
+                continue
+
+            def rows(side):
+                return {str(r[0]): r[1] for r in self._rows(
+                    side, db, f"select {self._q(key[0])}, toUnixTimestamp("
+                              f"{self._q(c)}) from"
+                              f" {self._qualified(side, db, t)} where"
+                              f" {self._q(c)} is not null order by"
+                              f" {self._q(key[0])} limit {self.TIME_ROWS}")
+                        if r[1] is not None}
+            line = verdict.uniform_shift(f"{t}.{c}", rows("src"), rows("dst"))
+            if line:
+                shifts.append(line)
+        return [verdict.timeshift_result(db, shifts)]
+
+    def _grants(self, side, db):
+        """{grantee: {(privilege, table or '*', column, partial revoke,
+        grant option)}} on the database's tables the hop takes, from the
+        server's grants."""
+        out = {}
+        for user, role, access, table, column, partial, option in self._rows(
+                side, db, "select user_name, role_name, access_type, table,"
+                          " column, is_partial_revoke, grant_option from"
+                          " system.grants where database = {d:String}",
+                {"d": self._d(side, db)}):
+            if table is not None and not self.in_scope(db, str(table)):
+                continue
+            who = f"user {user}" if user else f"role {role}"
+            out.setdefault(who, set()).add(
+                (str(access), str(table or "*"), str(column or ""),
+                 bool(partial), bool(option)))
+        return out
+
+    def _accounts(self, side):
+        """{'user name', 'role name'} the server holds."""
+        return ({f"user {n}" for (n,) in self._rows(
+            side, None, "select name from system.users")}
+            | {f"role {n}" for (n,) in self._rows(
+                side, None, "select name from system.roles")})
+
+    def _deep_grants(self, db):
+        """What each account both sides hold may do to this database's
+        tables - the grants a data move does not carry."""
+        from ..users import CH_SYS, NOT_CARRIED, carried
+        if not carried(self.hop):
+            return [Result("deep", f"{db} grants", "skip", NOT_CARRIED)]
+        try:
+            src, dst = self._grants("src", db), self._grants("dst", db)
+            there = self._accounts("dst")
+        except Exception as e:  # noqa: BLE001 - said, as a warning
+            return [Result("deep", f"{db} grants", "warn",
+                           "could not read the grants:"
+                           f" {str(e).splitlines()[0][:90]} - unknown, not"
+                           " clean")]
+        mine = {w: g for w, g in src.items()
+                if w.split(" ", 1)[1] not in CH_SYS}
+        absent = sorted(w for w in mine if w not in there)
+        miss, extra = [], []
+        for who in sorted(set(mine) & there):
+            held = dst.get(who, set())
+            miss += [f"{who}: {g[0]} on {g[1]}" for g in
+                     sorted(mine[who] - held)]
+            extra += [f"{who}: {g[0]} on {g[1]}" for g in
+                      sorted(held - mine[who])]
+        if miss or extra or absent:
+            parts = []
+            if miss:
+                parts.append(f"{len(miss)} grants missing on the target: "
+                             + "; ".join(miss[:3]))
+            if extra:
+                parts.append(f"{len(extra)} grants on the target the source"
+                             " does not give: " + "; ".join(extra[:3]))
+            if absent:
+                parts.append(f"{len(absent)} accounts hold grants here at"
+                             " the source and do not exist on the target: "
+                             + ", ".join(absent[:3]))
+            return [Result("deep", f"{db} grants", "diff", "; ".join(parts),
+                           "", "migkit users create replays the source's"
+                               " accounts and grants")]
+        return [Result("deep", f"{db} grants", "ok",
+                       f"{sum(len(g) for g in mine.values())} grants match"
+                       f" on {len(mine)} accounts" if mine
+                       else "no account but the server's own is granted"
+                       " here")]
 
     # ---- server-side fingerprints ---------------------------------------
 
@@ -633,13 +1515,36 @@ class ClickHouseEngine(NeutralCopier, Engine):
             out.append({str(p): (int(n), str(h)) for p, n, h in got})
         return out[0], out[1]
 
+    def _renamed_or_mapped(self, db, table):
+        """Whether the hop gives this table another name on the target or
+        maps its columns: the fingerprints and the pull read the one name
+        and every column on both sides."""
+        from ..movers import _renamed
+        parts = self.hop.parts_of(table)
+        return bool(self.hop.column_rules(db, *parts)
+                    or _renamed(self.hop, db, parts))
+
+    def _read_through_rules(self, db, table):
+        """Whether the hop reads this table through a rule that the
+        servers' fingerprints do not read - a row filter, another name,
+        mapped columns. The pair compares such a table row by row, through
+        the rule."""
+        return bool(self.hop.row_filter(db, *self.hop.parts_of(table))
+                    or self._renamed_or_mapped(db, table))
+
     def check_data(self, db, table=None, stream=None):
         """Every table's partitions compared by fingerprints each server
         computes; only a table where they differ - or cannot be computed on
-        a side - is compared row by row through the pair."""
+        a side - is compared row by row through the pair. Each finding
+        names its table as the source does (`Result.table`), says how that
+        table came out (`Result.tables`) and, where the rows were walked
+        one by one, counts the rows apart (`Result.rows_apart`)."""
         tables = [table] if table else self.neutral_tables("src", db)
         same, rest = [], []
         for t in tables:
+            if self._read_through_rules(db, t):
+                rest.append(t)
+                continue
             try:
                 s, d = self._fingerprints(db, t)
             except Exception:  # noqa: BLE001 - the rows will say
@@ -649,7 +1554,8 @@ class ClickHouseEngine(NeutralCopier, Engine):
                 same.append(Result("data", f"{db}.{t}", "ok",
                                    f"{sum(n for n, _ in s.values()):,} rows"
                                    f" in {len(s)} partitions, each one's"
-                                   " fingerprint equal on both servers"))
+                                   " fingerprint equal on both servers",
+                                   table=t, tables={t: "ok"}))
                 if stream:
                     stream(f"{t}: ok")
             else:
@@ -658,8 +1564,25 @@ class ClickHouseEngine(NeutralCopier, Engine):
         if rest:
             pair = self._as_pair()
             for t in rest:
-                out += pair.check_data(db, t, stream)
+                out += [self._counted(db, t, r)
+                        for r in pair.check_data(db, t, stream)]
         return out
+
+    @staticmethod
+    def _counted(db, table, found):
+        """A table's finding from the pair's row comparison, naming its
+        table, how it came out, and - where the pair walked every row and
+        said how many are missing, extra and changed - those counts."""
+        import re
+        if not str(found.scope).startswith(f"{db}."):
+            return found
+        found.table = found.table or table
+        found.tables = {table: found.status}
+        got = re.search(r"\bmissing=(\d+) extra=(\d+) changed=(\d+)",
+                        found.detail)
+        if found.status == "diff" and got:
+            found.rows_apart = rows_counted(table, *map(int, got.groups()))
+        return found
 
     # ---- settings, access, snapshot, delta ----------------------------------
 
@@ -755,6 +1678,15 @@ class ClickHouseEngine(NeutralCopier, Engine):
         # found by table, then compared by the source's partitions
         res, clean, compared = [], True, 0
         for t in self.neutral_tables("src", db):
+            if self._read_through_rules(db, t):
+                clean = False
+                res.append(Result(
+                    "delta", f"{db}.{t}", "error",
+                    "the hop reads this table through a row filter, another"
+                    " name or mapped columns, which the partitions'"
+                    " fingerprints do not read: `check` compares it row by"
+                    " row, through them"))
+                continue
             src_now = now["src"].get(t, {})
             if prev is None:
                 only = None
@@ -1374,7 +2306,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         there = set(self.neutral_tables("dst", db))
         for t, moved in sorted(self._changed(token.get("parts") or {},
                                              point["parts"]).items()):
-            if self.hop.excluded(db, t):
+            if not self.in_scope(db, t):
                 continue
             if t not in on_src:
                 log(f"{t} is no longer on the source; its rows on the"
@@ -1421,6 +2353,18 @@ class ClickHouseEngine(NeutralCopier, Engine):
         else:
             parts.setdefault(table, {})[pid] = now
 
+    def _cannot_follow(self, db):
+        """[(table, why)] of the source's tables the hop takes that a
+        follow by partitions would carry wrongly: a partition that differs
+        is copied again whole, under its own name, with every row and every
+        kind of change in it - so a table the hop filters, renames, maps
+        the columns of, or carries only some changes of (`mapping.ops`,
+        `Hop.carries`) cannot be followed this way
+        (`movers.stream_cannot_carry`)."""
+        from .. import movers
+        return movers.stream_cannot_carry(self.hop, db,
+                                          self.neutral_tables("src", db))
+
     def tail_apply(self, db, go, token_path, log):
         """Keep the target following the source by the partitions that
         changed: each round the source's parts are read, every partition
@@ -1436,6 +2380,17 @@ class ClickHouseEngine(NeutralCopier, Engine):
         time only once every changed one has, so the fence
         (`position_reached`) waits for all of them."""
         from .. import tailctl
+        refused = self._cannot_follow(db)
+        if refused:
+            raise SystemExit(
+                f"{db}: " + "; ".join(f"{t} ({why})" for t, why in refused[:6])
+                + (f" and {len(refused) - 6} more" if len(refused) > 6
+                   else "")
+                + " - a follow by partitions copies a changed partition"
+                " again whole, under its own name, with every row and every"
+                " kind of change in it, so it cannot hold the table to what"
+                " the hop asks. Nothing was followed: leave these tables out"
+                " of the hop, or carry them another way")
         reach = {}
 
         def look(token):
@@ -1503,3 +2458,324 @@ class ClickHouseEngine(NeutralCopier, Engine):
             out["free_connections"] = max(0, out.pop("limit")
                                           - out.get("running", 0))
         return out
+
+    # ---- the assessment: what the servers say before anything moves -------
+
+    def _server_versions(self):
+        """(the source's version, the target's) as each server says it."""
+        def one(side):
+            try:
+                return str(self._rows(side, None, "select version()")[0][0])
+            except Exception:  # noqa: BLE001 - unknown, said by the report
+                return None
+        return (one("src"), one("dst"))
+
+    def _brand_probes(self):
+        """What each server says of itself: its version, and the build it
+        names (`variants.SIGNATURES`) - the one number a managed build or a
+        distributor's fork may spell its own way."""
+        def one(side):
+            out = {}
+            for key, sql in (("version", "select version()"),
+                             ("version_full", "select value from"
+                                              " system.build_options where"
+                                              " name = 'VERSION_FULL'")):
+                try:
+                    out[key] = str(self._rows(side, None, sql)[0][0])
+                except Exception:  # noqa: BLE001 - a field fewer
+                    pass
+            return out
+        return (one("src"), one("dst"))
+
+    def _source_unsettled(self, db):
+        """Rows the source holds that a read now does not give: parts
+        detached from their table (a failed merge, a part that did not
+        verify, one taken off by hand) hold rows no query sees and no copy
+        carries, and a mutation that has not finished leaves the rows
+        read as they were halfway."""
+        scope = f"{db} source settled"
+        try:
+            detached = self._scoped_rows(db, self._rows(
+                "src", db, "select table, count() from system.detached_parts"
+                           " where database = {d:String} group by table",
+                {"d": self._d("src", db)}))
+            pending = self._scoped_rows(db, self._rows(
+                "src", db, "select table, command, latest_fail_reason from"
+                           " system.mutations where database = {d:String}"
+                           " and not is_done", {"d": self._d("src", db)}))
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return Result("deep", scope, "error",
+                          "could not read the source's parts and mutations:"
+                          f" {str(e).splitlines()[0][:90]}")
+        if detached:
+            return Result(
+                "deep", scope, "diff",
+                f"{sum(int(n) for _, n in detached)} parts of"
+                f" {len(detached)} tables are detached"
+                f" ({', '.join(str(t) for t, _ in detached[:4])}): the rows"
+                " in them are in no query's answer, and a copy leaves them"
+                " behind", "",
+                "attach them (ALTER TABLE ... ATTACH PARTITION) or drop"
+                " them, then move")
+        if pending:
+            return Result(
+                "deep", scope, "warn",
+                f"{len(pending)} changes are still being applied on the"
+                f" source ({', '.join(sorted({str(r[0]) for r in pending})[:4])})"
+                " - rows read now are not settled", "",
+                "wait for them, then move")
+        return Result("deep", scope, "ok",
+                      "no part detached from a table, no change still being"
+                      " applied")
+
+    def _assess_extra(self):
+        """What ClickHouse's two servers say about being moved between:
+        whether the target deletes by key (a copy written again, a
+        repair), whether it reaches the source to pull from it, whether
+        any replicated table of either is read-only; and the work the move
+        leaves for hands (`_handwork`)."""
+        items = []
+
+        def add(level, item, detail=""):
+            items.append({"level": level, "scope": "instance", "item": item,
+                          "detail": str(detail)})
+
+        def said(e):
+            return str(e).splitlines()[0][:90] if str(e) else type(e).__name__
+        try:
+            version = str(self._rows("dst", None, "select version()")[0][0])
+            major, minor = (int(x) for x in version.split(".")[:2])
+            add("pass" if (major, minor) >= (23, 3) else "warn",
+                "target deletes by key",
+                f"{version}: "
+                + ("a lightweight delete is available" if (major, minor)
+                   >= (23, 3) else "a lightweight delete is experimental"
+                   " before 23.3")
+                + " - a batch written again and a repair delete the rows"
+                  " they replace with it")
+        except Exception as e:  # noqa: BLE001 - unknown, not clean
+            add("warn", "target deletes by key",
+                f"could not be read: {said(e)} - unknown, not clean")
+        if self.hop.source.configured() and self.hop.target.configured():
+            reach = self._reach()
+            if "fn" in reach:
+                add("pass", "target reaches the source",
+                    f"{reach['address']}: partitions are pulled by the"
+                    " target, no row through migkit")
+            else:
+                add("warn", "target reaches the source",
+                    f"{reach.get('why')}: rows go through migkit, table by"
+                    " table")
+        for side, who in (("src", "source"), ("dst", "target")):
+            try:
+                n = int(self._rows(
+                    side, None, "select count() from system.replicas where"
+                                " is_readonly or is_session_expired")[0][0])
+                add("warn" if n else "pass", f"{who} replicas writable",
+                    f"{n} replicated tables are read-only or have lost"
+                    " their session" if n else "no replicated table is"
+                    " read-only")
+            except Exception as e:  # noqa: BLE001 - unknown, not clean
+                add("warn", f"{who} replicas writable",
+                    f"could not be read: {said(e)} - unknown, not clean")
+        inv = self._handwork()
+        return items + inv.rows() + inv.summary()
+
+    def _handwork(self):
+        """The work the move leaves for hands, per `migkit.handwork`: what
+        a copy of the tables does not make on the target."""
+        from .. import handwork
+        inv = handwork.Inventory()
+        try:
+            dbs = self.databases()
+        except Exception as e:  # noqa: BLE001 - nothing was looked at
+            inv.unknown("target-prereq", "instance",
+                        f"the databases could not be listed: "
+                        f"{str(e).splitlines()[0][:90]}")
+            return inv
+        queues = ", ".join(f"'{e}'" for e in self.QUEUE_ENGINES)
+        for db in dbs:
+            ask = {"d": self._d("src", db)}
+
+            def probe(kind, what, sql, take=lambda r: str(r[0]),
+                      taken=None, ask=ask, db=db):
+                try:
+                    rows = self._rows("src", db, sql, ask)
+                except Exception as e:  # noqa: BLE001 - never read as none
+                    inv.unknown(kind, db, f"{what}: "
+                                f"{str(e).splitlines()[0][:80]}")
+                    return
+                # only what the hop takes (`takes`, `in_scope`)
+                inv.add(kind, db, what, [
+                    take(r) for r in rows
+                    if (self.takes(db, taken, str(r[0])) if taken
+                        else self.in_scope(db, str(r[0])))])
+            probe("no-row-key", "MergeTree tables with no sorting key",
+                  "select name from system.tables where database ="
+                  " {d:String} and endsWith(engine, 'MergeTree') and"
+                  " sorting_key = ''", take=lambda r: str(r[0]))
+            probe("server-side-code", "views and materialized views",
+                  "select name, engine from system.tables where database ="
+                  " {d:String} and engine in ('View', 'MaterializedView',"
+                  " 'LiveView', 'WindowView')", taken="view")
+            probe("not-carried", "dictionaries (loaded from their own"
+                                 " sources)",
+                  "select name from system.tables where database ="
+                  " {d:String} and engine = 'Dictionary'")
+            probe("not-carried", "row policies",
+                  "select table, short_name from system.row_policies where"
+                  " database = {d:String}",
+                  take=lambda r: f"{r[0]}.{r[1]}")
+            probe("target-prereq", "Distributed tables (the cluster must be"
+                                   " defined on the target)",
+                  "select name from system.tables where database ="
+                  " {d:String} and engine = 'Distributed'")
+            probe("decide-then-apply", "tables that read a stream (made on"
+                                       " the target they would compete for"
+                                       " it)",
+                  "select name from system.tables where database ="
+                  f" {{d:String}} and engine in ({queues})")
+        try:
+            inv.add("server-side-code", "instance", "SQL functions",
+                    sorted(self._functions("src")))
+        except Exception as e:  # noqa: BLE001 - never read as none
+            inv.unknown("server-side-code", "instance",
+                        f"SQL functions: {str(e).splitlines()[0][:80]}")
+        return inv
+
+    def stream_writers(self, db):
+        """Besides migkit's own tail, what writes into the target's tables
+        of this database: a table that reads a stream into others through
+        a view, and inserts running now from an account other than
+        migkit's. None can be paused from here."""
+        out = super().stream_writers(db)
+        ask = {"d": self._d("dst", db)}
+        queues = ", ".join(f"'{e}'" for e in self.QUEUE_ENGINES)
+        for name, engine in self._scoped_rows(db, self._rows(
+                "dst", db, "select name, engine from system.tables where"
+                           f" database = {{d:String}} and engine in"
+                           f" ({queues}) and notEmpty(dependencies_table)",
+                ask)):
+            out.append((f"{engine} table {name} reading a stream into the"
+                        " tables it feeds", False))
+        for user, n in self._rows(
+                "dst", db, "select user, count() from system.processes where"
+                           " query_kind = 'Insert' and current_database ="
+                           " {d:String} and user != {u:String} group by user",
+                {**ask, "u": self.hop.target.user or "default"}):
+            out.append((f"{n} insert(s) running now from {user}", False))
+        return out
+
+    # ---- the schema other engines are given, and made here ------------------
+
+    def neutral_views(self, side, db):
+        """[(name, the query)] of the views the hop takes, as ClickHouse
+        keeps them. A materialized view is not here: it writes rows as
+        they are inserted, which no other engine's view does."""
+        return [(str(n), str(q)) for n, q in self._rows(
+            side, db, "select name, as_select from system.tables where"
+                      " database = {d:String} and engine = 'View' order by"
+                      " name", {"d": self._d(side, db)})
+            if self.takes(db, "view", str(n))]
+
+    def neutral_column_rules(self, side, db, table):
+        """{column: {"null", "default", "identity"}}: whether a column
+        takes NULL, the default it is given when an insert leaves it out
+        (a computed column is no default), and - none is numbered by the
+        server - no identity."""
+        return {str(n): {
+            "null": _nullable(t),
+            "default": str(expr) if kind == "DEFAULT" and expr else None,
+            "identity": False}
+            for n, t, kind, expr in self._rows(
+                side, db, "select name, type, default_kind,"
+                          " default_expression from system.columns where"
+                          " database = {d:String} and table = {t:String}",
+                {"d": self._d(side, db), "t": table})}
+
+    def default_works(self, side, db, expr, typ=None):
+        """Whether the server evaluates `expr` as it is - a constant or a
+        function, never a column - asked as a read that writes nothing."""
+        try:
+            self.run_rule(side, None, f"select ({expr})")
+            return True
+        except Exception:  # noqa: BLE001 - not a default it takes
+            return False
+
+    #: the classes of value an index over a range can skip by (`minmax`);
+    #: every other is skipped by a bloom filter
+    ORDERED = ("integer", "decimal", "float", "timestamp", "date", "time",
+               "boolean")
+
+    def neutral_indexes(self, side, db, table):
+        """[(name, unique, [columns], carried)] of the table's data-skipping
+        indexes. ClickHouse has no secondary index that refuses a
+        duplicate: none is unique. One over an expression is not carried
+        as it is."""
+        known = {n for n, _ in self.neutral_columns(side, db, table)}
+        out = []
+        for name, expr in self._rows(
+                side, db, "select name, expr from system.data_skipping_indices"
+                          " where database = {d:String} and table = {t:String}"
+                          " order by name",
+                {"d": self._d(side, db), "t": table}):
+            cols = [c.strip().strip("`") for c in
+                    str(expr).strip().strip("()").split(",")]
+            plain = bool(cols) and all(c in known for c in cols)
+            out.append((str(name), False, cols if plain else [], plain))
+        return out
+
+    def neutral_create_index_sql(self, side, db, table, name, unique,
+                                 columns):
+        """A data-skipping index over the columns: a min-max range for
+        numbers, dates and times, a bloom filter for the rest. It skips
+        granules a read would not need; it enforces nothing, so a unique
+        index of the source is made as one that is not."""
+        from .. import canon
+        have = dict(self.neutral_columns(side, db, table))
+        ordered = all(canon.type_class(self.CANON_ENGINE, have.get(c, ""))
+                      in self.ORDERED for c in columns)
+        return (f"alter table {self._qualified(side, db, table)} add index"
+                f" {self._q(name)} ({', '.join(self._q(c) for c in columns)})"
+                f" type {'minmax' if ordered else 'bloom_filter(0.025)'}"
+                " granularity 4")
+
+    def execute_ddl(self, side, db, sql):
+        """One statement that changes the schema of the target. An index
+        added is then built for the rows the table already holds
+        (`materialize index`), which `add index` alone does not do."""
+        self._target_only(side, "change a schema")
+        client = self._client(side, db)
+        try:
+            client.command(sql)
+            added = re.match(
+                r"\s*alter table (\S+) add index (`(?:[^`\\]|\\.)*`)", sql,
+                re.I)
+            if added:
+                client.command(f"alter table {added.group(1)} materialize"
+                               f" index {added.group(2)}",
+                               settings={"mutations_sync": 2})
+        finally:
+            client.close()
+
+    def create_missing(self, db, log=None):
+        """The tables the target lacks, made before the table copier fills
+        them: by the source's own definition (`_made_from_source`) - its
+        engine, partitioning, order, time to live and settings - where the
+        hop renames and maps nothing of the table and the definition does
+        not name the source's replication path; the rest by the pair, as
+        the copier builds a table from its columns."""
+        log = log or (lambda m: None)
+        made = self.prepare_target(db)
+        if made:
+            log(made)
+        there = set(self.neutral_tables("dst", db))
+        for t in self.neutral_tables("src", db):
+            kind = self._engine_of("src", db, t)
+            if t in there or self._renamed_or_mapped(db, t) \
+                    or not kind.endswith("MergeTree") \
+                    or kind.startswith("Replicated"):
+                continue
+            self._made_from_source(db, t)
+            log(f"{t}: not on the target, made as the source made it")
+        self._as_pair().create_missing(db, log)

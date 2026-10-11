@@ -464,7 +464,9 @@ def test_clickhouse_a_mutation_on_a_table_left_out_is_not_a_finding(
                                 exclude=["appdb.audit_log"]))
     eng._rows = lambda side, db, sql, params=None, settings=None: [
         ("audit_log", "DELETE WHERE 1", "")]
-    got = eng.check_deep("appdb")
+    # the catalogue checks beside it read the same canned row as a table's
+    # catalogue and say they cannot: the finding held here is the mutations'
+    got = [r for r in eng.check_deep("appdb") if "mutations" in r.scope]
     assert [r.status for r in got] == ["ok", "ok"], [r.detail for r in got]
 
 
