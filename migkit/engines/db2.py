@@ -13,6 +13,7 @@ runs on x86 only, and this machine is arm64.
 from .. import pieces
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
+from .sqlcatalog import CatalogChecks
 
 #: the declared type, with the numbers a counterpart needs
 DECLARED = ("case when typename in ('DECIMAL', 'NUMERIC') then typename"
@@ -106,8 +107,157 @@ def _twelve(text):
     return nanotime.parse(f"{head}.{frac[:9]}" if frac else head)
 
 
-class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
-    checks = ("schema", "counts", "data")
+def granted(table, schema_col, name_col, privileges, where=""):
+    """One row a privilege held, of a Db2 `*AUTH` catalogue whose columns
+    say each privilege as `Y` or `G` (granted, and granted with the right
+    to grant it on) - every Db2 platform keeps them so."""
+    return " union all ".join(
+        f"select {name_col}, grantee, '{word}' from {table} where"
+        f" {schema_col} = {{schema}} and {col} in ('Y', 'G'){where}"
+        for col, word in privileges)
+
+
+#: Db2 for Linux, UNIX and Windows's catalogue (`SYSCAT`), as IBM documents
+#: it, answering `sqlcatalog.QUESTIONS`
+CATALOGUE = {
+    "keyless": (
+        "select t.tabname from syscat.tables t where t.tabschema = {schema}"
+        " and t.type = 'T' and not exists (select 1 from syscat.tabconst c"
+        " where c.tabschema = t.tabschema and c.tabname = t.tabname and"
+        " c.type in ('P', 'U')) and not exists (select 1 from"
+        " syscat.indexes i where i.tabschema = t.tabschema and i.tabname ="
+        " t.tabname and i.uniquerule in ('P', 'U')) order by 1"),
+    "fks": (
+        "select r.tabname, r.constname, k.colname, r.reftabname, p.colname,"
+        " c.enforced from syscat.references r join syscat.tabconst c on"
+        " c.tabschema = r.tabschema and c.tabname = r.tabname and"
+        " c.constname = r.constname join syscat.keycoluse k on k.tabschema"
+        " = r.tabschema and k.tabname = r.tabname and k.constname ="
+        " r.constname join syscat.keycoluse p on p.tabschema ="
+        " r.reftabschema and p.tabname = r.reftabname and p.constname ="
+        " r.refkeyname and p.colseq = k.colseq where r.tabschema = {schema}"
+        " order by r.tabname, r.constname, k.colseq"),
+    # Db2 keeps no switch to turn a trigger off: one a dropped dependency
+    # left inoperative (`VALID` X) is the one that does not fire
+    "triggers": (
+        "select tabname, trigname, case when valid = 'Y' then 'Y' else 'N'"
+        " end from syscat.triggers where tabschema = {schema} order by 1,"
+        " 2"),
+    "indexes": (
+        "select i.tabname, i.indname, case when i.uniquerule in ('U', 'P')"
+        " then 'Y' else 'N' end, u.colname, case when exists (select 1"
+        " from sysibmadm.admintabinfo a where a.tabschema = i.tabschema and"
+        " a.tabname = i.tabname and a.indexes_require_rebuild = 'Y') then"
+        " 'N' else 'Y' end from syscat.indexes i join syscat.indexcoluse u"
+        " on u.indschema = i.indschema and u.indname = i.indname where"
+        " i.tabschema = {schema} order by i.tabname, i.indname, u.colseq"),
+    "checks": (
+        "select c.tabname, c.constname, case c.type when 'F' then 'foreign"
+        " key' when 'K' then 'check' when 'U' then 'unique' else 'primary"
+        " key' end, case when c.enforced = 'N' then 'not enforced' when"
+        " t.status = 'C' then 'set integrity pending' else '' end from"
+        " syscat.tabconst c join syscat.tables t on t.tabschema ="
+        " c.tabschema and t.tabname = c.tabname where c.tabschema ="
+        " {schema} and c.type in ('F', 'K', 'U', 'P') order by 1, 2"),
+    # a partition's rows are counted by DATAPARTITIONNUM, which names its
+    # SEQNO (`_partition_rows`)
+    "partitions": (
+        "select p.tabname, p.datapartitionname, coalesce(p.lowvalue, '') ||"
+        " ' - ' || coalesce(p.highvalue, ''), p.seqno from"
+        " syscat.datapartitions p join syscat.tables t on t.tabschema ="
+        " p.tabschema and t.tabname = p.tabname where p.tabschema = {schema}"
+        " and t.partition_mode = 'R' order by 1, 4"),
+    "matviews": (
+        "select tabname, case status when 'C' then 'not populated (set"
+        " integrity pending)' when 'X' then 'inoperative' else '' end, ''"
+        " from syscat.tables where tabschema = {schema} and type = 'S'"
+        " order by 1"),
+    "rls": (
+        "select c.tabname, c.controlname || case c.controltype when 'R'"
+        " then ' (row permission)' else ' (column mask)' end, case when"
+        " c.enable = 'Y' and ((c.controltype = 'R' and t.control in ('R',"
+        " 'B')) or (c.controltype = 'C' and t.control in ('C', 'B'))) then"
+        " 'Y' else 'N' end from syscat.controls c join syscat.tables t on"
+        " t.tabschema = c.tabschema and t.tabname = c.tabname where"
+        " c.tabschema = {schema} and c.controltype in ('R', 'C') order by"
+        " 1, 2"),
+    "generated": (
+        "select tabname, colname, case when rowchangetimestamp = 'Y' then"
+        " 'row change timestamp' when rowbegin = 'Y' then 'row begin' when"
+        " rowend = 'Y' then 'row end' when transactionstartid = 'Y' then"
+        " 'transaction start id' else generated || ' ' ||"
+        " cast(substr(text, 1, 4000) as varchar(4000)) end from"
+        " syscat.columns where tabschema = {schema} and generated <> ' '"
+        " and identity = 'N' order by 1, 2"),
+    "collation": (
+        "select tabname, colname, collationschema || '.' || collationname"
+        " from syscat.columns where tabschema = {schema} and collationname"
+        " is not null order by 1, 2"),
+    "charset": (
+        "select tabname, colname, cast(codepage as varchar(10)) from"
+        " syscat.columns where tabschema = {schema} and typename in"
+        " ('CHARACTER', 'VARCHAR', 'LONG VARCHAR', 'CLOB', 'GRAPHIC',"
+        " 'VARGRAPHIC', 'LONG VARGRAPHIC', 'DBCLOB') order by 1, 2"),
+    "owners": (
+        "select 'table', tabname, owner from syscat.tables where tabschema"
+        " = {schema} and type in ('T', 'S') union all select 'view',"
+        " tabname, owner from syscat.tables where tabschema = {schema} and"
+        " type = 'V' union all select case routinetype when 'P' then"
+        " 'procedure' else 'function' end, routinename, owner from"
+        " syscat.routines where routineschema = {schema} and origin <> 'S'"
+        " union all select 'sequence', seqname, owner from syscat.sequences"
+        " where seqschema = {schema} and seqtype = 'S'"),
+    "grants": granted("syscat.tabauth", "tabschema", "tabname", (
+        ("controlauth", "CONTROL"), ("alterauth", "ALTER"),
+        ("deleteauth", "DELETE"), ("indexauth", "INDEX"),
+        ("insertauth", "INSERT"), ("refauth", "REFERENCES"),
+        ("selectauth", "SELECT"), ("updateauth", "UPDATE"))),
+    "seq_grants": granted("syscat.sequenceauth", "seqschema", "seqname", (
+        ("usageauth", "USAGE"), ("alterauth", "ALTER"))),
+    # the first value of the server's next cache: no value at or past it
+    # has been handed out
+    "sequences": (
+        "select seqname, nextcachefirstvalue from syscat.sequences where"
+        " seqschema = {schema} and seqtype = 'S'"),
+    "identity": (
+        "select tabname, colname, nextcachefirstvalue from"
+        " syscat.colidentattributes where tabschema = {schema}"),
+    "objects": (
+        "select 'view', tabname, '' from syscat.tables where tabschema ="
+        " {schema} and type = 'V' union all select 'alias', tabname, '' from"
+        " syscat.tables where tabschema = {schema} and type = 'A' union all"
+        " select case routinetype when 'P' then 'procedure' else 'function'"
+        " end, specificname, '' from syscat.routines where routineschema ="
+        " {schema} and origin <> 'S' union all select 'trigger', trigname,"
+        " tabname from syscat.triggers where tabschema = {schema} union all"
+        " select 'sequence', seqname, '' from syscat.sequences where"
+        " seqschema = {schema} and seqtype = 'S'"),
+    "options": " union all ".join(
+        f"select tabname, '{word}', {col} from syscat.tables where tabschema"
+        " = {schema} and type = 'T'" for word, col in (
+            ("organize by", "tableorg"), ("compression", "compression"),
+            ("row compression", "rowcompmode"), ("append", "append_mode"),
+            ("volatile", "volatile"), ("data capture", "datacapture"),
+            ("lock size", "locksize"),
+            ("not logged initially", "log_attribute"))),
+    # the distribution key of a database partitioned across members; a
+    # table with none lives on one
+    "spread": (
+        "select tabname, listagg(colname, ',') within group (order by"
+        " partkeyseq) from syscat.columns where tabschema = {schema} and"
+        " partkeyseq > 0 group by tabname"),
+    "ids": (
+        "select tabname, cast(tbspaceid as varchar(10)) || '.' ||"
+        " cast(tableid as varchar(10)) from syscat.tables where tabschema"
+        " = {schema} and type = 'T'"),
+}
+
+
+class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
+    checks = ("schema", "counts", "autoinc", "data")
+    CATALOGUE = CATALOGUE
+    #: the types whose text the server writes in a way of its own
+    RENDERED = ("xml", "decfloat")
     CANON_ENGINE = "db2"
     CHARSETS = True
     SQL_DIALECT = None
@@ -193,7 +343,7 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
             side, db, "select tabname from syscat.tables where tabschema ="
                       f" {MARK} and type = 'T' order by 1",
             (self._owner(side, db),)))
-            if not self.hop.excluded(db, t)]
+            if self.in_scope(db, t)]
 
     def neutral_columns(self, side, db, table):
         return [(self._said(n.strip()), t.strip()) for n, t in self._rows(
@@ -233,8 +383,69 @@ class Db2Engine(FoldsToCapitals, DbapiRows, Engine):
 
     def check_deep(self, db):
         """What a load left pending on the target (`_pending`, each
-        platform's own), and text stored twice as UTF-8 on the source."""
-        return self._pending(db) + [self._mojibake(db)]
+        platform's own), text stored twice as UTF-8 on the source, and
+        every question Db2's catalogue answers (`sqlcatalog`): keys,
+        foreign keys and their orphans, triggers, indexes, constraints not
+        held to their rows, partitions, materialized query tables, row
+        permissions and column masks, generated columns, the columns and
+        the whole structure, the objects beside the tables, each table's
+        options and distribution, collations and code pages, NULL against
+        empty text, floats, narrower columns, shifted timestamps, the
+        server's own renderings, keys past the source's, owners and
+        grants."""
+        return self._pending(db) + [self._mojibake(db)] + self._deep(
+            db, self._keyless, self._foreign_keys_found,
+            self._triggers_found, self._indexes_found,
+            self._constraints_found, self._partitions_found,
+            self._matviews_found, self._row_security_found,
+            self._generated_found, self._columns_found,
+            self._structure_found, self._objects_found,
+            self._table_options_found, self._spread_found,
+            self._collations_found, self._charsets_found,
+            self._null_empty_found, self._floats_found,
+            self._narrowing_found, self._timeshift_found,
+            self._rendering_found, self._boundary_found,
+            self._owners_found, self._grants_found)
+
+    #: what `assess` runs before anything moves: the checks whose answer
+    #: is about the move to come - a table with no key, a column the
+    #: target declares narrower, text stored twice, a policy filtering
+    #: what migkit reads, a collation or code page the target sorts or
+    #: holds otherwise
+    PREFLIGHT = ("_keyless", "_narrowing_found", "_mojibake",
+                 "_row_security_found", "_collations_found")
+
+    def _partition_rows(self, side, db, table, partition, said):
+        """A partition's rows, counted by the server: DATAPARTITIONNUM
+        names the partition (its SEQNO) each row is in - one scan a
+        table, asked once."""
+        known = self.__dict__.setdefault("_partition_counts", {})
+        at = (side, db, str(table))
+        if at not in known:
+            first = self._q(self.neutral_columns(side, db, table)[0][0])
+            known[at] = {int(n): int(c) for n, c in self._rows(
+                side, db, f"select datapartitionnum({first}), count(*) from"
+                          f" {self._qualified(side, db, table)} group by"
+                          f" datapartitionnum({first})")}
+        return known[at].get(int(said), 0)
+
+    def _as_text(self, quoted, declared):
+        """An XML value as the server serializes it, any other as its
+        VARCHAR."""
+        if str(declared).split("(")[0].strip().upper() == "XML":
+            return f"xmlserialize({quoted} as clob(1M))"
+        return f"varchar({quoted})"
+
+    def _restart_sql(self, db, name, value):
+        """A sequence, or an identity column (`table.column`), set to hand
+        out `value` next."""
+        owner = self._q(self._owner("dst", db))
+        table, _, column = str(name).rpartition(".")
+        if table:
+            return (f"alter table {owner}.{self._q(table)} alter column"
+                    f" {self._q(column)} restart with {int(value)}")
+        return (f"alter sequence {owner}.{self._q(name)} restart with"
+                f" {int(value)}")
 
     def _held_in_scope(self, db, rows):
         """The rows of a target listing whose first value is a table the
