@@ -391,6 +391,48 @@ class CockroachEngine(PgWireEngine):
             conn.close()
         return out
 
+    def code_routines(self, side, db):
+        """Every function and procedure written in the database, as the
+        stored-code conversion reads them (`storedcode`): from CockroachDB's
+        `pg_proc`, which holds the user-defined functions beside its own
+        built-ins (told apart by schema)."""
+        from ..storedcode.routines import Param, Routine
+        out = []
+        for name, kind, lang, setof, ret, names, modes, types, src, made, \
+                sch in self._rows(
+                side, db, "select p.proname, p.prokind, l.lanname,"
+                          " p.proretset, format_type(p.prorettype, null),"
+                          " coalesce(p.proargnames, '{}'),"
+                          " coalesce(p.proargmodes::text[], '{}'),"
+                          " array(select format_type(t, null) from unnest("
+                          "coalesce(p.proallargtypes, p.proargtypes::oid[]))"
+                          " t), p.prosrc, pg_get_functiondef(p.oid),"
+                          " n.nspname from pg_catalog.pg_proc p join"
+                          " pg_catalog.pg_namespace n on n.oid ="
+                          " p.pronamespace join pg_catalog.pg_language l on"
+                          " l.oid = p.prolang where n.nspname not in "
+                          f"({self._sys()}) and p.prokind in ('f', 'p')"
+                          " order by 1"):
+            if not self.takes(db, "procedure" if kind == "p" else "function",
+                              f"{sch}.{name}"):
+                continue
+            params = []
+            for i, t in enumerate(types):
+                mode = {"i": "in", "o": "out", "b": "inout", "v": "in",
+                        "t": "table"}.get(modes[i] if i < len(modes)
+                                          else "i", "in")
+                if mode != "table":
+                    params.append(Param(names[i] if i < len(names) else "",
+                                        t, mode))
+            as_procedure = kind == "p"
+            out.append(Routine(
+                kind="procedure" if as_procedure else "function",
+                name=str(name), params=params,
+                returns=None if as_procedure else str(ret),
+                returns_set=bool(setof), body=src, definition=made,
+                language=str(lang), settings={"schema": sch}))
+        return out
+
     # ---- the server --------------------------------------------------------
 
     def server_identity(self, side, db):
@@ -428,12 +470,25 @@ class CockroachEngine(PgWireEngine):
             return None
         return str(got[0][0]).lower() in ("true", "t", "1")
 
+    #: `ALTER TABLE ... VALIDATE CONSTRAINT` checks the rows already there
+    VALIDATE_HINT = "ALTER TABLE ... VALIDATE CONSTRAINT <name>"
+
+    def _deep_extra(self):
+        """The checks for what CockroachDB keeps that the other servers on
+        this wire do not: foreign keys and constraints added without
+        checking the rows there, triggers and materialized views."""
+        return [
+            ("fk", self._deep_foreign_keys),
+            ("checks", self._deep_unvalidated),
+            ("triggers", self._deep_triggers),
+            ("matviews", self._deep_matviews)]
+
     def check_deep(self, db):
-        """The target's schema objects whole (`crdb_internal
-        .invalid_objects`: a descriptor a failed schema change left
-        broken reads as a table that is there and is not), and on the
-        source the rangefeeds a follow needs."""
-        out = []
+        """The shared checks (`pgwire`), the target's schema objects whole
+        (`crdb_internal.invalid_objects`: a descriptor a failed schema
+        change left broken reads as a table that is there and is not), and
+        on the source the rangefeeds a follow needs."""
+        out = self._shared_deep(db)
         try:
             bad = self._rows("dst", db, "select obj_name, error, schema_name"
                                         " from crdb_internal.invalid_objects")

@@ -2189,6 +2189,15 @@ WAYS = {
                                      " by feed range"),
         "sqlite": (NOT_APPLICABLE, "SQLite has no partitioned tables"),
         "duckdb": (NOT_APPLICABLE, "DuckDB has no partitioned tables"),
+        "cockroachdb": (NOT_APPLICABLE, "a partition only labels rows of"
+                                        " one table for a zone to place; the"
+                                        " table is read and copied as one,"
+                                        " and its zones are the cluster's"
+                                        " own, not carried"),
+        "dsql": (NOT_APPLICABLE, "a table is split over its storage by the"
+                                 " service itself; no partition is declared"
+                                 " (`CREATE TABLE` has no `PARTITION BY`),"
+                                 " so none is carried"),
         "copybook": (NOT_APPLICABLE, "a file is not partitioned; one file"
                                      " of several record layouts is several"
                                      " tables, by segment"),
