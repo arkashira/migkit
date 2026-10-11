@@ -2505,6 +2505,19 @@ class client_defaults:
         return False
 
 
+def client_dsn(ep, path):
+    """An endpoint as a MySQL client program's DSN, signing in by its
+    defaults file (`client_defaults`, `path`), and `s=1` where the side's
+    TLS is asked for: without it the program's driver turns TLS off
+    whatever the file says. Measured on 8.4 under
+    `require_secure_transport`: refused with `ssl-mode=REQUIRED` in the
+    file and no `s=1`; with it, encrypted, the file's authority checked
+    (another authority's refused with `certificate verify failed`)."""
+    tls = ep.tls_forms("mysql")["mode"] != "PREFERRED"
+    return (f"h={ep.host},P={ep.port},u={ep.user},F={path}"
+            + (",s=1" if tls else ""))
+
+
 def mydumper_session(hop, db, sections=None, tables=None):
     """The dump's defaults file: its session's sql_mode, then the hop's
     row filters of the tables it dumps (`tables`) and the lines migkit

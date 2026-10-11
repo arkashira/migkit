@@ -6941,13 +6941,12 @@ class MySQLEngine(Engine):
                 # take back what the hop keeps
                 if which("pt-table-sync") and not kept:
                     s, tg = self.hop.source, self.hop.target
-                    from ..movers import client_defaults
+                    from ..movers import client_defaults, client_dsn
                     with client_defaults(s, tg) as (fs, ft):
                         p = run(["pt-table-sync", "--print",
-                                 f"h={s.host},P={s.port},u={s.user},"
-                                 f"F={fs},D={db},t={t}",
-                                 f"h={tg.host},P={tg.port},u={tg.user},"
-                                 f"F={ft},D={self._d('dst', db)}"],
+                                 f"{client_dsn(s, fs)},D={db},t={t}",
+                                 f"{client_dsn(tg, ft)},"
+                                 f"D={self._d('dst', db)}"],
                                 check=False, timeout=300)
                     sql = [l for l in p.stdout.splitlines()
                            if l and not l.startswith("#")]
@@ -7404,14 +7403,12 @@ class MySQLEngine(Engine):
             return None
         vals = ", ".join(_ql(k[0]) for k in touched)
         s, tg = self.hop.source, self.hop.target
-        from ..movers import client_defaults
+        from ..movers import client_defaults, client_dsn
         with client_defaults(s, tg) as (fs, ft):
             p = run(["pt-table-sync", "--print",
                      "--where", f"{_qi(pks[0])} in ({vals})",
-                     f"h={s.host},P={s.port},u={s.user},F={fs},"
-                     f"D={db},t={t}",
-                     f"h={tg.host},P={tg.port},u={tg.user},F={ft},"
-                     f"D={self._d('dst', db)}"],
+                     f"{client_dsn(s, fs)},D={db},t={t}",
+                     f"{client_dsn(tg, ft)},D={self._d('dst', db)}"],
                     check=False, timeout=600)
         if p.returncode not in (0, 2):
             return None

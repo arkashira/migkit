@@ -148,6 +148,20 @@ def test_the_row_syncs_defaults_file_carries_it(ca):
     assert "ssl-mode=VERIFY_IDENTITY" in text
 
 
+def test_the_row_syncs_address_turns_it_on(ca):
+    """Measured: without `s=1` the row sync's driver turns TLS off
+    whatever its defaults file says, and a server that takes only TLS
+    refuses it."""
+    from migkit.movers import client_dsn
+    asked = Endpoint(host="db.example.com", port=3306, user="app",
+                     password="pw", options={"ssl_ca": ca})
+    assert client_dsn(asked, "/f.cnf") == \
+        "h=db.example.com,P=3306,u=app,F=/f.cnf,s=1"
+    plain = Endpoint(host="127.0.0.1", port=3306, user="app", password="pw")
+    assert client_dsn(plain, "/f.cnf") == "h=127.0.0.1,P=3306,u=app,F=/f.cnf"
+    assert "pw" not in client_dsn(asked, "/f.cnf")
+
+
 def test_the_pass_throughs_client_signs_in_with_it(ca, monkeypatch):
     from migkit import runner
     from migkit.engines import my_pass
@@ -188,3 +202,17 @@ def test_a_server_that_takes_only_tls_is_read_every_way(one, tmp_path):
         one.one.sql("create table t (id int primary key)", one.name)
         assert "CREATE TABLE `t`" in eng._dump_schema("src", one.name)
     eng.release_kept()
+    if which("pt-table-sync"):
+        # the row sync plans the rows the target lacks over TLS: refused,
+        # it planned nothing and the repair went without it
+        other = one.name + "_b"
+        one.one.sql(f"drop database if exists `{other}`; create database"
+                    f" `{other}`")
+        for name, rows in ((one.name, "(1, 1), (2, 2)"), (other, "(1, 9)")):
+            one.one.sql("create table s (id int primary key, v int);"
+                        f" insert into s values {rows}", name)
+        pair = MySQLEngine(Hop(name="t", engine="mysql", source=ep,
+                               target=ep, databases=[one.name],
+                               db_map={one.name: other}))
+        got = pair._pt_sync_sql(one.name, "s", ["id"], [(1,), (2,)])
+        assert got and any("INSERT" in line.upper() for line in got), got
