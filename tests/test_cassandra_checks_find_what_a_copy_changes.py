@@ -29,6 +29,7 @@ PROVES = [
     ("verify.value.timezone", "cassandra"),
     ("verify.movement.target-ahead", "cassandra"),
     ("verify.access.table-grants", "cassandra"),
+    ("verify.tables", "cassandra"),
 ]
 
 COLS = {"id": "int", "name": "text", "score": "double", "at": "timestamp",
@@ -279,3 +280,56 @@ def test_a_hop_that_leaves_roles_out_is_not_held_to_their_permissions(
                             objects={"roles": False})
     src.add_role("app", [("SELECT", "data/shop/orders")])
     assert _found(eng, "grants").status == "skip"
+
+
+# ---- how each table came out ----------------------------------------------------
+
+def test_a_finding_says_how_each_table_it_compared_came_out(tmp_path,
+                                                            monkeypatch):
+    """A database's one answer about its values carries each table's own:
+    the one that differs, the one that is equal, and the one that was not
+    compared (the target lacks it)."""
+    eng, src, dst = _engine(tmp_path, monkeypatch,
+                            [_row(1, name=None), _row(2)],
+                            [_row(1, name=""), _row(2)])
+    for cl in (src, dst):
+        cl.table("shop", "plain", COLS, ["id"], rows=_same(2))
+    src.table("shop", "lonely", COLS, ["id"], rows=_same(2))
+    got = _found(eng, "nullempty")
+    assert got.tables == {"orders": "diff", "plain": "ok",
+                          "lonely": "skip"}
+    assert _found(eng, "float").tables == {"orders": "ok", "plain": "ok",
+                                           "lonely": "skip"}
+    assert _found(eng, "timeshift").tables["orders"] == "ok"
+    assert _found(eng, "charset").tables["lonely"] == "skip"
+
+
+def test_the_structure_findings_say_how_each_table_came_out(tmp_path,
+                                                            monkeypatch):
+    eng, src, dst = _engine(tmp_path, monkeypatch, _same(), _same(),
+                            dst_cols={**COLS, "n": "int"})
+    for cl in (src, dst):
+        cl.table("shop", "plain", COLS, ["id"], rows=_same(2))
+    src.table("shop", "lonely", COLS, ["id"], rows=_same(2))
+    assert _found(eng, "columns").tables == {"orders": "diff", "plain": "ok",
+                                             "lonely": "skip"}
+    narrow = _found(eng, "narrowing")
+    assert narrow.status == "diff"
+    assert narrow.tables == {"orders": "diff", "plain": "ok",
+                             "lonely": "skip"}
+    assert _found(eng, "table options").tables["orders"] == "ok"
+
+
+def test_a_table_that_differs_in_its_columns_is_named_in_the_finding(
+        tmp_path, monkeypatch):
+    eng, *_ = _engine(tmp_path, monkeypatch, _same(), _same(),
+                      dst_cols={**COLS, "name": "ascii"})
+    assert _found(eng, "columns").tables == {"orders": "diff"}
+
+
+def test_a_finding_that_could_not_read_a_kind_says_no_table_is_equal(
+        tmp_path, monkeypatch):
+    eng, src, dst = _engine(tmp_path, monkeypatch, _same(), _same())
+    dst.broken.add("system_schema.indexes")
+    got = _found(eng, "indexes")
+    assert got.status == "error" and got.tables == {}

@@ -643,9 +643,12 @@ class CassandraEngine(NeutralCopier, Engine):
         out["unread"] = {k: f"{side}: {why}" for side, un in
                          (("source", unread_s), ("target", unread_d))
                          for k, why in un.items()}
+        out["compared"] = {}
         for t in tables:
             theirs = self._columns("dst", db, there[t])
-            if theirs and not self.hop.column_rules(db, t):
+            out["compared"][t] = bool(theirs) and not \
+                self.hop.column_rules(db, t)
+            if out["compared"][t]:
                 out["columns"] += self._column_drift(db, t, there[t],
                                                      theirs)
         out["options"] = self._options_drift(db, tables, there, out["unread"])
@@ -834,27 +837,42 @@ class CassandraEngine(NeutralCopier, Engine):
             + (f"; and {len(found) - 6} more" if len(found) > 6 else ""),
             "", hint)
 
+    @staticmethod
+    def _per_table(drift, kinds):
+        """{table: "ok" | "diff" | "skip"} of the tables a finding about
+        some kinds of object compared (`Result.tables`): "diff" where one
+        of its objects differs, "skip" for a table not compared - not on
+        the target, or its columns mapped by the hop - and nothing at all
+        where a kind could not be read, since then no table is known to be
+        equal."""
+        if any(k in drift["unread"] for k in kinds):
+            return {}
+        bad = {n.split(".", 1)[0] for k in kinds for n, *_ in drift[k]}
+        return {t: ("diff" if t in bad else "ok" if done else "skip")
+                for t, done in drift["compared"].items()}
+
     def _structure(self, db):
         """The findings for what a keyspace holds beside its rows - columns,
         indexes, triggers, materialized views, user types, functions and
         aggregates - the target's columns narrower than the source's, and
         the schema difference as a whole (`_structural`)."""
         from .. import verdict
-        drift, said = self._drift(db), self._said
+        drift, said, per = self._drift(db), self._said, self._per_table
         out = [
             Result("deep", f"{db} columns", *said(
                 drift, ("columns",), "column", "alter the target's tables"
                 " to the source's columns; a column's type cannot be"
                 " altered, so a table whose column differs is copied"
-                " again")),
+                " again"), tables=per(drift, ("columns",))),
             Result("deep", f"{db} indexes", *said(
                 drift, ("indexes",), "secondary index", "make the index on"
                 " the target (structural-fix.cql); built over a loaded"
-                " table it is built once, from its rows")),
+                " table it is built once, from its rows"),
+                tables=per(drift, ("indexes",))),
             Result("deep", f"{db} triggers", *said(
                 drift, ("triggers",), "trigger", "make the trigger on the"
                 " target after the load, so it does not fire for the copy's"
-                " rows")),
+                " rows"), tables=per(drift, ("triggers",))),
             Result("deep", f"{db} matviews", *said(
                 drift, ("views",), "materialized view", "create the view on"
                 " the target from the source's definition (describe"
@@ -871,6 +889,7 @@ class CassandraEngine(NeutralCopier, Engine):
                 "set the option on the target (structural-fix.cql); a"
                 " clustering order cannot be altered, so a table clustered"
                 " otherwise is copied again"),
+                tables=per(drift, ("options", "orders")),
                 category="structure.collection-options")]
         narrow = []
         for table in self.neutral_tables("src", db):
@@ -882,7 +901,12 @@ class CassandraEngine(NeutralCopier, Engine):
                 why = self._narrower(str(c.type), theirs.get(c.column_name))
                 if why:
                     narrow.append(f"{table}.{c.column_name}: {why}")
-        out.append(verdict.narrowing_result(db, narrow))
+        got = verdict.narrowing_result(db, narrow)
+        got.tables = {t: ("diff" if any(n.startswith(f"{t}.")
+                                        for n in narrow) else
+                          "ok" if done else "skip")
+                      for t, done in drift["compared"].items()}
+        out.append(got)
         out.append(self._structural(db, drift))
         return out
 
@@ -1096,13 +1120,20 @@ class CassandraEngine(NeutralCopier, Engine):
         tol = float(self.hop.options.get("float_tolerance", 1e-9))
         flipped, drifted, damaged, shifts, errors = [], [], [], [], []
         read, partial = 0, []
+        words = ("nullempty", "float", "charset", "timeshift")
+        # how each table came out, for each finding (`Result.tables`)
+        came = {w: {} for w in words}
         for table in self.neutral_tables("src", db):
             try:
                 got = self._pairs(db, table)
             except Exception as e:  # noqa: BLE001 - said, as the error
                 errors.append(f"{table}: {str(e).splitlines()[0][:80]}")
+                for w in words:
+                    came[w][table] = "error"
                 continue
             if got is None:
+                for w in words:
+                    came[w][table] = "skip"
                 continue
             cols, key, rows, theirs, whole = got
             read += len(rows)
@@ -1142,21 +1173,32 @@ class CassandraEngine(NeutralCopier, Engine):
             damaged += [f"{table}.{n}: {k} rows hold more U+FFFD"
                         " replacement characters on the target"
                         for n, k in sorted(ruined.items())]
-            shifts += [s for s in (verdict.uniform_shift(
+            here = [s for s in (verdict.uniform_shift(
                 f"{table}.{n}", *pair) for n, pair in sorted(moments.items()))
                 if s]
+            shifts += here
+            for w, found in (("nullempty", flips), ("float", off),
+                             ("charset", ruined), ("timeshift", here)):
+                came[w][table] = "diff" if found else "ok"
         if errors:
             said = ("error", "could not read the rows: "
                     + "; ".join(errors[:3]), "", "")
-            return [Result("deep", f"{db} nullempty", *said),
-                    Result("deep", f"{db} float", *said),
-                    Result("deep", f"{db} charset", *said),
-                    Result("deep", f"{db} timeshift", *said)]
+            return [Result("deep", f"{db} nullempty", *said,
+                           tables=came["nullempty"]),
+                    Result("deep", f"{db} float", *said,
+                           tables=came["float"]),
+                    Result("deep", f"{db} charset", *said,
+                           tables=came["charset"]),
+                    Result("deep", f"{db} timeshift", *said,
+                           tables=came["timeshift"])]
         how = (f"{read:,} rows read on both sides"
                + (f" (a sample - the first {self.VALUES_SAMPLE:,} in token"
                   f" order - of {', '.join(partial[:3])}"
                   + (" and more" if len(partial) > 3 else "") + ")"
                   if partial else " (every row)"))
+
+        shifted = verdict.timeshift_result(db, shifts)
+        shifted.tables = came["timeshift"]
 
         def one(found, ok, hint):
             return (("diff", f"{len(found)} column(s): "
@@ -1168,17 +1210,19 @@ class CassandraEngine(NeutralCopier, Engine):
                 " or the other way", "a null is a cell not written and an"
                 " empty text a written one: decide which the application"
                 " means, and copy the table again by the move's own path,"
-                " which keeps both as they were")),
+                " which keeps both as they were"),
+                tables=came["nullempty"]),
             Result("deep", f"{db} float", *one(
                 drifted, "float columns within the tolerance", "a column"
                 " held as a narrower float, or a value passed through text,"
                 " drifts; compare the columns' types first, or set"
-                " float_tolerance to accept it")),
+                " float_tolerance to accept it"), tables=came["float"]),
             Result("deep", f"{db} charset", *one(
                 damaged, "no replacement characters the source does not"
                 " have", "the rows were written over a connection that did"
-                " not read them as UTF-8; copy them again")),
-            verdict.timeshift_result(db, shifts),
+                " not read them as UTF-8; copy them again"),
+                tables=came["charset"]),
+            shifted,
         ]
 
     # ---- before the move: what each side is, and what it will not do --------
