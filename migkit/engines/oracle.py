@@ -1786,6 +1786,17 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                 out.setdefault(m.group(1).upper(), []).append(self._said(t))
         return out
 
+    def _identity_next(self, db):
+        """[(table, column, sequence, the next value it hands out)] of every
+        identity column on the target."""
+        return self._rows(
+            "dst", db, "select i.table_name, i.column_name,"
+                       " i.sequence_name, q.last_number from"
+                       " all_tab_identity_cols i join all_sequences q"
+                       " on q.sequence_owner = i.owner and"
+                       " q.sequence_name = i.sequence_name where"
+                       f" i.owner = {MARK}", (self._owner("dst", db),))
+
     def sequences_behind(self, db):
         """[(sequence, table, column, the column's largest value)] for each
         identity column on the target whose sequence would hand out a value
@@ -1794,13 +1805,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         hand out. Asked of the target alone."""
         owner = self._owner("dst", db)
         out = []
-        for t, c, s, last in self._rows(
-                "dst", db, "select i.table_name, i.column_name,"
-                           " i.sequence_name, q.last_number from"
-                           " all_tab_identity_cols i join all_sequences q"
-                           " on q.sequence_owner = i.owner and"
-                           " q.sequence_name = i.sequence_name where"
-                           f" i.owner = {MARK}", (owner,)):
+        for t, c, s, last in self._identity_next(db):
             if not self.in_scope(db, self._said(t)):
                 continue
             top = self._rows("dst", db, f"select max({self._q(c)}) from"
@@ -1875,7 +1880,14 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                 src.items()) if n in dst and dst[n] < v]
             undo = [self._restart_sql(db, n, dst[n]) for n, v in sorted(
                 src.items()) if n in dst and dst[n] < v]
-            stmts += self._raise_past(self.sequences_behind(db))
+            behind = self.sequences_behind(db)
+            stmts += self._raise_past(behind)
+            # each column raised past its rows put back to the next value
+            # it handed out before, as each sequence moved is
+            was = {(self._said(t), self._said(c)): int(last)
+                   for t, c, _, last in self._identity_next(db)}
+            undo += [self._restart_sql(db, f"{t}.{c}", was[(t, c)])
+                     for _, t, c, _ in behind]
             if stmts:
                 actions.append(RepairAction(
                     db, "sequences", stmts, undo,

@@ -2070,18 +2070,18 @@ DEPTH_GAPS = {
 #: item: the engines, each waiting on its area's backlog row (`AREAS`).
 #: Such a cell is "not yet": a way is one only once a test proves it
 UNPROVED = {
-    "scope.listings": "oracle ase ",
+    "scope.listings": "ase ",
     "scope.deep": "mongodb db2i db2zos ase hetero",
-    "scope.copy": "mongodb mssql oracle ase ",
-    "scope.repair": "oracle tidb cockroachdb dsql couchbase cosmosdb",
-    "scope.ops": ("mssql redis dynamodb oracle db2i redshift snowflake "
+    "scope.copy": "mongodb mssql ase ",
+    "scope.repair": "tidb cockroachdb dsql couchbase cosmosdb",
+    "scope.ops": ("mssql redis dynamodb db2i redshift snowflake "
                   "bigquery kinesis pubsub iceberg delta tidb cockroachdb "
                   "dsql couchbase cosmosdb sapodp saas"),
-    "scope.row-filter": ("parquet clickhouse dynamodb oracle db2 db2i "
+    "scope.row-filter": ("parquet clickhouse dynamodb db2 db2i "
                          "db2zos ase teradata opensearch cassandra "
                          "snowflake copybook iceberg delta "
                          "tidb couchbase cosmosdb"),
-    "scope.names": ("sqlite parquet clickhouse dynamodb oracle db2 db2i "
+    "scope.names": ("sqlite parquet clickhouse dynamodb db2 db2i "
                     "db2zos ase teradata opensearch cassandra redshift "
                     "snowflake bigquery duckdb copybook iceberg delta tidb "
                     "cockroachdb dsql couchbase cosmosdb"),
@@ -2092,11 +2092,11 @@ UNPROVED = {
                        "cassandra tidb cockroachdb dsql couchbase cosmosdb"),
     "verify.users": "mongodb",
     "verify.repair": "mssql tidb cockroachdb dsql couchbase cosmosdb",
-    "verify.repair-undo": ("mssql oracle tidb cockroachdb dsql couchbase "
+    "verify.repair-undo": ("mssql tidb cockroachdb dsql couchbase "
                            "cosmosdb"),
     "verify.rows-apart": "mongodb",
     "verify.table": ("mongodb parquet clickhouse "
-                     "dynamodb oracle db2 db2i db2zos ase teradata "
+                     "dynamodb db2 db2i db2zos ase teradata "
                      "opensearch cassandra redshift snowflake bigquery "
                      "copybook iceberg delta tidb cockroachdb dsql "
                      "couchbase cosmosdb sapodp saas hetero"),
@@ -2110,7 +2110,7 @@ UNPROVED = {
                              "sapodp "),
     "schema.create": "db2i db2zos ",
     "schema.indexes": "sqlite teradata ",
-    "schema.foreign-keys": "mssql oracle ",
+    "schema.foreign-keys": "mssql ",
     "schema.defaults": "teradata sapodp",
     "schema.views": "postgres ",
     "schema.routines": "tidb",
