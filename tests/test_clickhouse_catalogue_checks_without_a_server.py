@@ -30,6 +30,11 @@ def _col(table, name, typ, kind="", expr="", codec=""):
     return (table, name, typ, kind, expr, codec)
 
 
+def c_q(column):
+    """A column as the statements quote it, inside a call."""
+    return f"`{column}`"
+
+
 class Catalogue:
     """One side of a ClickHouse server as the catalogue says it."""
 
@@ -41,6 +46,7 @@ class Catalogue:
         self.nulls, self.tops, self.utf8, self.times = {}, {}, {}, {}
         self.running, self.queues, self.version = [], [], "24.8.1.1"
         self.replicas_bad = 0
+        self.missing = False
         self.__dict__.update(kw)
 
     def answer(self, sql, params):
@@ -58,6 +64,8 @@ class Catalogue:
             return self.policies
         if "from system.grants" in sql:
             return self.grants
+        if "from system.databases" in sql:
+            return [(int(not self.missing),)]
         if "from system.users" in sql:
             return [(u,) for u in sorted(self.users)]
         if "from system.roles" in sql:
@@ -85,9 +93,15 @@ class Catalogue:
                 if f"`{t}`" in sql and f"`{c}`" in sql:
                     return [n]
             return [(0, 0)]
-        if "toUnixTimestamp(" in sql:
+        if "toString(" in sql:
+            for (t, c), rows in getattr(self, "strings", {}).items():
+                if f"`{t}`" in sql and f"toString({c_q(c)})" in sql:
+                    return rows
+            return []
+        if "toUnixTimestamp" in sql:
+            self.time_sql = getattr(self, "time_sql", []) + [sql]
             for (t, c), rows in self.times.items():
-                if f"`{t}`" in sql and f"toUnixTimestamp(`{c}`)" in sql:
+                if f"`{t}`" in sql and f"({c_q(c)})" in sql:
                     return rows
             return []
         if "select version()" in sql:
@@ -430,6 +444,29 @@ def test_text_that_stopped_being_utf8_or_turned_to_replacement_marks(pair):
     assert _found(engine(), "charset").status == "ok"
 
 
+def test_a_value_the_two_servers_write_as_other_text_is_named_by_column(pair):
+    src, dst, engine = pair
+    _same(src, dst, _table("readings"))
+    _both(src, dst, _col("readings", "id", "UInt64"),
+          _col("readings", "ratio", "Float64"),
+          _col("readings", "tags", "Map(String, UInt8)"),
+          _col("readings", "name", "String"))
+    src.strings = {("readings", "ratio"): [(1, "0.1"), (2, "0.25")],
+                   ("readings", "tags"): [(1, "{'a':1}")]}
+    dst.strings = {("readings", "ratio"): [(1, "0.10000000000000001"),
+                                           (2, "0.25")],
+                   ("readings", "tags"): [(1, "{'a':1}")]}
+    got = _found(engine(), "render")
+    assert got.status == "diff" and got.category == "value.rendering"
+    assert "readings.ratio: renders differently (source '0.1', target" \
+        " '0.10000000000000001')" in got.detail
+    assert "tags" not in got.detail and "name" not in got.detail
+    dst.strings = dict(src.strings)
+    got = _found(engine(), "render")
+    assert got.status == "ok" and "2 exotic-typed columns sampled" \
+        in got.detail
+
+
 def test_a_time_column_shifted_as_a_whole_is_a_zone_not_row_damage(pair):
     src, dst, engine = pair
     _same(src, dst, _table("events"))
@@ -443,6 +480,15 @@ def test_a_time_column_shifted_as_a_whole_is_a_zone_not_row_damage(pair):
     assert "events.at: every row shifted 25200s" in got.detail
     dst.times = dict(src.times)
     assert _found(engine(), "timeshift").status == "ok"
+    # a time of finer ticks is read as whole seconds, by the server
+    _both(src, dst, _col("events", "at64", "Nullable(DateTime64(3))"))
+    src.times[("events", "at64")] = [(1, 5), (2, 6), (3, 7)]
+    dst.times[("events", "at64")] = [(1, 5 + 3600), (2, 6 + 3600),
+                                     (3, 7 + 3600)]
+    got = _found(engine(), "timeshift")
+    assert "events.at64: every row shifted 3600s" in got.detail
+    assert any("intDiv(toUnixTimestamp64Milli(`at64`), 1000)" in q
+               for q in src.time_sql), src.time_sql
 
 
 # ---- grants -----------------------------------------------------------------
@@ -451,25 +497,29 @@ def test_a_grant_the_target_lacks_or_adds_is_a_finding(pair):
     src, dst, engine = pair
     _same(src, dst, _table("orders"), _table("audit_log"))
     src.users, dst.users = {"app", "etl", "ghost"}, {"app", "etl"}
-    src.grants = [("app", None, "SELECT", "orders", None, 0, 0),
-                  ("app", None, "INSERT", "orders", None, 0, 0),
-                  ("etl", None, "SELECT", "audit_log", None, 0, 0),
-                  ("ghost", None, "SELECT", "orders", None, 0, 0),
-                  ("default", None, "ALL", None, None, 0, 1)]
-    dst.grants = [("app", None, "SELECT", "orders", None, 0, 0),
-                  ("app", None, "ALTER", "orders", None, 0, 0),
-                  ("etl", None, "SELECT", "audit_log", None, 0, 0)]
+    src.grants = [("app", None, "SELECT", "app", "orders", None, 0, 0),
+                  ("app", None, "INSERT", "app", "orders", None, 0, 0),
+                  ("etl", None, "SELECT", "app", "audit_log", None, 0, 0),
+                  ("ghost", None, "SELECT", "app", "orders", None, 0, 0),
+                  ("etl", None, "SELECT", None, None, None, 0, 0),
+                  ("default", None, "ALL", None, None, None, 0, 1)]
+    dst.grants = [("app", None, "SELECT", "app", "orders", None, 0, 0),
+                  ("app", None, "ALTER", "app", "orders", None, 0, 0),
+                  ("etl", None, "SELECT", "app", "audit_log", None, 0, 0)]
     got = [r for r in engine(exclude=["app.audit_log"]).check_deep("app")
            if r.scope == "app grants"]
     assert len(got) == 1 and got[0].status == "diff"
     assert got[0].category == "access.table-grants"
     assert "app: INSERT on orders" in got[0].detail
     assert "app: ALTER on orders" in got[0].detail
-    assert "ghost" in got[0].detail and "etl" not in got[0].detail
-    dst.grants += [("app", None, "INSERT", "orders", None, 0, 0)]
-    dst.grants.remove(("app", None, "ALTER", "orders", None, 0, 0))
+    assert "ghost" in got[0].detail
+    # a grant on the whole server reaches these tables too
+    assert "etl: SELECT on *.*" in got[0].detail
+    dst.grants += [("app", None, "INSERT", "app", "orders", None, 0, 0),
+                   ("etl", None, "SELECT", None, None, None, 0, 0)]
+    dst.grants.remove(("app", None, "ALTER", "app", "orders", None, 0, 0))
     dst.users.add("ghost")
-    dst.grants += [("ghost", None, "SELECT", "orders", None, 0, 0)]
+    dst.grants += [("ghost", None, "SELECT", "app", "orders", None, 0, 0)]
     got = [r for r in engine(exclude=["app.audit_log"]).check_deep("app")
            if r.scope == "app grants"]
     assert got[0].status == "ok"
@@ -579,6 +629,12 @@ def test_a_reading_that_failed_is_unknown_never_none(monkeypatch, tmp_path):
     out = ClickHouseEngine(hop)._handwork().rows()
     assert any("UNKNOWN" in r["detail"] and "dictionaries" in r["detail"]
                for r in out), out
+
+
+def test_a_target_not_made_yet_has_no_other_writer(pair):
+    src, dst, engine = pair
+    dst.missing, dst.running = True, [("etl", 2)]
+    assert engine().stream_writers("app") == []
 
 
 def test_another_writer_on_the_target_is_named_and_migkits_own_is_not(pair):
@@ -714,3 +770,81 @@ def test_a_default_works_where_the_server_evaluates_it(monkeypatch, tmp_path):
     assert eng.default_works("dst", "app", "now()") is True
     assert eng.default_works("dst", "app", "order_id + 1") is False
     assert seen[0] == ("select (now())", {"readonly": 1})
+
+
+# ---- scheduled jobs: views that refresh themselves --------------------------
+
+def _jobs_pair(monkeypatch, tmp_path, **kw):
+    """A hop over a source holding two refreshing views and a target holding
+    none, and the statements the servers were sent."""
+    sent = []
+    state = {"src": {"nightly": "Scheduled", "audit_roll": "Scheduled"},
+             "dst": {}}
+
+    def rows(eng, side, db, sql, params=None, settings=None):
+        if "from system.view_refreshes" in sql:
+            return sorted(state[side].items())
+        if "engine = 'MaterializedView'" in sql:
+            return [("nightly", "SELECT sum(x) FROM orders"),
+                    ("audit_roll", "SELECT * FROM audit_log")]
+        if "select name from system.tables where database" in sql:
+            return [("orders",), ("audit_log",)]
+        return []
+
+    class Client:
+        def __init__(self, side):
+            self.side = side
+
+        def command(self, sql, parameters=None, settings=None):
+            sent.append((self.side, sql))
+            _, _, view = sql.rpartition(".")
+            view = view.strip("`")
+            state[self.side][view] = "Disabled" if sql.startswith(
+                "system stop") else "Scheduled"
+
+        def close(self):
+            pass
+    monkeypatch.setattr(ClickHouseEngine, "_rows", rows)
+    monkeypatch.setattr(ClickHouseEngine, "_client",
+                        lambda self, side, db=None, wait=None: Client(side))
+    hop = Hop(name="ch", engine="clickhouse",
+              source=Endpoint(host="10.0.0.1", port=8123, user="u",
+                              password="CHANGE_ME"),
+              target=Endpoint(host="10.0.0.2", port=8123, user="u",
+                              password="CHANGE_ME"), databases=["app"], **kw)
+    hop.report_dir = lambda db=None: tmp_path
+    return hop, ClickHouseEngine(hop), sent, state
+
+
+def test_a_refreshing_view_runs_on_one_side_at_a_time(monkeypatch, tmp_path):
+    from migkit import jobs
+    hop, eng, sent, state = _jobs_pair(monkeypatch, tmp_path)
+    assert jobs.inventory(hop, eng, "app", "src") == [("audit_roll", True),
+                                                      ("nightly", True)]
+    assert jobs.switch(hop, eng, "app", "src", ["nightly"], False,
+                       lambda m: None) == 1
+    assert sent == [("src", "system stop view `app`.`nightly`")]
+    assert [e["name"] for e in jobs.recorded(hop)] == ["nightly"]
+    # on the target at the flip, from the record
+    state["dst"]["nightly"] = "Disabled"
+    assert jobs.switch(hop, eng, "app", "dst", ["nightly"], True,
+                       lambda m: None) == 1
+    assert sent[-1] == ("dst", "system start view `app`.`nightly`")
+    # a switch already made is not made again
+    assert jobs.switch(hop, eng, "app", "src", ["nightly"], False,
+                       lambda m: None) == 0
+    # and every switch is put back, the last first
+    jobs.undo(hop, eng, lambda m: None)
+    assert sent[-2:] == [("dst", "system stop view `app`.`nightly`"),
+                         ("src", "system start view `app`.`nightly`")]
+    assert jobs.recorded(hop) == []
+
+
+def test_a_refreshing_view_that_writes_only_what_the_hop_leaves_out_stays(
+        monkeypatch, tmp_path):
+    from migkit import jobs
+    hop, eng, sent, _ = _jobs_pair(monkeypatch, tmp_path,
+                                   exclude=["app.audit_log"])
+    assert jobs.inventory(hop, eng, "app", "src") == [("nightly", True)]
+    assert jobs.left_alone(hop, eng, "app", "src") == ["audit_roll"]
+    assert sent == []

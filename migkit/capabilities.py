@@ -1712,7 +1712,7 @@ DEPTH_GAPS = {
     },
     "verify.value.rendering": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "mysql mongodb mssql sqlite parquet clickhouse dynamodb "
+                "mysql mongodb mssql sqlite parquet dynamodb "
                 "oracle db2 db2i db2zos ase teradata opensearch cassandra "
                 "redshift snowflake bigquery duckdb copybook iceberg delta "
                 "tidb cockroachdb dsql couchbase cosmosdb hetero"),
@@ -2035,7 +2035,7 @@ DEPTH_GAPS = {
                 "mongodb redis kafka sqlite parquet dynamodb cassandra "
                 "duckdb copybook iceberg delta tidb dsql cosmosdb"),
         **_each(NOT_YET, "P0-PARITY.all",
-                "mssql clickhouse oracle db2 db2i db2zos ase teradata "
+                "mssql oracle db2 db2i db2zos ase teradata "
                 "opensearch redshift snowflake bigquery cockroachdb "
                 "couchbase"),
         **_as("schema", "kinesis pubsub"),
@@ -2156,6 +2156,8 @@ UNPROVED = {
     "assess.writers": "clickhouse",
     "assess.handwork": "clickhouse",
     "move.create-missing": "clickhouse",
+    "verify.value.rendering": "clickhouse",
+    "cutover.jobs": "clickhouse",
 }
 
 

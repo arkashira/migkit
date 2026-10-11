@@ -626,7 +626,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
                                   f" {who}"))
         return out
 
-    # ---- the deep checks that hold both sides' catalogues to each other ------
+    # ---- the deep checks that hold both catalogues to each other ---------
 
     #: what a table of each of these engines is: an object whose rows come
     #: from a query or from a source of its own, not rows it holds
@@ -740,6 +740,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
                 ("table options", self._deep_options),
                 ("boundary", self._deep_boundary),
                 ("charset", self._deep_charset),
+                ("render", self._deep_render),
                 ("timeshift", self._deep_timeshift)):
             try:
                 out += check(db, src, dst)
@@ -1353,6 +1354,64 @@ class ClickHouseEngine(NeutralCopier, Engine):
                        f"{said}: no excess of bytes that are not UTF-8 or of"
                        " replacement characters on the target")]
 
+    #: the types whose text depends on the server that renders them - a
+    #: float's digits, a decimal's trailing zeros, a map's or a tuple's
+    #: layout, an enum's name, an address, a time's ticks
+    EXOTIC = ("Float", "Decimal", "Map", "Tuple", "Nested", "JSON", "Object",
+              "Enum", "IPv", "Array", "DateTime64")
+    #: columns of those types whose rows the render check samples, and rows
+    #: a column
+    RENDER_COLUMNS, RENDER_ROWS = 10, 200
+
+    def _deep_render(self, db, src, dst):
+        """A value that the two servers render as other text: the first
+        rows of the exotic-typed columns, read by key, as each server
+        writes them (`toString`). A float, a decimal or a map is text
+        whose digits and layout belong to the server's version and its
+        settings, and a fingerprint that renders it there cannot tell
+        which column it was."""
+        cols = [(t, c) for t, c, (ta, *_), (tb, *_) in
+                self._both_columns(src, dst)
+                if _unwrap(ta).startswith(self.EXOTIC)
+                and _unwrap(tb).startswith(self.EXOTIC)]
+        drifts, audited = [], 0
+        for t, c in cols[:self.RENDER_COLUMNS]:
+            key = [k.strip().strip("`") for k in src[t]["sorting"].split(",")
+                   if k.strip()]
+            if len(key) != 1 or key[0] not in src[t]["columns"]:
+                continue
+
+            def rows(side, t=t, c=c, key=key):
+                return {str(r[0]): r[1] for r in self._rows(
+                    side, db, f"select {self._q(key[0])}, toString("
+                              f"{self._q(c)}) from"
+                              f" {self._qualified(side, db, t)} where"
+                              f" {self._q(c)} is not null order by"
+                              f" {self._q(key[0])} limit {self.RENDER_ROWS}")}
+            a, b = rows("src"), rows("dst")
+            audited += 1
+            for k in a:
+                if k in b and a[k] != b[k]:
+                    drifts.append(f"{t}.{c}: renders differently (source"
+                                  f" {a[k][:40]!r}, target {b[k][:40]!r})")
+                    break
+        if drifts:
+            return [Result("deep", f"{db} render", "diff",
+                           f"{len(drifts)} columns: " + clauses(drifts, 4),
+                           self._written(db, "render", drifts),
+                           "compare the two servers' versions and their"
+                           " output settings (`check params`)")]
+        return [Result("deep", f"{db} render", "ok",
+                       f"{audited} exotic-typed columns sampled, rendered"
+                       " alike" if audited else "no exotic-typed column")]
+
+    def _epoch_seconds(self, column, declared):
+        """A time column as whole seconds since the epoch, whatever its
+        ticks: the instant, not the wall clock it is shown as."""
+        if _unwrap(declared).startswith("DateTime64"):
+            return f"intDiv(toUnixTimestamp64Milli({self._q(column)}), 1000)"
+        return f"toUnixTimestamp({self._q(column)})"
+
     def _deep_timeshift(self, db, src, dst):
         """A time column every row of which the target holds shifted by a
         zone's offset: the first rows of each, read by key, as epoch
@@ -1360,7 +1419,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         from .. import verdict
         cols = [(t, c) for t, c, (ta, *_), (tb, *_) in
                 self._both_columns(src, dst)
-                if _unwrap(ta).startswith(("DateTime", "DateTime64"))
+                if _unwrap(ta).startswith("DateTime")
                 and _unwrap(tb).startswith("DateTime")]
         shifts = []
         for t, c in cols[:self.TIME_COLUMNS]:
@@ -1369,35 +1428,39 @@ class ClickHouseEngine(NeutralCopier, Engine):
             if len(key) != 1 or key[0] not in src[t]["columns"]:
                 continue
 
-            def rows(side):
+            def rows(side, cat, t=t, c=c, key=key):
+                at = self._epoch_seconds(c, cat[t]["columns"][c][0])
                 return {str(r[0]): r[1] for r in self._rows(
-                    side, db, f"select {self._q(key[0])}, toUnixTimestamp("
-                              f"{self._q(c)}) from"
-                              f" {self._qualified(side, db, t)} where"
+                    side, db, f"select {self._q(key[0])}, {at}"
+                              f" from {self._qualified(side, db, t)} where"
                               f" {self._q(c)} is not null order by"
                               f" {self._q(key[0])} limit {self.TIME_ROWS}")
                         if r[1] is not None}
-            line = verdict.uniform_shift(f"{t}.{c}", rows("src"), rows("dst"))
+            line = verdict.uniform_shift(f"{t}.{c}", rows("src", src),
+                                         rows("dst", dst))
             if line:
                 shifts.append(line)
         return [verdict.timeshift_result(db, shifts)]
 
     def _grants(self, side, db):
         """{grantee: {(privilege, table or '*', column, partial revoke,
-        grant option)}} on the database's tables the hop takes, from the
-        server's grants."""
+        grant option)}} that reach the database's tables the hop takes:
+        on the database, on a table of it, or on the whole server (`*.*`),
+        from the server's grants."""
         out = {}
-        for user, role, access, table, column, partial, option in self._rows(
-                side, db, "select user_name, role_name, access_type, table,"
-                          " column, is_partial_revoke, grant_option from"
-                          " system.grants where database = {d:String}",
-                {"d": self._d(side, db)}):
+        for user, role, access, base, table, column, partial, option in \
+                self._rows(
+                    side, db, "select user_name, role_name, access_type,"
+                              " database, table, column, is_partial_revoke,"
+                              " grant_option from system.grants where"
+                              " database = {d:String} or isNull(database)",
+                    {"d": self._d(side, db)}):
             if table is not None and not self.in_scope(db, str(table)):
                 continue
             who = f"user {user}" if user else f"role {role}"
             out.setdefault(who, set()).add(
-                (str(access), str(table or "*"), str(column or ""),
-                 bool(partial), bool(option)))
+                (str(access), str(table or "*") if base is not None
+                 else "*.*", str(column or ""), bool(partial), bool(option)))
         return out
 
     def _accounts(self, side):
@@ -2275,6 +2338,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         follows: a partition written while the copy runs has other parts
         by the time the follow looks, and is compared again."""
         from .. import tailctl
+        self._refuse_follow(db)
         if token_path.exists():
             return False
         tailctl.begin(self, db, token_path, self.change_point("src", db))
@@ -2365,6 +2429,21 @@ class ClickHouseEngine(NeutralCopier, Engine):
         return movers.stream_cannot_carry(self.hop, db,
                                           self.neutral_tables("src", db))
 
+    def _refuse_follow(self, db):
+        """Stop, before anything is copied or followed, at a hop a follow by
+        partitions cannot hold (`_cannot_follow`)."""
+        refused = self._cannot_follow(db)
+        if refused:
+            raise SystemExit(
+                f"{db}: " + "; ".join(f"{t} ({why})" for t, why in refused[:6])
+                + (f" and {len(refused) - 6} more" if len(refused) > 6
+                   else "")
+                + " - a follow by partitions copies a changed partition"
+                " again whole, under its own name, with every row and every"
+                " kind of change in it, so it cannot hold the table to what"
+                " the hop asks. Nothing was followed: leave these tables out"
+                " of the hop, or carry them another way")
+
     def tail_apply(self, db, go, token_path, log):
         """Keep the target following the source by the partitions that
         changed: each round the source's parts are read, every partition
@@ -2380,17 +2459,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         time only once every changed one has, so the fence
         (`position_reached`) waits for all of them."""
         from .. import tailctl
-        refused = self._cannot_follow(db)
-        if refused:
-            raise SystemExit(
-                f"{db}: " + "; ".join(f"{t} ({why})" for t, why in refused[:6])
-                + (f" and {len(refused) - 6} more" if len(refused) > 6
-                   else "")
-                + " - a follow by partitions copies a changed partition"
-                " again whole, under its own name, with every row and every"
-                " kind of change in it, so it cannot hold the table to what"
-                " the hop asks. Nothing was followed: leave these tables out"
-                " of the hop, or carry them another way")
+        self._refuse_follow(db)
         reach = {}
 
         def look(token):
@@ -2518,11 +2587,11 @@ class ClickHouseEngine(NeutralCopier, Engine):
                 "attach them (ALTER TABLE ... ATTACH PARTITION) or drop"
                 " them, then move")
         if pending:
+            named = ", ".join(sorted({str(r[0]) for r in pending})[:4])
             return Result(
                 "deep", scope, "warn",
                 f"{len(pending)} changes are still being applied on the"
-                f" source ({', '.join(sorted({str(r[0]) for r in pending})[:4])})"
-                " - rows read now are not settled", "",
+                f" source ({named}) - rows read now are not settled", "",
                 "wait for them, then move")
         return Result("deep", scope, "ok",
                       "no part detached from a table, no change still being"
@@ -2649,6 +2718,9 @@ class ClickHouseEngine(NeutralCopier, Engine):
         a view, and inserts running now from an account other than
         migkit's. None can be paused from here."""
         out = super().stream_writers(db)
+        if self.target_missing(db):
+            # a database not made yet has nothing writing into it
+            return out
         ask = {"d": self._d("dst", db)}
         queues = ", ".join(f"'{e}'" for e in self.QUEUE_ENGINES)
         for name, engine in self._scoped_rows(db, self._rows(
@@ -2665,6 +2737,48 @@ class ClickHouseEngine(NeutralCopier, Engine):
                 {**ask, "u": self.hop.target.user or "default"}):
             out.append((f"{n} insert(s) running now from {user}", False))
         return out
+
+    # ---- scheduled jobs: views that refresh themselves -------------------
+
+    def refreshes(self, side, db):
+        """[(name, runs, its query)] of the database's materialized views
+        that refresh on a schedule (`REFRESH EVERY`): the only job
+        ClickHouse runs by itself. `runs` is False for one stopped
+        (`SYSTEM STOP VIEW`); a view kept by inserts is no job."""
+        ask = {"d": self._d(side, db)}
+        queries = {str(n): str(q or "") for n, q in self._rows(
+            side, db, "select name, as_select from system.tables where"
+                      " database = {d:String} and engine ="
+                      " 'MaterializedView'", ask)}
+        return [(str(v), str(st) != "Disabled", queries.get(str(v), ""))
+                for v, st in self._rows(
+                    side, db, "select view, status from"
+                              " system.view_refreshes where database ="
+                              " {d:String} order by view", ask)]
+
+    def set_refresh(self, side, db, name, on):
+        """Let a view refresh again, or stop it refreshing - on either
+        side, as the cutover switches a job off on the source before it is
+        frozen and on on the target at the flip."""
+        client = self._client(side, db)
+        try:
+            client.command(f"system {'start' if on else 'stop'} view"
+                           f" {self._qualified(side, db, name)}")
+        finally:
+            client.close()
+
+    def every_table(self, side, db):
+        """The names of every table in the database, the hop's or not: a
+        job's text is read against all of them to tell the tables it
+        writes that the hop takes from those it does not."""
+        return [str(t) for (t,) in self._rows(
+            side, db, "select name from system.tables where database ="
+                      " {d:String} and not is_temporary",
+            {"d": self._d(side, db)})]
+
+    def functions(self, side):
+        """The names of the SQL functions its users wrote."""
+        return sorted(self._functions(side))
 
     # ---- the schema other engines are given, and made here ------------------
 

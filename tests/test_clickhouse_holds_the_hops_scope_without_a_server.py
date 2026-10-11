@@ -171,6 +171,10 @@ def test_a_follow_by_partitions_refuses_a_table_that_carries_fewer_changes(
     assert "audit_log (it carries only inserts, updates)" in said
     assert "Nothing was followed" in said
     assert ran == []
+    # and before the copy a follow was meant to come after, not after it
+    with pytest.raises(SystemExit, match="audit_log"):
+        eng.tail_start("app", tmp_path / "token.json")
+    assert not (tmp_path / "token.json").exists()
 
 
 def test_a_follow_refuses_a_table_it_would_carry_unfiltered_or_by_another_name(
