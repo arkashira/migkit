@@ -2086,7 +2086,7 @@ UNPROVED = {
                     "db2zos ase teradata opensearch cassandra redshift "
                     "snowflake bigquery duckdb copybook iceberg delta tidb "
                     "cockroachdb dsql couchbase cosmosdb"),
-    "verify.movement.target-ahead": "mongodb mssql",
+    "verify.movement.target-ahead": "mongodb",
     "verify.structure.indexes": "tidb",
     "verify.delta": "db2i tidb cockroachdb dsql couchbase cosmosdb",
     "verify.fence": "db2i",
