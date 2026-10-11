@@ -1,6 +1,7 @@
 """Scheduled jobs inside the databases, on exactly one side at a time.
 
-A job the database runs by itself - a pg_cron job, a MySQL event - writes
+A job the database runs by itself - a pg_cron job, a MySQL event, a
+ClickHouse materialized view that refreshes on a schedule - writes
 rows nobody's application wrote. On both sides at once it writes them
 twice: on the target before the flip (a copied `cron.job` is a table, and
 pg_cron runs on a logical subscriber, which is an ordinary primary), and
@@ -59,6 +60,8 @@ def _read(hop, eng, db, side):
         elif kind == "mysql":
             got = [(name, status == "ENABLED", body) for name, status, _, body
                    in _my_events(eng, db, side)]
+        elif kind == "clickhouse":
+            got = eng.refreshes(side, db)
         else:
             return None
     except Exception:  # noqa: BLE001 - not readable: said as unknown
@@ -100,6 +103,10 @@ def _names(kind, eng, db, side):
     name, lower case}) of one database on one side: what a job's text is
     read against."""
     tables = {}
+    if kind == "clickhouse":
+        for t in eng.every_table(side, db):
+            tables.setdefault(str(t).lower(), []).append(t)
+        return tables, {str(f).lower() for f in eng.functions(side)}
     for t in eng._all_tables(side, db):
         tables.setdefault(str(t).rpartition(".")[2].strip('"').lower(),
                           []).append(t)
@@ -216,6 +223,16 @@ def switch(hop, eng, db, side, names, on, say):
                          f" `{tdb}`.`{name}` "
                          + ("enable" if on else _my_off(eng, side)))
             n += 1
+    elif kind == "clickhouse":
+        have = {name: on for name, on, _ in eng.refreshes(side, db)}
+        for name in names:
+            if name not in have or have[name] == on:
+                continue
+            done.append({"db": db, "side": side, "name": name,
+                         "was": have[name]})
+            _save(hop, done)
+            eng.set_refresh(side, db, name, on)
+            n += 1
     elif kind == "postgres":
         home = _pg_cron_db(eng, db, side)
         if not home or not _has_cron(eng, side, home):
@@ -262,6 +279,8 @@ def undo(hop, eng, say, side=None):
                    "disable" if was == "DISABLED" else _my_off(e, s))
             e._q(s, f"alter definer = {_my_definer(entry['definer'])}"
                     f" event `{e._d(s, db)}`.`{name}` {how}")
+        elif kind == "clickhouse":
+            e.set_refresh(s, db, name, entry["was"])
         else:
             home = _pg_cron_db(e, db, s)
             e._psql(s, home, f"select cron.alter_job({int(entry['jobid'])},"

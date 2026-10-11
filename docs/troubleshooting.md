@@ -967,7 +967,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> already exists on the target - migkit will not alter or replace a table that is already there
 
+* <...>: a row is deleted by its key, and none was given
+
 * <...>: partition <...> <...>
+
+* <...>: <...> and <...> more | <...> - a follow by partitions copies a changed partition again whole, under its own name, with every row and every kind of change in it, so it cannot hold the table to what the hop asks. Nothing was followed: leave these tables out of the hop, or carry them another way
+
+* materialized views taken off for the load could not be attached again: <...>. `ATTACH TABLE` each, or run the move again
 
 ## DynamoDB
 

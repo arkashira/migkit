@@ -199,6 +199,14 @@ SIGNATURES = {
                    ("executable", "keydb")], "redis_version"),
         ("redis", [("redis_version", "")], "redis_version"),
     ],
+    # ClickHouse names its build in `system.build_options` (`VERSION_FULL`);
+    # a distributor's fork carries its own name in the version it reports
+    # (Altinity's stable builds end in `.altinitystable`). Neither is
+    # measured here yet: named, with no limit recorded
+    "clickhouse": [
+        ("altinity", [("version", "altinity")], "version"),
+        ("clickhouse", [("version_full", "clickhouse")], "version"),
+    ],
 }
 
 # What migkit measured about a brand, keyed by capability. A brand absent
