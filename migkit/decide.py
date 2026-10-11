@@ -2147,6 +2147,7 @@ WAYS = {
         **_NONE,
         "postgres": ("yes", "@check_deep"),
         "mysql": ("yes", "@check_deep"),
+        "mssql": ("yes", "@check_deep"),
         "clickhouse": ("yes", "@_partitioned_by"),
         "kafka": ("yes", "@move_table"),
         "cassandra": (NOT_APPLICABLE, "every table is partitioned by its"

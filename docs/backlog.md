@@ -3999,6 +3999,35 @@ way the code does not show, a "not yet" whose row is not in
 shows the matrix: per engine the ways proved of the items that apply, area
 by area, and per item the engines in each state.
 
+*SQL Server brought up to PostgreSQL and MySQL (branch gap-mssql,
+2026-10-11):* of its 49 open cells, 9 are proved by stand-in tests (a
+scripted server, `tests/mssql_stub.py`, no server) - and a target ahead of
+the source, which the list lacked, a tenth: the tables its copy lists, the
+objects beside its tables, the changes it applies, the finding that names
+its table, the repair of counters and rows with its undo, the keys a scope
+leaves out, and a target kept from the application and given back exactly -
+the statements of those ran on servers before. 32 are built and read `test
+owed` in `UNPROVED` (one of them, the tail's per-table states, was built
+before), their statements new and never run on a server: the row filter and the name rules
+in its counts and hash pass; the value checks (narrowing, time zone,
+character set, collation, computed columns, NULL against empty, floats,
+rendering), indexes switched off, partitions, CHECK constraints not
+trusted, row-level security, EXECUTE AS drift and table and sequence
+grants; a swapped table told apart by its object id; the assessment
+(versions, brands, its own checks, the predictive checks, the target's
+room, other writers, the work left for hands); the indexes and column rules
+a table is made with and built after its rows; the tables the target lacks
+made first; the load window (triggers off, recorded first, put back; the
+indexes stay on, as in the other two); the Agent jobs run on one side at a
+time; the partitioned table's deep check. One is not applicable (an indexed
+view cannot go stale). Seven are left, with the reason: column transforms and the
+collection options (not yet on PostgreSQL and MySQL either); the schema-diff
+reading (no program reads SQL Server's); the per-table DDL policy (Change
+Tracking carries no DDL, and reading a table whose tracking history was cut
+as a reload rewrites the read that stops the tail today); two-way marks;
+TLS (the driver checks no certificate); fencing (a hold in every write path,
+and a server to prove it).
+
 Measured at 9fd2442: 3,096 cells - yes 435, test owed
 252, not applicable 869, not yet 1,540. By area (yes / owed / n/a / not
 yet): scope 37/92/50/181, verify 124/74/499/707, tail 26/18/59/113,

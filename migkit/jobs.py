@@ -59,6 +59,8 @@ def _read(hop, eng, db, side):
         elif kind == "mysql":
             got = [(name, status == "ENABLED", body) for name, status, _, body
                    in _my_events(eng, db, side)]
+        elif kind == "mssql":
+            got = _ms_jobs(eng, db, side)
         else:
             return None
     except Exception:  # noqa: BLE001 - not readable: said as unknown
@@ -100,10 +102,15 @@ def _names(kind, eng, db, side):
     name, lower case}) of one database on one side: what a job's text is
     read against."""
     tables = {}
-    for t in eng._all_tables(side, db):
+    for t in (_ms_tables(eng, db, side) if kind == "mssql"
+              else eng._all_tables(side, db)):
         tables.setdefault(str(t).rpartition(".")[2].strip('"').lower(),
                           []).append(t)
-    if kind == "postgres":
+    if kind == "mssql":
+        routines = {str(r[0]).lower() for r in eng._rows(
+            side, db, "select o.name from sys.objects o where o.type in"
+                      " ('P', 'FN', 'IF', 'TF') and o.is_ms_shipped = 0")}
+    elif kind == "postgres":
         got = eng._psql(side, db, "select distinct lower(p.proname) from"
                                   " pg_proc p join pg_namespace n on n.oid ="
                                   " p.pronamespace where n.nspname not in"
@@ -114,6 +121,40 @@ def _names(kind, eng, db, side):
             side, "select routine_name from information_schema.routines"
                   " where routine_schema = %s", (eng._d(side, db),))}
     return tables, routines
+
+
+def _ms_jobs(eng, db, side):
+    """[(name, on, its text)] of the SQL Server Agent jobs with a step that
+    runs in this database. A job belongs to the server, not to a database:
+    it is the database's for each step it runs there, and its text is
+    those steps'."""
+    out = {}
+    for name, on, command in eng._rows(
+            side, db, "select j.name, j.enabled, cast(s.command as"
+                      " nvarchar(max)) from msdb.dbo.sysjobs j join"
+                      " msdb.dbo.sysjobsteps s on s.job_id = j.job_id where"
+                      " s.database_name = db_name() order by j.name,"
+                      " s.step_id"):
+        one = out.setdefault(str(name), [bool(on), []])
+        one[1].append(str(command or ""))
+    return [(name, on, "\n".join(steps)) for name, (on, steps) in
+            sorted(out.items())]
+
+
+def _ms_tables(eng, db, side):
+    """Every table of the database as SQL Server lists them, the hop's or
+    not: what a job's text is read against."""
+    return [str(r[0]) for r in eng._rows(
+        side, db, "select s.name + '.' + t.name from sys.tables t join"
+                  " sys.schemas s on s.schema_id = t.schema_id where"
+                  " t.is_ms_shipped = 0 order by 1")]
+
+
+def _ms_enable(name, on):
+    """The statement that switches a SQL Server Agent job on or off,
+    its name a literal."""
+    return ("exec msdb.dbo.sp_update_job @job_name = N'"
+            + str(name).replace("'", "''") + f"', @enabled = {int(bool(on))}")
 
 
 def _pg_cron_db(eng, db, side):
@@ -216,6 +257,16 @@ def switch(hop, eng, db, side, names, on, say):
                          f" `{tdb}`.`{name}` "
                          + ("enable" if on else _my_off(eng, side)))
             n += 1
+    elif kind == "mssql":
+        have = {name: enabled for name, enabled, _ in _ms_jobs(eng, db, side)}
+        for name in names:
+            if name not in have or have[name] == on:
+                continue
+            done.append({"db": db, "side": side, "name": name,
+                         "was": have[name]})
+            _save(hop, done)
+            eng._cmd(side, db, _ms_enable(name, on))
+            n += 1
     elif kind == "postgres":
         home = _pg_cron_db(eng, db, side)
         if not home or not _has_cron(eng, side, home):
@@ -262,6 +313,8 @@ def undo(hop, eng, say, side=None):
                    "disable" if was == "DISABLED" else _my_off(e, s))
             e._q(s, f"alter definer = {_my_definer(entry['definer'])}"
                     f" event `{e._d(s, db)}`.`{name}` {how}")
+        elif kind == "mssql":
+            e._cmd(s, db, _ms_enable(name, bool(entry["was"])))
         else:
             home = _pg_cron_db(e, db, s)
             e._psql(s, home, f"select cron.alter_job({int(entry['jobid'])},"

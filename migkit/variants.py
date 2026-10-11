@@ -153,6 +153,24 @@ SIGNATURES = {
     # *absence* of a field is a brand named by guessing. They come back
     # unidentified, which `rows` reports as "migkit cannot say which software
     # is answering" - which is the truth.
+    # SQL Server names itself in the banner of `@@version`; the services
+    # built on it, by what they report beside it. Azure SQL Edge says so in
+    # the banner and by its engine edition (9), Azure's other services by
+    # theirs (`SERVERPROPERTY('EngineEdition')`: 5 a database, 8 a managed
+    # instance), and Babelfish - PostgreSQL answering on this wire - by a
+    # property only it answers; a SQL Server answers it NULL, and the
+    # probe leaves the field out then, so its absence names nothing. Not
+    # run against any of them: each is identified, and none is measured.
+    "mssql": [
+        ("babelfish", [("babelfish", "")], "babelfish"),
+        ("azure-sql-edge", [("banner", "azure sql edge"),
+                            ("engine_edition", "9")], "product_version"),
+        ("azure-sql-managed-instance", [("engine_edition", "8")],
+         "product_version"),
+        ("azure-sql-database", [("engine_edition", "5")],
+         "product_version"),
+        ("mssql", [("banner", "microsoft sql server")], "product_version"),
+    ],
     "mongodb": [
         ("ferretdb", [("ferretdb", "")], "version"),
         # Azure Cosmos DB answers a command of its own, which MongoDB does
