@@ -1018,6 +1018,41 @@ def reader_rate(eng, side, db):
     return float(size) / took, name
 
 
+def reader_check(eng, side, db):
+    """(level, detail, measured) of the LogMiner reader against the redo
+    the source writes: the one place this is measured and judged. `fail`
+    where the reader mines slower than the source's busiest hour writes
+    (it would fall behind), `warn` where it is under twice that or where
+    it could not be measured (`measured` False: unknown, never a pass),
+    `pass` otherwise. The detail carries the figures. `assess` lists it;
+    the gate of a move or a tail (`ready`) stops on its `fail`."""
+    try:
+        rate = redo_rate(eng, side, db)
+        mined = reader_rate(eng, side, db)
+    except SystemExit as e:
+        return "warn", f"not measured: {e}", False
+    except Exception as e:  # noqa: BLE001 - said
+        return "warn", ("not measured:"
+                        f" {str(e).splitlines()[0][:90]}"), False
+    if mined is None or rate is None:
+        return "warn", ("not measured: the source has archived no redo in"
+                        " the last day, so neither its rate nor the"
+                        " reader's could be read"), False
+    peak, avg = rate
+    speed, _ = mined
+    words = (f"the source archived {peak / 2 ** 20:.2f} MB of redo a second"
+             f" at its busiest hour ({avg / 2 ** 20:.2f} on average); the"
+             f" reader mined {speed / 2 ** 20:.2f} MB a second")
+    if speed < peak:
+        return "fail", (words + " - it would fall behind at the busiest"
+                        " hour. The redo-file reader, run next to the redo,"
+                        " reads without the database's help"), True
+    if speed < 2 * peak:
+        return "warn", (words + " - under twice the peak, so a busier hour"
+                        " than the last day's would put it behind"), True
+    return "pass", words, True
+
+
 def assess(eng, side, db):
     """What `assess` says about following this source: whether the redo
     can be read back, and whether the reader keeps up with it - the redo
@@ -1053,33 +1088,6 @@ def assess(eng, side, db):
                 " a mined transaction in")
     except Exception:  # noqa: BLE001 - optional
         pass
-    try:
-        rate = redo_rate(eng, side, db)
-        mined = reader_rate(eng, side, db)
-    except SystemExit as e:
-        add("warn", "reader rate", f"not measured: {e}")
-        return items
-    except Exception as e:  # noqa: BLE001 - said
-        add("warn", "reader rate", "not measured:"
-            f" {str(e).splitlines()[0][:90]}")
-        return items
-    if mined is None or rate is None:
-        add("warn", "reader rate", "not measured: the source has archived"
-            " no redo in the last day, so neither its rate nor the"
-            " reader's could be read")
-        return items
-    peak, avg = rate
-    speed, _ = mined
-    words = (f"the source archived {peak / 2 ** 20:.2f} MB of redo a second"
-             f" at its busiest hour ({avg / 2 ** 20:.2f} on average); the"
-             f" reader mined {speed / 2 ** 20:.2f} MB a second")
-    if speed < peak:
-        add("fail", "reader rate", words + " - it would fall behind at the"
-            " busiest hour. The redo-file reader, run next to the redo,"
-            " reads without the database's help")
-    elif speed < 2 * peak:
-        add("warn", "reader rate", words + " - under twice the peak, so a"
-            " busier hour than the last day's would put it behind")
-    else:
-        add("pass", "reader rate", words)
+    level, detail, _ = reader_check(eng, side, db)
+    add(level, "reader rate", detail)
     return items

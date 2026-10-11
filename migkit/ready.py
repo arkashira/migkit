@@ -265,6 +265,44 @@ def _resources(hop, eng, dbs):
     return out
 
 
+def _change_reader(hop, eng, dbs, mode):
+    """A source whose change reader is measured against the redo it must
+    follow (`change_reader_check`: an Oracle source, alone or the source
+    side of a pair), for a step that follows the source's changes: a
+    reader measured to fall behind at the source's busiest hour stops the
+    start, with the figures. A reader that could not be measured is said
+    as unknown, a warning like every other unknown, never a pass. Where
+    the step follows nothing, or the engine has no such measure, nothing
+    is asked. `assess` carries the same verdict in the engine's own rows."""
+    if _goal(hop) == "verify" or not _streams(hop, mode):
+        return []
+    source = getattr(eng, "src_engine", eng)
+    check = getattr(source, "change_reader_check", None)
+    if check is None:
+        return []
+    out = []
+    for d in dbs:
+        try:
+            got = check(d)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - unknown
+            got = ("warn", f"not measured: {_last(e)}", False)
+        if got is None:
+            continue
+        level, detail, measured = got
+        what = f"source: {d}: the change reader keeps up with the redo"
+        fix = ("run the redo-file reader beside the redo (redo_reader:"
+               " host:port in the source's options), or say"
+               " MIGKIT_PREFLIGHT=warn to follow it behind")
+        if not measured:
+            out.append(Item("warn", BEFORE, what,
+                            f"{detail} - unknown, not clean", fix))
+        elif level == "fail":
+            out.append(Item("fail", BEFORE, what, detail, fix, gates=True))
+        else:
+            out.append(Item(level, BEFORE, what, detail))
+    return out
+
+
 def _mapping(eng):
     """A mapping that would land two tables on one, or match nothing
     (`Engine._mapping_items`): the first stops, the second is said."""
@@ -521,6 +559,8 @@ def items(hop, eng, dbs=None, mode=None, quick=False, assessed=None):
                  lambda: _managed(hop, eng, dbs, quick),
                  lambda: _target(hop, eng, dbs),
                  lambda: _resources(hop, eng, dbs),
+                 lambda: _change_reader(hop, eng, dbs, mode) if quick
+                 else [],
                  lambda: _case(hop, eng, dbs, quick),
                  lambda: _goal_checks(hop, eng, dbs, quick),
                  lambda: _rehearsed(hop, eng, dbs) if not quick else
