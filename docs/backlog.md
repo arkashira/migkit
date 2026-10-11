@@ -4053,6 +4053,35 @@ ClickHouse's and Oracle's deep findings and the shared capacity check's
 end in words no category reads (`mutations`, `constraints`, `capacity`),
 so they reach the verdict unclassified.
 
+*Oracle, 2026-10-11 (P0-PARITY.scope, .verify, .tail, .all): of its 57
+cells open, 16 are ways with a stub test, 37 are built and owed a sandbox
+run, 4 are left.* Proved over stubbed catalogues (statements the engine
+already sent): the scope read the same way by the checks, the copy list,
+the repair, the change tail, the row filter and the name rules, through
+the pair (`tests/test_oracle_holds_to_the_hops_scope_through_the_pair.py`);
+a repair's every identity column put back where it was; foreign keys read
+whole; the not-validated constraints and the character sets as findings of
+their own category; the rows apart and how each table came out in a
+finding; a copy held to the SCN it began at (the tail's seam for a table
+added) and a table that left read again from where it left; tables the
+target lacks made from the source's. Built and owed a server (they send
+statements that have not run against Oracle, `capabilities.UNPROVED`):
+the deep checks (keys, foreign-key orphans, deferrable constraints,
+columns, narrowing, computed columns, collations, NULL and empty, floats,
+shifted times, interval and zone rendering, target ahead, triggers,
+indexes, materialized views, row-level policies, grants, sequence grants,
+rights a routine runs with, table options), the assessment (versions,
+brand, pre-flight, room, other writers, the work left to hands), column
+rules and indexes made on the target, scheduled jobs switched one side at
+a time at cutover, TLS with the server's certificate checked, a schema
+change read from the redo as text, and rows sized by the server. Left:
+two-way marks (a rung of marking, a reader that leaves it out and a proof,
+all measured on a server - the rule of `marks`), fencing by the target
+itself (Oracle has no shared row lock to hold a writer's number under: a
+table lock design that has to be measured, and `shared` and `fencing` write
+their statements for `%s` parameters), column transforms (not yet on
+PostgreSQL and MySQL either), and the structural schema diff (a program's).
+
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
 Asked: "is the decision engine smart or still flat - I want it really

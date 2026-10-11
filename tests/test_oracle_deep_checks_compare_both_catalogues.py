@@ -12,16 +12,14 @@ cells named in `PROVES` rest on statements the engine already sent.
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from migkit.config import Endpoint, Hop
 from migkit.engines.base import CATEGORIES, Result
 from migkit.engines.oracle import OracleEngine
-from tests.oracle_catalogue import Catalogue, cat  # noqa: F401
+from tests.oracle_catalogue import cat  # noqa: F401
 
 EP = Endpoint(host="10.0.0.5", port=1521, user="app", password="CHANGE_ME")
 
-#: what this module proves, item by engine (`capabilities.proofs`): the two
+#: what this module proves, item by engine (`capabilities.proofs`): the three
 #: whose every statement is one the engine already sent
 PROVES = [
     ("verify.structure.unvalidated-constraints", "oracle"),
@@ -164,10 +162,6 @@ def test_a_character_set_the_target_cannot_widen_back_is_a_downgrade(
         in got.detail
     settings["dst"] = dict(settings["src"])
     assert eng._deep_charset("app").status == "ok"
-
-
-def _columns(cat, kinds_sql, rows):
-    cat.on(kinds_sql, rows)
 
 
 def test_a_text_column_that_lost_its_values_to_null_is_found(cat):

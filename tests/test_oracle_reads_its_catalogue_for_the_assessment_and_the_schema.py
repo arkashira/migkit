@@ -15,7 +15,7 @@ import pytest
 
 from migkit.config import Endpoint, Hop
 from migkit.engines.oracle import OracleEngine
-from tests.oracle_catalogue import Catalogue, cat  # noqa: F401
+from tests.oracle_catalogue import cat  # noqa: F401
 
 EP = Endpoint(host="10.0.0.5", port=1521, user="app", password="CHANGE_ME")
 

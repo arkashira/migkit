@@ -19,7 +19,7 @@ from migkit.config import Endpoint, Hop
 from migkit.engines.base import Engine
 from migkit.engines.hetero import HeteroEngine
 from migkit.engines.oracle import OracleEngine
-from tests.oracle_catalogue import Catalogue, cat  # noqa: F401
+from tests.oracle_catalogue import cat  # noqa: F401
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("verify.rows-apart", "oracle"), ("verify.tables", "oracle")]
