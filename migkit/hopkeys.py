@@ -243,10 +243,10 @@ HOP_KEYS = {
                    " names and patterns, or databases each with all, its"
                    " tables or its schemas", "list|dict"),
     "objects": Key("the kinds of object beside the tables carried: views,"
-                   " routines, triggers, events, sequences, roles - each"
-                   " all (the default), none, or a list of names; one not"
-                   " carried is out of scope as an excluded table is",
-                   "dict"),
+                   " routines, triggers, events, sequences, dictionaries,"
+                   " roles - each all (the default), none, or a list of"
+                   " names; one not carried is out of scope as an excluded"
+                   " table is", "dict"),
     "include": Key("the only databases, schemas or tables taken - moved,"
                    " followed, checked and repaired - the rest left alone"
                    " as if excluded; exclude wins where both name one."
@@ -498,8 +498,15 @@ HOP_OPTIONS = {
     "lob_scan_seconds": Key("the budget of the large-value scan", "int",
                             ("mysql",)),
     "mask": Key("values reports show as salted hashes", "str|list|bool"),
-    "mask_on_write": Key("table.column -> null or constant <text>: masked"
-                         " on the way into the target", "dict", ("mysql",)),
+    "mask_on_write": Key("[db.][schema.]table.column (names or patterns) ->"
+                         " null, constant <text>, hash or truncate <n>:"
+                         " written so into the target by every way that"
+                         " carries the table, and proved as written",
+                         "dict"),
+    "mask_key": Key("the key a hash in mask_on_write is taken with - a"
+                    " reference to a secret (env:, file:, vault:, ...);"
+                    " the same value gives the same digest on every run",
+                    "str"),
     "max_message_bytes": Key("the largest message a stream takes", "int",
                              STREAMS),
     "mongodb_entitlement": Key("atlas or enterprise: the MongoDB licence"
@@ -2255,6 +2262,71 @@ def _where_problems(where, mapping, engine):
     return out
 
 
+def _collision_problems(where, raw, engine, opts):
+    """Two rules of `mapping.tables` that land on one name on the target
+    (`Hop.ambiguous_mapping`, without case where the target's names have
+    none), read off the rules before anything is listed: whichever is
+    written second overwrites the first. The source's own tables, name
+    rules and all, are asked before anything runs (`Hop.name_collisions`)."""
+    from .config import Endpoint, Hop
+    mapping = raw.get("mapping")
+    if not isinstance(mapping, dict) or not isinstance(
+            mapping.get("tables"), dict):
+        return []
+    probe = Hop(name="", engine=engine or "", source=Endpoint(),
+                target=Endpoint(), mapping={"tables": mapping["tables"]},
+                db_map=raw.get("db_map") if isinstance(raw.get("db_map"),
+                                                       dict) else {},
+                options={k: v for k, v in opts.items()
+                         if k in ("source_engine", "target_engine")})
+    try:
+        clash = probe.ambiguous_mapping()
+    except Exception:  # noqa: BLE001 - said by the rules' own checks
+        return []
+    return [Problem("error", f"{where}.mapping.tables",
+                    f"{', '.join(srcs)} all land on {dst} on the target -"
+                    " whichever is written second overwrites the first;"
+                    " give them separate names")
+            for dst, srcs in sorted(clash.items())]
+
+
+def _mask_problems(where, opts):
+    """`mask_on_write` said wrong, before anything is written: a key that
+    names no table, a rule that is not a transform (`transforms.parse`),
+    a hash with no `mask_key` - a digest without a key is a dictionary
+    away from the value - and a key written out in the file."""
+    from . import addresses, transforms
+    rules = opts.get("mask_on_write")
+    out = []
+    key = opts.get("mask_key")
+    if isinstance(key, str) and key and not addresses.is_reference(key) \
+            and key != "CHANGE_ME":
+        out.append(Problem(
+            "warn", f"{where}.options.mask_key",
+            "written in plain text - whoever reads the file can take every"
+            " digest back to its value; write a reference: env:NAME,"
+            " file:/path, vault:path#key, keyring:name"))
+    if not isinstance(rules, dict):
+        return out
+    for col, rule in rules.items():
+        at = f"{where}.options.mask_on_write.{col}"
+        table, _, column = str(col).rpartition(".")
+        if not table or not column:
+            out.append(Problem("error", at, "names no table - write"
+                               " table.column, or a pattern for the table"))
+            continue
+        try:
+            kind, _ = transforms.parse(rule)
+        except SystemExit as e:
+            out.append(Problem("error", at, str(e)))
+            continue
+        if kind == "hash" and not key:
+            out.append(Problem("error", at, "hash needs the hop's mask_key"
+                               " (a secret reference): a digest without a"
+                               " key is a dictionary away from the value"))
+    return out
+
+
 def _names_problems(where, mapping):
     """`mapping.names` said wrong: a level that is not one, a rule that
     is not one, a case that is neither lower nor upper."""
@@ -2427,6 +2499,9 @@ def _contradictions(where, raw, opts, goal, engine):
     out += _ops_problems(where, mapping)
     out += _objects_problems(where, raw)
     out += _names_problems(where, mapping)
+    if raw.get("goal") != "consolidate":
+        out += _collision_problems(where, raw, engine, opts)
+    out += _mask_problems(where, opts)
     out += _where_problems(where, mapping, opts.get("source_engine")
                            if engine == "hetero" else engine)
     if goal in GOALS and not GOALS[goal]["writes"]:

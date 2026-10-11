@@ -1895,12 +1895,15 @@ select json_build_object(
         return (rows, tuple(rows[-1][i] for i in idx))
 
     def column_facts(self, side, db, table):
-        """Whether each column takes NULL. A table migkit builds here takes
-        NULL outside its key."""
+        """Whether each column takes NULL, and its collation where the
+        catalogue names one. A table migkit builds here takes NULL outside
+        its key."""
         if table is None:
             return {None: {"null": True}}
         got, name = self._shape_of(side, db, table)
-        return {c.name: {"null": c.nullable}
+        return {c.name: {"null": c.nullable,
+                         **({"collation": c.collation} if c.collation
+                            else {})}
                 for c in (got["catalog"].columns.get(name) or [])}
 
     def key_merges(self, side, db, columns, batches, examples=3):
@@ -3720,22 +3723,31 @@ select json_build_object(
             codes[at] = self._psql(side, db, "show server_encoding").strip()
         return wanted if codes[at].upper() in ("UTF8", "UTF-8") else None
 
-    def neutral_digest(self, side, db, table, columns, where=None):
+    #: `neutral_digest` takes columns computed in the server's SQL in place
+    #: of the table's own (`computed`: a masked column as its transform)
+    DIGESTS_COMPUTED = True
+
+    def neutral_digest(self, side, db, table, columns, where=None,
+                       computed=None):
         """(rows, digest) of a table as canon renders its rows, summed by the
         server. A JSON column is rendered as canon's text by the server too
         (`_json_text_sql`) - a document was folded in this process on every
         cross-engine proof, the proof taking three times the copy's time at
         a million rows (backlog P0-DEPTH 7) - and a table the server cannot
         render whole, or holding a number the fold here rounds
-        (`JSON_DIGITS`), is folded here: the same digest either way."""
+        (`JSON_DIGITS`), is folded here: the same digest either way.
+        `computed` is {column: SQL} read in place of a column - a masked
+        one as its transform makes it (`transforms.sql`)."""
         from .. import canon, rowtext
         jsons = self._json_in_sql(side, db, table, columns)
         if jsons is None:
             return self._folded_digest(side, db, table, columns, where)
+        computed = computed or {}
         sch, tbl = self._split(table)
         source = f"{_ident(sch)}.{_ident(tbl)}" + self._where(where)
-        if jsons:
+        if jsons or computed:
             inner = ", ".join(
+                f"{computed[n]} as {_ident(n)}" if n in computed else
                 f"{self._json_text_sql(_ident(n))} as {_ident(n)}"
                 if n in jsons else _ident(n) for n, _ in columns)
             source = f"(select {inner} from {source}) s"
@@ -4311,6 +4323,10 @@ select json_build_object(
                 return seq_gone(name)
             if kind.lower() in ("function", "procedure", "routine"):
                 name = name.split("(", 1)[0]
+            if kind.lower() == "trigger":
+                # `schema.table.trigger`: by its table, and by its kind
+                return not self.takes(db, kind, name,
+                                      name.rsplit(".", 1)[0])
             return not self.takes(db, kind, name)
         return out
 
@@ -4364,7 +4380,7 @@ select json_build_object(
                 if left(name) or (t == "trigger"
                                   and drift.transient_trigger(name)):
                     continue
-                if t in self.OWN_NAMED and out(t, name):
+                if t in self.OWN_NAMED + ("trigger",) and out(t, name):
                     continue
                 if name in working or name.rsplit(".", 1)[0] in working \
                         or (t != "table" and drift.transient(name, tables)):
@@ -4485,6 +4501,19 @@ select json_build_object(
         """
         gone = self._seq_gone(side, db, owned)
         return {n for n in names if gone(n)}
+
+    def sequences_needed(self, side, db):
+        """{schema.sequence} a table the hop takes owns or draws its column
+        defaults from: such a table is not made without it, so the schema
+        a move makes keeps it even where the hop's `objects` leaves
+        sequences out - said, as the closure of what is taken."""
+        out = {n for n, (s, t, _) in self._seq_owned(side, db).items()
+               if self.in_scope(db, f"{s}.{t}")}
+        for line in self._psql(side, db, self.SEQ_USED_Q).splitlines():
+            p = line.split("|")
+            if len(p) == 3 and self.in_scope(db, f"{p[1]}.{p[2]}"):
+                out.add(p[0])
+        return out
 
     def _seq_gone(self, side, db, owned=None):
         """A predicate on a sequence of a side (`schema.sequence`), true
@@ -4861,7 +4890,7 @@ select json_build_object(
         source's name.
         """
         sch, tbl = self._split(t)
-        pred = (self.hop.row_filter(db, *self._ruled(db, t))
+        pred = (self.row_filter(db, *self._ruled(db, t))
                 if hasattr(self.hop, "row_filter") else None)
         if side == "dst" and hasattr(self.hop, "target_table_in"):
             sch, tbl = split_table("postgres", self.hop.target_table_in(
@@ -4880,7 +4909,7 @@ select json_build_object(
         where the predicate is NULL is counted too.
         """
         sch, tbl = self._split(t)
-        pred = (self.hop.row_filter(db, *self._ruled(db, t))
+        pred = (self.row_filter(db, *self._ruled(db, t))
                 if hasattr(self.hop, "row_filter") else None)
         if not pred:
             return None
@@ -5078,7 +5107,7 @@ select json_build_object(
             expr = self._row_hash_expr("src", db, t)
             # the ranges' sums are of the rows the hop's row filter takes:
             # partials taken under another filter are not added in
-            pred = self.hop.row_filter(db, sch, tbl)
+            pred = self.row_filter(db, sch, tbl)
             todo = cp.begin(t, expr + (f" where {pred}" if pred else ""),
                             ranges)
             done_before = cp.resumed(t)
@@ -6430,7 +6459,7 @@ select json_build_object(
                     "postgres", self.hop.target_table_in(db, sch, tbl), sch))
             # through the same scope as every other check read: a table
             # whose row filter selects nothing is correctly empty
-            pred = self.hop.row_filter(db, sch, tbl)
+            pred = self.row_filter(db, sch, tbl)
             where = f" where {pred}" if pred else ""
             try:
                 has_src = bool(self._psql(
@@ -8232,8 +8261,12 @@ select json_build_object(
                               "no single-int-pk tables to boundary-check"))
         return res
 
+    #: each relation under the kind the hop's `objects` reads it by - a
+    #: view, a materialized view and a sequence by their own kinds
     OWNER_SQL = """
-        select 'table '||n.nspname||'.'||c.relname||'|'
+        select case c.relkind when 'v' then 'view ' when 'm' then 'matview '
+                              when 'S' then 'sequence ' else 'table ' end
+               ||n.nspname||'.'||c.relname||'|'
                ||pg_get_userbyid(c.relowner)
           from pg_class c join pg_namespace n on n.oid = c.relnamespace
          where c.relkind in ('r','p','v','m','S')
@@ -8677,7 +8710,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             if notes:
                 unread.append(f"{t}: {'; '.join(notes)}")
             sch, tbl = self._split(t)
-            where = (self.hop.row_filter(db, sch, tbl)
+            where = (self.row_filter(db, sch, tbl)
                      if hasattr(self.hop, "row_filter") else None)
             tables[t] = (self._partition_leaves("src", db, t, sc, where),
                          self._partition_leaves("dst", db, t, dc, where))
@@ -9089,13 +9122,50 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         if not hasattr(self, "migration_pair"):
             return None
         fwd, undo = self.migration_pair(db)
-        if not fwd:
+        fwd, left = self._without_triggers_not_taken(db, fwd or "")
+        undo, _ = self._without_triggers_not_taken(db, undo or "")
+        if not fwd.strip():
             return None
         return RepairAction(db, "schema", fwd.splitlines(),
-                            (undo or "").splitlines(),
+                            undo.splitlines(),
                             "DDL that aligns the target's objects with the"
                             " source (review before --apply; runs in one"
-                            " transaction, reverse DDL saved to undo)")
+                            " transaction, reverse DDL saved to undo)"
+                            + (f"; triggers the hop's objects leave out are"
+                               f" not made: {', '.join(left[:5])}"
+                               if left else ""))
+
+    #: a trigger made or dropped in a line of its own, as the schema differ
+    #: writes it: its name, and the table it is on
+    _TRIGGER_DDL = re.compile(
+        r'^\s*(?:CREATE(?:\s+OR\s+REPLACE)?(?:\s+CONSTRAINT)?|DROP)\s+TRIGGER'
+        r'\s+(?:IF\s+EXISTS\s+)?"?([^"\s]+)"?\s.*?\bON\s+"?([^".\s]+)"?\."?'
+        r'([^"\s;(]+)"?', re.I)
+
+    def _without_triggers_not_taken(self, db, text):
+        """(the DDL without the statements that make or drop a trigger the
+        hop's `objects` leaves out, [those triggers]) - the fix never makes
+        on the target one the move left behind. A statement naming such a
+        trigger that is not one line of its own is refused rather than
+        cut by guess."""
+        out, left = [], []
+        for line in str(text).splitlines():
+            m = self._TRIGGER_DDL.match(line)
+            if m:
+                name, sch, tbl = m.groups()
+                table = f"{sch}.{tbl}"
+                if not self.takes(db, "trigger", f"{table}.{name}", table):
+                    if not line.rstrip().endswith(";"):
+                        raise SystemExit(
+                            f"{db}: the schema fix would make or drop"
+                            f" trigger {name} on {table}, which the hop's"
+                            " objects leave out, in a statement that is not"
+                            " one line - nothing is applied; make the"
+                            " target's schema by hand or carry the trigger")
+                    left.append(f"{table}.{name}")
+                    continue
+            out.append(line)
+        return "\n".join(out), left
 
     def apply(self, db, action):
         if action.by == "pair":
@@ -12232,7 +12302,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         # check reports it separately (`_outside_filter`). A partition's is
         # its table's (`_ruled`): asked with its own name, it had none, and
         # its rows were carried unfiltered
-        rf = (self.hop.row_filter(db, *self._ruled(db, f"{sch}.{tbl}"))
+        rf = (self.row_filter(db, *self._ruled(db, f"{sch}.{tbl}"))
               if hasattr(self.hop, "row_filter") else None)
         if st.get("done") and self.recheck_done(db, key, st, log, rf):
             ck.save()

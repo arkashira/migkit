@@ -462,6 +462,7 @@ class Db2iEngine(Db2Engine):
         for t in tables:
             where = pair._row_scope(db, t)
             if where[0] or where[1] or self.hop.column_rules(db, t) or \
+                    self.hop.masks(db, t) or \
                     self.hop.target_table(db, t) != f"{db}.{t}":
                 rest.append(t)
                 continue
@@ -919,6 +920,9 @@ class Db2iEngine(Db2Engine):
 
     def tail_seed(self, db, token_path, point):
         return self._as_pair().tail_seed(db, token_path, point)
+
+    #: its change tail is the pair's (`Engine.tail_masks`)
+    TAILS_THROUGH_PAIR = True
 
     def tail_apply(self, db, go, token_path, log):
         return self._as_pair().tail_apply(db, go, token_path, log)

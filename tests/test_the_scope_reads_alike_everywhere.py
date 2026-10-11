@@ -356,3 +356,173 @@ def test_a_quoted_or_bare_name_is_taken_as_the_engine_names_it():
     my = _hop("mysql", include=["shop.orders"])
     assert my.takes_table("shop", "orders")
     assert not my.takes_table("crm", "orders")
+
+
+# ---- two names that become one (backlog P0-SCOPE 7, item 4) ----------------
+
+def test_names_that_become_one_on_the_target_are_found():
+    listed = [("appdb", "public.app_orders"), ("appdb", "public.orders"),
+              ("appdb", "public.people")]
+    hop = _hop(mapping={"names": {"tables": {"strip_prefix": "app_"}}})
+    assert hop.name_collisions(listed) == {"appdb.public.orders": [
+        "appdb.public.app_orders", "appdb.public.orders"]}
+    hop = _hop(mapping={"tables": {"public.people": "orders"}})
+    assert list(hop.name_collisions(listed)) == ["appdb.public.orders"]
+    # left out, a table lands nowhere
+    hop = _hop(mapping={"tables": {"public.people": "orders"}},
+               exclude=["public.orders"])
+    assert hop.name_collisions(listed) == {}
+    assert _hop().name_collisions(listed) == {}
+
+
+def test_names_that_differ_by_case_are_one_where_the_target_has_none():
+    listed = [("appdb", "Orders"), ("appdb", "orders")]
+    pair = _hop("hetero", options={"source_engine": "mysql",
+                                   "target_engine": "mssql"})
+    assert pair.target_folds_case()
+    assert len(pair.name_collisions(listed)) == 1
+    same = _hop("hetero", options={"source_engine": "mysql",
+                                   "target_engine": "postgres"})
+    assert same.name_collisions(listed) == {}
+    upper = _hop("mysql", mapping={"names": {"tables": {"case": "upper"}}})
+    assert len(upper.name_collisions(listed)) == 1
+
+
+def test_two_databases_into_one_collide_unless_that_is_the_goal():
+    listed = [("a", "public.orders"), ("b", "public.orders")]
+    hop = _hop(db_map={"a": "t", "b": "t"})
+    assert list(hop.name_collisions(listed)) == ["t.public.orders"]
+    hop.goal = "consolidate"
+    assert hop.name_collisions(listed) == {}
+    # read off the rules alone: two databases' tables onto one name land
+    # apart unless the databases do too
+    rules = {"a.public.orders": "x", "b.public.orders": "x"}
+    assert _hop(mapping={"tables": rules}).ambiguous_mapping() == {}
+    assert _hop(mapping={"tables": rules},
+                db_map={"a": "t", "b": "t"}).ambiguous_mapping()
+
+
+def test_the_hop_file_refuses_two_rules_onto_one_name():
+    from migkit import hopkeys
+    raw = {"source": "postgres://u@db.example.com/appdb",
+           "target": "postgres://u@db2.example.com/appdb",
+           "mapping": {"tables": {"public.a": "public.x",
+                                  "public.b": "public.x"}}}
+    got = [p for p in hopkeys.check_hop("h", raw) if p.level == "error"
+           and p.where.endswith("mapping.tables")]
+    assert got and "land on public.x" in got[0].text, got
+    raw["goal"] = "consolidate"
+    assert not [p for p in hopkeys.check_hop("h", raw)
+                if p.where.endswith("mapping.tables")]
+
+
+def test_every_check_and_write_is_refused_on_a_collision():
+    from migkit import cli
+
+    class Eng:
+        def neutral_tables(self, side, db):
+            return ["public.app_orders", "public.orders"]
+    hop = _hop(mapping={"names": {"tables": {"strip_prefix": "app_"}}})
+    said = cli._collided(hop, Eng(), ["appdb"])
+    assert "onto appdb.public.orders" in said, said
+    assert cli._collided(_hop(), Eng(), ["appdb"]) == ""
+
+
+# ---- a check narrower than the move (item 5) --------------------------------
+
+def _logged(tmp_path, **kw):
+    hop = _hop(**kw)
+    hop.report_dir = lambda db=None, _p=tmp_path: (
+        _p / db if db else _p)
+    (tmp_path / "appdb").mkdir(exist_ok=True)
+    return hop
+
+
+def test_a_check_narrower_than_the_move_is_said_as_narrowed(tmp_path,
+                                                            monkeypatch):
+    from migkit import cli, verdict
+
+    class Eng:
+        def __init__(self, hop):
+            self.hop = hop
+
+        def neutral_tables(self, side, db):
+            return [t for t in ("public.orders", "public.log")
+                    if self.hop.takes_table(db, t)]
+    monkeypatch.setattr(cli, "get_engine", Eng)
+    moved = _logged(tmp_path)
+    assert moved.log_scope("appdb", "0/16B3748", "move")
+    now = _logged(tmp_path, exclude=["public.log"])
+    got = cli._narrower_than_moved(now, ["appdb"])
+    assert got == ["appdb.public.log (left out since the move)"], got
+    decided = verdict.decide([{"check": "data", "scope": "appdb",
+                               "status": "ok"}], now,
+                             {"narrower than the move": got})
+    assert decided.status == "incomplete", decided
+    filtered = _logged(tmp_path, mapping={"where": {"orders": "id > 5"}})
+    assert cli._narrower_than_moved(filtered, ["appdb"]) == [
+        "appdb.public.orders (rows filtered otherwise than moved)"]
+    # the scope the move took is the scope now: nothing narrowed
+    assert cli._narrower_than_moved(moved, ["appdb"]) == []
+
+
+def test_a_watch_of_counts_alone_is_never_same(tmp_path, monkeypatch):
+    from migkit import cli
+    import migkit.config as cfg
+    hop = _logged(tmp_path)
+    monkeypatch.setattr(cfg, "get_hop", lambda name: hop)
+    monkeypatch.setattr(cli, "get_hop", lambda name: hop, raising=False)
+    monkeypatch.setattr(cli, "_require_configured", lambda h: None)
+    monkeypatch.setattr(cli, "get_engine",
+                        lambda h: type("E", (), {
+                            "checks": ["counts", "data"],
+                            "planned_checks": lambda self: [],
+                            "databases": lambda self: ["appdb"]})())
+    monkeypatch.setattr(cli, "run_checks", lambda *a, **k: (
+        [{"check": "counts", "scope": "appdb", "status": "ok",
+          "detail": "src=3 dst=3"}], {}))
+    monkeypatch.setattr(cli, "_watched", lambda *a, **k: None)
+    got = cli._monitor("h", "appdb", 1, "counts", 1)
+    assert got.status == "incomplete", got
+
+
+# ---- every scope change kept with its position (item 7) ---------------------
+
+def test_a_scope_change_is_logged_once_with_its_position(tmp_path):
+    hop = _logged(tmp_path)
+    assert hop.log_scope("appdb", "0/10", "move")
+    assert not hop.log_scope("appdb", "0/20", "tail"), "the same scope"
+    wider = _logged(tmp_path, exclude=["public.log"])
+    assert wider.log_scope("appdb", "0/30", "tail")
+    log = hop.scope_log("appdb")
+    assert [(e["by"], e["position"]) for e in log] == [("move", "0/10"),
+                                                       ("tail", "0/30")]
+    assert log[1]["scope"]["exclude"] == ["public.log"]
+
+    def reached(have, want):
+        return int(have.split("/")[1], 16) >= int(want.split("/")[1], 16)
+    # which scope a position was taken under
+    assert hop.scope_at("appdb", "0/18", reached).exclude == []
+    assert hop.scope_at("appdb", "0/40", reached).exclude == ["public.log"]
+    assert hop.scope_at("appdb", by="move").exclude == []
+    assert _logged(tmp_path / "x").scope_at("appdb") is None
+
+
+def test_a_delta_keeps_the_position_its_scope_took_effect_at(tmp_path):
+    from migkit.engines.base import Engine
+
+    class Delta(Engine):
+        CANON_ENGINE = "postgres"
+
+        def delta_verify(self, db, limit=20000, log=None):
+            return []
+
+        def log_position(self, side, db):
+            return "0/2A"
+    hop = _logged(tmp_path)
+    Delta(hop).delta_in_scope("appdb")
+    import json
+    kept = json.loads((tmp_path / "appdb" / Engine.DELTA_SCOPE).read_text())
+    assert kept["position"] == "0/2A", kept
+    assert hop.scope_log("appdb")[-1]["by"] == "delta"
+    assert hop.scope_log("appdb")[-1]["position"] == "0/2A"

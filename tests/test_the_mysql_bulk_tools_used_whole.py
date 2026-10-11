@@ -256,37 +256,69 @@ def test_the_dumps_metadata_counts_each_table(tmp_path):
 
 # ---- masking on the way -----------------------------------------------------
 
-def test_only_exact_rules_on_columns_outside_keys_are_applied(tmp_path):
+TABLES = ["people", "orders"]
+
+
+def test_the_dump_masks_only_what_it_says_itself(tmp_path):
+    """null and a constant are the dump's own column functions (measured
+    off the program); a hash or a cut goes to the table copier, which
+    applies every transform - never a section the dump would read as a
+    function it does not know and pass the value over as it is."""
     hop = _hop(tmp_path, {"mask_on_write": {
         "people.email": "null", "people.name": "constant anonymous",
-        "people.id": "null", "people.note": "random",
-        "people.city": "hash", "other.people.x": "null",
-        "people.bad": "constant it's"}})
-    sections, refused = movers.mask_plan(hop, "appdb", {"people": {"id"}})
+        "orders.note": "truncate 3"}, "mask_key": "env:NO_SUCH_KEY_HERE"})
+    rules = movers.mask_rules(hop, "appdb", TABLES)
+    assert rules == {"people": {"email": ("null", ""),
+                                "name": ("constant", "anonymous")},
+                     "orders": {"note": ("truncate", 3)}}, rules
+    sections, refused = movers.mask_plan(hop, "appdb", rules,
+                                         {"people": {"id"}})
     assert sections == {"people": ["`email` = null",
-                                   "`name` = constant 'anonymous'"]}, sections
-    why = dict(refused)
+                                   "`name` = constant 'anonymous'"]}, \
+        sections
+    assert refused == []
+    assert movers.dump_masks(rules["people"])
+    assert not movers.dump_masks(rules["orders"])
+
+
+def test_a_rule_no_way_can_apply_is_refused(tmp_path):
+    hop = _hop(tmp_path, {"mask_on_write": {
+        "people.id": "null", "people.city": "hash",
+        "people.age": "constant x"}})
+    rules = movers.mask_rules(hop, "appdb", TABLES)
+    why = dict(movers.mask_refused(
+        hop, rules, {"people": {"id"}},
+        {"people": {"id", "city", "age"}}, {"people": {"city"}}))
     assert "part of a key" in why["people.id"]
-    assert "random value" in why["people.note"]
-    assert "not a masking rule" in why["people.city"]
-    assert "without quotes" in why["people.bad"]
-    assert "people.x" not in why, "another database's rule was applied here"
+    assert "mask_key" in why["people.city"]
+    assert "not text" in why["people.age"]
+
+
+def test_a_rule_that_is_not_a_transform_raises(tmp_path):
+    """Unknown kinds raise: a rule passed over masks nothing and says it
+    did."""
+    for rule in ("random", "shuffle", "constant it's", "truncate 0"):
+        hop = _hop(tmp_path, {"mask_on_write": {"people.email": rule}})
+        with pytest.raises(SystemExit):
+            movers.mask_rules(hop, "appdb", TABLES)
 
 
 def test_a_rule_on_a_column_the_source_lacks_is_refused(tmp_path):
     """A typo in a masking rule hides nothing and would say it did."""
     hop = _hop(tmp_path, {"mask_on_write": {"people.emial": "null",
                                             "people.email": "null"}})
+    rules = movers.mask_rules(hop, "appdb", TABLES)
     sections, refused = movers.mask_plan(
-        hop, "appdb", {}, {"people": {"id", "email"}})
-    assert sections == {"people": ["`email` = null"]}, sections
+        hop, "appdb", rules, {}, {"people": {"id", "email"}})
+    assert sections == {}, sections
     assert refused == [("people.emial", "the source has no such column")]
 
 
 def test_a_hop_that_streams_back_masks_nothing(tmp_path):
     hop = _hop(tmp_path, {"mask_on_write": {"people.email": "null"},
                           "reverse": True})
-    sections, refused = movers.mask_plan(hop, "appdb", {})
+    rules = movers.mask_rules(hop, "appdb", TABLES)
+    sections, refused = movers.mask_plan(hop, "appdb", rules, {})
     assert sections == {} and "streams the target's changes back" in \
         refused[0][1], refused
 
@@ -295,33 +327,39 @@ def test_the_display_mask_masks_nothing_written(tmp_path):
     """`mask` hides values where a person reads them; it is not a rule
     about what the target gets."""
     hop = _hop(tmp_path, {"mask": ["people.email"]})
-    assert movers.mask_rules(hop, "appdb") == {}
+    assert movers.mask_rules(hop, "appdb", TABLES) == {}
+    assert not hop.masks_in("appdb")
 
 
-def test_no_other_path_carries_a_table_the_hop_masks(tmp_path):
-    hop = _hop(tmp_path, {"mask_on_write": {"people.email": "null"}})
-    for via in ("builtin", "mysqlsh", "pgdump"):
-        with pytest.raises(SystemExit) as e:
-            movers.refuse_unpushable_filters(hop, "appdb", via, "mysql")
-        assert "copy the values as they are" in str(e.value)
-    movers.refuse_unpushable_filters(hop, "appdb", "mydumper", "mysql")
-
-
-def test_a_table_is_left_out_of_the_comparison_only_once_it_was_masked(
+def test_a_path_that_carries_tables_whole_does_not_carry_a_masked_one(
         tmp_path):
-    """A rule alone never takes a table out of the digest: only the move
-    that masked it and held it to the rule does."""
     hop = _hop(tmp_path, {"mask_on_write": {"people.email": "null"}})
-    assert movers.masked_tables(hop, "appdb") == set()
-    (hop.report_dir("appdb") / "move-began.json").write_text(
-        json.dumps({"epoch": time.time()}))
-    movers._write_json(movers._masked_record(hop, "appdb"),
-                       {"at": time.time() + 1, "tables": ["people"]})
-    assert movers.masked_tables(hop, "appdb") == {"appdb.people"}
-    # a later move began: what the earlier one masked is not this one's
-    (hop.report_dir("appdb") / "move-began.json").write_text(
-        json.dumps({"epoch": time.time() + 10}))
-    assert movers.masked_tables(hop, "appdb") == set()
+    for via in ("mongodump", "pgloader", "redisshake"):
+        with pytest.raises(SystemExit) as e:
+            movers.refuse_unmasked(hop, "appdb", via)
+        assert "cannot leave a masked one" in str(e.value)
+
+
+def test_a_masked_table_is_the_copiers_where_the_dump_cannot_say_it(
+        tmp_path):
+    """The planner hands a table with a hash or a cut to the table copier,
+    and one with null or a constant to the dump only where the dump masks
+    (`MASKING_MOVERS`)."""
+    from migkit import planner
+    hop = _hop(tmp_path, {"mask_on_write": {
+        "people.email": "null", "orders.note": "truncate 3"}})
+    got = {d.table: d.path for d in planner.plan(
+        hop, "appdb", "mydumper", TABLES, "appdb", choice={})}
+    assert got == {"appdb.people": planner.BULK,
+                   "appdb.orders": planner.COPIER}, got
+    got = {d.table: d.path for d in planner.plan(
+        hop, "appdb", "mysqlsh", TABLES, "appdb", choice={})}
+    assert got == {"appdb.people": planner.COPIER,
+                   "appdb.orders": planner.COPIER}, got
+    # a hop that masks nothing goes as it went
+    plain = _hop(tmp_path)
+    assert all(d.path == planner.BULK for d in planner.plan(
+        plain, "appdb", "mydumper", TABLES, "appdb", choice={}))
 
 
 def test_every_feature_has_a_state_and_a_reason():

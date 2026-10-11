@@ -286,8 +286,13 @@ def test_the_masked_columns_are_masked_and_held_to_the_rule(pair, tmp_path,
     # the photo, which no rule names, is the source's
     assert _sql(SRC, "select sum(crc32(photo)) from appdb.people") == \
         _sql(DST, "select sum(crc32(photo)) from appdb.people")
-    assert movers.masked_tables(hop, "appdb") == {"appdb.people"}
     assert any("masked on the way" in str(s) for s in steps), steps
+    # the check proves the masked table through the hop's transforms: the
+    # same, where it used to be left out or called different
+    from migkit.engines.mysql import MySQLEngine
+    got = MySQLEngine(hop).check_data("appdb", "people")
+    assert got and all(r.status == "ok" for r in got), \
+        [(r.scope, r.status, r.detail) for r in got]
 
 
 @needs_docker
@@ -297,15 +302,16 @@ def test_a_column_left_unmasked_is_said(pair, tmp_path, monkeypatch):
     them: here nothing masked them."""
     _dump_only(monkeypatch)
     _seed()
-    hop = _hop(tmp_path)
-    movers.mydumper_move(hop, "appdb", 2, True, None)
-    got = movers._my_masked_held(hop, "appdb", {"people": {
-        "email": ("null", ""), "name": ("constant", "anonymous")}})
-    assert any("people.email: 2,000 rows not masked" in g for g in got), got
-    assert any("people.name: 2,000 rows not masked" in g for g in got), got
+    movers.mydumper_move(_hop(tmp_path), "appdb", 2, True, None)
+    from migkit.engines.mysql import MySQLEngine
+    hop = _hop(tmp_path, {"mask_on_write": {
+        "people.email": "null", "people.name": "constant anonymous"}})
+    got = movers.masked_held(MySQLEngine(hop), "appdb", ["people"])
+    assert got and got[0].startswith("people:"), got
+    _sql(DST, "update appdb.people set email = null, name = 'anonymous'")
+    assert movers.masked_held(MySQLEngine(hop), "appdb", ["people"]) == []
     _sql(DST, "delete from appdb.people where id <= 10")
-    got = movers._my_masked_held(hop, "appdb", {"people": {}})
-    assert got == ["people: 1,990 rows where the source has 2,000"], got
+    assert movers.masked_held(MySQLEngine(hop), "appdb", ["people"])
 
 
 @needs_docker
@@ -320,6 +326,38 @@ def test_a_rule_on_a_key_stops_the_move_before_it_writes(pair, tmp_path):
     assert "part of a key" in str(e.value) and "Nothing has been written" \
         in str(e.value)
     assert _sql(DST, "select count(*) from appdb.people") == "1"
+
+
+@needs_docker
+def test_a_hash_and_a_cut_go_by_the_table_copier_and_are_proved(
+        pair, tmp_path, monkeypatch):
+    """A hash and a cut are no function of the dump's: the table copier
+    carries the table, writing each value through the hop's transform, and
+    the check holds the target to the source taken through it."""
+    from migkit import transforms
+    from migkit.engines.mysql import MySQLEngine
+    _seed()
+    monkeypatch.setenv("MIGKIT_TEST_MASK_KEY", "k3y-for-tests")
+    hop = _hop(tmp_path, {"mask_on_write": {
+        "appdb.people.email": "hash", "people.name": "truncate 3"},
+        "mask_key": "env:MIGKIT_TEST_MASK_KEY"})
+    eng = MySQLEngine(hop)
+    assert eng.through_pair("appdb", "people")
+    assert not eng.through_pair("appdb", "orders")
+    from migkit import cli
+    ck = cli._checkpoint(hop, hop.report_dir("appdb") / "move.json")
+    cli._copy_table_by(eng, "appdb", "", "people", 500, ck, lambda m: None)
+    want = transforms.apply("hash", "p7@example.com", "k3y-for-tests")
+    assert _sql(DST, "select email, name from appdb.people where id = 7") \
+        == f"{want}\tnam"
+    got = eng.check_data("appdb", "people")
+    assert got and all(r.status == "ok" for r in got), \
+        [(r.scope, r.status, r.detail) for r in got]
+    # one value written as the source holds it is found
+    _sql(DST, "update appdb.people set email = 'p8@example.com' where id = 8")
+    got = eng.check_data("appdb", "people")
+    assert any(r.status == "diff" for r in got), \
+        [(r.scope, r.status, r.detail) for r in got]
 
 
 # ---- a resumable load --------------------------------------------------------

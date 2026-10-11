@@ -158,6 +158,189 @@ def to_sql(pred, src_dialect, dst_dialect, renames=None):
                          f" the target's SQL: {str(e).splitlines()[0][:120]}")
 
 
+# ---- the zone a filter's times are read in -----------------------------
+
+#: what a column's values mean for a time it is compared with: a point in
+#: time (`canon.INSTANT`), the digits of a clock with no zone
+#: (`canon.WALL`), or a time whose meaning this engine's is not measured
+INSTANT, WALL, UNKNOWN = "instant", "wall clock", "unknown"
+
+
+def _zone(tz):
+    import datetime as dt
+    text = zone_offset(tz)
+    if text.upper() in ("UTC", "Z"):
+        return dt.timezone.utc
+    if text[0] in "+-":
+        sign = -1 if text[0] == "-" else 1
+        hours, minutes = int(text[1:3]), int(text[4:6])
+        return dt.timezone(sign * dt.timedelta(hours=hours,
+                                               minutes=minutes))
+    from zoneinfo import ZoneInfo
+    return ZoneInfo(text)
+
+
+def instant(text, tz):
+    """The UTC moment a filter's time literal names when read in `tz`; one
+    that says its own offset is that moment. SystemExit for a text that is
+    no time, and for a wall-clock time `tz` has twice (the hour a clock
+    goes back) or never (the hour it goes forward): no one reading of it is
+    exact."""
+    import datetime as dt
+    try:
+        got = dt.datetime.fromisoformat(str(text).strip())
+    except ValueError:
+        raise SystemExit(f"{text!r} is compared with a column holding a"
+                         " point in time, and is not a time")
+    if got.tzinfo is not None:
+        return got.astimezone(dt.timezone.utc)
+    zone = _zone(tz)
+    first, second = got.replace(tzinfo=zone, fold=0), \
+        got.replace(tzinfo=zone, fold=1)
+    # a time in the hour a clock skips reads back as another; one in the
+    # hour it repeats reads back as itself under two offsets
+    back = first.astimezone(dt.timezone.utc).astimezone(zone)
+    if back.replace(tzinfo=None) != got:
+        raise SystemExit(f"{text} never happens in {tz} (its clock goes"
+                         " forward over it): write the time with its offset")
+    if first.utcoffset() != second.utcoffset():
+        raise SystemExit(f"{text} happens twice in {tz} (its clock goes back"
+                         " over it): write the time with its offset")
+    return first.astimezone(dt.timezone.utc)
+
+
+def _cast(type_name, dialect):
+    def build(at):
+        from sqlglot import exp
+        return exp.Cast(this=exp.Literal.string(
+            at.strftime("%Y-%m-%d %H:%M:%S.%f") + "+00:00"),
+            to=exp.DataType.build(type_name, dialect=dialect))
+    return build
+
+
+def _oracle(at):
+    from sqlglot import exp
+    return exp.Anonymous(this="TO_TIMESTAMP_TZ", expressions=[
+        exp.Literal.string(at.strftime("%Y-%m-%d %H:%M:%S.%f") + " +00:00"),
+        exp.Literal.string("YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM")])
+
+
+def _epoch(at):
+    from sqlglot import exp
+    return exp.Literal.number(f"{at.timestamp():.6f}")
+
+
+def _unix(col):
+    from sqlglot import exp
+    return exp.Anonymous(this="UNIX_TIMESTAMP", expressions=[col.copy()])
+
+
+#: a point in time written so a dialect's server reads it as that point in
+#: every session's zone: (the column it is compared with as it must be read
+#: for that, or None for itself; the point); a dialect not here has no
+#: exact way migkit writes one
+_INSTANT_SQL = {
+    "postgres": (None, _cast("TIMESTAMPTZ", "postgres")),
+    "duckdb": (None, _cast("TIMESTAMPTZ", "duckdb")),
+    "tsql": (None, _cast("DATETIMEOFFSET", "tsql")),
+    "oracle": (None, _oracle),
+    # a TIMESTAMP's own number of seconds, which the session's zone does
+    # not touch (UNIX_TIMESTAMP of the column reads it as stored)
+    "mysql": (_unix, _epoch),
+}
+
+
+def zone_free(pred, dialect, tz, kinds):
+    """The filter with every time it compares a column holding a point in
+    time written as that point (`instant`, read in `tz`), in the dialect's
+    words for one no session's zone moves (`_INSTANT_SQL`) - so the copy,
+    the check and the tail take the same rows whatever zone each server's
+    session is in. `kinds` is {column: INSTANT | WALL | UNKNOWN} of the
+    table's time columns; a wall clock's digits mean no zone and are left
+    as written, and so is every other column.
+
+    SystemExit where it cannot be made exact: a column holding a point in
+    time read through a function or an expression (which reads it in the
+    session's zone), a time column whose meaning this engine's is not
+    measured, a dialect with no exact way to write the point, a time `tz`
+    has twice or never."""
+    from sqlglot import exp
+    tree = parse(pred, dialect)
+    kinds = {str(k): v for k, v in (kinds or {}).items()}
+
+    def kind(node):
+        return kinds.get(node.name) if isinstance(node, exp.Column) else None
+
+    def literal(node):
+        return isinstance(node, exp.Literal) and node.is_string
+
+    done = set()
+
+    def written(col, lits):
+        if dialect not in _INSTANT_SQL:
+            raise SystemExit(f"{col.name} holds a point in time, and this"
+                             " engine's SQL has no way migkit writes one"
+                             f" exactly: write the times with their"
+                             " offset, or drop tz")
+        col_form, lit_form = _INSTANT_SQL[dialect]
+        for lit in lits:
+            lit.replace(lit_form(instant(lit.this, tz)))
+        if col_form is not None:
+            wrapped = col_form(col)
+            col.replace(wrapped)
+            done.add(id(wrapped))
+        done.add(id(col))
+
+    for node in list(tree.walk()):
+        if type(node).__name__ in _OPS:
+            a, b = node.this, node.expression
+            col, lit = (a, b) if kind(a) else (b, a)
+            got = kind(col)
+            if got == INSTANT and literal(lit):
+                written(col, [lit])
+            elif got == UNKNOWN and literal(lit):
+                raise SystemExit(f"{col.name} holds a time whose meaning on"
+                                 " this engine is not measured, so a time"
+                                 f" read in {tz} has no exact match: write"
+                                 " it with its offset, or drop tz")
+        elif isinstance(node, exp.Between) and kind(node.this) and all(
+                literal(node.args[k]) for k in ("low", "high")):
+            if kind(node.this) == UNKNOWN:
+                raise SystemExit(f"{node.this.name} holds a time whose"
+                                 " meaning on this engine is not measured")
+            if kind(node.this) == INSTANT:
+                written(node.this, [node.args["low"], node.args["high"]])
+        elif isinstance(node, exp.In) and kind(node.this) and all(
+                literal(e) for e in node.expressions):
+            if kind(node.this) == UNKNOWN:
+                raise SystemExit(f"{node.this.name} holds a time whose"
+                                 " meaning on this engine is not measured")
+            if kind(node.this) == INSTANT:
+                written(node.this, list(node.expressions))
+    for col in tree.find_all(exp.Column):
+        if kind(col) != INSTANT or id(col) in done or any(
+                id(p) in done for p in _parents(col)):
+            continue
+        holder = col.parent
+        if isinstance(holder, exp.Is) or (
+                type(holder).__name__ in _OPS
+                and kind(holder.this) == INSTANT
+                and kind(holder.expression) == INSTANT):
+            continue
+        raise SystemExit(f"{col.name} holds a point in time, and the filter"
+                         f" reads it through {holder.sql(dialect=dialect)},"
+                         " which each server reads in its own session's"
+                         " zone: compare the column itself with a time")
+    return tree.sql(dialect=dialect)
+
+
+def _parents(node):
+    p = node.parent
+    while p is not None:
+        yield p
+        p = p.parent
+
+
 # ---- a document store --------------------------------------------------
 
 def to_mongo(pred, dialect, renames=None):
@@ -238,6 +421,13 @@ def _m(node, renames, negate):
         if kind == "NEQ":
             return {"$and": [_present(field), {field: {"$ne": value}}]}
         return {field: {_OPS[kind]: value}}
+    if isinstance(node, exp.Is) and isinstance(node.expression, exp.Boolean):
+        # `x IS TRUE` holds only where x does, `x IS FALSE` only where NOT x
+        # does; their NOT where x is the other or unknown - the documents
+        # the first query leaves (what a reader asks to find a row outside
+        # the filter: `(filter) IS NOT TRUE`)
+        inner = _m(node.this, renames, not node.expression.this)
+        return {"$nor": [inner]} if negate else inner
     if isinstance(node, exp.Is):
         field = _field(node.this, renames)
         if not isinstance(node.expression, exp.Null):
@@ -341,6 +531,8 @@ def _e(node, row):
         a, b = _cmp(a, b)
         return {"EQ": a == b, "NEQ": a != b, "GT": a > b, "GTE": a >= b,
                 "LT": a < b, "LTE": a <= b}[kind]
+    if isinstance(node, exp.Is) and isinstance(node.expression, exp.Boolean):
+        return _e(node.this, row) is bool(node.expression.this)
     if isinstance(node, exp.Is):
         return _e(node.this, row) is None
     if isinstance(node, exp.In):

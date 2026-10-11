@@ -217,7 +217,7 @@ def _key_texts(s, eng, table):
         return key, None
     cls = _classes(src, "src", s.db, table)
     read = [(k, cls.get(k)) for k in key]
-    where = s.hop.row_filter(s.db, *s.hop.parts_of(table))
+    where = src.row_filter(s.db, *s.hop.parts_of(table))
     out = set()
     for rows in src._every_row("src", s.db, table, read, where):
         for r in rows:
@@ -675,7 +675,7 @@ def _carry(hop, pair, db, p, me, offsets, log):
     names = [n for n, _ in src_cols]
     cls, _ = _tenant_column(me.value)
     columns = list(dst_cols) + [(got["column"], cls)]
-    where = hop.row_filter(db, *hop.parts_of(p.table))
+    where = src.row_filter(db, *hop.parts_of(p.table))
     n = 0
     for rows in src._every_row("src", db, p.table, src_cols, where):
         batch = [_shift(r, names, p, offsets) + [me.value] for r in rows]
@@ -740,7 +740,7 @@ def prove(hop, eng, db):
             offsets = {t.table: offset_of(hop, eng, s, group_, [t.table])
                        for t in plans}
             from collections import Counter
-            where = hop.row_filter(db, *hop.parts_of(p.table))
+            where = pair.src_engine.row_filter(db, *hop.parts_of(p.table))
             # by key; a table without one as a multiset of rows, so a row
             # there twice on one side is not one row
             a, b = ({}, {}) if key else (Counter(), Counter())

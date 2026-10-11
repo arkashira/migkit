@@ -346,7 +346,7 @@ class Conversion:
 
     def __init__(self, pair, db, propose=True):
         from . import mysql_pg
-        from .prove import expressions, routines_of
+        from .prove import expressions, routines_of, taken
         self.pair = pair
         self.db = db
         self.propose = propose
@@ -357,7 +357,8 @@ class Conversion:
         views = [Routine(kind="view", name=pair._leaf(n), body=sql,
                          definition=f"CREATE VIEW {pair._leaf(n)} AS {sql}",
                          settings={"source": n})
-                 for n, sql in pair.src_engine.neutral_views("src", db)]
+                 for n, sql in pair.src_engine.neutral_views("src", db)
+                 if taken(pair.src_engine, "src", db, "view", n)]
         self.views = views
         self.routines = routines_of(pair.src_engine, "src", db)
         expr = expressions(pair.src_engine, "src", db)

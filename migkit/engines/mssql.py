@@ -295,6 +295,9 @@ class MSSQLEngine(DbapiRows, Engine):
             if kind == "check":
                 said = (f"check{'' if own else ' ' + str(name)}"
                         + (f" on {b}" if b else "") + f" {a}")
+            elif not self.takes(db, "trigger", f"{table}.{name}", table):
+                # a trigger the hop's `objects` does not carry
+                continue
             else:
                 said = f"trigger {name} {b} {str(a)[:16].lower()}"
             cat.others.setdefault(str(table), []).append(said)
@@ -362,8 +365,10 @@ class MSSQLEngine(DbapiRows, Engine):
                          " s.schema_id = o.schema_id where o.is_ms_shipped = 0"
                          " and o.type in ('V', 'P', 'FN', 'TF', 'IF', 'SO',"
                          " 'SN') order by 1, 2")
+        # each by its kind as the hop's `objects` carries it (`takes`):
+        # a procedure the hop does not carry was "missing on target"
         return {(r[0], r[1]): r[2] for r in rows
-                if not self.hop.excluded(db, r[3], r[4])}
+                if self.takes(db, str(r[1]), f"{r[3]}.{r[4]}")}
 
     def check_schema(self, db):
         """Every table compared whole on both sides, by the one comparer
@@ -594,7 +599,13 @@ class MSSQLEngine(DbapiRows, Engine):
         st = [r[0] for r in self._cmd("src", db, q)
               if self.in_scope(db, r[0])]
         dt = {r[0] for r in self._cmd("dst", db, q)}
+        if table and self.hop.masks(db, table):
+            # its row hash reads the values as they are on both sides: the
+            # pair takes the source through the hop's transforms
+            return self.columns_pair().check_data(db, table, stream)
         tables = [table] if table else [t for t in st if t in dt]
+        masked = [t for t in tables if self.hop.masks(db, t)]
+        tables = [t for t in tables if t not in masked]
         bad, left = [], []
         outcomes = {} if table else {t: "diff" for t in st if t not in dt}
         apart = {}
@@ -700,6 +711,8 @@ class MSSQLEngine(DbapiRows, Engine):
                               f"{len(tables)} tables, counts and every"
                               " row's hash equal both sides" + again + said,
                               tables=outcomes))
+        for t in masked:
+            res += self.columns_pair().check_data(db, t, stream)
         return res
 
     #: CLR types a row hash reads through their own rendering: `FOR JSON`
@@ -1577,7 +1590,7 @@ class MSSQLEngine(DbapiRows, Engine):
                           " v.schema_id join sys.sql_modules m on"
                           " m.object_id = v.object_id where v.is_ms_shipped"
                           " = 0 order by 1"):
-            if not self.in_scope(db, name):
+            if not self.takes(db, "view", name):
                 continue
             try:
                 tree = sqlglot.parse_one(definition, read="tsql")
@@ -1644,8 +1657,12 @@ class MSSQLEngine(DbapiRows, Engine):
                 r.table, r.events = table, tuple(events)
                 r.timing = "INSTEAD OF" if instead else "AFTER"
                 r.level = "statement"
-                if table and not self.in_scope(db, table):
-                    continue
+            # each by its kind as the hop's `objects` carries it, a
+            # trigger by its table too (`takes`)
+            if not self.takes(db, k, f"{schema}.{name}" if k != "trigger"
+                              else f"{r.table}.{name}", r.table
+                              if k == "trigger" and r.table else None):
+                continue
             try:
                 from ..storedcode.tsql_pg import body_of
                 r.body = body_of(definition or "", k)[0]
@@ -1771,6 +1788,9 @@ class MSSQLEngine(DbapiRows, Engine):
                       " in ('FN', 'IF', 'TF', 'P') order by o.name")
         out = []
         for oid, name, kind, definition in found:
+            if not self.takes(db, "procedure" if str(kind).strip() == "P"
+                              else "function", str(name)):
+                continue
             params, returns = [], None
             for pname, declared, pid in self._rows(
                     side, db, f"select p.name, {self.DECLARED.format(c='p')},"
@@ -2572,6 +2592,9 @@ class MSSQLEngine(DbapiRows, Engine):
 
     def tail_seed(self, db, token_path, point):
         return self._as_pair().tail_seed(db, token_path, point)
+
+    #: its change tail is the pair's (`Engine.tail_masks`)
+    TAILS_THROUGH_PAIR = True
 
     def tail_apply(self, db, go, token_path, log):
         return self._as_pair().tail_apply(db, go, token_path, log)

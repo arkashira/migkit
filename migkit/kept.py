@@ -596,6 +596,11 @@ class Keeper:
             pair.dst_engine.neutral_tables("dst", db), pair._renamer(db))
         made = {}
         for src_t, dst_t in pairs:
+            if pair._masks(db, src_t):
+                # its leaves would be hashed by the source's server from
+                # the values as they are: compared by the check instead,
+                # through the hop's transforms
+                continue
             try:
                 sc, dc, _ = pair._comparable_columns(
                     db, pair.src_engine, src_t, pair.dst_engine, dst_t)

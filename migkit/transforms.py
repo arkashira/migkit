@@ -36,9 +36,16 @@ def parse(rule):
     """(kind, argument) of one rule as a hop writes it - `null`,
     `constant <text>`, `hash`, `truncate <n>`; SystemExit for one that
     is none of them or cannot be proved."""
+    if isinstance(rule, tuple) and len(rule) == 2:
+        rule = f"{rule[0]} {rule[1]}".strip()
     text = "" if rule is None else str(rule).strip()
     kind, _, arg = text.partition(" ")
+    if ":" in kind:
+        # `constant:text`, as hops written before transforms said it
+        kind, _, rest = kind.partition(":")
+        arg = (rest + " " + arg).strip()
     kind = kind.lower()
+    arg = arg.strip()
     if kind not in KINDS:
         raise SystemExit(f"`{text or '(nothing)'}` is not a transform:"
                          " null, constant <text>, hash or truncate <n>")
@@ -67,6 +74,9 @@ def apply(rule, value, key=None):
         return arg
     if value is None or kind == "null":
         return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        # a text column a driver hands over as its bytes: its text
+        value = bytes(value).decode("utf-8")
     if kind == "truncate":
         return str(value)[:arg]
     if not key:
@@ -85,7 +95,9 @@ def _lit(text):
 #: the key and the value's text in UTF-8, SHA-256, lower-case hex
 _HASH_SQL = {
     "postgres": "encode(sha256(convert_to({k} || {c}, 'UTF8')), 'hex')",
-    "mysql": "SHA2(CONCAT({k}, {c}), 256)",
+    # the column's text in UTF-8 whatever its character set: SHA2 hashes
+    # the bytes of the string as it holds them
+    "mysql": "SHA2(CONCAT({k}, CONVERT({c} USING utf8mb4)), 256)",
     "oracle": ("CASE WHEN {c} IS NULL THEN NULL ELSE"
                " LOWER(RAWTOHEX(STANDARD_HASH({k} || {c}, 'SHA256'))) END"),
 }
@@ -100,7 +112,9 @@ def sql(rule, column, dialect, key=None):
     in Python (`apply`) by whichever reader holds it."""
     kind, arg = parse(rule) if isinstance(rule, str) else rule
     if kind == "null":
-        return "NULL"
+        # a NULL of the column's own type, which every rendering of the
+        # column's class takes as it takes the column
+        return f"CASE WHEN 1 = 0 THEN {column} END"
     if kind == "constant":
         return _lit(arg)
     if kind == "truncate":

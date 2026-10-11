@@ -155,9 +155,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * share_tables needs the s3 state backend (options.state.backend: s3): the machines sharing a move find each other's tables there
 
-* <...> masks columns on the way, and a repair of rows writes the source's values as they are, unmasked: move those tables again with --mode full, which masks them; --kind sequences or --kind schema repairs the rest. Nothing has been started
+* <...> masks columns on the way, and this engine's change stream would carry their real values into the target: a hop that masks is copied here (--mode full), not followed. Nothing has been started
 
-* <...> masks columns on the way, and a change stream would carry their real values into the target: a hop that masks is copied (--mode full), not followed. Nothing has been started
+* <...> masks columns on the way, and a repair of rows on this engine writes the source's values as they are, unmasked: --kind sequences or --kind schema repairs the rest. Nothing has been started
+
+* <...>: <...>: the hop asks to mask <...>. Nothing has been started
 
 * <...>: <...> not configured yet fill host/user/password in conf/hops.yaml, then: migkit doctor
 
@@ -182,6 +184,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the row-by-row drilldown needs a component that is not installed here: migkit doctor --install puts it in place
 
 * --only <...>: not a check of this hop's engine; its checks are <...>
+
+* <...>: <...>. Nothing has been compared
 
 * on_conflict: <...> - source-wins or keep-target
 
@@ -215,7 +219,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * topology: two_way - <...>. Nothing was set up.
 
-* the hop maps columns or renames tables (mapping.columns, mapping.tables), and the server's own replication carries whole rows under the source's names. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
+* the hop maps or masks columns or renames tables (mapping.columns, mask_on_write, mapping.tables), and the server's own replication carries whole rows under the source's names, as the source holds them. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
 
 * <...>. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which reads the hop's scope and mapping for every change.
 
@@ -333,7 +337,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the hop maps row filters onto <...>, and nothing on this <...> path can apply one: neither its bulk copy nor its table copier takes a row predicate. Moving anyway would copy every row and leave `check` comparing a filtered source against a full target for good. Drop the filters, or narrow the source with a view the hop points at instead.
 
-* the hop masks <...> on the way, and only the parallel dump of a MySQL hop can: this path would copy the values as they are. Nothing has been copied. Install it with migkit doctor --install, or drop the masking rule
+* the hop masks <...> on the way, and this engine's copy writes what it reads, as it reads it - no way of it takes the hop's transforms. Nothing has been copied. Drop the masking rule to copy the values as they are
+
+* the hop masks <...> on the way, and this path carries whole tables as they are and cannot leave a masked one to the table copier, which masks it. Nothing has been copied. Move by another way, or drop the masking rule
+
+* <...>: the hop asks to mask <...>. Nothing has been copied: fix the rule, or drop it to copy the values as they are
 
 * <...> would be emptied anyway: the table references one of the tables this move replaces, and emptying a table empties everything pointing at it. the hop excludes it, which says its rows are written here and not carried, so they cannot be put back afterwards. either it is not target-owned after all - take it out of the hop's exclude list and let the move carry it - or the reference has to go before the move can run. | <...> the hop carries only the rows its filter selects into it, and the rows outside the filter are the target's own, so they cannot be put back afterwards. Either the filter goes, or the reference has to go before the move can run. | <...> the source has no such table, so the move does not carry it and its rows are the target's own, which cannot be put back afterwards. Either the reference goes before the move can run, or the hop leaves out the table it points at. | <...>
 
@@ -349,7 +357,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the copy's own checksum of <...> tables differs from the source's: <...> ... | <...>. Nothing has been marked as moved; the load reported <...> warnings, the likely cause | <...>. A source written to while it was copied differs by what changed - move with --mode full+cdc for that; otherwise `migkit sync` puts the rows right
 
-* <...>: the tables masked on the way are not what the hop's rule makes them: <...>
+* <...>: the tables masked on the way are not what the hop's transforms make them: <...>
+
+* <...>: the online sync carried collections the hop leaves out: <...> ... | <...>. They are on the target now; nothing has been marked as moved - drop them there, or move this hop by the dump
 
 * MIGKIT_CDC=<...> is not one of native, follow. native = the database's own replication, which needs the target to dial the source; follow = a leg driven from where migkit runs, which connects out to both sides instead
 
@@ -781,6 +791,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance(<...>, pg_current_wal_lsn()); -- skips everything pending, including this
 
+* <...>: the schema fix would make or drop trigger <...> on <...>, which the hop's objects leave out, in a statement that is not one line - nothing is applied; make the target's schema by hand or carry the trigger
+
 * <...>: the key column <...> has no text both sides render, so the repair could not be recorded row by row. Nothing was repaired on this table.
 
 * <...>: newer_wins names <...>, and it is not on both sides, so which row is newer cannot be told. Nothing was repaired on this table.
@@ -830,8 +842,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 ## MongoDB
 
 * pip install 'migkit[mongo]' for mongodb support
-
-* a row filter is SQL, and MongoDB takes none; narrow this collection another way
 
 * <...>: migkit will not write documents without _id - there would be no way to write the same row twice without duplicating it
 
@@ -1606,6 +1616,20 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the row filter <...> is not SQL the source reads: <...>
 
 * the row filter <...> has no translation into the target's SQL: <...>
+
+* <...> never happens in <...> (its clock goes forward over it): write the time with its offset
+
+* <...> happens twice in <...> (its clock goes back over it): write the time with its offset
+
+* <...> is compared with a column holding a point in time, and is not a time
+
+* <...> holds a point in time, and the filter reads it through <...>, which each server reads in its own session's zone: compare the column itself with a time
+
+* <...> holds a point in time, and this engine's SQL has no way migkit writes one exactly: write the times with their offset, or drop tz
+
+* <...> holds a time whose meaning on this engine is not measured, so a time read in <...> has no exact match: write it with its offset, or drop tz
+
+* <...> holds a time whose meaning on this engine is not measured
 
 * <...> is not a column - a document store is asked of its fields only
 

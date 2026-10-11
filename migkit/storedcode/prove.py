@@ -84,11 +84,28 @@ class Verdict:
                 **({"history": self.history} if self.history else {})}
 
 
+def taken(eng, side, db, kind, name, table=None):
+    """Whether the hop carries this object of the source - a routine by
+    its kind, a trigger by its table too, a view by its name
+    (`Engine.takes`, the hop's `objects` and scope). What the target holds
+    is read as it is."""
+    takes = getattr(eng, "takes", None)
+    if side != "src" or takes is None:
+        return True
+    return takes(db, kind, f"{table}.{name}" if table else name, table)
+
+
 def routines_of(eng, side, db, notes=None):
     """The routines a side keeps: its engine's catalogue, or - where the
     engine reads only functions of one expression, or its catalogue could
     not be read (said in `notes`, which keeps the verdict from `ok`) -
-    those, as routines."""
+    those, as routines; of the source, only those the hop carries
+    (`taken`)."""
+    return [r for r in _routines(eng, side, db, notes) if taken(
+        eng, side, db, r.kind, r.name, getattr(r, "table", None))]
+
+
+def _routines(eng, side, db, notes=None):
     try:
         got = eng.code_routines(side, db)
     except Exception as e:  # noqa: BLE001 - said, and read another way
@@ -123,7 +140,7 @@ def expressions(eng, side, db):
     """{name: its one expression} for the functions whose body is one."""
     try:
         return {n: one for n, _, _, one in eng.neutral_functions(side, db)
-                if one is not None}
+                if one is not None and taken(eng, side, db, "function", n)}
     except Exception:  # noqa: BLE001 - none known
         return {}
 

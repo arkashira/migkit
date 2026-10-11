@@ -235,23 +235,54 @@ OBJECT_KINDS = {"views": ("views", "view", "matviews"),
                 "triggers": ("triggers", "trigger"),
                 "events": ("events", "event"),
                 "sequences": ("sequences", "sequence"),
+                "dictionaries": ("dictionaries", "dictionary"),
                 "roles": ("roles", "role", "users", "accounts", "grants")}
 #: words that name more than one kind at once
 OBJECT_GROUPS = {"routines": ("functions", "procedures"),
                  "routine": ("functions", "procedures")}
+#: the words each engine's own catalogue names a kind of object with, as
+#: an inventory reads them: SQL Server's `type_desc`, Oracle's
+#: `object_type`, Cassandra's schema tables, ClickHouse's engines
+CATALOGUE_KINDS = {
+    "materialized view": ("views",), "matview": ("views",),
+    "mview": ("views",), "materializedview": ("views",),
+    "sql stored procedure": ("procedures",),
+    "clr stored procedure": ("procedures",),
+    "extended stored procedure": ("procedures",),
+    "sql scalar function": ("functions",),
+    "sql table valued function": ("functions",),
+    "sql inline table valued function": ("functions",),
+    "clr scalar function": ("functions",),
+    "clr table valued function": ("functions",),
+    "aggregate function": ("functions",), "aggregate": ("functions",),
+    "sql trigger": ("triggers",), "clr trigger": ("triggers",),
+    "sequence object": ("sequences",),
+    "package": ("functions", "procedures"),
+    "package body": ("functions", "procedures")}
+
+
+def object_kinds(word):
+    """The kinds of `objects` a word names - `view`, `materialized view`,
+    `function`, `trigger` as the inventories say them, `routine` or an
+    Oracle package for functions and procedures at once, a catalogue's own
+    words (`CATALOGUE_KINDS`) - or () for a word that is none (a table, an
+    index: they follow the table)."""
+    w = str(word or "").strip().lower().replace("_", " ")
+    if w in CATALOGUE_KINDS:
+        return CATALOGUE_KINDS[w]
+    if w in OBJECT_GROUPS:
+        return OBJECT_GROUPS[w]
+    for kind, words in OBJECT_KINDS.items():
+        if w in words:
+            return (kind,)
+    return ()
 
 
 def object_kind(word):
-    """The kind of `objects` a word names - `view`, `materialized view`,
-    `function`, `trigger` as the inventories say them - or None for a
-    word that is not one (a table, an index: they follow the table)."""
-    w = str(word or "").strip().lower().replace("_", " ")
-    if w in ("materialized view", "matview", "mview"):
-        return "views"
-    for kind, words in OBJECT_KINDS.items():
-        if w in words:
-            return kind
-    return None
+    """The one kind of `objects` a word names (`object_kinds`), or None
+    for a word that names none or more than one."""
+    got = object_kinds(word)
+    return got[0] if len(got) == 1 else None
 
 
 def objects_of(hop):
@@ -1111,14 +1142,20 @@ class Hop:
     def scope_record(self):
         """What `scope_fingerprint` digests, as plain values - kept beside
         a record whose reader must know what that scope took, not only
-        that it was another (`under`)."""
+        that it was another (`under`). The values the hop masks
+        (`mask_on_write`) are part of it where it masks any: an answer
+        taken over values masked one way is not one over values masked
+        another, and a hop that masks nothing keeps the record it had."""
+        masks = (self.options or {}).get("mask_on_write")
         return {"databases": sorted(str(d) for d in self.databases or []),
                 "db_map": {str(k): str(v) for k, v in
                            sorted((self.db_map or {}).items())},
                 "include": sorted(str(p) for p in self.include or []),
                 "exclude": sorted(str(p) for p in self.exclude or []),
                 "objects": self.objects or {},
-                "mapping": self.mapping or {}}
+                "mapping": self.mapping or {},
+                **({"masks": {str(k): str(v) for k, v in masks.items()}}
+                   if isinstance(masks, dict) and masks else {})}
 
     def under(self, record):
         """This hop under the scope `record` kept (`scope_record`, or a dict
@@ -1130,13 +1167,81 @@ class Hop:
             record = record["scope"]
         if not isinstance(record, dict) or "mapping" not in record:
             return None
+        options = {k: v for k, v in (self.options or {}).items()
+                   if k != "mask_on_write"}
+        if record.get("masks"):
+            options["mask_on_write"] = dict(record["masks"])
         return dataclasses.replace(
             self, databases=list(record.get("databases") or []),
             db_map=dict(record.get("db_map") or {}),
             include=list(record.get("include") or []),
             exclude=list(record.get("exclude") or []),
             objects=dict(record.get("objects") or {}),
-            mapping=dict(record.get("mapping") or {}))
+            mapping=dict(record.get("mapping") or {}), options=options)
+
+    #: the file a database's scope changes are kept in, among its reports
+    SCOPE_LOG = "scope-log.jsonl"
+
+    def log_scope(self, db, position, by):
+        """The hop's scope now (`scope_record`) appended to `db`'s scope
+        log with the source position it takes effect at - the position a
+        copy was taken after, the change a tail applies first under it -
+        and what took it (`by`: a move, a tail), where it is not the scope
+        the log last holds. Every reader of a record kept under a scope
+        (`under`, `scope_changed`) can then ask which scope a position was
+        taken under (`scope_at`), and the evidence says when it changed.
+        Returns whether a line was written; never raises - a log that
+        cannot be written costs the evidence this line, not the move."""
+        import json
+        import time
+        fp = self.scope_fingerprint()
+        try:
+            last = self.scope_log(db)[-1:]
+            if last and last[0].get("scope_fingerprint") == fp:
+                return False
+            from . import durable
+            durable.append_line(
+                self.report_dir(db) / self.SCOPE_LOG,
+                json.dumps({"at": time.time(), "by": str(by),
+                            "position": position, "scope_fingerprint": fp,
+                            "scope": self.scope_record()}, default=str,
+                           sort_keys=True))
+            return True
+        except Exception:  # noqa: BLE001 - the evidence's line, not the move
+            return False
+
+    def scope_log(self, db):
+        """[{at, by, position, scope_fingerprint, scope}] of `db`'s scope
+        changes, oldest first (`log_scope`); [] where none is kept."""
+        import json
+        try:
+            text = (self.report_dir(db) / self.SCOPE_LOG).read_text()
+        except OSError:
+            return []
+        out = []
+        for line in text.splitlines():
+            try:
+                got = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(got, dict):
+                out.append(got)
+        return out
+
+    def scope_at(self, db, position=None, reached=None, by=None):
+        """This hop under the scope `db`'s log says was in effect at
+        `position` - the last change logged at or before it, by `reached`
+        (`Engine.position_reached(have, want)`) - or under the last one
+        logged (by `by` where given: the scope the last move took); None
+        where the log holds none."""
+        log = [e for e in self.scope_log(db) if by is None or e.get("by")
+               == by]
+        if position is not None and reached is not None:
+            # a position the engine cannot order is taken as reached: the
+            # later scope is the one said
+            log = [e for e in log if e.get("position") is None
+                   or reached(position, e.get("position")) is not False]
+        return self.under(log[-1]) if log else None
 
     def scope_changed(self, recorded):
         """Whether a record made under `recorded` (a fingerprint, or a dict
@@ -1486,11 +1591,89 @@ class Hop:
             else None
 
     def _where_rule(self, *parts):
+        """The rule that names this table, its name split the one way names
+        are (`_names`): `public.orders` given as one part is asked as
+        `orders` too, where it was asked only whole."""
         rules = (self.mapping or {}).get("where") or {}
-        for ident in self._ids(*parts):
+        for ident in self._ids(*self._names(*parts)):
             if ident in rules:
                 return rules[ident]
         return None
+
+    def masks(self, db, *parts, columns=None):
+        """{column: (kind, argument)} of the columns this table is written
+        other than as read (`options.mask_on_write`, each rule a
+        `transforms` rule): keys `[db.][schema.]table.column`, the part
+        before the column matched by the same right-anchored suffix and
+        pattern rule as every other name in the hop (`_ids`,
+        `name_matches`, without case where the engine's names have none),
+        so `public.orders.email` names PostgreSQL's `appdb.public.orders`
+        as `orders.email` and `appdb.public.orders.email` do. Where two
+        keys name one column the most particular wins (`most_particular`).
+        With `columns` (the table's own column names) each rule is keyed by
+        the column it names there, matched the same way. Empty where
+        nothing is masked; SystemExit for a rule that is not a transform
+        (`transforms.parse`), never a rule passed over."""
+        raw = (self.options or {}).get("mask_on_write") or {}
+        if not isinstance(raw, dict) or not raw:
+            return {}
+        from . import transforms
+        fold = self.folds_case()
+        by_column = {}
+        for key, rule in raw.items():
+            table, _, column = str(key).rpartition(".")
+            if not table or not column:
+                continue
+            name = column.casefold() if fold else column
+            by_column.setdefault(name, {})[table] = (column, rule)
+        names = self._names(db, *parts)
+        out = {}
+        for rules in by_column.values():
+            best = self.most_particular(rules, *names)
+            if best is None:
+                continue
+            column, rule = rules[best]
+            out[column] = transforms.parse(rule)
+        if columns is None or not out:
+            return out
+        said = {(c.casefold() if fold else c): r for c, r in out.items()}
+        return {c: said[str(c).casefold() if fold else str(c)]
+                for c in columns
+                if (str(c).casefold() if fold else str(c)) in said}
+
+    def masks_in(self, db):
+        """Whether a `mask_on_write` key may name a table of `db`: one that
+        names no database (a pattern, or fewer parts than a table's whole
+        name), or one whose database is `db`. What a way that carries a
+        database whole asks before it is taken, the source's tables not
+        yet listed."""
+        raw = (self.options or {}).get("mask_on_write") or {}
+        if not isinstance(raw, dict):
+            return False
+        whole = self.whole_name()
+        fold = self.folds_case()
+        for key in raw:
+            table = str(key).rpartition(".")[0]
+            if not table:
+                continue
+            parts = table.split(".")
+            if not whole or len(parts) < whole or name_matches(
+                    db, parts[0], fold):
+                return True
+        return False
+
+    def mask_key(self):
+        """The hop's `mask_key` resolved (a secret reference, read as every
+        other is - `_secret`), kept on the hop for this run so the
+        redactor hides it wherever a statement holding it is said; None
+        where the hop has none."""
+        got = getattr(self, "_mask_key", None)
+        if got is not None:
+            return got or None
+        ref = (self.options or {}).get("mask_key")
+        got = str(_secret(ref)) if ref not in (None, "") else ""
+        self._mask_key = got
+        return got or None
 
     def takes_object(self, kind, *parts):
         """Whether the hop carries this object of a kind beside the tables
@@ -1502,14 +1685,19 @@ class Hop:
         evidence carries and before the move, so nobody takes its absence
         on the target for a pass. A table's own objects follow the table
         too (`excluded`)."""
-        got = objects_of(self).get(object_kind(kind), True)
-        if got is True:
-            return True
-        if got is False:
-            return False
+        said = objects_of(self)
         ids = self._ids(*self._names(*parts))
         fold = self.folds_case()
-        return any(name_matches(i, p, fold) for p in got for i in ids)
+
+        def one(k):
+            got = said.get(k, True)
+            if got is True or got is False:
+                return got
+            return any(name_matches(i, p, fold) for p in got for i in ids)
+        # a word for more than one kind (a routine, a package) is taken
+        # where any of them is: left out, a carried one would go unread
+        kinds = object_kinds(kind)
+        return any(one(k) for k in kinds) if kinds else True
 
     def carries(self, *parts):
         """The changes the hop carries for this table: insert, update and
@@ -1565,11 +1753,72 @@ class Hop:
         overwrite the first, and the verification would then compare one
         source against a target holding the other. `hetero.match_tables`
         already refuses an ambiguous *pair* for the same reason.
+
+        Read off the rules alone, before a source is listed: two rules
+        naming one target name - without case where the target's names have
+        none (`target_folds_case`) - in one target database, or where
+        either names no database. `name_collisions` answers it of the
+        source's own tables, name rules and all.
         """
+        whole = self.whole_name()
+        fold = self.target_folds_case()
         seen = {}
-        for src, dst in sorted(self.table_map().items()):
-            seen.setdefault(str(dst), []).append(src)
-        return {dst: srcs for dst, srcs in seen.items() if len(srcs) > 1}
+        for src, dst in sorted(self.table_map().items(), key=str):
+            parts = str(src).split(".")
+            db = parts[0] if whole and len(parts) >= whole else None
+            name = str(dst).casefold() if fold else str(dst)
+            seen.setdefault(name, []).append(
+                (self.target_db(db) if db else None, str(src)))
+        out = {}
+        for got in seen.values():
+            hit = [s for i, (w, s) in enumerate(got) if any(
+                j != i and (w is None or v is None or w == v)
+                for j, (v, _) in enumerate(got))]
+            if hit:
+                out[str(self.table_map()[hit[0]])] = hit
+        return out
+
+    def target_folds_case(self):
+        """Whether the target's names have no case (`FOLDS_CASE`): two
+        names that differ only by it are one table there."""
+        from .util import _canonical
+        eng = self.engine
+        if eng == "hetero":
+            eng = (self.options or {}).get("target_engine") or ""
+        return _canonical(eng) in FOLDS_CASE
+
+    def name_collisions(self, tables):
+        """{the target's name: [the source's tables]} of `tables` - each
+        `(db, table)` as the source lists it - that the hop takes and that
+        land on one name on the target after its renames, its name rules
+        and its database names (`target_db`, `target_table_in`), compared
+        without case where the target's names have none. Refused before
+        anything runs (`Engine._mapping_items`, every write, the check):
+        whichever copy ran second wrote over the first, and the check
+        compared one source against a target holding the other. A hop
+        whose goal is to bring many into one (`consolidate`) means it."""
+        if self.goal == "consolidate":
+            return {}
+        from .util import DEFAULT_SCHEMA, _canonical
+        fold = self.target_folds_case()
+        eng = self.engine if self.engine != "hetero" else (
+            (self.options or {}).get("target_engine") or "")
+        # a name the rule gives without its schema is in the target's
+        # default one, as the copier makes and finds it there
+        schema = DEFAULT_SCHEMA.get(_canonical(eng), "") \
+            if self.whole_name() == 3 else ""
+        seen = {}
+        for db, t in tables:
+            if not self.takes_table(db, t):
+                continue
+            name = self.target_table_in(db, *self._names(t))
+            if schema and "." not in name:
+                name = f"{schema}.{name}"
+            there = f"{self.target_db(db)}.{name}"
+            seen.setdefault(there.casefold() if fold else there, []).append(
+                (there, f"{db}.{t}"))
+        return {got[0][0]: [s for _, s in got] for got in seen.values()
+                if len(got) > 1}
 
     def unused_mapping(self, source_ids):
         """Mapping keys that matched nothing on the source.
@@ -1584,7 +1833,13 @@ class Hop:
         keys = set(self.table_map()) | set(
             ((self.mapping or {}).get("where") or {})) | set(
             ((self.mapping or {}).get("tolerance") or {}))
-        return sorted(k for k in keys if k not in known)
+        # a masking rule names its table before its column; a pattern
+        # takes what it takes
+        masks = (self.options or {}).get("mask_on_write") or {}
+        masked = {str(k) for k in masks if isinstance(masks, dict)
+                  and not has_wildcard(str(k).rpartition(".")[0])
+                  and str(k).rpartition(".")[0] not in known}
+        return sorted({k for k in keys if k not in known} | masked)
 
 
 #: the port a side listens on where it names none: the one table, kept
@@ -2097,5 +2352,8 @@ def get_hop(name):
     # so the run's config file stays the single place the operator changes.
     extra = envkeys.items("MIGKIT_EXCLUDE")
     if extra:
-        hop.exclude = list(hop.exclude) + extra
+        # kept apart too: a check narrowed so is said as narrowed, never
+        # `same` of the hop (`cli._check`)
+        hop.run_exclude = list(extra)
+        hop.exclude = list(hop.exclude) + hop.run_exclude
     return hop
