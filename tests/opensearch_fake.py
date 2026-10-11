@@ -52,7 +52,7 @@ class Cluster:
         self.log = []
         self._n = 0
 
-    # ---- building a cluster -------------------------------------------------
+    # ---- building a cluster ----
 
     def index(self, name, properties=None, docs=(), shards=1, replicas=0,
               settings=None, mappings=None, aliases=None, meta=None):
@@ -116,7 +116,7 @@ class Cluster:
     def sources(self, name):
         return {i: d["_source"] for i, d in self.indexes[name]["docs"].items()}
 
-    # ---- the wire -----------------------------------------------------------
+    # ---- the wire ----
 
     def handle(self, method, path, body=None, ndjson=False, missing_ok=False):
         """What `OpenSearchEngine._call` returns for this request."""
@@ -293,7 +293,7 @@ class Cluster:
                     "unassigned_shards": idx.get("unassigned", 0)}
         return out
 
-    # ---- queries ------------------------------------------------------------
+    # ---- queries ----
 
     def _matching(self, name, query):
         """[(id, doc)] a query selects: match_all, ids, a range over the
@@ -366,7 +366,8 @@ class Cluster:
         sl = body.get("slice")
         if sl:
             hits = [(i, d) for i, d in hits
-                    if zlib.crc32(i.encode()) % int(sl["max"]) == int(sl["id"])]
+                    if zlib.crc32(i.encode()) % int(sl["max"])
+                    == int(sl["id"])]
         hits.sort(key=lambda h: (h[1]["_shard"], h[1]["_seq_no"]))
         size = int(body.get("size", 10))
         if "scroll" in q:
@@ -416,7 +417,7 @@ class Cluster:
         return {"indices": {name: {"uuid": idx["settings"]["uuid"],
                                    "shards": shards}}}
 
-    # ---- bulk -----------------------------------------------------------------
+    # ---- bulk ----
 
     def bulk_action(self, action):
         """(ok, {op: item}) for one action of a bulk stream, as the client

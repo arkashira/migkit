@@ -47,7 +47,7 @@ def _setting(cluster, index, key):
     return cluster.indexes[index]["settings"].get(key)
 
 
-# ---- the load window -------------------------------------------------------
+# ---- the load window ----
 
 def test_a_load_takes_the_replicas_and_the_refresh_and_gives_them_back(
         tmp_path):
@@ -136,7 +136,46 @@ def test_a_load_still_running_is_held_off_on_purpose(tmp_path):
     assert path.exists()
 
 
-# ---- an index the target lacks ----------------------------------------------
+def test_the_copy_of_documents_as_they_are_runs_inside_the_same_window(
+        tmp_path):
+    src, dst = Cluster(), _target()
+    src.index("shop.orders", PROPS, {str(i): {"title": f"t{i}", "n": i}
+                                     for i in range(30)}, shards=2)
+    src.index("shop.fresh", PROPS, {"a": {"title": "x", "n": 1}})
+    said = []
+    with installed(src, dst):
+        eng = _engine(tmp_path)
+        eng.native_bulk("shop", ["orders", "fresh"], True, said.append)
+    assert len(dst.indexes["shop.orders"]["docs"]) == 30
+    assert len(dst.indexes["shop.fresh"]["docs"]) == 1
+    # an index that was there keeps its own replicas and refresh; one
+    # made for the copy has the source's
+    assert _setting(dst, "shop.orders", "number_of_replicas") == "2"
+    assert _setting(dst, "shop.orders", "refresh_interval") == "5s"
+    assert _setting(dst, "shop.fresh", "refresh_interval") is None
+    assert not list(tmp_path.glob("load-window.*.json"))
+    assert any("fresh: not on the target" in m for m in said), said
+
+
+def test_a_deep_check_names_a_window_a_dead_load_left_open(tmp_path):
+    src, dst = Cluster(), _target()
+    src.index("shop.orders", PROPS, {})
+    src.index("shop.lines", PROPS, {})
+    _a_load_that_died(tmp_path, "shop.orders",
+                      {"number_of_replicas": "2", "refresh_interval": "5s"})
+    with installed(src, dst):
+        for engine in ("opensearch", "elasticsearch"):
+            eng = _engine(tmp_path)
+            eng.hop.engine = engine
+            found = [r for r in eng.check_deep("shop")
+                     if r.scope.endswith("load windows set aside")]
+            assert [r.status for r in found] == ["diff"], (engine, found)
+            # and the comparison of the twins ran under either name
+            assert any(r.scope.endswith("columns")
+                       for r in eng.check_deep("shop")), engine
+
+
+# ---- an index the target lacks ----
 
 def test_an_index_the_target_lacks_is_made_like_the_sources(tmp_path):
     src, dst = Cluster(), Cluster()
@@ -160,7 +199,7 @@ def test_an_index_the_target_lacks_is_made_like_the_sources(tmp_path):
         assert eng.create_missing("shop", said.append) == []
 
 
-# ---- the documents sized where they lie --------------------------------------
+# ---- the documents sized where they lie ----
 
 def test_the_documents_are_sized_where_they_lie(tmp_path):
     c = Cluster()
@@ -191,7 +230,7 @@ def test_a_large_index_is_sampled_and_says_it_is_not_exact(tmp_path,
     assert sized["exact"] is False and sized["rows"] == 50
 
 
-# ---- the rules a column has that an index cannot keep -------------------------
+# ---- the rules a column has that an index cannot keep ----
 
 def test_a_mapping_says_every_field_takes_null_but_the_key(tmp_path):
     c = Cluster()

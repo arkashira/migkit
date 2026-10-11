@@ -158,7 +158,7 @@ def test_the_preflight_names_both_and_assess_runs_them(tmp_path):
     assert "shop target room" in scopes and "shop target writes" in scopes
 
 
-# ---- the cluster's own figures ---------------------------------------------
+# ---- the cluster's own figures ----
 
 def test_the_processors_and_the_busy_threads_are_the_data_nodes(tmp_path):
     c = _cluster()
@@ -194,7 +194,7 @@ def test_the_free_bytes_are_what_the_nodes_will_take(tmp_path):
         assert _engine(tmp_path).free_bytes("dst", "shop") is None
 
 
-# ---- who else writes ----------------------------------------------------------
+# ---- who else writes ----
 
 def test_a_reindex_a_follower_and_a_writer_are_each_named(tmp_path):
     dst = _cluster()
@@ -238,7 +238,7 @@ def test_assess_says_none_found_where_nothing_writes(tmp_path):
     assert [i["level"] for i in items] == ["pass"], items
 
 
-# ---- the work left to hands ---------------------------------------------------
+# ---- the work left to hands ----
 
 def test_the_work_the_move_leaves_is_counted_and_named(tmp_path):
     src = Cluster()

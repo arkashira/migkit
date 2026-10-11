@@ -304,6 +304,12 @@ def kinds_drift(a, b):
     return typed, empty
 
 
+def _last_line(error, most=90):
+    """What an error says at its end, cut to `most` characters: the line a
+    finding gives for a read that could not be made."""
+    return (str(error).strip().splitlines() or [""])[-1][:most]
+
+
 _UNITS = {"b": 1, "kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30,
           "tb": 1 << 40, "pb": 1 << 50}
 
@@ -377,7 +383,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         (`pieces.widest`) - a page is held whole once it arrives."""
         return pieces.rows_for(pieces.widest(self, side, db, table), most)
 
-    # ---- the wire ---------------------------------------------------------
+    # ---- the wire ----
 
     def _base(self, side):
         ep = self.hop.source if side == "src" else self.hop.target
@@ -517,7 +523,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
     def databases(self):
         return list(self.hop.databases or ["default"])
 
-    # ---- what an index is -------------------------------------------------
+    # ---- what an index is ----
 
     def neutral_tables(self, side, db):
         pre = self._prefix(side, db)
@@ -554,7 +560,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         described = self._described(side, db, table)
         return described[1] if described is not None else ["_id"]
 
-    # ---- values -----------------------------------------------------------
+    # ---- values ----
 
     @staticmethod
     def _to_source(declared, value):
@@ -727,14 +733,22 @@ class OpenSearchEngine(NeutralCopier, Engine):
             exact = int(f.get("bytes") or 0) <= pieces.EXACT_UP_TO
             most = None if exact else self.SIZE_SAMPLE
             lengths = []
+            index = self._index(side, db, t)
             try:
+                # a few first, then as many to a page as a step of bytes
+                # holds at the widest of them: a page of wide documents is
+                # never five hundred of them held at once
+                first = self._call(side, "POST", f"/{index}/_search",
+                                   {"size": 5, "sort": ["_doc"]})
+                widest = max([self._carried_bytes(h) for h in
+                              (first.get("hits") or {}).get("hits", [])] or
+                             [0])
                 for hits in self._scroll(
-                        side, self._index(side, db, t),
-                        {"size": 500, "sort": ["_doc"]}):
-                    lengths += [len(json.dumps(
-                        h.get("_source") or {}, separators=(",", ":"),
-                        ensure_ascii=False).encode())
-                        + len(str(h["_id"]).encode()) for h in hits]
+                        side, index,
+                        {"size": pieces.rows_for(
+                            widest, 500, pieces.SAMPLE_STEP_BYTES),
+                         "sort": ["_doc"]}):
+                    lengths += [self._carried_bytes(h) for h in hits]
                     if most and len(lengths) >= most:
                         lengths = lengths[:most]
                         break
@@ -744,6 +758,15 @@ class OpenSearchEngine(NeutralCopier, Engine):
                 out[t] = sizes_of(lengths, exact=exact,
                                   rows=int(f.get("rows") or len(lengths)))
         return out
+
+    @staticmethod
+    def _carried_bytes(hit):
+        """Bytes one document takes as it is carried: its `_source` as
+        JSON, and its id."""
+        return (len(json.dumps(hit.get("_source") or {},
+                               separators=(",", ":"),
+                               ensure_ascii=False).encode())
+                + len(str(hit["_id"]).encode()))
 
     def neutral_column_rules(self, side, db, table):
         """{field: {"null", "default", "identity"}}: what a mapping says of
@@ -757,7 +780,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                     "identity": False}
                 for n, _ in self.neutral_columns(side, db, table)}
 
-    # ---- writing ----------------------------------------------------------
+    # ---- writing ----
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         if not key:
@@ -847,7 +870,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         freeze.counted(self.hop, {index: int(got.get("deleted", 0))})
         return int(got.get("deleted", 0))
 
-    # ---- the checks, through the pair every engine compares by --------
+    # ---- the checks, through the pair every engine compares by ----
 
     def check_schema(self, db):
         return self._as_pair().check_schema(db)
@@ -918,7 +941,10 @@ class OpenSearchEngine(NeutralCopier, Engine):
         value their documents hold (types, null against empty against
         absent). Only the indexes the hop takes (`in_scope`)."""
         out = self._health_findings(db)
-        if self.hop.engine != "opensearch":
+        left = self.set_aside(db)
+        if left is not None:
+            out.append(left)
+        if self.hop.engine not in ("opensearch", "elasticsearch"):
             return out
         pairs, unread = self._described_pairs(db)
         return (out + self._mapping_findings(db, pairs, unread)
@@ -947,7 +973,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                 pairs.append((t, self._described_index("src", db, t),
                               self._described_index("dst", db, t)))
             except Exception as e:  # noqa: BLE001 - said, per index
-                unread[t] = (str(e).strip().splitlines() or [""])[-1][:100]
+                unread[t] = _last_line(e, 100)
         return pairs, unread
 
     @staticmethod
@@ -1084,7 +1110,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
             category="value.null-empty"))
         return out
 
-    # ---- how the cluster lays the twins out ----------------------------------
+    # ---- how the cluster lays the twins out ----
 
     def _duplicate_ids(self, side, db, table):
         """How many more documents an index holds than ids: a document
@@ -1199,7 +1225,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                        " change made there is lost to the source's next"
                        " write, or to a rollback" if ahead else "")]
 
-    # ---- what lies beside the indexes -----------------------------------------
+    # ---- what lies beside the indexes ----
 
     def _optional(self, side, path):
         """What the cluster answers, None where it has no such thing: the
@@ -1231,15 +1257,19 @@ class OpenSearchEngine(NeutralCopier, Engine):
         return fnmatch.fnmatchcase(name, pattern)
 
     def _lifecycle(self, side, db, table, described):
-        """(policy, definition) the index is managed by, or None: the
+        """(policy, its definition) the index is managed by, or None: the
         policy index management (OpenSearch) or lifecycle management
-        (Elasticsearch) rolls it over, shrinks and deletes it by."""
+        (Elasticsearch) rolls it over, shrinks and deletes it by. The
+        definition is None where the policy is named and not there; what
+        changes by itself (versions, dates of change) is left out of it."""
         index = self._index(side, db, table)
         if self._brands()[0 if side == "src" else 1].name == "elasticsearch":
             name = _settings_of(described).get("lifecycle.name")
-            got = self._optional(side, f"/_ilm/policy/{name}") if name \
-                else None
-            return (name, (got or {}).get(name)) if name else None
+            if not name:
+                return None
+            got = (self._optional(side, f"/_ilm/policy/{name}") or {}).get(
+                name) or {}
+            return name, got.get("policy")
         got = (self._optional(side, f"/_plugins/_ism/explain/{index}")
                or {}).get(index) or {}
         name = got.get("index.plugins.index_state_management.policy_id") \
@@ -1248,9 +1278,10 @@ class OpenSearchEngine(NeutralCopier, Engine):
             return None
         body = (self._optional(side, f"/_plugins/_ism/policies/{name}")
                 or {}).get("policy") or {}
-        keep = {k: body.get(k) for k in ("default_state", "states",
-                                         "ism_template", "description")}
-        return name, keep
+        if not body:
+            return name, None
+        return name, {k: body.get(k) for k in (
+            "default_state", "states", "ism_template", "description")}
 
     def _beside(self, side, db, held):
         """{what: (definition, table)} of the objects beside the indexes
@@ -1277,7 +1308,8 @@ class OpenSearchEngine(NeutralCopier, Engine):
                     if got is not None:
                         out[f"pipeline {name}"] = (got, t)
             managed = self._lifecycle(side, db, t, d)
-            if managed and self.takes(db, "policy", managed[0], by=t):
+            if managed and managed[1] is not None and self.takes(
+                    db, "policy", managed[0], by=t):
                 out[f"policy {managed[0]}"] = (managed[1], t)
         shown = self._optional(side, "/_index_template") or {}
         for entry in shown.get("index_templates") or []:
@@ -1341,7 +1373,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         text = json.dumps(body, sort_keys=True)
         return json.loads(text.replace(f'"{prefix[0]}', f'"{prefix[1]}'))
 
-    # ---- who may do what to them ------------------------------------------------
+    # ---- who may do what to them ----
 
     @classmethod
     def _grants_on(cls, role, index):
@@ -1437,7 +1469,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                           if rows else ""))
         return out
 
-    # ---- when a value was --------------------------------------------------------
+    # ---- when a value was ----
 
     #: documents of an index whose dates are read from both sides to tell
     #: a whole index shifted in time from rows that differ one by one
@@ -1534,7 +1566,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         return [Result("deep", f"{db} target index health", "ok",
                        "no index is missing a shard")]
 
-    # ---- settings -------------------------------------------------------
+    # ---- settings ----
 
     #: settings that change what a search finds or whether a write lands:
     #: an analyzer is how text is split into what is searched, a field
@@ -1596,7 +1628,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
             "give the target's indexes the source's analysis and limits"
             " before cutover")
 
-    # ---- before the move: what the target has room for, who writes in it ------
+    # ---- before the move: what the target has room for, who writes in it ----
 
     def _allocation(self, side):
         """[(node, free bytes, total bytes)] of the nodes that hold data,
@@ -1705,7 +1737,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         except Exception as e:  # noqa: BLE001 - said, as the error
             return Result("deep", scope, "error",
                           "the target's room could not be read: "
-                          f"{(str(e).strip().splitlines() or [''])[-1][:90]}"
+                          f"{_last_line(e)}"
                           " - unknown, not clean")
         need = sum(max(0, size - held.get(t, (0, 0, 0))[0]) * (1 + rep)
                    for t, (size, pri, rep) in want.items())
@@ -1780,7 +1812,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         except Exception as e:  # noqa: BLE001 - said, as the error
             return Result("deep", scope, "error",
                           "the target's blocks could not be read: "
-                          f"{(str(e).strip().splitlines() or [''])[-1][:90]}"
+                          f"{_last_line(e)}"
                           " - unknown, not clean")
         if blocked:
             return Result("deep", scope, "diff",
@@ -1871,7 +1903,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
             except Exception as e:  # noqa: BLE001 - said, per database
                 inv.unknown("not-carried", db, "what lies beside the"
                             " indexes could not be read: "
-                            f"{(str(e).strip().splitlines() or [''])[-1][:80]}")
+                            f"{_last_line(e, 80)}")
                 held, beside = [], {}
             for title, words in (("aliases", ("alias ", "view ")),
                                  ("templates", ("template ",
@@ -1900,7 +1932,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
             except Exception as e:  # noqa: BLE001 - said, per database
                 inv.unknown("not-carried", db, "data streams and closed"
                             " indexes could not be listed: "
-                            f"{(str(e).strip().splitlines() or [''])[-1][:80]}")
+                            f"{_last_line(e, 80)}")
         return inv
 
     def _assess_extra(self):
@@ -1916,7 +1948,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                 items.append({"level": "warn", "scope": f"{word} cluster",
                               "item": "cluster health",
                               "detail": "could not be read: "
-                              f"{(str(e).strip().splitlines() or [''])[-1][:90]}"
+                              f"{_last_line(e)}"
                               " - unknown, not clean"})
                 continue
             colour = health.get("status")
@@ -1935,7 +1967,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         inv = self._handwork()
         return items + inv.rows() + inv.summary()
 
-    # ---- snapshot ---------------------------------------------------------
+    # ---- snapshot ----
 
     def snapshot_state(self, db, state_dir, kind="all"):
         """The target's indexes snapshotted by the cluster itself into a
@@ -1976,7 +2008,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
         (state_dir / "dst-indexes.json").write_text(
             json.dumps(out, indent=2, sort_keys=True, default=str))
 
-    # ---- verifying only what changed ----------------------------------------
+    # ---- verifying only what changed ----
 
     def _shard_marks(self, side, db, table):
         """{primary shard: (highest sequence number, deleted docs)}: every
@@ -2081,7 +2113,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                              f" {'advanced' if clean else 'NOT advanced'}"))
         return res
 
-    # ---- documents copied as they are -------------------------------------
+    # ---- documents copied as they are ----
 
     def _scroll(self, side, index, body, where=""):
         """Pages of hits of one search, read through to the end with a
@@ -2418,7 +2450,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                    {"settings": {"index": keep},
                     "mappings": got.get("mappings") or {}})
 
-    # ---- following the source by its shards' sequence numbers --------------
+    # ---- following the source by its shards' sequence numbers ----
 
     #: seconds between two looks at the source once caught up
     FOLLOW_EVERY = 1

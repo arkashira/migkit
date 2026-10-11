@@ -4017,6 +4017,35 @@ ClickHouse's and Oracle's deep findings and the shared capacity check's
 end in words no category reads (`mutations`, `constraints`, `capacity`),
 so they reach the verdict unclassified.
 
+*OpenSearch, built on the depth matrix (it had 51 cells open):* 25 now
+proved on a model of the cluster that answers only the requests the engine
+makes (`tests/opensearch_fake.py`) - the scope of its listings, copy, deep
+check, repairs and follow (`mapping.ops`), the row filter and the name
+rules, eleven deep-check categories, confirm, rows apart, tables and
+table, the load window (written to disk first, so a load that died is
+found and its settings given back), tables made like the source's, rows
+sized where they lie, the column rules; 12 built and owed a proof against
+a real server, because each asks the cluster a request no migkit run has
+sent (the objects beside the indexes, the target ahead by document
+version, sharding, the time-zone shift, repair and its undo - a bulk
+delete -, and the five assess items); 2 not applicable (charset and
+rendering: a document is JSON text, always UTF-8, and comes back exactly as
+sent); 12 left: the five tail items (its follow is a loop of its own and
+finds deletes by counts and ids; the shared tail's per-table states need
+one change record per document, and OpenSearch keeps no delete log a
+request can read), column transforms (no engine has them), the schema
+diff (PostgreSQL's is a DDL differ with generated SQL and its undo),
+views (a filtered alias is the nearest thing, compared and named but not
+carried), stored code (scripts and pipelines have no target outside
+OpenSearch), two-way marks (a document has no room for a mark and a bulk
+no transaction), scheduled jobs (transforms, rollups, snapshot policies and
+monitors each have a switch of their own, none run against a server) and
+fencing (a bulk cannot be held to a number the target keeps). Found by
+building it: a SQL table into OpenSearch stopped at the first table it had
+to make (`canon.DDL` had no entry for it), and a load that died inside the
+copy's window left the index with no replica and no refresh for good -
+the next run took the window's settings for the index's own.
+
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
 Asked: "is the decision engine smart or still flat - I want it really

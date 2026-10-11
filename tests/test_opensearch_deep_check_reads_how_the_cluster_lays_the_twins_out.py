@@ -54,7 +54,7 @@ def _deep(tmp_path, src, dst, **kw):
                 for r in _engine(tmp_path, **kw).check_deep("shop")}
 
 
-# ---- the target ahead of the source ---------------------------------------
+# ---- the target ahead of the source ----
 
 def _copied_with_the_sources_versions(src, dst):
     for i, d in src.indexes["shop.orders"]["docs"].items():
@@ -92,7 +92,7 @@ def test_a_copy_through_rows_carries_no_version_and_is_not_judged(tmp_path):
     assert got.status == "ok", got
 
 
-# ---- the shards ---------------------------------------------------------------
+# ---- the shards ----
 
 def test_shards_on_the_move_make_a_count_a_moving_target(tmp_path):
     src, dst = _twins()
@@ -122,7 +122,7 @@ def test_an_id_held_in_two_shards_is_found(tmp_path):
     assert "orders: 1 documents share an _id" in got.detail
 
 
-# ---- what lies beside the indexes ----------------------------------------------
+# ---- what lies beside the indexes ----
 
 def _templates(cluster, body):
     cluster.answers["/_index_template"] = {"index_templates": [
@@ -173,6 +173,39 @@ def test_objects_that_agree_are_found_to_agree_and_one_that_differs_is_named(
     assert "template orders-template: differs" in got.detail
 
 
+def test_a_policy_the_target_lacks_is_missing_not_different(tmp_path):
+    src, dst = Cluster(), Cluster()
+    for c in (src, dst):
+        c.index("shop.orders", PROPS, _docs())
+    src.answers["/_plugins/_ism/explain/shop.orders"] = {"shop.orders": {
+        "index.plugins.index_state_management.policy_id": "age"}}
+    src.answers["/_plugins/_ism/policies/age"] = {"policy": {"states": [
+        {"name": "hot"}], "default_state": "hot"}}
+    # the target's index names the policy, which is not there
+    dst.answers["/_plugins/_ism/explain/shop.orders"] = {"shop.orders": {
+        "index.plugins.index_state_management.policy_id": "age"}}
+    got = _deep(tmp_path, src, dst)["objects"]
+    assert "policy age: missing on the target" in got.detail, got
+
+
+def test_a_lifecycle_policys_dates_of_change_are_not_a_difference(tmp_path):
+    src = Cluster(distribution="elasticsearch", number="8.14.0")
+    dst = Cluster(distribution="elasticsearch", number="8.14.0")
+    for c in (src, dst):
+        c.index("shop.orders", PROPS, _docs(),
+                settings={"lifecycle.name": "age"})
+    phases = {"phases": {"hot": {"actions": {}}}}
+    src.answers["/_ilm/policy/age"] = {"age": {
+        "version": 3, "modified_date": "2024-01-01", "policy": phases}}
+    dst.answers["/_ilm/policy/age"] = {"age": {
+        "version": 9, "modified_date": "2024-06-01", "policy": phases}}
+    assert _deep(tmp_path, src, dst)["objects"].status == "ok"
+    dst.answers["/_ilm/policy/age"] = {"age": {
+        "version": 9, "policy": {"phases": {"delete": {}}}}}
+    got = _deep(tmp_path, src, dst)["objects"]
+    assert got.status == "diff" and "policy age: differs" in got.detail
+
+
 def test_the_hops_objects_leave_a_kind_out(tmp_path):
     src, dst = Cluster(), Cluster()
     src.index("shop.orders", PROPS, _docs(), aliases={
@@ -191,7 +224,7 @@ def test_an_object_of_an_index_the_hop_leaves_out_is_not_compared(tmp_path):
     assert got.status == "ok", got
 
 
-# ---- who may do what ---------------------------------------------------------
+# ---- who may do what ----
 
 ROLES = "/_plugins/_security/api/roles"
 
@@ -266,7 +299,7 @@ def test_roles_that_cannot_be_read_are_an_error_not_an_ok(tmp_path):
     assert got["grants"].status == "error" and got["rls"].status == "error"
 
 
-# ---- the dates ---------------------------------------------------------------
+# ---- the dates ----
 
 def test_dates_all_held_hours_apart_are_a_timezone_finding(tmp_path):
     src, dst = Cluster(), Cluster()
