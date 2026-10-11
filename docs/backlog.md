@@ -5030,6 +5030,34 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   downstream capture as LogMiner on an Oracle Free mining instance
   migkit owns; C6 RIOT-X's live mode made lossless by a resuming PSYNC
   client or an `OBJECT IDLETIME` sweep under `CLIENT NO-TOUCH`.
+  *Built 2026-10-11, partly (LT.C2, LT.C3; no broker was reached):*
+  `KafkaEngine` keeps a copied partition's offsets identical where they
+  can be exact, and otherwise (with `offsets: map` and a client that runs
+  transactions) writes the map in the batch's own transaction. C2: a
+  partition whose target is empty and whose source offsets are
+  consecutive has the target padded with throwaway records up to the
+  source's first offset and `DeleteRecords` moves the start there
+  (Kafka's only way to set a log's first offset; probed first with a
+  request that deletes nothing, bounded by `offsets_pad_limit`); the copy
+  is not transactional, since a marker would take an offset, and every
+  landed offset is read back and held to the source's; the source is read
+  to its end first only where padding is owed, otherwise each offset is
+  proved as it lands, and a gap ends identity there, said and recorded.
+  C3: in `map` mode a gappy partition is copied one batch to one
+  transaction with the source-to-target runs it took, in
+  `__migkit_offset_map` on the target; the copy goes on from the map; the
+  map is read back whole at the cutover and places a group's offset
+  exactly (`group_positions` through `_located`). Proved on in-memory
+  clusters with crash before the commit, crash after it, repeated resume
+  and replay equal to an uninterrupted run
+  (`test_a_kafka_copy_keeps_the_sources_offsets_where_it_can.py`,
+  `test_a_kafka_offset_map_is_written_in_the_data_transaction.py`).
+  **Not verified on a real broker:** DeleteRecords on a live log, the
+  client's transactions and fencing, retention or compaction racing the
+  padding, throughput. **Not built:** a content comparison for mapped
+  partitions (the count and tail checks warn and skip them), the map in
+  `auto`, a cost-model choice for a very long padding, thinning the map,
+  a group sitting at the end behind a trailing marker.
 * **P1-P3, cloud processes without an API:** a mover that scales on the
   source's own stress and scales down at a range boundary (DMS
   Serverless waits 60 minutes); seeding from ZFS/LVM/EBS snapshots
