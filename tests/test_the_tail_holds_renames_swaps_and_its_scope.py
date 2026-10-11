@@ -32,7 +32,7 @@ from migkit.config import Endpoint, Hop
 from migkit.engines.hetero import HeteroEngine
 
 #: what this module proves, item by engine (`capabilities.proofs`)
-PROVES = [("tail.renames", "mysql")]
+PROVES = [("tail.renames", "mysql"), ("tail.renames", "postgres")]
 
 EP = Endpoint(host="x", port=1, user="x", password="x")
 
@@ -182,6 +182,59 @@ def test_a_table_swapped_in_under_its_name_is_seen_by_its_id(tmp_path):
     t = _tables(tmp_path / "stop", src=src)
     t.boundary("0/1", None, force=True)
     src.oids["public.b"] = "7"
+    with pytest.raises(SystemExit) as e:
+        t.boundary("0/2", None, force=True)
+    assert "public.b was replaced on the source" in str(e.value)
+
+
+class _PgRows:
+    """PostgreSQL's own `table_oids`, reading what the server would answer
+    (`schema.table` and its pg_class oid, joined by the unit separator)."""
+
+    def __init__(self, rows):
+        self.rows = dict(rows)
+
+    def psql(self, side, db, sql):
+        assert "pg_class" in sql and "pg_namespace" in sql
+        return "\n".join(f"{n}\x1f{o}" for n, o in self.rows.items()) + "\n"
+
+
+def _postgres_source(rows):
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(Hop(name="p", engine="postgres", source=EP,
+                             target=EP, databases=["d"]))
+    server = _PgRows(rows)
+    eng._psql = server.psql
+    eng.neutral_tables = lambda side, db: list(server.rows)
+    eng.neutral_columns = lambda side, db, table: [("id", "integer")]
+    eng.log_position = lambda side, db: "0/10"
+    eng.snapshot_mark = lambda side, db: None
+    eng.mark_covers = lambda side, db, mark, change: None
+    eng.position_lost = lambda side, db, at: None
+    return eng, server
+
+
+def test_postgresql_reads_a_swapped_table_by_its_id(tmp_path):
+    """Its log names no rename: two renames that swap a table in under the
+    name leave its name and columns, and the id read from the server is
+    what tells it apart."""
+    eng, server = _postgres_source({"public.a": "16401", "public.b": "16402"})
+    assert eng.table_oids("source", "d") == server.rows
+    t = _tables(tmp_path, src=eng, options={"ddl": "park"})
+    t.boundary("0/1", None, force=True)
+    assert t.tables["public.a"]["oid"] == "16401"
+    server.rows["public.a"] = "16999"
+    t.scope_at = 0
+    t.boundary("0/2", None, force=True)
+    assert t.tables["public.a"]["state"] == "copying"
+    assert "replaced on the source" in t.tables["public.a"]["why"]
+    assert t.tables["public.a"]["oid"] == "16999"
+    assert t.tables["public.b"]["state"] == "live"
+    # under the default, the tail stops before the batch
+    eng, server = _postgres_source({"public.b": "16402"})
+    t = _tables(tmp_path / "stop", src=eng)
+    t.boundary("0/1", None, force=True)
+    server.rows["public.b"] = "16777"
     with pytest.raises(SystemExit) as e:
         t.boundary("0/2", None, force=True)
     assert "public.b was replaced on the source" in str(e.value)

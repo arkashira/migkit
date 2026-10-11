@@ -2107,7 +2107,6 @@ UNPROVED = {
                           "cosmosdb sapodp saas hetero"),
     "tail.added": "mysql mssql tidb",
     "tail.readded": "mssql tidb",
-    "tail.renames": "postgres",
     "assess.versions": "mongodb",
     "assess.brands": "tidb",
     "assess.engine-checks": ("db2i teradata snowflake tidb cockroachdb dsql "

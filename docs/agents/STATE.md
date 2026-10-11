@@ -47,7 +47,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 252, yes 469. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 251, yes 470. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -77,7 +77,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | opensearch | 0/9 | 3/26 | 1/6 | 2/7 | 1/4 | 3/6 | 4/6 | 1/1 | 1/1 | 0/1 | 16/67 |
 | oracle | 3/10 | 8/36 | 1/6 | 1/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 25/82 |
 | parquet | 0/7 | 0/15 | - | 0/4 | 1/2 | 3/6 | 1/1 | 0/1 | 0/1 | 0/1 | 5/38 |
-| postgres | 9/10 | 35/37 | 4/6 | 7/7 | 5/6 | 7/7 | 8/8 | 1/1 | 1/1 | 1/1 | 78/84 |
+| postgres | 9/10 | 35/37 | 5/6 | 7/7 | 5/6 | 7/7 | 8/8 | 1/1 | 1/1 | 1/1 | 79/84 |
 | pubsub | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | redis | 1/8 | 7/14 | 1/6 | 4/7 | 0/1 | 4/5 | 3/6 | 1/1 | 1/1 | 0/1 | 22/50 |
 | redshift | 0/10 | 0/32 | 0/6 | 1/7 | 1/5 | 1/5 | 1/7 | 1/1 | 1/1 | 0/1 | 6/75 |
@@ -146,7 +146,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | tail.added | cockroachdb postgres | mssql mysql tidb | the rest (22) | copybook db2zos duckdb hetero kinesis parquet pubsub sqlite teradata |
 | tail.readded | mysql | mssql tidb | the rest (24) | copybook db2zos duckdb hetero kinesis parquet pubsub sqlite teradata |
 | tail.ddl | mysql postgres | - | the rest (25) | copybook db2zos duckdb hetero kinesis parquet pubsub sqlite teradata |
-| tail.renames | mysql | postgres | the rest (20) | cassandra copybook cosmosdb couchbase db2zos duckdb dynamodb hetero kafka kinesis parquet pubsub sqlite teradata |
+| tail.renames | mysql postgres | - | the rest (20) | cassandra copybook cosmosdb couchbase db2zos duckdb dynamodb hetero kafka kinesis parquet pubsub sqlite teradata |
 | assess.versions | mysql opensearch postgres redis sqlite | mongodb | the rest (23) | copybook delta hetero iceberg kinesis parquet pubsub |
 | assess.brands | kafka mongodb mysql opensearch postgres redis | tidb | the rest (22) | copybook delta hetero iceberg kinesis parquet pubsub |
 | assess.engine-checks | bigquery db2zos generic hetero kafka mongodb mysql oracle postgres redis redshift sqlite | cockroachdb cosmosdb couchbase db2i dsql saas sapodp snowflake teradata tidb | the rest (14) | - |
