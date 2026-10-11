@@ -939,7 +939,12 @@ class OpenSearchEngine(NeutralCopier, Engine):
         their mappings field by field (columns, narrowing, precision,
         collation, what the cluster generates), their options, the kinds of
         value their documents hold (types, null against empty against
-        absent). Only the indexes the hop takes (`in_scope`)."""
+        absent). Only the indexes the hop takes (`in_scope`).
+
+        The comparison of values, ids and versions reads every document of
+        each twin, none sampled - a count of kinds over a sample would say
+        nothing of the documents it did not read - so a deep check of a
+        large index costs what its data check costs, several times over."""
         out = self._health_findings(db)
         left = self.set_aside(db)
         if left is not None:
