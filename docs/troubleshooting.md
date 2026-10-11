@@ -905,6 +905,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the target's registry refused schema <...> (<...>) - its compatibility rule says the topic's consumers could not read it: <...>
 
+* <...>: its settings could not be read on the source, and a topic made without them (compaction, retention) would mean something else on the target. Nothing was made
+
+* <...> is not a topic on the source
+
 * <...> has fewer partitions on the target than on the source: a key's messages would land in another partition, out of the order its consumers read them
 
 * offsets: <...> is not one of <...>
@@ -1756,6 +1760,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the offline bundle's <...> is not what its sums say. Nothing has been installed from it
 
 * the offline bundle's <...> is not in its sums
+
+* <...>: made on the source while the tail runs, and the hop's ddl says stop. Nothing of it is copied. Start the tail again to follow it, or set ddl to apply (follow it as it is made) or park (leave it aside)
+
+* <...>: deleted on the source, and the hop's ddl says stop. Its target topic is untouched; its saved offsets are kept
+
+* <...>: came back to the tail, and <...>. Nothing of it is copied. Set ddl to park to leave it aside and go on with the other topics
+
+* <...>: <...>. Nothing more of it is copied; set ddl to park to leave it aside
+
+* <...>: <...>, and start the tail again
 
 * `<...>` is not a transform: null, constant <text>, hash or truncate <n>
 

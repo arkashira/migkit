@@ -1,4 +1,6 @@
 import hashlib
+import json
+import re
 import time
 
 from .. import pieces
@@ -376,10 +378,12 @@ class KafkaEngine(Engine):
     def move_key(self, db, sch, tbl):
         return f"topic.{tbl or sch}"
 
-    def _made_like_the_source(self, topic, partitions):
-        """The target's topic, made with the source's partition count and
-        the configs that decide what a topic means, where it is missing."""
-        from kafka.admin import NewTopic
+    def _topic_plan(self, topic, partitions):
+        """What would make the target's `topic` like the source's, or None
+        where the target has it: `{topic, partitions, replication_factor,
+        configs}` - the source's partition count, its replication (no more
+        than the target has brokers for) and the settings that decide what
+        a topic means (`CRITICAL_CONFIGS`)."""
         dst = self._consumer("dst")
         try:
             if topic in dst.topics():
@@ -387,19 +391,131 @@ class KafkaEngine(Engine):
             brokers = len(dst._client.cluster.brokers()) or 1
         finally:
             dst.close()
-        configs = self._topic_configs("src", [topic]).get(topic, {})
-        keep = {k: v for k, v in configs.items()
-                if k in self.CRITICAL_CONFIGS and v is not None}
-        rf = int((self.hop.options or {}).get("replication_factor",
-                                                min(3, brokers)))
+        read = self._topic_configs("src", [topic])
+        if read is None:
+            raise SystemExit(
+                f"{topic}: its settings could not be read on the source, and"
+                " a topic made without them (compaction, retention) would"
+                " mean something else on the target. Nothing was made")
+        keep = {k: v for k, v in read.get(topic, {}).items()
+                if k in self.CRITICAL_CONFIGS and v not in (None, "")}
+        return {"topic": topic, "partitions": int(partitions),
+                "replication_factor": self._replication_factor(topic,
+                                                               brokers),
+                "configs": keep}
+
+    def _made_like_the_source(self, topic, partitions):
+        """The target's topic, made as `_topic_plan` says, where it is
+        missing."""
+        from kafka.admin import NewTopic
+        plan = self._topic_plan(topic, partitions)
+        if plan is None:
+            return None
         admin = self._admin("dst")
         try:
-            admin.create_topics([NewTopic(topic, num_partitions=partitions,
-                                          replication_factor=rf,
-                                          topic_configs=keep)])
+            admin.create_topics([NewTopic(
+                topic, num_partitions=plan["partitions"],
+                replication_factor=plan["replication_factor"],
+                topic_configs=plan["configs"])])
+        except Exception as e:  # noqa: BLE001 - another maker got there
+            if "TopicAlreadyExists" not in type(e).__name__:
+                raise
+            return None
         finally:
             admin.close()
         return f"{topic}: made on the target with {partitions} partitions"
+
+    def neutral_create_sql(self, side, db, table, columns, key=()):
+        """What would make the topic `table` on the target, without making
+        it, as text: the plan (`_topic_plan`) of the topic as the source
+        has it. A topic has no columns, so `columns` and `key` say
+        nothing. A topic the target has is never touched, and says so."""
+        src = self._consumer("src")
+        try:
+            partitions = len(self._partitions(src, table))
+        finally:
+            src.close()
+        if not partitions:
+            raise SystemExit(f"{table} is not a topic on the source")
+        return json.dumps(self._topic_plan(table, partitions)
+                          or {"topic": table, "exists": True},
+                          sort_keys=True)
+
+    def neutral_create(self, side, db, table, columns, key=()):
+        """Make the topic `table` on the target as `neutral_create_sql`
+        says. An existing topic is never altered, emptied or replaced.
+        Returns the plan it carried out."""
+        said = self.neutral_create_sql(side, db, table, columns, key)
+        plan = json.loads(said)
+        if not plan.get("exists"):
+            self._made_like_the_source(table, plan["partitions"])
+        return said
+
+    def _source_replication(self, topic):
+        """The copies the source keeps of each partition of `topic` (the
+        most any partition has), or None where the source will not say."""
+        try:
+            admin = self._admin("src")
+        except Exception:  # noqa: BLE001 - not said, so not carried
+            return None
+        try:
+            got = admin.describe_topics([topic])
+        except Exception:  # noqa: BLE001 - not said, so not carried
+            return None
+        finally:
+            admin.close()
+        for described in got or ():
+            if str(described.get("name") or described.get("topic")) != topic:
+                continue
+            counts = [len(part.get("replica_nodes")
+                          or part.get("replicas") or ())
+                      for part in described.get("partitions") or ()]
+            return max(counts) if counts and max(counts) > 0 else None
+        return None
+
+    def _replication_factor(self, topic, brokers):
+        """The copies a topic made on the target keeps of each partition:
+        the hop's `replication_factor`; else the source topic's own, no
+        more than the target has brokers for; else three, or the brokers
+        there are."""
+        said = (self.hop.options or {}).get("replication_factor")
+        if said:
+            return int(said)
+        theirs = self._source_replication(topic)
+        return min(theirs, brokers) if theirs else min(3, brokers)
+
+    def _replicas(self):
+        """The copies of a partition a topic made on the target keeps, for
+        a figure before any is made (`_room_rows`): the hop's, else three
+        or the brokers there are."""
+        said = (self.hop.options or {}).get("replication_factor")
+        if said:
+            return int(said)
+        dst = self._consumer("dst")
+        try:
+            return min(3, len(dst._client.cluster.brokers()) or 1)
+        finally:
+            dst.close()
+
+    def create_missing(self, db, log=None):
+        """The topics in scope the target lacks, made before the copier
+        fills any: the source's partition count, its replication (no more
+        than the target has brokers for) and the settings that decide what
+        a topic means (`CRITICAL_CONFIGS`). One that is there is never
+        touched - not altered, not emptied. The copy of a topic makes it
+        too if it is still missing (`_copy_topic`): a topic made between
+        the two is made once."""
+        log = log or (lambda m: None)
+        src = self._consumer("src")
+        try:
+            wanted = [(t, len(self._partitions(src, t)))
+                      for _, t in self.list_move_tables(db)]
+        finally:
+            src.close()
+        for topic, partitions in wanted:
+            made = self._made_like_the_source(topic, partitions)
+            if made:
+                log(made)
 
     def move_table(self, db, sch, tbl, chunk, ck, log):
         """One topic, each partition's messages into the same partition on
@@ -493,6 +609,10 @@ class KafkaEngine(Engine):
                         log(f"{topic}[{p}]: the target held {there:,}"
                             " messages before the copy; offsets will differ,"
                             " and group positions are translated by message")
+                begin = src.beginning_offsets([src_tp])[src_tp]
+                if pst["next"] < begin:
+                    self._cut_by_retention(topic, p, pst, begin, producer_of,
+                                           save, log)
                 self._partition_ready(topic, p, pst, src, dst, src_tp, dst_tp,
                                       end, producer_of, save, log)
                 there = dst.end_offsets([dst_tp])[dst_tp]
@@ -576,6 +696,26 @@ class KafkaEngine(Engine):
             dst.close()
         return sent
 
+    def _cut_by_retention(self, topic, p, pst, begin, producer_of, save, log):
+        """The source's log of a partition starts past the offset the copy
+        had reached: retention, or a delete of records, took messages
+        before they were copied. They cannot be; they are counted in the
+        partition's state (`lost`) and said, and the copy goes on from the
+        first message the log still holds. Read from the lost offset, a
+        consumer is moved to the log's end by its reset, and everything
+        between was passed over without a word. An identical partition
+        keeps its offsets below where it stopped (`_identity_ends`)."""
+        gone = begin - pst["next"]
+        why = (f"{gone:,} messages ({pst['next']:,} to {begin - 1:,}) left"
+               " the source's log before they were copied")
+        if pst.get("mode") == "identical":
+            self._identity_ends(topic, p, pst, producer_of, save, log, why)
+        pst["lost"] = int(pst.get("lost") or 0) + gone
+        pst["next"] = begin
+        save()
+        log(f"{topic}[{p}]: {why}; they cannot be copied, and the copy goes"
+            f" on from {begin:,}")
+
     def moved_nothing(self, db):
         """Topics holding messages on the source and none on the target:
         what reached a partition is its end past its start."""
@@ -638,7 +778,7 @@ class KafkaEngine(Engine):
         it carries (`HEADER`), so it is not sent twice."""
         import json
 
-        from .. import failpoint, tailctl
+        from .. import failpoint, tailctl, topicstates
         state = self._tail_state(db, token_path)
         log("following the source's topics, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to copy)"))
@@ -665,16 +805,18 @@ class KafkaEngine(Engine):
             last[0] = text
             failpoint.hit("tail.saved")
 
+        topics = topicstates.TopicSet(self, db, state, log)
+        shown = [""]
+
         def look(at):
-            went = 0
-            for _, topic in self.list_move_tables(db):
-                st = state.setdefault(self.move_key(db, "", topic), {})
-                went += self._copy_topic(topic, st, 5000, save,
-                                         lambda m: None)
-            save()
+            went = self._tail_round(db, topics, save, log)
             if went:
                 seen[0] += went
                 log(f"{seen[0]} messages")
+            if topics.said() != shown[0]:
+                # the topics not live, said when they change
+                shown[0] = topics.said()
+                log("topics: " + (shown[0] or "all live"))
             return state, went, not went
 
         def lost(e, at):
@@ -687,6 +829,94 @@ class KafkaEngine(Engine):
                          hop=self.hop, go=go, token=state, lost=lost,
                          secrets=(self.hop.source.password,
                                   self.hop.target.password))
+
+    #: what a round of the tail says of a topic it copies: only these
+    #: (the copy's progress lines are for the copy)
+    NEWS = ("left the source's log", "made on the target")
+
+    def _tail_round(self, db, topics, save, log):
+        """One round of the tail: the topics' states held to the hop's
+        scope (`topicstates`) and saved before a message is copied, then
+        each topic that is followed copied on from its saved offsets. A
+        topic that left or is parked is not copied. Returns how many
+        messages went."""
+        state = topics.state
+        src = self._consumer("src")
+        try:
+            listing = {t: len(self._partitions(src, t) or [])
+                       for t in self._topics(src)}
+            everywhere = set(src.topics())
+        finally:
+            src.close()
+        if topics.boundary(listing, everywhere,
+                           lambda names: self._ranges("src", names)):
+            save()
+
+        def news(m):
+            if any(n in m for n in self.NEWS):
+                log(m)
+        went = 0
+        for topic in topics.following():
+            went += self._copy_topic(topic, state[topics.key(topic)], 5000,
+                                     save, news)
+            if topics.settle(topic):
+                save()
+        save()
+        return went
+
+    def _ranges(self, side, topics):
+        """{topic: {"begin": {partition: offset}, "end": {...}}} as the
+        copier reads them - first offset, and the end a reader of
+        committed messages is given - of the topics that are on the side."""
+        from kafka import TopicPartition
+        consumer = self._consumer(side, isolation_level="read_committed")
+        try:
+            tps = {topic: [TopicPartition(topic, p)
+                           for p in self._partitions(consumer, topic)]
+                   for topic in topics}
+            every = [tp for got in tps.values() for tp in got]
+            # one ask for every partition, not one for each topic
+            begins = consumer.beginning_offsets(every) if every else {}
+            ends = consumer.end_offsets(every) if every else {}
+            return {topic: {
+                "begin": {str(tp.partition): begins[tp] for tp in got},
+                "end": {str(tp.partition): ends[tp] for tp in got}}
+                for topic, got in tps.items()}
+        finally:
+            consumer.close()
+
+    #: a reader of its own can read a topic again from any offset the log
+    #: still holds, without moving the tail's: a topic that left comes back
+    #: with only the messages since (`topicstates`)
+    REREADS_FROM_A_POSITION = True
+
+    def snapshot_mark(self, side, db):
+        """Where each of the hop's topics ends on a side now, for a reader
+        of committed messages, as text a message can be held to
+        (`mark_covers`): the seam a topic added to a running tail joins
+        at - the messages before it are the copy's, those from it on the
+        stream's."""
+        topics = [t for _, t in self.list_move_tables(db)]
+        return json.dumps({t: r["end"] for t, r in
+                           self._ranges(side, topics).items()},
+                          sort_keys=True)
+
+    def mark_covers(self, side, db, mark, change):
+        """Whether the message `change` names - `topic`, `partition`,
+        `offset`, as a mapping or an object - lies below the mark's end of
+        its partition (`snapshot_mark`): True, False, or None where the
+        mark does not say."""
+        try:
+            seam = json.loads(mark)
+            if isinstance(change, dict):
+                topic, part, offset = (change["topic"], change["partition"],
+                                       change["offset"])
+            else:
+                topic, part, offset = (change.topic, change.partition,
+                                       change.offset)
+            return int(offset) < int(seam[topic][str(part)])
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return None
 
     def _behind(self, db, state):
         """{topic: messages on the source past the saved positions}."""
@@ -709,25 +939,49 @@ class KafkaEngine(Engine):
         finally:
             src.close()
 
-    def src_lsn(self, db):
-        """Each source partition's end now, where a tail is running to
-        reach it; None where none is."""
+    def log_position(self, side, db):
+        """Where each of the hop's topics ends on one side now, every
+        partition's end as the brokers hold it -
+        `{topic: {partition: offset}}`, the form the tail's position is
+        held to (`position_reached`). The end includes a transaction still
+        open: the tail passes it only once that transaction is over, so a
+        drain to it is never proved while a write from before the freeze
+        is outstanding."""
         from kafka import TopicPartition
-
-        from .. import tailctl
-        if not tailctl.alive(self.hop.report_dir(db), self.hop):
-            return None
-        src = self._consumer("src")
+        consumer = self._consumer(side)
         try:
             out = {}
             for _, topic in self.list_move_tables(db):
                 tps = [TopicPartition(topic, p)
-                       for p in self._partitions(src, topic)]
-                for tp, end in (src.end_offsets(tps) if tps else {}).items():
+                       for p in self._partitions(consumer, topic)]
+                for tp, end in (consumer.end_offsets(tps)
+                                if tps else {}).items():
                     out.setdefault(topic, {})[str(tp.partition)] = end
             return out
         finally:
-            src.close()
+            consumer.close()
+
+    @staticmethod
+    def position_reached(have, want):
+        """Whether a tail whose saved position is `have` has copied every
+        partition up to the ends in `want` (`log_position`): True or False,
+        None where either is not a position."""
+        if not isinstance(have, dict) or not isinstance(want, dict):
+            return None
+        for topic, parts in want.items():
+            saved = (have.get(f"topic.{topic}") or {}).get("parts") or {}
+            for p, end in (parts or {}).items():
+                if int((saved.get(str(p)) or {}).get("next", -1)) < int(end):
+                    return False
+        return True
+
+    def src_lsn(self, db):
+        """Each source partition's end now, where a tail is running to
+        reach it; None where none is."""
+        from .. import tailctl
+        if not tailctl.alive(self.hop.report_dir(db), self.hop):
+            return None
+        return self.log_position("src", db)
 
     def fence_wait(self, db, at, timeout=300):
         """Wait until the tail's saved position has reached `at` in every
@@ -745,16 +999,60 @@ class KafkaEngine(Engine):
                 return None
             if not isinstance(state, dict):
                 return None
-            if all(int((state.get(self.move_key(db, "", topic)) or {})
-                       .get("parts", {}).get(p, {}).get("next", -1)) >= want
-                   for topic, parts in at.items()
-                   for p, want in parts.items()):
+            if self.position_reached(state, at):
                 # where the confirm pass compares up to
                 self._fenced_at = at
                 return True
             # looked at every 50 ms, not once a second (audit SP19)
             time.sleep(tailctl.POLL)
         return False
+
+    def drain_report(self, db, at):
+        """What the drain to `at` (`log_position`) still waits for, in
+        words: the messages not yet on the target topic by topic, and how
+        far behind each consumer group of the source stands - the group's
+        committed offset to the partition's end, which is what its
+        consumers have yet to read, all of it on the target once the tail
+        has passed `at`."""
+        from kafka import TopicPartition
+
+        from .. import tailctl
+        try:
+            state = tailctl.saved(tailctl.token_path(self.hop, db))
+        except SystemExit:
+            state = None
+        state = state if isinstance(state, dict) else {}
+        behind = {}
+        for topic, parts in (at or {}).items():
+            saved = (state.get(f"topic.{topic}") or {}).get("parts") or {}
+            left = sum(max(0, int(end) - int((saved.get(str(p)) or {})
+                                             .get("next", 0)))
+                       for p, end in parts.items())
+            if left:
+                behind[topic] = left
+        lag = {}
+        try:
+            for group in sorted(self._groups("src")):
+                held = self._group_offsets("src", group)
+                ends = {tp: int(at[tp.topic][str(tp.partition)])
+                        for tp in held if str(tp.partition)
+                        in (at.get(tp.topic) or {})}
+                if ends:
+                    lag[group] = sum(max(0, ends[tp] - held[tp])
+                                     for tp in ends)
+        except Exception:  # noqa: BLE001 - the groups, said as unread
+            lag = None
+        said = (f"{sum(behind.values()):,} messages not on the target yet ("
+                + ", ".join(f"{t} {n:,}"
+                            for t, n in sorted(behind.items())[:5])
+                + ")") if behind else "every message up to the position is"\
+            " on the target"
+        if lag is None:
+            return said + "; the consumer groups' lag could not be read"
+        if lag:
+            said += "; consumer group lag at the position: " + ", ".join(
+                f"{g} {n:,}" for g, n in sorted(lag.items())[:5])
+        return said
 
     #: topics a cluster keeps for itself: the broker's own (`__`), a schema
     #: registry's store (`_schemas`), Confluent's and Redpanda's. Copied, a
@@ -875,6 +1173,25 @@ class KafkaEngine(Engine):
                        "default.replication.factor", "num.partitions",
                        "compression.type", "log.message.timestamp.type")
 
+    def _broker_configs(self, side):
+        """{setting: value} of the first broker of a side, as the cluster
+        describes it. Raises where the cluster will not say."""
+        from kafka.admin import ConfigResource, ConfigResourceType
+        admin = self._admin(side)
+        try:
+            # the attribute is `node_id` on this client (3.x) and was
+            # `nodeId` on the 2.x one - measured, 3.0.11 has no `nodeId`
+            # at all
+            first = list(admin._client.cluster.brokers())[0]
+            node = str(first.node_id if hasattr(first, "node_id")
+                       else first.nodeId)
+            resp = admin.describe_configs(
+                [ConfigResource(ConfigResourceType.BROKER, node)],
+                config_filter="all")
+        finally:
+            admin.close()
+        return self._described(resp).get(node, {})
+
     def check_params(self, db):
         """The brokers' own settings, both sides, through the same report
         every engine's server settings go through. A broker's defaults are
@@ -882,24 +1199,9 @@ class KafkaEngine(Engine):
         partition count, a default retention - silently gets, so a target
         whose defaults differ turns the same traffic into different topics.
         """
-        from kafka.admin import ConfigResource, ConfigResourceType
-
         def pull(side):
             try:
-                admin = self._admin(side)
-                try:
-                    # the attribute is `node_id` on this client (3.x) and
-                    # was `nodeId` on the 2.x one - measured, 3.0.11 has no
-                    # `nodeId` at all
-                    first = list(admin._client.cluster.brokers())[0]
-                    node = str(first.node_id if hasattr(first, "node_id")
-                               else first.nodeId)
-                    resp = admin.describe_configs(
-                        [ConfigResource(ConfigResourceType.BROKER, node)],
-                        config_filter="all")
-                finally:
-                    admin.close()
-                return self._described(resp).get(node, {})
+                return self._broker_configs(side)
             except Exception as e:
                 return {self.UNREADABLE: str(e).splitlines()[-1][:80]
                         if str(e) else type(e).__name__}
@@ -945,19 +1247,151 @@ class KafkaEngine(Engine):
         nothing - there is nothing held for it to write over."""
         return set()
 
+    # --- the assessment: versions, limits, writers, room, hand work -----
+
+    #: the broker setting that names the protocol version a cluster runs
+    #: (`3.7-IV4`); a cluster that does not list it is read through the
+    #: protocol versions its brokers accept, and the version then is said
+    #: to be inferred
+    VERSION_SETTING = "inter.broker.protocol.version"
+    #: the oldest broker that has message headers, timestamps and
+    #: transactions - what the copy carries
+    OLDEST_BROKER = (0, 11)
+
+    @staticmethod
+    def _numbers(text):
+        """(major, minor) of a version written `3.7`, `3.7-IV4` or
+        `3.7.1`, or None."""
+        got = re.match(r"\s*(\d+)\.(\d+)", str(text or ""))
+        return (int(got.group(1)), int(got.group(2))) if got else None
+
+    def _version_of(self, side):
+        """(version as `3.7`, how it was read) of one side's brokers, or
+        (None, ""): the brokers' own setting, else what the client library
+        works out from the protocol versions they accept."""
+        try:
+            got = self._numbers(self._broker_configs(side).get(
+                self.VERSION_SETTING))
+        except Exception as e:  # noqa: BLE001 - asked another way below
+            if type(e).__name__ == "NoBrokersAvailable":
+                # no broker answered: asking again waits for nothing
+                return None, ""
+            got = None
+        if got:
+            return "%d.%d" % got, "the brokers' own setting"
+        try:
+            admin = self._admin(side)
+        except Exception:  # noqa: BLE001 - unknown, said as such
+            return None, ""
+        try:
+            seen = (getattr(admin, "config", None) or {}).get("api_version")
+            if not seen:
+                seen = getattr(getattr(getattr(admin, "_manager", None),
+                                       "broker_version_data", None),
+                               "broker_version", None)
+        except Exception:  # noqa: BLE001 - unknown, said as such
+            seen = None
+        finally:
+            admin.close()
+        if seen:
+            return (".".join(str(x) for x in tuple(seen)[:2]),
+                    "inferred by the client library from the protocol"
+                    " versions the brokers accept")
+        return None, ""
+
+    def _versions(self):
+        """{side: (version, how)}, asked once per engine."""
+        got = self.__dict__.get("_versions_cache")
+        if got is None:
+            got = self.__dict__["_versions_cache"] = {
+                side: self._version_of(side) for side in ("src", "dst")}
+        return got
+
     def _server_versions(self):
-        """Kafka does not publish a version over the client protocol the way
-        a database does, so this says so rather than inventing one."""
-        return (None, None)
+        """(source version, target version), each as `3.7`, None where the
+        brokers would not say and the library could not work it out."""
+        got = self._versions()
+        return got["src"][0], got["dst"][0]
+
+    def _version_row(self, sv, dv, parts=2):
+        """Held to the minor version: 3.7 and 3.8 are not the same
+        protocol."""
+        return super()._version_row(sv, dv, parts)
+
+    @staticmethod
+    def _library():
+        """(the client library's version, the newest broker it knows) -
+        each None where it does not say."""
+        have = newest = None
+        try:
+            from importlib import metadata
+            have = metadata.version("kafka-python")
+        except Exception:  # noqa: BLE001 - not said by this install
+            have = None
+        try:
+            from kafka.protocol.broker_version_data import BROKER_API_VERSIONS
+            newest = max(BROKER_API_VERSIONS)
+        except Exception:  # noqa: BLE001 - this client does not list them
+            newest = None
+        return have, newest
+
+    def _version_items(self):
+        """What the two versions mean for this move, beside whether they
+        match: how each was read, a broker too old for what the copy
+        carries, a target older than the source, and a broker newer than
+        the client library knows."""
+        got = self._versions()
+        items = []
+
+        def add(level, item, detail):
+            items.append({"level": level, "scope": "instance",
+                          "item": item, "detail": detail})
+        for side, name in (("src", "source"), ("dst", "target")):
+            version, how = got[side]
+            number = self._numbers(version)
+            if number is None:
+                continue
+            if how.startswith("inferred"):
+                add("warn", f"the {name} brokers' version is inferred",
+                    f"{version}: {how}; the brokers did not name it in"
+                    " their settings")
+            if number < self.OLDEST_BROKER:
+                add("fail", f"the {name} brokers are too old",
+                    f"{version}: message headers, timestamps and"
+                    " transactions, which the copy carries, need 0.11 or"
+                    " newer")
+        s, d = (self._numbers(got[x][0]) for x in ("src", "dst"))
+        if s and d and d < s:
+            add("warn", "the target brokers are older than the source's",
+                f"src {got['src'][0]} / dst {got['dst'][0]}: a message"
+                " format or compression the source's topics use may be one"
+                " the target does not know (zstd needs 2.1), and a topic"
+                " setting it does not have is refused when the topic is"
+                " made")
+        have, newest = self._library()
+        if have is None:
+            add("warn", "the client library's version is not known",
+                "which brokers it speaks to is unknown, not clean")
+        else:
+            beyond = [f"{name} {got[side][0]}" for side, name in
+                      (("src", "source"), ("dst", "target"))
+                      if self._numbers(got[side][0]) and newest
+                      and self._numbers(got[side][0]) > tuple(newest[:2])]
+            add("warn" if beyond else "pass", "client library and brokers",
+                f"client library {have}"
+                + (", which knows brokers up to "
+                   + ".".join(map(str, newest[:2])) if newest else "")
+                + (f"; newer than that: {', '.join(beyond)} - the library"
+                   " speaks the newest protocol versions both know"
+                   if beyond else ""))
+        return items
 
     def _assess_extra(self):
-        """What has to line up before topics are moved.
-
-        Partition counts are the one that cannot be fixed afterwards: a
-        consumer's key-to-partition mapping depends on the count, so a target
-        with a different number of partitions delivers the same key to a
-        different consumer - and nothing errors.
-        """
+        """What has to line up before topics are moved: the topics the
+        target will have to make, what each broker version means, the
+        writers beside the move, the room on the target and the work the
+        move leaves. Partition counts, which cannot be fixed afterwards,
+        and message limits are the pre-flight's (`PREFLIGHT`)."""
         items = []
 
         def add(level, item, detail=""):
@@ -965,34 +1399,258 @@ class KafkaEngine(Engine):
                           "item": item, "detail": str(detail)})
         try:
             sc, dc = self._consumer("src"), self._consumer("dst")
-            stops = set(self._topics(sc))
-            dtops = set(self._topics(dc))
+            try:
+                stops = set(self._topics(sc))
+                dtops = set(self._topics(dc))
+            finally:
+                sc.close()
+                dc.close()
         except Exception as e:
             add("warn", "cannot list topics on both sides",
                 f"{str(e)[:90]} - unknown, not clean")
             return items
 
         missing = sorted(stops - dtops)
-        add("pass" if not missing else "fail",
-            "every source topic exists on the target",
-            f"{len(stops)} topics" if not missing
-            else f"{len(missing)} missing: {', '.join(missing[:5])}")
+        add("pass", "every source topic exists on the target",
+            f"{len(stops)} topics" if not missing else
+            f"{len(missing)} not there yet, made as the move goes with the"
+            " source's partitions, replication and settings:"
+            f" {', '.join(missing[:5])}"
+            + (f" and {len(missing) - 5} more" if len(missing) > 5 else ""))
+        items += self._version_items()
+        items += self._writer_rows()
+        items += self._room_rows()
+        inv = self._handwork()
+        items += inv.rows() + inv.summary()
+        return items
 
-        drift = []
-        for topic in sorted(stops & dtops):
-            try:
-                sp = len(self._partitions(sc, topic) or [])
-                dp = len(self._partitions(dc, topic) or [])
-            except Exception:
-                continue
-            if sp != dp:
-                drift.append(f"{topic} {sp}->{dp}")
-        add("pass" if not drift else "fail",
-            "partition counts match",
-            "all equal" if not drift else
+    #: checked by `assess` before anything moves (`Engine._preflight_items`)
+    PREFLIGHT = ("_partitions_fit", "_message_limits")
+
+    def _partitions_fit(self, db):
+        """Partition counts, topic by topic, where the target has the
+        topic: the one thing that cannot be fixed afterwards - a
+        consumer's key-to-partition mapping depends on the count, so a
+        target with a different number delivers the same key to a different
+        consumer, and nothing errors."""
+        sc, dc = self._consumer("src"), self._consumer("dst")
+        try:
+            stops, dtops = set(self._topics(sc)), set(self._topics(dc))
+            drift = []
+            for topic in sorted(stops & dtops):
+                try:
+                    sp = len(self._partitions(sc, topic) or [])
+                    dp = len(self._partitions(dc, topic) or [])
+                except Exception:  # noqa: BLE001 - not compared, not said ok
+                    continue
+                if sp != dp:
+                    drift.append(f"{topic} {sp}->{dp}")
+        finally:
+            sc.close()
+            dc.close()
+        if not drift:
+            return Result("assess", "partition counts match", "ok",
+                          "all equal")
+        return Result(
+            "assess", "partition counts match", "diff",
             "; ".join(drift[:5]) + " - a key lands on a different partition"
             " when the count changes, so ordering and consumer assignment"
-            " move with it and nothing errors")
+            " move with it and nothing errors", "",
+            "make the target's topics with the source's partition counts, or"
+            " leave them to be made by the move")
+
+    def _message_limits(self, db):
+        """The largest message each topic takes, source against target,
+        where the target has the topic: a message over the target's limit
+        is refused and the copy stops there. A sample of the source's
+        messages cannot say none is that large, so the topic's limit is
+        what is held."""
+        sc, dc = self._consumer("src"), self._consumer("dst")
+        try:
+            common = sorted(set(self._topics(sc)) & set(self._topics(dc)))
+        finally:
+            sc.close()
+            dc.close()
+        if not common:
+            return Result("assess", "message size limits", "ok",
+                          "no topic is on both sides yet")
+        src = self._topic_configs("src", common)
+        dst = self._topic_configs("dst", common)
+        if src is None or dst is None:
+            return Result(
+                "assess", "message size limits", "error",
+                "the topics' settings could not be read on "
+                + ("the source" if src is None else "the target")
+                + " - unknown, not clean")
+
+        def limit(configs, topic):
+            try:
+                return int((configs.get(topic) or {}).get(
+                    "max.message.bytes") or 0) or None
+            except (TypeError, ValueError):
+                return None
+        small = []
+        for topic in common:
+            a, b = limit(src, topic), limit(dst, topic)
+            if a and b and b < a:
+                small.append(f"{topic} takes {a:,} bytes on the source and"
+                             f" {b:,} on the target")
+        if not small:
+            return Result("assess", "message size limits", "ok",
+                          f"{len(common)} topics take on the target every"
+                          " message they take on the source")
+        return Result(
+            "assess", "message size limits", "diff",
+            "; ".join(small[:5]) + " - the target refuses a message over"
+            " its limit, and the copy stops at the first", "",
+            "raise max.message.bytes on those target topics to the source's")
+
+    def stream_writers(self, db):
+        """[(what, pausable)] writing into the target's topics besides a
+        repair: migkit's own tail, and every producer the target's brokers
+        still hold state for on the hop's topics that wrote within
+        `WRITER_WINDOW` seconds (`_producers`) - none of which can be
+        paused from here."""
+        out = super().stream_writers(db)
+        if out:
+            # migkit's own tail writes there, and a producer id says
+            # nothing of whose it is: they cannot be told apart
+            return out
+        found = self._producers("dst", db, self._migkit_wrote_at(db))
+        return out + [(f"producer {pid} on {topics}", False)
+                      for pid, topics in sorted(found.items())]
+
+    #: a producer that wrote this recently, in seconds, is writing now
+    WRITER_WINDOW = 300
+    #: a producer whose last write is no later than migkit's own last
+    #: activity plus this, in seconds, is taken for migkit's (an earlier
+    #: run's producers are listed for as long as the brokers keep them)
+    OWN_SLACK = 60
+
+    def _migkit_wrote_at(self, db):
+        """When migkit last wrote into this hop's target, in milliseconds,
+        as far as its own files say: the copy's checkpoint and the tail's
+        position - 0 where neither is there."""
+        from .. import tailctl
+        last = 0.0
+        for path in (self.hop.report_dir(db) / "move.json",
+                     tailctl.token_path(self.hop, db)):
+            try:
+                last = max(last, path.stat().st_mtime)
+            except OSError:
+                continue
+        return last * 1000
+
+    def _producers(self, side, db, own=0):
+        """{producer id: "topic[partition], ..."} of the producers active
+        on the hop's topics on one side that wrote within the window and
+        after migkit's own last write (`own`, `OWN_SLACK`), from the
+        brokers' own producer state (DescribeProducers). A producer that is
+        neither idempotent nor transactional leaves no state to name. Raises
+        where the client or the cluster does not have the call."""
+        from kafka import TopicPartition
+        consumer = self._consumer(side)
+        try:
+            tps = [TopicPartition(t, p) for _, t in
+                   self.list_move_tables(db)
+                   for p in self._partitions(consumer, t)]
+        finally:
+            consumer.close()
+        if not tps:
+            return {}
+        admin = self._admin(side)
+        try:
+            states = admin.describe_producers(tps)
+        finally:
+            admin.close()
+        now = time.time() * 1000
+        found = {}
+        for tp, state in states.items():
+            for pr in getattr(state, "active_producers", None) or ():
+                last = getattr(pr, "last_timestamp", None)
+                if last is None or last < 0 \
+                        or now - last > self.WRITER_WINDOW * 1000 \
+                        or last <= own + self.OWN_SLACK * 1000:
+                    continue
+                found.setdefault(pr.producer_id, []).append(
+                    f"{tp.topic}[{tp.partition}]")
+        return {pid: ", ".join(sorted(where)[:3])
+                + (f" and {len(where) - 3} more" if len(where) > 3 else "")
+                for pid, where in found.items()}
+
+    #: the ACL operations that let a principal write a topic
+    WRITING = ("WRITE", "ALL", "IDEMPOTENT_WRITE")
+
+    def _writer_rows(self):
+        """Who else writes to the hop's topics, as far as the cluster
+        tells: the producers active on the source, the principals its ACLs
+        let write them, the client quotas that throttle producers - and
+        what it did not tell, said as unknown, never as none."""
+        from .. import users
+        items = []
+
+        def add(level, item, detail):
+            items.append({"level": level, "scope": "cluster", "item": item,
+                          "detail": detail})
+        # the target's producers are the base's row (`stream_writers`)
+        try:
+            found = self._producers("src", "cluster")
+        except Exception as e:  # noqa: BLE001 - unknown, not none
+            add("warn", "producers writing the source's topics",
+                f"not readable ({type(e).__name__}: {str(e)[:70]}) -"
+                " unknown, not clean")
+        else:
+            add("pass" if not found else "warn",
+                "producers writing the source's topics",
+                f"no idempotent or transactional producer wrote in the last"
+                f" {self.WRITER_WINDOW // 60} minutes (one that is neither"
+                " leaves no state the brokers can name)"
+                if not found else
+                "; ".join(f"producer {pid} on {where}" for pid, where
+                          in sorted(found.items())[:6])
+                + " - the tail follows what they write; they are stopped"
+                  " at cutover")
+        try:
+            mine = [t for _, t in self.list_move_tables("cluster")]
+        except Exception:  # noqa: BLE001 - the ACLs are then read whole
+            mine = None
+        for side, name in (("src", "source"), ("dst", "target")):
+            try:
+                got = users._kafka_accounts(self.hop, side)
+            except Exception as e:  # noqa: BLE001 - unknown, not none
+                add("warn", f"who may write the {name}'s topics",
+                    f"not readable ({type(e).__name__}) - unknown, not"
+                    " clean")
+                continue
+            unread = got.get("unread") or {}
+            if got.get("acls") is None:
+                add("warn", f"who may write the {name}'s topics",
+                    "the ACLs could not be read ("
+                    + str(unread.get("acls") or "no answer")[:80]
+                    + ") - a cluster that checks none lets any client"
+                      " write; unknown, not clean")
+            else:
+                who = sorted({a[0] for a in got["acls"]
+                              if a[2] in self.WRITING and a[3] == "ALLOW"
+                              and a[4] == "TOPIC"
+                              and self._acl_names(a, mine)})
+                add("pass", f"who may write the {name}'s topics",
+                    f"{len(who)} principals: {', '.join(who[:6])}"
+                    + (" and more" if len(who) > 6 else "")
+                    if who else "no principal is allowed by an ACL")
+            quotas = got.get("quotas")
+            if quotas is None:
+                if unread.get("quotas"):
+                    add("warn", f"client quotas on the {name}",
+                        f"not readable ({str(unread['quotas'])[:70]}) -"
+                        " unknown, not clean")
+                continue
+            throttled = sorted(
+                users._quota_said(e, "producer_byte_rate")
+                for e, q in quotas.items() if "producer_byte_rate" in q)
+            if throttled:
+                add("pass", f"client quotas on the {name}",
+                    "producers throttled: " + "; ".join(throttled[:4]))
         return items
 
     @staticmethod
@@ -1002,6 +1660,175 @@ class KafkaEngine(Engine):
         and one about several names none but its `tables`."""
         topics = list(topics)
         return topics[0] if len(topics) == 1 else ""
+
+    @staticmethod
+    def _acl_names(acl, topics):
+        """Whether an ACL (`users._acl_key`) is on a topic of the hop: its
+        name is `*`, one of them, or a prefix of one. Every ACL where the
+        topics are not known."""
+        name, kind = acl[5], acl[6]
+        if topics is None or name == "*":
+            return True
+        if kind == "PREFIXED":
+            return any(t.startswith(name) for t in topics)
+        return name in topics
+
+    def free_bytes(self, side, db):
+        """What the side's brokers have free on their disks, summed, as
+        the brokers report it (DescribeLogDirs, brokers 3.3 and newer); None
+        where they will not say."""
+        total = 0
+        found = False
+        for broker in self._log_dirs(side):
+            for d in broker.get("log_dirs") or ():
+                if d.get("error_code") or d.get("usable_bytes") is None:
+                    continue
+                total += max(int(d["usable_bytes"]), 0)
+                found = True
+        return total if found else None
+
+    def _log_dirs(self, side):
+        """[{broker, log_dirs: [{log_dir, topics: [{name, partitions}],
+        usable_bytes}]}] of one side, or [] where the client or the cluster
+        does not say."""
+        try:
+            admin = self._admin(side)
+        except Exception:  # noqa: BLE001 - not readable, said by the caller
+            return []
+        try:
+            got = admin.describe_log_dirs()
+        except Exception:  # noqa: BLE001 - not readable, said by the caller
+            return []
+        finally:
+            admin.close()
+        return got if isinstance(got, list) else []
+
+    def _logical_bytes(self, side, topics):
+        """The bytes the topics hold, one replica of each partition (the
+        largest any broker has), or None where the brokers will not say."""
+        sizes = {}
+        for broker in self._log_dirs(side):
+            for d in broker.get("log_dirs") or ():
+                if d.get("error_code"):
+                    continue
+                for t in d.get("topics") or ():
+                    for part in t.get("partitions") or ():
+                        key = (t["name"], part["partition_index"])
+                        sizes[key] = max(sizes.get(key, 0),
+                                         int(part.get("partition_size") or 0))
+        if not sizes:
+            return None
+        return sum(n for (t, _), n in sizes.items() if t in topics)
+
+    def _room_rows(self):
+        """Whether the target has the room for the topics, and the replicas
+        of each, where the brokers say what they have free."""
+        item = "room on the target"
+        try:
+            topics = {t for _, t in self.list_move_tables("cluster")}
+            have = self.free_bytes("dst", "cluster")
+            need = self._logical_bytes("src", topics)
+        except Exception as e:  # noqa: BLE001 - unknown, not clean
+            return [{"level": "warn", "scope": "cluster", "item": item,
+                     "detail": f"not readable ({type(e).__name__}) -"
+                               " unknown, not clean"}]
+        if have is None or need is None:
+            return [{"level": "warn", "scope": "cluster", "item": item,
+                     "detail": "the "
+                     + ("target's free disk" if have is None
+                        else "source topics' sizes")
+                     + " could not be read from the brokers (it needs"
+                       " brokers 3.3 or newer and the right to describe log"
+                       " directories) - unknown, not clean"}]
+        from ..wording import human_bytes
+        replicas = self._replicas()
+        wanted = need * replicas
+        level = ("fail" if have < wanted else
+                 "warn" if have < wanted * 1.25 else "pass")
+        return [{"level": level, "scope": "cluster", "item": item,
+                 "detail": f"{human_bytes(have)} free on the target's"
+                           f" brokers for {human_bytes(need)} of topics in"
+                           f" {replicas} replicas ({human_bytes(wanted)})"
+                 + (" - a load that fills a broker's disk can stop it"
+                    if level != "pass" else "")}]
+
+    def _handwork(self):
+        """The work the move leaves to hands, counted and named
+        (`migkit.handwork`): the topic settings it does not carry, and the
+        cluster's accounts - SCRAM users, ACLs, client quotas - which move
+        by `migkit users`, not by the copy. A probe that could not run is
+        unknown, never none."""
+        from .. import handwork, users
+        inv = handwork.Inventory()
+        db = "cluster"
+        try:
+            topics = [t for _, t in self.list_move_tables(db)]
+            set_apart = self._settings_not_carried(topics)
+        except Exception as e:  # noqa: BLE001 - unknown, not none
+            inv.unknown("decide-then-apply", db,
+                        f"the topics' settings could not be read: "
+                        f"{type(e).__name__}")
+        else:
+            if set_apart is None:
+                inv.unknown("decide-then-apply", db,
+                            "the topics' settings could not be read from"
+                            " the source")
+            else:
+                inv.add("decide-then-apply", db,
+                        "topic settings the copy does not carry",
+                        [f"{t}: {', '.join(names)}"
+                         for t, names in sorted(set_apart.items())])
+        try:
+            got = users._kafka_accounts(self.hop, "src")
+        except Exception as e:  # noqa: BLE001 - unknown, not none
+            inv.unknown("not-carried", db,
+                        f"the accounts could not be read: {type(e).__name__}")
+        else:
+            unread = got.get("unread") or {}
+            said = {
+                "users": lambda v: sorted(v),
+                "acls": lambda v: sorted(users._acl_said(k) for k in v),
+                "quotas": lambda v: sorted(
+                    users._quota_said(e, k) for e, q in v.items()
+                    for k in q)}
+            for key, what in (("users", "SCRAM users"), ("acls", "ACLs"),
+                              ("quotas", "client quotas")):
+                if got.get(key) is None:
+                    inv.unknown("not-carried", db,
+                                f"the {what} could not be read: "
+                                f"{str(unread.get(key) or 'no answer')[:70]}")
+                else:
+                    inv.add("not-carried", db,
+                            f"{what} (carried by migkit users, not by the"
+                            " copy)", said[key](got[key]))
+        return inv
+
+    def _settings_not_carried(self, topics):
+        """{topic: [setting, ...]} of the settings the source's topics set
+        themselves (a topic-level override) that the copy does not carry
+        (`CRITICAL_CONFIGS` are), or None where the source will not say."""
+        from kafka.admin import ConfigResource, ConfigResourceType
+        out = {}
+        admin = self._admin("src")
+        try:
+            for i in range(0, len(topics), 20):
+                resp = admin.describe_configs(
+                    [ConfigResource(ConfigResourceType.TOPIC, t)
+                     for t in topics[i:i + 20]], config_filter="all")
+                for by_name in resp.values():
+                    for name, settings in by_name.items():
+                        names = sorted(
+                            k for k, v in settings.items()
+                            if (v or {}).get("config_source")
+                            == "DYNAMIC_TOPIC_CONFIG"
+                            and k not in self.CRITICAL_CONFIGS)
+                        if names:
+                            out[str(name)] = names
+        except Exception:  # noqa: BLE001 - unknown, said by the caller
+            return None
+        finally:
+            admin.close()
+        return out
 
     def check_schema(self, db):
         sc, dc = self._consumer("src"), self._consumer("dst")

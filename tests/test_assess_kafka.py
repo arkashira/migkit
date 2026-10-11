@@ -1,8 +1,9 @@
 """`migkit assess` on Kafka - the same command again, a third kind of store.
 
-Kafka has no server version over the client protocol, so the base reports
-that as unknown rather than inventing one. What it does have is the finding
-that cannot be fixed after the fact: partition counts.
+A cluster's version is the brokers' own setting where they list one and
+what the client library works out from the protocol they accept where they
+do not, said to be inferred - never invented. And the finding that cannot be
+fixed after the fact: partition counts.
 """
 import socket
 import subprocess
@@ -96,19 +97,23 @@ def test_assess_answers_rather_than_saying_not_implemented(pair, tmp_path):
     assert not any("not implemented" in i["item"] for i in _rows(tmp_path))
 
 
-def test_a_store_with_no_version_says_unknown_not_nothing(pair, tmp_path):
-    """Kafka does not hand a version to a client the way a database does, and
-    inventing one would be worse than admitting it."""
-    hit = [i for i in _rows(tmp_path) if "version" in i["item"]]
+def test_the_version_is_read_and_said_not_invented(pair, tmp_path):
+    """The brokers' own setting where they list one; where they do not,
+    what the client library works out from the protocol they accept, said
+    to be inferred; and a side nobody could read is unknown, not clean.
+    The version is held to the other side's (the fake-cluster tests are
+    `test_kafka_is_assessed_before_the_move`)."""
+    hit = [i for i in _rows(tmp_path) if "server version match" in i["item"]]
     assert hit, _rows(tmp_path)
-    assert "unknown, not clean" in hit[0]["detail"], hit[0]["detail"]
+    assert "src" in hit[0]["detail"] and "dst" in hit[0]["detail"]
 
 
-def test_a_missing_topic_is_a_failure(pair, tmp_path):
+def test_a_missing_topic_is_made_by_the_move_not_a_failure(pair, tmp_path):
     hit = [i for i in _rows(tmp_path)
            if "every source topic exists" in i["item"]]
-    assert hit and hit[0]["level"] == "fail", hit
+    assert hit and hit[0]["level"] == "pass", hit
     assert "only_src" in hit[0]["detail"], hit[0]["detail"]
+    assert "made as the move goes" in hit[0]["detail"]
 
 
 def test_a_partition_count_change_is_a_failure_with_its_reason(pair,

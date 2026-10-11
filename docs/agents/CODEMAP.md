@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (155 modules)
+## `migkit/` (156 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -156,6 +156,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/tools.py` - What migkit can do on this machine, and how to make it able to do more. Classes: Program, Terms, Bundle.
 - `migkit/tooluse.py` - What migkit asks of each program and library it wraps, against what the build installed offers (backlog 0f). Classes: Terms, Tool.
 - `migkit/toolversion.py` - Whether the client tools on this machine can talk to that server.
+- `migkit/topicstates.py` - The topics of a running Kafka tail, each in a state of its own (backlog P0-PARITY.tail; the SQL tail's are `tailtables`). Classes: TopicSet.
 - `migkit/traces.py` - A run as OpenTelemetry spans, beside the Prometheus metrics (backlog R23.8).
 - `migkit/transforms.py` - A column written other than as it was read, and proved as written (backlog P0-SCOPE.7: column transforms the check understands).
 - `migkit/troubleshooting.py` - The troubleshooting guide, read off the code (backlog 42).
