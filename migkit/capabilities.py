@@ -955,6 +955,17 @@ def _undone(n, c):
         or _asks(c, entries, _UNDO)
 
 
+def _own_policy(c):
+    """A Kafka tail's topics (`topicstates.TopicSet`) ask the hop's
+    per-table DDL policy (`tailtables.policy`) themselves: their changes
+    are not a change log's DDL."""
+    if not (_own(c, "tail_apply")
+            and "TopicSet" in _reached(c, ("tail_apply",))[0]):
+        return False
+    from . import topicstates
+    return "policy" in _body(topicstates.TopicSet.word).calls
+
+
 def _ddl(*keywords):
     """The engine's change reader hands a DDL to the tail's policy
     (`canon.ddl`), saying `keywords` with it."""
@@ -1021,11 +1032,13 @@ def _jobs(n, c):
 
 def _states(n, c):
     """The tail the engine runs keeps each table in a state of its own
-    (`tailtables.TableSet`): its own tail, where it hands its changes to
-    the pair's, or - with no tail of its own - the pair's tail reading its
-    change log (`cli._tail_pair`)."""
+    (`tailtables.TableSet`; a Kafka tail's topics, `topicstates.TopicSet`):
+    its own tail, where it hands its changes to the pair's, or - with no
+    tail of its own - the pair's tail reading its change log
+    (`cli._tail_pair`)."""
     if _own(c, "tail_apply"):
-        return "TableSet" in _reached(c, ("tail_apply",))[0]
+        return bool({"TableSet", "TopicSet"}
+                    & _reached(c, ("tail_apply",))[0])
     return _own(c, "neutral_changes")
 
 
@@ -1143,7 +1156,7 @@ def _items():
                          and own("position_reached")(n, c)),
         "tail.ddl": ("a schema change met in its changes goes by the hop's"
                      " per-table DDL policy", lambda n, c: _states(n, c)
-                     and _ddl()(n, c)),
+                     and (_ddl()(n, c) or _own_policy(c))),
         "tail.renames": ("a table renamed or swapped while followed is told"
                          " apart", lambda n, c: _states(n, c) and (
                              _own(c, "table_oids") or _ddl("to")(n, c))),
@@ -1783,7 +1796,7 @@ DEPTH_GAPS = {
     },
     "tail.table-states": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb redis kafka clickhouse db2 ase opensearch "
+                "mongodb redis clickhouse db2 ase opensearch "
                 "cassandra redshift snowflake bigquery iceberg delta"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_as("schema", "kinesis pubsub"),
@@ -1791,7 +1804,7 @@ DEPTH_GAPS = {
     },
     "tail.added": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb redis kafka clickhouse dynamodb oracle db2 db2i "
+                "mongodb redis clickhouse dynamodb oracle db2 db2i "
                 "ase opensearch cassandra redshift snowflake bigquery "
                 "iceberg delta dsql couchbase cosmosdb sapodp saas"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
@@ -1801,7 +1814,7 @@ DEPTH_GAPS = {
     },
     "tail.readded": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "postgres mongodb redis kafka clickhouse dynamodb oracle "
+                "postgres mongodb redis clickhouse dynamodb oracle "
                 "db2 db2i ase opensearch cassandra redshift snowflake "
                 "bigquery iceberg delta cockroachdb dsql couchbase cosmosdb "
                 "sapodp saas"),
@@ -1812,7 +1825,7 @@ DEPTH_GAPS = {
     },
     "tail.ddl": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb mssql redis kafka clickhouse dynamodb oracle db2 "
+                "mongodb mssql redis clickhouse dynamodb oracle db2 "
                 "db2i ase opensearch cassandra redshift snowflake bigquery "
                 "iceberg delta tidb cockroachdb dsql couchbase cosmosdb "
                 "sapodp saas"),
@@ -1835,7 +1848,7 @@ DEPTH_GAPS = {
     },
     "assess.versions": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mssql kafka clickhouse dynamodb oracle db2 db2i db2zos ase "
+                "mssql clickhouse dynamodb oracle db2 db2i db2zos ase "
                 "teradata cassandra redshift snowflake bigquery duckdb tidb "
                 "cockroachdb dsql couchbase cosmosdb sapodp saas"),
         **_as("params", "parquet copybook iceberg delta"),
@@ -1860,7 +1873,7 @@ DEPTH_GAPS = {
     },
     "assess.preflight": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mysql mongodb mssql redis kafka sqlite parquet clickhouse "
+                "mysql mongodb mssql redis sqlite parquet clickhouse "
                 "dynamodb oracle db2 db2i db2zos ase teradata opensearch "
                 "cassandra redshift snowflake bigquery duckdb copybook "
                 "iceberg delta tidb cockroachdb dsql couchbase cosmosdb "
@@ -1871,7 +1884,7 @@ DEPTH_GAPS = {
     },
     "assess.capacity": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mssql redis kafka sqlite parquet dynamodb oracle db2 db2i "
+                "mssql redis sqlite parquet dynamodb oracle db2 db2i "
                 "db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery kinesis pubsub duckdb copybook iceberg "
                 "delta cockroachdb dsql couchbase cosmosdb"),
@@ -1880,7 +1893,7 @@ DEPTH_GAPS = {
     },
     "assess.writers": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb mssql kafka sqlite parquet clickhouse dynamodb "
+                "mongodb mssql sqlite parquet clickhouse dynamodb "
                 "oracle db2 db2i db2zos ase teradata opensearch cassandra "
                 "redshift snowflake bigquery duckdb copybook iceberg delta "
                 "tidb cockroachdb dsql couchbase cosmosdb sapodp saas "
@@ -1890,7 +1903,7 @@ DEPTH_GAPS = {
     },
     "assess.handwork": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mssql redis kafka sqlite clickhouse dynamodb oracle db2 "
+                "mssql redis sqlite clickhouse dynamodb oracle db2 "
                 "db2i db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb iceberg delta tidb cockroachdb "
                 "dsql couchbase cosmosdb sapodp saas hetero"),
@@ -1900,7 +1913,6 @@ DEPTH_GAPS = {
     },
     "schema.create": {
         **_each(NOT_APPLICABLE, _MADE_BY_WRITE, "mongodb redis"),
-        **_each(NOT_YET, "P0-PARITY.all", "kafka"),
         **_as("schema", "kinesis pubsub"),
         **_as("table-copy", "sapodp saas"),
         **_each(NOT_APPLICABLE, _PAIR, "hetero"),
@@ -1989,7 +2001,7 @@ DEPTH_GAPS = {
     "move.create-missing": {
         **_each(NOT_APPLICABLE, _MADE_BY_WRITE, "mongodb redis"),
         **_each(NOT_YET, "P0-PARITY.all",
-                "mssql kafka sqlite parquet clickhouse dynamodb oracle db2 "
+                "mssql sqlite parquet clickhouse dynamodb oracle db2 "
                 "db2i db2zos ase teradata opensearch cassandra redshift "
                 "snowflake bigquery duckdb copybook iceberg delta "
                 "cockroachdb dsql couchbase cosmosdb"),
@@ -1999,7 +2011,7 @@ DEPTH_GAPS = {
     },
     "cutover.drain": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "redis kafka db2 ase redshift snowflake bigquery iceberg "
+                "redis db2 ase redshift snowflake bigquery iceberg "
                 "delta hetero"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_as("schema", "kinesis pubsub"),
@@ -2108,7 +2120,10 @@ UNPROVED = {
     "move.partitioned": "mssql oracle tidb",
     "assess.engine-checks": ("db2i snowflake "
                              "sapodp "),
-    "schema.create": "db2i db2zos ",
+    "schema.create": "db2i db2zos kafka",
+    "assess.capacity": "kafka",
+    "assess.writers": "kafka",
+    "move.create-missing": "kafka",
     "schema.indexes": "sqlite teradata ",
     "schema.foreign-keys": "mssql oracle ",
     "schema.defaults": "teradata sapodp",

@@ -4053,6 +4053,63 @@ ClickHouse's and Oracle's deep findings and the shared capacity check's
 end in words no category reads (`mutations`, `constraints`, `capacity`),
 so they reach the verdict unclassified.
 
+*Kafka's tail, assessment, schema, move and cutover cells, 2026-10-11:*
+twelve of the fourteen cells it had open under those areas are built. A
+topic is Kafka's table and the tail follows topics.
+* *tail* (4, proved on `tests/kafka_fake.py`): `topicstates.TopicSet` keeps
+  each topic of a running tail live, joining, left or parked beside its
+  saved offsets, written before the topic is copied. A topic added to the
+  scope (or made while the hop's `ddl` applies) joins at the source's end
+  offsets then (`snapshot_mark`, `mark_covers`); one that left and returns
+  is copied from its saved offsets (`REREADS_FROM_A_POSITION`), only if its
+  target topic is as it was left; a topic made, deleted, grown in
+  partitions or recreated shorter goes by the hop's `ddl` per topic
+  (`tailtables.policy`: stop, park, apply, and `skip` for creates, drops
+  and truncates). With no `ddl` in the hop a topic made is followed as it
+  always was, and one that grew or was recreated stops the tail as the copy
+  always did. Found by building it: a copy resumed past messages the
+  source's retention had taken was moved to the log's end by the client's
+  own reset, and everything between passed over without a word
+  (`_cut_by_retention` counts them, says so, and keeps an identical
+  partition's offsets below the cut); a topic recreated shorter than the
+  offsets saved of it was skipped whole.
+* *assess* (5): the version is the brokers' own setting, else what the
+  client library works out from the protocol they accept (said to be
+  inferred), held to the other side's at the minor version, to 0.11 (headers,
+  timestamps, transactions) and to the newest broker the library knows
+  (`assess.versions`, proved); the partition counts and the message limits
+  are the pre-flight (`assess.preflight`, proved - a limit is held to the
+  topic's, not to a sample of its messages); the topic settings the copy
+  does not carry and the accounts it leaves to `migkit users` are counted
+  and named, and an unreadable probe is unknown, never none
+  (`assess.handwork`, proved). Built and owed a proof against a broker:
+  the producers the brokers hold state for on the hop's topics, the
+  principals the ACLs let write them and the client quotas that throttle
+  producers (`assess.writers`), and the target's free disk against the
+  topics' sizes times their replicas (`assess.capacity`) - their calls,
+  `describe_producers` and `describe_log_dirs`, have not been asked of a
+  broker.
+* *schema, move* (2, owed a proof): a topic the target lacks is made with
+  the source's partitions, its replication (no more than the target has
+  brokers for) and the settings that decide what it means, before the
+  copier fills any (`create_missing`, `neutral_create_sql`); the
+  replication is read with `describe_topics`, which has not been asked of
+  a broker. An existing topic is never touched.
+* *cutover* (1, proved on the fake): the drain is the source's end offsets
+  (`log_position`, an open transaction's range included) and the tail's
+  saved offsets reaching them (`position_reached`); `drain_report` says
+  what is left and how far behind each consumer group stands.
+* Not built, and why: *cutover.two-way* - nothing marks what the copy
+  writes so that a way back leaves it out (the marks ladder is PostgreSQL's
+  and MySQL's, and `twoway.refuse_unless_able` refuses a Kafka side), and a
+  loop-proof mirror needs a mark on each message and a reader that skips it,
+  proved against two clusters; *operations.fencing* - the hold is a row of
+  `migkit_origin` read under a shared lock, and a Kafka writer is held by
+  its transactional id only in the copy's `mapped` mode (a producer epoch
+  the broker refuses a stale writer by), not in `identical` or `plain`;
+  carrying it to the standby needs the hold armed on Kafka and a proof on
+  two brokers.
+
 ## P0-SMART. The decision engine, smart and not flat (owner, 2026-09-30)
 
 Asked: "is the decision engine smart or still flat - I want it really

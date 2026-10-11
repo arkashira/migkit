@@ -13,7 +13,15 @@ test can say what a real log would do:
 * a producer with a `transactional_id` that starts again ends what the
   last one left open (`init_transactions`), as the broker does;
 * a crash is a `Crash` (a `BaseException`, so nothing the engine catches
-  on a failure runs - the process is gone and the transaction stays open).
+  on a failure runs - the process is gone and the transaction stays open);
+* a consumer asked to read from an offset the log no longer holds is moved
+  to the log's end, as the real client does by default (`auto_offset_reset`
+  is `latest`), unless it was made with `earliest`;
+* the admin calls the assessment asks: a broker's and a topic's settings
+  (`describe_configs`), a topic's replicas (`describe_topics`), the
+  producers a partition holds state for (`describe_producers`) and the
+  brokers' log directories (`describe_log_dirs`), each answering what the
+  test put on the cluster, or refusing where the test says it does.
 
 What it does not model, and a test here therefore does not prove: the
 broker's wire protocol, replication, leader changes, producer epochs
@@ -84,6 +92,16 @@ class Cluster:
         self.producers = []     # the config of every producer made
         self.refuse = set()     # topics whose sends the broker refuses
         self.sequence = 0       # transactions begun, to tell them apart
+        self.broker_ids = [1]
+        self.cluster_id = f"id-{name}"
+        self.broker_configs = {}    # setting -> value, of every broker
+        self.topic_settings = {}    # topic -> {setting: (value, source)}
+        self.replication = {}       # topic -> copies of each partition
+        self.producer_state = {}    # (topic, partition) -> [producer]
+        self.log_dirs = None        # what describe_log_dirs answers
+        self.api_version = None     # what the client library infers
+        self.refuse_calls = set()   # admin calls the cluster refuses
+        self.no_producer_state = False  # the client has no such call
 
     # -- building a log the way a producer did ----
     def topic(self, name, partitions=1):
@@ -228,17 +246,23 @@ class Producer:
 
 
 class _Brokers:
+    def __init__(self, cluster):
+        self.cluster = cluster
+        self.cluster_id = cluster.cluster_id
+
     def brokers(self):
-        return [1]
+        return [types.SimpleNamespace(node_id=i)
+                for i in self.cluster.broker_ids]
 
 
 class Consumer:
     def __init__(self, cluster, isolation_level="read_uncommitted", **cfg):
         self.cluster = cluster
         self.committed = isolation_level == "read_committed"
+        self.reset = cfg.get("auto_offset_reset", "latest")
         self.pos = {}
         self.tps = []
-        self._client = types.SimpleNamespace(cluster=_Brokers())
+        self._client = types.SimpleNamespace(cluster=_Brokers(cluster))
 
     def topics(self):
         return set(self.cluster.topics)
@@ -285,8 +309,11 @@ class Consumer:
         out = {}
         for tp in self.tps:
             log = self.cluster.log(*tp)
-            at = max(self.pos.get(tp, log.start), log.start)
             limit = log.stable if self.committed else log.end
+            at = self.pos.get(tp, log.start)
+            if at < log.start:
+                # out of range: the client's reset, by default to the end
+                at = log.start if self.reset == "earliest" else limit
             got = []
             while at < limit and len(got) < max_records:
                 r = log.recs[at]
@@ -309,11 +336,69 @@ class Consumer:
 class Admin:
     def __init__(self, cluster):
         self.cluster = cluster
+        self.config = {"api_version": cluster.api_version}
+        self._client = types.SimpleNamespace(cluster=_Brokers(cluster))
+
+    def _asked(self, call):
+        if call in self.cluster.refuse_calls:
+            raise PermissionError(f"{call}: ClusterAuthorizationFailedError")
 
     def create_topics(self, topics):
         for t in topics:
             self.cluster.created.append(t)
             self.cluster.topic(t.name, t.num_partitions)
+            self.cluster.replication[t.name] = t.replication_factor
+            self.cluster.topic_settings.setdefault(t.name, {}).update(
+                {k: (v, "DYNAMIC_TOPIC_CONFIG")
+                 for k, v in t.topic_configs.items()})
+
+    def describe_configs(self, resources, include_synonyms=False,
+                         config_filter="modified"):
+        self._asked("describe_configs")
+        out = {}
+        for r in resources:
+            if r.resource_type == ConfigResourceType.BROKER:
+                got = {k: (v, "STATIC_BROKER_CONFIG")
+                       for k, v in self.cluster.broker_configs.items()}
+            else:
+                got = dict(self.cluster.topic_settings.get(r.name, {}))
+                if config_filter == "all":
+                    for k, v in TOPIC_DEFAULTS.items():
+                        got.setdefault(k, (v, "DEFAULT_CONFIG"))
+                else:
+                    got = {k: x for k, x in got.items()
+                           if x[1] == "DYNAMIC_TOPIC_CONFIG"}
+            out.setdefault(r.resource_type, {})[r.name] = {
+                k: {"value": v, "config_source": src, "is_sensitive": False}
+                for k, (v, src) in got.items()}
+        return out
+
+    def describe_topics(self, topics=None):
+        self._asked("describe_topics")
+        out = []
+        for t in topics or sorted(self.cluster.topics):
+            if t not in self.cluster.topics:
+                continue
+            copies = self.cluster.replication.get(t, 1)
+            out.append({"name": t, "partitions": [
+                {"partition_index": i, "leader_id": 1,
+                 "replica_nodes": list(range(1, copies + 1))}
+                for i in range(len(self.cluster.topics[t]))]})
+        return out
+
+    def describe_producers(self, partitions):
+        self._asked("describe_producers")
+        if self.cluster.no_producer_state:
+            raise AttributeError("describe_producers")
+        return {tp: types.SimpleNamespace(
+            active_producers=list(self.cluster.producer_state.get(
+                (tp.topic, tp.partition), ()))) for tp in partitions}
+
+    def describe_log_dirs(self):
+        self._asked("describe_log_dirs")
+        if self.cluster.log_dirs is None:
+            raise AttributeError("describe_log_dirs")
+        return self.cluster.log_dirs
 
     def delete_records(self, wanted):
         out = {}
@@ -338,6 +423,46 @@ class Admin:
 
     def close(self):
         pass
+
+
+#: what a topic reports of the settings it does not set itself
+TOPIC_DEFAULTS = {"cleanup.policy": "delete", "retention.ms": "604800000",
+                  "retention.bytes": "-1", "max.message.bytes": "1048588",
+                  "min.insync.replicas": "1", "compression.type": "producer",
+                  "delete.retention.ms": "86400000", "segment.ms": "604800000",
+                  "segment.bytes": "1073741824"}
+
+
+def producer(producer_id, last_timestamp):
+    """What the brokers hold of one active producer of a partition."""
+    return types.SimpleNamespace(producer_id=producer_id, producer_epoch=0,
+                                 last_sequence=0,
+                                 last_timestamp=last_timestamp,
+                                 coordinator_epoch=0,
+                                 current_transaction_start_offset=-1)
+
+
+def log_dir(topics, usable, total=None):
+    """One broker's answer to DescribeLogDirs: `topics` is {topic:
+    {partition: bytes}}, `usable` the bytes free."""
+    return {"log_dirs": [{
+        "log_dir": "/data", "error_code": 0, "total_bytes": total or usable,
+        "usable_bytes": usable,
+        "topics": [{"name": t, "partitions": [
+            {"partition_index": p, "partition_size": n}
+            for p, n in sorted(parts.items())]}
+            for t, parts in sorted(topics.items())]}]}
+
+
+class ConfigResourceType:
+    TOPIC = "topic"
+    BROKER = "broker"
+
+
+class ConfigResource:
+    def __init__(self, resource_type, name, configs=None):
+        self.resource_type, self.name = resource_type, name
+        self.configs = configs
 
 
 class NewTopic:
@@ -368,14 +493,18 @@ def install(monkeypatch, transactions=True):
     admin.NewTopic = NewTopic
     structs = types.ModuleType("kafka.structs")
     structs.OffsetAndMetadata = OffsetAndMetadata
+    admin.ConfigResource = ConfigResource
+    admin.ConfigResourceType = ConfigResourceType
     kafka.admin, kafka.structs = admin, structs
     monkeypatch.setitem(sys.modules, "kafka", kafka)
     monkeypatch.setitem(sys.modules, "kafka.admin", admin)
     monkeypatch.setitem(sys.modules, "kafka.structs", structs)
 
 
-def engine(src, dst, **options):
-    """A KafkaEngine whose clients are the in-memory clusters."""
+def engine(src, dst, real_settings=False, where=None, **options):
+    """A KafkaEngine whose clients are the in-memory clusters. The topics'
+    settings are not asked of them (`{}`) unless `real_settings`; `where`
+    is the directory the hop keeps its files in."""
     from migkit.config import Endpoint, Hop
     from migkit.engines.kafka import KafkaEngine
     hop = Hop(name="k", engine="kafka",
@@ -389,7 +518,10 @@ def engine(src, dst, **options):
     eng._consumer = lambda s, **kw: Consumer(side[s], **kw)
     eng._producer = lambda **kw: Producer(dst, **kw)
     eng._admin = lambda s: Admin(side[s])
-    eng._topic_configs = lambda s, topics: {}
+    if not real_settings:
+        eng._topic_configs = lambda s, topics: {}
+    if where is not None:
+        hop.report_dir = lambda db=None: where
     return eng
 
 

@@ -1341,7 +1341,8 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
                     raise _Undo(f"{d}: the stream did not pass {pos}, where"
                                 " the source stood after the freeze"
                                 + (", within the budget" if got is False
-                                   else " - it has no position"))
+                                   else " - it has no position")
+                                + _drain_left(leg.fence, d, pos))
                 say(f"  {d}: the stream passed {pos}, taken after the"
                     " freeze")
             if leg.settle is not None:
@@ -1757,6 +1758,20 @@ def _no_return_back(hop, eng, dbs, rec, way, say, why):
     raise SystemExit(f"the point of no return was undone ({why}): the old"
                      " source is frozen as the cutover left it, and going"
                      " back is still possible")
+
+
+def _drain_left(fence, db, pos):
+    """What a drain that did not pass its position still waits for, where
+    the engine says (`drain_report`): ". Left: ..." or nothing. A report
+    that cannot be made is not a reason to say less of why it stopped."""
+    report = getattr(fence, "drain_report", None)
+    if report is None:
+        return ""
+    try:
+        said = report(db, pos)
+    except Exception:  # noqa: BLE001 - the stop is said without it
+        return ""
+    return f". Left: {said}" if said else ""
 
 
 def _bounded(fn, within, *args, **kw):
