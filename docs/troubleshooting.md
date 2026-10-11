@@ -869,6 +869,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * pip install 'migkit[redis]' for redis support
 
+* the hop asks for <...>, which this engine does not read: its keys are taken or left by name (`include`, `exclude`) and carried as they are. Nothing was read or written; take the rule out of the hop
+
 * <...>: the source would not hand over a key: <...>
 
 * <...>: the target refused a key it was handed: <...>. A payload version error means it runs an older Redis than the source, whose values do not load into an older version

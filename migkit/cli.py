@@ -3566,8 +3566,13 @@ def _own_refused(hop, eng, db):
     if [k for k in narrowed if k not in BY_NAME + ("databases_renamed",)]:
         refused = []
         for d in dbs:
-            refused += movers.stream_cannot_carry(
-                hop, d, eng.neutral_tables("src", d))
+            try:
+                listed = eng.neutral_tables("src", d)
+            except NotImplementedError:
+                # an engine that lists no tables answers for itself
+                # (`native_replica_unsafe`), never with a traceback
+                break
+            refused += movers.stream_cannot_carry(hop, d, listed)
         if refused:
             said.append(
                 "the servers' own replication applies whole rows under the"
