@@ -572,6 +572,7 @@ class Miner:
         self.eng, self.side, self.db = eng, side, db
         self.conn = self.cur = None
         self.held = None
+        self.ddl = None
         self.samples = _SAMPLES.setdefault(
             (id(eng.hop), side, db), [])
         self.shapes = {}
@@ -734,11 +735,14 @@ class Miner:
     #: rows of one transaction held before it is handed back in parts
     LARGEST_HELD = 20000
 
-    def read(self, token, limit=1000):
+    def read(self, token, limit=1000, ddl=None):
         """(changes, token): whole transactions until about `limit`
         changes, in commit order; a transaction larger than the reader
         holds is handed back in parts, the part said in the token so a
-        read that starts over leaves out what went."""
+        read that starts over leaves out what went. `ddl(db, text,
+        commit)` turns a DDL statement of the redo into the changes that
+        carry it."""
+        self.ddl = ddl
         lost_why = lost(self.eng, self.side, self.db, token)
         if lost_why:
             raise SystemExit(lost_why)
@@ -867,7 +871,17 @@ class Miner:
                     " does not support), at SCN"
                     f" {scn}. Nothing after it was handed on; leave the"
                     " table out of the hop, or move it again after")
-            if op == DDL or self.eng.hop.excluded(self.db, table):
+            if op == DDL:
+                # a statement the redo carries as text, at its place among
+                # the rows; the shape of what it touched is read again
+                made = self.ddl(self.db, redo or "", commit) \
+                    if self.ddl else []
+                for one in made:
+                    for name in (one["table"], one.get("to")):
+                        self.shapes.pop(name, None)
+                out.extend(made)
+                continue
+            if self.eng.hop.excluded(self.db, table):
                 continue
             kinds, key = self._shape(table)
             lob_cols = [n for n, k in kinds.items() if k in
@@ -920,6 +934,10 @@ class Miner:
                 fetch.setdefault(table, []).append((change, missing))
         for table, wanted in fetch.items():
             self._as_of(table, commit, wanted)
+        # the transaction each committed in, as the SCN it did: what the
+        # tail holds to the table copier's marks (`Engine.mark_covers`)
+        for change in out:
+            change.setdefault("txn", int(commit))
         return out
 
     def _as_of(self, table, commit, wanted):

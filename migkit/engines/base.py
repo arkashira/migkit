@@ -4221,6 +4221,11 @@ class Engine:
                       how=""):
         """The rows found, written to the estate's files, as a clause."""
         import json
+        # counted, for the finding that names the table (`Result.rows_apart`)
+        # - exact where every row was walked
+        self.__dict__.setdefault("_apart", {})[(db, name)] = {
+            "missing": len(missing), "extra": len(extra),
+            "changed": len(changed), "exact": not capped}
         # the leaves an earlier check kept go with its lists: the leaves'
         # own drill keeps them again after this (`leaves.kept_leaves`)
         self._write_drill(

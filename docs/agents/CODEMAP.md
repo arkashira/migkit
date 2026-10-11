@@ -178,7 +178,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/workload.py` - Whether the target answers the source's own queries as well as the source does (backlog 24, problems file G1; R23, 4).
 - `migkit/zones.py` - The time zone the data is written in, against the one the server declares (backlog 23).
 
-## `migkit/engines/` (44 modules)
+## `migkit/engines/` (46 modules)
 
 - `migkit/engines/__init__.py` - (no docstring)
 - `migkit/engines/ase.py` - SAP ASE (Sybase) as one side of a pair (backlog 34). Classes: AseEngine.
@@ -207,6 +207,8 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/mysql.py` - (no docstring) Classes: MySQLEngine.
 - `migkit/engines/opensearch.py` - OpenSearch (and Elasticsearch) as one side of a pair (backlog 34). Classes: TooManyFields, OpenSearchEngine.
 - `migkit/engines/oracle.py` - Oracle as a side of a pair and a hop's engine (backlog 11, F5), through python-oracledb in thin mode: no Instant Client on the machine. Classes: Zoned, Bind, OracleEngine.
+- `migkit/engines/oracle_catalog.py` - What Oracle says about itself and its schema beyond its rows: its version and product, the rules and indexes of its columns and tables, the  Classes: OracleCatalog.
+- `migkit/engines/oracle_deep.py` - Oracle's deep checks of a finished move (backlog P0-PARITY.verify): the things a copy of the rows leaves looking right while they are not -  Classes: OracleDeep.
 - `migkit/engines/oracle_logminer.py` - migkit's own reader of Oracle's redo, through LogMiner (backlog F5). Classes: NotRead, Miner.
 - `migkit/engines/oracle_pump.py` - Oracle to Oracle, server to server: the target's Data Pump pulls the tables over a database link to the source, as of one SCN, no row throug
 - `migkit/engines/oracle_redo.py` - The redo-file reader: Oracle's redo read from its files by a program of its own, run next to them, as the rung above LogMiner (backlog F5). Classes: Stream, RedoFileReader.

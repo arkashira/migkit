@@ -35,9 +35,12 @@ import re
 import threading
 import time
 
+from .. import pieces
 from ..decide import Need, Rung
 from .base import Engine, RepairAction, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
+from .oracle_catalog import OracleCatalog
+from .oracle_deep import OracleDeep
 
 #: the declared type, with the numbers a counterpart needs
 DECLARED = ("case when data_type like '%WITH LOCAL TIME ZONE' then"
@@ -350,9 +353,32 @@ WRITE_WAYS = (
          because="deleted by key and inserted, one round trip each"))
 
 
-class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
+class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
+                   Engine):
     checks = ("schema", "counts", "autoinc", "data")
     CANON_ENGINE = "oracle"
+    OWN_PREFIX = OWN_PREFIX
+    BRAND_FAMILY = "oracle"
+    #: large values: a row sized by the server over the stored length of
+    #: the columns that can hold one (a character takes at most four bytes
+    #: of a text large object), a large table over a sample of its rows.
+    #: They are read and written through the value's locator in pieces
+    #: (`_read_in_pieces`), which is Oracle's own
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, read and written in pieces through the"
+        " value's locator",
+        length={"clob": "dbms_lob.getlength({c}) * 4",
+                "nclob": "dbms_lob.getlength({c}) * 4",
+                "blob": "dbms_lob.getlength({c})",
+                "varchar2": "lengthb({c})", "nvarchar2": "lengthb({c})",
+                "char": "lengthb({c})", "nchar": "lengthb({c})",
+                "raw": "lengthb({c})"},
+        types=("varchar2", "nvarchar2", "char", "nchar", "clob", "nclob",
+               "blob", "raw"),
+        sample="sample ({pct})")
+    #: what `assess` asks before anything moves: the tables no key names a
+    #: row of, and text stored twice as UTF-8 on the source
+    PREFLIGHT = ("_deep_keys", "_mojibake")
     CHARSETS = True
     SQL_DIALECT = "oracle"
     FOLDED_BECAUSE = ("holds a column this table has that Oracle's SQL"
@@ -390,6 +416,27 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                    or ep.options.get("service_name") or "FREEPDB1")
         return f"{ep.host}:{ep.port or 1521}/{service}"
 
+    def _tls(self, ep):
+        """What the endpoint's TLS asks of a connection (`tls`,
+        `tls_ca_file`, `tls_insecure`): the listener's TCPS port, the
+        server's certificate checked against the system's authorities or
+        the file's, and the name on it against the host's. Nothing is
+        checked only where `tls_insecure` says so (which `assess` fails
+        on); {} where none is asked, the connection plain as before."""
+        o = ep.options or {}
+        if not (o.get("tls") or o.get("tls_ca_file")
+                or o.get("tls_insecure")):
+            return {}
+        import ssl
+        ctx = ssl.create_default_context(
+            cafile=str(o["tls_ca_file"]) if o.get("tls_ca_file") else None)
+        insecure = bool(o.get("tls_insecure"))
+        if insecure:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return {"protocol": "tcps", "ssl_context": ctx,
+                "ssl_server_dn_match": not insecure}
+
     def _pool(self, side):
         """One pool per endpoint and process. A connection each statement
         made cost a round of logon and session setup per catalogue question
@@ -397,7 +444,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         import oracledb
         ep = self._endpoint(side)
         name = (os.getpid(), ep.host, ep.port, ep.user,
-                self._dsn(ep))
+                self._dsn(ep), bool(self._tls(ep)))
         with _POOLS_LOCK:
             pool = _POOLS.get(name)
             if pool is None:
@@ -405,7 +452,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                     user=ep.user, password=ep.password, dsn=self._dsn(ep),
                     min=0, max=16, increment=1, session_callback=_session,
                     getmode=oracledb.POOL_GETMODE_WAIT,
-                    tcp_connect_timeout=15)
+                    tcp_connect_timeout=15, **self._tls(ep))
         return pool
 
     def _connect(self, side, db):
@@ -427,7 +474,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         conn = oracledb.connect(user=user or ep.user,
                                 password=password or ep.password,
                                 dsn=dsn or self._dsn(ep),
-                                tcp_connect_timeout=15)
+                                tcp_connect_timeout=15, **self._tls(ep))
         _session(conn)
         return conn
 
@@ -1514,10 +1561,26 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         return self._as_pair().check_schema(db)
 
     def check_counts(self, db):
-        return self._as_pair().check_counts(db)
+        """The pair's counts, the database's one answer saying how each
+        table it compared came out."""
+        pair = self._as_pair()
+        got = pair.check_counts(db)
+        outcome = pair.__dict__.get("_outcome", {}).get(db)
+        for found in got:
+            if found.scope == db and outcome:
+                found.tables = dict(outcome)
+        return got
 
     def check_data(self, db, table=None, stream=None):
-        return self._as_pair().check_data(db, table, stream)
+        """The pair's comparison; a table that differs says how many of its
+        rows are missing, extra and changed, counted where the pair walked
+        them all."""
+        pair = self._as_pair()
+        got = pair.check_data(db, table, stream)
+        for found in got:
+            if found.status == "diff":
+                found.rows_apart = pair._apart_of(db, found.scope)
+        return got
 
     def _compare_pks(self, db, table, keys):
         return self._as_pair()._compare_pks(db, table, keys)
@@ -1579,9 +1642,11 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                           if loose else "every constraint enabled and"
                                         " validated", "",
                           "alter table ... enable validate constraint ..."
-                          if loose else ""))
+                          if loose else "",
+                          category="structure.unvalidated-constraints"))
         out.append(self._deep_partitions(db))
         out.append(self._mojibake(db))
+        out += self._deep_more(db)
         return out
 
     # ---- partitions ------------------------------------------------------
@@ -1786,6 +1851,17 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                 out.setdefault(m.group(1).upper(), []).append(self._said(t))
         return out
 
+    def _identity_next(self, db):
+        """[(table, column, sequence, the next value it hands out)] of every
+        identity column on the target."""
+        return self._rows(
+            "dst", db, "select i.table_name, i.column_name,"
+                       " i.sequence_name, q.last_number from"
+                       " all_tab_identity_cols i join all_sequences q"
+                       " on q.sequence_owner = i.owner and"
+                       " q.sequence_name = i.sequence_name where"
+                       f" i.owner = {MARK}", (self._owner("dst", db),))
+
     def sequences_behind(self, db):
         """[(sequence, table, column, the column's largest value)] for each
         identity column on the target whose sequence would hand out a value
@@ -1794,13 +1870,7 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         hand out. Asked of the target alone."""
         owner = self._owner("dst", db)
         out = []
-        for t, c, s, last in self._rows(
-                "dst", db, "select i.table_name, i.column_name,"
-                           " i.sequence_name, q.last_number from"
-                           " all_tab_identity_cols i join all_sequences q"
-                           " on q.sequence_owner = i.owner and"
-                           " q.sequence_name = i.sequence_name where"
-                           f" i.owner = {MARK}", (owner,)):
+        for t, c, s, last in self._identity_next(db):
             if not self.in_scope(db, self._said(t)):
                 continue
             top = self._rows("dst", db, f"select max({self._q(c)}) from"
@@ -1875,7 +1945,14 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
                 src.items()) if n in dst and dst[n] < v]
             undo = [self._restart_sql(db, n, dst[n]) for n, v in sorted(
                 src.items()) if n in dst and dst[n] < v]
-            stmts += self._raise_past(self.sequences_behind(db))
+            behind = self.sequences_behind(db)
+            stmts += self._raise_past(behind)
+            # each column raised past its rows put back to the next value
+            # it handed out before, as each sequence moved is
+            was = {(self._said(t), self._said(c)): int(last)
+                   for t, c, _, last in self._identity_next(db)}
+            undo += [self._restart_sql(db, f"{t}.{c}", was[(t, c)])
+                     for _, t, c, _ in behind]
             if stmts:
                 actions.append(RepairAction(
                     db, "sequences", stmts, undo,
@@ -2035,7 +2112,87 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
     def neutral_changes(self, side, db, token=None, limit=1000):
         if token is None:
             return [], self.change_point(side, db)
-        return self._reader(side, db).read(token, limit)
+        return self._reader(side, db).read(token, limit, self._ddl_of)
+
+    def release_changes(self):
+        """The readers' sessions let go, once the tail is done with them
+        (a table read again from where it left, beside the stream)."""
+        for reader in list(self.__dict__.get("_readers", {}).values()):
+            reader.close()
+        self.__dict__["_readers"] = {}
+
+    #: the redo is read again from any position it still holds, by a
+    #: reader of its own that moves nothing of the tail's: a table that
+    #: left the tail and comes back gets its changes since from there
+    REREADS_FROM_A_POSITION = True
+
+    def _ddl_of(self, db, sql, commit):
+        """[canon.ddl] for a statement the redo carries as text, one for
+        each table of the tail's schema it touches and the hop does not
+        leave alone, at the SCN it committed at. A statement naming
+        another schema's table is not this tail's."""
+        from .. import canon, logddl
+        owner = self._owner("src", db)
+        out = []
+        for d, t, kind, to in logddl.oracle(sql, owner):
+            if d != owner:
+                continue
+            if to is not None and to[0] != owner:
+                # renamed into another schema: gone from this one
+                kind, to = "drop", None
+            name = self._said(t)
+            went = self._said(to[1]) if to is not None else None
+            if self.hop.excluded(db, name) and not (
+                    went is not None and not self.hop.excluded(db, went)):
+                continue
+            out.append(canon.ddl(name, kind, sql=str(sql)[:4000], to=went,
+                                 txn=int(commit)))
+        return out
+
+    def _marked_on(self, side, db):
+        """The database a mark belongs to - its id, its incarnation and
+        its container - asked once: an SCN means something in one
+        database only."""
+        from . import oracle_logminer
+        known = self.__dict__.setdefault("_marks_on", {})
+        if (side, db) not in known:
+            try:
+                got = oracle_logminer.identity(self, side, db)
+                known[(side, db)] = (
+                    f"{got['database']}/{got['incarnation']}/"
+                    f"{got['container']}" if got else None)
+            except Exception:  # noqa: BLE001 - no mark, then
+                known[(side, db)] = None
+        return known[(side, db)]
+
+    def snapshot_mark(self, side, db):
+        """The SCN now, after the database it was read in: every
+        transaction that committed at or below it is visible to a read
+        begun after (a read sees the database as of the SCN it begins at).
+        None where the database cannot be told from another."""
+        from . import oracle_logminer
+        on = self._marked_on(side, db)
+        if on is None:
+            return None
+        try:
+            return f"{on}|{oracle_logminer.current_scn(self, side, db)}"
+        except Exception:  # noqa: BLE001 - no mark, then
+            return None
+
+    def mark_covers(self, side, db, mark, change):
+        """Whether the SCN the change committed at (`txn`) is at or below
+        the mark's, in the same database."""
+        version = change.get("txn")
+        if not isinstance(mark, str) or not isinstance(version, int) \
+                or isinstance(version, bool):
+            return None
+        on, _, at = mark.rpartition("|")
+        if not on or on != self._marked_on(side, db):
+            return None
+        try:
+            return version <= int(at)
+        except ValueError:
+            return None
 
     def log_position(self, side, db):
         from . import oracle_logminer
@@ -2144,7 +2301,9 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
         items = []
         for db in self.databases():
             items += oracle_logminer.assess(self, "src", db)
-        return items
+        # what the move will not do, counted and named
+        inv = self._handwork()
+        return items + inv.rows() + inv.summary()
 
     # ---- Oracle to Oracle, server to server ------------------------------
 

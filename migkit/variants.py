@@ -225,6 +225,13 @@ SIGNATURES = {
         ("altinity", [("version", "altinity")], "version"),
         ("clickhouse", [("version_full", "clickhouse")], "version"),
     ],
+    # Oracle names itself by the product row of its component view
+    # (`Oracle Database 23ai Free`), and its release by `version_full`.
+    # Any server on Oracle's protocol that is not Oracle's says nothing of
+    # the kind, and comes back unidentified.
+    "oracle": [
+        ("oracle", [("product", "oracle database")], "version"),
+    ],
 }
 
 # What migkit measured about a brand, keyed by capability. A brand absent

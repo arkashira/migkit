@@ -535,7 +535,7 @@ class RedoFileReader:
                     " needs may be gone, or the account lacks its grants")
         raise SystemExit("the redo-file reader never began streaming")
 
-    def read(self, token, limit=1000):
+    def read(self, token, limit=1000, ddl=None):
         """(changes, token): whole transactions until about `limit`
         changes, or until the writer has been quiet `IDLE` seconds. A
         transaction still open when a read ends is held here, with the
@@ -622,4 +622,7 @@ class RedoFileReader:
                 fetch.setdefault(table, []).append((change, missing))
         for table, wanted in fetch.items():
             self.shapes._as_of(table, commit, wanted)
+        # the transaction each committed in, as the SCN it did
+        for change in out:
+            change.setdefault("txn", int(commit))
         return out

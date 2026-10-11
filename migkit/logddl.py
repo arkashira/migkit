@@ -185,6 +185,91 @@ def mysql(query, schema):
     return []
 
 
+# ---- Oracle -----------------------------------------------------------
+
+#: a name as Oracle writes one: double-quoted (a doubled quote inside),
+#: or bare - which the server folds to capitals
+_ONAME = r'(?:"(?:[^"]|"")+"|[A-Za-z][\w$#]*)'
+_OTABLE = rf"({_ONAME})(?:\s*\.\s*({_ONAME}))?"
+
+_ORACLE = (
+    ("truncate", re.compile(rf"^truncate\s+table\s+{_OTABLE}", re.I)),
+    ("drop", re.compile(rf"^drop\s+table\s+{_OTABLE}", re.I)),
+    # rows come back with no row event for them
+    ("reload", re.compile(rf"^flashback\s+table\s+{_OTABLE}\s+to\s", re.I)),
+    ("alter", re.compile(rf"^alter\s+table\s+{_OTABLE}", re.I)),
+    ("create", re.compile(rf"^create\s+table\s+{_OTABLE}", re.I)),
+    ("index", re.compile(
+        rf"^create\s+(?:unique\s+|bitmap\s+)?index\s+{_OTABLE}\s+on\s+"
+        rf"{_OTABLE}", re.I)),
+)
+_ORENAME = re.compile(rf"^rename\s+{_OTABLE}\s+to\s+({_ONAME})\s*$", re.I)
+_ORENAME_CLAUSE = re.compile(rf"^rename\s+to\s+({_ONAME})\s*$", re.I)
+#: what an ALTER does to a table's rows without writing a row event for
+#: them: a partition emptied, dropped or swapped with another table's
+_OROWS_GONE = re.compile(
+    r"^(?:(?:truncate|drop)\s+(?:sub)?partition\b|exchange\s+(?:sub)?"
+    r"partition\b)", re.I)
+_OEXCHANGE = re.compile(
+    rf"^exchange\s+(?:sub)?partition\s+{_ONAME}\s+with\s+table\s+"
+    rf"{_OTABLE}", re.I)
+
+
+def _ofold(name):
+    """A name as the server keeps it: bare, in capitals; quoted, as it is
+    written."""
+    name = name.strip()
+    if name.startswith('"') and name.endswith('"'):
+        return name[1:-1].replace('""', '"')
+    return name.upper()
+
+
+def _opair(first, second, schema):
+    """(schema, table) from a matched name and its optional second part."""
+    if second is None:
+        return schema, _ofold(first)
+    return _ofold(first), _ofold(second)
+
+
+def oracle(query, schema):
+    """[(schema, table, kind, (schema, table) it goes to or None)] for one
+    DDL statement of the redo, `schema` the owner it runs in where the
+    statement names none; `kind` one of `canon.DDL_KINDS`. [] for a
+    statement that is not a DDL of a table the redo carries rows of - a
+    temporary table's is never logged as rows."""
+    text = _COMMENTS.sub(" ", str(query) + "\n").strip().rstrip(";").strip()
+    if not text or re.match(r"^create\s+global\s+temporary\b", text, re.I):
+        return []
+    got = _ORENAME.match(text)
+    if got:
+        a = _opair(got.group(1), got.group(2), schema)
+        return [(a[0], a[1], "rename", (a[0], _ofold(got.group(3))))]
+    for kind, rule in _ORACLE:
+        got = rule.match(text)
+        if not got:
+            continue
+        if kind == "index":
+            # an index's name may be qualified, its table's follows `on`
+            d, t = _opair(got.group(3), got.group(4), schema)
+            return [(d, t, "alter", None)]
+        d, t = _opair(got.group(1), got.group(2), schema)
+        if kind == "alter":
+            rest = text[got.end():].strip()
+            moved = _ORENAME_CLAUSE.match(rest)
+            if moved:
+                return [(d, t, "rename", (d, _ofold(moved.group(1))))]
+            if _OROWS_GONE.match(rest):
+                out = [(d, t, "reload", None)]
+                other = _OEXCHANGE.match(rest)
+                if other:
+                    od, ot = _opair(other.group(1), other.group(2), d)
+                    out.append((od, ot, "reload", None))
+                return out
+            return [(d, t, "alter", None)]
+        return [(d, t, kind, None)]
+    return []
+
+
 #: a statement that changes rows, in a binlog written in STATEMENT or
 #: MIXED format - which carries the text of those, where ROW carries the
 #: rows. Only the plain forms are read: one table, named after its

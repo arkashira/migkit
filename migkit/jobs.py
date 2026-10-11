@@ -1,7 +1,8 @@
 """Scheduled jobs inside the databases, on exactly one side at a time.
 
 A job the database runs by itself - a pg_cron job, a MySQL event, a
-ClickHouse materialized view that refreshes on a schedule - writes
+ClickHouse materialized view that refreshes on a schedule, an Oracle
+scheduler job or `DBMS_JOB` job - writes
 rows nobody's application wrote. On both sides at once it writes them
 twice: on the target before the flip (a copied `cron.job` is a table, and
 pg_cron runs on a logical subscriber, which is an ordinary primary), and
@@ -10,6 +11,11 @@ the source ran is switched off there before the source is frozen (a
 frozen MySQL server refuses the statement that would do it afterwards)
 and switched on on the target at the flip; each switch is recorded first
 and undone from the record.
+
+An Oracle job is switched with the scheduler (`DBMS_SCHEDULER.ENABLE` and
+`DISABLE`, the job's name quoted as the catalogue keeps it) or, for a job
+the old `DBMS_JOB` made, by marking it broken - which, put back, is given
+the time the job was due, since the default is to run it at once.
 
 MySQL marks an event it received by replication `REPLICA_SIDE_DISABLED`
 (`SLAVESIDE_DISABLED` before 8.4); a copied schema carries whatever the
@@ -21,6 +27,8 @@ every table is one the hop leaves out belongs to whatever writes those
 tables, and is left as it is on both sides (`left_alone`).
 """
 import re
+
+from .engines.dbapi import MARK as _MARK
 
 
 def _side(hop, eng, side):
@@ -64,6 +72,9 @@ def _read(hop, eng, db, side):
             got = eng.refreshes(side, db)
         elif kind == "mssql":
             got = _ms_jobs(eng, db, side)
+        elif kind == "oracle":
+            got = [(name, on, body) for name, on, body, _
+                   in _ora_jobs(eng, db, side)]
         else:
             return None
     except Exception:  # noqa: BLE001 - not readable: said as unknown
@@ -110,6 +121,7 @@ def _names(kind, eng, db, side):
             tables.setdefault(str(t).lower(), []).append(t)
         return tables, {str(f).lower() for f in eng.functions(side)}
     for t in (_ms_tables(eng, db, side) if kind == "mssql"
+              else _ora_tables(eng, db, side) if kind == "oracle"
               else eng._all_tables(side, db)):
         tables.setdefault(str(t).rpartition(".")[2].strip('"').lower(),
                           []).append(t)
@@ -123,6 +135,11 @@ def _names(kind, eng, db, side):
                                   " p.pronamespace where n.nspname not in"
                                   " ('pg_catalog', 'information_schema')")
         routines = set(got.split())
+    elif kind == "oracle":
+        routines = {str(r[0]).lower() for r in eng._rows(
+            side, db, "select object_name from all_objects where owner ="
+                      f" {_MARK} and object_type in ('FUNCTION', 'PROCEDURE',"
+                      " 'PACKAGE')", (eng._owner(side, db),))}
     else:
         routines = {str(r[0]).lower() for r in eng._q(
             side, "select routine_name from information_schema.routines"
@@ -162,6 +179,84 @@ def _ms_enable(name, on):
     its name a literal."""
     return ("exec msdb.dbo.sp_update_job @job_name = N'"
             + str(name).replace("'", "''") + f"', @enabled = {int(bool(on))}")
+def _ora_jobs(eng, db, side):
+    """[(name, on, its action, how it is kept)] of the schema's jobs on one
+    side: the scheduler's, whose action is its own or its program's, and
+    the old `DBMS_JOB` queue's (named `dbms_job <number>`, on where it is
+    not broken, with the time it is due)."""
+    owner = eng._owner(side, db)
+    out = [(str(n), str(e) == "TRUE", str(a or ""), ("scheduler", str(n)))
+           for n, e, a in eng._rows(
+               side, db, "select j.job_name, j.enabled, nvl(j.job_action,"
+                         " p.program_action) from all_scheduler_jobs j left"
+                         " join all_scheduler_programs p on p.owner ="
+                         " j.program_owner and p.program_name ="
+                         f" j.program_name where j.owner = {_MARK} order by 1",
+               (owner,))]
+    out += [(f"dbms_job {int(n)}", str(b) != "Y", str(w or ""),
+             ("job", int(n), nxt))
+            for n, b, w, nxt in eng._rows(
+                side, db, "select job, broken, what, next_date from all_jobs"
+                          f" where schema_user = {_MARK} order by 1",
+                (owner,))]
+    return out
+
+
+def _ora_tables(eng, db, side):
+    """Every table of the schema, as the engine names one - the hop's or
+    not: a job's text is read against all of them."""
+    return [eng._said(str(t)) for (t,) in eng._rows(
+        side, db, f"select table_name from all_tables where owner = {_MARK}",
+        (eng._owner(side, db),))]
+
+
+def _ora_run(eng, side, db, sql, args=()):
+    """One statement that changes a job, run on one side and committed
+    (the cutover's, on a source too)."""
+    conn = eng._connect(side, db)
+    try:
+        cur = conn.cursor()
+        cur.execute(sql.replace(_MARK, ":1"), list(args))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _ora_set(eng, side, db, how, on):
+    """A job of the schema switched on or off, as `how` keeps it. A broken
+    job's due time is the far future the server gives it, and is not put
+    back as one: it runs when the server says it does."""
+    owner = eng._owner(side, db)
+    if how[0] == "scheduler":
+        quoted = '"' + owner.replace('"', '""') + '"."' \
+            + how[1].replace('"', '""') + '"'
+        if on:
+            _ora_run(eng, side, db, "begin dbms_scheduler.enable("
+                                    f"{_MARK}); end;", (quoted,))
+        else:
+            # force: a run in progress finishes, none starts after it
+            _ora_run(eng, side, db, "begin dbms_scheduler.disable("
+                                    f"{_MARK}, force => true); end;",
+                     (quoted,))
+        return
+    if not on:
+        _ora_run(eng, side, db, f"begin dbms_job.broken({_MARK}, true);"
+                                " end;", (how[1],))
+        return
+    due = how[2] if len(how) > 2 else None
+    if getattr(due, "year", 0) >= 4000:
+        due = None
+    if due is None:
+        _ora_run(eng, side, db, f"begin dbms_job.broken({_MARK}, false);"
+                                " end;", (how[1],))
+        return
+    conn = eng._connect(side, db)
+    try:
+        conn.cursor().execute("begin dbms_job.broken(:1, false, :2); end;",
+                              [how[1], due])
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _pg_cron_db(eng, db, side):
@@ -280,6 +375,21 @@ def switch(hop, eng, db, side, names, on, say):
             else:
                 eng._cmd(side, db, _ms_enable(name, on))
             n += 1
+    elif kind == "oracle":
+        have = {name: (on, how) for name, on, _, how
+                in _ora_jobs(eng, db, side)}
+        for name in names:
+            if name not in have or have[name][0] == on:
+                continue
+            was, how = have[name]
+            entry = {"db": db, "side": side, "name": name, "was": was,
+                     "how": list(how[:2])}
+            if how[0] == "job":
+                entry["due"] = str(how[2])
+            done.append(entry)
+            _save(hop, done)
+            _ora_set(eng, side, db, how, on)
+            n += 1
     elif kind == "postgres":
         home = _pg_cron_db(eng, db, side)
         if not home or not _has_cron(eng, side, home):
@@ -330,6 +440,12 @@ def undo(hop, eng, say, side=None):
             e.set_refresh(s, db, name, entry["was"])
         elif kind == "mssql":
             e._cmd(s, db, _ms_enable(name, bool(entry["was"])))
+        elif kind == "oracle":
+            how = tuple(entry["how"])
+            if how[0] == "job":
+                import datetime
+                how += (datetime.datetime.fromisoformat(entry["due"]),)
+            _ora_set(e, s, db, how, bool(entry["was"]))
         else:
             home = _pg_cron_db(e, db, s)
             e._psql(s, home, f"select cron.alter_job({int(entry['jobid'])},"
