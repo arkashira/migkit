@@ -93,6 +93,19 @@ class Registry:
                 self._entries[schema_id] = got
         return got
 
+    def latest(self, subject):
+        """{"type": "AVRO" | "JSON" | "PROTOBUF", "schema": the schema -
+        parsed for Avro and JSON, the text for Protobuf} of a subject's
+        newest version, or None where the registry has no such subject."""
+        try:
+            got = self._ask("GET", f"/subjects/{_q(subject)}/versions/latest")
+        except Missing:
+            return None
+        kind = str(got.get("schemaType") or "AVRO").upper()
+        text = got["schema"]
+        return {"type": kind,
+                "schema": text if kind == "PROTOBUF" else json.loads(text)}
+
     def schema(self, schema_id):
         """An Avro schema by its id, parsed; a schema of another kind is
         not one."""
@@ -129,6 +142,77 @@ class Registry:
             with self._lock:
                 self._prints[schema_id] = got
         return got
+
+
+def _label(t):
+    """An Avro type as a field's type is told apart: `int`, `long`,
+    `union<null|string>`, `array<int>`, `record Address`, `decimal` with its
+    logical type."""
+    if isinstance(t, str):
+        return t
+    if isinstance(t, list):
+        return "union<" + "|".join(_label(x) for x in t) + ">"
+    if not isinstance(t, dict):
+        return str(t)
+    kind = t.get("type")
+    logical = t.get("logicalType")
+    if kind == "array":
+        return f"array<{_label(t.get('items'))}>"
+    if kind == "map":
+        return f"map<{_label(t.get('values'))}>"
+    if kind in ("record", "enum", "fixed"):
+        return f"{kind} {t.get('name', '')}".strip()
+    base = _label(kind)
+    return f"{base}({logical})" if logical else base
+
+
+def _fields(t, path, out, depth=0):
+    """{field path: its type's label} of an Avro type, records inside
+    records, arrays, maps and unions followed to their fields."""
+    if depth > 24:
+        return
+    if isinstance(t, list):
+        for x in t:
+            _fields(x, path, out, depth + 1)
+    elif isinstance(t, dict):
+        kind = t.get("type")
+        if kind == "record":
+            for f in t.get("fields") or []:
+                name = f"{path}.{f['name']}" if path else str(f["name"])
+                out[name] = _label(f.get("type"))
+                _fields(f.get("type"), name, out, depth + 1)
+        elif kind == "array":
+            _fields(t.get("items"), path + "[]", out, depth + 1)
+        elif kind == "map":
+            _fields(t.get("values"), path + "{}", out, depth + 1)
+        elif isinstance(kind, (dict, list)):
+            _fields(kind, path, out, depth + 1)
+
+
+def field_drift(a, b):
+    """What differs between two schemas of one subject (`Registry.latest`)
+    as clauses: for Avro, each field whose type is one on the first and
+    another on the second (`int` against `long`), and each field only one
+    has; for a schema kept as text, whether the two differ at all."""
+    if a["type"] != b["type"]:
+        return [f"is {a['type']} on the source and {b['type']} on the"
+                " target"]
+    if a["type"] != "AVRO":
+        return [] if a["schema"] == b["schema"] else [
+            f"differs between the registries ({a['type']}, compared as a"
+            " whole)"]
+    fa, fb = {}, {}
+    _fields(a["schema"], "", fa)
+    _fields(b["schema"], "", fb)
+    if not fa and not fb and a["schema"] != b["schema"]:
+        # not records: a bare type
+        return [f"is {_label(a['schema'])} on the source and"
+                f" {_label(b['schema'])} on the target"]
+    out = [f"field {n} is {fa[n]} on the source and {fb[n]} on the target"
+           for n in sorted(fa) if n in fb and fa[n] != fb[n]]
+    out += [f"field {n} is only on the {'source' if n in fa else 'target'}"
+            for n in sorted(set(fa) ^ set(fb))]
+    return out
 
 
 def _q(subject):

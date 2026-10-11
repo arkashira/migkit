@@ -336,6 +336,18 @@ class Admin:
         return {group: {tp: OffsetAndMetadata(o, "", -1)
                         for tp, o in held.items()}}
 
+    def alter_group_offsets(self, group, offsets):
+        """Commit offsets for a group, making it where it is new; the
+        answer per partition, `None` being no error."""
+        held = self.cluster.groups.setdefault(group, {})
+        for tp, meta in offsets.items():
+            held[tp] = meta.offset
+        return {tp: None for tp in offsets}
+
+    def delete_consumer_groups(self, groups):
+        for group in groups:
+            self.cluster.groups.pop(group, None)
+
     def close(self):
         pass
 
