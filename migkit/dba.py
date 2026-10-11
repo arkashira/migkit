@@ -519,26 +519,23 @@ def _my(hop, e, key, side, dbs, where, read, write, follow, native):
                                have == want, f"{name} is {have or '?'}",
                                change, ctx))
         keep = int(var.get("binlog_expire_logs_seconds") or 0)
-        if cloud == "aws":
-            # RDS keeps its own setting, empty by default - and then it
-            # removes each log as soon as it may
-            try:
-                hours = next((r[1] for r in e._q(
-                    key, "call mysql.rds_show_configuration")
-                    if str(r[0]) == "binlog retention hours"), None)
-                ok = hours is not None and int(hours) >= 24
-                now = (f"kept {hours} hours" if hours is not None else
-                       "not kept: removed as soon as it may be")
-            except Exception as err:  # noqa: BLE001 - not allowed to ask
-                ok, now = None, _last(err)
-        elif getattr(e, "_own_retention", None) is not None and \
-                e._own_retention(key) is not None:
-            # a server whose retention is its service's own setting, as
-            # the server itself says (a CNAME, a private address)
-            own = e._own_retention(key)
-            ok = own >= 86400
-            now = (f"kept {own // 3600} hours" if own != e.OWN_PURGE else
-                   "not kept: removed as soon as it may be")
+        from .engines.mysql import managed_retention
+        try:
+            own = managed_retention(lambda sql: e._q(key, sql),
+                                    hinted=cloud == "aws")
+        except Exception:  # noqa: BLE001 - its variables then
+            own = None
+        if own is not None:
+            # RDS and Aurora keep the log by the service's own setting,
+            # empty by default - and then remove each log as soon as they
+            # may: the tail cannot be stopped at all
+            if own["state"] == "unknown":
+                ok, now = None, own["why"] + (
+                    f" ({own['caveat']})" if own["caveat"] else "")
+            elif own["state"] in ("unset", "zero"):
+                ok, now = False, "not kept: removed as soon as it may be"
+            else:
+                ok, now = own["hours"] >= 24, f"kept {own['hours']} hours"
         else:
             ok = keep == 0 or keep >= 86400
             now = f"kept {keep}s" if keep else "kept for ever"

@@ -168,6 +168,95 @@ def code_words(body):
              for m in _CODE_NAME.finditer(text)}
     return words, named
 
+#: seconds a managed server with no retention hours set keeps a binlog
+#: file once it is closed, as its documentation says (RDS: purged
+#: once no replica needs it, within about five minutes)
+OWN_PURGE = 300
+
+
+def managed_retention(ask, hinted=False):
+    """What a managed MySQL (RDS, Aurora MySQL) says it keeps its binary
+    log for, or None where the server is not one.
+
+    A managed server's retention is its service's own setting, not
+    `binlog_expire_logs_seconds`: `call mysql.rds_set_configuration(
+    'binlog retention hours', n)` sets it and `call
+    mysql.rds_show_configuration` reads it. `ask(sql)` gives the rows of
+    one statement. The server is a managed one where it lists that
+    procedure, where it carries `aurora_version`, or where its address
+    (`hinted`) says so - an account with no right on the procedure does
+    not see it listed, and is then asked anyway.
+
+    The answer is a dict: `service` (what the server said it is), `state`
+    - `hours` (set), `unset` (NULL: the service removes a log as soon as
+    it may), `zero` (the same, said as 0) or `unknown` (the account may
+    not run the procedure, or it gave an answer not understood; never read
+    as fine) - with `hours`, `seconds` (the room a closed file has;
+    `OWN_PURGE` where none is kept; None where unknown), `why` in words and
+    `caveat` for what is not known. The procedures were written from the
+    services' documentation and not yet run on one."""
+    try:
+        listed = ask("select count(*) from information_schema.routines"
+                     " where routine_schema = 'mysql' and routine_name ="
+                     " 'rds_show_configuration'")
+        listed = bool(listed and int(listed[0][0]))
+    except Exception:  # noqa: BLE001 - the variables and the address say
+        listed = False
+    try:
+        aurora = any(str(r[1]) for r in ask(
+            "show global variables like 'aurora_version'"))
+    except Exception:  # noqa: BLE001 - not asked: the address still says
+        aurora = False
+    if not (listed or aurora or hinted):
+        return None
+    service = "Aurora MySQL" if aurora else "RDS for MySQL"
+    caveat = ("Aurora keeps its binary log in the cluster's own storage;"
+              " migkit reads the same setting there and has not measured"
+              " how Aurora counts the time a log is kept, nor whether a"
+              " reader instance's setting differs" if aurora else "")
+    out = {"service": service, "state": "unknown", "hours": None,
+           "seconds": None, "why": "", "caveat": caveat}
+    try:
+        rows = ask("call mysql.rds_show_configuration")
+    except Exception as err:  # noqa: BLE001 - not allowed to run it
+        text = (str(err).strip().splitlines() or [type(err).__name__])[-1]
+        out["why"] = (f"{service} keeps its log by `binlog retention hours`,"
+                      " which this account could not read (it needs the"
+                      " right to run mysql.rds_show_configuration):"
+                      f" {text[:160]}")
+        return out
+    got = next((r for r in rows
+                if str(r[0]).strip().lower() == "binlog retention hours"),
+               None)
+    if got is None:
+        out["why"] = (f"{service} did not list `binlog retention hours` in"
+                      " mysql.rds_show_configuration")
+        return out
+    value = got[1] if len(got) > 1 else None
+    if value is None or str(value).strip().upper() in ("", "NULL"):
+        out.update(state="unset", seconds=OWN_PURGE, why=(
+            f"{service} has no `binlog retention hours` set, so it removes"
+            " each log as soon as it may (within minutes): a tail cannot be"
+            " stopped at all without losing its place"))
+        return out
+    try:
+        hours = int(float(str(value).strip()))
+    except ValueError:
+        out["why"] = (f"{service} gave `binlog retention hours` as"
+                      f" {str(value)[:40]!r}, which is not a number of hours")
+        return out
+    if hours <= 0:
+        out.update(state="zero", hours=0, seconds=OWN_PURGE, why=(
+            f"{service} has `binlog retention hours` at 0, so it removes"
+            " each log as soon as it may (within minutes): a tail cannot be"
+            " stopped at all without losing its place"))
+        return out
+    out.update(state="hours", hours=hours, seconds=hours * 3600, why=(
+        f"{service} keeps a binary log {hours} hours (`binlog retention"
+        " hours`), so a stopped tail's position lasts that long"))
+    return out
+
+
 class MySQLEngine(Engine):
     ENGINE_FAMILY = "mysql"
     checks = ("schema", "counts", "autoinc", "data")
@@ -1968,16 +2057,22 @@ class MySQLEngine(Engine):
 
         None where nothing purges (`binlog_expire_logs_auto_purge` off, or
         no expiry). A managed server whose retention is its own setting
-        and not this variable - the server says so by the procedure that
-        shows it (`mysql.rds_show_configuration`) - is held to that: its
-        hours, or, where none are set, the few minutes it keeps a file
-        before it is purged (`OWN_PURGE`)."""
+        and not this variable (`managed_retention`: RDS, Aurora MySQL) is
+        held to that: its hours, or, where none are set (NULL or 0), the
+        few minutes it keeps a file before it is purged (`OWN_PURGE`);
+        where the account may not read it, `{"unknown": why}` - the room
+        is not known, and is never taken as fine."""
         import pymysql
         if not token:
             return None
-        own = self._own_retention(side)
-        if own is not None:
-            expire = own
+        managed = self.managed_retention(side)
+        if managed is not None and managed["state"] == "unknown":
+            # never read as fine: the room is not known, and why
+            return {"unknown": managed["why"]
+                    + (f" ({managed['caveat']})" if managed["caveat"]
+                       else "")}
+        if managed is not None:
+            expire = managed["seconds"]
         else:
             try:
                 expire = int(self._q(side, "select"
@@ -2005,29 +2100,24 @@ class MySQLEngine(Engine):
             return None
         return {"seconds": max(int(closed + expire - time.time()), 0)}
 
-    #: seconds a managed server with no retention hours set keeps a binlog
-    #: file once it is closed, as its documentation says (RDS: purged
-    #: once no replica needs it, within about five minutes)
-    OWN_PURGE = 300
+    OWN_PURGE = OWN_PURGE
+
+    def managed_retention(self, side):
+        """`managed_retention` for this side's server (None where it is
+        not a managed one); the address is the hint where the account
+        cannot see the procedure listed."""
+        from .. import clouds
+        ep = self.hop.source if side == "src" else self.hop.target
+        hinted = clouds.from_host(getattr(ep, "host", "")).cloud == "aws"
+        return managed_retention(lambda sql: self._q(side, sql), hinted)
 
     def _own_retention(self, side):
         """Seconds a managed server keeps a closed binlog file by its own
         setting (`call mysql.rds_show_configuration`), or None where the
-        server keeps no such setting and its variables say."""
-        try:
-            listed = self._q(side, "select count(*) from"
-                                   " information_schema.routines where"
-                                   " routine_schema = 'mysql' and"
-                                   " routine_name = 'rds_show_configuration'")
-        except Exception:  # noqa: BLE001 - its variables then
-            return None
-        if not listed or not int(listed[0][0]):
-            return None
-        rows = self._q(side, "call mysql.rds_show_configuration")
-        hours = next((r[1] for r in rows
-                      if str(r[0]) == "binlog retention hours"), None)
-        return int(hours) * 3600 if hours not in (None, "", "NULL") \
-            else self.OWN_PURGE
+        server keeps no such setting and its variables say - or where the
+        setting could not be read (`managed_retention` says that)."""
+        got = self.managed_retention(side)
+        return got["seconds"] if got else None
 
     def _binlog_started(self, side, name):
         """The time on the format event a binlog file opens with."""
@@ -6415,6 +6505,47 @@ class MySQLEngine(Engine):
                 "grant select on mysql.user to compare accounts")
         return items
 
+    def _retention_row(self, var):
+        """The assessment's line for how long the source keeps its binary
+        log - the time a stopped tail's position lasts. A managed server
+        (RDS, Aurora MySQL) keeps it by the service's own setting
+        (`managed_retention`), and `binlog_expire_logs_seconds` says
+        nothing there; NULL or 0 hours is a failure (the log goes as soon
+        as it may, so the tail cannot be stopped at all), and a setting the
+        account may not read is said to be unknown, never fine."""
+        item = "binlog retention at least 24h"
+        try:
+            own = self.managed_retention("src")
+        except Exception:  # noqa: BLE001 - its variables then
+            own = None
+        fix = ("call mysql.rds_set_configuration('binlog retention hours',"
+               " 168)")
+        if own is not None:
+            note = f" ({own['caveat']})" if own["caveat"] else ""
+            if own["state"] == "unknown":
+                return {"level": "warn", "scope": "instance", "item": item,
+                        "detail": own["why"] + "; its retention is not"
+                        " known, so how long the tail may be stopped is not"
+                        + note}
+            if own["state"] in ("unset", "zero"):
+                return {"level": "fail", "scope": "instance", "item": item,
+                        "detail": own["why"] + " - " + fix + note}
+            ok = own["hours"] >= 24
+            return {"level": "pass" if ok else "warn", "scope": "instance",
+                    "item": item,
+                    "detail": own["why"] + (
+                        "" if ok else f" - raise it: {fix}") + note}
+        ret = var("src", "binlog_expire_logs_seconds")
+        try:
+            ok = int(ret) >= 86400
+        except ValueError:
+            ok = False
+        return {"level": "pass" if ok else "warn", "scope": "instance",
+                "item": item,
+                "detail": str(ret) if ok else
+                f"{ret} - set global binlog_expire_logs_seconds = 604800, or"
+                f" on RDS {fix}"}
+
     def assess(self):
         items = []
 
@@ -6478,17 +6609,7 @@ class MySQLEngine(Engine):
         except Exception as e:  # noqa: BLE001 - a view of the log, not a gate
             add("warn", "instance", "change reading depth not worked out",
                 str(e)[:200])
-        ret = var("src", "binlog_expire_logs_seconds")
-        try:
-            ok = int(ret) >= 86400
-        except ValueError:
-            ok = False
-        add("pass" if ok else "warn", "instance",
-            "binlog retention at least 24h",
-            ret if ok else
-            f"{ret} - set global binlog_expire_logs_seconds = 604800, or"
-            " on RDS call mysql.rds_set_configuration('binlog retention"
-            " hours', 168)")
+        items.append(self._retention_row(var))
         # MySQL's compressed transactions the tail opens (binlog_payload);
         # MariaDB's compressed row events it cannot
         zc = str(var("src", "binlog_transaction_compression")).upper()
