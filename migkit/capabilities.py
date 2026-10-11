@@ -1457,7 +1457,7 @@ DEPTH_GAPS = {
     },
     "verify.structure.collection-options": {
         **_each(NOT_YET, "P0-PARITY.verify",
-                "postgres mysql mssql kafka sqlite clickhouse dynamodb "
+                "mysql mssql kafka sqlite clickhouse dynamodb "
                 "oracle db2 db2i db2zos ase teradata opensearch cassandra "
                 "redshift snowflake bigquery duckdb iceberg delta tidb "
                 "cockroachdb dsql couchbase cosmosdb hetero"),
@@ -2088,7 +2088,7 @@ UNPROVED = {
     "verify.movement.target-ahead": "mongodb",
     "verify.delta": "db2i tidb cockroachdb dsql couchbase cosmosdb",
     "verify.fence": "db2i",
-    "verify.confirm": ("postgres clickhouse dynamodb db2i opensearch "
+    "verify.confirm": ("clickhouse dynamodb db2i opensearch "
                        "cassandra tidb cockroachdb dsql couchbase cosmosdb"),
     "verify.users": "mongodb",
     "verify.repair": "mssql tidb cockroachdb dsql couchbase cosmosdb",
@@ -2112,7 +2112,6 @@ UNPROVED = {
     "schema.indexes": "sqlite teradata ",
     "schema.foreign-keys": "mssql oracle ",
     "schema.defaults": "teradata sapodp",
-    "schema.views": "postgres ",
     "schema.routines": "tidb",
     "move.table-copy": "db2i db2zos snowflake bigquery dsql",
     "move.bulk": "hetero",
