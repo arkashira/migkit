@@ -335,7 +335,7 @@ class KafkaEngine(Engine):
             consumer_timeout_ms=10000, enable_auto_commit=False, **extra))
 
     def databases(self):
-        return ["cluster"]
+        return [self.CLUSTER]
 
     # --- copying topics, message for message (backlog 0e) ---------------
 
@@ -685,15 +685,25 @@ class KafkaEngine(Engine):
     #: schemas its messages use by registering them (`_translated`)
     INTERNAL = ("__", "_schemas", "_confluent", "_redpanda")
 
-    def _topics(self, consumer):
-        """Every topic migkit verifies: internal ones, the cluster mirror's
-        own on the target (`mirror.internal`) and the ones the hop excludes
-        left out. This engine used to ignore `exclude`."""
+    #: the one database a cluster is moved as (`databases`)
+    CLUSTER = "cluster"
+
+    def _takes_topic(self, topic):
+        """Whether the hop takes a topic: not a cluster's own, not the
+        cluster mirror's own on the target (`mirror.internal`), and in the
+        hop's scope (`Engine.in_scope`). The one answer every listing of
+        topics - the copy's, the counts', the data's, the schema's, the
+        groups' offsets', the repair's - asks, so none reads a topic the
+        hop leaves out."""
         from .. import mirror
-        return sorted(t for t in consumer.topics()
-                      if not t.startswith(self.INTERNAL)
-                      and not mirror.internal(t)
-                      and not self.hop.excluded("cluster", t))
+        return (not topic.startswith(self.INTERNAL)
+                and not mirror.internal(topic)
+                and self.in_scope(self.CLUSTER, topic))
+
+    def _topics(self, consumer):
+        """Every topic migkit verifies: the ones the hop takes
+        (`_takes_topic`). This engine used to ignore `exclude`."""
+        return sorted(t for t in consumer.topics() if self._takes_topic(t))
 
     def _partitions(self, consumer, topic):
         return sorted(consumer.partitions_for_topic(topic) or [])
@@ -906,27 +916,59 @@ class KafkaEngine(Engine):
             " move with it and nothing errors")
         return items
 
+    @staticmethod
+    def _lone(topics):
+        """The topic a finding is about when it is about one, else "": a
+        finding names its table (`Result.table`) as the source names it,
+        and one about several names none but its `tables`."""
+        topics = list(topics)
+        return topics[0] if len(topics) == 1 else ""
+
     def check_schema(self, db):
         sc, dc = self._consumer("src"), self._consumer("dst")
         src = {t: len(self._partitions(sc, t)) for t in self._topics(sc)}
         dst = {t: len(self._partitions(dc, t)) for t in self._topics(dc)}
-        bad = []
+        bad, apart, named = [], [], {}
         for t in sorted(set(src) | set(dst)):
             if t not in dst:
                 bad.append(f"missing topic {t}")
+                named[t] = "diff"
             elif t not in src:
                 bad.append(f"extra topic {t}")
-            elif src[t] != dst[t]:
-                bad.append(f"{t} partitions src={src[t]} dst={dst[t]}")
+                named[t] = "diff"
+            else:
+                named[t] = "ok"
+                if src[t] != dst[t]:
+                    apart.append(t)
         res = []
         if bad:
             res.append(Result("schema", "topics", "diff",
                               "; ".join(bad[:10]), "",
                               "create the missing topics on the target with"
-                              " the source's partition counts before copying"))
+                              " the source's partition counts before copying",
+                              table=self._lone(
+                                  t for t in named if named[t] == "diff"),
+                              tables=named))
         else:
-            res.append(Result("schema", "topics", "ok", f"{len(src)} topics"))
+            res.append(Result("schema", "topics", "ok", f"{len(src)} topics",
+                              tables=named))
+        # a partition count is what a key's partition is taken from, so it
+        # is a finding of its own: the same keys, read by other consumers
         common = sorted(set(src) & set(dst))
+        counts = {t: "diff" if t in apart else "ok" for t in common}
+        if apart:
+            res.append(Result(
+                "schema", "topics partitions", "diff",
+                "; ".join(f"{t} partitions src={src[t]} dst={dst[t]}"
+                          for t in apart[:10]), "",
+                "make the target's topic with the source's partition count"
+                " before copying - a key lands on another partition when the"
+                " count changes, and its messages are read out of order",
+                table=self._lone(apart), tables=counts))
+        else:
+            res.append(Result("schema", "topics partitions", "ok",
+                              f"partition counts equal on {len(common)}"
+                              " topics", tables=counts))
         ca = self._topic_configs("src", common)
         cb = self._topic_configs("dst", common)
         if common and (ca is None or cb is None):
@@ -935,24 +977,32 @@ class KafkaEngine(Engine):
             res.append(Result("schema", "topic-configs", "error",
                               "the topics' settings could not be read on"
                               f" {'the source' if ca is None else 'the target'}"
-                              " - retention and cleanup were not compared"))
+                              " - retention and cleanup were not compared",
+                              category="structure.collection-options"))
         if ca is not None and cb is not None:
-            drift = []
+            drift, differ = [], []
             for t in common:
                 for k in self.CRITICAL_CONFIGS:
                     a, b = ca.get(t, {}).get(k), cb.get(t, {}).get(k)
                     if a != b:
                         drift.append(f"{t} {k} src={a} dst={b}")
+                        if t not in differ:
+                            differ.append(t)
+            kept = {t: "diff" if t in differ else "ok" for t in common}
             if drift:
                 res.append(Result("schema", "topic-configs", "diff",
                                   "; ".join(drift[:8]), "",
                                   "kafka-configs --alter on target:"
                                   " cleanup.policy/retention drift changes"
-                                  " topic semantics"))
+                                  " topic semantics",
+                                  category="structure.collection-options",
+                                  table=self._lone(differ), tables=kept))
             else:
                 res.append(Result("schema", "topic-configs", "ok",
                                   f"{len(self.CRITICAL_CONFIGS)} critical"
-                                  f" configs match on {len(common)} topics"))
+                                  f" configs match on {len(common)} topics",
+                                  category="structure.collection-options",
+                                  tables=kept))
         return res
 
     def _groups(self, side):
@@ -979,8 +1029,11 @@ class KafkaEngine(Engine):
                 out.add(name)
         return out
 
-    def _group_offsets(self, side, group):
-        """{TopicPartition: committed offset} for one group."""
+    def _group_offsets(self, side, group, taken=True):
+        """{TopicPartition: committed offset} for one group - of the topics
+        the hop takes (`_takes_topic`), or all but the broker's own with
+        `taken` off: a group's position on a topic the hop leaves out is
+        not migkit's to compare, place or repair."""
         admin = self._admin(side)
         try:
             got = admin.list_group_offsets(group)
@@ -988,7 +1041,26 @@ class KafkaEngine(Engine):
             admin.close()
         per_group = got.get(group, got) if isinstance(got, dict) else {}
         return {tp: meta.offset for tp, meta in per_group.items()
-                if not tp.topic.startswith("__") and meta.offset >= 0}
+                if not tp.topic.startswith("__") and meta.offset >= 0
+                and (not taken or self._takes_topic(tp.topic))}
+
+    def _groups_taken(self, side):
+        """The groups on one side that are the hop's: those with a position
+        on a topic it takes, and those with none at all (nothing says what
+        they read). A group that reads only topics the hop leaves out is
+        another application's. One whose positions cannot be read is kept:
+        what cannot be told is not left out."""
+        out = set()
+        for group in self._groups(side):
+            try:
+                held = self._group_offsets(side, group, taken=False)
+                mine = self._group_offsets(side, group)
+            except Exception:  # noqa: BLE001 - kept, and said by the offsets
+                out.add(group)
+                continue
+            if mine or not held:
+                out.add(group)
+        return out
 
     def _comparable(self, tps):
         """The partitions whose offsets mean the same thing on both sides.
@@ -1272,6 +1344,14 @@ class KafkaEngine(Engine):
         return rows, unsure, checked
 
     def check_deep(self, db):
+        """Everything beside the topics' own messages: the consumer groups'
+        positions, whether the target has messages past the source's
+        newest, the ACLs on the topics the hop takes and the schemas the
+        two registries hold for them."""
+        return (self._groups_found(db) + self._boundary(db)
+                + self._grants(db) + self._schema_types(db))
+
+    def _groups_found(self, db):
         """Consumer-group parity: the classic kafka-migration failure is
         moving the data but not the committed offsets - every consumer
         restarts from earliest/latest and double-processes or drops.
@@ -1283,7 +1363,9 @@ class KafkaEngine(Engine):
         """
         import json
         try:
-            gs = self._groups("src")
+            # the source's groups the hop takes, against every group the
+            # target has: what a group is on the target is its name
+            gs = self._groups_taken("src")
             gd = self._groups("dst")
         except Exception as e:
             return [Result("deep", "groups", "error",
@@ -1292,17 +1374,20 @@ class KafkaEngine(Engine):
                            " there being none")]
         missing = sorted(gs - gd)
         res = []
+        # a consumer group is an object beside the topics: it is there or it
+        # is not, and a group missing is every reader of it starting over
         if missing:
             res.append(Result("deep", "groups", "diff",
                               f"{len(missing)} consumer groups missing on"
                               f" target: {', '.join(missing[:6])}", "",
                               f"migkit sync {self.hop.name} --db {db}"
                               " --kind sequences --apply, which puts each"
-                              " group at the same message on the target"))
+                              " group at the same message on the target",
+                              category="structure.objects"))
         else:
             res.append(Result("deep", "groups", "ok",
                               f"{len(gs)} consumer groups present on"
-                              " target"))
+                              " target", category="structure.objects"))
         rows, unsure, checked = self.group_positions(db)
         behind, changed = [], []
         translated = sum(1 for r in rows if r["how"] != "number")
@@ -1346,6 +1431,299 @@ class KafkaEngine(Engine):
                 " group reads next, or reset the target's groups"
                 " deliberately with kafka-consumer-groups --reset-offsets"))
         return res
+
+    # --- what the target holds past the source's newest message --------
+
+    def _newest(self, consumer, tp):
+        """(time, key, value) of a partition's newest message as it
+        compares across clusters (`_as_compared`), or None where it holds
+        none: read back from its end in widening windows, since the last
+        offsets may be a transaction's marker or a compaction's hole."""
+        beg = consumer.beginning_offsets([tp])[tp]
+        end = consumer.end_offsets([tp])[tp]
+        width = 16
+        while end > beg:
+            start = max(beg, end - width)
+            consumer.assign([tp])
+            consumer.seek(tp, start)
+            last = None
+            while consumer.position(tp) < end:
+                batch = consumer.poll(timeout_ms=3000)
+                if not batch:
+                    break
+                for msgs in batch.values():
+                    for m in msgs:
+                        if m.offset < end:
+                            last = m
+            if last is not None:
+                return (last.timestamp, last.key, last.value)
+            if start == beg:
+                return None
+            width *= 8
+        return None
+
+    def _after(self, consumer, tp, message):
+        """(how many messages the partition holds after the last one that
+        is `message`, whether it read on to the end) or None where it is
+        not found: from the first offset at its time, at most
+        `TRANSLATE_SCAN` messages, the last one with its key and value."""
+        at, key, value = message
+        start = consumer.offsets_for_times({tp: at}).get(tp)
+        if start is None:
+            return None
+        end = consumer.end_offsets([tp])[tp]
+        consumer.assign([tp])
+        consumer.seek(tp, start.offset)
+        seen = after = 0
+        found = False
+        while consumer.position(tp) < end and seen < self.TRANSLATE_SCAN:
+            batch = consumer.poll(timeout_ms=3000)
+            if not batch:
+                break
+            for msgs in batch.values():
+                for m in msgs:
+                    if m.offset >= end:
+                        continue
+                    seen += 1
+                    if (self._as_compared("dst", m.key) == key
+                            and self._as_compared("dst", m.value) == value):
+                        found, after = True, 0
+                    elif found:
+                        after += 1
+        return (after, consumer.position(tp) >= end) if found else None
+
+    def _boundary(self, db):
+        """Whether the target holds messages past the source's newest:
+        writes landing on the target, or a copy applied twice. Per
+        partition, the source's newest message is looked for on the target
+        and what follows it counted (`_after`); a partition whose newest
+        message is not found there cannot be told, and is said."""
+        from kafka import TopicPartition
+        try:
+            sc, dc = self._consumer("src"), self._consumer("dst")
+            tops = [t for t in self._topics(sc) if t in dc.topics()]
+        except Exception as e:  # noqa: BLE001 - said, not an empty answer
+            return [Result("deep", f"{db} boundary", "error",
+                           f"{type(e).__name__}: {str(e)[:110]} - whether the"
+                           " target is ahead of the source was not looked at")]
+        ahead, unknown, named, apart = [], [], {}, {}
+        try:
+            for t in tops:
+                named[t] = "ok"
+                for p in self._partitions(sc, t):
+                    tp = TopicPartition(t, p)
+                    try:
+                        send = sc.end_offsets([tp])[tp]
+                        sbeg = sc.beginning_offsets([tp])[tp]
+                        dend = dc.end_offsets([tp])[tp]
+                        dbeg = dc.beginning_offsets([tp])[tp]
+                        if send <= sbeg:
+                            # nothing on the source: whatever the target
+                            # holds is past it - unless the source once
+                            # held messages that retention took
+                            if dend > dbeg and sbeg:
+                                unknown.append(f"{t}[{p}] (the source's"
+                                               " messages are gone)")
+                                continue
+                            n, whole = dend - dbeg, True
+                        else:
+                            newest = self._newest(sc, tp)
+                            got = self._after(dc, tp, newest) \
+                                if newest is not None else None
+                            # a log neither retention nor a delete has cut
+                            # holds, on the target, no more offsets than the
+                            # source's: a copy applied twice ends with the
+                            # source's newest message again, with nothing
+                            # after it
+                            more = dend - send if not (sbeg or dbeg) else 0
+                            if got is None and more <= 0:
+                                unknown.append(f"{t}[{p}] (the source's"
+                                               " newest message is not on"
+                                               " the target)")
+                                continue
+                            n, whole = got or (0, True)
+                            if more > n:
+                                n, whole = more, True
+                    except Exception as e:  # noqa: BLE001 - said
+                        unknown.append(f"{t}[{p}] ({type(e).__name__})")
+                        continue
+                    if n > 0:
+                        named[t] = "diff"
+                        ahead.append(f"{t}[{p}] AHEAD of source by {n:,}"
+                                     f"{'' if whole else ' or more'}"
+                                     " messages")
+                        now = apart.setdefault(t, {
+                            "missing": 0, "extra": 0, "changed": 0,
+                            "exact": False})
+                        now["extra"] += n
+        finally:
+            sc.close()
+            dc.close()
+        if ahead:
+            return [Result(
+                "deep", f"{db} boundary", "diff",
+                "; ".join(ahead[:8]) + (
+                    f"; not compared: {', '.join(unknown[:4])}"
+                    if unknown else ""), "",
+                "something wrote to the target, or a copy ran twice: stop"
+                " the producers of those topics there and copy them again"
+                " into topics made empty",
+                table=self._lone(t for t in named if named[t] == "diff"),
+                tables=named, rows_apart=apart)]
+        if unknown:
+            return [Result(
+                "deep", f"{db} boundary", "warn",
+                f"{len(unknown)} partitions could not be told: "
+                + ", ".join(unknown[:6]) + " - the others hold nothing past"
+                " the source's newest message", tables=named)]
+        return [Result("deep", f"{db} boundary", "ok",
+                       f"{len(tops)} topics, nothing on the target past the"
+                       " source's newest message", tables=named)]
+
+    # --- the ACLs on the topics the hop takes ---------------------------
+
+    def _acl_taken(self, db, key, topics):
+        """Whether an ACL (`users.ACL_FIELDS`) is one the hop carries: on a
+        topic it takes - a literal name, a prefix or all topics, by any one
+        topic it covers - and of an account its `objects` take (`roles`)."""
+        principal, _, _, _, resource, name, pattern = key
+        if resource != "TOPIC":
+            return False
+        if pattern == "PREFIXED":
+            covers = [t for t in topics if t.startswith(name)]
+        elif name == "*":
+            covers = list(topics)
+        else:
+            covers = [name] if self._takes_topic(name) else []
+        return any(self.takes(db, "roles", principal, by=t) for t in covers)
+
+    def _grants(self, db):
+        """The ACLs on topics, source against target: a consumer allowed to
+        read a topic on the source and not on the target stops reading at
+        the cutover without an error anywhere else. Read the way
+        `migkit users` reads them (`users._kafka_accounts`); a side that
+        would not list them is said, and the target's own ACLs beyond the
+        source's are noted, never a difference."""
+        from .. import users
+        try:
+            sc, dc = self._consumer("src"), self._consumer("dst")
+            try:
+                tops = sorted(set(self._topics(sc)) | set(self._topics(dc)))
+            finally:
+                sc.close()
+                dc.close()
+            got = {side: users._kafka_accounts(self.hop, side)
+                   for side in ("src", "dst")}
+        except Exception as e:  # noqa: BLE001 - said, not an empty answer
+            return [Result("deep", f"{db} grants", "error",
+                           f"{type(e).__name__}: {str(e)[:110]} - the topics'"
+                           " ACLs were not compared")]
+        sacl, dacl = got["src"]["acls"], got["dst"]["acls"]
+        if sacl is None and "SecurityDisabled" in str(
+                got["src"]["unread"].get("acls", "")):
+            sacl = set()
+        if dacl is None and "SecurityDisabled" in str(
+                got["dst"]["unread"].get("acls", "")):
+            dacl = set()
+        blind = [f"{side}: {got[key]['unread'].get('acls', 'not listed')}"
+                 for side, key, acls in (("source", "src", sacl),
+                                         ("target", "dst", dacl))
+                 if acls is None]
+        if blind:
+            return [Result("deep", f"{db} grants", "error",
+                           "the ACLs could not be listed - "
+                           + "; ".join(blind) + " - topic access was not"
+                           " compared")]
+        mine = {k for k in sacl if self._acl_taken(db, k, tops)}
+        held = {k for k in dacl if self._acl_taken(db, k, tops)}
+        gone, extra = sorted(mine - held), sorted(held - mine)
+        named = {t: ("diff" if any(self._acl_covers(k, t) for k in gone)
+                     else "ok") for t in tops}
+        if gone:
+            return [Result(
+                "deep", f"{db} grants", "diff",
+                f"{len(gone)} ACLs on topics the source has and the target"
+                " lacks: " + "; ".join(users._acl_said(k) for k in gone[:6])
+                + (f" ({len(gone) - 6} more)" if len(gone) > 6 else ""), "",
+                f"migkit users {self.hop.name} --apply carries them",
+                table=self._lone(t for t in named if named[t] == "diff"),
+                tables=named)]
+        if extra:
+            return [Result(
+                "deep", f"{db} grants", "warn",
+                f"every ACL on a topic is on the target ({len(mine)}); the"
+                f" target has {len(extra)} of its own beyond them: "
+                + "; ".join(users._acl_said(k) for k in extra[:4]),
+                tables=named)]
+        return [Result("deep", f"{db} grants", "ok",
+                       f"{len(mine)} ACLs on topics, all on the target",
+                       tables=named)]
+
+    @staticmethod
+    def _acl_covers(key, topic):
+        """Whether an ACL's resource covers a topic."""
+        name, pattern = key[5], key[6]
+        return (topic.startswith(name) if pattern == "PREFIXED"
+                else name in ("*", topic))
+
+    # --- the schemas the registries hold for the topics -----------------
+
+    def _schema_types(self, db):
+        """A field's type, on the source's registry and on the target's, for
+        the subjects of the topics the hop takes: a field that is an int on
+        one and a long on the other reads the same messages as different
+        values - or fails to. Only where both sides name a registry
+        (`schema_registry`); the schema of a subject is its latest."""
+        from .. import registry
+        src, dst = self._registry("src"), self._registry("dst")
+        if src is None and dst is None:
+            return []
+        if src is None or dst is None:
+            return [Result(
+                "deep", f"{db} schemas", "warn",
+                f"only the {'target' if src is None else 'source'} names a"
+                " schema registry (`schema_registry`): the schemas were not"
+                " compared", category="value.type-drift")]
+        try:
+            sc = self._consumer("src")
+            try:
+                topics = self._topics(sc)
+            finally:
+                sc.close()
+            wanted = {t: [f"{t}-key", f"{t}-value"] for t in topics}
+            drift, named, checked = [], {}, 0
+            for t, subjects in wanted.items():
+                named[t] = "ok"
+                for subject in subjects:
+                    a, b = src.latest(subject), dst.latest(subject)
+                    if a is None:
+                        continue
+                    checked += 1
+                    if b is None:
+                        drift.append(f"{subject} is not registered on the"
+                                     " target")
+                        named[t] = "diff"
+                        continue
+                    for said in registry.field_drift(a, b):
+                        drift.append(f"{subject} {said}")
+                        named[t] = "diff"
+        except Exception as e:  # noqa: BLE001 - said, not an empty answer
+            return [Result("deep", f"{db} schemas", "error",
+                           f"{type(e).__name__}: {str(e)[:110]} - the"
+                           " registries' schemas were not compared",
+                           category="value.type-drift")]
+        if drift:
+            return [Result(
+                "deep", f"{db} schemas", "diff", "; ".join(drift[:8]), "",
+                "register the source's schema on the target's registry under"
+                " the same subject before its consumers read the topic",
+                category="value.type-drift",
+                table=self._lone(t for t in named if named[t] == "diff"),
+                tables=named)]
+        return [Result("deep", f"{db} schemas", "ok",
+                       f"{checked} schemas, every field's type equal on"
+                       " both registries", category="value.type-drift",
+                       tables=named)]
 
     def repair_plan(self, db, kind):
         """Committed offsets are the counters this engine can put right.
@@ -1405,8 +1783,12 @@ class KafkaEngine(Engine):
         from kafka.structs import OffsetAndMetadata
         carried = [json.loads(s) for s in (action.statements or [])
                    if str(s).startswith("{")]
-        rows = carried or [json.loads(line) for line in
-                           self._read_drill(db, "groups", "changed")]
+        # the last check's rows may be from another scope: a position on a
+        # topic the hop no longer takes is the target's own now
+        rows = carried or [r for r in (
+            json.loads(line) for line in
+            self._read_drill(db, "groups", "changed"))
+            if self._takes_topic(r["topic"])]
         if not rows:
             return
         undo_dir = self.hop.report_dir(db) / "undo"
@@ -1451,6 +1833,7 @@ class KafkaEngine(Engine):
         bad = []
         n = 0
         total_a = total_b = 0
+        named, apart = {}, {}
         for t in self._topics(sc):
             tps = [TopicPartition(t, p) for p in self._partitions(sc, t)]
             if not tps:
@@ -1459,21 +1842,32 @@ class KafkaEngine(Engine):
                     for tp in tps)
             if t not in dc.topics():
                 bad.append(f"{t} missing on target")
+                named[t] = "diff"
                 continue
             b = sum(dc.end_offsets(tps)[tp] - dc.beginning_offsets(tps)[tp]
                     for tp in tps)
             n += 1
             total_a += a
             total_b += b
+            named[t] = "ok"
             if a != b:
                 bad.append(f"{t} messages src={a} dst={b}")
+                named[t] = "diff"
+                # the offsets between a partition's first and its end: a
+                # transaction's marker and a compaction's hole take one
+                # too, so what is apart is at least this, not exactly it
+                apart[t] = {"missing": max(a - b, 0), "extra": max(b - a, 0),
+                            "changed": 0, "exact": False}
         if bad:
             return [Result("counts", "messages", "diff", "; ".join(bad[:10]), "",
                            "counts net of retention: small gaps are normal"
-                           " while mirror lags, big gaps mean missing data")]
+                           " while mirror lags, big gaps mean missing data",
+                           table=self._lone(t for t in named
+                                            if named[t] == "diff"),
+                           tables=named, rows_apart=apart)]
         return [Result("counts", "messages", "ok",
                        f"{n} topics, messages {total_a:,}=={total_b:,}"
-                       " (net of retention)")]
+                       " (net of retention)", tables=named)]
 
     def check_data(self, db, table=None, stream=None):
         from kafka import TopicPartition
@@ -1481,10 +1875,14 @@ class KafkaEngine(Engine):
         from ..throttle import Throttle
         sample = int(self.hop.options.get("sample", 200))
         sc, dc = self._consumer("src"), self._consumer("dst")
-        topics = [table] if table else self._topics(sc)
+        # a topic handed over by name is asked of the scope as a listed one
+        # is: one the hop leaves out is not compared
+        topics = [t for t in [table] if self._takes_topic(t)] if table \
+            else self._topics(sc)
         bad = []
         unread = []
         checked = 0
+        named = {}
         # Fetching the tail of every partition on both clusters is the
         # heaviest thing this check does, and brokers are shared with whatever
         # else produces and consumes. Kafka publishes its own load over JMX,
@@ -1497,8 +1895,10 @@ class KafkaEngine(Engine):
         gate = Throttle(1)
         for t in topics:
             parts = self._partitions(sc, t)
+            named.setdefault(t, "ok")
             if not parts:
                 unread.append((t, None, "no partitions on the source"))
+                named[t] = "error"
                 continue
             for p in parts:
                 tp = TopicPartition(t, p)
@@ -1511,6 +1911,7 @@ class KafkaEngine(Engine):
                             unread.append((t, p, f"{side}: {err}"))
                     if stream:
                         stream(f"{t}[{p}]: unreadable")
+                    named[t] = "error"
                     continue
                 checked += 1
                 if stream:
@@ -1519,24 +1920,46 @@ class KafkaEngine(Engine):
                     bad.append(f"{t}[{p}]")
         healed = self._confirmed(db, bad, stream) if bad else []
         bad = [b for b in bad if b not in healed]
+        for b in bad:
+            named[b[:-1].rsplit("[", 1)[0]] = "diff"
         res = []
         if unread:
-            named = "; ".join(f"{t}[{p}] {why}" if p is not None
-                              else f"{t} {why}" for t, p, why in unread[:6])
+            said = "; ".join(f"{t}[{p}] {why}" if p is not None
+                             else f"{t} {why}" for t, p, why in unread[:6])
             distinct = len({(t, p) for t, p, _ in unread})
             res.append(Result(
                 "data", "tail-sample", "error",
                 f"{distinct} partition{'' if distinct == 1 else 's'} could not"
-                f" be read: {named}"
+                f" be read: {said}"
                 + self._why_unreadable(unread), "",
                 "a partition with no leader cannot be read at all - start the"
                 " broker holding it and re-run; an unread partition is not a"
-                " partition that matched"))
+                " partition that matched",
+                table=self._lone(t for t in named if named[t] == "error"),
+                tables=named))
         if bad:
+            apart, hollow = self._windows_apart(sc, dc, bad, sample)
             res.append(Result("data", "tail-sample", "diff",
                               f"content differs in: {', '.join(bad[:10])}", "",
                               "re-mirror those topics, verify consumer-group"
-                              " checkpoints before cutover"))
+                              " checkpoints before cutover",
+                              table=self._lone(t for t in named
+                                               if named[t] == "diff"),
+                              tables=named, rows_apart=apart))
+            if hollow:
+                res.append(Result(
+                    "data", f"{db} nullempty", "diff",
+                    "a message with no value (a tombstone, which deletes its"
+                    " key when the topic is compacted) on one side is an"
+                    " empty value on the other: "
+                    + "; ".join(f"{t} {n} message{'' if n == 1 else 's'}"
+                                for t, n in sorted(hollow.items())[:10]),
+                    "", "copy those topics again: a tombstone and an empty"
+                    " value are different messages to a consumer, and only"
+                    " the tombstone removes the key",
+                    table=self._lone(hollow), tables={
+                        t: "diff" if t in hollow else st
+                        for t, st in named.items()}))
         if not res and not checked:
             res.append(Result("data", "tail-sample", "error",
                               "no partitions were compared at all, which is"
@@ -1547,8 +1970,60 @@ class KafkaEngine(Engine):
                               f" {checked} partitions"
                               + (f"; {', '.join(healed)} differed while"
                                  " their changes were still arriving"
-                                 if healed else "")))
+                                 if healed else ""), tables=named))
         return res
+
+    @staticmethod
+    def _apart(src, dst):
+        """(missing, extra, changed, hollow) between two windows of
+        (key, value) - what the source's has the target's has not, the
+        reverse, the same key with another value (a pair, in order) and, of
+        those, the pairs where one value is missing and the other empty: a
+        tombstone and an empty value read alike to a hash of the bytes and
+        mean different things to a consumer."""
+        from collections import Counter
+        only_s = Counter(src) - Counter(dst)
+        only_d = Counter(dst) - Counter(src)
+        by_key = {}
+        for side, only in ((0, only_s), (1, only_d)):
+            for (key, value), n in only.items():
+                by_key.setdefault(key, ([], []))[side].extend([value] * n)
+        changed = hollow = 0
+        for here, there in by_key.values():
+            for a, b in zip(here, there):
+                changed += 1
+                hollow += (a is None and b == b"") or (b is None
+                                                      and a == b"")
+        return (sum(only_s.values()) - changed,
+                sum(only_d.values()) - changed, changed, hollow)
+
+    def _windows_apart(self, sc, dc, bad, sample):
+        """({topic: rows apart}, {topic: tombstone-for-empty messages}) of
+        the partitions (`topic[p]`) whose last `sample` messages differ,
+        counted from those messages - at least what is apart, not all of
+        it: the rows before the window were not read."""
+        from kafka import TopicPartition
+        apart, hollow = {}, {}
+        for item in bad:
+            topic, part = item[:-1].rsplit("[", 1)
+            tp = TopicPartition(topic, int(part))
+            try:
+                got = [
+                    self._messages(c, tp, max(
+                        c.beginning_offsets([tp])[tp],
+                        c.end_offsets([tp])[tp] - sample), sample, side)
+                    for c, side in ((sc, "src"), (dc, "dst"))]
+            except Exception:  # noqa: BLE001 - the finding stands uncounted
+                continue
+            missing, extra, changed, empty = self._apart(*got)
+            now = apart.setdefault(topic, {
+                "missing": 0, "extra": 0, "changed": 0, "exact": False})
+            now["missing"] += missing
+            now["extra"] += extra
+            now["changed"] += changed
+            if empty:
+                hollow[topic] = hollow.get(topic, 0) + empty
+        return apart, hollow
 
     def _confirmed(self, db, bad, stream=None):
         """The partitions of `bad` (`topic[p]`) that were only behind: where
@@ -1667,10 +2142,14 @@ class KafkaEngine(Engine):
                 for m in msgs:
                     if m.offset >= end:
                         break
-                    h.update(self._as_compared(side, m.key) or b""
-                             if side else m.key or b"")
-                    h.update(self._as_compared(side, m.value) or b""
-                             if side else m.value or b"")
+                    for part in (m.key, m.value):
+                        part = self._as_compared(side, part) if side \
+                            else part
+                        # a missing value (a tombstone) is not an empty one,
+                        # and where one part ends is part of what it says
+                        h.update(b"\x00" if part is None else
+                                 b"\x01" + len(part).to_bytes(8, "big")
+                                 + part)
                     got += 1
         return f"{got}|{h.hexdigest()}"
 
