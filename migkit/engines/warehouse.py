@@ -38,6 +38,14 @@ write stream refuses rows at an offset it already holds, Snowflake's
 channel keeps the last offset token it committed, and Redshift's journal
 is a table of the same transaction.
 
+**Redshift and Snowflake are read through their catalogues** (`_CatalogWarehouse`):
+the deep checks hold the two sides' keys (and a key more than one row holds,
+which a warehouse never refuses), columns, foreign keys, views, materialized
+views, table options, row policies, grants and owners to each other, for the
+tables and objects the hop takes; `assess` names what the move will not do
+(streams, tasks, stages, datashares, routines, tables with no key). Their
+statements have not run on an account: `capabilities.UNPROVED` says which.
+
 The tables migkit makes here start with `_migkit_`, are left out of every
 listing of the application's tables, and are named by `assess`. Proved on
 BigQuery's emulator and on PostgreSQL where Redshift's SQL is PostgreSQL's;
@@ -49,7 +57,7 @@ import json
 
 from .. import decide, nanotime, pieces
 from . import warehouse_sql
-from .base import Engine
+from .base import Engine, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 
 #: the declared type from `information_schema.columns`, with the numbers a
@@ -392,7 +400,574 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         raise NotImplementedError
 
 
-class RedshiftEngine(_Warehouse):
+class _CatalogWarehouse(_Warehouse):
+    """A warehouse read through the standard `information_schema` and its
+    own system views - Redshift and Snowflake - held to everything a
+    server of its kind is: the checks and repairs through the pair every
+    engine compares by, and a deep look at the catalogue of each side.
+
+    A warehouse declares keys and foreign keys and enforces none, keeps no
+    secondary index and runs no trigger, so a move is proved by what the
+    catalogue says of both sides and by the rows, not by what the server
+    refused."""
+
+    def repair_plan(self, db, kind):
+        return self._as_pair().repair_plan(db, kind)
+
+    def apply(self, db, action):
+        return self._as_pair().apply(db, action)
+
+    def create_missing(self, db, log=None):
+        return self._as_pair().create_missing(db, log)
+
+    def _listing(self, side, db, sql, args=None):
+        """The rows of a statement as {column, in small letters: value}, for
+        a listing whose columns are read by name."""
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            self._run(cur, sql, args)
+            names = [str(d[0]).lower() for d in cur.description]
+            return [dict(zip(names, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def _assess_extra(self):
+        return self.reach_items("src") + self.reach_items("dst")
+
+    def reach_items(self, side):
+        """The tables migkit keeps in a target's schemas
+        (`_Warehouse.reach_items`), and for a source what its move will not
+        do (`migkit.handwork`)."""
+        items = super().reach_items(side)
+        if side == "src":
+            inv = self._handwork(side)
+            items += inv.rows() + inv.summary()
+        return items
+
+    # ---- the catalogue of one side, read for the deep checks -----------------
+    #
+    # A warehouse enforces none of the keys it declares and keeps no index,
+    # so what a move leaves behind is told by the catalogue: each reader
+    # below answers {table or object: what the catalogue says of it} for the
+    # whole schema in one statement, and `_held` holds the two sides' answers
+    # to each other. Only a table or an object the hop takes is read
+    # (`_scoped_rows`, `takes`).
+
+    @staticmethod
+    def _said(name):
+        """A name as the catalogue spells it, in the case migkit says it."""
+        return name
+
+    def _stored(self, table):
+        """A table's name as the catalogue stores it."""
+        return str(table)
+
+    def _schema(self, side, db):
+        """The schema's name as the catalogue stores it."""
+        return self._d(side, db)
+
+    def _named(self, db, rows):
+        """The rows of a catalogue listing for the tables the hop takes,
+        the first value of each said as migkit says a name."""
+        return self._scoped_rows(
+            db, [[self._said(r[0])] + list(r[1:]) for r in rows])
+
+    def neutral_tables(self, side, db):
+        """The tables of the schema the hop takes, asked of the scope's one
+        answer (`Engine.in_scope`) in the name the engine says them."""
+        return [t for t in self._table_names(side, db)
+                if not self._own(t) and self.in_scope(db, t)]
+
+    def _first_line(self, err):
+        return (str(err).strip().splitlines() or [""])[-1][:90]
+
+    def _scoped_names(self, side, db):
+        """The tables in scope on `side`, as the catalogue names them
+        (`neutral_tables` asks the scope)."""
+        return self.neutral_tables(side, db)
+
+    def _held(self, db, noun, mine, theirs, names):
+        """(status, detail, {name: "ok" | "diff"}) of what the two sides'
+        catalogues say of the `names` the check compares: a name one side
+        has no answer for differs."""
+        names = sorted(names)
+        differ = [n for n in names if mine.get(n) != theirs.get(n)]
+        tables = {n: ("diff" if n in differ else "ok") for n in names}
+        if not differ:
+            return "ok", f"{len(names)} {noun} the same on both sides", tables
+        shown = [f"{n} {self._differs(mine.get(n), theirs.get(n))}"
+                 for n in differ[:4]]
+        return "diff", (f"{len(differ)} of {len(names)} {noun} differ: "
+                        + "; ".join(shown)
+                        + (f"; and {len(differ) - 4} more"
+                           if len(differ) > 4 else "")), tables
+
+    @staticmethod
+    def _differs(a, b):
+        """Where two answers part, short."""
+        if isinstance(a, dict) and isinstance(b, dict):
+            names = sorted(str(k) for k in set(a) | set(b)
+                           if a.get(k) != b.get(k))
+            return "(" + ", ".join(names[:4]) \
+                + (" ..." if len(names) > 4 else "") + ")"
+        if a is None or b is None:
+            return "(only on the " + ("target" if a is None else "source")
+        return f"({str(a)[:40]} on the source, {str(b)[:40]} on the target)"
+
+    def _read_error(self, db, scope, category, err):
+        return Result("deep", scope, "error",
+                      f"could not read the catalogue: {self._first_line(err)}",
+                      "", "", category)
+
+    # the readers: {name: facts} for the whole schema
+
+    def _column_facts(self, side, db):
+        """{table: {column: (declared type, takes NULL, default)}}."""
+        out = {}
+        for t, c, typ, null, default in self._named(db, self._rows(
+                side, db, "select table_name, column_name,"
+                          f" {DECLARED}, is_nullable, column_default from"
+                          f" {self._catalog(side, db, 'columns')} where"
+                          f" table_schema = {MARK} order by table_name,"
+                          " ordinal_position", (self._schema(side, db),))):
+            out.setdefault(self._said(t), {})[self._said(c)] = (
+                typ, str(null).upper() != "NO",
+                self._default_text(side, db, default))
+        return out
+
+    def _default_text(self, side, db, default):
+        """A column's default as the two sides compare it: what a cluster
+        numbers with, and the database it names itself by, are its own."""
+        return None if default in (None, "") else str(default)
+
+    def _keys_of(self, side, db):
+        """{table: [declared key columns]}."""
+        got = {}
+        for t, c in self._named(db, self._rows(
+                side, db, "select c.table_name, k.column_name from"
+                          f" {self._catalog(side, db, 'table_constraints')} c"
+                          f" join {self._catalog(side, db, 'key_column_usage')}"
+                          " k on k.constraint_name = c.constraint_name and"
+                          " k.table_schema = c.table_schema and k.table_name"
+                          " = c.table_name where c.constraint_type ="
+                          f" 'PRIMARY KEY' and c.table_schema = {MARK}"
+                          " order by 1, k.ordinal_position",
+                (self._schema(side, db),))):
+            got.setdefault(self._said(t), []).append(self._said(c))
+        return got
+
+    def _duplicate_keys(self, side, db):
+        """{table: how many key values more than one row holds} for the
+        tables in scope that declare a key - which the warehouse never
+        enforces."""
+        keys, out = self._keys_of(side, db), {}
+        for t in self._scoped_names(side, db):
+            if not keys.get(t):
+                continue
+            cols = ", ".join(self._q(c) for c in keys[t])
+            n = self._rows(side, db, "select count(*) from (select 1 from"
+                                     f" {self._qualified(side, db, t)}"
+                                     f" group by {cols} having count(*) > 1)"
+                                     " d")[0][0]
+            if n:
+                out[t] = int(n)
+        return out
+
+    def _views_of(self, side, db):
+        """{view: its definition's select}."""
+        return dict(self.neutral_views(side, db))
+
+    def _matviews(self, side, db):
+        """{materialized view: its state}."""
+        return {}
+
+    def _table_options(self, side, db):
+        """{table: the options the table was made with}."""
+        return {}
+
+    def _owners(self, side, db):
+        """{table: the account that owns it}."""
+        return {}
+
+    def _policies(self, side, db):
+        """{table: the row policies attached to it}."""
+        return {}
+
+    def _grants_of(self, side, db):
+        """{table: {(grantee, privilege)}}."""
+        got = {}
+        for t, who, what in self._named(db, self._rows(
+                side, db, "select table_name, grantee, privilege_type from"
+                          f" {self._catalog(side, db, 'table_privileges')}"
+                          f" where table_schema = {MARK} order by 1, 2, 3",
+                (self._schema(side, db),))):
+            got.setdefault(self._said(t), set()).add((str(who), str(what)))
+        return got
+
+    # the checks: each finding names the tables it compared and how each
+    # came out, and the category it is about
+
+    def _both_tables(self, db):
+        there = set(self.neutral_tables("dst", db))
+        return [t for t in self.neutral_tables("src", db) if t in there]
+
+    def _by_table(self, db, noun, read):
+        """(status, detail, {table: how it came out}) of `read(side, db)`
+        held to itself on the two sides, for the tables both have."""
+        try:
+            return self._held(db, noun, read("src", db), read("dst", db),
+                              self._both_tables(db))
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return ("error", f"could not read the catalogue:"
+                             f" {self._first_line(e)}", {})
+
+    def _by_object(self, db, kind, noun, read):
+        """The same for the objects of a kind the hop takes, one side
+        having an object the other lacks included."""
+        try:
+            mine, theirs = read("src", db), read("dst", db)
+            return self._held(db, noun, mine, theirs, [
+                n for n in set(mine) | set(theirs)
+                if self.takes(db, kind, n)])
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return ("error", f"could not read the catalogue:"
+                             f" {self._first_line(e)}", {})
+
+    def _columns_result(self, db):
+        status, detail, tables = self._by_table(
+            db, "tables' columns", self._column_facts)
+        return Result("deep", f"{db} columns", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "make the target's columns what the source's are,"
+                      " then check again",
+                      category="structure.columns", tables=tables)
+
+    def _keys_result(self, db):
+        try:
+            mine, theirs = self._keys_of("src", db), self._keys_of("dst", db)
+            status, detail, tables = self._held(
+                db, "tables' declared keys",
+                {t: tuple(k) for t, k in mine.items()},
+                {t: tuple(k) for t, k in theirs.items()},
+                self._both_tables(db))
+            twice = self._duplicate_keys("dst", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            status, detail, tables, twice = (
+                "error", f"could not read the catalogue:"
+                         f" {self._first_line(e)}", {}, {})
+        if twice:
+            # a declared key is not enforced here: rows that share one are
+            # on the target and nothing refused them
+            tables.update({t: "diff" for t in twice})
+            status = "diff"
+            detail += (f"; {len(twice)} tables hold a declared key value"
+                       " in more than one row ("
+                       + ", ".join(f"{t}: {n}" for t, n in
+                                   sorted(twice.items())[:4])
+                       + (" ..." if len(twice) > 4 else "") + ")")
+        return Result("deep", f"{db} keys", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "a warehouse enforces no key: remove the repeated"
+                      " rows, or key the table on columns that never repeat",
+                      category="structure.keys", tables=tables)
+
+    def _duplicate_source_keys(self, db):
+        """Before the move: a key the source declares and does not enforce
+        may be held by more than one row, which a merge by that key either
+        refuses or collapses, and a target that enforces it refuses."""
+        try:
+            twice = self._duplicate_keys("src", db)
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return Result("deep", f"{db} source keys", "error",
+                          f"could not read the source: {self._first_line(e)}",
+                          category="structure.keys")
+        if not twice:
+            return Result("deep", f"{db} source keys", "ok",
+                          "no declared key of the source is held by more"
+                          " than one row", category="structure.keys")
+        return Result(
+            "deep", f"{db} source keys", "diff",
+            f"{len(twice)} tables hold a declared key value in more than"
+            " one row (" + ", ".join(f"{t}: {n}" for t, n in
+                                     sorted(twice.items())[:4])
+            + (" ..." if len(twice) > 4 else "") + ") - a merge by that key"
+            " cannot place them both",
+            fix_hint="remove the repeated rows at the source, or move the"
+                     " table keyless", category="structure.keys",
+            tables={t: "diff" for t in twice})
+
+    def _foreign_keys_result(self, db):
+        def read(side, db):
+            got = {}
+            for child, cols, parent, pcols in self.foreign_keys(side, db):
+                got.setdefault(child, set()).add(
+                    (tuple(cols), parent, tuple(pcols)))
+            return got
+        status, detail, tables = self._by_table(
+            db, "tables' declared foreign keys", read)
+        return Result("deep", f"{db} foreign keys", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "declare the source's foreign keys on the target;"
+                      " neither side enforces them",
+                      category="structure.foreign-keys", tables=tables)
+
+    def _objects_result(self, db):
+        status, detail, tables = self._by_object(
+            db, "view", "views", self._views_of)
+        return Result("deep", f"{db} objects", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "make the target's views what the source's are",
+                      category="structure.objects", tables=tables)
+
+    def _matviews_result(self, db):
+        status, detail, tables = self._by_object(
+            db, "materialized view", "materialized views", self._matviews)
+        return Result("deep", f"{db} materialized views", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "make the target's materialized views what the"
+                      " source's are, and refresh a stale one",
+                      category="structure.materialized-views",
+                      tables=tables)
+
+    def _options_result(self, db):
+        status, detail, tables = self._by_table(
+            db, "tables' options", self._table_options)
+        return Result("deep", f"{db} table options", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "make the target's tables what the source's are in"
+                      " these", category="structure.collection-options",
+                      tables=tables)
+
+    def _policies_result(self, db):
+        status, detail, tables = self._by_table(
+            db, "tables' row policies", self._policies)
+        return Result("deep", f"{db} row policies", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "attach the source's row policies to the target's"
+                      " tables", category="structure.row-security",
+                      tables=tables)
+
+    def _grants_result(self, db):
+        status, detail, tables = self._by_table(
+            db, "tables' grants", self._grants_of)
+        return Result("deep", f"{db} grants", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "grant on the target what the source's tables grant",
+                      category="access.table-grants", tables=tables)
+
+    def _ownership_result(self, db):
+        status, detail, tables = self._by_table(
+            db, "tables' owners", self._owners)
+        return Result("deep", f"{db} ownership", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "give the target's tables the owners the source's"
+                      " have", category="access.object-ownership",
+                      tables=tables)
+
+    def _boundary_result(self, db):
+        """The largest value of each single whole-number key, held to the
+        source's: a target's that is past it holds a row the source never
+        had - a writer on the target, or a batch applied twice."""
+        from .. import canon
+        try:
+            keys = self._keys_of("src", db)
+            there = {t for t in self.neutral_tables("dst", db)}
+            both = []
+            for t in self.neutral_tables("src", db):
+                key = keys.get(t, [])
+                declared = dict(self.neutral_columns("src", db, t))
+                if t in there and len(key) == 1 and canon.type_class(
+                        self.CANON_ENGINE, declared.get(key[0])) == "integer":
+                    both.append((t, key[0]))
+
+            def tops(side):
+                return {t: self._rows(
+                    side, db, f"select max({self._q(c)}) from"
+                              f" {self._qualified(side, db, t)}")[0][0]
+                    for t, c in both}
+            mine, theirs = tops("src"), tops("dst")
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return Result("deep", f"{db} boundary", "error",
+                          f"could not read the keys' largest values:"
+                          f" {self._first_line(e)}",
+                          category="movement.target-ahead")
+        ahead = [t for t, _ in both if theirs[t] is not None and (
+            mine[t] is None or int(theirs[t]) > int(mine[t]))]
+        if ahead:
+            return Result(
+                "deep", f"{db} boundary", "diff",
+                f"the target's largest key is past the source's on"
+                f" {len(ahead)} tables: " + "; ".join(
+                    f"{t} source {mine[t]}, target {theirs[t]}"
+                    for t in ahead[:4]),
+                fix_hint="rows landing on the target, or a batch applied"
+                         " twice: find the writer before cutover",
+                category="movement.target-ahead",
+                tables={t: ("diff" if t in ahead else "ok")
+                        for t, _ in both})
+        return Result("deep", f"{db} boundary", "ok",
+                      f"the largest key of {len(both)} tables is not past"
+                      " the source's" if both else
+                      "no table with one whole-number key to look at",
+                      category="movement.target-ahead",
+                      tables={t: "ok" for t, _ in both})
+
+    def _deep_extra(self, db):
+        """What only one warehouse's catalogue has to say."""
+        return []
+
+    def check_deep(self, db):
+        """The two sides' catalogues held to each other for the tables and
+        objects the hop takes - what a move leaves wrong without an error,
+        since a warehouse enforces no key and keeps no index to refuse it:
+        declared keys, and a key more than one row holds; columns, their
+        types and defaults; foreign keys; views and materialized views;
+        the options a table was made with; row policies; grants; owners."""
+        return [self._keys_result(db), self._boundary_result(db),
+                self._columns_result(db),
+                self._foreign_keys_result(db), self._objects_result(db),
+                self._matviews_result(db), self._options_result(db),
+                self._policies_result(db), self._grants_result(db),
+                self._ownership_result(db)] + self._deep_extra(db)
+
+    #: what `assess` asks before anything moves
+    PREFLIGHT = ("_duplicate_source_keys",)
+
+    # ---- what the catalogue says of a table, for another engine to be given -
+
+    def foreign_keys(self, side, db):
+        """[(child, [columns], parent, [parent's columns])] - declared and
+        never enforced, so the copy's order is all they are for."""
+        return []
+
+    def neutral_column_rules(self, side, db, table):
+        """{column: {"null", "default", "identity"}} from the catalogue.
+        A column an identity numbers has its default left to the
+        identity."""
+        out = {}
+        for name, null, default, identity in self._rows(
+                side, db, f"select column_name, is_nullable, column_default,"
+                          f" {self._identity_column()} from"
+                          f" {self._catalog(side, db, 'columns')} where"
+                          f" table_schema = {MARK} and table_name = {MARK}"
+                          " order by ordinal_position",
+                (self._schema(side, db), self._stored(table))):
+            numbered = self._numbered(identity, default)
+            out[self._said(name)] = {
+                "null": str(null).upper() != "NO",
+                "default": None if numbered or default in (None, "")
+                else str(default),
+                "identity": numbered}
+        return out
+
+    def _identity_column(self):
+        """The expression telling a column an identity numbers."""
+        return "null"
+
+    @staticmethod
+    def _numbered(identity, default):
+        return str(identity or "").upper() in ("YES", "Y", "T", "TRUE")
+
+    #: the dialect sqlglot reads this warehouse's view text as
+    VIEW_DIALECT = None
+
+    def _view_select(self, text):
+        """A view's definition as its select: the statement the catalogue
+        keeps is `create view ... as <select>` on some, the select alone
+        on others."""
+        import sqlglot
+        from sqlglot import exp
+        try:
+            tree = sqlglot.parse_one(str(text), read=self.VIEW_DIALECT)
+            body = tree.expression if isinstance(tree, exp.Create) else tree
+            return body.sql(self.VIEW_DIALECT)
+        except Exception:  # noqa: BLE001 - handed on as written
+            return str(text).strip().rstrip(";")
+
+    def neutral_views(self, side, db):
+        """[(name, the view's select)] - the views the hop takes."""
+        out = []
+        for name, definition in self._view_rows(side, db):
+            if self.takes(db, "view", self._said(name)):
+                out.append((self._said(name), self._view_select(definition)))
+        return out
+
+    def _view_rows(self, side, db):
+        return self._rows(
+            side, db, "select table_name, view_definition from"
+                      f" {self._catalog(side, db, 'views')} where"
+                      f" table_schema = {MARK} order by 1",
+            (self._schema(side, db),))
+
+    # ---- the servers, for `assess` ---------------------------------------------
+
+    def _banner(self, side, db):
+        """What the server says of itself."""
+        raise NotImplementedError
+
+    def _release(self, banner):
+        """The warehouse's own release number in what it says of itself."""
+        return str(banner or "").strip() or None
+
+    def _banners(self):
+        """(source's, target's) as each says it, None for a side that would
+        not."""
+        out = []
+        for side in ("src", "dst"):
+            try:
+                db = (self.databases() or [None])[0]
+                out.append(self._banner(side, db))
+            except Exception:  # noqa: BLE001 - unknown, said as such
+                out.append(None)
+        return tuple(out)
+
+    def _server_versions(self):
+        return tuple(self._release(b) if b else None for b in self._banners())
+
+    def _brand_probes(self):
+        out = []
+        for banner in self._banners():
+            release = self._release(banner) if banner else None
+            out.append({self.BRAND_FIELD: release} if release else {})
+        return tuple(out)
+
+    #: the field of what a server says that only this warehouse says
+    BRAND_FIELD = "release"
+
+    # ---- what the move will not do ----------------------------------------------
+
+    def _handwork_probes(self):
+        """[(kind of work, what, kind of object the hop's `objects` names it
+        by, reader)] - each reader gives the names of what the warehouse
+        keeps that no copy of its tables carries (`handwork.KINDS`)."""
+        return []
+
+    def _handwork(self, side="src"):
+        from .. import handwork
+        inv = handwork.Inventory()
+        for db in self.databases():
+            try:
+                keys = self._keys_of(side, db)
+                inv.add("no-row-key", db, "tables",
+                        [t for t in self.neutral_tables(side, db)
+                         if not keys.get(t)])
+            except Exception as e:  # noqa: BLE001 - unknown, not zero
+                inv.unknown("no-row-key", db, "cannot read the declared"
+                            f" keys: {self._first_line(e)}")
+            for kind, what, taken, read in self._handwork_probes():
+                try:
+                    inv.add(kind, db, what, [
+                        n for n in read(side, db)
+                        if taken is None or self.takes(db, taken, n)])
+                except Exception as e:  # noqa: BLE001 - unknown, not zero
+                    inv.unknown(kind, db, f"cannot list {what}:"
+                                          f" {self._first_line(e)}")
+        return inv
+
+
+
+class RedshiftEngine(_CatalogWarehouse):
     """Amazon Redshift, through the PostgreSQL driver it speaks to, or
     through its own driver where the endpoint signs in by IAM (`iam: true`,
     with `cluster_identifier` or `serverless_work_group`, `region`).
@@ -453,6 +1028,177 @@ class RedshiftEngine(_Warehouse):
         except Exception:  # noqa: BLE001 - not a cluster's catalogue
             pass
         return out
+
+    # ---- the catalogue, as Redshift keeps it ----------------------------------
+
+    BRAND_FAMILY = "redshift"
+    BRAND_FIELD = "redshift_release"
+    VIEW_DIALECT = "redshift"
+
+    def _banner(self, side, db):
+        return self._rows(side, db, "select version()")[0][0]
+
+    def _release(self, banner):
+        """`Redshift 1.0.x` in the banner PostgreSQL 8's version string
+        carries."""
+        import re
+        got = re.search(r"Redshift\s+([0-9][0-9.]*)", str(banner or ""))
+        return got.group(1) if got else None
+
+    def _default_text(self, side, db, default):
+        """An identity's default names the table's object id, which is the
+        cluster's own: it is said as the identity it is."""
+        if default in (None, ""):
+            return None
+        return "identity" if str(default).startswith('"identity"') \
+            else str(default)
+
+    def _identity_column(self):
+        return "coalesce(position('\"identity\"' in column_default), 0) = 1"
+
+    def foreign_keys(self, side, db):
+        """From the constraint's own text (`pg_get_constraintdef`):
+        `FOREIGN KEY (a, b) REFERENCES parent(x, y)`."""
+        import re
+
+        def names(text):
+            return [n.strip().strip('"') for n in text.split(",")]
+        out = []
+        for child, text in self._named(db, self._rows(
+                side, db, "select cl.relname, pg_get_constraintdef(c.oid)"
+                          " from pg_constraint c join pg_class cl on cl.oid"
+                          " = c.conrelid join pg_namespace n on n.oid ="
+                          " cl.relnamespace where c.contype = 'f' and"
+                          f" n.nspname = {MARK} order by cl.relname,"
+                          " c.conname", (self._schema(side, db),))):
+            got = re.match(r"\s*FOREIGN KEY\s*\((.*?)\)\s*REFERENCES\s+"
+                           r"(\S+?)\s*\((.*?)\)", str(text), re.I | re.S)
+            if got:
+                out.append((child, names(got.group(1)),
+                            names(got.group(2).split(".")[-1])[0],
+                            names(got.group(3))))
+        return out
+
+    def _view_rows(self, side, db):
+        return self._rows(
+            side, db, "select viewname, definition from pg_views where"
+                      f" schemaname = {MARK} order by 1",
+            (self._schema(side, db),))
+
+    def _matviews(self, side, db):
+        return {self._said(n): ("stale" if str(stale).lower() in ("t", "true")
+                                else "fresh")
+                for n, stale in self._rows(
+                    side, db, "select name, is_stale from stv_mv_info where"
+                              f' "schema" = {MARK}', (self._schema(side, db),))
+                if self.takes(db, "materialized view", self._said(n))}
+
+    def _distribution(self, side, db):
+        """{table: how the cluster spreads its rows}: `KEY(col)`, `EVEN`,
+        `ALL`, or `AUTO` - which the cluster changes as the table grows,
+        so it is not held against the other side's."""
+        out = {}
+        for t, style in self._named(db, self._rows(
+                side, db, 'select "table", diststyle from svv_table_info'
+                          f' where "schema" = {MARK}',
+                (self._schema(side, db),))):
+            style = str(style or "")
+            out[t] = "AUTO" if style.upper().startswith("AUTO") else style
+        return out
+
+    def _table_options(self, side, db):
+        """{table: (its sort key, the number of its sort columns, whether
+        its columns are encoded)}."""
+        return {t: (str(key or ""), int(num or 0), str(enc or ""))
+                for t, key, num, enc in self._named(db, self._rows(
+                    side, db, 'select "table", sortkey1, sortkey_num, encoded'
+                              f' from svv_table_info where "schema" = {MARK}',
+                    (self._schema(side, db),)))}
+
+    def _owners(self, side, db):
+        return {t: str(o) for t, o in self._named(db, self._rows(
+            side, db, "select tablename, tableowner from pg_tables where"
+                      f" schemaname = {MARK}", (self._schema(side, db),)))}
+
+    def _policies(self, side, db):
+        """{table: {policy}} from the views that list what is attached:
+        row-level security and dynamic data masking. The views name their
+        columns by version, so the columns are found by name."""
+        out, errors = {}, []
+        for view in ("svv_rls_attached_policy", "svv_attached_masking_policy"):
+            try:
+                rows = self._listing(side, db, f"select * from {view}")
+            except Exception as e:  # noqa: BLE001 - the other view, then
+                errors.append(e)
+                continue
+            for row in rows:
+                table = next((row[k] for k in ("relname", "relation_name",
+                                               "table_name") if k in row),
+                             None)
+                policy = next((row[k] for k in ("policyname", "policy_name")
+                               if k in row), None)
+                schema = next((row[k] for k in ("relschema", "schema_name",
+                                                "schemaname", "table_schema")
+                               if k in row), self._schema(side, db))
+                if table is None or policy is None:
+                    raise ValueError(f"{view} names no table and policy")
+                if str(schema) == self._schema(side, db) and self.in_scope(
+                        db, self._said(str(table))):
+                    out.setdefault(self._said(str(table)), set()).add(
+                        (view, str(policy)))
+        if len(errors) == 2:
+            raise errors[0]
+        return out
+
+    def _deep_extra(self, db):
+        """How the cluster spreads each table's rows, held to the source's:
+        a table spread by a column on one side and evenly on the other is
+        read and joined at another cost."""
+        status, detail, tables = self._by_table(
+            db, "tables' distribution", self._distribution)
+        return [Result("deep", f"{db} distribution", status, detail,
+                       fix_hint="" if status == "ok" else
+                       "alter the target's tables to the source's"
+                       " distribution style and key",
+                       category="structure.sharding", tables=tables)]
+
+    def free_bytes(self, side, db):
+        """What the cluster's disks have free, from its partitions (a
+        provisioned cluster's; Serverless keeps no disk to run out of and
+        answers nothing)."""
+        try:
+            got = self._rows(side, db, "select sum(capacity) - sum(used)"
+                                       " from stv_partitions where part_begin"
+                                       " = 0")
+        except Exception:  # noqa: BLE001 - not a cluster's catalogue
+            return None
+        # the views count in megabyte blocks
+        return int(got[0][0]) * 1048576 if got and got[0][0] is not None \
+            else None
+
+    def _handwork_probes(self):
+        def routines(kind):
+            def read(side, db):
+                return [self._said(n) for (n,) in self._rows(
+                    side, db, "select p.proname from pg_proc_info p join"
+                              " pg_namespace n on n.oid = p.pronamespace"
+                              f" where n.nspname = {MARK} and p.prokind ="
+                              f" {MARK} order by 1",
+                    (self._schema(side, db), kind))]
+            return read
+        return [
+            ("server-side-code", "functions", "function", routines("f")),
+            ("server-side-code", "procedures", "procedure", routines("p")),
+            ("not-carried", "materialized views", "materialized view",
+             lambda side, db: list(self._matviews(side, db))),
+            ("not-carried", "datashares", None,
+             lambda side, db: [n for (n,) in self._rows(
+                 side, db, "select share_name from svv_datashares where"
+                           " share_type = 'OUTBOUND' order by 1")]),
+            ("target-prereq", "external schemas", None,
+             lambda side, db: [n for (n,) in self._rows(
+                 side, db, "select schemaname from svv_external_schemas"
+                           " order by 1")])]
 
     # ---- the stage --------------------------------------------------------
 
@@ -784,7 +1530,7 @@ class RedshiftEngine(_Warehouse):
                 self._drop_files(side, url)
 
 
-class SnowflakeEngine(FoldsToCapitals, _Warehouse):
+class SnowflakeEngine(FoldsToCapitals, _CatalogWarehouse):
     """Snowflake. The endpoint's `account` option is the account
     identifier; `warehouse` and `role`, where given, are used as they
     are; `private_key_file` (and `private_key_passphrase`) signs in by key
@@ -944,6 +1690,212 @@ class SnowflakeEngine(FoldsToCapitals, _Warehouse):
 
     def _fix_read(self, side, db, table, columns, rows):
         return self._unpad(side, db, table, columns, rows)
+
+    # ---- the catalogue, as Snowflake keeps it ---------------------------------
+
+    BRAND_FAMILY = "snowflake"
+    BRAND_FIELD = "snowflake_release"
+    VIEW_DIALECT = "snowflake"
+
+    def _schema(self, side, db):
+        return self._owner(side, db)
+
+    def _stored(self, table):
+        return self._q(table)[1:-1]
+
+    def _banner(self, side, db):
+        return self._rows(side, db, "select current_version()")[0][0]
+
+    def _default_text(self, side, db, default):
+        """A default that draws from a sequence names the database and the
+        schema the sequence is in: said without them, so a schema moved
+        under another name is not a column that differs."""
+        import re
+        if default in (None, ""):
+            return None
+        text = str(default)
+        for name, word in ((self._database(side), "<database>"),
+                           (self._schema(side, db), "<schema>")):
+            text = re.sub(re.escape(name), word, text, flags=re.I)
+        return text
+
+    def _identity_column(self):
+        return "is_identity"
+
+    def _show(self, side, db, what):
+        """The rows of `show <what> in schema`, as {column: value}."""
+        return self._listing(side, db, f"show {what} in schema"
+                                      f" {self._q(self._schema(side, db))}")
+
+    def _keys_of(self, side, db):
+        got = {}
+        for row in sorted(self._show(side, db, "primary keys"),
+                          key=lambda r: (str(r["table_name"]),
+                                         int(r["key_sequence"]))):
+            t = self._said(row["table_name"])
+            if self.in_scope(db, t):
+                got.setdefault(t, []).append(self._said(row["column_name"]))
+        return got
+
+    def foreign_keys(self, side, db):
+        """From `show imported keys`: a row a column of a key, in the
+        order of the key."""
+        keys = {}
+        for row in sorted(self._show(side, db, "imported keys"),
+                          key=lambda r: (str(r["fk_table_name"]),
+                                         str(r["fk_name"]),
+                                         int(r["key_sequence"]))):
+            child = self._said(row["fk_table_name"])
+            if not self.in_scope(db, child):
+                continue
+            one = keys.setdefault((child, str(row["fk_name"])),
+                                  (self._said(row["pk_table_name"]), [], []))
+            one[1].append(self._said(row["fk_column_name"]))
+            one[2].append(self._said(row["pk_column_name"]))
+        return [(child, cols, parent, pcols)
+                for (child, _), (parent, cols, pcols) in keys.items()]
+
+    def _matviews(self, side, db):
+        return {self._said(r["name"]): (
+            "invalid" if str(r.get("invalid")).lower() == "true" else "valid")
+            for r in self._show(side, db, "materialized views")
+            if self.takes(db, "materialized view", self._said(r["name"]))}
+
+    def _table_options(self, side, db):
+        """{table: (its kind - permanent, transient - its clustering key,
+        its time travel in days, whether it tracks changes)}."""
+        return {t: (str(kind), str(cluster or ""), str(days),
+                    str(tracking or ""))
+                for t, kind, cluster, days, tracking in self._named(db, [
+                    [r["name"], r.get("kind"), r.get("cluster_by"),
+                     r.get("retention_time"), r.get("change_tracking")]
+                    for r in self._show(side, db, "tables")])}
+
+    def _owners(self, side, db):
+        return {t: str(o) for t, o in self._named(db, self._rows(
+            side, db, "select table_name, table_owner from"
+                      " information_schema.tables where table_schema ="
+                      f" {MARK} and table_type = {MARK}",
+            (self._schema(side, db), self.BASE_TABLE)))}
+
+    def _policies(self, side, db):
+        """{table: {(kind, policy)}}: the masking and row access policies
+        each table is under, asked of the table function that lists what a
+        policy is on."""
+        out = {}
+        conn = self._connect(side, db)
+        try:
+            cur = conn.cursor()
+            for t in self.neutral_tables(side, db):
+                cur.execute(
+                    "select policy_kind, policy_name from table("
+                    "information_schema.policy_references(ref_entity_name"
+                    f" => {MARK}, ref_entity_domain => 'TABLE'))",
+                    (f"{self._q(self._database(side))}."
+                     f"{self._qualified(side, db, t)}",))
+                got = {(str(k), str(n)) for k, n in cur.fetchall()}
+                if got:
+                    out[t] = got
+        finally:
+            conn.close()
+        return out
+
+    def _sequences(self, side, db):
+        """{sequence: (the value it hands out next, its step)}."""
+        return {self._said(r["name"]): (int(r["next_value"]),
+                                         int(r.get("interval") or 1))
+                for r in self._show(side, db, "sequences")}
+
+    def capacity(self, side, db):
+        """The queries running now on the warehouse the session uses."""
+        name = self._rows(side, db, "select current_warehouse()")[0][0]
+        if not name:
+            return {}
+        got = self._listing(side, db, f"show warehouses like {MARK}",
+                            (name,))
+        return {"running": int(got[0].get("running") or 0)} if got else {}
+
+    def _sequence_grants(self, side, db):
+        """{sequence: {(grantee, privilege)}}."""
+        got = {}
+        for name, who, what in self._named(db, self._rows(
+                side, db, "select object_name, grantee, privilege_type from"
+                          " information_schema.object_privileges where"
+                          f" object_schema = {MARK} and object_type ="
+                          " 'SEQUENCE' order by 1, 2, 3",
+                (self._schema(side, db),))):
+            if self.takes(db, "sequence", name):
+                got.setdefault(name, set()).add((str(who), str(what)))
+        return got
+
+    def _sequence_grants_result(self, db):
+        try:
+            mine, theirs = (self._sequence_grants("src", db),
+                            self._sequence_grants("dst", db))
+            status, detail, _ = self._held(
+                db, "sequences' grants", mine, theirs,
+                set(mine) | set(theirs))
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            status, detail = ("error", f"could not read the catalogue:"
+                                       f" {self._first_line(e)}")
+        return Result("deep", f"{db} seq-grants", status, detail,
+                      fix_hint="" if status == "ok" else
+                      "grant on the target's sequences what the source's"
+                      " grant", category="access.sequence-grants")
+
+    def _deep_extra(self, db):
+        """Each sequence the hop takes, held to the source's: a target's
+        that would hand out a value the source's already has gives a key a
+        row holds. Raising one is the operator's - Snowflake sets a
+        sequence's next value only by making it again."""
+        try:
+            mine, theirs = (self._sequences("src", db),
+                            self._sequences("dst", db))
+        except Exception as e:  # noqa: BLE001 - said, as the error
+            return [Result("deep", f"{db} parity", "error",
+                           f"could not read the sequences:"
+                           f" {self._first_line(e)}",
+                           category="identity.sequence-parity")]
+        names = sorted(n for n in mine if self.takes(db, "sequence", n))
+        behind = []
+        for n in names:
+            want, step = mine[n]
+            got = theirs.get(n)
+            if got is None:
+                behind.append(f"{n} (not on the target)")
+            elif (got[0] - want) * (1 if step >= 0 else -1) < 0:
+                behind.append(f"{n} (next {got[0]}, the source's {want})")
+        status = "diff" if behind else "ok"
+        return [self._sequence_grants_result(db), Result(
+            "deep", f"{db} parity", status,
+            "; ".join(behind[:8]) if behind else
+            f"{len(names)} sequences are at or past the source's",
+            fix_hint="make the target's sequences start where the source's"
+                     " are before cutover" if behind else "",
+            category="identity.sequence-parity")]
+
+    def _handwork_probes(self):
+        def listed(what):
+            return lambda side, db: [self._said(r["name"]) for r in
+                                     self._show(side, db, what)]
+        return [
+            ("server-side-code", "functions", "function",
+             listed("user functions")),
+            ("server-side-code", "procedures", "procedure",
+             listed("user procedures")),
+            ("server-side-code", "tasks", None, listed("tasks")),
+            ("not-carried", "streams", None, listed("streams")),
+            ("not-carried", "pipes", None, listed("pipes")),
+            ("not-carried", "stages", None, listed("stages")),
+            ("not-carried", "sequences", "sequence", listed("sequences")),
+            ("not-carried", "dynamic tables", None,
+             listed("dynamic tables")),
+            ("not-carried", "materialized views", "materialized view",
+             lambda side, db: list(self._matviews(side, db))),
+            ("not-carried", "masking policies", None,
+             listed("masking policies")),
+            ("not-carried", "row access policies", None,
+             listed("row access policies"))]
 
     # ---- a batch staged in the table's own stage ----------------------------
 

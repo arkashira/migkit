@@ -182,6 +182,16 @@ SIGNATURES = {
         ("percona-server-mongodb", [("psmdbversion", "")], "psmdbversion"),
         ("mongodb", [("storageengines", ""), ("gitversion", "")], "version"),
     ],
+    # A warehouse names itself by a release number only it reports:
+    # Redshift's is the last word of PostgreSQL 8's version string
+    # (`... , Redshift 1.0.12345`), Snowflake's is `current_version()`.
+    # Both are read by the engine (`_brand_probes`) into the field named.
+    "redshift": [
+        ("redshift", [("redshift_release", "")], "redshift_release"),
+    ],
+    "snowflake": [
+        ("snowflake", [("snowflake_release", "")], "snowflake_release"),
+    ],
     # Elasticsearch and OpenSearch answer `GET /` alike, but only OpenSearch
     # names its distribution (`version.distribution: opensearch`), and only
     # Elasticsearch its build flavour and its tagline. A managed service
