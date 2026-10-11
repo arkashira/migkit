@@ -1121,6 +1121,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the target refused <...> rows: <...>
 
+* <...>: <...> indexes or triggers were not made on the target; they are kept in <...> and the next move makes them
+
+* <...>: renamed, or with columns the hop maps, which the copy that keeps each cell's times does not read - move them with --via builtin, the table copier through the pair
+
 * <...> holds counters, which are added to and never written: it is not copied by this path
 
 * <...>: Cassandra keeps its changes in the commit log's change files on each node, which only a program running on every node reads - there is nothing a client can follow. Stop writes on the source and move it, then prove it with migkit check
@@ -1132,6 +1136,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>.<...> has no change log on, and turning it on is a change to the source's table, which migkit does not make: ALTER TABLE <...>.<...> WITH cdc = {'enabled': true}, then move again with --mode full+cdc
 
 * <...>.<...>: a range of rows was deleted on the source, which a change carried to another engine cannot name by key. Move the table again
+
+* <...>: the target's triggers could not be saved before taking them off for the load, so nothing was loaded
+
+* <...>: <...> triggers were not put back: <...>. Their definitions are in <...>
 
 ## Amazon Redshift, Snowflake and BigQuery
 

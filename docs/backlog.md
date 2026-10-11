@@ -4082,6 +4082,35 @@ ClickHouse's and Oracle's deep findings and the shared capacity check's
 end in words no category reads (`mutations`, `constraints`, `capacity`),
 so they reach the verdict unclassified.
 
+*Cassandra and ScyllaDB, 2026-10-11 (of 49 cells open at the start):*
+18 now yes, proved on `tests/cassandra_fake.py`, an in-process stand-in
+that answers only statements this engine's server tests have run - the
+listings, deep checks, copy, repair plan and name rules (the engine's own
+listing asks the one scope answer, `Engine.in_scope`), `mapping.ops` in its
+tail, columns, narrowing, null vs empty, float drift, replacement
+characters, timestamp shift, a target ahead, table grants, rows apart,
+table, the tables a finding compared and confirm. 19 built and their test owed, because each sends a
+statement no server has yet been sent: secondary indexes, triggers,
+materialized views, types and functions, table options and clustering,
+the schema difference (`structural-fix.cql` and its undo), repair and its
+exact undo (a delete by key; a null written as one, which a repair needs and
+a copy does not), objects held to the hop's `objects`, versions, brands,
+readiness checks, the pre-flight, capacity, handwork, indexes carried by the
+pair, rows sized across the token ring, the load window (triggers off
+for a load, put back after it) and tables made as the source has them with
+their indexes, triggers and views once the rows are in. 2 not applicable
+(rendering: rows are hashed here from decoded values; defaults: the engine
+has none). 10 left: row filter (the pair refuses one for an engine with no
+SQL; a client-side filter belongs to the pair), column transforms, the four
+tail items (per-table states need `TableSet` in the own tail; an exact seam
+needs reads and writes at a quorum), other writers on the target (no
+server table says who writes), stored code (the converters and the proof
+run SQL; the schema check compares and writes the statements instead),
+two-way marks and fencing (neither has a place in a mutation: a mark
+would need a column or a side table the change log joins, a fence a
+transaction across partitions). Found on the way: a repair or an undo left
+a column the source holds null filled on the target, and could not delete
+a row by its key; a table made through the pair lost its clustering order.
 *Oracle, 2026-10-11 (P0-PARITY.scope, .verify, .tail, .all): of its 57
 cells open, 16 are ways with a stub test, 37 are built and owed a sandbox
 run, 4 are left.* Proved over stubbed catalogues (statements the engine

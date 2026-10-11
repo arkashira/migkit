@@ -203,6 +203,18 @@ SIGNATURES = {
         ("redpanda", [("cluster_id", "redpanda.")], ""),
         ("kafka", [("cluster_id", "")], ""),
     ],
+    # A Cassandra cluster and ScyllaDB both answer `release_version` from
+    # `system.local`. ScyllaDB keeps schema tables of its own beside
+    # Cassandra's (`system_schema.scylla_tables`), which the engine's probe
+    # reports as `scylla` when it reads them, and it reports nothing
+    # otherwise. Its `release_version` is the Cassandra release it speaks, so
+    # no version is read as its own. Any other server on Cassandra's protocol
+    # answers as `cassandra` does: the name is the protocol's implementation,
+    # as Kafka's is.
+    "cassandra": [
+        ("scylladb", [("scylla", "yes")], ""),
+        ("cassandra", [("release_version", "")], "release_version"),
+    ],
     "redis": [
         # Valkey says both, and says them in the Server section of INFO where
         # the engine is already looking.
@@ -269,6 +281,19 @@ LIMITS = {
             " 5L6g3nShT-eMCtK--X86sw - and MSK, Confluent and a self-hosted"
             " broker all answer the same way, so this names the protocol"
             " implementation rather than the distribution",
+    },
+    "cassandra": {
+        CDC_POSITION:
+            "keeps its changes in the commit log's change files on each node,"
+            " which only a program running on every node reads - there is no"
+            " position in a change log a client can start a follow from",
+    },
+    "scylladb": {
+        CDC_POSITION:
+            "keeps a table's changes in a log table of its own only where"
+            " the table's cdc setting is on, and a keyspace of tablets keeps"
+            " its log streams per tablet, split and merged with them - a"
+            " follow of either is refused with the reason",
     },
     "mariadb": {
         CDC_POSITION:

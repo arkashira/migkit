@@ -468,7 +468,7 @@ HOP_OPTIONS = {
     "fk_scan_seconds": Key("the budget of the orphaned-row scan", "int",
                            ("postgres",)),
     "float_tolerance": Key("how far two floats may differ", "number",
-                           ("postgres",)),
+                           ("postgres", "cassandra")),
     "format": Key("the change stream's message format", "str", STREAMS,
                   check="migkit.streamout:options"),
     "keep_proof": Key("the tail keeps every table's digest leaves up as"

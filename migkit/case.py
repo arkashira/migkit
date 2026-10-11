@@ -60,7 +60,8 @@ BRAND_WORDS = {"postgres": "PostgreSQL", "mysql": "MySQL",
                "elasticsearch": "Elasticsearch", "opensearch": "OpenSearch",
                "kafka": "Kafka", "mssql": "SQL Server",
                "oracle": "Oracle Database", "clickhouse": "ClickHouse",
-               "altinity": "Altinity ClickHouse"}
+               "altinity": "Altinity ClickHouse",
+               "cassandra": "Apache Cassandra", "scylladb": "ScyllaDB"}
 
 
 def engine_of(eng):
@@ -144,7 +145,8 @@ class Case:
 #: its own (CockroachDB's v23, FerretDB's 2.0) or a compatibility claim
 FAMILY_NUMBERED = {"postgres", "yugabytedb", "greenplum", "mysql",
                    "percona", "mongodb", "percona-server-mongodb", "redis",
-                   "opensearch", "elasticsearch", "clickhouse", "altinity"}
+                   "opensearch", "elasticsearch", "clickhouse", "altinity",
+                   "cassandra"}
 
 
 def _side_of(eng, hop, side, identity_version):
