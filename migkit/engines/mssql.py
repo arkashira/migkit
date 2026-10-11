@@ -2610,16 +2610,81 @@ class MSSQLEngine(DbapiRows, Engine):
                         "insert" if op == "I" else "update", t, ident,
                         values, txn=int(version))))
         found.sort(key=lambda x: x[0])
+        times = self._commit_times(side, db, {int(v) for v, _ in found})
         # the changes of one version are one transaction's, and a read
-        # from a version goes on after it
+        # from a version goes on after it; `at` is that position, `ts`
+        # the time the source committed it where the server gives it
         out, group = [], []
         for i, (version, c) in enumerate(found):
             group.append(c)
             if i + 1 == len(found) or found[i + 1][0] != version:
-                canon.ended(group, 0, at=int(version))
+                canon.ended(group, 0, at=int(version),
+                            ts=times.get(int(version)))
                 out += group
                 group = []
         return out, now
+
+    #: the versions whose commit time one lookup asks for, the newest
+    #: first, and the most the cache keeps
+    COMMIT_LOOKUP, COMMIT_KEPT = 1000, 4096
+    #: seconds before a lookup the account was refused is tried again
+    COMMIT_RETRY = 300.0
+
+    def _commit_times(self, side, db, versions):
+        """{change tracking version: the time the source committed it, in
+        seconds since the epoch} for the versions of one batch - what
+        `canon.ended` takes as `ts`, and the beat's `through` and `lag`.
+
+        A version is the `commit_ts` of `sys.dm_tran_commit_table`, whose
+        `commit_time` is the server's own clock. It is asked of the server
+        as an age (`datediff` against `getdate()`, the same clock), so the
+        migkit host's clock plays no part but the moment of the answer, and
+        it is whole seconds. One query per batch for the versions the cache
+        does not hold (the newest `COMMIT_LOOKUP` of them); a version the
+        table no longer holds has no time, and is left out.
+
+        The table needs VIEW SERVER STATE (VIEW DATABASE STATE on Azure SQL
+        Database). Where the account is refused, or the server has no such
+        view, no time is made up: the answer is empty, the reason is kept
+        (`commit_time_gap`, which the beat says) and the lookup is tried
+        again after `COMMIT_RETRY` seconds, not each batch."""
+        key = (side, db)
+        cache = self.__dict__.setdefault("_commit_cache", {}).setdefault(
+            key, {})
+        gap = self.__dict__.setdefault("_commit_gaps", {})
+        miss = sorted((v for v in versions if v not in cache), reverse=True)
+        if miss and key in gap and time.monotonic() < gap[key][1]:
+            miss = []
+        miss = miss[:self.COMMIT_LOOKUP]
+        if miss:
+            try:
+                rows = self._kept_rows(
+                    side, db,
+                    "select commit_ts, datediff(second, commit_time,"
+                    " getdate()) from sys.dm_tran_commit_table where"
+                    " commit_ts in (" + ", ".join([MARK] * len(miss)) + ")",
+                    [int(v) for v in miss])
+            except Exception as e:  # noqa: BLE001 - said, never guessed
+                said = " ".join(str(e).split())
+                gap[key] = (
+                    "the account cannot read the source's commit times"
+                    " (sys.dm_tran_commit_table needs VIEW SERVER STATE): "
+                    + said[-160:], time.monotonic() + self.COMMIT_RETRY)
+            else:
+                gap.pop(key, None)
+                now = time.time()
+                for version, age in rows:
+                    if version is not None and age is not None:
+                        cache[int(version)] = now - max(float(age), 0.0)
+                while len(cache) > self.COMMIT_KEPT:
+                    del cache[min(cache)]
+        return {v: cache[v] for v in versions if v in cache}
+
+    def commit_time_gap(self, side, db):
+        """Why this source's commit times are not known, or None: what the
+        beat says in place of a lag (`tailctl.beat`)."""
+        got = self.__dict__.get("_commit_gaps", {}).get((side, db))
+        return got[0] if got else None
 
     def snapshot_mark(self, side, db):
         """The database's change tracking version now, after the database
