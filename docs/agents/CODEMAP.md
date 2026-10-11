@@ -32,7 +32,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/avrostream.py` - Changes as Avro messages through a schema registry, in Debezium's envelope: `before`, `after`, `source`, `op` and `ts_ms`, the key a record  Classes: Encoder.
 - `migkit/backupseed.py` - SQL Server's own backup, restored on the target: a database's pages carried whole, and its changes followed from the version the restored co Classes: MsFacts.
 - `migkit/binlog_marks.py` - The binlog events a two-way tail's marks travel in, as migkit reads them (`marks`): MySQL's tagged GTID, which the binlog reader does not kn
-- `migkit/binlog_payload.py` - MySQL's compressed transactions, read rather than stopped on (backlog 6). Classes: TransactionPayloadEvent.
+- `migkit/binlog_payload.py` - MySQL's compressed transactions, read rather than stopped on (backlog 6). Classes: TransactionPayloadEvent, Unreadable, MariadbCompressedEvent.
 - `migkit/bsontype.py` - A MongoDB value compared as its BSON type and its value, both.
 - `migkit/bulkways.py` - The whole-database ways of the keyed engines, ranked by what each has measured on the hop (backlog F7.rshake, F7.mm2).
 - `migkit/canon.py` - One text rendering of a value that two different engines both produce. Classes: Added, Kept, Limits.
