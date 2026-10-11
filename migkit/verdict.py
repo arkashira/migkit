@@ -845,6 +845,46 @@ def timeshift_result(db, shifts):
                   "no uniform timestamp offset detected")
 
 
+def option_differences(table, src, dst):
+    """What differs between the storage options of one table on the two
+    sides, [(table, option, source's, target's)] by option.
+
+    `src` and `dst` are `{option: value}` as each engine reads them, in
+    words that mean the same on both sides (an option that is not set
+    is left out, and reads as "default" here): a table's persistence, its
+    storage parameters, the way its columns are stored. Only the options
+    both tables could hold are paired; a table one side lacks is another
+    finding's."""
+    out = []
+    for name in sorted(set(src) | set(dst)):
+        a, b = src.get(name, "default"), dst.get(name, "default")
+        if str(a) != str(b):
+            out.append((table, name, a, b))
+    return out
+
+
+def options_result(db, found, unsafe=lambda option, src, dst: False,
+                   fix="", report=""):
+    """The deep check's answer about tables whose storage options differ,
+    from `option_differences`' rows, in one set of words for every engine.
+    An option that changes what the target keeps through a crash or a
+    standby (`unsafe`) is a difference; the rest change how the table
+    performs and are worth a person's reading: a warning."""
+    from .engines.base import Result, clauses
+    if not found:
+        return Result("deep", f"{db} storage", "ok",
+                      "storage options of every table match")
+    bad = [f for f in found if unsafe(f[1], f[2], f[3])]
+    return Result("deep", f"{db} storage", "diff" if bad else "warn",
+                  f"{len(found)} storage options differ"
+                  + (f", {len(bad)} of them put the target's data at risk"
+                     if bad else " (performance, not data)") + ": "
+                  + clauses(f"{t}: {o} src={a} dst={b}"
+                            for t, o, a, b in bad + [
+                                f for f in found if f not in bad]),
+                  report, fix)
+
+
 #: the checks whose answer is about the tables' shape or contents, which a
 #: DDL on the source in the middle of the run leaves describing a table
 #: that is no longer there

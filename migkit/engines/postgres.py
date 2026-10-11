@@ -7455,6 +7455,117 @@ select json_build_object(
             conn.rollback()
             conn.close()
 
+    #: how a table is kept, one line a table: its persistence, access
+    #: method and storage parameters (the table's own and its TOAST
+    #: table's, which the server keeps on the TOAST table)
+    STORAGE_TABLES = (
+        "select n.nspname||'.'||c.relname || chr(31)"
+        " || case c.relpersistence when 'u' then 'unlogged'"
+        " when 't' then 'temporary' else 'logged' end || chr(31)"
+        " || coalesce(am.amname, 'heap') || chr(31)"
+        " || coalesce((select string_agg(o, ',' order by o) from"
+        " (select unnest(c.reloptions) o union all"
+        " select 'toast.' || unnest(t.reloptions) from pg_class t"
+        " where t.oid = c.reltoastrelid) x), '')"
+        " from pg_class c join pg_namespace n on n.oid = c.relnamespace"
+        " left join pg_am am on am.oid = c.relam"
+        " where c.relkind in ('r', 'p', 'm')"
+        " and n.nspname not in ('pg_catalog', 'information_schema')"
+        " and n.nspname not like 'pg\\_%'"
+        " and n.nspname not like '\\_\\_%'"
+        f" and c.relname not in {OWN_SQL} order by 1")
+    #: how each column of those is stored: where a long value goes
+    #: (`attstorage`) and how it is compressed (`attcompression`, read
+    #: through the row's JSON so a server before 14, which has none,
+    #: answers the default)
+    STORAGE_COLUMNS = (
+        "select n.nspname||'.'||c.relname || chr(31) || a.attname"
+        " || chr(31) || a.attstorage::text || chr(31)"
+        " || coalesce(to_jsonb(a) ->> 'attcompression', '')"
+        " from pg_attribute a join pg_class c on c.oid = a.attrelid"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " where c.relkind in ('r', 'p', 'm') and a.attnum > 0"
+        " and not a.attisdropped"
+        " and n.nspname not in ('pg_catalog', 'information_schema')"
+        " and n.nspname not like 'pg\\_%'"
+        " and n.nspname not like '\\_\\_%'"
+        f" and c.relname not in {OWN_SQL} order by 1")
+
+    def _storage_of(self, side, db):
+        """{table: {option: value}} of how each table the hop takes is
+        kept on a side (`STORAGE_TABLES`, `STORAGE_COLUMNS`), the options
+        in words that mean the same on both: persistence, access method,
+        each storage parameter, each column's storage and compression.
+        Tables are named as the side names them."""
+        out = {}
+        for line in self._scoped(db, self._psql(side, db,
+                                                self.STORAGE_TABLES), "\x1f"):
+            table, persistence, method, params = (
+                line.split("\x1f") + ["", "", ""])[:4]
+            got = out.setdefault(table, {})
+            got["persistence"] = persistence
+            got["access method"] = method
+            for p in filter(None, params.split(",")):
+                name, _, value = p.partition("=")
+                got[f"parameter {name}"] = value
+        for line in self._scoped(db, self._psql(side, db,
+                                                self.STORAGE_COLUMNS), "\x1f"):
+            table, column, storage, compression = (
+                line.split("\x1f") + ["", "", ""])[:4]
+            got = out.setdefault(table, {})
+            got[f"column {column} storage"] = {
+                "p": "plain", "e": "external", "m": "main",
+                "x": "extended"}.get(storage, storage)
+            got[f"column {column} compression"] = {
+                "": "default", "p": "pglz", "l": "lz4"}.get(
+                    compression, compression)
+        return out
+
+    @staticmethod
+    def _storage_unsafe(option, src, dst):
+        """A target table the server does not log is empty after a crash
+        and absent from its standbys, where the source's data is neither:
+        the one storage option that is a risk to the data and not only to
+        the table's speed."""
+        return option == "persistence" and dst == "unlogged" \
+            and src != "unlogged"
+
+    def _storage_options(self, db):
+        """How the target keeps each table the hop takes, held to how the
+        source does (`verdict.options_result`): its persistence (a table
+        made `UNLOGGED` on the target loses its rows in a crash and is not
+        replicated), its access method, its storage parameters (fill
+        factor, autovacuum, the TOAST table's) and how each column's long
+        values are stored and compressed. A move that rebuilds tables from
+        their columns alone leaves every one of these at the server's
+        default."""
+        from .. import verdict
+        try:
+            src, dst = (self._storage_of(s, db) for s in ("src", "dst"))
+        except (RuntimeError, OSError) as e:
+            return Result("deep", f"{db} storage", "error",
+                          "could not read how the tables are kept: "
+                          + (str(e).strip().splitlines() or [""])[-1][:90])
+        found = []
+        for table in sorted(src):
+            sch, tbl = self._split(table)
+            there = ".".join(split_table(
+                "postgres", self.hop.target_table_in(db, sch, tbl), sch))
+            if there in dst:
+                found += verdict.option_differences(table, src[table],
+                                                    dst[there])
+        path = self.hop.report_dir(db) / "deep-storage.diff"
+        if found:
+            path.write_text("\n".join(f"{t}: {o} src={a} dst={b}"
+                                      for t, o, a, b in found) + "\n")
+        else:
+            path.unlink(missing_ok=True)
+        return verdict.options_result(
+            db, found, self._storage_unsafe,
+            "alter table ... set logged / set (fillfactor = ...) / alter"
+            " column ... set storage on the target to match the source; see"
+            " deep-storage.diff", str(path) if found else "")
+
     def check_deep(self, db):
         res = []
         rpt = self.hop.report_dir(db)
@@ -8122,6 +8233,8 @@ select json_build_object(
                           if mvs else "no matviews", "",
                           "refresh materialized view ... on target"
                           if stale else ""))
+
+        res.append(self._storage_options(db))
 
         # The same computation feeds the repair, so it lives in one place:
         # two copies of "which grants are missing" would eventually disagree,

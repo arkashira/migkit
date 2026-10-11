@@ -44,6 +44,7 @@ CATEGORIES = {
     "rls": "structure.row-security",
     "extensions": "structure.extensions",
     "capped": "structure.collection-options",
+    "storage": "structure.collection-options",
     "sharding": "structure.sharding",
     "(atlas)": "structure.schema-diff",
     "(liquibase)": "structure.schema-diff",
