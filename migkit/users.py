@@ -567,6 +567,26 @@ def compare(hop, say=print, sides=None):
             not_compared.append(
                 f"passwords of {len(blind)} user(s): the target hides their"
                 f" hashes ({blind[:8]})")
+    elif eng == "hetero":
+        # a pair: each side read in the one shape, by its own engine or
+        # here (`across`)
+        s, t, said, unread = across(hop)
+        skeys, tkeys = set(s), set(t)
+        ad, gm, gx, pw = _shape_gaps(s, t, not_compared)
+        notes += said
+        if unread:
+            not_compared.append(
+                f"accounts: {', '.join(unread)} accounts are read only"
+                " beside another of the same engine, so the pair's are"
+                " not compared")
+    elif owner(hop) is not None:
+        # an engine that reads its own accounts (`Engine.accounts`)
+        own = owner(hop)
+        s, t = own.accounts("src"), own.accounts("dst")
+        skeys, tkeys = set(s), set(t)
+        ad, gm, gx, pw = _shape_gaps(s, t, not_compared)
+        if own.ACCOUNT_PASSWORDS:
+            notes.append(own.ACCOUNT_PASSWORDS)
     else:
         from .capabilities import require
         require(eng, "users")
@@ -659,6 +679,586 @@ def _after(hop, say, apply, given=()):
     if left:
         raise SystemExit("users: the target still differs from the source"
                          " after create - " + "; ".join(left))
+
+
+# --- accounts in one shape (`Engine.accounts`), and across engines ---------
+#
+# An engine that reads its own accounts gives them in one shape
+# (`Engine.accounts`), compared, carried and taken back here one way. A
+# pair carries its accounts across (`across`) where both of its engines
+# give that shape - their own, or PostgreSQL's, MySQL's, SQL Server's and
+# Oracle's, read here in it beside their own shapes: a role made, a user
+# made with the password the passwords file gives it (no engine keeps
+# another's kind of stored password), its memberships, and the table
+# privileges every engine has, on the tables as the target names them.
+# What one engine grants that the other has no word for is said, never
+# carried.
+
+#: the privileges carried across engines: the four every engine with
+#: tables grants on one
+PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
+
+
+def owner(hop, engine=None):
+    """The engine `engine` - the hop's by default - built on `hop`, where
+    it reads and writes its own accounts (`Engine.accounts`); None where
+    this module reads them itself."""
+    from .capabilities import _own
+    from .engines import _class_for, canonical
+    name = canonical(engine or hop.engine)
+    cls = _class_for(name) if name else None
+    if cls is None or not _own(cls, "accounts"):
+        return None
+    return cls(hop)
+
+
+def _shape_gaps(s, t, not_compared):
+    """(attributes differ, grants or memberships missing on the target,
+    only on the target, passwords differ) of two sides' accounts in one
+    shape. A password is compared only where the source's is read as
+    stored - None otherwise - and one the target hides is said, never
+    taken for the same."""
+    ad = sorted(k for k in s if k in t and (
+        bool(s[k].get("login")) != bool(t[k].get("login"))
+        or (s[k].get("attrs") or {}) != (t[k].get("attrs") or {})))
+    gm, gx = [sorted(set(a) | set(b)) for a, b in
+              zip(_grant_gaps(s, t, "roles"), _grant_gaps(s, t))]
+    hashed = sorted(k for k in s if s[k].get("hash"))
+    if not hashed:
+        return ad, gm, gx, None
+    blind = [k for k in hashed if k in t and not t[k].get("hash")]
+    if blind:
+        not_compared.append(f"passwords of {len(blind)} account(s): the"
+                            f" target hides them ({blind[:8]})")
+    return ad, gm, gx, [k for k in hashed if k in t and t[k].get("hash")
+                        and t[k]["hash"] != s[k]["hash"]]
+
+
+def _owned_create(hop, apply, passwords, say):
+    """The plan the hop's engine makes (`Engine.account_steps`), shown,
+    and on --apply run step by step into the record a rollback reads."""
+    out, s, t = _compare(hop, say)
+    eng = owner(hop)
+    steps, skipped = eng.account_steps(s, t, passwords or {})
+    return _run_plan(hop, hop.engine, steps, skipped, eng.account_run,
+                     apply, say)
+
+
+def _run_plan(hop, engine, steps, skipped, run, apply, say):
+    """Show `steps`, and on --apply run each through `run` - one that fails
+    is recorded and the rest go on - into the hop's record: what ran, and
+    what takes it back. What a step runs is never recorded: it may hold a
+    password. Returns the accounts given the passwords file's password."""
+    say(f"\nplan: {len(steps)} step(s) on TARGET"
+        f" ({'APPLY' if apply else 'dry-run'})")
+    key = None
+    for st in steps:
+        if st["key"] != key:
+            key = st["key"]
+            say(f"  -- {key}")
+        say(f"     {st['shown'][:160]}")
+    for name, why in skipped:
+        say(f"  skipped {name}: {why}")
+    if not steps:
+        say("nothing to create - the target already has every source"
+            " account as the source has it")
+        return set()
+    if not apply:
+        say("\ndry-run only. Add --apply to execute on the target.")
+        return set()
+    ledger = []
+    for st in steps:
+        entry = {"key": st["key"], "sql": st["shown"], "undo": st.get("undo"),
+                 "made": bool(st.get("made"))}
+        try:
+            run(st["run"])
+            entry["ok"] = True
+        except Exception as e:  # noqa: BLE001 - recorded and said
+            entry["ok"] = False
+            entry["error"] = f"{type(e).__name__}: {str(e).strip()[:160]}"
+            say(f"   FAILED {st['shown']}: {entry['error']}")
+        ledger.append(entry)
+    rec = _record(hop, engine, ledger,
+                  skipped=[f"{n}: {why}" for n, why in skipped])
+    failed = [e for e in ledger if not e["ok"]]
+    say(f"\nran={len(ledger) - len(failed)} failed={len(failed)}"
+        f"  record: {rec}")
+    if failed:
+        raise SystemExit(f"users: {len(failed)} step(s) failed, each named"
+                         f" above and in {rec}")
+    return {st["key"] for st in steps if st.get("given")}
+
+
+def _undo_plan(hop, engine, run, apply, say):
+    """Every recorded step of `engine` that has an undo, undone last first
+    through `run`; the record set aside once all of them are."""
+    rf = hop.report_dir() / "user-sync-created.json"
+    if not rf.exists():
+        say(f"no created-record at {rf} - nothing this tool created here")
+        return
+    got = json.loads(rf.read_text())
+    undo = [(st["key"], st["undo"]) for r in (got if isinstance(got, list)
+                                              else [])
+            if r.get("engine") == engine for st in r.get("steps", [])
+            if st.get("ok") and st.get("undo")]
+    if not undo:
+        say("record has nothing to undo")
+        return
+    say(f"rollback plan ({'APPLY' if apply else 'dry-run'}): {len(undo)}"
+        " step(s), last first")
+    for key, what in reversed(undo):
+        say(f"  {key}: {_undo_said(what)}")
+    if not apply:
+        say("dry-run only. Add --apply to execute.")
+        return
+    failed = []
+    for key, what in reversed(undo):
+        try:
+            run(what)
+            say(f"  undone {key}: {_undo_said(what)[:100]}")
+        except Exception as e:  # noqa: BLE001 - said, the rest go on
+            failed.append(key)
+            say(f"  FAILED {key}: {type(e).__name__}: {str(e)[:100]}")
+    if not failed:
+        rf.rename(str(rf) + ".rolled-back")
+
+
+def _undo_said(what):
+    """An undo as the operator reads it: its statement, or what it asks."""
+    if isinstance(what, dict):
+        return str(what.get("sql") or what.get("shown") or what)
+    return str(what)
+
+
+def _owned_rollback(hop, apply, say):
+    _undo_plan(hop, hop.engine, owner(hop).account_run, apply, say)
+
+
+# ---- across engines (backlog R13-HETERO) -----------------------------------
+
+def _pair_engines(hop):
+    from .engines import canonical
+    o = hop.options or {}
+    return (canonical(o.get("source_engine") or ""),
+            canonical(o.get("target_engine") or ""))
+
+
+def _taken(eng, side, db, table):
+    """Whether a table a grant is on is one the hop takes: a target's
+    asked by the source's name for it."""
+    parts = eng.hop.parts_of(str(table), eng.CANON_ENGINE or None)
+    if side == "dst":
+        back = eng.hop.source_table_in(db, *parts)
+        if back:
+            parts = list(back)
+    return not eng.hop.excluded(db, *parts)
+
+
+def _entry(out, key, login=False):
+    return out.setdefault(key, {"login": login, "roles": [], "grants": [],
+                                "hash": None, "attrs": {}})
+
+
+def _finished(out):
+    for v in out.values():
+        v["roles"] = sorted(set(v["roles"]))
+        v["grants"] = sorted(set(v["grants"]))
+    return out
+
+
+def _pg_neutral(hop, side):
+    """PostgreSQL's roles in the one shape: each with whether it signs in,
+    the roles it is a member of, and the table privileges it holds in each
+    of the hop's databases."""
+    from .engines import engine_named
+    eng = engine_named("postgres", hop)
+    ep = hop.source if side == "src" else hop.target
+    out = {}
+    for name, v in _pg_roles(ep).items():
+        e = _entry(out, f"{'user' if v['login'] else 'role'}:{name}",
+                   bool(v["login"]))
+        e["roles"] += [m.split(" WITH ")[0] for m in v["member_of"]
+                       if not m.startswith("pg_")]
+    keys = {k.split(":", 1)[1]: k for k in out}
+    for db in hop.databases or []:
+        c = _pg_conn(ep, hop.target_db(db) if side == "dst" else db)
+        try:
+            cur = c.cursor()
+            cur.execute("select grantee, table_schema, table_name,"
+                        " privilege_type from"
+                        " information_schema.role_table_grants where"
+                        " table_schema not in ('pg_catalog',"
+                        " 'information_schema')")
+            for who, sch, tbl, priv in cur.fetchall():
+                table = f"{sch}.{tbl}"
+                if who in keys and _taken(eng, side, db, table):
+                    out[keys[who]]["grants"].append(
+                        eng.account_grant(side, priv, db, table))
+        finally:
+            c.close()
+    return _finished(out)
+
+
+def _grantee(text):
+    """`'app'@'%'` as the account's name, `app`."""
+    import re
+    m = re.match(r"^'((?:[^']|'')*)'@", str(text))
+    return m.group(1).replace("''", "'") if m else str(text)
+
+
+def _my_neutral(hop, side):
+    """MySQL's accounts in the one shape, by name - an account's hosts are
+    one account on an engine that has none: a role (`mysql.role_edges`'
+    giver) or a user, whether it signs in (not locked), its roles, and
+    what it may do on the hop's databases, whole or table by table."""
+    from .engines import engine_named
+    eng = engine_named("mysql", hop)
+    ep = hop.source if side == "src" else hop.target
+    dbs = {(hop.target_db(d) if side == "dst" else d): d
+           for d in hop.databases or []}
+    c = _mysql_conn(ep)
+    out = {}
+    try:
+        cur = c.cursor()
+        cur.execute("select user, host, account_locked from mysql.user")
+        users = {_text(u): _text(lk) != "Y" for u, h, lk in cur.fetchall()
+                 if not system_principal("mysql", _text(u))}
+        roles, member = set(), {}
+        try:
+            cur.execute("select from_user, to_user from mysql.role_edges")
+            for giver, taker in cur.fetchall():
+                roles.add(_text(giver))
+                member.setdefault(_text(taker), []).append(_text(giver))
+        except Exception:  # noqa: BLE001 - before 8.0: no roles
+            pass
+        for u, login in users.items():
+            e = _entry(out, f"{'role' if u in roles else 'user'}:{u}",
+                       login and u not in roles)
+            e["roles"] += member.get(u, [])
+        keys = {k.split(":", 1)[1]: k for k in out}
+        cur.execute("select grantee, privilege_type from"
+                    " information_schema.user_privileges")
+        for who, priv in cur.fetchall():
+            if _grantee(who) in keys and priv in PRIVILEGES:
+                out[keys[_grantee(who)]]["grants"] += [
+                    eng.account_grant(side, priv, d) for d in dbs.values()]
+        cur.execute("select grantee, table_schema, privilege_type from"
+                    " information_schema.schema_privileges")
+        for who, schema, priv in cur.fetchall():
+            if _grantee(who) in keys and schema in dbs:
+                out[keys[_grantee(who)]]["grants"].append(
+                    eng.account_grant(side, priv, dbs[schema]))
+        cur.execute("select grantee, table_schema, table_name,"
+                    " privilege_type from information_schema.table_privileges")
+        for who, schema, table, priv in cur.fetchall():
+            if _grantee(who) in keys and schema in dbs \
+                    and _taken(eng, side, dbs[schema], table):
+                out[keys[_grantee(who)]]["grants"].append(
+                    eng.account_grant(side, priv, dbs[schema], table))
+    finally:
+        c.close()
+    return _finished(out)
+
+
+#: SQL Server's fixed database roles, as the privileges they give on the
+#: whole database
+MS_FIXED = {"db_datareader": ("SELECT",),
+            "db_datawriter": ("INSERT", "UPDATE", "DELETE")}
+
+
+def _ms_neutral(hop, side):
+    """SQL Server's in the one shape: a database user by its login's name
+    where it has one, a role by its own; whether it signs in (its login,
+    enabled); its roles - the fixed reader and writer roles as the
+    privileges they give - and its table permissions."""
+    import re
+    from .engines import engine_named
+    eng = engine_named("mssql", hop)
+    got = _ms_principals(hop, side)
+    logins = {k[6:]: v for k, v in got.items() if k.startswith("login:")}
+    out = {}
+    for k, v in got.items():
+        if k.startswith("login:"):
+            continue
+        role = k.startswith("role:")
+        name = v["name"] if role else (v.get("login") or v["name"])
+        login = not role and bool(v.get("login")) and not \
+            logins.get(v.get("login"), {}).get("disabled")
+        e = _entry(out, f"{'role' if role else 'user'}:{name}", login)
+        for r in v["roles"]:
+            if r in MS_FIXED:
+                e["grants"] += [eng.account_grant(side, p, v["db"])
+                                for p in MS_FIXED[r]]
+            elif not r.startswith("db_"):
+                e["roles"].append(r)
+        for g in v["grants"]:
+            m = re.match(r"^GRANT ([A-Z][A-Z ]*?)( ON OBJECT::\[((?:[^\]]|"
+                         r"\]\])*)\]\.\[((?:[^\]]|\]\])*)\])?$", g)
+            if not m:
+                continue
+            if m.group(2) is None:
+                e["grants"].append(eng.account_grant(side, m.group(1),
+                                                     v["db"]))
+                continue
+            table = (f"{m.group(3).replace(']]', ']')}."
+                     f"{m.group(4).replace(']]', ']')}")
+            if _taken(eng, side, v["db"], table):
+                e["grants"].append(eng.account_grant(side, m.group(1),
+                                                     v["db"], table))
+    return _finished(out)
+
+
+#: Oracle's system privileges that are one of `PRIVILEGES` on every table
+ORA_ANY = {f"{p} ANY TABLE": p for p in PRIVILEGES}
+
+
+def _ora_neutral(hop, side):
+    """Oracle's in the one shape: a user (signs in where it is not
+    locked) or a role, the roles it holds, and its table privileges on
+    the hop's schemas - `SELECT ANY TABLE` and its kind as the privilege
+    on each schema whole."""
+    import re
+    from .engines import engine_named
+    eng = engine_named("oracle", hop)
+    dbs = {str(d).upper(): d for d in hop.databases or []}
+    out = {}
+    for k, v in _ora_principals(hop, side).items():
+        e = _entry(out, k, k.startswith("user:") and not v.get("locked"))
+        e["roles"] += [r.split(" WITH ")[0] for r in v.get("roles", [])]
+        for p in v.get("privileges", []):
+            p = p.split(" WITH ")[0]
+            if p in ORA_ANY:
+                e["grants"] += [eng.account_grant(side, ORA_ANY[p], d)
+                                for d in dbs.values()]
+        for g in v.get("grants", []):
+            m = re.match(r'^([A-Z][A-Z ]*?) ON "([^"]*)"\."([^"]*)"', g)
+            if not m or m.group(2).upper() not in dbs:
+                continue
+            db = dbs[m.group(2).upper()]
+            if _taken(eng, side, db, m.group(3)):
+                e["grants"].append(eng.account_grant(side, m.group(1), db,
+                                                     m.group(3)))
+    return _finished(out)
+
+
+#: the engines whose accounts this module reads in the one shape, beside
+#: those that read their own (`owner`)
+NEUTRAL = {"postgres": _pg_neutral, "mysql": _my_neutral,
+           "mssql": _ms_neutral, "oracle": _ora_neutral}
+
+
+def _neutral(hop, side, engine):
+    """One side's accounts in the one shape, or None where neither the
+    engine nor this module reads them in it."""
+    own = owner(hop, engine)
+    if own is not None:
+        return own.accounts(side)
+    reader = NEUTRAL.get(engine)
+    return reader(hop, side) if reader else None
+
+
+def across(hop):
+    """(the source's accounts, the target's, what is said of them, the
+    engines whose accounts could not be read in the one shape) of a pair.
+    Between two engines a stored password is never compared (neither
+    keeps the other's kind) and only the table privileges both have are
+    carried (`PRIVILEGES`); what else the source grants is said."""
+    src, dst = _pair_engines(hop)
+    s, t = _neutral(hop, "src", src), _neutral(hop, "dst", dst)
+    unread = [n for n, got in ((src, s), (dst, t)) if got is None]
+    if unread:
+        return {}, {}, [], unread
+    said = []
+    if src != dst:
+        others = sorted({g for v in s.values() for g in v["grants"]
+                         if g.split(" ON ")[0] not in PRIVILEGES})
+        if others:
+            said.append(f"{len(others)} grant(s) of {src}'s beyond the"
+                        " four every engine has (select, insert, update,"
+                        f" delete) are not carried into {dst}:"
+                        f" {others[:6]}")
+        for side in (s, t):
+            for v in side.values():
+                v["hash"] = None
+                v["attrs"] = {}
+                v["grants"] = [g for g in v["grants"]
+                               if g.split(" ON ")[0] in PRIVILEGES]
+        said.append(f"passwords are not carried between {src} and {dst}:"
+                    " create gives each user the one in the passwords file")
+    return s, t, said, []
+
+
+def _target_name(hop, dst, grant):
+    """(privilege, the target's database, the target's table as its
+    listings name it, or None for the whole database) of a neutral grant,
+    or None where the table is not on the target."""
+    from .engines import engine_named
+    return engine_named(dst, hop).account_target(grant)
+
+
+def _across_steps(hop, dst, s, t, passwords):
+    """(steps, skipped) making the target's accounts the source's, in the
+    target engine's own statements: each role, each user with the
+    passwords file's password, the memberships, the table privileges."""
+    from .engines import engine_named
+    eng = engine_named(dst, hop)
+    from .engines.postgres import PostgresEngine
+    q = {"postgres": PostgresEngine._quote_ident, "mssql": _ms_ident,
+         "oracle": lambda n: _ora_ident(str(n).upper()
+                                        if str(n) == str(n).lower() else n),
+         "mysql": lambda n: "`" + str(n).replace("`", "``") + "`"}[dst]
+    host = str((hop.options or {}).get("account_host") or "%")
+
+    def who(name):
+        if dst == "mysql":
+            return "'" + str(name).replace("'", "''") + "'@'" + \
+                host.replace("'", "''") + "'"
+        return q(name)
+
+    def step(key, sql, undo=None, db=None, made=False, shown=None,
+             given=False):
+        return {"key": key, "shown": shown or sql, "made": made,
+                "given": given, "run": {"db": db, "sql": sql},
+                "undo": {"db": db, "sql": undo} if undo else None}
+    steps, skipped = [], []
+    for key in sorted(k for k in s if k not in t):
+        name = key.split(":", 1)[1]
+        if key.startswith("role:"):
+            sql = {"mysql": f"CREATE ROLE {who(name)}"}.get(
+                dst, f"CREATE ROLE {q(name)}")
+            steps.append(step(key, sql, f"DROP ROLE {who(name)}",
+                              made=True))
+            continue
+        pw = (passwords or {}).get(name)
+        if not pw:
+            skipped.append((key, "no engine's stored password is"
+                                 f" {dst}'s, and the passwords file gives"
+                                 " none"))
+            continue
+        lit = "'" + str(pw).replace("'", "''") + "'"
+        hidden = "'<from the passwords file>'"
+        sql = {"postgres": f"CREATE ROLE {q(name)} LOGIN PASSWORD {{}}",
+               "mysql": f"CREATE USER {who(name)} IDENTIFIED BY {{}}",
+               "mssql": f"CREATE LOGIN {q(name)} WITH PASSWORD = {{}}",
+               "oracle": f'CREATE USER {q(name)} IDENTIFIED BY "{{}}"'}[dst]
+        secret = str(pw).replace('"', "") if dst == "oracle" else lit
+        undo = {"postgres": f"DROP ROLE {q(name)}",
+                "mysql": f"DROP USER {who(name)}",
+                "mssql": f"DROP LOGIN {q(name)}",
+                "oracle": f"DROP USER {q(name)} CASCADE"}[dst]
+        steps.append(step(key, sql.format(secret), undo, made=True,
+                          shown=sql.format(hidden), given=True))
+        if dst == "mssql":
+            for d in hop.databases or []:
+                there = hop.target_db(d)
+                steps.append(step(key, f"CREATE USER {q(name)} FOR LOGIN"
+                                       f" {q(name)}",
+                                  f"DROP USER {q(name)}", db=there))
+    for key, v in sorted(s.items()):
+        have = t.get(key, {"roles": [], "grants": []})
+        name = key.split(":", 1)[1]
+        if key not in t and key.startswith("user:") \
+                and not (passwords or {}).get(name):
+            continue
+        for role in sorted(set(v["roles"]) - set(have["roles"])):
+            if dst == "mssql":
+                for d in hop.databases or []:
+                    there = hop.target_db(d)
+                    steps.append(step(
+                        key, f"ALTER ROLE {q(role)} ADD MEMBER {q(name)}",
+                        f"ALTER ROLE {q(role)} DROP MEMBER {q(name)}",
+                        db=there))
+                continue
+            steps.append(step(key, f"GRANT {who(role)} TO {who(name)}",
+                              f"REVOKE {who(role)} FROM {who(name)}"))
+        for g in sorted(set(v["grants"]) - set(have["grants"])):
+            got = eng.account_target(g)
+            if got is None:
+                skipped.append((key, f"{g}: the table is not on the"
+                                     " target"))
+                continue
+            priv, there, table = got
+            if table is None:
+                on = {"postgres": "ALL TABLES IN SCHEMA public",
+                      "mysql": f"{q(there)}.*", "mssql": "SCHEMA::[dbo]",
+                      "oracle": None}[dst]
+                if on is None:
+                    skipped.append((key, f"{g}: Oracle grants a privilege"
+                                         " on every table only as the"
+                                         " system privilege on any"
+                                         " table, which reaches past the"
+                                         " hop's schemas"))
+                    continue
+            else:
+                on = ".".join(q(p) for p in eng.hop.parts_of(
+                    str(table), dst, bare_in=""))
+                if dst == "mysql":
+                    on = f"{q(there)}.{on}"
+                elif dst == "oracle":
+                    on = f"{q(there)}.{on}" if "." not in str(table) \
+                        else on
+            db = there if dst in ("postgres", "mssql") else None
+            steps.append(step(key, f"GRANT {priv} ON {on} TO {who(name)}",
+                              f"REVOKE {priv} ON {on} FROM {who(name)}",
+                              db=db))
+    return steps, skipped
+
+
+def _across_run(hop, dst):
+    """What runs one step of `_across_steps` on the target: its statement,
+    in its database where the engine grants within one."""
+    def run(what):
+        sql, db = what["sql"], what.get("db")
+        if dst == "postgres":
+            c = _pg_conn(hop.target, db or "postgres")
+            try:
+                c.cursor().execute(sql.replace("%", "%%"), ())
+            finally:
+                c.close()
+        elif dst == "mysql":
+            c = _mysql_conn(hop.target)
+            try:
+                c.cursor().execute(sql)
+            finally:
+                c.close()
+        elif dst == "mssql":
+            c = _ms_conn(hop.target, db or "master")
+            try:
+                c.cursor().execute(sql)
+            finally:
+                c.close()
+        else:
+            eng = _ora_engine(hop)
+            eng.neutral_create_code("dst", (hop.databases or [""])[0], sql)
+    return run
+
+
+def _across_writer(hop):
+    """(the target engine, what runs a step there) of a pair, or a
+    SystemExit naming why its accounts are not carried."""
+    src, dst = _pair_engines(hop)
+    own = owner(hop, dst)
+    if own is not None:
+        return dst, own, own.account_run
+    if dst in NEUTRAL:
+        return dst, None, _across_run(hop, dst)
+    raise SystemExit(f"users: accounts are carried into {dst} only from"
+                     f" another {dst}: its own accounts are read in a shape"
+                     " no other engine's meet")
+
+
+def _across_create(hop, apply, passwords, say):
+    out, s, t = _compare(hop, say)
+    dst, own, run = _across_writer(hop)
+    if own is not None:
+        steps, skipped = own.account_steps(s, t, passwords or {})
+    else:
+        steps, skipped = _across_steps(hop, dst, s, t, passwords)
+    return _run_plan(hop, "hetero", steps, skipped, run, apply, say)
+
+
+def _across_rollback(hop, apply, say):
+    _undo_plan(hop, "hetero", _across_writer(hop)[2], apply, say)
 
 
 # --- kafka -----------------------------------------------------------------
@@ -3050,9 +3650,12 @@ def create(hop, apply=False, passwords=None, say=print):
             "teradata": lambda: _td_create(hop, apply, passwords, say),
             "oracle": lambda: _ora_create(hop, apply, passwords, say),
             "mongodb": lambda: _mongo_create_all(hop, apply, passwords, say),
-            "mongo": lambda: _mongo_create_all(hop, apply, passwords, say)}
-    way = ways.get(hop.engine) or (
-        lambda: _sql_create(hop, apply, passwords or {}, say))
+            "mongo": lambda: _mongo_create_all(hop, apply, passwords, say),
+            "hetero": lambda: _across_create(hop, apply, passwords, say)}
+    way = ways.get(hop.engine)
+    if way is None and owner(hop) is not None:
+        way = lambda: _owned_create(hop, apply, passwords, say)  # noqa: E731
+    way = way or (lambda: _sql_create(hop, apply, passwords or {}, say))
     _after(hop, say, apply, way() or ())
 
 
@@ -3207,6 +3810,10 @@ def rollback(hop, apply=False, say=print):
         return _ora_rollback(hop, apply, say)
     if hop.engine in ("mongodb", "mongo"):
         return _mongo_rollback(hop, apply, say)
+    if hop.engine == "hetero":
+        return _across_rollback(hop, apply, say)
+    if owner(hop) is not None:
+        return _owned_rollback(hop, apply, say)
     return _sql_rollback(hop, apply, say)
 
 

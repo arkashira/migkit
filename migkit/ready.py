@@ -20,6 +20,8 @@ known now would stop it half way:
   source itself, production the hop does not name, rows it did not write),
   the room its disk has for the tables, and what one worker of the copy
   holds against this machine's memory (`model`);
+* a side that holds an SAP system's tables (`sapodp.licence_rows`): read
+  directly only where the hop says its database licence is full-use;
 * the case between the two servers (`case`): a fork change, a version
   down, an edition change - what the source uses that the target has not
   (`lacks`), what the target's edition leaves behind and its caps
@@ -395,6 +397,19 @@ def _case(hop, eng, dbs, quick):
     return out
 
 
+def _sap_licence(hop, eng):
+    """A side that holds an SAP system's tables, read directly only where
+    the hop says its database licence is full-use (`sapodp.licence_rows`):
+    a refusal before the first read otherwise."""
+    from .engines import sapodp
+    out = []
+    for r in sapodp.licence_rows(hop, eng):
+        detail, _, fix = str(r["detail"]).partition("  [fix] ")
+        out.append(Item(r["level"], BEFORE, f"{r['scope']}: {r['item']}",
+                        detail, fix, gates=r["level"] == "fail"))
+    return out
+
+
 def _goal_checks(hop, eng, dbs, quick):
     """The goal's own: an upgrade's version checks and its way, a subset's
     rules."""
@@ -493,6 +508,7 @@ def items(hop, eng, dbs=None, mode=None, quick=False):
                  lambda: _target(hop, eng, dbs),
                  lambda: _resources(hop, eng, dbs),
                  lambda: _case(hop, eng, dbs, quick),
+                 lambda: _sap_licence(hop, eng),
                  lambda: _goal_checks(hop, eng, dbs, quick),
                  lambda: _rehearsed(hop, eng, dbs) if not quick else
                  [i for i in _rehearsed_quick(hop)],

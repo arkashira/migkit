@@ -350,9 +350,9 @@ GAPS = {
     "pubsub": {cap: (NOT_APPLICABLE, STREAM_ONLY.format("Pub/Sub",
                                                         "pubsub"))
                for cap in CAPABILITIES},
-    "hetero": {
-        "users": (NOT_YET, "0e"),
-    },
+    # every capability of a pair is read off the code: its accounts too,
+    # carried across engines in the one shape (`users.across`)
+    "hetero": {},
     "generic": {
         "confirm": (NOT_YET, "33"),
         "sequences": (NOT_YET, "0e"),
@@ -482,7 +482,9 @@ PROBES = {
     "confirm": lambda n, c: (_there(c, "fence_wait")
                              and _own(c, "_compare_pks")),
     "delta": _has("delta_verify"),
-    "users": lambda n, c: n in _users_engines(),
+    # the engines `users` reads itself, and those that read their own
+    # accounts in the one shape (`Engine.accounts`)
+    "users": lambda n, c: n in _users_engines() or _own(c, "accounts"),
     "guard": lambda n, c: _own(c, "moved_nothing"),
     "statistics": lambda n, c: _own(c, "settle_target"),
     "snapshot": _has("snapshot_state"),

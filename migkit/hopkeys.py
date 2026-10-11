@@ -603,6 +603,14 @@ HOP_OPTIONS = {
                  check="migkit.rules:configured"),
     "sample": Key("how many keys or messages are compared", "int",
                   ("redis", "kafka")),
+    "sap_licence": Key("the licence of a database that holds an SAP system:"
+                       " full-use (bought apart from SAP, so a direct read"
+                       " is the customer's) or runtime (bought through SAP,"
+                       " which allows no direct read)", "str",
+                       ("oracle", "mssql", "db2", "db2i", "db2zos", "ase",
+                        "hana", "hetero"),
+                       choices=("full-use", "runtime"), fold=True,
+                       check="migkit.engines.sapodp:licence"),
     "schedule": Key("when the hop runs by itself", "dict",
                     subs={"cron": Key("five fields of cron", "str"),
                           "timezone": Key("a zone of the tz database",

@@ -1710,7 +1710,11 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
     more."""
     from . import drift, traces
     from . import verdict as _verdict
+    from .engines import sapodp
     from .engines.base import Engine
+    # a side that holds an SAP system's tables is read only where the hop
+    # says its database licence allows it (backlog ER6)
+    sapodp.refuse_runtime(hop, eng)
     scope = (hop.scope_fingerprint()
              if hasattr(hop, "scope_fingerprint") else None)
     prev = {k: r for k, r in (prev or {}).items()

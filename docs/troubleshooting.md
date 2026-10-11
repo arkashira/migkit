@@ -681,6 +681,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * users: the target still differs from the source after create - <...>
 
+* users: <...> step(s) failed, each named above and in <...>
+
+* users: accounts are carried into <...> only from another <...>: its own accounts are read in a shape no other engine's meet
+
 * users: <...>
 
 * users: <...> could not be created
@@ -1256,6 +1260,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the account does not serve the all-versions-and-deletes change feed (<...>), and the latest-version one carries no delete: turn on continuous backup and the all-versions-and-deletes feature, or say change_feed: latest in the source's options - every delete is then found by check instead of followed
 
 ## SAP application data (ODP)
+
+* sap_licence: <...> - full-use or runtime
+
+* <...>: nothing was read - <...>
 
 * the <...> service <...> refused its metadata (<...>): the SAP user needs the service (S_SERVICE) and ODP extraction of its data sources
 

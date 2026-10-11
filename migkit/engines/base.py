@@ -1804,6 +1804,87 @@ class Engine:
         return [Result("params", db, "skip",
                        "no parameter comparison for this engine yet")]
 
+    # ---- accounts, read and written by the engine itself (`users`) -------
+    #
+    # One shape for every engine that reads its own accounts, so `users`
+    # compares, carries and takes them back one way, and a pair of two such
+    # engines - or one of them beside PostgreSQL, MySQL, SQL Server or
+    # Oracle, whose accounts `users` reads in the same shape - carries them
+    # across (`users.across`).
+
+    #: the attributes of an account compared besides its grants, roles and
+    #: password (`accounts`' "attrs")
+    ACCOUNT_ATTRS = ()
+    #: what a comparison of this engine's accounts says of their passwords:
+    #: whether they are read as stored, and what `create` does instead
+    ACCOUNT_PASSWORDS = ""
+
+    def accounts(self, side):
+        """Every account on `side` that is not the server's own, in one
+        shape: {"user:<name>" | "role:<name>": {"login": whether it signs
+        in, "roles": [the roles it holds], "grants": ["<PRIVILEGE> ON
+        <database>.<table or *>"], "hash": its password as the server
+        keeps it where that can be read and set again (else None),
+        "attrs": {name: value} of `ACCOUNT_ATTRS`}}. A grant names the
+        hop's database by its source name and a table by its own name on
+        either side - the target's read back through the hop's mapping -
+        so the two sides compare, and two engines' too; a privilege is
+        said in capitals, in the words `users.PRIVILEGES` holds where it
+        is one of theirs."""
+        raise self._no_canon("read accounts")
+
+    def account_steps(self, src, dst, passwords):
+        """(steps, skipped) that make the target's accounts the source's
+        (`accounts` of each side): each step {"key": the account,
+        "shown": what the operator reads (no password in it), "run" and
+        "undo": what `account_run` does and takes back - a statement, or
+        what the engine's own interface is asked, as JSON - "made": it
+        makes the account, "given": its password is the passwords
+        file's}; `skipped` [(account, why)]. Nothing here runs: `users`
+        shows the plan, runs it on --apply, and records each step so a
+        rollback undoes it."""
+        raise self._no_canon("write accounts")
+
+    def account_run(self, what):
+        """One step's `run` or `undo` (`account_steps`) done on the
+        target."""
+        raise self._no_canon("write accounts")
+
+    def account_grant(self, side, privilege, db, table=None):
+        """A grant as `accounts` says it: `<PRIVILEGE> ON <db>.<table>` -
+        `db` the hop's database as the source names it, the table by its
+        own name without its schema, a target's named back through the
+        hop's mapping (`Hop.source_table_in`) so both sides say one table
+        one way - or `<db>.*` for the whole database."""
+        priv = " ".join(str(privilege).split()).upper()
+        if table in (None, "", "*"):
+            return f"{priv} ON {db}.*"
+        parts = self.hop.parts_of(str(table), self.CANON_ENGINE or None,
+                                  bare_in="")
+        if side == "dst":
+            back = self.hop.source_table_in(db, *parts)
+            if back:
+                parts = list(back)
+        return f"{priv} ON {db}.{parts[-1]}"
+
+    def account_target(self, grant):
+        """(privilege, the target's database, the target's table as its
+        listings name it - None for the whole database) of a grant
+        `accounts` said; None where the table is not on the target."""
+        priv, _, on = str(grant).partition(" ON ")
+        db, _, leaf = on.partition(".")
+        there = self.hop.target_db(db)
+        if leaf in ("", "*"):
+            return priv, there, None
+        want = self.hop.parts_of(self.hop.target_table_in(db, leaf),
+                                 self.CANON_ENGINE or None, bare_in="")[-1]
+        for t in self.neutral_tables("dst", db):
+            got = self.hop.parts_of(str(t), self.CANON_ENGINE or None,
+                                    bare_in="")
+            if got[-1] == want:
+                return priv, there, t
+        return None
+
     def move_key(self, db, sch, tbl):
         """What a table's entry in the copy's checkpoint is called: the one
         name the copier writes under and the plan reads back."""
