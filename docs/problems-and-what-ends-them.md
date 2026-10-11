@@ -2553,16 +2553,21 @@ The change reader skipped all three without a word; its position did not
 move and it returned nothing. A tail on such a source calls itself caught
 up for as long as it runs, while every change goes missing.
 
-**migkit: Ends it for MySQL, ends the silent part for MariaDB** -
+**migkit: Ends it for MySQL, ends the silent part for MariaDB and reads it there too, unproved against a server** -
 `test_a_compressed_binlog_is_read_or_stops_the_tail.py`.
 * MySQL's compressed transaction is opened by migkit itself: the payload is
   decompressed, and its events are parsed as if they had arrived on their
   own. The tail and the delta read them like any other: measured on 8.4,
   an insert, an update and a delete written compressed all arrived, in
   order and with their values, and `assess` passes the setting.
-* MariaDB's compressed row events are another format. The tail stops on
-  the first one and names the setting, with its position where it was,
-  and `assess` fails `log_bin_compress` with the statement to run.
+* MariaDB's compressed statements and version-1 rows are another format
+  (zlib behind a header byte), opened by migkit the same way, and
+  `assess` passes `log_bin_compress`. Built from the server's layout as
+  remembered and proved with events made by hand, not yet against a
+  MariaDB server (`test_mariadb_compressed_events_are_read_or_stop_the_tail.py`):
+  an event that is not in that layout stops the tail with the reason and
+  its position where it was. The version-2 rows (169-171) are not read and
+  stop it.
 * The test also pins the reader's own behaviour: on its own it still
   returns nothing for a compressed transaction, which is why migkit opens
   them itself.

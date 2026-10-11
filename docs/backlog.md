@@ -1502,10 +1502,25 @@ different points.**
     map. Measured on 8.4: an insert, an update and a delete in a session
     that turned compression on, and an insert with the server's own
     setting on, all reached the tail in order with their values, and the
-    delta verified the rows. `assess` passes the setting. MariaDB's
-    compressed row events are another format, and still stop the tail
-    and fail `assess`
+    delta verified the rows. `assess` passes the setting
     (`tests/test_a_compressed_binlog_is_read_or_stops_the_tail.py`).
+  * *MariaDB read, not yet against a server (2026-10-11):* MariaDB's
+    compressed statement (165) and version-1 rows (166-168) are opened by
+    `binlog_payload.MariadbCompressedEvent`: what is in front of the
+    compressed part is read as in the plain event, the compressed part is
+    a header byte, a length and a zlib stream, and the plain event
+    rebuilt from the two goes to the reader's own parser. A stream that
+    is corrupt, of another algorithm, of a length that does not match,
+    with bytes after it, or in a layout other than the one read stops the
+    tail with the reason and the position, never a skip, and the delta
+    reports it as an error. `assess` passes `log_bin_compress`.
+    Proved with events built by hand and compressed with zlib, no server
+    (`tests/test_mariadb_compressed_events_are_read_or_stop_the_tail.py`).
+    NOT proved: that MariaDB writes this layout (which part is compressed,
+    the length's byte order, version-1 rows only) - it is from the
+    server's code as remembered; the test against MariaDB 11 is written
+    and not run. The version-2 rows (169-171) are not read and still stop
+    the tail. Row 6.mariadb.
 * **The largest row against the target's `max_allowed_packet` (MySQL):**
   measured on 8.4. An 8 MiB value loaded into a target with a 4 MiB packet
   stopped the copy with `Lost connection` and nothing else. An 8 MiB value

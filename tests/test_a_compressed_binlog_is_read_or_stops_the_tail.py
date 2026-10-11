@@ -10,9 +10,13 @@ for as long as it ran.
 MySQL's compressed transaction is now opened by migkit itself
 (`binlog_payload`): its events are decompressed and parsed as if they had
 arrived on their own, and the tail and the delta read them like any other.
-MariaDB's compressed row events are another format; they still stop the
-tail, say which setting writes them and what to do, and `assess` fails
-the setting before anything starts.
+MariaDB's compressed statements and rows are another format, read by
+`binlog_payload.MariadbCompressedEvent` (zlib behind a one-byte header).
+The synthetic proof of that, with no server, is in
+`test_mariadb_compressed_events_are_read_or_stop_the_tail.py`. The test
+below against a real MariaDB is written but NOT YET RUN: it is what settles
+whether MariaDB writes the layout that module reads. If it does not, the
+tail stops with the reason (proved there) and this test fails, saying so.
 """
 import socket
 import subprocess
@@ -103,11 +107,6 @@ def _eng(port):
                            databases=["appdb"]))
 
 
-def _changes(eng, token):
-    got, _ = eng.neutral_changes("src", "appdb", token)
-    return [(c["op"], c["key"]["id"]) for c in got]
-
-
 def test_the_reader_really_skips_a_compressed_transaction(mysql):
     """Why migkit opens them itself: the reader, on its own, returns
     nothing for them."""
@@ -168,19 +167,29 @@ def test_assess_passes_the_setting_on_mysql(mysql):
         ("pass", "ON - the tail opens them")], got
 
 
-def test_mariadb_compressed_rows_stop_the_tail_and_fail_assess(mariadb):
+def test_mariadb_compressed_rows_are_read_by_the_tail(mariadb):
+    """Not yet run against a server. A rows event of more than the
+    configured minimum length is written compressed (`log_bin_compress`),
+    and the tail reads the insert and the delete from it."""
     eng = _eng(MARIA_PORT)
     token = eng.change_point("src", "appdb")
     _sql(MARIA, "mariadb", "insert into appdb.t values"
                            " (1, repeat('a', 200));"
+                           " update appdb.t set v = repeat('b', 200)"
+                           " where id = 1;"
                            " delete from appdb.t where id = 1")
-    with pytest.raises(SystemExit) as e:
-        _changes(eng, token)
-    assert "log_bin_compress" in str(e.value), e.value
+    got, _ = eng.neutral_changes("src", "appdb", token)
+    assert [(c["op"], c["key"]["id"]) for c in got] == [
+        ("insert", 1), ("update", 1), ("delete", 1)], got
+    assert got[1]["values"]["v"] == "b" * 200, got[1]
+
+
+def test_assess_passes_the_setting_on_mariadb(mariadb):
+    eng = _eng(MARIA_PORT)
     got = [i for i in eng.assess()
-           if i["item"].startswith("log_bin_compress=OFF")]
-    assert [i["level"] for i in got] == ["fail"], got
-    assert "set global log_bin_compress = OFF" in got[0]["detail"], got
+           if i["item"].startswith("MariaDB compressed events")]
+    assert [(i["level"], i["detail"]) for i in got] == [
+        ("pass", "ON - the tail opens them")], got
 
 
 def test_a_compressed_transaction_is_verified_by_the_delta(mysql,
