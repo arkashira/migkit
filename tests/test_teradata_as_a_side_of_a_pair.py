@@ -571,7 +571,10 @@ def test_the_deep_check_finds_a_table_left_mid_load_and_leftovers(fake):
     # beside it, the text stored twice as UTF-8 on the source: asked, its
     # answer whatever the stand-in gives
     assert "shop mojibake" in got
-    assert set(got) == {"shop target tables", "shop mojibake"}
+    # and the two systems' tables held to each other
+    # (`tests/test_teradata_deep.py` reads each of those)
+    assert {"shop target tables", "shop mojibake", "shop keys",
+            "shop columns", "shop narrowing"} <= set(got)
 
 
 def test_a_tail_batch_lands_with_its_line_in_the_ledger(fake):

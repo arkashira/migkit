@@ -226,6 +226,8 @@
 #     https://docs.singlestore.com/cloud/connect-to-singlestore/connect-with-mysql/connect-with-mysql-client/
 #     https://docs.confluent.io/cloud/current/clusters/cluster-types.html
 #     https://docs.confluent.io/cloud/current/security/access-control/acls/overview.html
+#     https://docs.teradata.com/r/Enterprise_IntelliFlex_VMware/Database-Administration/Databases-and-Users-in-Teradata-All-DBAs/As-A-Service-System-Users
+#     https://docs.teradata.com/r/Lake-Getting-Started-with-VantageCloud-Lake/First-Sign-On-by-Organization-Admin-Create-an-Environment/Step-2-Set-the-Environment-Connection-Type
 version: 1
 providers:
   aws:     {label: AWS, api: aws, console: the AWS console, cli: aws}
@@ -250,6 +252,7 @@ providers:
   yugabyte-cloud:  {label: YugabyteDB Aeon, api: none, console: the YugabyteDB Aeon UI, cli: ybm}
   singlestore:     {label: SingleStore Helios, api: none, console: the SingleStore Portal, cli: null}
   confluent:       {label: Confluent Cloud, api: none, console: the Confluent Cloud Console, cli: confluent}
+  teradata:        {label: Teradata VantageCloud, api: none, console: the VantageCloud Lake Console, cli: null}
 services:
 
   # ---- AWS -------------------------------------------------------------------
@@ -3590,3 +3593,25 @@ services:
     defaults: {}
     notes:
       - "an ACL made through the Kafka admin API is not stated in its documentation; its audit log records CreateAcls from an admin client"
+
+  teradata-vantagecloud-lake:
+    provider: teradata
+    where: vantagecloud
+    label: Teradata VantageCloud Lake
+    family: teradata
+    distinct: null
+    hosts: []
+    signs: {}
+    api: {product: null, restore_point: "", clone: false}
+    admin:
+      role: "a user the organization's admin makes; the As-A-Service users (TDaaS_Support, TDaaS_Maint, TDaaS_Monitor, TDaaS_BAR, TDaaS_DB) are Teradata's, and no customer user, DBC included, can change them"
+    change:
+      how: console
+      words: "the environment's settings in the VantageCloud Lake Console: {name} = {value}{after}"
+      cli: null
+      names: {}
+    cdc: []
+    limits: {}
+    defaults: {}
+    notes:
+      - "an environment is reachable through the console only, until its Settings enable an internet connection with the IP ranges allowed; migkit then reaches it on port 1025 of the public address the Dashboard shows"

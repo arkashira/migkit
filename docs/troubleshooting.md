@@ -1087,6 +1087,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> is not whole years, which a Teradata <...> holds
 
+* <...>: the statements that enable the target's triggers again could not be saved, so none was disabled - and <...> would fire for every row the load writes. Nothing has been loaded.
+
+* <...>: the target's triggers could not be read (<...>), and a trigger that fires for every row the load writes could rewrite them. Nothing has been loaded.
+
 * the <...> is Teradata, which is reached through Teradata's own driver, and it is not installed on this machine: migkit doctor --install puts it in place once its terms are accepted
 
 ## OpenSearch

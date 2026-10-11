@@ -55,7 +55,8 @@ KINDS = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
          "redshift": "Redshift", "bigquery": "BigQuery",
          "clickhouse": "ClickHouse", "cockroachdb": "CockroachDB",
          "tidb": "TiDB", "dsql": "Aurora DSQL", "cosmosdb": "Cosmos DB",
-         "snowflake": "Snowflake", "kinesis": "a Kinesis stream",
+         "snowflake": "Snowflake", "teradata": "Teradata",
+         "kinesis": "a Kinesis stream",
          "pubsub": "a Pub/Sub topic"}
 
 #: what `clouds` calls an endpoint of a service, and the service it is

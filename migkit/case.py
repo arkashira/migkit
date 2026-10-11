@@ -61,7 +61,8 @@ BRAND_WORDS = {"postgres": "PostgreSQL", "mysql": "MySQL",
                "kafka": "Kafka", "mssql": "SQL Server",
                "oracle": "Oracle Database", "clickhouse": "ClickHouse",
                "altinity": "Altinity ClickHouse",
-               "cassandra": "Apache Cassandra", "scylladb": "ScyllaDB"}
+               "cassandra": "Apache Cassandra", "scylladb": "ScyllaDB",
+               "teradata": "Teradata"}
 
 
 def engine_of(eng):
@@ -146,7 +147,7 @@ class Case:
 FAMILY_NUMBERED = {"postgres", "yugabytedb", "greenplum", "mysql",
                    "percona", "mongodb", "percona-server-mongodb", "redis",
                    "opensearch", "elasticsearch", "clickhouse", "altinity",
-                   "cassandra"}
+                   "cassandra", "teradata"}
 
 
 def _side_of(eng, hop, side, identity_version):

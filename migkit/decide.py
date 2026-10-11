@@ -2135,7 +2135,7 @@ WAYS = {
             "mongodb", "mssql", "redis", "kafka", "sqlite", "parquet",
             "clickhouse", "db2", "db2i", "db2zos", "ase", "opensearch",
             "snowflake", "bigquery", "duckdb", "iceberg", "delta",
-            "hetero")},
+            "hetero", "teradata")},
         "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
                                      " under the 1 MB a scan page returns"),
         "cassandra": (NOT_APPLICABLE, "a row is written as one mutation, at"
@@ -2156,6 +2156,7 @@ WAYS = {
         "mssql": ("yes", "@_deep_partitions"),
         "oracle": ("yes", "@_deep_partitions"),
         "tidb": ("yes", "@_deep_partitions"),
+        "teradata": ("yes", "@_deep_partitions"),
         "clickhouse": ("yes", "@_partitioned_by"),
         "kafka": ("yes", "@move_table"),
         "redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
