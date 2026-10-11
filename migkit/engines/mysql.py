@@ -1217,15 +1217,17 @@ class MySQLEngine(Engine):
                 out[k] = v
         return out
 
-    #: binlog events that carry rows the reader cannot open, and the
-    #: setting that writes them: MariaDB's compressed row events. MySQL's
-    #: compressed transaction is read (`binlog_payload`); it is listed for
-    #: the reader that cannot, should one be given no way to
+    #: binlog events that carry rows (or a statement) the reader cannot
+    #: open, and the setting that writes them. MySQL's compressed
+    #: transaction and MariaDB's compressed statement and version-1 rows
+    #: are read (`binlog_payload`); they are listed for the reader that
+    #: cannot, should one be given no way to, and for the one that finds
+    #: them unreadable. MariaDB's version-2 rows (169-171) are only listed.
     COMPRESSED_ROWS = {0x28: "binlog_transaction_compression",
-                       **{t: "log_bin_compress" for t in range(166, 172)}}
+                       **{t: "log_bin_compress" for t in range(165, 172)}}
 
-    @staticmethod
-    def _row_events(stream, marks=(), ddl=False, when=None):
+    @classmethod
+    def _row_events(cls, stream, marks=(), ddl=False, when=None):
         """The stream's events, with each compressed transaction's opened
         in its place (`binlog_payload`), and `COMMITTED` wherever a
         transaction has ended: after its XID, after a compressed one, and
@@ -1238,9 +1240,17 @@ class MySQLEngine(Engine):
         its `COMMITTED`."""
         from pymysqlreplication.event import QueryEvent, XidEvent
 
-        from ..binlog_payload import TransactionPayloadEvent
+        from ..binlog_payload import (MariadbCompressedEvent,
+                                      TransactionPayloadEvent)
         for ev in stream:
-            if isinstance(ev, TransactionPayloadEvent):
+            if isinstance(ev, MariadbCompressedEvent) and not ev.error:
+                # MariaDB's compressed statement or rows, opened: the
+                # plain event it holds goes the way a plain one does. One
+                # that could not be opened is handed on as it is, for the
+                # caller to stop on.
+                for inner in cls._row_events(ev.events, marks, ddl, when):
+                    yield inner
+            elif isinstance(ev, TransactionPayloadEvent):
                 # a two-way tail's mark in a statement's text travels
                 # inside the compressed transaction with its rows
                 yield from (e for e in ev.events if hasattr(e, "rows")
@@ -1267,17 +1277,30 @@ class MySQLEngine(Engine):
                 yield ev
 
     @classmethod
-    def _compressed_stop(cls, token, event_type):
+    def _compressed_stop(cls, token, event_type, why=None):
         """Measured, MySQL 8.4 with `binlog_transaction_compression = ON`
         and MariaDB 11 with `log_bin_compress = ON`: an insert, an update
         and a delete were written compressed, and the reader skipped all
         three - no change returned, the position not moved, nothing said.
         A tail on it would have called itself caught up for ever."""
-        raise SystemExit(cls._compressed_said(token, event_type, "applied"))
+        raise SystemExit(cls._compressed_said(token, event_type, "applied",
+                                              why))
 
     @classmethod
-    def _compressed_said(cls, token, event_type, done):
+    def _compressed_said(cls, token, event_type, done, why=None):
         name = cls.COMPRESSED_ROWS[event_type]
+        if why:
+            # opened, and not what a compressed event is: switching the
+            # setting off does not undo what is already written
+            return (
+                f"the source wrote an event compressed ({name}, event type"
+                f" {event_type}) that migkit could not read: {why}."
+                " Reading on would skip it, so the tail stops. Nothing"
+                f" after {token.get('log_file')}, position"
+                f" {token.get('log_pos')}, was {done}. This is either a"
+                " damaged binlog or a layout migkit has not been shown:"
+                " keep the log file and report it. Move again with --mode"
+                " full+cdc to start from a fresh copy")
         return (
             f"the source writes rows into its binlog compressed ({name}),"
             " and migkit's binlog reader cannot read them; reading on would"
@@ -1738,7 +1761,7 @@ class MySQLEngine(Engine):
         from pymysqlreplication.event import GtidEvent, QueryEvent, XidEvent
 
         from ..binlog_marks import register as register_marks
-        from ..binlog_payload import register
+        from ..binlog_payload import MariadbCompressedEvent, register
         token = dict(token or {}) or self.change_point(side, db)
         start = dict(token)
         # A position is kept only where a transaction ended, with how many
@@ -1786,7 +1809,7 @@ class MySQLEngine(Engine):
                 only_events=[WriteRowsEvent, UpdateRowsEvent,
                              PartialUpdateRowsEvent,
                              DeleteRowsEvent, NotImplementedEvent,
-                             XidEvent, QueryEvent, GtidEvent, register(),
+                             XidEvent, QueryEvent, GtidEvent, *register(),
                              *mark_events],
                 filter_non_implemented_events=False)
             # each commit's time, as the source wrote it (`canon.ended`)
@@ -1824,6 +1847,11 @@ class MySQLEngine(Engine):
                         keep = True
                         break
                     continue
+                if isinstance(ev, MariadbCompressedEvent):
+                    # opened and found not what it should be: nothing of
+                    # this batch is handed back, as for any other
+                    # compressed event the reader cannot read
+                    self._compressed_stop(start, ev.event_type, ev.error)
                 if isinstance(ev, GtidEvent):
                     gtid = str(ev.gtid).lower()
                     continue
@@ -3538,7 +3566,7 @@ class MySQLEngine(Engine):
                            f"baseline {pos[0]}:{pos[1]} recorded,"
                            " changes are tracked from this point on")]
         from .. import rowtext
-        from ..binlog_payload import register
+        from ..binlog_payload import MariadbCompressedEvent, register
         ck = json.loads(state.read_text())
         s = self.hop.source
         stream = BinLogStreamReader(
@@ -3550,7 +3578,7 @@ class MySQLEngine(Engine):
             only_schemas=[db],
             only_events=[WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent,
                          NotImplementedEvent, XidEvent, QueryEvent,
-                         register()],
+                         *register()],
             filter_non_implemented_events=False)
         touched = {}
         nopk = set()
@@ -3568,6 +3596,11 @@ class MySQLEngine(Engine):
                     if n >= limit:
                         break
                     continue
+                if isinstance(ev, MariadbCompressedEvent):
+                    return [Result("delta", db, "error",
+                                   self._compressed_said(
+                                       ck, ev.event_type, "verified",
+                                       ev.error))]
                 if isinstance(ev, NotImplementedEvent):
                     # the rows of a compressed transaction are not read,
                     # and the delta said "0 changes" over them: the
@@ -6610,8 +6643,9 @@ class MySQLEngine(Engine):
             add("warn", "instance", "change reading depth not worked out",
                 str(e)[:200])
         items.append(self._retention_row(var))
-        # MySQL's compressed transactions the tail opens (binlog_payload);
-        # MariaDB's compressed row events it cannot
+        # MySQL's compressed transactions and MariaDB's compressed
+        # statements and rows the tail opens (binlog_payload); one it cannot
+        # open stops it, with the reason
         zc = str(var("src", "binlog_transaction_compression")).upper()
         if zc not in ("?", ""):
             add("pass", "instance", "compressed transactions in the binlog"
@@ -6619,11 +6653,9 @@ class MySQLEngine(Engine):
                 zc + (" - the tail opens them" if zc == "ON" else ""))
         zc = str(var("src", "log_bin_compress")).upper()
         if zc not in ("?", ""):
-            add("pass" if zc == "OFF" else "fail", "instance",
-                "log_bin_compress=OFF on source (the change tail cannot"
-                " read MariaDB's compressed rows)",
-                zc if zc == "OFF" else
-                f"{zc} - set global log_bin_compress = OFF")
+            add("pass", "instance", "MariaDB compressed events in the"
+                " binlog readable by the change tail",
+                zc + (" - the tail opens them" if zc == "ON" else ""))
         sid = var("src", "server_id")
         add("pass" if str(sid) not in ("0", "") else "fail", "instance",
             "server_id set on source (a binlog reader needs it)",

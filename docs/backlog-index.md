@@ -54,9 +54,9 @@ in these historical totals.
 | Status | S | M | L | Total |
 |---|---|---|---|---|
 | DONE | 93 | 137 | 29 | 259 |
-| PARTLY | 4 | 24 | 20 | 48 |
+| PARTLY | 5 | 24 | 20 | 49 |
 | IN PROGRESS | 0 | 7 | 11 | 18 |
-| OPEN | 38 | 36 | 10 | 84 |
+| OPEN | 37 | 36 | 10 | 83 |
 | BLOCKED | 10 | 4 | 6 | 20 |
 | NOT PURSUED | 8 | 1 | 0 | 9 |
 | **Total** | 153 | 209 | 76 | **438** |
@@ -65,7 +65,7 @@ in these historical totals.
 |---|---|---|---|---|---|---|---|
 | move | 29 | 10 | 2 | 11 | 0 | 2 | 54 |
 | verify | 40 | 4 | 0 | 10 | 1 | 1 | 56 |
-| change follow | 34 | 3 | 1 | 19 | 5 | 0 | 62 |
+| change follow | 34 | 4 | 1 | 18 | 5 | 0 | 62 |
 | two-way | 4 | 2 | 0 | 3 | 0 | 0 | 9 |
 | cutover | 14 | 1 | 1 | 4 | 0 | 0 | 20 |
 | types | 11 | 1 | 1 | 1 | 0 | 0 | 14 |
@@ -75,7 +75,7 @@ in these historical totals.
 | ease of use | 19 | 2 | 1 | 3 | 1 | 1 | 27 |
 | operations/scale | 26 | 9 | 0 | 11 | 5 | 3 | 54 |
 | tools used whole | 30 | 6 | 0 | 4 | 0 | 0 | 40 |
-| **Total** | 259 | 48 | 18 | 84 | 20 | 9 | **438** |
+| **Total** | 259 | 49 | 18 | 83 | 20 | 9 | **438** |
 
 ## Items
 
@@ -117,7 +117,7 @@ in these historical totals.
 | 34 | 5 | DDL during the move: seen on every path, the tail stops, verdicts it overtook marked stale, the native replica scoped to the hop | DONE (in text) | M | change follow | L1320-1423 |
 | 35 | 5b | MySQL full+cdc from one point; `--mode cdc` after a separate copy | DONE (in text) | M | change follow | L1425-1466 |
 | 36 | 6 | Pre-checks give the value to set: tables over 10k, case collisions, slots/senders, binlog settings, packet vs largest row, other writers, decoding spill, target room with its log, max_slot_wal_keep_size, key-less columns a replica cannot match, HA/replicas on the target | DONE (in text; R9 2026-09-27; grep: max_slot_wal_keep_size in postgres.py) | M | ease of use | L1470-1711, L6343-6362 |
-| 37 | 6.mariadb | MariaDB's compressed row events read instead of stopping the tail | OPEN (grep: still refused, binlog_payload.py:18, mysql.py:4925) | S | change follow | L1505-1508 |
+| 37 | 6.mariadb | MariaDB's compressed row events read instead of stopping the tail | PARTLY (done 2026-10-11: `binlog_payload.MariadbCompressedEvent` opens the compressed statement (165) and version-1 rows (166-168) and hands the plain event to the reader's parser; a stream that is corrupt, of another algorithm, of the wrong length or not laid out as read stops the tail with the reason; tests with synthetic events, no server. Missing: a run against a real MariaDB with `log_bin_compress = ON` (written, not run: `test_mariadb_compressed_rows_are_read_by_the_tail`), which settles the layout and the length's byte order; the version-2 rows 169-171 are still refused) | S | change follow | L1505-1508 |
 | 38 | 6.wal_sender | `wal_sender_timeout` recommendation | NOT PURSUED (left open on purpose until a failure shows a value) | S | ease of use | L1565-1573 |
 | 39 | 6.fkwin | Foreign-key window around the PostgreSQL streaming copy, instead of falling back to the local copy | OPEN (grep: no FK window) | M | move | L1627-1630 |
 | 40 | 7 | Cost in the plan: time from measured rates (as ranges, item 40), size and room, transfer price, free space where the server reports it | DONE (in text) | M | operations/scale | L1713-1753, L5662-5678 |
