@@ -47,7 +47,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 244, yes 477. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 243, yes 478. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -86,7 +86,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | snowflake | 0/10 | 0/33 | 0/6 | 0/7 | 1/6 | 0/6 | 1/7 | 1/1 | 0/1 | 0/1 | 3/78 |
 | sqlite | 2/9 | 4/27 | - | 2/7 | 2/5 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 17/59 |
 | teradata | 1/8 | 1/30 | - | 0/7 | 1/6 | 1/6 | 2/4 | 1/1 | 0/1 | 0/1 | 7/64 |
-| tidb | 0/10 | 1/31 | 3/6 | 1/7 | 0/6 | 2/7 | 4/6 | 0/1 | 0/1 | 0/1 | 11/76 |
+| tidb | 0/10 | 2/31 | 3/6 | 1/7 | 0/6 | 2/7 | 4/6 | 0/1 | 0/1 | 0/1 | 12/76 |
 
 Per item: the engines in each state - "test owed" is a way in the code whose test on that engine is not written (`UNPROVED`).
 
@@ -113,7 +113,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.structure.deferrable | postgres | - | generic hetero oracle sqlite | the rest (31) |
 | verify.structure.extensions | postgres | - | generic hetero | the rest (33) |
 | verify.structure.foreign-keys | mssql mysql postgres | - | ase bigquery cockroachdb db2 db2i db2zos duckdb generic hetero oracle redshift snowflake sqlite teradata tidb | the rest (18) |
-| verify.structure.indexes | mongodb postgres | tidb | the rest (20) | copybook delta iceberg kafka kinesis mysql opensearch parquet pubsub redis redshift saas sapodp |
+| verify.structure.indexes | mongodb postgres tidb | - | the rest (20) | copybook delta iceberg kafka kinesis mysql opensearch parquet pubsub redis redshift saas sapodp |
 | verify.structure.keys | mssql mysql postgres redis | - | the rest (19) | cassandra cosmosdb couchbase delta dynamodb kafka kinesis mongodb opensearch parquet pubsub saas sapodp |
 | verify.structure.materialized-views | postgres | - | ase bigquery cassandra clickhouse cockroachdb cosmosdb db2 db2i db2zos generic hetero iceberg mssql oracle redshift snowflake teradata | the rest (18) |
 | verify.structure.objects | cockroachdb duckdb mongodb mysql oracle postgres | - | the rest (22) | copybook dynamodb kinesis parquet pubsub redis saas sapodp |

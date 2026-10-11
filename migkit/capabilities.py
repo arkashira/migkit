@@ -2087,7 +2087,6 @@ UNPROVED = {
                     "snowflake bigquery duckdb copybook iceberg delta tidb "
                     "cockroachdb dsql couchbase cosmosdb"),
     "verify.movement.target-ahead": "mongodb",
-    "verify.structure.indexes": "tidb",
     "verify.delta": "db2i tidb cockroachdb dsql couchbase cosmosdb",
     "verify.fence": "db2i",
     "verify.confirm": ("postgres clickhouse dynamodb db2i opensearch "
