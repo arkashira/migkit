@@ -2070,11 +2070,10 @@ DEPTH_GAPS = {
 #: item: the engines, each waiting on its area's backlog row (`AREAS`).
 #: Such a cell is "not yet": a way is one only once a test proves it
 UNPROVED = {
-    "scope.listings": "oracle ase tidb cockroachdb dsql",
-    "scope.deep": "mongodb db2i db2zos ase tidb hetero",
-    "scope.copy": "mongodb mssql oracle ase tidb cockroachdb dsql",
+    "scope.listings": "oracle ase ",
+    "scope.deep": "mongodb db2i db2zos ase hetero",
+    "scope.copy": "mongodb mssql oracle ase ",
     "scope.repair": "oracle tidb cockroachdb dsql couchbase cosmosdb",
-    "scope.counters": "tidb",
     "scope.ops": ("mssql redis dynamodb oracle db2i redshift snowflake "
                   "bigquery kinesis pubsub iceberg delta tidb cockroachdb "
                   "dsql couchbase cosmosdb sapodp saas"),
@@ -2125,7 +2124,6 @@ UNPROVED = {
                        " hetero"),
     "cutover.read-only-target": "mssql db2i db2zos dsql hetero",
     "cutover.drain": "db2i saas",
-    "security.tls": "parquet duckdb copybook tidb cockroachdb dsql",
     "operations.fencing": "tidb",
 }
 

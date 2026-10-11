@@ -47,7 +47,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 243, yes 478. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 887, not yet 1488, test owed 229, yes 492. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -55,16 +55,16 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | bigquery | 0/10 | 0/31 | 0/6 | 1/7 | 1/6 | 1/6 | 1/6 | 1/1 | 1/1 | 0/1 | 6/75 |
 | cassandra | 0/9 | 3/24 | 1/5 | 0/7 | 1/4 | 2/5 | 4/5 | 1/1 | 1/1 | 0/1 | 13/62 |
 | clickhouse | 1/9 | 3/30 | 1/6 | 0/7 | 1/5 | 5/7 | 4/6 | 1/1 | 1/1 | 0/1 | 17/73 |
-| cockroachdb | 1/10 | 2/35 | 3/6 | 0/7 | 1/6 | 1/7 | 3/7 | 0/1 | 1/1 | 0/1 | 12/81 |
-| copybook | 0/7 | 0/15 | - | 0/4 | 1/2 | 2/4 | 0/1 | 0/1 | - | 0/1 | 3/35 |
+| cockroachdb | 3/10 | 2/35 | 3/6 | 0/7 | 1/6 | 1/7 | 3/7 | 1/1 | 1/1 | 0/1 | 15/81 |
+| copybook | 0/7 | 0/15 | - | 0/4 | 1/2 | 2/4 | 0/1 | 1/1 | - | 0/1 | 4/35 |
 | cosmosdb | 0/9 | 1/23 | 1/5 | 0/7 | 1/3 | 1/6 | 1/3 | 1/1 | 1/1 | 0/1 | 7/59 |
 | couchbase | 0/9 | 1/22 | 1/5 | 0/7 | 1/4 | 1/6 | 2/6 | 1/1 | 0/1 | 0/1 | 7/62 |
 | db2 | 1/10 | 0/35 | 0/6 | 0/7 | 1/6 | 3/7 | 1/7 | 0/1 | 1/1 | 0/1 | 7/81 |
 | db2i | 0/10 | 1/35 | 0/6 | 0/7 | 0/6 | 0/7 | 0/6 | 1/1 | 0/1 | 0/1 | 2/80 |
 | db2zos | 0/9 | 0/32 | - | 1/7 | 0/6 | 0/7 | 0/4 | 0/1 | 0/1 | 0/1 | 1/68 |
 | delta | 0/9 | 0/23 | 0/6 | 0/5 | 1/2 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/57 |
-| dsql | 0/10 | 1/30 | 1/6 | 0/7 | 0/5 | 0/6 | 1/5 | 0/1 | 1/1 | 0/1 | 4/72 |
-| duckdb | 0/9 | 1/23 | - | 0/7 | 1/6 | 4/6 | 2/2 | 0/1 | 0/1 | 0/1 | 8/56 |
+| dsql | 2/10 | 1/30 | 1/6 | 0/7 | 0/5 | 0/6 | 1/5 | 1/1 | 1/1 | 0/1 | 7/72 |
+| duckdb | 0/9 | 1/23 | - | 0/7 | 1/6 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 9/56 |
 | dynamodb | 0/8 | 2/18 | 1/5 | 0/7 | 1/2 | 2/5 | 3/4 | 1/1 | 1/1 | 0/1 | 11/52 |
 | generic | 1/10 | 2/39 | 0/6 | 1/7 | 0/6 | 0/7 | 0/6 | 0/1 | 0/1 | 0/1 | 4/84 |
 | hetero | 4/10 | 5/39 | 1/2 | 1/5 | - | 5/7 | 2/5 | - | - | - | 18/68 |
@@ -76,7 +76,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | mysql | 9/10 | 26/31 | 6/6 | 6/7 | 6/6 | 7/7 | 7/8 | 1/1 | 1/1 | 1/1 | 70/78 |
 | opensearch | 0/9 | 3/26 | 1/6 | 2/7 | 1/4 | 3/6 | 4/6 | 1/1 | 1/1 | 0/1 | 16/67 |
 | oracle | 3/10 | 8/36 | 1/6 | 1/7 | 3/6 | 4/7 | 4/7 | 0/1 | 1/1 | 0/1 | 25/82 |
-| parquet | 0/7 | 0/15 | - | 0/4 | 1/2 | 3/6 | 1/1 | 0/1 | 0/1 | 0/1 | 5/38 |
+| parquet | 0/7 | 0/15 | - | 0/4 | 1/2 | 3/6 | 1/1 | 1/1 | 0/1 | 0/1 | 6/38 |
 | postgres | 9/10 | 35/37 | 5/6 | 7/7 | 5/6 | 7/7 | 8/8 | 1/1 | 1/1 | 1/1 | 79/84 |
 | pubsub | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | redis | 1/8 | 7/14 | 1/6 | 4/7 | 0/1 | 4/5 | 3/6 | 1/1 | 1/1 | 0/1 | 22/50 |
@@ -86,17 +86,17 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | snowflake | 0/10 | 0/33 | 0/6 | 0/7 | 1/6 | 0/6 | 1/7 | 1/1 | 0/1 | 0/1 | 3/78 |
 | sqlite | 2/9 | 4/27 | - | 2/7 | 2/5 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 17/59 |
 | teradata | 1/8 | 1/30 | - | 0/7 | 1/6 | 1/6 | 2/4 | 1/1 | 0/1 | 0/1 | 7/64 |
-| tidb | 0/10 | 2/31 | 3/6 | 1/7 | 0/6 | 2/7 | 4/6 | 0/1 | 0/1 | 0/1 | 12/76 |
+| tidb | 4/10 | 2/31 | 3/6 | 1/7 | 0/6 | 2/7 | 4/6 | 1/1 | 0/1 | 0/1 | 17/76 |
 
 Per item: the engines in each state - "test owed" is a way in the code whose test on that engine is not written (`UNPROVED`).
 
 | item | yes | test owed | not yet | n/a |
 |---|---|---|---|---|
-| scope.listings | mssql mysql postgres | ase cockroachdb dsql oracle tidb | the rest (26) | kinesis pubsub |
-| scope.deep | clickhouse cockroachdb db2 mssql mysql oracle postgres teradata | ase db2i db2zos hetero mongodb tidb | the rest (18) | kinesis pubsub saas sapodp |
-| scope.copy | mysql postgres | ase cockroachdb dsql mongodb mssql oracle tidb | the rest (25) | kinesis pubsub |
+| scope.listings | cockroachdb dsql mssql mysql postgres tidb | ase oracle | the rest (26) | kinesis pubsub |
+| scope.deep | clickhouse cockroachdb db2 mssql mysql oracle postgres teradata tidb | ase db2i db2zos hetero mongodb | the rest (18) | kinesis pubsub saas sapodp |
+| scope.copy | cockroachdb dsql mysql postgres tidb | ase mongodb mssql oracle | the rest (25) | kinesis pubsub |
 | scope.repair | generic hetero mongodb mssql mysql postgres redis sqlite | cockroachdb cosmosdb couchbase dsql oracle tidb | the rest (18) | kinesis pubsub saas sapodp |
-| scope.counters | mssql mysql oracle postgres | tidb | ase bigquery cockroachdb db2 db2i db2zos dsql duckdb generic hetero redshift snowflake sqlite | the rest (18) |
+| scope.counters | mssql mysql oracle postgres tidb | - | ase bigquery cockroachdb db2 db2i db2zos dsql duckdb generic hetero redshift snowflake sqlite | the rest (18) |
 | scope.objects | mysql oracle postgres | - | the rest (25) | copybook dynamodb kinesis parquet pubsub redis saas sapodp |
 | scope.ops | hetero mysql postgres | the rest (19) | ase cassandra clickhouse db2 generic kafka mongodb opensearch | copybook db2zos duckdb parquet sqlite teradata |
 | scope.row-filter | hetero mysql postgres sqlite | the rest (23) | generic kafka mongodb mssql redis saas sapodp | kinesis pubsub |
@@ -175,7 +175,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | cutover.pause-replication | mysql postgres | - | generic redis | the rest (32) |
 | cutover.two-way | mysql postgres teradata | - | the rest (23) | copybook db2zos duckdb hetero kinesis parquet pubsub saas sapodp sqlite |
 | cutover.jobs | mysql postgres | - | ase bigquery clickhouse cockroachdb couchbase db2 db2i db2zos generic mssql opensearch oracle redshift snowflake teradata | the rest (19) |
-| security.tls | the rest (22) | cockroachdb copybook dsql duckdb parquet tidb | ase db2 db2zos generic mssql oracle saas | hetero |
+| security.tls | the rest (28) | - | ase db2 db2zos generic mssql oracle saas | hetero |
 | managed.catalogued | the rest (19) | - | ase couchbase db2i db2zos delta duckdb generic iceberg parquet saas sapodp snowflake sqlite teradata tidb | copybook hetero |
 | operations.fencing | mysql postgres | tidb | the rest (30) | hetero saas sapodp |
 
