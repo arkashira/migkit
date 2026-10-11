@@ -1881,6 +1881,20 @@ DDL = {
         "vector": ("vector<float>", "vector<float, {0}>"),
         "bson": ("text", "text"),
     },
+    # the mapping type of each class, as `OpenSearchEngine.MAPPING` writes
+    # it: a class with none is refused by name, as on every other engine
+    "opensearch": {
+        OWN: ("text", "{0}"),
+        "integer": ("long", "long"),
+        "decimal": ("scaled_float", "scaled_float"),
+        "float": ("double", "double"),
+        "boolean": ("boolean", "boolean"),
+        "text": ("text", "text"),
+        "bytes": ("binary", "binary"),
+        "date": ("date", "date"),
+        "timestamp": ("date_nanos", "date_nanos"),
+        "time": ("keyword", "keyword"),
+    },
     "sqlite": {
         OWN: ("text", "{0}"),
         "integer": ("integer", "integer"),
