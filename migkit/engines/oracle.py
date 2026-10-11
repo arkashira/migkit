@@ -2127,6 +2127,18 @@ class OracleEngine(FoldsToCapitals, DbapiRows, Engine):
     def fence_wait(self, db, lsn, timeout=300):
         return self._as_pair().fence_wait(db, lsn, timeout)
 
+    def change_reader_check(self, db):
+        """(level, detail, measured) of the reader that would follow this
+        source against the redo it writes, or None where the redo-file
+        reader, run beside the redo, is the one chosen (it does not mine
+        through the database, so the LogMiner measure is not its). The
+        gate of a move or a tail reads this; the measure is
+        `oracle_logminer.reader_check`."""
+        from . import oracle_logminer, oracle_redo
+        if oracle_redo.chosen(self, "src", db) == oracle_redo.RUNG:
+            return None
+        return oracle_logminer.reader_check(self, "src", db)
+
     def _assess_extra(self):
         from . import oracle_logminer
         items = []
