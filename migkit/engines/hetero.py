@@ -4255,9 +4255,17 @@ class HeteroEngine(Engine):
                 got["set_aside_bytes"] = sum(tables.spilled().values())
             return got
 
+        def lag_gap():
+            """Why the source gives no commit time, where its reader
+            says so and the beat has no lag to give."""
+            say = getattr(self.src_engine, "commit_time_gap", None)
+            return say("src", db) if callable(say) and s.lag is None \
+                else None
+
         def beat_with(caught_up, seen):
             tailctl.beat(where, s.caught_up, s.seen, s.room, s.through,
-                         s.lag, lambda: beat(caught_up, seen))
+                         s.lag, lambda: beat(caught_up, seen),
+                         lag_unknown=lag_gap())
 
         def resolve():
             """A batch set down and sent whose commit's answer was lost

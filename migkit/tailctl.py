@@ -359,7 +359,7 @@ def _read(path):
 
 
 def beat(where, caught_up_at, changes, room=None, through=None, lag=None,
-         tables=None):
+         tables=None, lag_unknown=None):
     """Written as the tail goes round its loop (`run_loop`, at most every
     `BEAT_EVERY`): when it last reached the end of the source's log, how
     many changes it has applied, and how much longer the source keeps
@@ -371,7 +371,10 @@ def beat(where, caught_up_at, changes, room=None, through=None, lag=None,
     log's own time, `canon.ended`), and `lag` how long that change took
     from the source's commit to the target's - GoldenGate's end-to-end
     latency and Q Replication's `END2END_LATENCY`, with no table on the
-    source; skewed by as much as the two clocks are apart. `tables` is
+    source; skewed by as much as the two clocks are apart. `lag_unknown`
+    is why a source gives no commit time to measure it from (a SQL Server
+    account that cannot read its commit table): the lag is then unknown,
+    never 0. `tables` is
     {state: tables in it} of a tail whose tables move on their own
     (`tailtables`), with `set_aside_bytes` - or what gives it, asked only
     when the beat is written."""
@@ -383,6 +386,7 @@ def beat(where, caught_up_at, changes, room=None, through=None, lag=None,
                                "caught_up_at": caught_up_at,
                                "changes": changes, "room": room,
                                "through": through, "lag": lag,
+                               "lag_unknown": lag_unknown,
                                "tables": tables}))
     os.replace(tmp, where / BEAT)
 
@@ -408,7 +412,7 @@ def state(where):
            "marked": marked, "paused": (where / PAUSED).exists(),
            "stopped": was, "beat_age": None, "behind": None,
            "changes": None, "room": None, "lag": None, "through": None,
-           "tables": None}
+           "lag_unknown": None, "tables": None}
     b = _read(where / BEAT) if marked else None
     if b:
         now = time.time()
@@ -418,6 +422,7 @@ def state(where):
         out["room"] = b.get("room")
         out["lag"] = b.get("lag")
         out["through"] = b.get("through")
+        out["lag_unknown"] = b.get("lag_unknown")
         out["tables"] = b.get("tables")
     return out
 
