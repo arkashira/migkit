@@ -874,7 +874,8 @@ def progress(where, pace, total_rows, model=None, done=False, ways=(),
         except Exception as e:  # noqa: BLE001 - kept without it, said why
             got["eta_error"] = type(e).__name__ + (
                 ": " + str(e).splitlines()[0][:120] if str(e) else "")
-    from . import durable
+    from . import durable, telemetry
+    telemetry.progressed("move", rows, total_rows, got["rate"], took, done)
     durable.write_json(os.path.join(str(where), "progress.json"), got)
 
 

@@ -1097,7 +1097,8 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         st = r.get("status", "unknown")
         totals[st] = totals.get(st, 0) + 1
     got = decide(records, hop, coverage)
-    from . import digests, session
+    from . import digests, session, telemetry
+    telemetry.verified(records, got)
     # digests the check took and could not keep: the answers stand, and
     # the evidence lists as many tables fewer - said here, not swallowed
     unwritten = digests.unwritten(session.current())

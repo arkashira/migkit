@@ -99,9 +99,13 @@ def ask(answer, key, default=""):
     no `answer` (no terminal) stops on it as `Asked`. A question not in
     `QUESTIONS` is never asked."""
     q = BY_KEY[key]
+    from . import telemetry
+    telemetry.intervened("asked", key)
     if answer is None:
         raise Asked(q)
-    return answer(q, default)
+    got = answer(q, default)
+    telemetry.intervened("answered", key)
+    return got
 
 
 def question_for(text):

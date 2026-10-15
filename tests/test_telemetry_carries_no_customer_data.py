@@ -120,7 +120,7 @@ def test_a_field_outside_the_schema_or_a_free_string_is_refused():
         with pytest.raises(telemetry.Rejected):
             telemetry.make("decision", **bad)
     with pytest.raises(telemetry.Rejected):
-        telemetry.make("crash", detail="x")
+        telemetry.make("dump", detail="x")
     ok = telemetry.make("decision", reasons=["keyless", "keyless"],
                         guarantees=("correct:proved",), ranked=2)
     assert ok["reasons"] == ["keyless"] and ok["ranked"] == 2
@@ -161,7 +161,7 @@ def test_an_exception_is_kept_by_its_type_never_its_words():
                                  "command"])
 def test_off_stops_queueing_and_disposes_of_the_spool(spool, tmp_path,
                                                       monkeypatch, how):
-    assert telemetry.record("intervention", phase="move", kind="paused")
+    assert telemetry.record("intervention", phase="move", did="paused")
     assert _kept(spool)
     if how == "env":
         monkeypatch.setenv("MIGKIT_TELEMETRY", "off")
@@ -178,7 +178,7 @@ def test_off_stops_queueing_and_disposes_of_the_spool(spool, tmp_path,
     on, why = telemetry.state()
     assert not on and why
     assert not telemetry.record("intervention", phase="move",
-                                kind="resumed")
+                                did="resumed")
     assert not list(spool.glob("events-*.jsonl"))
     if how == "command":
         CliRunner().invoke(_main(), ["telemetry", "on"])
@@ -216,7 +216,7 @@ def test_a_full_queue_drops_the_event_and_never_waits(spool, monkeypatch):
     monkeypatch.setattr(telemetry, "_started", lambda: None)
     before = telemetry.dropped()
     began = time.monotonic()
-    got = [telemetry.record("intervention", phase="move", kind="paused")
+    got = [telemetry.record("intervention", phase="move", did="paused")
            for _ in range(50)]
     assert time.monotonic() - began < 1.0
     assert got[0] and not any(got[1:])
@@ -248,3 +248,173 @@ def test_the_disclosure_is_in_the_manual_and_names_no_program():
         assert export.words(text) == text, heading
     assert all(export.words(s) == s
                for s in telemetry.strategies().values())
+
+
+# ---- the five other kinds, and crashes, from their owners ----------------------
+
+def _events(root):
+    blob = _kept(root)
+    _no_canary(blob)
+    return [json.loads(x) for x in blob.decode().splitlines()]
+
+
+class _Pace:
+    """What `planner.progress` reads of a move's pace."""
+    limit, history = 3, [(3, None, "start")]
+    started, recent = 0.0, 50.0
+
+    def __init__(self, total):
+        self.total = total
+
+    def took(self):
+        return 20.0
+
+    def _clock(self):
+        return 10.0
+
+    def held_by(self):
+        return None
+
+
+def test_progress_and_resources_keep_buckets_and_rates_only(spool,
+                                                           monkeypatch):
+    from migkit import model, planner
+    monkeypatch.setattr(telemetry, "_PACE", {})
+    where = spool.parent / "canary_orders"
+    planner.progress(where, _Pace(500), 1000)
+    planner.progress(where, _Pace(1000), 1000, done=True)
+    m = model.Model(measured=False, worker_memory=10 ** 8)
+    m.observe([{"table": "canary_orders", "work": "canary_ssn_col"}],
+              5000, 20.0, 3)
+    got = _events(spool)
+    kinds = [e["kind"] for e in got]
+    assert kinds.count("progress") == 2 and "resources" in kinds, kinds
+    last = [e for e in got if e["kind"] == "progress"][-1]
+    assert last["done"] == "100%" and last["rows"] == "1e3-1e4"
+    assert last["eta_off"] > 0
+    res = [e for e in got if e["kind"] == "resources"][0]
+    assert res["workers_used"] == 3 and res["memory"] == "1e8-1e9"
+    for e in got:
+        assert set(e) <= {"schema", "kind", "hour", "phase", "rows", "rate",
+                          "took", "done", "eta_off", "bytes", "cpus",
+                          "memory", "workers_allocated", "workers_used",
+                          "connections"}, e
+
+
+def test_a_recovery_keeps_the_class_and_the_action_never_the_words(spool):
+    from migkit import faults
+    seen = []
+
+    def work():
+        seen.append(1)
+        if len(seen) < 3:
+            raise Exception("lost connection to db7.canary.example.com"
+                            " while SELECT canary_ssn_col")
+        return "canary_orders"
+    assert faults.retried(work, wait=lambda s: None) == "canary_orders"
+
+    def never():
+        raise Exception("password authentication failed for user"
+                        " hunter2-canary-pw")
+    with pytest.raises(Exception):
+        faults.retried(never, wait=lambda s: None)
+    got = [e for e in _events(spool) if e["kind"] == "recovery"]
+    assert got[0]["fault"] == "connectivity" and got[0]["path"] == "retry"
+    assert got[0]["outcome"] == "recovered" and got[0]["attempts"] == 3
+    assert got[1]["outcome"] == "failed" and got[1]["fault"] == "auth"
+    assert {e["error"] for e in got} <= set(telemetry.ERRORS)
+
+
+def test_a_check_keeps_how_much_was_compared_and_the_guarantees(spool):
+    from migkit import verdict
+    records = [{"scope": "canary_orders", "status": "ok",
+                "detail": "canary_ssn_col 123-45-6789"},
+               {"scope": "canary_orders_2", "status": "ok"},
+               {"scope": "canary_orders_3", "status": "diff",
+                "detail": "SELECT canary_ssn_col"}]
+    verdict.summarize(None, records)
+    verdict.summarize(None, records[:2])
+    got = [e for e in _events(spool) if e["kind"] == "coverage"]
+    assert got[0]["verified"] == "<90%" and got[0]["completion"] == \
+        "different" and "guarantees" not in got[0]
+    assert got[1]["verified"] == "100%" and got[1]["units"] == "1-9"
+    assert got[1]["completion"] in telemetry.COMPLETIONS
+
+
+def test_a_question_to_the_operator_is_kept_by_its_key_alone(spool):
+    from migkit import autonomous
+    with pytest.raises(autonomous.Asked):
+        autonomous.ask(None, "target")
+    autonomous.ask(lambda q, d: "postgres://app:hunter2-canary-pw@db7",
+                   "password")
+    got = [e for e in _events(spool) if e["kind"] == "intervention"]
+    assert [(e["did"], e["question"]) for e in got] == [
+        ("asked", "target"), ("asked", "password"),
+        ("answered", "password")]
+
+
+def test_a_crash_is_a_category_and_a_phase_the_traceback_stays_local(
+        spool, tmp_path, monkeypatch):
+    import click
+
+    from migkit import cli, config
+    monkeypatch.setattr(config, "REPORTS", tmp_path / "reports")
+    ctx = click.Context(click.Command("check"), info_name="check")
+    code = cli._stopped(RuntimeError("SELECT canary_ssn_col FROM"
+                                     " canary_orders hunter2-canary-pw"), ctx)
+    assert code != 0
+    got = [e for e in _events(spool) if e["kind"] == "crash"]
+    assert len(got) == 1 and got[0]["command"] == "check"
+    assert got[0]["phase"] == "verify" and got[0]["error"] == "internal"
+    assert set(got[0]) == {"schema", "kind", "hour", "command", "phase",
+                           "error"}
+    local = (tmp_path / "reports" / "commands.log").read_text()
+    assert "RuntimeError" in local and "canary_ssn_col" in local
+
+
+def test_a_support_bundle_adds_only_a_code_to_the_spool(spool):
+    assert telemetry.intervened("bundled", phase="report")
+    got = _events(spool)
+    assert got[-1]["did"] == "bundled" and "path" not in got[-1]
+
+
+def test_a_producer_cannot_hand_the_new_kinds_free_text():
+    for kind, bad in (("crash", {"error": "SELECT canary_ssn_col"}),
+                      ("recovery", {"fault": "canary_orders"}),
+                      ("recovery", {"path": "retry 3 times"}),
+                      ("intervention", {"question": "canary_orders"}),
+                      ("coverage", {"verified": "99.5%"}),
+                      ("progress", {"rows": "12345"}),
+                      ("resources", {"memory": "5 GB"})):
+        with pytest.raises(telemetry.Rejected) as e:
+            telemetry.make(kind, **bad)
+        _no_canary(str(e.value))
+    assert telemetry.SCHEMA == 1.1
+
+
+def test_the_spool_adds_bounded_time_per_thousand_events_and_never_blocks(
+        spool):
+    began = time.monotonic()
+    for _ in range(1000):
+        telemetry.record("progress", phase="move", rows="1e3-1e4",
+                         rate="1e1-1e2", took="8s+", done="<90%")
+    caller = time.monotonic() - began
+    assert caller < 2.0, caller
+    assert telemetry.flush(30)
+    assert telemetry.Local(spool).bytes() <= (telemetry.FILE_BYTES
+                                              * telemetry.FILES)
+
+
+def test_off_in_the_middle_of_a_run_stops_queueing_and_disposes(spool,
+                                                                monkeypatch):
+    for _ in range(20):
+        assert telemetry.record("progress", phase="move", done="<50%")
+    assert _kept(spool)
+    monkeypatch.setenv("MIGKIT_TELEMETRY", "off")
+    began = time.monotonic()
+    got = [telemetry.record("progress", phase="move", done="<50%")
+           for _ in range(1000)]
+    assert not any(got) and time.monotonic() - began < 2.0
+    assert not list(spool.glob("events-*.jsonl"))
+    assert telemetry.progressed("move", 1, 10, 1.0, 1.0) is False
+    assert telemetry.flush(5) and not list(spool.glob("events-*.jsonl"))

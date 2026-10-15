@@ -10473,13 +10473,31 @@ Built 2026-10-16 (`migkit/telemetry.py`, proved by
   `migkit telemetry show [--schema]` prints the state, the disclosure and
   every kept event. Disclosure on the manual's Telemetry page and README.
 
+Built 2026-10-16, schema 1.1 (same files; tests written, not yet run):
+- The five other kinds are emitted by their owners through typed calls
+  that never raise: progress by `planner.progress` (buckets and rate; at
+  most one event per 30 s, and on the end the time over the first
+  estimate), resources by `model.Model.observe` (workers the model
+  allotted and ran, memory the workers hold), recovery by
+  `faults.retried` (failure class and the action `decide.recovery` chose,
+  tries, how it ended; the exception by type only), coverage by
+  `verdict.summarize` (scope compared in a bucket, the verdict, the
+  guarantees only for a check that came out the same), intervention by
+  `autonomous.ask` (asked, answered, the question's key alone).
+- New codes instead of strings: recovery `fault` and `path`, intervention
+  `question`, intervention `did` (renamed from `kind`, which shadowed the
+  event's own kind), and the `crash` kind (command, phase, error category).
+  `cli._stopped` emits it; the traceback stays in the local debug log, and
+  a diagnostics bundle adds only a `bundled` code.
+- Canaries now cover all five emitters, a crash and the bundle; tests
+  assert the spool costs the caller under 2 s per 1000 events and that off
+  in mid-run stops queueing and disposes of the spool.
+
 Not done: no destination, transport, receiver, retention or identifiers
-(storage undecided); progress, resources, recovery, coverage and
-intervention events have a schema but their owners (watch/ETA, resource
-coordinator, failure catalogue, verdict, approvals) do not emit them yet;
-crash reports and support bundles are not yet routed through the same
-boundary; the analysis loop is not built; canaries cover the decision and
-command paths only.
+(storage undecided); the analysis loop is not built; eta_off is measured
+for the move phase only; coverage is emitted by the check envelope, not
+by each verification rung, so its guarantees are the command's chosen
+ways, not per unit; the tests above have not been run (final suite).
 
 ## P1-SOURCE-HIERARCHY: readable project and source organization
 

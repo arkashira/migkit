@@ -445,6 +445,15 @@ def _check(check):
     return got, None
 
 
+def _recovered(hurt, outcome, tries=None):
+    """Tell telemetry how a failure that was met ended, by its class and
+    the action chosen; nothing where no failure was met."""
+    if hurt is not None:
+        from . import telemetry
+        name, path, made, error = hurt
+        telemetry.recovered(name, path, tries or made, outcome, error)
+
+
 def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
             check=None, renew=None, log=None, label="", backoff=None,
             wait=None, ledger=None, owned=None, breaker=None):
@@ -477,7 +486,7 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
         if state == COMMITTED:
             return value
         reconciled = state
-    last, told = None, None
+    last, told, hurt = None, None, None
     for i in range(tries):
         if reconciled == RUNNING:
             state, value = _check(check)
@@ -523,6 +532,7 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
                 e.fault, e.recovery = told.fault.name, got.path
             except (AttributeError, TypeError):
                 pass
+            hurt = (told.fault.name, got.path, i + 1, e)
             if got.path == "reconcile":
                 state, value = _check(check)
                 reconciled = state
@@ -533,10 +543,12 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
                     ledger.own(owned.key, state=state or "unknown")
                 if state == COMMITTED:
                     breaker.ok(side)
+                    _recovered(hurt, "recovered")
                     return value
                 if state in (RUNNING, NOTHING) and i < tries - 1:
                     wait(backoff(i))
                     continue
+                _recovered(hurt, "failed")
                 raise
             if got.path == "pause" and told.fault.name == "expired_credential":
                 renew()
@@ -549,12 +561,15 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
                 wait(delay)
                 reconciled = None
                 continue
+            _recovered(hurt, "failed")
             raise
         breaker.ok(side)
         if keep:
             ledger.own(owned.key, state="done")
+        _recovered(hurt, "recovered", i + 1)
         return out
     if last is not None:
+        _recovered(hurt, "failed")
         raise last
     raise RuntimeError(f"{name}: the outcome could not be settled within"
                        f" {tries} tries, so the work is not run again")

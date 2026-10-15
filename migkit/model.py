@@ -331,6 +331,11 @@ class Model:
             "workers": workers,
             "seconds_a_row": costs[len(costs) // 2] if costs else None,
             "at": time.time()}
+        from . import telemetry
+        telemetry.resourced(
+            "move", self.little, workers,
+            memory=self.worker_memory * workers
+            if self.worker_memory and workers else None)
 
     def too_wide(self, free):
         """Why not even one worker fits in `free` bytes of this machine's

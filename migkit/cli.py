@@ -676,6 +676,8 @@ def _stopped(e, ctx):
     # anything else: the database's or the program's words, the traceback
     # to the debug log - nobody reads a traceback for a server's refusal
     where, secrets = _debug_log(ctx), _secrets(ctx)
+    from . import telemetry
+    telemetry.crashed(ctx.info_name, e)
     try:
         where.parent.mkdir(parents=True, exist_ok=True)
         with where.open("a") as f:
@@ -917,6 +919,8 @@ def doctor(install):
         from . import config as _config
         from . import diagnostics
         got = diagnostics.write(bundle, Path(_config.CONF), _config.REPORTS)
+        from . import telemetry
+        telemetry.intervened("bundled", phase="report")
         console.print(f"diagnostics: {bundle} ({len(got)} files; passwords,"
                       " tokens, addresses' credentials and every finding's"
                       " values left out)")

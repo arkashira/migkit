@@ -34,7 +34,9 @@ import threading
 import time
 from pathlib import Path
 
-SCHEMA = 1
+#: 1.1 added the emitters' own codes: a fault class and the action taken
+#: for it, the question put to the operator, and the `crash` kind
+SCHEMA = 1.1
 
 #: what is collected, why, where it goes and how to stop it: the manual's
 #: page and `telemetry show` say these words
@@ -82,7 +84,19 @@ RECOVERIES = ("retry", "resume", "fallback", "autotune", "reconcile",
               "gave up")
 OUTCOMES = ("recovered", "failed", "blocked")
 INTERVENTIONS = ("paused", "resumed", "cancelled", "approved", "overrode",
-                 "retried by hand", "repaired by hand")
+                 "retried by hand", "repaired by hand", "asked", "answered",
+                 "bundled")
+#: the phase a command works in, for a stop that no phase announced
+PHASE_OF = {"assess": "assess", "advise": "assess", "doctor": "assess",
+            "init": "configure", "hops": "configure",
+            "convert-schema": "schema", "schema": "schema",
+            "setup-target": "schema", "users": "schema",
+            "gen-migration": "plan", "move": "move", "migrate": "move",
+            "sync": "follow", "tail": "follow", "replicate": "follow",
+            "check": "verify", "sample-diff": "verify", "repair": "repair",
+            "rollback": "rollback", "report": "report", "history": "report",
+            "watch": "report", "monitor": "report", "state": "report",
+            "ui": "report"}
 COVERAGE = ("0", "<50%", "<90%", "<99%", "<100%", "100%")
 
 
@@ -142,6 +156,21 @@ def _guarantees():
     from .guarantees import LEVELS
     return tuple(f"{g}:{level}" for g, levels in LEVELS.items()
                  for level in levels)
+
+
+def _faults():
+    from .faults import CATALOGUE
+    return tuple(CATALOGUE)
+
+
+def _paths():
+    from .faults import ACTIONS
+    return tuple(ACTIONS)
+
+
+def _questions():
+    from .autonomous import BY_KEY
+    return tuple(BY_KEY)
 
 
 def _bucket_names():
@@ -324,7 +353,7 @@ class Resources:
     workers_allocated: int = number(10 ** 5, "workers allocated")
     workers_used: int = number(10 ** 5, "workers that ran")
     connections: int = number(10 ** 5, "connections held")
-    memory: str = one_of(_sizes, "bytes of memory used")
+    memory: str = one_of(_sizes, "bytes of memory the workers hold")
     cpus: int = number(10 ** 4, "processors on this machine")
 
 
@@ -333,6 +362,8 @@ class Recovery:
     """A failure met and what was done about it."""
     phase: str = one_of(lambda: PHASES, "the phase")
     error: str = one_of(lambda: ERRORS, "the failure, by kind")
+    fault: str = one_of(_faults, "the class of failure")
+    path: str = one_of(_paths, "the action the decision engine chose")
     action: str = one_of(lambda: RECOVERIES, "what was done")
     outcome: str = one_of(lambda: OUTCOMES, "how it ended")
     attempts: int = number(10 ** 4, "attempts")
@@ -352,12 +383,23 @@ class Coverage:
 class Intervention:
     """The operator stepping in."""
     phase: str = one_of(lambda: PHASES, "the phase")
-    kind: str = one_of(lambda: INTERVENTIONS, "what they did")
+    did: str = one_of(lambda: INTERVENTIONS, "what they did")
+    question: str = one_of(_questions, "the question migkit put to them")
+
+
+@dataclasses.dataclass(frozen=True)
+class Crash:
+    """A stop migkit did not expect: its kind and where, never its words;
+    the traceback stays in the local evidence folder."""
+    command: str = one_of(_commands, "the command")
+    phase: str = one_of(lambda: PHASES, "the phase it worked in")
+    error: str = one_of(lambda: ERRORS, "what stopped it, by kind")
 
 
 KINDS = {"run": Run, "decision": Decision, "progress": Progress,
          "resources": Resources, "recovery": Recovery,
-         "coverage": Coverage, "intervention": Intervention}
+         "coverage": Coverage, "intervention": Intervention,
+         "crash": Crash}
 
 
 def _check(name, value, meta):
@@ -394,7 +436,7 @@ def _check(name, value, meta):
     return got
 
 
-def make(kind, **fields):
+def make(kind, /, **fields):
     """The event of `kind` as it is kept: {"schema", "kind", "hour",
     fields}; `Rejected` for an unknown kind or field, or a value outside
     its field's set."""
@@ -603,7 +645,7 @@ def dropped():
     return _DROPPED
 
 
-def record(kind, **fields):
+def record(kind, /, **fields):
     """Keep one event, without waiting: True if it was queued. Off, the
     spool is disposed of (once) and nothing is kept; a full queue drops
     the event and counts it. `Rejected` is the only thing raised: a
@@ -666,6 +708,10 @@ class Command:
         self.command, self.params, self.hop = command, params, hop
         self.began = time.time()
         self.chosen, self.decisions, self.fallbacks = {}, 0, 0
+        #: the guarantees the ways chosen in this command reach
+        self.reached = set()
+        global _CURRENT
+        _CURRENT = self
 
     def heard(self, got):
         try:
@@ -697,6 +743,7 @@ class Command:
                    (getattr(got, "guarantees", ()) or ())} & allowed
         self.decisions += 1
         self.fallbacks += fell
+        self.reached |= reached
         record("decision",
                strategy=names.get(label, "other") if label else "other",
                reasons=tuple(sorted(reasons))[:16],
@@ -706,6 +753,9 @@ class Command:
                trial=bool(getattr(got, "trial", 0)))
 
     def ended(self, code=None, error=None):
+        global _CURRENT
+        if _CURRENT is self:
+            _CURRENT = None
         try:
             self._ended(code, error)
         except Exception:  # noqa: BLE001 - telemetry never stops a run
@@ -741,6 +791,9 @@ class Command:
                dropped=min(_DROPPED, 10 ** 9))
 
 
+_CURRENT = None
+
+
 def _scheduled():
     from . import envkeys
     try:
@@ -756,3 +809,106 @@ def rung_lacks(rung, why, words):
     from .decide import lacking
     said = str(why)
     return {cap for cap in words if lacking(cap, rung) in said}
+
+
+# ---- the other kinds, from the code that knows them ---------------------------
+# Each emitter takes typed values, makes the event and keeps it; none raises:
+# an event refused or a spool that cannot be written never changes a run.
+
+def _emit(what, /, **fields):
+    try:
+        return record(what, **fields)
+    except Exception:  # noqa: BLE001 - telemetry never stops a run
+        return False
+
+
+#: seconds between one phase's progress events; the last one always goes
+PROGRESS_EVERY = 30.0
+_PACE = {}
+
+
+def progressed(phase, rows, total, rate, took, done=False, size=None,
+               now=None):
+    """`planner.progress`: where a phase stands, as buckets. The first
+    estimate of the whole phase is kept in memory, and once the phase is
+    done `eta_off` is the time it took over that estimate."""
+    now = time.monotonic() if now is None else now
+    key = phase
+    seen = _PACE.get(key)
+    left = (max(total - rows, 0) / rate) if rate and total else None
+    if seen is None or took < seen["took"]:
+        seen = _PACE[key] = {"took": took, "at": None, "whole": None}
+    seen["took"] = took
+    if seen["whole"] is None and left is not None and not done:
+        seen["whole"] = took + left
+    if not done and seen["at"] is not None \
+            and now - seen["at"] < PROGRESS_EVERY:
+        return False
+    seen["at"] = now
+    off = None
+    if done:
+        whole = _PACE.pop(key, seen)["whole"]
+        off = took / whole if whole else None
+    return _emit("progress", phase=phase, rows=bucket(rows),
+                 bytes=bucket(size) if size is not None else None,
+                 rate=bucket(rate or 0), took=seconds_bucket(took),
+                 eta_off=min(off, 1000) if off is not None else None,
+                 done="100%" if done else coverage(rows, total))
+
+
+def resourced(phase, allocated, used, memory=None, connections=None):
+    """`model.Model.observe`: the workers the model allotted and the
+    workers the phase ran, and the memory they hold."""
+    return _emit("resources", phase=phase,
+                 workers_allocated=min(allocated, 10 ** 5)
+                 if allocated is not None else None,
+                 workers_used=min(used, 10 ** 5) if used is not None
+                 else None,
+                 connections=min(connections, 10 ** 5)
+                 if connections is not None else None,
+                 memory=bucket(memory) if memory else None,
+                 cpus=min(os.cpu_count() or 1, 10 ** 4))
+
+
+#: how an action `decide.recovery` chose reads as what was done
+_DONE = {"reconcile": "reconcile", "replan": "fallback",
+         "isolate": "fallback", "stop": "gave up"}
+
+
+def recovered(fault, path, tries, outcome, error=None):
+    """`faults.retried`: a class of failure (`faults.CATALOGUE`), the
+    action chosen for it, the tries made and how it ended. The exception
+    is read by its type only (`error_category`)."""
+    return _emit("recovery", fault=fault, path=path,
+                 action=_DONE.get(path, "retry"), outcome=outcome,
+                 attempts=min(tries, 10 ** 4),
+                 error=error_category(error) if error is not None
+                 else None)
+
+
+def verified(records, decision):
+    """`verdict.summarize`: how much of the scope a check compared and
+    the verdict. The guarantees the ways reached are named only for a
+    check that came out the same."""
+    total = len(records)
+    same = sum(1 for r in records if r.get("status") == "ok")
+    reached = (sorted(_CURRENT.reached) if _CURRENT is not None
+               and decision.status == "same" else ())
+    return _emit("coverage", phase="verify", verified=coverage(same, total),
+                 guarantees=tuple(reached)[:16],
+                 completion=completion(decision.exit),
+                 units=bucket(total))
+
+
+def intervened(did, question=None, phase=None):
+    """`autonomous.ask`: the operator was asked, or answered, a question
+    of `autonomous.QUESTIONS`, by its key alone."""
+    return _emit("intervention", phase=phase, did=did, question=question)
+
+
+def crashed(command, error):
+    """`cli._stopped`: an unexpected stop, by the exception's type and the
+    phase its command works in. The traceback is the local debug log's."""
+    return _emit("crash", command=command if command in _commands()
+                 else "other", phase=PHASE_OF.get(command, "report"),
+                 error=error_category(error))
