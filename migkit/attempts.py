@@ -209,16 +209,12 @@ class Ledger:
         self._lock = threading.Lock()
         self.attempts = {}
         self.durations = {}
-<<<<<<< HEAD
         #: operations by identity (`faults.Owned.key`): state, tries, fault
         self.operations = {}
-||||||| 7c40b782
-=======
         #: the units opened (`unit_opened`), by name
         self.records = {}
         #: this run's mark on what it opens and attempts
         self.run = os.urandom(6).hex()
->>>>>>> worktree-agent-abe14b67862374ad8
         if path:
             from .durable import read_state
             got = read_state(path, "cache")
@@ -226,7 +222,6 @@ class Ledger:
                 self.attempts = dict(got.get("attempts") or {})
                 self.durations = {k: list(v) for k, v in
                                   (got.get("durations") or {}).items()}
-<<<<<<< HEAD
                 self.operations = dict(got.get("operations") or {})
 
     def owned(self, key):
@@ -247,10 +242,7 @@ class Ledger:
         with self._lock:
             return {k: dict(v) for k, v in self.operations.items()
                     if v.get("state") in ("began", "unknown", "running")}
-||||||| 7c40b782
-=======
                 self.records = dict(got.get("units") or {})
->>>>>>> worktree-agent-abe14b67862374ad8
 
     def waits(self, operation):
         with self._lock:
@@ -442,13 +434,8 @@ class Ledger:
         with self._lock:
             text = json.dumps({"attempts": self.attempts,
                                "durations": self.durations,
-<<<<<<< HEAD
                                "operations": self.operations},
-||||||| 7c40b782
-                               "durations": self.durations},
-=======
                                "units": self.records},
->>>>>>> worktree-agent-abe14b67862374ad8
                               sort_keys=True, default=str)
         write_atomic(self.path, text)
 
