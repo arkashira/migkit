@@ -11128,15 +11128,12 @@ Not done: a same-engine pair's inner engines must say their side (`pair_side`), 
 ### W12L (2026-10-16) change-sheet command, doctor numbers
 Done: `migkit change-sheet` (export, `--back`); `doctor` says connections per side, memory and disk spool of this machine, and objects created on the servers per leg (`report.footprint_lines`).
 Not done: the run does not call `write_back` by itself as each step ends; server objects are read from each way's `leaves` words (no structured per-side counts on `decide.Rung`); the disk spool is the bytes carried, before compression.
-<<<<<<< HEAD
 * **P0-SCENARIOS.consolidate / .engine, W12H - not done.** A per-source
   slice verify at a follow position; `keys: prefix` is accepted by
   `consolidate.settings` but the hop-key check (`hopkeys`) is not touched;
   `scenarios.storage_copy_case` is not yet read by the move's copy-way
   choice; no capabilities cell names the ClickHouse storage reads.
 W12D (R19.9/R20.3/W10A tail) not done: the Arrow batches (`pgslot.columnar`) are built and proved equal on both paths but the appliers still take change records - handing them the batches is each target engine's `neutral_apply`; the MySQL stream's heartbeat period is the tail's longest idle wait, not yet measured per source; the stream-vs-poll latency is not measured into `decide.change_read`'s costs yet; MSSQL keeps polling, paced by `tailctl.Pace` like every polled tail. Sandbox proof against live PostgreSQL/MySQL streams is owed.
-||||||| ba8d5c61
-=======
 
 ## Left after waves 10 and 11 (2026-10-16)
 
@@ -11179,4 +11176,3 @@ What waves 10 (W10A-E) and 11 (W11A-F), and the wave 9 review (CRIT4), left open
 CRIT4 (wave 9 review) items, checked on `c95da9db`: 1 (one consent for the switch) is closed: `--switch` is its own flag (cli.py:2804). 2 (PostgreSQL key cycle as a hard stop) is closed by b3adbb81 (subject only, not re-run). 3 (second throttle on `Pace`) is closed: `faults.Throttle` is gone (rg: no match). 5 (two recovery ladders) is closed: `autonomous._unit` no longer carries `TRIES` or `MIN_SCALE` (rg: no match). 6 (fixed retry count) is closed by the same removal. 7 (telemetry pace keyed by phase only) is closed: `_pace_key(phase, where)` (telemetry.py:886). 8 (whole-table count per failed batch) is closed: the count is span-scoped (generic.py:1700-1712). 4 is open, listed above.
 
 Not done: the rows above are not run on a server. Everything that W10-W11 wrote is proved on fakes, and the tests are written but not run until the wave 12 gate.
->>>>>>> w12o
