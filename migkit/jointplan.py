@@ -198,6 +198,11 @@ class Plan:
     #: why not
     admitted: bool = True
     refused: str = ""
+    #: whether the target's foreign keys hold while rows load, as the
+    #: mover said (`Engine.foreign_keys_in_load`)
+    fks: str = "during"
+    #: {table: guarantees.Semantics} it was admitted against
+    semantics: dict = None
 
     def ways(self):
         """{table: way name}."""
@@ -214,6 +219,7 @@ class Plan:
                 "order": list(self.order),
                 "truth": self.truth, "tables_at_once": self.tables,
                 "admitted": self.admitted, "refused": self.refused,
+                "foreign_keys": self.fks,
                 "tables": {n: {"way": p.way, "start": p.start,
                                "copied": p.copied, "indexed": p.indexed,
                                "checked": p.checked,
@@ -991,6 +997,7 @@ def admitted(plan, semantics, fks="during"):
                     for n, p in sorted(plan.placed.items())))
     ok, why = decide.admit(sched, semantics, "the tables planned as one")
     plan.admitted, plan.refused = ok, why
+    plan.fks, plan.semantics = fks, semantics
     if not ok:
         plan.meets = False
         plan.why = "; ".join(x for x in (plan.why, why) if x)
@@ -1216,5 +1223,15 @@ def semantics_of(eng, db, tables=None, tail=False):
     cat = drift.catalog_of(got)
     return guarantees.read_hop(
         cat, getattr(eng, "src_engine", None) or eng,
-        getattr(eng, "dst_engine", None) or eng,
+        getattr(eng, "dst_engine", None) or eng, _target_catalog(eng, db),
         tables=set(tables) if tables is not None else None, tail=tail)
+
+
+def _target_catalog(eng, db):
+    """The target's catalogue of `db` as the move finds it, so what each
+    table must keep is held to both sides; None where it cannot be read
+    so, and the target is then not compared."""
+    from . import drift
+    r = drift.side_reader(eng, "dst")
+    got = drift.shape(r, "dst", db) if r is not None else None
+    return drift.catalog_of(got) if got else None

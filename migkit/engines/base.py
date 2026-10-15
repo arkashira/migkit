@@ -6545,7 +6545,7 @@ class Engine:
                 at = hash((table, _ident(row[1], repr))) % lanes
             out[at].append((table, row))
         out = [lane for lane in out if lane]
-        return out if len(out) > 1 else None
+        return self._lanes_admitted(out, ordered) if len(out) > 1 else None
 
     def _net_rows(self, side, db, changes):
         """A batch as the rows to write, in the fewest statements their
@@ -7152,6 +7152,54 @@ class Engine:
         rendering had to be pinned down first.
         """
         raise self._no_canon("digest a table")
+
+    def _lanes_admitted(self, lanes, groups):
+        """`lanes` where the decision engine admits them as a schedule
+        (`guarantees.lanes_schedule`, `decide.admit`) against the tables
+        the engine says are tied (`_ordered_tables`), else None: the batch
+        goes as one, in the source's order, and why is kept
+        (`lanes_refused`) for the tail to say."""
+        from .. import decide, guarantees
+        name = self._lane_name
+        here = {name(t) for lane in lanes for t, _ in lane}
+        sem = {t: s for t, s in guarantees.tied_of(groups).items()
+               if t in here}
+        ok, why = decide.admit(guarantees.lanes_schedule(lanes, sem, name),
+                               sem, "a batch applied in lanes side by side")
+        if ok:
+            return lanes
+        self.__dict__["lanes_refused"] = why
+        return None
+
+    #: when a copied range's mark is saved: after its rows are committed on
+    #: the target (`ranges.finished` runs after the commit; the failpoints
+    #: `range.committed` and `range.saved` prove the order). A target that
+    #: acknowledges a write before it is durable says "before durable".
+    RANGE_MARK = "after durable"
+
+    #: the copy's range workers read under one snapshot the source shares
+    #: between its connections, rather than each range as of its own mark
+    SHARED_SNAPSHOT = False
+
+    #: the target loads rows with its foreign keys not checked (a session
+    #: that skips them), so no order between tables is owed for the load
+    LOAD_SKIPS_KEYS = False
+
+    def foreign_keys_in_load(self, db):
+        """Whether the target's foreign keys hold while the move loads
+        `db`: "after" where a load's window took them off and keeps them
+        off (`indexes.ForeignKeyWindow`, its record) or the target loads
+        without checking them (`LOAD_SKIPS_KEYS`), else "during" - read
+        from the mover, never assumed by the planner."""
+        dst = getattr(self, "dst_engine", None) or self
+        if getattr(dst, "LOAD_SKIPS_KEYS", False):
+            return "after"
+        hop = getattr(self, "hop", None)
+        if hop is not None:
+            from ..movers import _fks_off
+            if _fks_off(hop, db):
+                return "after"
+        return "during"
 
 
 class Enough(Exception):

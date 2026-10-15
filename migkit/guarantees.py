@@ -482,7 +482,7 @@ class Schedule:
 
 def _linked(semantics):
     out = {t for t, s in semantics.items()
-           if any(p in semantics for p in s.parents)}
+           if s.self_ref or any(p in semantics for p in s.parents)}
     return out | {p for t in out for p in semantics[t].parents
                   if p in semantics}
 
@@ -575,6 +575,62 @@ def breaks(schedule, semantics):
     return out
 
 
+def tied_of(groups):
+    """{table: Semantics} of a tail's tables from the engine's own groups
+    ({table: group}, `Engine._ordered_tables`): tables sharing a group
+    tied to each other, a table alone in its group - a second unique
+    index, where one row's value can move to another - tied to itself."""
+    by = {}
+    for t, g in (groups or {}).items():
+        by.setdefault(g, []).append(t)
+    out = {}
+    for ts in by.values():
+        ts = sorted(ts)
+        for t in ts:
+            out[t] = Semantics(table=t, parents=tuple(x for x in ts
+                                                      if x != t),
+                               self_ref=len(ts) == 1, order="per key",
+                               deletes=True)
+    return out
+
+
+def lanes_schedule(lanes, semantics, name=None):
+    """The `Schedule` a batch applied in `lanes` ([[(table, row)]]) runs
+    as: "by transaction" where every table whose changes need their order
+    sits whole in one lane with every table it is tied to, "by key" where
+    one is spread over lanes or apart from its kin. The position moves
+    once every lane has committed (`Engine.neutral_apply` returns then)."""
+    name = name or (lambda t: t)
+    where = {}
+    for i, lane in enumerate(lanes or ()):
+        for table, _ in lane:
+            where.setdefault(name(table), set()).add(i)
+    linked = _linked(semantics)
+    spread = False
+    for t, at in where.items():
+        s = semantics.get(t)
+        if s is None or not s.needs_order():
+            continue
+        if len(at) > 1 and (t in linked or s.order == "as logged"):
+            spread = True
+        for p in s.parents:
+            if p in where and where[p] != at:
+                spread = True
+    return Schedule(at_once=len(lanes or ()) or 1, checkpoint="after durable",
+                    apply="by key" if spread else "by transaction")
+
+
+def copy_schedule(at_once, shared, followed, mark):
+    """The `Schedule` a copy's range workers run as: `at_once` tables side
+    by side, read under one snapshot where `shared`, else each range as of
+    its own mark; `followed` where a tail goes on from a position taken
+    before every read; `mark` when a range's mark is saved ("after
+    durable" or "before durable")."""
+    return Schedule(at_once=at_once or 1,
+                    snapshot="one" if shared else "per range",
+                    caught_up=bool(followed), checkpoint=mark)
+
+
 #: the faults a move is tried against (`failpoint`), each with what must
 #: hold after it: the run after ends equal, or the move stops saying why
 FAULTS = {
@@ -604,15 +660,15 @@ SAFETY_PROVED = {
         _SAFE + "test_a_move_with_foreign_keys_stopped_anywhere_ends_equal",
     "out-of-order dependent events":
         _SAFE + "test_lanes_by_key_over_tied_tables_are_not_admitted",
+    "crash before the tail's position moves":
+        _SAFE + "test_a_tail_stopped_before_its_position_with_keys_held"
+        "_ends_equal",
+    "duplicate delivery":
+        _SAFE + "test_a_change_delivered_twice_in_one_batch_lands_once",
+    "DDL during copy":
+        _SAFE + "test_a_shape_changed_between_ranges_stops_the_move",
     "concurrent delete during copy":
         _SAFE + "test_rows_deleted_between_a_stop_and_the_run_after_are_gone",
 }
 #: the faults whose test is owed, and why
-SAFETY_UNPROVED = {
-    "crash before the tail's position moves": "proved per engine by the"
-    " tail's own crash tests; not yet with foreign keys across tables",
-    "duplicate delivery": "the tail's numbered batches skip a batch seen"
-    " twice; a change delivered twice inside one batch is not injected yet",
-    "DDL during copy": "the tail stops on a change of shape; a change of"
-    " shape between a copy's ranges is not injected yet",
-}
+SAFETY_UNPROVED = {}

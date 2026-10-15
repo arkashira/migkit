@@ -3194,7 +3194,8 @@ def _joint_for_move(hop, eng, m, d, names, most, log):
     try:
         facts = eng.table_facts("src", d)
         sem = jointplan.semantics_of(eng, d, names)
-        jp = jointplan.for_move(hop, m, facts, set(names), most, d, sem)
+        jp = jointplan.for_move(hop, m, facts, set(names), most, d, sem,
+                                eng.foreign_keys_in_load(d))
     except SystemExit:
         raise
     except Exception:  # noqa: BLE001 - the move goes on as sized
@@ -3203,14 +3204,45 @@ def _joint_for_move(hop, eng, m, d, names, most, log):
         return None
     for line in jointplan.lines(jp):
         log(f"plan: {line}")
-    if not jp.admitted:
-        log(f"plan: not admitted as it stands - {jp.refused}")
     decide.record(hop, {
         "work": f"the move of {d}", "plan": jp.as_evidence(),
         "facts": jointplan.account(hop, m, facts, jp)}, log,
-        way="the tables planned as one",
-        reason="; ".join(jointplan.lines(jp)))
+        way="the tables planned as one" if jp.admitted else "stop",
+        reason=jp.refused or "; ".join(jointplan.lines(jp)))
+    if not jp.admitted:
+        # a plan that breaks what the move must keep is not run in part:
+        # the move stops before its first row, with what to do next
+        raise SystemExit(f"{d}: not started - the tables as planned do not"
+                         f" keep what the move must keep: {jp.refused}")
     return jp
+
+
+def _copy_admitted(hop, eng, d, jp, at_once, followed, log):
+    """The copy's range workers asked of the decision engine as a schedule
+    of their own (`guarantees.copy_schedule`): ranges read each as of its
+    own mark, the tables at once, the marks saved after the target's
+    commit. Refused - tied tables read at different moments with no tail
+    to carry what changed between - the tables are copied one at a time,
+    in the plan's order, and why is said and recorded."""
+    from . import decide, guarantees
+    sem = getattr(jp, "semantics", None) if jp is not None else None
+    if not sem or at_once <= 1:
+        return at_once
+    src = getattr(eng, "src_engine", None) or eng
+    dst = getattr(eng, "dst_engine", None) or eng
+    sched = guarantees.copy_schedule(
+        at_once, getattr(src, "SHARED_SNAPSHOT", False), followed,
+        getattr(dst, "RANGE_MARK", "after durable"))
+    ok, why = decide.admit(sched, sem, "the copy's ranges side by side")
+    if ok:
+        return at_once
+    if sched.checkpoint == "before durable":
+        raise SystemExit(f"{d}: not started - {why}")
+    log(f"plan: tables copied one at a time - {why}")
+    decide.record(hop, {"work": f"the copy of {d}", "refused": why,
+                        "tables_at_once": at_once}, log,
+                  way="one table at a time", reason=why)
+    return 1
 
 
 def _largest_first(eng, d, tables):
@@ -3239,7 +3271,7 @@ def _largest_first(eng, d, tables):
     return sorted(tables, key=size)
 
 
-def _copy_tables(hop, eng, d, tables, chunk, ck):
+def _copy_tables(hop, eng, d, tables, chunk, ck, followed=False):
     """The tables copied side by side, as many at once as the hop's
     `workers` - and only as many as both servers take: the gate asks each
     side how it is doing before a table starts, and narrows when either
@@ -3278,6 +3310,8 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
     joint = _joint_for_move(hop, eng, m, d, names, most, log)
     if joint is not None and joint.workers:
         start = joint.workers
+    if _copy_admitted(hop, eng, d, joint, most, followed, log) == 1:
+        most = start = 1
     total, _ = _source_rows(eng, d)
     where = hop.report_dir(d)
     ways = getattr(eng, "measured_ways", None) or (lambda: [])
@@ -3634,7 +3668,8 @@ def _move_full(hop, eng, db, table, chunk, go):
             else:
                 with eng.load_window(d, lambda m: console.print(f"  {m}"),
                                      {t for _, t in tables}):
-                    _copy_tables(hop, eng, d, tables, chunk, ck)
+                    _copy_tables(hop, eng, d, tables, chunk, ck,
+                                 followed=point is not None)
             if not table:
                 eng.finish_created(d, lambda m: console.print(f"  {m}"))
                 eng.carry_database_objects(

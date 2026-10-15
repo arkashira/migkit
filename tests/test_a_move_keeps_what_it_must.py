@@ -430,3 +430,261 @@ def test_rows_deleted_between_a_stop_and_the_run_after_are_gone(
     again = _migkit(tmp_path, "move", "keeps", "--go", "--chunk", "20000")
     assert again.returncode == 0, again.stdout[-3000:] + again.stderr[-2000:]
     _same_and_whole(pg_pair)
+
+
+# --- every writer asks admission (lanes, ranges, the joint plan) ----------
+
+class _Lanes:
+    """Just enough of an engine for `Engine._lanes_admitted`."""
+
+    def _lane_name(self, table):
+        return table.split(".")[-1]
+
+
+def test_lanes_that_split_tied_tables_go_as_one_with_why():
+    from migkit.engines.base import Engine
+    groups = {"customers": 1, "orders": 1, "lines": 1, "codes": 2}
+    sem = guarantees.tied_of(groups)
+    assert sem["orders"].parents == ("customers", "lines")
+    assert sem["codes"].self_ref and not sem["orders"].self_ref
+    row = ("upsert", {"id": 1}, {})
+    whole = [[("public.orders", row), ("public.lines", row)],
+             [("public.events", row), ("public.events", row)]]
+    assert Engine._lanes_admitted(_Lanes(), whole, groups) is whole
+    apart = [[("public.orders", row)], [("public.lines", row)]]
+    eng = _Lanes()
+    assert Engine._lanes_admitted(eng, apart, groups) is None
+    assert "lines, orders are tied" in eng.lanes_refused
+    # a table tied to itself spread over two lanes is refused alike
+    spread = [[("codes", row)], [("codes", row)]]
+    eng = _Lanes()
+    assert Engine._lanes_admitted(eng, spread, groups) is None
+    assert "codes" in eng.lanes_refused
+    assert guarantees.lanes_schedule(spread, sem).apply == "by key"
+    assert guarantees.lanes_schedule(whole, sem, _Lanes()._lane_name
+                                     ).apply == "by transaction"
+
+
+def test_ranges_read_apart_are_admitted_only_where_a_tail_catches_up():
+    sem = guarantees.read_hop(_shop())
+    ok, why = decide.admit(guarantees.copy_schedule(
+        4, False, False, "after durable"), sem)
+    assert not ok and "read each as of its own moment" in why
+    assert decide.admit(guarantees.copy_schedule(
+        4, False, True, "after durable"), sem) == (True, "")
+    assert decide.admit(guarantees.copy_schedule(
+        4, True, False, "after durable"), sem) == (True, "")
+    ok, why = decide.admit(guarantees.copy_schedule(
+        4, True, True, "before durable"), sem)
+    assert not ok and "move it after the target's commit" in why
+    # tables tied to nothing are read apart safely
+    loose = {"events": sem["events"]}
+    assert decide.admit(guarantees.copy_schedule(
+        4, False, False, "after durable"), loose)[0]
+
+
+def test_the_copy_runs_one_table_at_a_time_where_its_ranges_are_refused():
+    from migkit import cli
+    said = []
+    jp = jointplan.Plan(placed={}, makespan=1.0,
+                        semantics=guarantees.read_hop(_shop()))
+    eng = _Engine()
+    assert cli._copy_admitted(None, eng, "db", jp, 4, False,
+                              said.append) == 1
+    assert said and "one at a time" in said[0]
+    assert cli._copy_admitted(None, eng, "db", jp, 4, True,
+                              said.append) == 4
+    assert cli._copy_admitted(None, eng, "db", None, 4, False,
+                              said.append) == 4
+    early = _Engine(RANGE_MARK="before durable")
+    with pytest.raises(SystemExit, match="not started"):
+        cli._copy_admitted(None, _Engine(dst_engine=early), "db", jp, 4,
+                           True, said.append)
+
+
+def test_a_refused_plan_stops_the_move_with_what_to_do(monkeypatch):
+    from migkit import cli
+    got = {}
+
+    def for_move(hop, m, facts, names, most, d, sem, fks):
+        got["fks"] = fks
+        return jointplan.admitted(
+            jointplan.Plan(placed={}, makespan=1.0, order=("a", "b")),
+            {"a": guarantees.Semantics("a", parents=("b",)),
+             "b": guarantees.Semantics("b", parents=("a",))}, fks)
+    monkeypatch.setattr(jointplan, "for_move", for_move)
+    monkeypatch.setattr(jointplan, "semantics_of", lambda *a, **k: {})
+    monkeypatch.setattr(jointplan, "account", lambda *a, **k: {})
+    eng = _Engine(table_facts=lambda side, d: {},
+                  foreign_keys_in_load=lambda d: "during")
+    said = []
+    with pytest.raises(SystemExit) as stop:
+        cli._joint_for_move(None, eng, _Engine(measured=True), "db",
+                            ["a", "b"], 4, said.append)
+    assert "not started" in str(stop.value)
+    assert "point at each other" in str(stop.value)
+    assert "take the keys off for the load" in str(stop.value)
+    assert got["fks"] == "during"
+    # the mover says the keys are off: the same tables load
+    eng.foreign_keys_in_load = lambda d: "after"
+    jp = cli._joint_for_move(None, eng, _Engine(measured=True), "db",
+                             ["a", "b"], 4, said.append)
+    assert jp.admitted and jp.as_evidence()["foreign_keys"] == "after"
+
+
+def test_the_mover_says_whether_the_keys_hold_during_the_load():
+    from migkit.engines.base import Engine
+    assert Engine.foreign_keys_in_load(_Engine(), "db") == "during"
+    skips = _Engine(dst_engine=_Engine(LOAD_SKIPS_KEYS=True))
+    assert Engine.foreign_keys_in_load(skips, "db") == "after"
+
+
+def test_the_target_catalogue_is_held_to_the_source(monkeypatch):
+    from migkit import drift
+    src, dst = _shop(), _shop()
+    dst.columns["orders"] = [c for c in dst.columns["orders"]
+                             if c.name != "note"]
+    monkeypatch.setattr(drift, "side_reader", lambda eng, side: side)
+    monkeypatch.setattr(drift, "shape", lambda r, side, db: {side: 1})
+    monkeypatch.setattr(drift, "catalog_of",
+                        lambda got: src if "src" in got else dst)
+    sem = jointplan.semantics_of(_Engine(), "db")
+    assert [g.said() for g in sem["orders"].gaps] == [
+        "orders: scope - column note is not on the target"]
+    assert not sem["customers"].gaps
+
+
+# --- the faults the tail and a change of shape bring -----------------------
+
+_TAIL = """
+import sys
+from pathlib import Path
+from migkit.config import Endpoint, Hop
+from migkit.engines.postgres import PostgresEngine
+where, name = Path(sys.argv[1]), sys.argv[2]
+src, dst = int(sys.argv[3]), int(sys.argv[4])
+hop = Hop(name=name, engine="postgres",
+          source=Endpoint(host="127.0.0.1", port=src, user="postgres",
+                          password="test"),
+          target=Endpoint(host="127.0.0.1", port=dst, user="postgres",
+                          password="test"),
+          databases=["postgres"], workers=4,
+          options={"follow_until": "caught_up"})
+hop.report_dir = lambda db=None: where
+pair = PostgresEngine(hop)._as_pair()
+pair.tail_apply("postgres", True, where / "tail-token.json", print)
+"""
+
+
+def _tail(where, name, pg_pair, fail=None):
+    env = dict(os.environ, PYTHONPATH=str(ROOT))
+    env.pop("MIGKIT_FAILPOINT", None)
+    if fail:
+        env["MIGKIT_FAILPOINT"] = fail
+    return subprocess.run([sys.executable, "-c", _TAIL, str(where), name,
+                           str(pg_pair["src"]), str(pg_pair["dst"])],
+                          env=env, capture_output=True, text=True,
+                          timeout=600)
+
+
+def _tail_ready(pg_pair, tmp_path, name):
+    _seed(pg_pair["src"])
+    _reset(pg_pair, tmp_path)
+    _hop(tmp_path, pg_pair)
+    moved = _migkit(tmp_path, "move", "keeps", "--go", "--chunk", "20000")
+    assert moved.returncode == 0, moved.stdout[-3000:]
+    where = tmp_path / "tail"
+    where.mkdir()
+    first = _tail(where, name, pg_pair)
+    assert first.returncode == 0, first.stdout + first.stderr
+    return where
+
+
+def _no_slot(pg_pair):
+    psql(pg_pair["src"], "select pg_drop_replication_slot(slot_name) from"
+                         " pg_replication_slots where slot_name like"
+                         " 'migkit_%'")
+
+
+@needs_docker
+def test_a_tail_stopped_before_its_position_with_keys_held_ends_equal(
+        pg_pair, tmp_path):
+    """The target's keys stay on through the tail; parents and their
+    children inserted and a parent deleted with its cascade, in batches
+    the lanes would cut - stopped after they apply, before the position
+    moves, the run after applies each once and leaves no orphan."""
+    where = _tail_ready(pg_pair, tmp_path, "keys_held")
+    try:
+        got = psql(pg_pair["src"], """
+            insert into public.customers select g, 'n-' || g
+              from generate_series(20001, 23000) g;
+            insert into public.orders select g, g - 60000, 'x'
+              from generate_series(80001, 83000) g;
+            insert into public.lines select g, 9, 'y'
+              from generate_series(80001, 83000) g;
+            delete from public.customers where id between 100 and 400""")
+        assert got.returncode == 0, got.stderr
+        stopped = _tail(where, "keys_held", pg_pair, "tail.applied:1:exit")
+        assert stopped.returncode != 0, stopped.stdout
+        again = _tail(where, "keys_held", pg_pair)
+        assert again.returncode == 0, again.stdout + again.stderr
+        _same_and_whole(pg_pair)
+    finally:
+        _no_slot(pg_pair)
+
+
+@needs_docker
+def test_a_change_delivered_twice_in_one_batch_lands_once(pg_pair,
+                                                         tmp_path):
+    """One batch holding the same rows changed again and again - inserted,
+    updated, deleted, inserted again under one key, two equal rows of a
+    table with no key - and the whole batch delivered a second time after
+    a stop before its position: each row ends as the source has it."""
+    where = _tail_ready(pg_pair, tmp_path, "twice")
+    try:
+        got = psql(pg_pair["src"], """
+            begin;
+            insert into public.events values (90001, 'a'), (90001, 'a');
+            update public.customers set name = 'one' where id = 5;
+            update public.customers set name = 'two' where id = 5;
+            delete from public.lines where order_id = 6;
+            insert into public.lines values (6, 0, 'again');
+            update public.lines set sku = 'again2' where order_id = 6;
+            commit""")
+        assert got.returncode == 0, got.stderr
+        stopped = _tail(where, "twice", pg_pair, "tail.applied:1:exit")
+        assert stopped.returncode != 0, stopped.stdout
+        again = _tail(where, "twice", pg_pair)
+        assert again.returncode == 0, again.stdout + again.stderr
+        _same_and_whole(pg_pair)
+        dup = psql(pg_pair["dst"], "select count(*) from public.events"
+                                   " where at = 90001").stdout.strip()
+        assert dup == "2", dup
+    finally:
+        _no_slot(pg_pair)
+
+
+@needs_docker
+def test_a_shape_changed_between_ranges_stops_the_move(pg_pair, tmp_path):
+    """A column added to a table after some of its ranges are copied: the
+    run after either stops naming the table or carries the new shape -
+    never rows read under two shapes said to be equal."""
+    _seed(pg_pair["src"])
+    _reset(pg_pair, tmp_path)
+    _hop(tmp_path, pg_pair)
+    first = _migkit(tmp_path, "move", "keeps", "--go", "--chunk", "20000",
+                    fail="range.saved:2:exit")
+    assert first.returncode != 0, first.stdout[-2000:]
+    got = psql(pg_pair["src"], "alter table public.orders add column"
+                               " extra int default 7")
+    assert got.returncode == 0, got.stderr
+    again = _migkit(tmp_path, "move", "keeps", "--go", "--chunk", "20000")
+    said = again.stdout + again.stderr
+    if again.returncode != 0:
+        assert "orders" in said, said[-3000:]
+        return
+    extra = psql(pg_pair["dst"], "select count(*) filter (where extra = 7)"
+                                 " || ':' || count(*) from public.orders"
+                 ).stdout.strip()
+    assert extra == "80000:80000", extra
+    _same_and_whole(pg_pair)

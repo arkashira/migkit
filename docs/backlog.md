@@ -10087,15 +10087,40 @@ Status 2026-10-16: PARTLY. Built:
   with foreign keys stopped at every mark and with deletes between stop and
   re-run).
 
-Not done: a refused joint plan is said and recorded but does not stop the
-move (whether the target's keys hold during the load is not yet a fact the
-mover reports, so the planner assumes they hold); the tail's parallel lanes
-(`LANES_FROM`), the copy's per-range snapshots and the checkpoint writers
-do not yet build a `Schedule` and ask `decide.admit`; the target's
-catalogue is not read into `read_hop` by the move; duplicate delivery inside
-one batch, DDL between a copy's ranges and a crash before the tail's
-position with foreign keys are UNPROVED; the tests are written and not yet
-run; no measured comparison at high concurrency.
+Status 2026-10-16 (W9B): every writer asks admission.
+
+- A joint plan `decide.admit` refuses stops the move before its first row
+  (`cli._joint_for_move`): the refusal, with the gap's next step, is the
+  operator's line and the decision record's (way "stop").
+- The mover reports whether the target's foreign keys hold during the
+  load (`Engine.foreign_keys_in_load`: "after" where a load's
+  `indexes.ForeignKeyWindow` record keeps them off or the target loads
+  without checking them, `LOAD_SKIPS_KEYS`); the plan is admitted against
+  that and keeps it (`Plan.fks`, evidence `foreign_keys`).
+- The move reads the target's catalogue too (`jointplan._target_catalog`)
+  so `Semantics` compares both sides.
+- Tail lanes: `Engine._lanes` asks `decide.admit` with the batch's own
+  `guarantees.lanes_schedule` against the engine's tied tables
+  (`guarantees.tied_of`); lanes that split tied tables are refused, the
+  batch goes as one in the source's order, why kept in `lanes_refused`.
+  A table tied to itself (self reference, second unique index) counts as
+  tied (`guarantees._linked`).
+- Copy ranges and their marks: `cli._copy_admitted` asks with
+  `guarantees.copy_schedule` (one snapshot or per range, a kept position
+  a tail goes on from, `Engine.RANGE_MARK`); tied tables read apart with
+  no position are copied one table at a time with why said and recorded;
+  a mark saved before the target's commit stops the move.
+- The three faults moved to PROVES (tests written, not run): a tail
+  stopped before its position with keys held, a change delivered twice in
+  one batch, a column added between a copy's ranges.
+
+Not done: PostgreSQL's load window (session as a replica) does not yet set
+`LOAD_SKIPS_KEYS`, so its moves are planned as keys held (stricter, a key
+cycle stops the move); no engine sets `SHARED_SNAPSHOT`; the tail loop in
+the cross-engine pair does not yet say `lanes_refused` in its report;
+copying tied tables one at a time narrows the window, it does not read them
+as of one moment; the tests are written and not yet run; no measured
+comparison at high concurrency.
 
 
 ## P0-RESILIENCE-ALL: prevent, contain and recover from migration failures

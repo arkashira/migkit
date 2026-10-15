@@ -215,6 +215,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>'s goal is <...>: migrate runs <...>
 
+* <...>: not started - the tables as planned do not keep what the move must keep: <...>
+
 * <...>: not started - <...>
 
 * <...> reported success and <...> is still empty on the target: <...> ... | <...>. Nothing has been marked as moved - look at the copy's output above, and at the target server's log
