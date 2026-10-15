@@ -2,7 +2,7 @@
 the target is named, a side that cannot be read is no answer, and every
 cell of its capability row is decided."""
 from migkit import capabilities
-from migkit.capabilities import NOT_APPLICABLE, NOT_YET
+from migkit.capabilities import NOT_APPLICABLE
 from migkit.engines.generic import GenericEngine
 
 
@@ -53,5 +53,5 @@ def test_every_generic_capability_is_decided():
         assert row[cap] == NOT_APPLICABLE
         assert "standard driver" in capabilities.GAPS["generic"][cap][1]
     for cap in ("table-copy", "stream", "fence", "confirm", "delta"):
-        assert row[cap] == NOT_YET
-        assert capabilities.GAPS["generic"][cap][1] == "R13-GENERIC"
+        assert row[cap] == "yes"
+        assert cap not in capabilities.GAPS["generic"]

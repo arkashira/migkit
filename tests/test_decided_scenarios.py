@@ -632,3 +632,86 @@ def test_a_failed_verify_or_a_wrong_class_back_is_no_success(monkeypatch):
     _, facts = _restoring(monkeypatch, "db.r6i.large")
     with pytest.raises(SystemExit, match="not db.r7g.large"):
         scenarios.run_managed_case(facts, lambda: True)
+
+
+def _shard(kind, sources, targets, **tables):
+    return scenarios.shard_facts(kind, sources, targets, tables or {
+        "orders": {"key": ["customer_id"],
+                   "columns": ["id", "customer_id", "total"],
+                   "whole": False}})
+
+
+def test_a_split_places_rows_by_a_hash_range_of_the_key():
+    got = scenarios.shard_case(_shard("split", 1, 3))
+    assert got.choice.path == "shard-hash-range"
+    assert "1 sources to 3 targets" in got.words()
+
+
+def test_a_merge_writes_every_source_into_the_one_target():
+    got = scenarios.shard_case(_shard("consolidate", 4, 1))
+    assert got.choice.path == "shard-merge"
+
+
+@pytest.mark.parametrize("table, why", [
+    ({"key": [], "columns": ["id"], "whole": False}, "no shard key"),
+    ({"key": ["tenant"], "columns": ["id"], "whole": False},
+     "tenant is not among its columns"),
+])
+def test_a_table_without_its_shard_key_refuses_the_case(table, why):
+    got = scenarios.shard_case(_shard("split", 1, 2, events=table))
+    assert got.choice.path is None
+    assert why in got.choice.reason and "events" in got.choice.reason
+
+
+def test_a_table_every_target_takes_whole_needs_no_key():
+    got = scenarios.shard_case(_shard(
+        "split", 1, 2, countries={"key": [], "columns": ["code"],
+                                  "whole": True}))
+    assert got.choice.path == "shard-hash-range"
+    assert "taken whole by every target: countries" in got.words()
+
+
+@pytest.mark.parametrize("kind, sources, targets", [
+    ("split", 2, 3), ("split", 1, 1), ("consolidate", 1, 1),
+    ("consolidate", 3, 2)])
+def test_a_group_not_of_its_kinds_shape_is_refused(kind, sources, targets):
+    got = scenarios.shard_case(_shard(kind, sources, targets))
+    assert got.choice.path is None
+    assert f"{sources} sources and {targets} targets" in got.choice.reason
+
+
+def test_a_group_that_does_not_hold_together_is_said(monkeypatch):
+    from migkit import reshard
+
+    def broken(hop, db, siblings=None):
+        raise SystemExit("split: part b names no rule")
+    monkeypatch.setattr(reshard, "kind_of", lambda hop: "split")
+    monkeypatch.setattr(reshard, "group", broken)
+    facts = scenarios.shard_facts_of(SimpleNamespace(), None, "db")
+    got = scenarios.shard_case(facts)
+    assert got.choice.path is None
+    assert "part b names no rule" in got.choice.reason
+
+
+def test_the_shard_facts_are_read_off_the_group_and_the_engine(monkeypatch):
+    from migkit import reshard
+    g = SimpleNamespace(kind="split", conf={"shared": ["countries"]},
+                        sources=[1], targets=[1, 2])
+    monkeypatch.setattr(reshard, "kind_of", lambda hop: "split")
+    monkeypatch.setattr(reshard, "group", lambda hop, db, siblings=None: g)
+    eng = SimpleNamespace(
+        neutral_tables=lambda side, db: ["orders", "countries"],
+        neutral_key=lambda side, db, t: ["id"],
+        neutral_columns=lambda side, db, t: [("id", "int"),
+                                             ("customer_id", "int")])
+    facts = scenarios.shard_facts_of(SimpleNamespace(), eng, "db")
+    assert facts["sources"] == 1 and facts["targets"] == 2
+    assert facts["tables"]["orders"]["key"] == ["id"]
+    assert facts["tables"]["countries"]["whole"] is True
+    assert scenarios.shard_case(facts).choice.path == "shard-hash-range"
+
+
+def test_a_hop_of_no_group_has_no_shard_line(monkeypatch):
+    from migkit import reshard
+    monkeypatch.setattr(reshard, "kind_of", lambda hop: None)
+    assert scenarios.shard_lines(SimpleNamespace(), None, "db") == []

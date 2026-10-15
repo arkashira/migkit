@@ -1392,3 +1392,729 @@ class GenericEngine(Engine):
     @staticmethod
     def _text(value):
         return None if value is None else str(value)
+
+    # ---- copying and following through the driver ------------------------
+
+    #: a statement's n-th placeholder (from 1), by the paramstyle the DB-API
+    #: module of the driver declares
+    PLACEHOLDERS = {"qmark": "?", "format": "%s", "pyformat": "%s",
+                    "numeric": ":{n}", "named": ":p{n}"}
+    #: the table migkit owns on both sides: a marker row written on the
+    #: source and seen on the target is the fence of a follow
+    FENCE_TABLE = "migkit_fence"
+    #: a column whose name says when its row last changed
+    CHANGED_AT = re.compile(r"(^|_)(updated|modified|changed|last_?update"
+                            r"|last_?modified|mtime|row_?version)(_|$)",
+                            re.I)
+    #: a declared type whose values only grow as rows change
+    MONOTONE_TYPE = re.compile(r"timestamp|datetime|rowversion", re.I)
+    #: what one batch of a copy holds at most, its rows rendered; the batch
+    #: is resized to it from the widths measured on the rows just read
+    BATCH_BYTES_MOST = 64 * 1024 * 1024
+    #: rows a batch holds at most when the caller gives no chunk
+    BATCH_ROWS = 10_000
+
+    def _dbapi(self, side):
+        """(call, paramstyle): `call(fn)` runs `fn` on the driver's own
+        DB-API connection on the thread that opened it - a threaded driver
+        keeps one per worker thread, and a cursor may not cross threads -
+        and the placeholder style its module declares."""
+        import sys
+        conn = self._connect(side)
+        if hasattr(conn, "_queue"):
+            def call(fn):
+                def inside():
+                    if conn._init_error:
+                        raise conn._init_error
+                    return fn(conn.thread_local.conn)
+                return conn._queue.submit(inside).result()
+            kind = call(type)
+        else:
+            raw = getattr(conn, "_conn", None)
+            if raw is None:
+                raise SystemExit(f"the {self._said(side)}'s driver keeps no"
+                                 " connection that runs statements")
+
+            def call(fn):
+                return fn(raw)
+            kind = type(raw)
+        parts = kind.__module__.split(".")
+        style = None
+        for n in range(len(parts), 0, -1):
+            style = getattr(sys.modules.get(".".join(parts[:n])),
+                            "paramstyle", None)
+            if style:
+                break
+        if style not in self.PLACEHOLDERS:
+            raise SystemExit(f"the {self._said(side)}'s driver declares no"
+                             " placeholder style a statement can be written"
+                             f" in ({style or 'none'}); nothing was written")
+        return call, style
+
+    @staticmethod
+    def _said(side):
+        return "source" if side == "src" else "target"
+
+    def _quote(self, side, name):
+        return self._connect(side).dialect.quote(name)
+
+    def _marks(self, style, values, start=1):
+        """(placeholders, parameters) for `values`, numbered from `start`."""
+        mark = self.PLACEHOLDERS[style]
+        marks = [mark.format(n=n) for n in range(start, start + len(values))]
+        if style == "named":
+            return marks, {f"p{n}": v for n, v in enumerate(values, start)}
+        return marks, tuple(values)
+
+    @staticmethod
+    def _run(c, sql, params=(), commit=False, fetch=False):
+        cur = c.cursor()
+        try:
+            if params:
+                cur.execute(sql, params)
+            else:
+                cur.execute(sql)
+            got = cur.fetchall() if fetch else None
+        finally:
+            cur.close()
+        if commit:
+            c.commit()
+        return got
+
+    def _keyed_where(self, side, style, key, values, op="=", start=1):
+        """(sql, parameters): rows whose key is `values` (`=`), or past it
+        in the key's order (`>`: a many-column key compared column by
+        column, written out so every dialect reads it)."""
+        q = [self._quote(side, k) for k in key]
+        if op == "=":
+            marks, params = self._marks(style, list(values), start)
+            return (" AND ".join(f"{c} = {m}" for c, m in zip(q, marks)),
+                    params)
+        flat = []
+        for i in range(len(key)):
+            flat += list(values[:i + 1])
+        marks, params = self._marks(style, flat, start)
+        ors, at = [], 0
+        for i in range(len(key)):
+            terms = [f"{q[j]} = {marks[at + j]}" for j in range(i)]
+            terms.append(f"{q[i]} > {marks[at + i]}")
+            at += i + 1
+            ors.append("(" + " AND ".join(terms) + ")")
+        return " OR ".join(ors), params
+
+    @staticmethod
+    def _carried(value):
+        """A key or position value as JSON holds it, its type kept."""
+        if isinstance(value, decimal.Decimal):
+            return {"decimal": str(value)}
+        if isinstance(value, datetime.datetime):
+            return {"datetime": value.isoformat()}
+        if isinstance(value, datetime.date):
+            return {"date": value.isoformat()}
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return {"hex": bytes(value).hex()}
+        return value
+
+    @staticmethod
+    def _uncarried(value):
+        if not isinstance(value, dict):
+            return value
+        kind, text = next(iter(value.items()))
+        return {"decimal": decimal.Decimal,
+                "datetime": datetime.datetime.fromisoformat,
+                "date": datetime.date.fromisoformat,
+                "hex": bytes.fromhex}[kind](text)
+
+    def _batch(self, rows, most):
+        """The rows the next batch takes: as many as fit the bytes a batch
+        may hold, measured on the rows just read, never more than `most`."""
+        if not rows:
+            return most
+        width = sum(len(self._row_text(r)) for r in rows) / len(rows)
+        return max(1, min(most, int(self.BATCH_BYTES_MOST
+                                    // max(width, 1.0))))
+
+    def list_move_tables(self, db):
+        return [(t.rpartition(".")[0], t.rpartition(".")[2])
+                for t in self._tables()]
+
+    def copy_rungs(self):
+        """The ways a table is copied through the driver, climbed by
+        `decide.climb`: in the key's order, resumed after the last key the
+        target committed, where the key is on both sides and the source
+        holds it unique; whole otherwise, emptied and copied again if cut
+        off."""
+        from ..decide import Need, Rung
+        return (
+            Rung("key-order", "rows copied in the key's order, resumed"
+                 " after the last key the target committed",
+                 frozenset({"copied", "resume by key"}),
+                 needs=(Need("the key on both sides",
+                             lambda f: not f["key_absent"],
+                             lambda f: "the key is not on both sides: "
+                             + ", ".join(f["key_absent"])),
+                        Need("a key the source holds unique",
+                             lambda f: f["unique"] is not False,
+                             "the source's catalogue does not hold the key"
+                             " unique, so the last key copied does not"
+                             " say which rows are done")),
+                 because="a cut-off copy goes on from the last committed"
+                         " key"),
+            Rung("whole-table", "the table copied whole, emptied and"
+                 " copied again if cut off", frozenset({"copied"}),
+                 because="without a key held unique there is no order to"
+                         " resume in"))
+
+    def copy_way(self, table, columns):
+        from .. import decide
+        absent = [k for k in self._key() if k not in columns]
+        facts = decide.Facts({"key_absent": absent,
+                              "unique": False if absent
+                              else self._unique(table)})
+        return decide.climb(f"copy {table}", self.copy_rungs(), facts,
+                            need=("copied",))
+
+    def _copy_columns(self, table):
+        src = self._side_columns("src", table)
+        if not src:
+            raise SystemExit(f"{table}: the source's catalogue gave no"
+                             " columns; nothing was copied")
+        dst = set(self._side_columns("dst", table))
+        lost = [c for c in src if c not in dst]
+        if lost:
+            raise SystemExit(
+                f"{table}: {', '.join(lost)} not on the target, so a row"
+                " copied would lose them. Nothing was copied: add them to"
+                " the target, or leave the table out of the hop")
+        return list(src)
+
+    def move_table(self, db, sch, tbl, chunk, ck, log):
+        """One table copied through the standard driver: the source read
+        by a cursor in batches (`fetchmany`), each batch written to the
+        target in one statement (`executemany`, in the placeholder style
+        the target's driver declares) and committed before the checkpoint
+        moves. The way is climbed (`copy_way`); a copy cut off between a
+        commit and its checkpoint finds the rows past the checkpoint on the
+        target and removes them before it goes on, so no row lands
+        twice."""
+        table = f"{sch}.{tbl}" if sch else tbl
+        st = ck.setdefault(self.move_key(db, sch, tbl), {})
+        if st.get("done"):
+            return
+        try:
+            self._copy_rows(table, chunk, st, ck, log)
+        finally:
+            self._close()
+
+    def _copy_rows(self, table, chunk, st, ck, log):
+        columns = self._copy_columns(table)
+        choice = self.copy_way(table, columns)
+        if choice.rung is None:
+            raise SystemExit(f"{table}: {choice.reason}")
+        way, key = choice.rung.name, self._key()
+        if st.get("way") not in (None, way):
+            # the facts changed under a cut-off copy: the rows it wrote are
+            # its own, and go before the other way starts
+            st.pop("after", None)
+        st["way"] = way
+        log(f"{table}: {choice.rung.said}")
+        src_call, src_style = self._dbapi("src")
+        dst_call, dst_style = self._dbapi("dst")
+        src_t = self._from(self._connect("src"), table)
+        dst_t = self._from(self._connect("dst"), table)
+        after = st.get("after") if way == "key-order" else None
+        if after is not None:
+            where, params = self._keyed_where(
+                "dst", dst_style, key, [self._uncarried(v) for v in after],
+                op=">")
+            dst_call(lambda c: self._run(
+                c, f"DELETE FROM {dst_t} WHERE {where}", params,
+                commit=True))
+        else:
+            held = int(dst_call(lambda c: self._run(
+                c, f"SELECT COUNT(*) FROM {dst_t}", fetch=True))[0][0])
+            if held and not st.get("began"):
+                raise SystemExit(
+                    f"{table}: the target already holds {held:,} rows this"
+                    " copy did not write, and copying on top would leave"
+                    " them or write some twice. Nothing was copied: empty"
+                    " the table on the target, or repair it with sync")
+            if held:
+                dst_call(lambda c: self._run(c, f"DELETE FROM {dst_t}",
+                                             commit=True))
+            st["moved"] = 0
+        st["began"] = True
+        ck.save()
+        cols = ", ".join(self._quote("src", c) for c in columns)
+        sql, params = f"SELECT {cols} FROM {src_t}", ()
+        if after is not None:
+            where, params = self._keyed_where(
+                "src", src_style, key, [self._uncarried(v) for v in after],
+                op=">")
+            sql += f" WHERE {where}"
+        if way == "key-order":
+            sql += " ORDER BY " + ", ".join(self._quote("src", k)
+                                            for k in key)
+        marks, _ = self._marks(dst_style, columns)
+        insert = (f"INSERT INTO {dst_t} ("
+                  + ", ".join(self._quote("dst", c) for c in columns)
+                  + f") VALUES ({', '.join(marks)})")
+        at = [columns.index(k) for k in key] if way == "key-order" else []
+        most = max(1, int(chunk or self.BATCH_ROWS))
+        cursor = src_call(lambda c: c.cursor())
+        if params:
+            src_call(lambda c: cursor.execute(sql, params))
+        else:
+            src_call(lambda c: cursor.execute(sql))
+        size = min(most, 1000)
+        try:
+            while True:
+                rows = src_call(lambda c: cursor.fetchmany(size))
+                if not rows:
+                    break
+                batch = [self._marks(dst_style, list(r))[1] for r in rows]
+
+                def write(c, batch=batch):
+                    cur = c.cursor()
+                    try:
+                        cur.executemany(insert, batch)
+                    finally:
+                        cur.close()
+                    c.commit()
+                dst_call(write)
+                st["moved"] = int(st.get("moved") or 0) + len(rows)
+                if at:
+                    st["after"] = [self._carried(rows[-1][i]) for i in at]
+                ck.save()
+                size = self._batch(rows, most)
+                log(f"{table}: {st['moved']:,} rows copied")
+        finally:
+            src_call(lambda c: cursor.close())
+        st["done"] = True
+        ck.save()
+
+    # ---- following by the column of when a row changed --------------------
+
+    def _declared_types(self, side, table):
+        """{column: its declared type} as the side's catalogue says."""
+        conn = self._connect(side)
+        return {name: str(row[1]) for name, row in
+                self._raw_schema(conn, table).items()}
+
+    def follow_rungs(self):
+        """The ways a table's changes are found through the driver, climbed
+        by `decide.climb`: the column the hop names as when a row changed
+        (`newer_wins`), else the one column the catalogue names and types
+        as it. A table with neither, or without its key on both sides, is
+        not followed this way."""
+        from ..decide import Need, Rung, fenced
+        keyed = Need("a key on both sides",
+                     lambda f: not f["key_absent"],
+                     lambda f: "the key is not on both sides ("
+                     + ", ".join(f["key_absent"]) + "), so a changed row"
+                     " cannot be told from a new one")
+        return fenced((
+            Rung("named-column", "the column the hop names as when a row"
+                 " changed", frozenset({"changes followed"}),
+                 needs=(Need("a column the hop names",
+                             lambda f: bool(f["named"]),
+                             "the hop names no column as when a row"
+                             " changed (newer_wins)"),
+                        Need("the named column on both sides",
+                             lambda f: f["named"] in f["both"],
+                             lambda f: f"{f['named']} is not on both"
+                                       " sides")),
+                 because="the hop says which column it is"),
+            Rung("catalogue-column", "the one column the catalogue gives"
+                 " as when a row changed", frozenset({"changes followed"}),
+                 needs=(Need("one column of when a row changed",
+                             lambda f: len(f["found"]) == 1,
+                             lambda f: "no column on both sides is named"
+                             " and typed as when a row changed"
+                             if not f["found"] else "more than one column"
+                             " could be when a row changed ("
+                             + ", ".join(f["found"]) + "): name one with"
+                             " newer_wins"),),
+                 because="its name and its type say it")), keyed)
+
+    def follow_way(self, table):
+        """(the column a table's changes are found by, or None; the
+        choice)."""
+        from .. import decide
+        a = self._declared_types("src", table)
+        b = self._declared_types("dst", table)
+        both = [c for c in a if c in b]
+        found = [c for c in both if self.CHANGED_AT.search(c)
+                 and self.MONOTONE_TYPE.search(a[c])]
+        named = self.newer_wins_column()
+        facts = decide.Facts({"named": named, "both": both, "found": found,
+                              "key_absent": [k for k in self._key()
+                                             if k not in both]})
+        choice = decide.climb(f"follow {table}", self.follow_rungs(), facts,
+                              need=("changes followed",))
+        if choice.rung is None:
+            return None, choice
+        return (named if choice.rung.name == "named-column"
+                else found[0]), choice
+
+    def _unfollowable(self):
+        """[(table, why)] of the hop's tables no change column finds."""
+        out = []
+        for t in self._tables():
+            column, choice = self.follow_way(t)
+            if column is None:
+                out.append((t, choice.reason))
+        return out
+
+    def _highest(self, side, table, column):
+        call, _ = self._dbapi(side)
+        got = call(lambda c: self._run(
+            c, f"SELECT MAX({self._quote(side, column)}) FROM"
+               f" {self._from(self._connect(side), table)}", fetch=True))
+        call(lambda c: c.commit())
+        return self._carried(got[0][0]) if got else None
+
+    def _ensure_fence(self, side):
+        """The fence table on this side, made where it is not there."""
+        call, _ = self._dbapi(side)
+        t = self._quote(side, self.FENCE_TABLE)
+        try:
+            call(lambda c: self._run(c, f"SELECT COUNT(*) FROM {t}",
+                                     fetch=True))
+        except Exception:  # noqa: BLE001 - not there yet, made below
+            call(lambda c: c.rollback())
+            call(lambda c: self._run(
+                c, f"CREATE TABLE {t} (marker VARCHAR(64) NOT NULL PRIMARY"
+                   " KEY, seq BIGINT NOT NULL)", commit=True))
+
+    def _follow_point(self, db):
+        """Where a follow begins: each table's highest change value and the
+        source's last fence marker, read before the copy it follows."""
+        refused = self._unfollowable()
+        if refused:
+            raise SystemExit(
+                "; ".join(f"{t}: {why}" for t, why in refused[:6])
+                + ". Nothing is followed: a table is followed by its key"
+                " and a column of when its rows changed. Name the column"
+                " with newer_wins, or move with writes stopped and prove it"
+                " with check")
+        for side in ("src", "dst"):
+            self._ensure_fence(side)
+        tables = {}
+        for t in self._tables():
+            column, _ = self.follow_way(t)
+            tables[t] = {"column": column,
+                         "at": self._highest("src", t, column)}
+        call, _ = self._dbapi("src")
+        seq = call(lambda c: self._run(
+            c, f"SELECT MAX(seq) FROM {self._quote('src', self.FENCE_TABLE)}",
+            fetch=True))[0][0]
+        return {"tables": tables, "fence": int(seq or 0)}
+
+    def tail_start(self, db, token_path):
+        from .. import tailctl
+        if token_path.exists():
+            return False
+        try:
+            tailctl.begin(self, db, token_path, self._follow_point(db))
+        finally:
+            self._close()
+        return True
+
+    def _changed_since(self, table, column, at, most):
+        """(columns, up to `most` rows at or past `at` in the change
+        column's order). Rows at `at` itself are read again: a row
+        committed later can carry the same value."""
+        call, style = self._dbapi("src")
+        columns = self._copy_columns(table)
+        cols = ", ".join(self._quote("src", c) for c in columns)
+        q = self._quote("src", column)
+        sql = f"SELECT {cols} FROM {self._from(self._connect('src'), table)}"
+        params = ()
+        if at is not None:
+            marks, params = self._marks(style, [self._uncarried(at)])
+            sql += f" WHERE {q} >= {marks[0]}"
+        sql += f" ORDER BY {q}"
+        cursor = call(lambda c: c.cursor())
+        try:
+            if params:
+                call(lambda c: cursor.execute(sql, params))
+            else:
+                call(lambda c: cursor.execute(sql))
+            rows = call(lambda c: cursor.fetchmany(most))
+        finally:
+            call(lambda c: cursor.close())
+            call(lambda c: c.commit())
+        return columns, rows
+
+    def _upsert(self, table, columns, rows):
+        """Each row put on the target by its key: the target's row deleted
+        and the source's inserted in one transaction, so no reader sees the
+        row on neither side."""
+        if not rows:
+            return
+        call, style = self._dbapi("dst")
+        at = [columns.index(k) for k in self._key()]
+        dst_t = self._from(self._connect("dst"), table)
+        marks, _ = self._marks(style, columns)
+        insert = (f"INSERT INTO {dst_t} ("
+                  + ", ".join(self._quote("dst", c) for c in columns)
+                  + f") VALUES ({', '.join(marks)})")
+        where, _ = self._keyed_where("dst", style, self._key(),
+                                     [None] * len(at))
+        delete = f"DELETE FROM {dst_t} WHERE {where}"
+
+        def write(c):
+            cur = c.cursor()
+            try:
+                cur.executemany(delete, [self._marks(
+                    style, [r[i] for i in at])[1] for r in rows])
+                cur.executemany(insert, [self._marks(style, list(r))[1]
+                                         for r in rows])
+            finally:
+                cur.close()
+            c.commit()
+        call(write)
+
+    def _carry_markers(self, since):
+        """The source's fence markers past `since`: (rows, highest seq)."""
+        call, _ = self._dbapi("src")
+        rows = call(lambda c: self._run(
+            c, f"SELECT marker, seq FROM"
+               f" {self._quote('src', self.FENCE_TABLE)}", fetch=True))
+        call(lambda c: c.commit())
+        new = [(m, int(s)) for m, s in rows if int(s) > since]
+        return new, max([since] + [s for _, s in new])
+
+    def _follow_round(self, token, log):
+        """One look: the fence markers read first, every table's changed
+        rows carried, the markers written last - so a marker on the target
+        means a whole round read every table after it was written."""
+        markers, seq = self._carry_markers(int(token.get("fence") or 0))
+        tables, went, settled = {}, 0, True
+        for t, held in (token.get("tables") or {}).items():
+            column, at = held["column"], held.get("at")
+            columns, rows = self._changed_since(t, column, at,
+                                                self.BATCH_ROWS)
+            c = columns.index(column)
+            was = self._uncarried(at)
+            went += sum(1 for r in rows if r[c] is not None
+                        and (was is None or r[c] > was))
+            self._upsert(t, columns, rows)
+            top = max((r[c] for r in rows if r[c] is not None),
+                      default=None)
+            tables[t] = {"column": column,
+                         "at": self._carried(top) if top is not None
+                         else at}
+            if len(rows) >= self.BATCH_ROWS:
+                settled = False
+                log(f"{t}: more changed rows than one round reads; the"
+                    " next round goes on from here")
+        if markers:
+            call, style = self._dbapi("dst")
+            marks, _ = self._marks(style, ["", 0])
+            sql = (f"INSERT INTO {self._quote('dst', self.FENCE_TABLE)}"
+                   f" (marker, seq) VALUES ({', '.join(marks)})")
+
+            def write(c):
+                cur = c.cursor()
+                try:
+                    cur.executemany(sql, [self._marks(style, [m, s])[1]
+                                          for m, s in markers])
+                finally:
+                    cur.close()
+                c.commit()
+            call(write)
+        return {"tables": tables, "fence": seq}, went, settled
+
+    def tail_apply(self, db, go, token_path, log):
+        """Keep the target following the source by each table's column of
+        when a row changed (`follow_way`): every round the rows at or past
+        the saved value are read and put on the target by key. A row the
+        source deletes leaves no value to find, so deletes are not
+        followed - the full check finds them, and this says so."""
+        from .. import tailctl
+        log("rows deleted on the source are not followed by a column of"
+            " when rows changed; the check after the move finds them")
+
+        def look(token):
+            try:
+                return self._follow_round(token or {}, log)
+            finally:
+                self._close()
+
+        def behind(token):
+            ahead = []
+            try:
+                for t, held in ((token or {}).get("tables") or {}).items():
+                    if self._highest("src", t, held["column"]) \
+                            != held.get("at"):
+                        ahead.append(t)
+            finally:
+                self._close()
+            return (f"{len(ahead)} tables changed on the source since the"
+                    " saved position" + "".join(f"; {t}" for t in ahead))
+        tailctl.follow(self, db, go, token_path, log, "rows", look, behind)
+
+    def src_lsn(self, db):
+        """A fence: a new marker row written to the source's fence table,
+        or None where no follow runs to carry it."""
+        import uuid
+
+        from .. import tailctl
+        if not tailctl.alive(self.hop.report_dir(db), self.hop):
+            return None
+        call, style = self._dbapi("src")
+        t = self._quote("src", self.FENCE_TABLE)
+        marker = uuid.uuid4().hex
+        try:
+            seq = call(lambda c: self._run(c, f"SELECT MAX(seq) FROM {t}",
+                                           fetch=True))[0][0]
+            marks, params = self._marks(style, [marker, int(seq or 0) + 1])
+            call(lambda c: self._run(
+                c, f"INSERT INTO {t} (marker, seq) VALUES"
+                   f" ({', '.join(marks)})", params, commit=True))
+        finally:
+            self._close()
+        return marker
+
+    def fence_wait(self, db, lsn, timeout=300):
+        """Wait for the marker row `lsn` on the target: True once there,
+        False on timeout, None where there is nothing to wait on."""
+        import time
+
+        from .. import tailctl
+        if lsn is None:
+            return None
+        began = time.monotonic()
+        try:
+            while time.monotonic() - began < timeout:
+                call, style = self._dbapi("dst")
+                marks, params = self._marks(style, [lsn])
+                got = call(lambda c: self._run(
+                    c, f"SELECT COUNT(*) FROM"
+                       f" {self._quote('dst', self.FENCE_TABLE)} WHERE"
+                       f" marker = {marks[0]}", params, fetch=True))
+                call(lambda c: c.commit())
+                if int(got[0][0]):
+                    return True
+                time.sleep(tailctl.POLL)
+        finally:
+            self._close()
+        return False
+
+    # ---- rows compared by key, and only the changed ones -------------------
+
+    def _rows_by_keys(self, side, table, columns, keys):
+        """{key text: row} of the rows with these keys, `REPAIR_BATCH` keys
+        a statement."""
+        call, style = self._dbapi(side)
+        key = self._key()
+        at = [columns.index(k) for k in key]
+        cols = ", ".join(self._quote(side, c) for c in columns)
+        src = self._from(self._connect(side), table)
+        got = {}
+        for i in range(0, len(keys), self.REPAIR_BATCH):
+            ors, values = [], []
+            for k in keys[i:i + self.REPAIR_BATCH]:
+                where, _ = self._keyed_where(side, style, key, list(k),
+                                             start=len(values) + 1)
+                ors.append(f"({where})")
+                values += list(k)
+            _, bound = self._marks(style, values)
+            for row in call(lambda c: self._run(
+                    c, f"SELECT {cols} FROM {src} WHERE " + " OR ".join(ors),
+                    bound, fetch=True)):
+                got[tuple(self._text(row[j]) for j in at)] = row
+        call(lambda c: c.commit())
+        return got
+
+    def _differ(self, table, keys):
+        """(missing, extra, changed) of `keys` (each a tuple of the key's
+        texts), both sides read by key through the driver and compared in
+        one rendering."""
+        columns = self._copy_columns(table)
+        a = self._rows_by_keys("src", table, columns, keys)
+        b = self._rows_by_keys("dst", table, columns, keys)
+        missing = [k for k in keys if k in a and k not in b]
+        extra = [k for k in keys if k in b and k not in a]
+        changed = [k for k in keys if k in a and k in b
+                   and self._row_text(a[k]) != self._row_text(b[k])]
+        return missing, extra, changed
+
+    def _compare_pks(self, db, table, keys):
+        """What still differs of the keys the check named, each line in its
+        drilldown's own text."""
+        lines = {tuple(str(v) for v in json.loads(k)): k for k in keys}
+        try:
+            got = self._differ(table, list(lines))
+        finally:
+            self._close()
+        return tuple([lines[k] for k in kind] for kind in got)
+
+    def _write_pk_files(self, db, table, missing, extra, changed):
+        self._write_drill(db, table, missing=list(missing),
+                          extra=list(extra), changed=list(changed))
+
+    def delta_verify(self, db, limit=20000, log=None):
+        """Verify only the rows changed since the last clean pass, found by
+        each table's column of when a row changed (`follow_way`) and asked
+        of both sides by key. A table's position moves only when it is
+        clean; a table no column finds is said, never passed as clean. A
+        row the source deleted leaves nothing to find: the full check
+        finds it."""
+        from .. import durable
+        state = self.hop.report_dir(db) / "generic-delta.json"
+        held = durable.read_state(state, "tables")
+        res, now = [], dict(held or {})
+        try:
+            for t in self._tables():
+                column, choice = self.follow_way(t)
+                if column is None:
+                    res.append(Result("delta", f"{db}.{t}", "skip",
+                                      "not verified by change: "
+                                      + choice.reason))
+                elif held is None or t not in held:
+                    now[t] = self._highest("src", t, column)
+                    res.append(Result("delta", f"{db}.{t}", "ok",
+                                      "baseline recorded, changes are"
+                                      " verified from this point on"))
+                else:
+                    res.append(self._delta_table(db, t, column, held[t],
+                                                 limit, now))
+        finally:
+            self._close()
+        durable.write_json(state, {"tables": now})
+        return res
+
+    def _delta_table(self, db, t, column, at, limit, now):
+        columns, rows = self._changed_since(t, column, at, limit + 1)
+        c = columns.index(column)
+        over = len(rows) > limit
+        rows = rows[:limit]
+        key_at = [columns.index(k) for k in self._key()]
+        keys = list(dict.fromkeys(tuple(self._text(r[j]) for j in key_at)
+                                  for r in rows))
+        missing, extra, changed = self._differ(t, keys)
+        if missing or extra or changed:
+            self._write_drill(db, t,
+                              missing=[json.dumps(list(k)) for k in missing],
+                              extra=[json.dumps(list(k)) for k in extra],
+                              changed=[json.dumps(list(k)) for k in changed])
+            got, _ = self._delta_held(Result(
+                "delta", f"{db}.{t}", "diff",
+                f"of {len(keys)} changed rows: missing={len(missing)}"
+                f" extra={len(extra)} changed={len(changed)}",
+                str(self.hop.report_dir(db)),
+                f"migkit sync {self.hop.name} --db {db} --kind rows",
+                table=t))
+            return got
+        top = max((r[c] for r in rows if r[c] is not None), default=None)
+        if top is not None:
+            now[t] = self._carried(top)
+        return Result("delta", f"{db}.{t}", "ok",
+                      f"{len(keys)} changed rows match"
+                      + ("; more changed than one pass reads, the next"
+                         " goes on from here" if over else "")
+                      + "; rows deleted on the source are found by the full"
+                        " check")

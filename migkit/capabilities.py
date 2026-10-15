@@ -490,14 +490,9 @@ GAPS = {
                       " the server's own dump and load, which a standard"
                       " driver does not reach; table by table is"
                       " table-copy"),
-        # real ways any driver has, not built yet: rows copied by key
-        # range, a column of the time a row changed followed, the target
-        # fenced on that column, and only rows past it verified
-        "table-copy": (NOT_YET, "R13-GENERIC"),
-        "stream": (NOT_YET, "R13-GENERIC"),
-        "fence": (NOT_YET, "R13-GENERIC"),
-        "confirm": (NOT_YET, "R13-GENERIC"),
-        "delta": (NOT_YET, "R13-GENERIC"),
+        # table-copy, stream, fence, confirm and delta are read off the
+        # code: rows by key order, a column of when a row changed, a marker
+        # row in migkit's fence table (`GenericEngine.follow_way`)
     },
 }
 

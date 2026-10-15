@@ -1,6 +1,7 @@
 """Migration scenarios decided on observed facts (backlog P0-SCENARIOS):
 a managed service change through the provider's own operations
-(`cloudapi.OPERATIONS`), and a hardware / OS / architecture change.
+(`cloudapi.OPERATIONS`), a hardware / OS / architecture change, and a
+shard split or merge (`shard_case`, its copy and follow `reshard`'s).
 A storage engine change is decided where it is planned, `tableengine`.
 """
 from __future__ import annotations
@@ -586,7 +587,8 @@ def plan_lines(hop, eng, db, offers=None):
     on the instances the providers' APIs gave where both sides have one."""
     from . import managed
     if any(managed.api_conf(hop, eng, w)[0] is None for w in ("src", "dst")):
-        return architecture_lines(hop, eng, db)
+        return architecture_lines(hop, eng, db) + shard_lines(hop, eng,
+                                                              db)
     try:
         sized = eng.table_sizes(db, quick=True) if db else None
     except Exception:  # noqa: BLE001 - unmeasured, said as not yet
@@ -624,4 +626,133 @@ def plan_lines(hop, eng, db, offers=None):
              " again"] if offers_error else [])
     return managed_lines(facts) + said + architecture_lines(
         hop, eng, db, {"src": facts.get("source"), "dst": facts.get("target")},
-        offers, size)
+        offers, size) + shard_lines(hop, eng, db)
+
+
+# --- shard split and merge ------------------------------------------------------
+
+#: the shapes of a shard change: one source to many targets, many to one,
+#: many to many under a new key
+SHARD_SHAPES = {"split": "one source into many targets",
+                "consolidate": "many sources into one target",
+                "reshard": "many sources into many targets by a new key"}
+
+
+def shard_facts(kind, sources, targets, tables):
+    """The shard split / merge facts: the group's kind, how many sources
+    and targets it holds, and each table's `{"key": [...], "columns":
+    [...], "whole": bool}` - its shard key, its columns on the source, and
+    whether every target takes it whole."""
+    return decide.Facts({"kind": kind, "sources": int(sources),
+                         "targets": int(targets), "tables": dict(tables)})
+
+
+def shard_facts_of(hop, eng, db, siblings=None):
+    """`shard_facts` read off the hop's group (`reshard.group`) and the
+    source engine's catalogue: each table's key as the hop names it, else
+    its own (`reshard.shard_key`), its columns, and whether the hop keeps
+    it whole (`shared`). A group that does not hold together is said as the
+    reason, never guessed past."""
+    from . import reshard
+    kind = reshard.kind_of(hop)
+    if kind is None:
+        return None
+    try:
+        g = reshard.group(hop, db, siblings)
+    except SystemExit as e:
+        return decide.Facts({"kind": kind, "sources": 0, "targets": 0,
+                             "tables": {}, "not_read": str(e)[:300]})
+    shared = g.conf.get("shared") or ()
+    tables = {}
+    for t in eng.neutral_tables("src", db):
+        pk = list(eng.neutral_key("src", db, t) or [])
+        tables[str(t)] = {
+            "key": reshard.shard_key(g, t, pk),
+            "columns": [n for n, _ in eng.neutral_columns("src", db, t)],
+            "whole": reshard._named_in(shared, t)}
+    return shard_facts(kind, len(g.sources), len(g.targets), tables)
+
+
+def _keyless(f):
+    """[(table, why)] of the tables a placement by key cannot place."""
+    out = []
+    for t, s in sorted((f.get("tables") or {}).items()):
+        if s.get("whole"):
+            continue
+        key = list(s.get("key") or [])
+        if not key:
+            out.append((t, "no shard key: the hop names none and the table"
+                           " has no key of its own"))
+            continue
+        absent = [k for k in key if k not in (s.get("columns") or ())]
+        if absent:
+            out.append((t, "its shard key " + ", ".join(absent)
+                           + " is not among its columns"))
+    return out
+
+
+def _shape_holds(f):
+    kind, n, m = f.get("kind"), f.get("sources", 0), f.get("targets", 0)
+    return {"split": n == 1 and m > 1, "consolidate": n > 1 and m == 1,
+            "reshard": n >= 1 and m >= 1}.get(kind, False)
+
+
+def _shape_why(f):
+    if f.get("not_read"):
+        return "the group was not read: " + f["not_read"]
+    return (f"a {f.get('kind')} is {SHARD_SHAPES.get(f.get('kind'), '?')};"
+            f" the group holds {f.get('sources', 0)} sources and"
+            f" {f.get('targets', 0)} targets")
+
+
+def shard_case(facts):
+    """The shard split / merge decided on the group's facts: a group whose
+    sources and targets are not its kind's shape refused, a table with no
+    shard key on its columns refused by name (a row with no key has no
+    place), then the rows placed by a hash range of the key into the
+    targets (`reshard.hash_place`), or - many into one - each source's
+    rows written whole into the one target. The copy and the follow are
+    `reshard`'s; the target is proved table by table after."""
+    shared = (
+        decide.Need("a group of its kind's shape", _shape_holds, _shape_why),
+        decide.Need("a shard key on every table placed by key",
+                    lambda f: not _keyless(f),
+                    lambda f: "; ".join(f"{t}: {why}" for t, why
+                                        in _keyless(f)[:6])
+                    + " - name it under the hop's key, or list the table"
+                      " in shared"))
+    by_hash = decide.Rung(
+        "shard-hash-range", "rows placed by a hash range of the shard key",
+        frozenset({"shard change"}),
+        needs=(decide.Need("more than one target",
+                           lambda f: f.get("targets", 0) > 1),),
+        because="each row's key hashes into exactly one target's range, so"
+                " a row lands once")
+    merged = decide.Rung(
+        "shard-merge", "every source's rows written into the one target",
+        frozenset({"shard change"}),
+        needs=(decide.Need("one target",
+                           lambda f: f.get("targets", 0) == 1),),
+        because="many into one places every row in the one target; the key"
+                " keeps two sources' rows apart")
+    choice = decide.climb("shard split / merge",
+                          decide.fenced((by_hash, merged), *shared),
+                          facts, need=("shard change",))
+    details = (f"{facts.get('kind')}: {facts.get('sources', 0)} sources to"
+               f" {facts.get('targets', 0)} targets",)
+    whole = sorted(t for t, s in (facts.get("tables") or {}).items()
+                   if s.get("whole"))
+    if whole:
+        details += ("taken whole by every target: " + ", ".join(whole[:6]),)
+    return ScenarioDecision("shard split / merge", choice, details)
+
+
+def shard_lines(hop, eng, db, siblings=None):
+    """The plan's line of a shard split or merge, the decision kept in the
+    run's record; nothing for a hop that is no group's."""
+    facts = shard_facts_of(hop, eng, db, siblings)
+    if facts is None:
+        return []
+    got = shard_case(facts)
+    decide.record(hop, got.choice)
+    return [f"  {got.words()}"]

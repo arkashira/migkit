@@ -1657,6 +1657,20 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * a numeric column holds <...>, which is not a number that can be written literally. Nothing has been written; repair that row with the tool that owns the target
 
+* the <...>'s driver declares no placeholder style a statement can be written in (<...>); nothing was written
+
+* the <...>'s driver keeps no connection that runs statements
+
+* <...>: the source's catalogue gave no columns; nothing was copied
+
+* <...>: <...> not on the target, so a row copied would lose them. Nothing was copied: add them to the target, or leave the table out of the hop
+
+* <...>: <...>
+
+* <...>: the target already holds <...> rows this copy did not write, and copying on top would leave them or write some twice. Nothing was copied: empty the table on the target, or repair it with sync
+
+* <...>. Nothing is followed: a table is followed by its key and a column of when its rows changed. Name the column with newer_wins, or move with writes stopped and prove it with check
+
 ## Every engine
 
 * unsupported engine <...>
