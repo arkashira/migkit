@@ -391,6 +391,12 @@ class FakeDatabase:
     def get_collection(self, name, codec_options=None):
         return self[name].with_options(codec_options=codec_options)
 
+    def with_options(self, codec_options=None, **kw):
+        return self
+
+    def drop_collection(self, name):
+        self.colls.pop(name, None)
+
     def list_collection_names(self):
         return [n for n, c in self.colls.items()
                 if not getattr(c, "created_empty", False) or c.docs]

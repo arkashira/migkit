@@ -356,7 +356,7 @@ in these historical totals.
 | 272 | LT.R8 | MySQL STATEMENT/MIXED binlogs as invalidations | PARTLY | M | change follow | report L1081 |
 | 273 | LT.R9 | PostgreSQL at wal_level=replica via pg_walinspect/pg_waldump | OPEN | M | change follow | L4503-4505 |
 | 274 | LT.R10 | MongoDB standalone (dbHash + raw-BSON bucket digests) | DONE 7901f35, 3fcbed7 (a standalone source followed by a bucket sweep, dbHash then raw-BSON bucket digests (`MongoEngine.FOLLOW_WAYS`, `_sweep_round`), and a replica set by its oplog between the change stream and the sweep; fakes, `tests/test_a_mongodb_standalone_is_followed_by_buckets.py`, `tests/test_a_mongodb_replica_set_is_followed_by_its_oplog.py`. Not done: no real 4.0 replica set test, none with a refused stream; the server tests are written, not run; the oplog's consistency is declared per range) | S | change follow | report L1083 |
-| 275 | LT.C1 | mongosync's job rebuilt from change streams, raw BSON and generations, bypassWriteBlockingMode audited | OPEN | M | change follow | L3947-3949, L4513-4517 |
+| 275 | LT.C1 | mongosync's job rebuilt from change streams, raw BSON and generations, bypassWriteBlockingMode audited | DONE W11F (ledger-kept resume, raw BSON events, per-collection generations by the hop's ddl, blocked writes a blocker, reseed rung; oplog raw and expanded events not done) | M | change follow | L3947-3949, L4513-4517 |
 | 276 | LT.C2 | Kafka offsets kept identical for gap-free partitions (pad, DeleteRecords) | DONE 2026-10-15 | M | cutover | L3949-3951, L4517-4519 |
 | 277 | LT.C3 | Kafka offset map written in the data's transaction | DONE 2026-10-15 | M | cutover | L4519-4521 |
 | 278 | LT.C4 | Redis/Valkey two-site active-active rules | OPEN | L | two-way | L3951-3952, L4521-4522 |

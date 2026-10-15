@@ -4733,6 +4733,25 @@ number: `docs/research/smart-decisions-2026-09-30.md`,
     conflict policies (CRDT-like counters by `delta`); XStream's job by
     LogMiner. Each rebuilt capability is measured against what it
     replaces and better where it can be (verified as it lands).
+    *LT.C1 done (W11F, `engines/mongodb.py`):* the MongoDB follow's
+    position is kept in the attempt ledger before the position file, and
+    a crash between the two goes on from the ledger (`_follow_state`);
+    events are read as raw BSON, so a Decimal128, any binary subtype and
+    a date past year 9999 arrive byte-identical; a drop, rename, dropped
+    database or reshard starts a generation of that collection, by the
+    hop's `ddl` stopped at, set aside, or copied again from the source in
+    a ledger-kept copy while the others go on (`_new_generations`,
+    `_reseed`, `_finish_reseeds`); an ended stream opens again after its
+    end; a write refused for blocked user writes stops with the next
+    step, and an account that may write past a block is said
+    (`_audit_write_block`). `FOLLOW_WAYS` gained the saved-position need
+    (lost, or too far behind to catch up at the measured rate before the
+    oplog drops it: `_position_held`, `token_age`) and a `reseed` rung.
+    Proved: `tests/test_mongo_follows_change_streams_by_generation.py`.
+    *Not done:* the oplog rung still decodes entries (a date past 9999
+    stops it there); reshard events need the server's expanded events
+    (6.0+), which the stream does not ask for yet; a reseed after a lost
+    position does not drop target collections the source no longer has.
   * *What only a cloud's control plane can do:* driven through the
     provider's API where it exists (snapshot copy, clone, restore to a
     point, zero-ETL where offered, Azure MI link), and the process

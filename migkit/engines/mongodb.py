@@ -325,6 +325,60 @@ def oplog_events(entry, db, txns):
     return [ev]
 
 
+# --- generations -------------------------------------------------------------
+
+#: the events after which a collection is another than the one followed:
+#: what the target holds of it no longer follows from the changes before,
+#: so it starts a generation of its own, copied whole again while the
+#: other collections go on (`MongoEngine._new_generations`)
+GENERATION_EVENTS = ("drop", "rename", "dropDatabase", "shardCollection",
+                     "reshardCollection", "refineCollectionShardKey")
+
+
+def generation_of(ev):
+    """The collections `ev` starts a new generation of, by their names in
+    the database followed: [] for a row change, both names of a rename -
+    the old one is gone, the new one holds what it held - and None for a
+    dropped database, every collection of it."""
+    op = ev.get("operationType")
+    if op not in GENERATION_EVENTS:
+        return []
+    if op == "dropDatabase":
+        return None
+    names = [(ev.get("ns") or {}).get("coll")]
+    if op == "rename":
+        names.append((ev.get("to") or {}).get("coll"))
+    return [n for n in names if n]
+
+
+#: what a server answers a write with while user writes are blocked on it
+WRITES_BLOCKED = 371
+
+
+def writes_blocked(error):
+    """Whether `error` is the server refusing a write because user writes
+    are blocked on it - alone, or among a bulk write's errors."""
+    codes = {getattr(error, "code", None)}
+    details = getattr(error, "details", None) or {}
+    if isinstance(details, dict):
+        codes |= {e.get("code") for e in details.get("writeErrors") or ()}
+    return WRITES_BLOCKED in codes
+
+
+class _LedgerCheckpoint(dict):
+    """A copy's checkpoint (`MongoEngine.move_table`) kept in the attempt
+    ledger under one operation's key, so a generation copied again after a
+    crash goes on from the last `_id` it saved."""
+
+    def __init__(self, ledger, key):
+        super().__init__(ledger.owned(key).get("copy") or {})
+        self.ledger, self.key = ledger, key
+
+    def save(self):
+        import json
+        self.ledger.own(self.key, copy=json.loads(json.dumps(self)))
+
+
 class MongoEngine(Engine):
     checks = ("schema", "counts", "data")
     counts_from_data = True
@@ -3443,7 +3497,8 @@ class MongoEngine(Engine):
         for db in self.databases():
             way = self.follow_way(db) if logged else None
             path = way.path if way is not None and way.rung else None
-            above = {"oplog": "change stream", "bucket sweep": "oplog"}
+            above = {"oplog": "change stream", "reseed": "oplog",
+                     "bucket sweep": "reseed"}
             why = next((w for r, w in (way.passed if way else ())
                         if r.name == above.get(path)), "")
             for info in self._client("src")[db].list_collections():
@@ -3475,7 +3530,10 @@ class MongoEngine(Engine):
                     Need("the stream opened",
                          lambda f: f["stream opens"] is True,
                          lambda f: "the source refused to open a change"
-                                   f" stream: {f['stream opens']}")),
+                                   f" stream: {f['stream opens']}"),
+                    Need("the saved position held",
+                         lambda f: f.get("position held", True) is True,
+                         lambda f: str(f.get("position held")))),
              holds={"consistent": "as of one moment",
                     "idempotent": "converges", "resumable": "goes on"},
              because="every change read from the oplog, in order",
@@ -3488,7 +3546,10 @@ class MongoEngine(Engine):
                          lambda f: f.get("oplog reads") is True,
                          lambda f: str(f.get("oplog reads")
                                        or "the source's oplog was not"
-                                          " looked at"))),
+                                          " looked at")),
+                    Need("the saved position held",
+                         lambda f: f.get("position held", True) is True,
+                         lambda f: str(f.get("position held")))),
              holds={"consistent": "per range", "idempotent": "converges",
                     "resumable": "goes on"},
              because="every entry up to the point a majority of the"
@@ -3496,6 +3557,28 @@ class MongoEngine(Engine):
                      " commits; an update its entry cannot say as fields"
                      " set and unset is read again by key, so a document"
                      " may stand as of a later moment than its entry",
+             leaves="a position file and a process on this machine"),
+        Rung("reseed", "every collection copied again, then followed from"
+                       " a position taken before the copy",
+             needs=(Need("an oplog", lambda f: f["replica set"],
+                         "the source is a standalone server and keeps no"
+                         " oplog, which the follow after {rung} reads"),
+                    Need("a saved position lost",
+                         lambda f: f.get("position held", True) is not True,
+                         "no saved position is lost, and {rung} is only for"
+                         " one the source no longer holds"),
+                    Need("a way to follow after it",
+                         lambda f: f["stream opens"] is True
+                         or f.get("oplog reads") is True,
+                         "the source neither opens a change stream nor lets"
+                         " its oplog be read, which the follow after {rung}"
+                         " reads")),
+             holds={"consistent": "per range", "idempotent": "converges",
+                    "resumable": "goes on"},
+             because="the saved position can no longer be followed from:"
+                     " each collection is copied as it is now, and the"
+                     " changes after a position taken first are applied"
+                     " over it, which writes by key converge on",
              leaves="a position file and a process on this machine"),
         Rung("bucket sweep", "the collections compared again and again,"
                              " their changed documents written",
@@ -3514,7 +3597,7 @@ class MongoEngine(Engine):
     def follow_choice(cls, facts, costs=None):
         """The `decide.Choice` of the way this source's changes are
         followed, from `facts` ("replica set", "stream opens", "oplog
-        reads") and what
+        reads", "position held": `_position_held`) and what
         each way cost here (`_follow_costs`)."""
         from ..decide import climb
         return climb("following the source's changes", cls.FOLLOW_WAYS,
@@ -3565,8 +3648,242 @@ class MongoEngine(Engine):
         from ..decide import Facts
         facts = Facts(**{"replica set": lambda: self._keeps_a_log("src"),
                          "stream opens": lambda: self._stream_opens(db),
-                         "oplog reads": lambda: self._oplog_reads("src")})
+                         "oplog reads": lambda: self._oplog_reads("src"),
+                         "position held": lambda: self._position_held(db)})
         return self.follow_choice(facts, self._follow_costs(db))
+
+    def token_age(self, side, token):
+        """{"age": seconds the position `token` stands behind the source's
+        clock, "room": seconds of oplog older than it}, or None where the
+        token, the oplog or the clock cannot be read."""
+        from pymongo.errors import PyMongoError
+
+        from . import enterprise_connectors as ec
+        at = oplog_ts(token)
+        if at is None:
+            return None
+        try:
+            oldest = next(iter(self._oplog(side, {}, limit=1)), None)
+            now = self._hello(side).get("operationTime")
+        except (PyMongoError, ec.MissingGrant):
+            return None
+        if not oldest or now is None:
+            return None
+        return {"age": max(now.time - at.time, 0),
+                "room": max(at.time - oldest["ts"].time, 0)}
+
+    def _position_held(self, db):
+        """True, or why the position a follow of `db` saved can no longer
+        be followed from: gone from the oplog or taken on another set
+        (`position_lost`), or so far behind that reading the entries after
+        it - at the rate the source writes this database (`_oplog_rate`)
+        and the fastest a way was measured to carry an entry at here -
+        takes longer than the oplog keeps it (`token_age`). True where
+        nothing is saved or nothing was measured."""
+        from .. import tailctl
+        from ..decide import HopCosts
+        from . import enterprise_connectors as ec
+        path = tailctl.token_path(self.hop, db)
+        env, _ = self._follow_state(db, path, False)
+        token = None if env is None else env.get("token")
+        if token is None:
+            return True
+        lost = self.position_lost("src", db, token)
+        if lost:
+            return lost
+        age = self.token_age("src", token)
+        kept = HopCosts(self.hop, "follow/")
+        per = [v for v in (kept.get("change stream entries"),
+                           kept.get("oplog entries")) if v is not None]
+        if age is None or not per:
+            return True
+        try:
+            rate = self._oplog_rate(db)
+        except ec.MissingGrant:
+            rate = None
+        if not rate:
+            return True
+        behind = rate * age["age"]
+        takes = behind * min(per)
+        if takes > age["room"]:
+            return (f"the saved position is {age['age']:,.0f}s behind the"
+                    f" source, whose oplog keeps it {age['room']:,.0f}s"
+                    f" more at most; reading the {behind:,.0f} entries"
+                    f" after it at the rate measured here takes"
+                    f" {takes:,.0f}s, so it would leave the oplog before"
+                    " the follow caught up")
+        return True
+
+    #: the attempt ledger's key of what a follow of a database keeps
+    FOLLOW_KEY = "follow|{db}"
+
+    def _follow_state(self, db, token_path, go):
+        """(the envelope saved at `token_path` - None where none is - and
+        what the follow of `db` keeps in the attempt ledger beside it: its
+        collections' generations, those set aside, an ended stream's last
+        position). The ledger is written before the position file, so one
+        of the same stream a generation later holds what a crash between
+        the two left the file without: the follow goes on from it, and
+        with `go` the file is brought up to it."""
+        from .. import tailctl
+        env = tailctl.position(token_path)
+        rec = self.attempts().ledger.owned(self.FOLLOW_KEY.format(db=db))
+        mine = env is not None and rec.get("id") == env.get("id")
+        if mine and rec.get("token") is not None \
+                and int(rec.get("gen") or 0) > int(env.get("gen") or 0):
+            env = {**env, "token": rec["token"], "gen": int(rec["gen"])}
+            if go:
+                env = tailctl.keep(token_path, env)
+        kept = {"generations": dict(rec.get("generations") or {}) if mine
+                else {}, "parked": list(rec.get("parked") or ()) if mine
+                else [], "invalidated": rec.get("invalidated") if mine
+                else None}
+        return env, kept
+
+    def _keep_follow(self, db, env, token, kept):
+        """The follow's position `token` and what it keeps (`kept`) in the
+        attempt ledger, a generation past `env`'s - written before the
+        position file is (`_follow_state`)."""
+        self.attempts().ledger.own(
+            self.FOLLOW_KEY.format(db=db), state="running",
+            id=(env or {}).get("id"), gen=int((env or {}).get("gen") or 0)
+            + 1, token=token, **kept)
+
+    def _write_refused(self, error, where):
+        """The stop to raise where the target refused a write because user
+        writes are blocked on it, else None. A follow never writes past a
+        block: the block is the target's owner saying no writes."""
+        if not writes_blocked(error):
+            return None
+        return SystemExit(
+            f"{where}: the target refuses writes - user writes are blocked"
+            " on it, by a cutover's freeze or by its owner. Nothing past the"
+            " saved position was applied, and migkit does not write past a"
+            " block.\n    Lift the block on the target once its owner"
+            " agrees, then run the follow again; it goes on from the saved"
+            " position")
+
+    def _audit_write_block(self, log):
+        """Say where the target's account may write past a block of user
+        writes (the `bypassWriteBlockingMode` action): a block set on the
+        target for a cutover would not hold this follow's writes back.
+        True where it may, False where not, None where it cannot be read."""
+        try:
+            got = self._client("dst").admin.command(
+                {"connectionStatus": 1, "showPrivileges": True})
+        except Exception:  # noqa: BLE001 - not read is not known
+            return None
+        privileges = (got.get("authInfo") or {}).get(
+            "authenticatedUserPrivileges") or ()
+        held = any("bypassWriteBlockingMode" in (p.get("actions") or ())
+                   for p in privileges)
+        if held:
+            log("the target's account may write past a block of user writes"
+                " (bypassWriteBlockingMode): a block set on the target for"
+                " the cutover would not stop this follow. Follow with an"
+                " account without it for the block to hold")
+        return held
+
+    def _reseed(self, db, name, go, log, key):
+        """`name` copied whole again from the source as a generation of its
+        own: the target's collection dropped - its documents, indexes and
+        options were the old generation's - and the source's copied in as
+        stored (`move_table`), its progress kept in the attempt ledger
+        under `key`, so a crash goes on from the last `_id` it saved. True
+        once copied; without `go` nothing is written, False."""
+        from pymongo.errors import PyMongoError
+        if not go:
+            return False
+        ledger = self.attempts().ledger
+        there = self._there(db, name)
+        try:
+            if not ledger.owned(key).get("copy"):
+                ledger.own(key, state="began", collection=name, copy={})
+                self._client("dst")[self._d("dst", db)].drop_collection(
+                    there)
+            if name in self._client("src")[db].list_collection_names():
+                self.move_table(db, "", name, self.COPY_BATCH,
+                                _LedgerCheckpoint(ledger, key), log)
+        except PyMongoError as e:
+            stop = self._write_refused(e, f"{db}.{there}")
+            if stop is None:
+                raise
+            raise stop from e
+        ledger.own(key, state="done")
+        return True
+
+    def _finish_reseeds(self, db, go, log):
+        """The generations a follow of `db` began copying and never
+        finished - a crash in the middle - copied on from where they
+        stood, before any change is applied over them."""
+        prefix = self.FOLLOW_KEY.format(db=db) + "|"
+        for key, rec in sorted(self.attempts().ledger.uncertain().items()):
+            if key.startswith(prefix) and rec.get("collection"):
+                log(f"{db}.{rec['collection']}: its copy as a new generation"
+                    " was cut off; going on with it")
+                self._reseed(db, rec["collection"], go, log, key)
+
+    def _new_generations(self, db, ev, kept, go, log):
+        """A collection the source dropped, renamed or resharded: what the
+        target holds of it no longer follows from the changes before, so
+        it starts a generation of its own (`generation_of`) - by the hop's
+        `ddl` (`tailtables.policy`) stopped at, set aside while the other
+        collections go on, or copied whole again from the source as it is
+        now (`_reseed`), the changes after the event applied over it. One
+        event is copied for once: met again after a restart, a generation
+        it finished is not copied twice."""
+        from ..tailtables import policy
+        op = ev["operationType"]
+        names = generation_of(ev)
+        if names is None:
+            names = sorted(set(self._client("src")[db]
+                               .list_collection_names())
+                           | set(kept["generations"]))
+        tag = str((ev.get("_id") or {}).get("_data") or "")
+        for name in names:
+            if name.startswith("system.") or not self.in_scope(db, name):
+                continue
+            pol = policy(self.hop, [db, name])
+            if pol == "stop":
+                raise self._not_a_row_change(op, ev)
+            if pol == "park":
+                if name not in kept["parked"]:
+                    kept["parked"].append(name)
+                    log(f"{db}.{name}: {op} on the source; set aside by the"
+                        " hop's ddl, the other collections go on")
+                continue
+            key = f"{self.FOLLOW_KEY.format(db=db)}|{name}|{tag}"
+            if self.attempts().ledger.owned(key).get("state") == "done":
+                continue
+            gen = int(kept["generations"].get(name) or 0) + 1
+            log(f"{db}.{name}: {op} on the source starts its generation"
+                f" {gen}; copied again, the other collections go on")
+            if self._reseed(db, name, go, log, key):
+                kept["generations"][name] = gen
+
+    def _reseed_follow(self, db, go, token_path, log):
+        """`FOLLOW_WAYS`' reseed: a position taken now as a stream of its
+        own (`tailctl.begin`), every collection the hop takes copied again
+        from the source (`_reseed`), then followed from that position by
+        the way that holds now (`tail_apply`)."""
+        from .. import tailctl
+        if not go:
+            log(f"{db}: the saved position can no longer be followed from;"
+                " --go takes a new one and copies every collection again")
+            return None
+        point = self.change_point("src", db)
+        env = tailctl.begin(self, db, token_path, point
+                            if isinstance(point, dict) else {"_data": point})
+        names = [n for n in self._client("src")[db].list_collection_names()
+                 if not n.startswith("system.") and self.in_scope(db, n)]
+        prefix = self.FOLLOW_KEY.format(db=db)
+        for name in names:
+            self._reseed(db, name, go, log,
+                         f"{prefix}|{name}|reseed {env.get('id')}")
+        self._keep_follow(db, {**env, "gen": -1}, env["token"],
+                          {"generations": {n: 1 for n in names},
+                           "parked": [], "invalidated": None})
+        return self.tail_apply(db, go, token_path, log)
 
     def _majority_ts(self, side, hello=None):
         """The time of the last write a majority of the replica set's
@@ -4286,10 +4603,17 @@ class MongoEngine(Engine):
         from bson.json_util import dumps, loads
 
         from .. import tailctl
+        from pymongo.errors import PyMongoError
         way = self.follow_way(db)
         if way.rung is None:
             raise SystemExit(f"{db}: no way to follow the source -"
                              f" {way.reason}")
+        if way.path == "reseed":
+            log(f"following by {way.said}: {way.reason}")
+            return self._reseed_follow(db, go, token_path, log)
+        self._finish_reseeds(db, go, log)
+        if go:
+            self._audit_write_block(log)
         if way.path == "bucket sweep":
             log(f"following by {way.said}: {way.reason}")
             return self._sweep_follow(db, go, token_path, log)
@@ -4298,9 +4622,14 @@ class MongoEngine(Engine):
             return self._oplog_follow(db, go, token_path, log)
         from ..decide import HopCosts
         kept = HopCosts(self.hop, "follow/")
-        src = self._client("src")[db]
+        from bson.raw_bson import DEFAULT_RAW_BSON_OPTIONS
+        # each event's documents as the bytes the source stored - a
+        # Decimal128, a binary of any subtype, a date past the years a
+        # Python datetime holds - never decoded and made again
+        src = self._client("src")[db].with_options(
+            codec_options=DEFAULT_RAW_BSON_OPTIONS)
         dst = self._client("dst")[self._d("dst", db)]
-        env = tailctl.position(token_path)
+        env, gens = self._follow_state(db, token_path, go)
         resume = None
         if env is not None:
             if env.get("token") is not None:
@@ -4313,7 +4642,7 @@ class MongoEngine(Engine):
             resume = env["token"]
         log("tailing change stream, ctrl-c to stop"
             + ("" if go else " (count-only, add --go to apply)"))
-        s = SimpleNamespace(stream=None, n=0, env=env)
+        s = SimpleNamespace(stream=None, n=0, env=env, kept=gens)
 
         def close():
             if s.stream is not None:
@@ -4326,7 +4655,13 @@ class MongoEngine(Engine):
         def look(at):
             if s.stream is None:
                 kwargs = {"full_document": "updateLookup"}
-                if isinstance(at, dict) and "ts" in at:
+                ended = s.kept.get("invalidated")
+                if ended is not None and at is not None \
+                        and json.loads(dumps(at)) == ended:
+                    # a stream that ended (a database dropped) opens
+                    # again only after its end
+                    kwargs["start_after"] = at
+                elif isinstance(at, dict) and "ts" in at:
                     # an oplog follow's position: opened at its entry,
                     # which carried again converges
                     kwargs["start_at_operation_time"] = oplog_ts(at)
@@ -4350,13 +4685,29 @@ class MongoEngine(Engine):
                 read += 1
                 op = ev["operationType"]
                 coll = (ev.get("ns") or {}).get("coll")
-                if coll and not self.in_scope(db, coll):
+                if op == "invalidate":
+                    close()
+                    after = ev["_id"]
+                    s.kept["invalidated"] = json.loads(dumps(after))
+                    break
+                if op in GENERATION_EVENTS:
+                    self._new_generations(db, ev, s.kept, go, log)
+                    after = ev["_id"]
+                    continue
+                if coll and (not self.in_scope(db, coll)
+                             or coll in s.kept["parked"]):
                     after = ev["_id"]
                     continue
                 if op not in self.STREAM_OPS:
                     raise self._not_a_row_change(op, ev)
                 n += 1
-                self._tail_event(db, dst, ev, go)
+                try:
+                    self._tail_event(db, dst, ev, go)
+                except PyMongoError as e:
+                    stop = self._write_refused(e, f"{db}.{coll}")
+                    if stop is None:
+                        raise
+                    raise stop from e
                 after = ev["_id"]
             if n:
                 s.n += n
@@ -4369,8 +4720,9 @@ class MongoEngine(Engine):
             return after, n, settled
 
         def save(after):
-            s.env = tailctl.moved(token_path, s.env,
-                                  json.loads(dumps(after)))
+            token = json.loads(dumps(after))
+            self._keep_follow(db, s.env, token, s.kept)
+            s.env = tailctl.moved(token_path, s.env, token)
 
         def lost(e, at):
             # the stream opened again from the last position saved
