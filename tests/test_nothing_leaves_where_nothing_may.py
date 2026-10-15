@@ -339,7 +339,7 @@ def test_the_evidence_reaches_only_a_bucket_the_egress_names(tmp_path,
     monkeypatch.setattr(state, "run_state", lambda h: Bucket())
     hop = _hop(tmp_path, state={"backend": "s3", "bucket": "b",
                                 "endpoint_url": "http://10.0.0.5:9000"},
-               egress={"to": ["minio.example.com"]})
+               egress={"to": ["objects.example.com"]})
     said = []
     export._anchor_remote(hop, tmp_path, {"op": "evidence"}, said.append)
     assert put == [] and said, said

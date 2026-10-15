@@ -632,12 +632,12 @@ def _dynamo_left(s):
     return ["tables"] if s.client().list_tables()["TableNames"] else []
 
 
-def _minio_leave(s):
+def _objectstore_leave(s):
     s.client().put_object(Bucket=servers.space_name(
-        "tests.test_put_back_minio").replace("_", "-"), Key="k", Body=b"v")
+        "tests.test_put_back_objectstore").replace("_", "-"), Key="k", Body=b"v")
 
 
-def _minio_left(s):
+def _objectstore_left(s):
     return ["buckets"] if s.client().list_buckets()["Buckets"] else []
 
 
@@ -670,7 +670,7 @@ LEAVE = {"pg": (_pg_leave, _pg_left), "mysql": (_my_leave, _my_left),
          "redpanda": (_kafka_leave, _kafka_left),
          "clickhouse": (_ch_leave, _ch_left),
          "dynamodb": (_dynamo_leave, _dynamo_left),
-         "minio": (_minio_leave, _minio_left),
+         "objectstore": (_objectstore_leave, _objectstore_left),
          "cassandra": (_cassandra_leave, _cassandra_left),
          "opensearch": (_os_leave, _os_left)}
 

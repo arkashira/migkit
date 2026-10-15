@@ -8,7 +8,6 @@ and a holder that stopped renewing is taken over once its term lapses.
 Checkpoints are kept there too: a second machine sees what the first had
 copied and resumes from it.
 """
-import socket
 import sqlite3
 import subprocess
 import threading
@@ -17,6 +16,7 @@ import time
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as store
 
 pytestmark = [pytest.mark.docker]
 
@@ -38,42 +38,21 @@ def _docker():
 def bucket():
     if not _docker():
         pytest.skip("docker not available")
-    subprocess.run(["docker", "rm", "-f", "-v", S3], capture_output=True)
-    subprocess.run(["docker", "run", "-d", "--name", S3, "-e",
-                    "MINIO_ROOT_USER=minioadmin", "-e",
-                    "MINIO_ROOT_PASSWORD=minioadmin", "-p", f"{PORT}:9000",
-                    "bitnamilegacy/minio:latest"], check=True,
-                   capture_output=True)
     try:
-        import boto3
-        end = time.time() + 60
-        while time.time() < end:
-            with socket.socket() as s:
-                s.settimeout(1)
-                if s.connect_ex(("127.0.0.1", PORT)) == 0:
-                    break
-            time.sleep(1)
-        client = boto3.client("s3", endpoint_url=f"http://127.0.0.1:{PORT}",
-                              aws_access_key_id="minioadmin",
-                              aws_secret_access_key="minioadmin",
-                              region_name="us-east-1")
-        for _ in range(30):
-            try:
-                client.create_bucket(Bucket=BUCKET)
-                break
-            except Exception:
-                time.sleep(1)
+        client = store.start_object_store(S3, PORT)
+        store.object_store_bucket(client, BUCKET)
+        store.object_store_holds_to_preconditions(client, BUCKET)
         yield client
     finally:
-        subprocess.run(["docker", "rm", "-f", "-v", S3], capture_output=True)
+        store.remove(S3)
 
 
 @pytest.fixture
 def machine(tmp_path, monkeypatch, bucket):
     """This process as one machine: its own report directory."""
     import migkit.config as cfg
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "minioadmin")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", store.OBJECT_STORE_USER)
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", store.OBJECT_STORE_SECRET)
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
 
     # the table copier, which leases a table at a time; a whole SQLite
@@ -236,8 +215,8 @@ def _two_machines(tmp_path, tables, rows, extra_env=None):
     for name in ("one", "two"):
         env = {**os.environ, "MIGKIT_CONF": str(conf),
                "MIGKIT_REPORTS": str(tmp_path / name),
-               "AWS_ACCESS_KEY_ID": "minioadmin",
-               "AWS_SECRET_ACCESS_KEY": "minioadmin",
+               "AWS_ACCESS_KEY_ID": store.OBJECT_STORE_USER,
+               "AWS_SECRET_ACCESS_KEY": store.OBJECT_STORE_SECRET,
                "AWS_DEFAULT_REGION": "us-east-1", **(extra_env or {})}
         runs.append(subprocess.Popen(
             [sys.executable, "-m", "migkit.cli", "move", "shared", "--mode",
@@ -307,8 +286,8 @@ def test_a_machine_that_dies_mid_table_is_taken_over(machine, tmp_path,
         env = {**os.environ, "MIGKIT_CONF": str(conf),
                "MIGKIT_REPORTS": str(tmp_path / name),
                "MIGKIT_LEASE_SECONDS": "3",
-               "AWS_ACCESS_KEY_ID": "minioadmin",
-               "AWS_SECRET_ACCESS_KEY": "minioadmin",
+               "AWS_ACCESS_KEY_ID": store.OBJECT_STORE_USER,
+               "AWS_SECRET_ACCESS_KEY": store.OBJECT_STORE_SECRET,
                "AWS_DEFAULT_REGION": "us-east-1"}
         return subprocess.Popen(
             [sys.executable, "-m", "migkit.cli", "move", "shared", "--mode",

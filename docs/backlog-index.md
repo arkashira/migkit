@@ -421,8 +421,16 @@ in these historical totals.
 | 337 | R8.mv | MongoDB migration-verifier with its metadata on a local server | OPEN (waited on the owner's download go-ahead; the 2026-09-28 decision makes worthwhile tools dependencies) | M | verify | L2131-2134, L6326-6327, L6335-6336 |
 | 338 | R8.explain | A mismatch narrowed to one range explained column by column (datacompy) | DONE 5713daf | S | verify | L2320, L6327-6328, L6337-6338 |
 | 339 | R10 | Large values sized; PostgreSQL large objects carried in pieces | DONE (in text 2026-09-27) | M | move | L6370-6383 |
+<<<<<<< HEAD
 | 340 | R10.pieces | MySQL and Oracle large values read in pieces and appended (plan 12, LOBs) | DONE 2026-10-15 | M | move | L2234, L6383-6393, L8157 |
 | 341 | R12.minio | Object-store tests off MinIO's images (VersityGW) | OPEN (grep: tests still start bitnamilegacy/minio, including `tests/servers.py`'s `minio` profile) | S | operations/scale | L6525-6527 |
+||||||| accbb35
+| 340 | R10.pieces | MySQL and Oracle large values read in pieces and appended (plan 12, LOBs) | PARTLY 0c89d67 (done: Oracle's LOBs read and written in pieces; missing: MySQL's large values by `SUBSTRING` in steps - grep: no `LARGE_VALUES` adapter on MySQL, `pieces` covers 18 other engines) | M | move | L2234, L6383-6393, L8157 |
+| 341 | R12.minio | Object-store tests off MinIO's images (VersityGW) | OPEN (grep: tests still start bitnamilegacy/minio, including `tests/servers.py`'s `minio` profile) | S | operations/scale | L6525-6527 |
+=======
+| 340 | R10.pieces | MySQL and Oracle large values read in pieces and appended (plan 12, LOBs) | PARTLY 0c89d67 (done: Oracle's LOBs read and written in pieces; missing: MySQL's large values by `SUBSTRING` in steps - grep: no `LARGE_VALUES` adapter on MySQL, `pieces` covers 18 other engines) | M | move | L2234, L6383-6393, L8157 |
+| 341 | R12.minio | Object-store tests off MinIO's images (VersityGW) | PARTLY (done: the `objectstore` profile and the three module fixtures start VersityGW; missing: never started here, see backlog R12) | S | operations/scale | L6525-6527 |
+>>>>>>> worktree-agent-a3d9c912e7197cb4a
 | 342 | R13 | Engine cells done 2026-09-27: Kafka users/ACLs/confirm/snapshot; ClickHouse server-side sums, delta, settings, users, snapshot; SQLite and DuckDB native bulk; Parquet; Redis verify of written keys; DynamoDB stream follow, fence, confirm, delta, settings, backup, bulk; SQL Server logins, confirm, FOR JSON hash; OpenSearch copy, settings, snapshot, delta; Cassandra roles, settings, TTL-keeping copy | DONE (in text 2026-09-27) | L | engines | L6535-6683 |
 | 343 | R13-MSSQL | SQL Server bulk move (its own bulk load, staged and promoted in migkit's transaction; R2.4 staging) | DONE fed3f89 | M | engines | L753, L3929-3931, L4067-4069, L5911, L5959-5960; capabilities.py GAPS mssql |
 | 344 | R13-CH | ClickHouse bulk as the target pulling from the source (`remote()`, dedup tokens) | DONE ba59531 | M | engines | L4139, L6553-6554, L7542, L8153-8154 |

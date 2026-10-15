@@ -10,7 +10,7 @@ then committed to a backend so it survives losing this machine:
       backend: s3
       bucket: my-migkit-state
       prefix: migkit/           # optional
-      endpoint_url: ...         # optional, for S3-compatible stores (minio)
+      endpoint_url: ...         # optional, for S3-compatible stores
 
 Config lives per-hop (hop.options["state"]) or falls back to a top-level
 `state:` block in hops.yaml.

@@ -7300,8 +7300,15 @@ clocks cannot be set for a session.
   `DBMS_METADATA`, statistics, restore points - to be tried within the
   VM's limits.
 * **MinIO's images left Docker Hub on 2026-09-11.** The object store tests
-  use a copy cached here; VersityGW (arm64, versioning) replaces it before
-  it is needed again.
+  now start VersityGW (`tests/servers.py`: the `objectstore` profile and
+  `start_object_store`, one sample sign-in, its health path as the ready
+  sign, buckets made through the S3 calls). Not done: the image was never
+  started here (colima was down), so these are unproved against it: the
+  `--health` flag and the `/tmp` posix directory in `OBJECT_STORE_ARGS`, and
+  that it honours `IfNoneMatch`/`IfMatch` on a put (the lease tests probe
+  this first and fail loudly if not). No second profile for versioning or
+  Object Lock was needed: the anchor's tests run on a stand-in, so real
+  Object Lock semantics stay unexercised (item R5.anchor).
 * SQL Server: the 2022 image runs only under Rosetta, which colima does
   not use - but SQL Edge (`azure-sql-edge`, retired and still runnable)
   runs on arm64 and is what the tests use; found its checksum's blind

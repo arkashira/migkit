@@ -318,6 +318,18 @@ _KAFKA_ENV = (
 MSSQL_IMAGE = os.environ.get("MIGKIT_MSSQL_IMAGE") or \
     "mcr.microsoft.com/azure-sql-edge:latest"
 
+#: the S3-compatible store every object-store test runs against: a gateway
+#: over a plain directory, signed in with a sample pair; no versioning, no
+#: Object Lock (the anchor's tests use a stand-in for those)
+OBJECT_STORE_IMAGE = "versity/versitygw:latest"
+OBJECT_STORE_INNER = 7070
+OBJECT_STORE_USER = "migkit-test"
+OBJECT_STORE_SECRET = "migkit-test-secret"  # sample
+OBJECT_STORE_HEALTH = "/health"
+OBJECT_STORE_ARGS = ("--access", OBJECT_STORE_USER, "--secret",
+                     OBJECT_STORE_SECRET, "--health", OBJECT_STORE_HEALTH,
+                     "posix", "/tmp")
+
 PROFILES = {p.key: p for p in (
     # what `pg_pair` has always been; lane 0 keeps its names and ports
     Profile("pg", "postgres", "postgres:16", 5432, 0, mb=80,
@@ -384,13 +396,10 @@ PROFILES = {p.key: p for p in (
             roles=("one",), mb=250,
             args=("-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"),
             start_s=90),
-    Profile("minio", "minio", "bitnamilegacy/minio:latest", 9000, 32,
-            roles=("one",), mb=200,
-            env=(("MINIO_ROOT_USER", "minioadmin"),
-                 ("MINIO_ROOT_PASSWORD", "minioadmin")),
-            # the local stand-in's own sign-in
-            user="minioadmin", password="minioadmin",  # sample
-            start_s=90),
+    Profile("objectstore", "objectstore", OBJECT_STORE_IMAGE,
+            OBJECT_STORE_INNER, 32, roles=("one",), mb=120,
+            args=OBJECT_STORE_ARGS, user=OBJECT_STORE_USER,
+            password=OBJECT_STORE_SECRET, start_s=90),
     Profile("sqlserver", "mssql", MSSQL_IMAGE, 1433, 33, roles=("one",),
             mb=1100,
             env=(("ACCEPT_EULA", "Y"), ("MSSQL_SA_PASSWORD", STRONG),
@@ -741,6 +750,76 @@ def private(module, role, image_name, *args, ports=(), env=None, options=(),
         yield container, mapped
     finally:
         remove(container)
+
+
+# ---- the object store, for modules that own a container of it ---------------
+
+def object_store_client(host, port):
+    import boto3
+    return boto3.client("s3", endpoint_url=f"http://{host}:{port}",
+                        region_name="us-east-1",
+                        aws_access_key_id=OBJECT_STORE_USER,
+                        aws_secret_access_key=OBJECT_STORE_SECRET)
+
+
+def object_store_ready(host, port):
+    """The store's health answer, then a signed-in call: raises until both
+    come."""
+    import urllib.request
+    with urllib.request.urlopen(
+            f"http://{host}:{port}{OBJECT_STORE_HEALTH}", timeout=3) as got:
+        if got.status != 200:
+            raise ConnectionError(f"health answered {got.status}")
+    object_store_client(host, port).list_buckets()
+
+
+def start_object_store(container, host_port):
+    """A container of the object store of a module's own, on
+    `127.0.0.1:host_port`, answering by its health sign: its client. The
+    caller removes it."""
+    remove(container)
+    got = docker("run", "-d", "--name", container, "-p",
+                 f"{HOST}:{host_port}:{OBJECT_STORE_INNER}",
+                 OBJECT_STORE_IMAGE, *OBJECT_STORE_ARGS)
+    if got.returncode != 0:
+        raise RuntimeError(f"starting {container}: {got.stderr.strip()}")
+    try:
+        until(lambda: object_store_ready(HOST, host_port) or True, 90,
+              f"{container} to answer")
+    except NeverCame as e:
+        raise NeverCame(f"{e}\n{logs(container)}") from None
+    return object_store_client(HOST, host_port)
+
+
+def object_store_bucket(client, bucket):
+    """`bucket` made through the store's S3 calls (it has no program for
+    it), retried while the store settles."""
+    until(lambda: client.create_bucket(Bucket=bucket) or True, 60,
+          f"bucket {bucket} to be made")
+
+
+def object_store_holds_to_preconditions(client, bucket):
+    """Raises, saying which, when the store lets through a second creation
+    of a key or a write over a version no longer there: the two conditions
+    the run state's lease stands on, so a lease test never passes against a
+    store that lets two writers in."""
+    from botocore.exceptions import ClientError
+    key = "precondition-probe"
+    first = client.put_object(Bucket=bucket, Key=key, Body=b"one",
+                              IfNoneMatch="*")
+    for what, args in (("a second creation of a key", {"IfNoneMatch": "*"}),
+                       ("a write over a version no longer there",
+                        {"IfMatch": '"0"'})):
+        try:
+            client.put_object(Bucket=bucket, Key=key, Body=b"two", **args)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("PreconditionFailed", "412"):
+                continue
+            raise
+        raise AssertionError(f"the object store let through {what}")
+    client.put_object(Bucket=bucket, Key=key, Body=b"three",
+                      IfMatch=first["ETag"])
+    client.delete_object(Bucket=bucket, Key=key)
 
 
 # ---- engines: ready, baseline, open, reset, sql, tls ------------------------
@@ -1246,20 +1325,16 @@ class _Dynamo:
             c.delete_table(TableName=t)
 
 
-class _Minio:
+class _ObjectStore:
     @staticmethod
     def client(s):
-        import boto3
-        return boto3.client("s3", endpoint_url=f"http://{s.host}:{s.port}",
-                            region_name="us-east-1",
-                            aws_access_key_id=s.user,
-                            aws_secret_access_key=s.password)
+        return object_store_client(s.host, s.port)
 
     def sql(self, s, statement, db=None):
         raise TypeError("an object store takes calls: its client")
 
     def ready(self, s):
-        self.client(s).list_buckets()
+        object_store_ready(s.host, s.port)
         return True
 
     def baseline(self, s):
@@ -1269,13 +1344,12 @@ class _Minio:
         self.client(s).create_bucket(Bucket=db.replace("_", "-"))
 
     def reset(self, s):
+        # started without versioning: only current objects exist
         c = self.client(s)
         for b in c.list_buckets().get("Buckets", []):
-            for page in c.get_paginator("list_object_versions").paginate(
+            for page in c.get_paginator("list_objects_v2").paginate(
                     Bucket=b["Name"]):
-                gone = [{"Key": v["Key"], "VersionId": v["VersionId"]}
-                        for v in page.get("Versions", []) +
-                        page.get("DeleteMarkers", [])]
+                gone = [{"Key": o["Key"]} for o in page.get("Contents", [])]
                 if gone:
                     c.delete_objects(Bucket=b["Name"],
                                      Delete={"Objects": gone})
@@ -1375,7 +1449,7 @@ class _Oracle:
 _ENGINES = {"postgres": _Postgres(), "mysql": _MySQL(), "mongo": _Mongo(),
             "redis": _Redis(), "kafka": _Kafka(), "cassandra": _Cassandra(),
             "clickhouse": _ClickHouse(), "opensearch": _OpenSearch(),
-            "dynamodb": _Dynamo(), "minio": _Minio(), "mssql": _SqlServer(),
+            "dynamodb": _Dynamo(), "objectstore": _ObjectStore(), "mssql": _SqlServer(),
             "oracle": _Oracle()}
 
 
@@ -1406,7 +1480,7 @@ class Holds:
 #: ports inside a container a file names beside its host ports; never a
 #: host port the tests fix
 INNER_PORTS = {5432, 3306, 27017, 6379, 9042, 8123, 9000, 9200, 1433, 1521,
-               50000, 5000, 9092, 9093, 8000, 8080, 443, 80, 22, 2181, 8081,
+               7070, 50000, 5000, 9092, 9093, 8000, 8080, 443, 80, 22, 2181, 8081,
                8083, 9300, 11210, 8091, 26257, 6432, 7000, 7001, 9160, 8443,
                5672, 9644, 8082, 33060, 10000, 2379, 8529, 7474, 7687, 8086,
                9001, 4566, 8888, 19092, 10800, 1025}
@@ -1421,7 +1495,7 @@ IMAGE_MB = {"cassandra": 800, "scylla": 800, "opensearch": 650,
             "azure-sql-edge": 1100, "oracle": 2000, "db2": 2500,
             "sybase": 1000, "clickhouse": 350, "mongo": 300, "mysql": 420,
             "mariadb": 200, "postgres": 80, "postgis": 120, "redis": 20,
-            "valkey": 20, "minio": 200, "dynamodb": 250, "toxiproxy": 20,
+            "valkey": 20, "versitygw": 120, "dynamodb": 250, "toxiproxy": 20,
             "alpine": 10, "pgbouncer": 20, "bigquery": 200, "python": 300}
 _KNOWN_REPOS = ("postgres", "mysql", "mariadb", "mongo", "redis", "valkey",
                 "cassandra", "alpine", "debian", "ubuntu", "python", "nginx",

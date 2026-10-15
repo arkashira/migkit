@@ -8,14 +8,13 @@ the files move back into PostgreSQL, read in one pass, since files keep
 no order to resume by.
 """
 import datetime
-import socket
 import subprocess
-import time
 from decimal import Decimal
 
 import pytest
 
 from migkit.config import Endpoint, Hop
+from tests import servers as store
 from tests.conftest import psql
 
 #: what this module proves, item by engine (`capabilities.proofs`)
@@ -39,35 +38,12 @@ def _docker():
 def s3(pg_pair):
     if not _docker():
         pytest.skip("docker not available")
-    subprocess.run(["docker", "rm", "-f", "-v", S3], capture_output=True)
-    subprocess.run(["docker", "run", "-d", "--name", S3, "-e",
-                    "MINIO_ROOT_USER=minioadmin", "-e",
-                    "MINIO_ROOT_PASSWORD=minioadmin", "-p",
-                    f"{S3_PORT}:9000", "bitnamilegacy/minio:latest"],
-                   check=True, capture_output=True)
     try:
-        import boto3
-        end = time.time() + 60
-        while time.time() < end:
-            with socket.socket() as s:
-                s.settimeout(1)
-                if s.connect_ex(("127.0.0.1", S3_PORT)) == 0:
-                    break
-            time.sleep(1)
-        client = boto3.client("s3",
-                              endpoint_url=f"http://127.0.0.1:{S3_PORT}",
-                              aws_access_key_id="minioadmin",
-                              aws_secret_access_key="minioadmin",
-                              region_name="us-east-1")
-        for _ in range(30):
-            try:
-                client.create_bucket(Bucket="lake")
-                break
-            except Exception:
-                time.sleep(1)
+        client = store.start_object_store(S3, S3_PORT)
+        store.object_store_bucket(client, "lake")
         yield client
     finally:
-        subprocess.run(["docker", "rm", "-f", "-v", S3], capture_output=True)
+        store.remove(S3)
 
 
 @pytest.fixture(scope="module")
@@ -127,8 +103,9 @@ def test_a_move_into_parquet_is_checked_and_its_losses_found(
         where, source, s3, tmp_path):
     target = (Endpoint(options={"path": str(tmp_path / "lake")})
               if where == "disk" else
-              # the local stand-in's own sample sign-in
-              Endpoint(user="minioadmin", password="minioadmin",  # sample
+              # the local store's own sample sign-in
+              Endpoint(user=store.OBJECT_STORE_USER,
+                       password=store.OBJECT_STORE_SECRET,  # sample
                        options={"url": f"s3://lake/{tmp_path.name}",
                                 "endpoint_url":
                                     f"http://127.0.0.1:{S3_PORT}"}))

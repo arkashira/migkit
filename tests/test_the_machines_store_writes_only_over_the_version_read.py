@@ -21,6 +21,7 @@ import pytest
 from migkit import ha, hopkeys, shared, tooluse
 from migkit.config import Endpoint, Hop
 from migkit.state import Taken
+from tests import servers as s3store
 
 PG, PG_PORT = "migkit-test-w1-store-pg", 16424
 MY, MY_PORT = "migkit-test-w1-store-my", 16425
@@ -214,12 +215,8 @@ def servers():
                     "MYSQL_ROOT_PASSWORD=test", "-e", "MYSQL_DATABASE=app",
                     "-p", f"127.0.0.1:{MY_PORT}:3306", "mysql:8.4"],
                    check=True, capture_output=True)
-    subprocess.run(["docker", "run", "-d", "--name", S3, "-e",
-                    "MINIO_ROOT_USER=minioadmin", "-e",
-                    "MINIO_ROOT_PASSWORD=minioadmin", "-p",
-                    f"127.0.0.1:{S3_PORT}:9000", "bitnamilegacy/minio:latest"],
-                   check=True, capture_output=True)
     try:
+        s3store.start_object_store(S3, S3_PORT)
         _wait(PG_PORT, lambda: subprocess.run(
             ["docker", "exec", PG, "pg_isready", "-U", "postgres"],
             capture_output=True).returncode == 0)
@@ -229,7 +226,6 @@ def servers():
             ["docker", "exec", MY, "mysql", "-uroot", "-ptest",
              "-h127.0.0.1", "--protocol=tcp", "-e", "select 1"],
             capture_output=True).returncode == 0)
-        _wait(S3_PORT)
         yield
     finally:
         for name in (PG, MY, S3):
@@ -255,18 +251,12 @@ def test_rows_of_migkit_origin_on_the_target(servers, tmp_path, engine,
 
 @pytest.mark.docker
 def test_the_run_states_bucket(servers, tmp_path, monkeypatch):
-    import boto3
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "minioadmin")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "minioadmin")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", s3store.OBJECT_STORE_USER)
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", s3store.OBJECT_STORE_SECRET)
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-    client = boto3.client("s3", endpoint_url=f"http://127.0.0.1:{S3_PORT}",
-                          region_name="us-east-1")
-    for _ in range(30):
-        try:
-            client.create_bucket(Bucket="w1-state")
-            break
-        except Exception:
-            time.sleep(1)
+    client = s3store.object_store_client("127.0.0.1", S3_PORT)
+    s3store.object_store_bucket(client, "w1-state")
+    s3store.object_store_holds_to_preconditions(client, "w1-state")
     shared.forget()
     hop = _hop(tmp_path, "bk", options={
         "standby": True, "state": {
