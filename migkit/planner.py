@@ -831,14 +831,17 @@ class Ewma:
         return self.value
 
 
-def progress(where, pace, total_rows, model=None, done=False, ways=()):
+def progress(where, pace, total_rows, model=None, done=False, ways=(),
+             eta=None):
     """What the move has done and how long is left, kept as
     `progress.json` beside its reports for `watch` and the metrics: rows
     done, the recent rate (the pace's moving average), the time left of
     the copy at it, the number at a time and what holds it down - a
     resource whose own limit holds it now, measured while the move runs,
     before the one the model named from its probes. `done` once the copy
-    has ended: its whole rate then."""
+    has ended: its whole rate then. `eta` answers the copy's own estimate
+    from its units (`Engine.forecast`), kept with its range, confidence
+    and evidence for `watch`."""
     import os
     import time
     rate, rows = pace.recent, pace.total
@@ -863,6 +866,13 @@ def progress(where, pace, total_rows, model=None, done=False, ways=()):
                      "way": w.get("chosen"),
                      "seconds_a_row": w.get("seconds_a_row")}
                     for w in ways or ()][:50]}
+    if eta is not None and not done:
+        try:
+            e = eta()
+            got["eta"] = e.as_evidence()
+            got["eta_said"] = e.operator_line()
+        except Exception:  # noqa: BLE001 - the progress is kept without it
+            pass
     from . import durable
     durable.write_json(os.path.join(str(where), "progress.json"), got)
 

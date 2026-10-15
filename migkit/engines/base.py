@@ -5506,7 +5506,8 @@ class Engine:
         return contextlib.nullcontext()
 
     def forecast(self, kind, db, units=None, backlog=None, ingest=None,
-                 applied=None, spread=(), history=None, **kw):
+                 applied=None, spread=(), history=None, attempts=None,
+                 **kw):
         """When one task over `db` ends (`util.forecast`), the same for
         every engine: `kind` is move, follow, check, verify or deep. A
         follow is its catch-up (`util.catch_up`: the `backlog` of changes,
@@ -5517,7 +5518,10 @@ class Engine:
         work undiscovered. The rate an earlier run of this hop kept is
         read only where this run has not measured enough
         (`decide.HopCosts`); a task found done keeps its own for the next
-        run."""
+        run. `attempts` - an `attempts.Ledger`, or True for this engine's
+        own (`attempts()`) - holds the units to what their attempts
+        measured (`util.merge_units`): their times are the rate, and a unit
+        that has made no progress for long is said stalled."""
         from .. import util
         from ..decide import HopCosts
         scope = f"{util.TASK_KINDS.get(kind, kind)} of {db}"
@@ -5534,6 +5538,10 @@ class Engine:
                 tables, undiscovered = [], True
             units = [util.Unit(str(t), kind, rows=self._rows_of("src", db, t))
                      for t in tables]
+        if attempts is not None:
+            ledger = self.attempts().ledger if attempts is True else attempts
+            units = util.merge_units(units, ledger.units(kind,
+                                                         now=kw.get("now")))
         kept = HopCosts(self.hop, "eta.")
 
         def kept_rate():

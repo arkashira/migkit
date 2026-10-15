@@ -305,6 +305,20 @@ class ETA(NamedTuple):
     def __str__(self):
         return self.formatted
 
+    def operator_line(self):
+        """The estimate as the operator reads it: the time with its range
+        and confidence (or why there is none), the last evidence it stands
+        on - a revision where there was one - and what to do next."""
+        parts = [self.formatted]
+        said = [e for e in self.evidence if not e.startswith("stands on")]
+        if said and self.basis != "done":
+            parts.append(said[-1])
+        if self.stale and not self.revised:
+            parts.append("measured again after a stale estimate")
+        if self.next_step:
+            parts.append(self.next_step)
+        return "; ".join(parts)
+
     def as_evidence(self):
         """The estimate as data, for the ledger and the report."""
         return {k: (list(v) if isinstance(v, tuple) else v)
@@ -509,6 +523,32 @@ class Unit(NamedTuple):
     #: seconds it waits before it may run again (a backoff, a throttle)
     cooldown: float = 0.0
     ended: Optional[float] = None
+    #: seconds since a running unit last made useful progress, as its
+    #: attempts say (`attempts.Ledger.units`); None where not watched
+    idle: Optional[float] = None
+
+
+def merge_units(listed, measured):
+    """The units a task lists (`listed`: their rows and bytes from the
+    catalogue) held to what their attempts measured (`measured`: state,
+    seconds, attempts, when each ended and how long a running one has
+    made no progress), matched by name; a measured unit the listing does
+    not hold is work found while it ran, and is added."""
+    took = {u.name: u for u in measured or ()}
+    out = []
+    for u in listed or ():
+        m = took.pop(u.name, None)
+        if m is None:
+            out.append(u)
+            continue
+        out.append(u._replace(
+            state=m.state, seconds=m.seconds, attempts=max(u.attempts,
+                                                          m.attempts),
+            ended=m.ended, idle=m.idle,
+            cooldown=max(u.cooldown, m.cooldown),
+            done_rows=u.rows if m.state == "done" and u.rows else
+            u.done_rows))
+    return out + list(took.values())
 
 
 def _quantile(xs, q):
@@ -772,6 +812,31 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
                     " under pressure")
     last = max((u.ended for u in this_run if u.ended), default=None)
     usual = _quantile(durations, 0.5)
+    # a unit its attempts say has made no progress for many times the
+    # usual unit is stalled, however the others go: the time cannot hold
+    # it, and where every running unit is so, no time is said at all
+    stuck = sorted((u for u in left if u.state == "running"
+                    and u.idle is not None and usual
+                    and u.idle > STALL_UNITS * usual),
+                   key=lambda u: -u.idle)
+    look = ("look at what the stalled units wait on: a lock, a connection"
+            " or a side out of room")
+    if stuck:
+        worst = stuck[0]
+        evidence.append(
+            f"{len(stuck)} of {running} running units made no progress"
+            f" for {human_secs(stuck[-1].idle)} or more, up to"
+            f" {worst.idle / usual:.0f} times the usual unit: "
+            + ", ".join(u.name for u in stuck[:3])
+            + (f" and {len(stuck) - 3} more" if len(stuck) > 3 else ""))
+        if len(stuck) >= running:
+            return made(None, wall, None, round(min(conf, 0.1), 2),
+                        f"stalled: {worst.name} made no progress for"
+                        f" {human_secs(worst.idle)}", "stalled", look,
+                        active)
+        conf *= max(0.1, 1.0 - len(stuck) / running)
+        hi = None
+        step = look
     if running and last is not None and usual and \
             now - last > STALL_UNITS * usual:
         evidence.append(f"no unit has finished for {human_secs(now - last)},"
@@ -784,8 +849,13 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
     rng = (f"{human_secs(lo)} to {human_secs(hi)}" if hi is not None
            else f"at least {human_secs(lo)}")
     how = "conditional" if cond or choice.path == "eta.kept" else "measured"
+    if stuck:
+        cond, how = f"if the {len(stuck)} stalled units go on, ", \
+            "conditional"
     return made(wall, lo, hi, conf, f"{cond}{human_secs(wall)} ({rng},"
-                f" {int(conf * 100)}% confidence)", how, step, active)
+                f" {int(conf * 100)}% confidence)"
+                + (f"; {len(stuck)} stalled" if stuck else ""), how, step,
+                active)
 
 
 def catch_up(backlog, ingest, applied, scope="", now=None, spread=(),
@@ -896,6 +966,15 @@ class EstimateHistory:
             durable.append_line(self.path, json.dumps(
                 {"scope": scope, "unit": Unit(n, state="pending")._asdict()
                  | {"after": []}}))
+
+    def latest(self):
+        """{scope: the last estimate kept for it (a dict, with `at`)},
+        for the report's time left."""
+        got = {}
+        for e in self._lines():
+            if isinstance(e.get("estimate"), dict) and e.get("scope"):
+                got[e["scope"]] = e["estimate"]
+        return got
 
     def last(self, scope):
         """The last estimate kept for `scope` (a dict), or None."""

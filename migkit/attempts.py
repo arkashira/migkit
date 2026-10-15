@@ -89,6 +89,10 @@ class Attempt:
     patience: float = 0.0
     told: str = ""
     looked: float = 0.0
+    #: when it ended, on the monitor's clock
+    ended: float = 0.0
+    #: the wall time at the clock's zero, so a later run reads its times
+    epoch: float = 0.0
     transport: dict = field(default_factory=dict)
     abandon: object = field(default=None, repr=False)
 
@@ -181,6 +185,47 @@ class Ledger:
         with self._lock:
             return dict(self.attempts.get(key) or {})
 
+    def units(self, kind="move", operation=None, now=None):
+        """The units the attempts worked, as the estimate reads them
+        (`util.Unit`, `util.forecast`): a unit every attempt of which ended
+        well is done, timed from its first start to its last end; one whose
+        last attempt failed and none runs is owed again; one still in
+        flight is running, with the seconds since any of its attempts last
+        made useful progress (`idle`), which says a stall. `operation`
+        narrows to one; an attempt kept before the wall time was is not
+        timed."""
+        from .util import Unit
+        now = time.time() if now is None else float(now)
+        by = collections.defaultdict(list)
+        with self._lock:
+            for r in self.attempts.values():
+                if r.get("unit") and r.get("epoch") and (
+                        not operation or r.get("operation") == operation):
+                    by[r["unit"]].append(dict(r))
+        out = []
+        for name, rs in sorted(by.items()):
+            at = [float(r["epoch"]) for r in rs]
+            tries = sum(int(r.get("retries") or 0) for r in rs) + len(rs)
+            began = min(e + float(r.get("started") or 0.0)
+                        for e, r in zip(at, rs))
+            live = [(e, r) for e, r in zip(at, rs)
+                    if r.get("stage") != "done"]
+            if live:
+                moved = max(e + float(r.get("progress") or r.get("sent")
+                                      or r.get("started") or 0.0)
+                            for e, r in live)
+                out.append(Unit(name, kind, state="running", attempts=tries,
+                                idle=max(0.0, now - moved)))
+            elif any(r.get("reason") for r in rs):
+                out.append(Unit(name, kind, state="failed", attempts=tries))
+            else:
+                end = max(e + float(r.get("ended") or 0.0)
+                          for e, r in zip(at, rs))
+                out.append(Unit(name, kind, state="done", attempts=tries,
+                                seconds=max(0.0, end - began) or None,
+                                ended=end))
+        return out
+
     def put(self, attempt):
         """Keep `attempt`; written to the file where it is a unit's."""
         with self._lock:
@@ -206,8 +251,8 @@ class Monitor:
     and `say` are given in tests; `check(now)` is one pass of the thread."""
 
     def __init__(self, engine, ledger=None, clock=time.monotonic, say=None,
-                 thread=True):
-        self.engine, self.clock = engine, clock
+                 thread=True, wall=time.time):
+        self.engine, self.clock, self.wall = engine, clock, wall
         self.ledger = ledger or Ledger()
         self.say = say or (lambda line: print(line, file=sys.stderr))
         self._lock = threading.Lock()
@@ -222,7 +267,8 @@ class Monitor:
         from .decide import session_patience
         now = self.clock()
         a = Attempt(side, operation, unit, position, session, reads, now,
-                    now, transport=dict(transport or {}), abandon=abandon)
+                    now, transport=dict(transport or {}), abandon=abandon,
+                    epoch=self.wall() - now)
         before = self.ledger.earlier(a.key)
         if before:
             a.retries = int(before.get("retries", 0)) + 1
@@ -257,6 +303,7 @@ class Monitor:
         with self._lock:
             self._flight.pop(id(a), None)
         closed, a.stage = a.stage == "closed", "done"
+        a.ended = self.clock()
         if ok:
             self.ledger.measured(a.operation, self.clock() - a.sent)
             a.unprogressed, a.reason = 0, ""

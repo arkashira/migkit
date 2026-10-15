@@ -213,6 +213,34 @@ def _service_section(hop, results):
 _WORST = ("error", "diff", "warn", "skip", "ok")
 
 
+def _time_left_section(hop):
+    """What is left of each task and when it ends, as its last estimate
+    said (`util.EstimateHistory`): the time with its range and confidence,
+    or why none is said, how old the estimate is and what to do next."""
+    import time
+
+    from .util import STALE_SECONDS, EstimateHistory, human_secs
+    try:
+        latest = EstimateHistory(
+            hop.report_dir() / "eta-history.jsonl").latest()
+    except Exception:  # noqa: BLE001 - no estimate kept, no section
+        return ""
+    rows = []
+    for scope, e in sorted(latest.items()):
+        age = time.time() - float(e.get("at") or 0.0)
+        old = (f" (said {human_secs(age)} ago: stale, measured again on the"
+               " next run)" if age > STALE_SECONDS else "")
+        rows.append(f"<tr><td>{html.escape(scope)}</td>"
+                    f"<td>{html.escape(str(e.get('formatted', '')))}{old}"
+                    f"</td><td>{html.escape(str(e.get('next_step', '')))}"
+                    "</td></tr>")
+    if not rows:
+        return ""
+    return ('<div class="card"><h2>time left</h2><table><thead><tr>'
+            "<th>task</th><th>estimate</th><th>next</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>")
+
+
 def render(hop, results, generated=None, decided=None, taken=None):
     """The report of a check's answers. It reads them and changes nothing:
     the verdict is `verdict.decide`'s - the one the check's exit code and
@@ -327,6 +355,7 @@ def render(hop, results, generated=None, decided=None, taken=None):
 {"".join(f"<th>{html.escape(CHECK_LABEL.get(c, c).lower())}</th>" for c in ran)}
 </tr></thead><tbody>{"".join(rows)}</tbody></table></div>
 {objects_html}
+{_time_left_section(hop)}
 <div class="card"><h2>issues</h2>{"".join(cards)}</div>
 </div></body></html>"""
 

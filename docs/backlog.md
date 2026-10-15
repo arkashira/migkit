@@ -10431,11 +10431,30 @@ and revisions out of the earlier range are said. `Engine.forecast(kind, db)`
 covers move, follow, check, verify and deep for every engine; `check` progress
 says it. Proved on fakes in `tests/test_calibrated_eta.py`.
 
+Built 2026-10-16 (W6A2): every long loop says its time through
+`Engine.forecast`. The move's progress (`planner.progress` `eta`, said by
+`watch` through `_move_said`) is a table a unit sized from the catalogue
+(`cli._move_units`); `watch` adds the tail's catch-up (`cli._follow_said`,
+"falling behind" where arrivals outrun the apply); the check loop says the
+deep comparison or the verification by what it runs (`cli._checks_kind`);
+the report has a "time left" card from `EstimateHistory.latest`. The attempt
+ledger (`attempts.Ledger.units`, wall times kept per attempt) feeds unit
+times, retries and failures into the rate (`util.merge_units`); a running
+unit idle past `STALL_UNITS` times the usual unit lowers the confidence and
+opens the range, and where every running unit is so the line says
+"stalled". Operator text is `ETA.operator_line`: time, range, confidence,
+evidence, next step. Proved on fakes in
+`tests/test_every_long_loop_says_its_eta.py`.
+
 Not done: the empirical accuracy and coverage gate (predictions at several
 horizons against actual completion, error and interval-coverage by engine,
 task, scale and pressure, release thresholds) - needs representative sandbox
-runs. The move, tail and deep loops do not yet call `Engine.forecast` with
-their own units and health; only the check progress line does.
+runs. The attempt ledger knows statements, not whole units: a table between
+two of its statements reads as done until the next begins, and the move's
+units are matched to attempts by table name only, so the move estimate
+holds where the engines name the unit by its table. The tail's own loop
+(`_tail`) prints no catch-up line itself; `watch` says it. The move does not
+pass side health (`throttle.Health`) into its estimate yet.
 
 
 ## P0-CONNECTION-PROGRESS: detect and reconcile client/server progress mismatch
