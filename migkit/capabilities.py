@@ -1249,7 +1249,8 @@ def _items():
             "its value checks - charset where it has one, NULL/empty and"
             " float - read a table once a side, every column in one shared"
             " plan, cut into key ranges where its statistics say how"
-            " (`scan_cuts`)",
+            " (`scan_cuts`); its rows proved alike on the one row parity"
+            " ladder, the row text way a key range of that plan at a time",
             own("_deep_scans")),
         "scope.copy": ("the tables its copy lists are the hop's",
                        _every(("list_move_tables",), _SCOPE)),

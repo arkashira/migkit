@@ -230,11 +230,53 @@ def ledger_path(eng):
     """Where `eng`'s attempts and units are kept, beside the hop's
     reports: a pair's inner engine in a file of its own, named by its side
     and engine, so neither side's unit records overwrite the other's or
-    the pair's."""
+    the pair's. Where both sides are the same engine, the file carries a
+    short hash of the side's address too (`side_mark`) - the two never
+    share a file, and no file names the server it reads."""
     path = eng.hop.report_dir("") / "attempts.json"
     side = pair_side(eng)
-    return path.with_name(f"attempts.{side}-{engine_name(eng)}.json") \
-        if side else path
+    if not side:
+        return path
+    name = engine_name(eng)
+    if same_engine(eng.hop):
+        return path.with_name(
+            f"attempts.{side}-{name}-{side_mark(eng.hop, side)}.json")
+    return path.with_name(f"attempts.{side}-{name}.json")
+
+
+def same_engine(hop):
+    """Whether a pair's two sides are the same engine."""
+    from .engines import canonical
+    opts = getattr(hop, "options", None) or {}
+    a, b = (canonical(opts.get(r)) or opts.get(r)
+            for r in ("source_engine", "target_engine"))
+    return bool(a) and a == b
+
+
+def side_mark(hop, side):
+    """A short hash of the address `side` of `hop` reaches (its host, port
+    and database, with the side itself): stable across runs, distinct per
+    side, and nothing a reader can turn back into the host."""
+    import hashlib
+    got = getattr(hop, side, None)
+    if not isinstance(got, dict):
+        got = getattr(got, "__dict__", None) or {}
+    said = "|".join(str(got.get(k) or "") for k in ("host", "port",
+                                                     "database", "db"))
+    return hashlib.blake2b(f"{side}|{said}".encode(),
+                           digest_size=4).hexdigest()
+
+
+def reconcile_units(eng, kind=None):
+    """The units an earlier run of `eng` left open - in flight when it
+    stopped - closed now as cut off (`Ledger.reconcile_open`), before the
+    work they were part of is replayed: their names, the ranges the
+    restart reads again first. None where `eng` keeps no ledger."""
+    fn = getattr(eng, "attempts", None)
+    ledger = getattr(fn(), "ledger", None) if callable(fn) else None
+    if ledger is None or not hasattr(ledger, "reconcile_open"):
+        return None
+    return ledger.reconcile_open(kind)
 
 
 def work_unit(eng, kind, name, level="table", parent="", parts=None):
@@ -466,6 +508,24 @@ class Ledger:
             r.update(state="done" if ok else "failed", ended=at,
                      reason="" if ok else (reason or "failed"))
         self.flush()
+
+    def reconcile_open(self, kind=None):
+        """Close every unit (of `kind`, or any) an earlier run left open
+        as failed - cut off - so the restart owes it again and its
+        estimate reads it owed, not running: the names, oldest first."""
+        with self._lock:
+            cut = sorted((n for n, r in self.records.items()
+                          if r.get("state") == "open"
+                          and r.get("run") != self.run
+                          and (kind is None or r.get("kind") == kind)),
+                         key=lambda n: float(
+                             self.records[n].get("started") or 0.0))
+            for n in cut:
+                self.records[n].update(state="failed", reason="cut off",
+                                       ended=self.records[n].get("started"))
+        if cut:
+            self.flush()
+        return cut
 
     def session_health(self, side):
         """What `side`'s sessions said of it over its latest attempts in

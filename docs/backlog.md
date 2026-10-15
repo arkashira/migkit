@@ -10829,6 +10829,7 @@ table's rows their own way, not through `decide.row_parity`; the row
 text rung on SQL Server reads a range of the whole table (no key
 cuts yet). Proved in tests/test_units_and_row_text_reach_every_engine.py.
 
+<<<<<<< HEAD
 ## Left after wave 9
 
 What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs/backlog-index.md` (2026-10-16). The next wave is cut from this list; an item is out of it only when its row is DONE.
@@ -10870,3 +10871,9 @@ What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs
 - `P0-ETA-ALL` (row 503): open part units under their table, the check loop a unit a database, a pair's inner engines keep a ledger file each; statement-level unit boundaries and move health left
 - `P0-CONNECTION-PROGRESS` (row 504): on fakes only
 - `P0-VERIFY-EXECUTION` (row 505): still their own
+||||||| e756b16d
+=======
+### W10C (2026-10-16) row parity on every engine, units on restart
+Done: MySQL and generic row parity through `decide.row_parity`; SQL Server row text a key range at a time (`scan_cuts`); `attempts.reconcile_units` closes units an earlier run left open before the move or check replays; same-engine pairs keep a ledger file a side (`side_mark`).
+Not done: a same-engine pair's inner engines must say their side (`pair_side`), the hop's options cannot; range-level units of a move live in the engines' range copiers (not cli) and are not opened there yet; MySQL/generic row parity keep no measured costs between tables yet.
+>>>>>>> w10c

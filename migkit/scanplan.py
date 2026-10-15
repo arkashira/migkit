@@ -588,6 +588,16 @@ def row_text(rows, preds=("",), key_width=1, most=1, sides=("src", "dst")):
     return got
 
 
+def fold_digests(got, side):
+    """One digest of `side` over every range `row_text` read, in range
+    order: alike on both sides only where every range is."""
+    import hashlib
+    whole = hashlib.blake2b(digest_size=16)
+    for d in got.digests:
+        whole.update(d[side].encode())
+    return whole.hexdigest()
+
+
 def row_text_line(table, got):
     """A table's OK/DIFF line from what `row_text` read: the rows and the
     digest folded over every range, or the first key held apart."""

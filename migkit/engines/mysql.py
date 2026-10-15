@@ -3791,8 +3791,37 @@ class MySQLEngine(Engine):
         # row with a smaller key - exactly the kind of difference worth
         # catching.
         from .. import checkpoint as _cp
+        from .. import decide
         pk_ranges, col = self._checksum_ranges(db, t, pks)
+        cp = (_cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
+              if col else None)
+        # ranges an earlier run proved are kept, and a table cut into
+        # several is read so that a stop does not lose what was read
+        need = (("resume by chunk",) if col and (
+            cp.resumed(scope) or len(pk_ranges) > 1) else ())
 
+        def run(choice):
+            if choice.rung.name == "row text":
+                return self._row_text_table(db, t, pks, expr, pk_ranges, col)
+            if choice.rung.name == "key-range digest":
+                return self._digest_table(db, t, pks, expr, pk_ranges, col)
+            return self._digest_table(db, t, pks, expr, [(None, None)], None)
+        try:
+            return decide.row_parity(
+                f"{db}.{t}: its rows alike", run, decide.Facts({
+                    "server digest": True, "key": col,
+                    "rows read here": True}), need=need)[1]
+        except decide.Exhausted as e:
+            return Result("data", scope, "error",
+                          (str(e).splitlines() or [""])[-1][:200]), 0, 0
+
+    def _digest_table(self, db, t, pks, expr, pk_ranges, col):
+        """The `decide.ROW_PARITY` digest ways for table `t`: each server
+        folding its rows' hashes, over the whole table (`col` None) or a
+        key range of `pk_ranges` at a time, each range kept in the
+        checkpoint as it is proved; the differing ranges drilled down."""
+        from .. import checkpoint as _cp
+        scope = f"{db}.{t}"
         key_expr = self._key_expr(db, t)
 
         def clause(lo, hi):
@@ -3875,6 +3904,45 @@ class MySQLEngine(Engine):
             # inferred from the sums only where the rows were not counted
             r.detail += " kind=" + ",".join(sorted(kinds))
         return r, ra, rb
+
+    def _row_text_table(self, db, t, pks, expr, pk_ranges, col):
+        """The `decide.ROW_PARITY` row text way for table `t`: every row of
+        both sides read here as the text `expr` renders, in key order, a
+        range of the copier's plan (`pk_ranges`) at a time, and compared as
+        canonical text (`scanplan.row_text`); the ranges that differ are
+        drilled down by key, the first key held apart named."""
+        from .. import checkpoint as _cp
+        from .. import scanplan
+        scope = f"{db}.{t}"
+        c = col if not col or col.startswith(("`", "(")) else f"`{col}`"
+        preds = ([_cp.where(c, lo, hi) or "" for lo, hi in pk_ranges]
+                 if col else [""])
+        keys = ", ".join("`" + k.replace("`", "``") + "`" for k in pks)
+        width = (len(pks) if c.startswith("(") else 1) if col else 0
+        order = (c[1:-1] if c.startswith("(") else c) if col else "1"
+        head = (f"{keys}, " if c.startswith("(") else f"{c}, ") if col else ""
+        kept = self.row_filter(db, t) if col else None
+
+        def read(side, pred):
+            where = " and ".join(f"({w})" for w in (pred, kept) if w)
+            return self._q(side, f"select {head}{expr} from"
+                           f" {self._scope(side, db, t)}"
+                           + (f" where {where}" if where else "")
+                           + f" order by {order}")
+        got = scanplan.row_text(read, preds, key_width=width,
+                                most=scanplan.plan_most(self, db))
+        line = scanplan.row_text_line(t, got)
+        if got.alike:
+            return Result("data", scope, "ok", line.split(": OK ", 1)[1]
+                          + f" ({len(preds)} ranges read as text)"), \
+                got.rows["src"], got.rows["dst"]
+        if not pks:
+            return Result("data", scope, "diff", line.split(": ", 1)[1], "",
+                          "recopy whole table with dump/load"), \
+                got.rows["src"], got.rows["dst"]
+        bad = [f"where {p}" if p else "" for p, d in zip(preds, got.digests)
+               if d["src"] != d["dst"]] or [""]
+        return self._drilldown(db, t, pks, expr, bad)
 
     def target_mark(self, db):
         """Where the target's binlog is as the move begins: a row written

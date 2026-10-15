@@ -920,53 +920,69 @@ class GenericEngine(Engine):
         res = []
         gate = self._gate()
         for t in ([table] if table else self._tables()):
-            choice, facts = self.compare_way(t)
-            if choice.path != "key-ranges":
-                scope = f"{db}.{t}" if db != "-" else t
-                try:
-                    got = (self._digest_result(db, scope, t, facts, choice)
-                           if choice.rung is not None else
-                           Result("data", scope, "error",
-                                  f"no way compares it here: {choice.reason}"))
-                except SystemExit as e:
-                    got = Result("data", scope, "error", str(e)[:200])
-                if stream:
-                    stream(f"{t}: {got.status}")
-                res.append(got)
-                continue
-            with gate.unit():
-                p = self._reladiff(t, ["-c", "%"], jobs=gate.permits)
-            got = self._stats(p)
             scope = f"{db}.{t}" if db != "-" else t
-            if not got:
-                if stream:
-                    stream(f"{t}: error")
-                res.append(Result(
-                    "data", scope, "error",
-                    f"no comparison came back: {self._why_no_stats(p)}", "",
-                    "the comparison reports success whether it compared"
-                    " anything or not, so the absence of its numbers is the"
-                    " only thing that says it did not"))
-                continue
-            parts = [f"{got['only_a']} rows only on the source"
-                     if got["only_a"] else "",
-                     f"{got['only_b']} rows only on the target"
-                     if got["only_b"] else "",
-                     f"{got['updated']} rows with different values"
-                     if got["updated"] else ""]
-            parts = [x for x in parts if x]
-            status = "diff" if parts else "ok"
+            try:
+                got = self._row_parity(db, scope, t, gate)
+            except SystemExit as e:
+                got = Result("data", scope, "error", str(e)[:200])
             if stream:
-                stream(f"{t}: {status}")
-            detail = ("; ".join(parts) if parts
-                      else "no row is on one side only and no compared"
-                           " column differs")
-            res.append(Result(
-                "data", scope, status,
-                detail + self._drill(db, t, bool(parts), gate.permits), "",
-                "`migkit sync --db - --kind rows` names them and can put"
-                " them right" if parts else ""))
+                stream(f"{t}: {got.status}")
+            res.append(got)
         return res
+
+    def _row_parity(self, db, scope, t, gate):
+        """Table `t`'s data Result, by the way of proving its rows alike
+        `decide.row_parity` climbs: the servers folding key ranges into
+        checksums and splitting only those that differ (its server digest,
+        where the table's facts let the comparison component stand on its
+        key - `compare_way`), else every row digested in this machine (its
+        row text, where the rows fit the memory it may take). A comparison
+        that comes back without its numbers switches to the next way."""
+        from .. import decide
+        way, facts = self.compare_way(t)
+        parity = decide.Facts(
+            {"key": None},
+            **{"server digest": lambda: way.path == "key-ranges",
+               "rows read here": lambda: way.path == "row-digests"
+               or self._fits(facts)})
+
+        def run(choice):
+            if choice.rung.name == "row text":
+                return self._digest_result(db, scope, t, facts, choice)
+            return self._ranged_result(db, scope, t, gate)
+        try:
+            return decide.row_parity(f"{scope}: its rows alike", run,
+                                     parity)[1]
+        except decide.Exhausted as e:
+            why = (str(e).splitlines() or [""])[-1] or way.reason
+            return Result("data", scope, "error",
+                          f"no way compares it here: {why}"[:300])
+
+    def _ranged_result(self, db, scope, t, gate):
+        with gate.unit():
+            p = self._reladiff(t, ["-c", "%"], jobs=gate.permits)
+        got = self._stats(p)
+        if not got:
+            # the comparison reports success whether it compared anything
+            # or not, so the absence of its numbers is the only thing that
+            # says it did not
+            raise RuntimeError("no comparison came back: "
+                               + self._why_no_stats(p))
+        parts = [f"{got['only_a']} rows only on the source"
+                 if got["only_a"] else "",
+                 f"{got['only_b']} rows only on the target"
+                 if got["only_b"] else "",
+                 f"{got['updated']} rows with different values"
+                 if got["updated"] else ""]
+        parts = [x for x in parts if x]
+        detail = ("; ".join(parts) if parts
+                  else "no row is on one side only and no compared"
+                       " column differs")
+        return Result(
+            "data", scope, "diff" if parts else "ok",
+            detail + self._drill(db, t, bool(parts), gate.permits), "",
+            "`migkit sync --db - --kind rows` names them and can put"
+            " them right" if parts else "")
 
     # ---- the rows behind the counts ------------------------------------
 

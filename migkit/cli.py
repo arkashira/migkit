@@ -1890,7 +1890,14 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
         return results, timings
     from .ranges import ReadPool
     pool = ReadPool(hop, eng, dbs[0], max(1, int(workers or 1)))
-    futs = {pool.submit(run_db, d): d for d in dbs}
+    from . import attempts
+
+    def unit(d):
+        # a unit a database, so a restart knows which were in flight
+        with attempts.work_unit(eng, "check", d, level="database"):
+            return run_db(d)
+    attempts.reconcile_units(eng, "check")
+    futs = {pool.submit(unit, d): d for d in dbs}
     try:
         for fut in as_completed(futs):
             d = futs[fut]
@@ -3401,10 +3408,30 @@ def _session_health(eng):
         return ()
 
 
-def _work_unit(eng, kind, name):
-    """`Engine.work_unit`, or nothing where the engine keeps no ledger."""
-    fn = getattr(eng, "work_unit", None)
-    return fn(kind, name) if fn else contextlib.nullcontext()
+def _work_unit(eng, kind, name, level="table", parent="", parts=None):
+    """`Engine.work_unit` (`attempts.work_unit`), or nothing where the
+    engine keeps no ledger."""
+    from . import attempts
+    return attempts.work_unit(eng, kind, name, level, parent, parts)
+
+
+def _in_flight_first(eng, tables, log):
+    """`tables` with those an earlier run left in flight first: their
+    units closed as cut off before any is replayed
+    (`attempts.reconcile_units`), so the restart reads them owed and
+    copies them again before anything new."""
+    from . import attempts
+    cut = attempts.reconcile_units(eng, "move") or []
+    if not cut:
+        return tables
+    names = {f"{sch}.{t}" if sch else t for sch, t in tables}
+    owed = [n for n in cut if n in names]
+    if owed:
+        log(f"[yellow]{len(owed)} tables were in flight when the last run"
+            " stopped: copied again first[/yellow]")
+    first = {n: i for i, n in enumerate(owed)}
+    return sorted(tables, key=lambda x: first.get(
+        f"{x[0]}.{x[1]}" if x[0] else x[1], len(first)))
 
 
 def _move_units(eng, d, tables):
@@ -3453,6 +3480,7 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
 
     def log(m):
         console.print(f"  {m}")
+    tables = _in_flight_first(eng, tables, log)
     if workers < 2:
         from . import failpoint, jointplan
         # one table at a time: in the joint plan's order where it planned

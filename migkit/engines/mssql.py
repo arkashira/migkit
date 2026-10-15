@@ -1336,18 +1336,28 @@ class MSSQLEngine(DbapiRows, Engine):
         its rows alike `decide.row_parity` climbs: each server folding its
         rows' hashes (`cq`), else every row's text (`row`, the row as the
         server writes it out) brought here in order and compared
-        (`scanplan.row_text`) where a server cannot fold them."""
+        (`scanplan.row_text`) where a server cannot fold them - a range of
+        the key at a time, cut where the deep plan cuts it (`scan_cuts`)."""
         from .. import scanplan
 
         def run(choice):
             if choice.rung.name == "server digest":
                 return (tuple(self._cmd("src", db, cq)[0]),
                         tuple(self._cmd("dst", db, cq)[0]))
-            sql = (f"select {row} from {self._qualified('src', db, t)} t"
-                   + (f" where {pred}" if pred else "") + " order by 1")
-            got = scanplan.row_text(lambda side, _: self._cmd(side, db, sql),
-                                    key_width=0)
-            return tuple((got.rows[s], got.digests[0][s])
+            most = scanplan.plan_most(self, db)
+            try:
+                cuts = self.scan_cuts(db, t, most)
+            except Exception:  # noqa: BLE001 - statistics not read: whole
+                cuts = [""]
+
+            def read(side, cut):
+                where = " and ".join(f"({w})" for w in (cut, pred) if w)
+                return self._cmd(side, db, f"select {row} from"
+                                 f" {self._qualified('src', db, t)} t"
+                                 + (f" where {where}" if where else "")
+                                 + " order by 1")
+            got = scanplan.row_text(read, cuts, key_width=0, most=most)
+            return tuple((got.rows[s], scanplan.fold_digests(got, s))
                          for s in ("src", "dst"))
         return decide.row_parity(
             f"{db}.{t}: its rows alike", run, decide.Facts({
