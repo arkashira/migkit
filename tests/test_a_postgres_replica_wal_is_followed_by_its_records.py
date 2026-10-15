@@ -24,7 +24,9 @@ error: error in WAL record at 0/1567AF8: invalid record length
 def facts(**over):
     base = {"wal_level": "replica", "version": 160004,
             "wal functions": "installed", "wal read granted": True,
-            "wal kept": True, "wal dirs": [], "wal program": None}
+            "wal kept": True, "wal dirs": [], "wal program": None,
+            "no key": False,
+            "digest way": "asked of one table, not a database"}
     base.update(over)
     return decide.Facts(base)
 
