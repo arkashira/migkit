@@ -1673,9 +1673,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * generic engine needs <...>.url in hops.yaml
 
-* generic engine needs options.tables: [t1, t2]
+* the hop names no tables in options.tables and the source's catalogue listed none (<...>): name them in options.tables: [t1, t2]
 
-* every table in options.tables is also in the hop's exclude list, so there is nothing to compare
+* every table the hop lists is also in its exclude list, so there is nothing to compare
 
 * this engine needs a comparison component that is not installed on this machine: migkit doctor --install puts it in place, and migkit doctor says what is missing
 

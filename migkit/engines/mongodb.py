@@ -1,3 +1,4 @@
+import json
 import re
 import time
 
@@ -429,17 +430,50 @@ class MongoEngine(Engine):
     OPLOG_GRANT = ("the find action on local.oplog.rs (the read role on the"
                    " local database)")
 
-    def _refused(self, action, e, grant=None):
+    #: the built-in role that holds each refused action, and whether it is
+    #: held on the cluster (granted in admin) or on the database refused
+    ROLE_OF = {"listDatabases": ("readAnyDatabase", True),
+               "serverStatus": ("clusterMonitor", True),
+               "replSetGetStatus": ("clusterMonitor", True),
+               "collStats": ("read", False), "find": ("read", False),
+               "changeStream": ("read", False),
+               "reading the oplog": ("read", "local")}
+
+    def grant_statement(self, action, db=None, side="src"):
+        """The statement the operator runs, as a user who may grant, to give
+        this hop's user the role a refused `action` needs: the role read off
+        the action (`ROLE_OF`), the database off where it was refused, the
+        user off the side's endpoint. None where the action is not one
+        whose role is known, or no user is configured."""
+        got = self.ROLE_OF.get(action)
+        ep = self.hop.source if side == "src" else self.hop.target
+        user = getattr(ep, "user", None)
+        if not got or not user:
+            return None
+        role, where = got
+        on = ("admin" if where is True else where if where
+              else (self._d(side, db) if db else None))
+        if not on:
+            return None
+        auth = (getattr(ep, "options", None) or {}).get("authSource") \
+            or "admin"
+        return (f'db.getSiblingDB({json.dumps(auth)}).grantRolesToUser('
+                f'{json.dumps(user)}, [{{role: {json.dumps(role)},'
+                f' db: {json.dumps(on)}}}])')
+
+    def _refused(self, action, e, grant=None, db=None, side="src"):
         """Stop on `e` where the server refused `action` for want of a
-        grant, as the grant (`enterprise_connectors.missing_grant`) - never
-        an empty answer in its place. Returns where `e` is anything else,
-        for the caller to raise as it is."""
+        grant, as the grant (`enterprise_connectors.missing_grant`) and the
+        statement that gives it (`grant_statement`) - never an empty answer
+        in its place. Returns where `e` is anything else, for the caller to
+        raise as it is."""
         from . import enterprise_connectors as ec
         if not ec.is_grant_error("mongodb", e):
             return
-        if grant:
-            raise ec.MissingGrant("mongodb", action, grant, e)
-        ec.missing_grant("mongodb", action, e)
+        grant = grant or ec.lacking("mongodb", e, action)
+        run = self.grant_statement(action, db, side)
+        raise ec.MissingGrant("mongodb", action,
+                              grant + (f"; run: {run}" if run else ""), e)
 
     def _hello(self, side):
         """The server's `hello`, or `isMaster` from one older than it."""
@@ -1097,7 +1131,7 @@ class MongoEngine(Engine):
             try:
                 st = dbh.command("collStats", name)
             except Exception as e:  # noqa: BLE001 - a view has none
-                self._refused("collStats", e)
+                self._refused("collStats", e, db=db, side=side)
                 continue
             out[name] = {"rows": int(st.get("count") or 0), "key": True,
                          "bytes": int(st.get("size") or 0),
@@ -3906,7 +3940,8 @@ class MongoEngine(Engine):
                 flt, projection, sort=[("$natural", sort)], limit=limit,
                 **kw))
         except PyMongoError as e:
-            self._refused("reading the oplog", e, self.OPLOG_GRANT)
+            self._refused("reading the oplog", e, self.OPLOG_GRANT,
+                          side=side)
             raise
 
     def _ranges_need_replay(self, side):

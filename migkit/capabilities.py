@@ -1519,7 +1519,6 @@ DEPTH_GAPS = {
                 "duckdb copybook iceberg delta couchbase "
                 "sapodp saas hetero"),
         **_as("schema", "kinesis pubsub"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
     "scope.deep": {
         **_each(NOT_YET, "P0-PARITY.scope",
@@ -1528,7 +1527,6 @@ DEPTH_GAPS = {
                 "dsql couchbase "),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
     "scope.copy": {
         **_each(NOT_YET, "P0-PARITY.scope",
@@ -1537,7 +1535,6 @@ DEPTH_GAPS = {
                 "duckdb copybook iceberg delta couchbase "
                 "sapodp saas hetero"),
         **_as("schema", "kinesis pubsub"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
     "scope.repair": {
         **_each(NOT_YET, "P0-PARITY.scope",
@@ -1581,7 +1578,6 @@ DEPTH_GAPS = {
         **_each(NOT_YET, "P0-PARITY.scope",
                 "redis kafka sapodp saas"),
         **_as("schema", "kinesis pubsub"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
     "scope.transforms": {
         **_each(NOT_YET, "P0-PARITY.scope",
@@ -1597,7 +1593,6 @@ DEPTH_GAPS = {
         **_each(NOT_YET, "P0-PARITY.scope",
                 "redis kafka sapodp saas"),
         **_as("schema", "kinesis pubsub"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
     "verify.access.object-ownership": {
         **_each(NOT_APPLICABLE, _NO_OWNER,

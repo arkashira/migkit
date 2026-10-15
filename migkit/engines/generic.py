@@ -24,18 +24,98 @@ class GenericEngine(Engine):
     def databases(self):
         return ["-"]
 
-    def _tables(self):
-        """The hop's listed tables, less the ones it excludes, so a pattern
-        like `tmp_*` means here what it means on every other engine."""
-        listed = self.hop.options.get("tables") or []
+    def _tables(self, db="-"):
+        """The tables the hop takes: those it lists, or where it lists none
+        every base table the source's catalogue holds (`_catalogue_tables`),
+        each asked of the one scope answer (`in_scope`), so a pattern like
+        `tmp_*` means here what it means on every other engine."""
+        listed = [str(t) for t in self.hop.options.get("tables") or []] \
+            or self._catalogue_tables()
         if not listed:
-            raise SystemExit("generic engine needs options.tables: [t1, t2]")
-        tables = [t for t in listed if not self.hop.excluded(*str(t).split("."))]
+            raise SystemExit(
+                "the hop names no tables in options.tables and the source's"
+                f" catalogue listed none ({self._unlisted or 'it is empty'}):"
+                " name them in options.tables: [t1, t2]")
+        tables = [t for t in listed if self.in_scope(db, t)]
         if not tables:
-            raise SystemExit("every table in options.tables is also in the"
-                             " hop's exclude list, so there is nothing to"
-                             " compare")
+            raise SystemExit("every table the hop lists is also in its"
+                             " exclude list, so there is nothing to compare")
         return tables
+
+    #: the schemas a server keeps its own catalogue in, never a hop's tables
+    SYSTEM_SCHEMAS = frozenset({"information_schema", "pg_catalog", "sys",
+                                "mysql", "performance_schema", "pg_toast",
+                                "crdb_internal", "system"})
+    #: the standard catalogue's base tables, asked through the driver
+    CATALOGUE_TABLES = ("SELECT table_schema, table_name FROM"
+                        " information_schema.tables WHERE table_type ="
+                        " 'BASE TABLE'")
+
+    def _catalogue_tables(self):
+        """`schema.table` of every base table the source's standard
+        catalogue lists, probed once; [] where the server keeps no standard
+        catalogue, the reason kept (`_unlisted`) for the stop that follows.
+        A catalogue the user may not read stops as the grant it needs."""
+        if getattr(self, "_listed", None) is not None:
+            return self._listed
+        self._unlisted, self._listed = None, []
+        try:
+            rows = self._connect("src").query(self.CATALOGUE_TABLES, list)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - kept, said
+            self._grant_refused("src", "listing tables",
+                                "information_schema.tables", e)
+            self._unlisted = (str(e).splitlines() or [""])[-1][:160] \
+                or "no standard catalogue"
+            return self._listed
+        self._listed = sorted(
+            f"{s}.{t}" if s else str(t) for s, t in rows
+            if str(s or "").lower() not in self.SYSTEM_SCHEMAS)
+        return self._listed
+
+    def _user(self, side):
+        from urllib.parse import unquote, urlsplit
+        try:
+            got = urlsplit(self._url(side)).username
+        except (ValueError, SystemExit):
+            return None
+        return unquote(got) if got else None
+
+    def grant_statement(self, side, privilege, on):
+        """The standard statement that gives the side's user `privilege` on
+        `on`; None where the address names no user to grant to."""
+        user = self._user(side)
+        return f"GRANT {privilege} ON {on} TO {user}" if user else None
+
+    #: the privilege each refused action needs, in the standard's words
+    PRIVILEGE = {"listing tables": "SELECT", "reading rows": "SELECT",
+                 "copying rows in": "INSERT, DELETE, SELECT"}
+
+    def _grant_refused(self, side, action, on, e):
+        """Stop on `e` where the server refused `action` on `on` for want
+        of a grant, as the grant and the statement that gives it - never an
+        empty answer in its place. Returns where `e` is anything else."""
+        from . import enterprise_connectors as ec
+        if not ec.is_grant_error("generic", e):
+            return
+        privilege = self.PRIVILEGE[action]
+        run = self.grant_statement(side, privilege, on)
+        raise ec.MissingGrant(
+            "generic", action, f"{privilege} on {on}"
+            + (f"; run: {run}" if run else ""), e)
+
+    def _on(self, which, table, db="-"):
+        """The table's name on one side: the source's as listed, the
+        target's under the hop's name rules (`Hop.target_table_in`)."""
+        if which == "src":
+            return table
+        return str(self.hop.target_table_in(None if db == "-" else db,
+                                            *str(table).split(".")))
+
+    def _filter(self, table, db="-"):
+        """The hop's row filter of the table (`Engine.row_filter`), read
+        alike by the copy and every check, or None."""
+        return self.row_filter(None if db == "-" else db,
+                               *str(table).split("."))
 
     def _key(self):
         key = self.hop.options.get("key", "id")
@@ -74,7 +154,8 @@ class GenericEngine(Engine):
                 "--bisection-threshold", str(rung["bisection_threshold"])]
         for k in self._key():
             cmd += ["-k", k]
-        return cmd + list(extra)
+        pred = self._filter(table)
+        return cmd + (["-w", pred] if pred else []) + list(extra)
 
     def _facts_of(self, table):
         """What the catalogue says of one table's size, or {}: the engine
@@ -95,7 +176,8 @@ class GenericEngine(Engine):
         from ..util import PrivateFile, diff_run_config
         cmd = self._reladiff_cmd(table, extra, jobs, stats)
         with PrivateFile(diff_run_config(self._url("src"), table,
-                                         self._url("dst"), table),
+                                         self._url("dst"),
+                                         self._on("dst", table)),
                          ".toml") as path:
             cmd[2] = path
             return run(cmd, check=False, timeout=3600)
@@ -356,11 +438,12 @@ class GenericEngine(Engine):
         costs nothing to find now and a cutover to find then.
         """
         res = []
-        for t in self._tables():
+        for t in self._tables(db):
             scope = f"{db}.{t}" if db != "-" else t
             try:
                 src = self._raw_schema(self._connect("src"), t)
-                dst = self._raw_schema(self._connect("dst"), t)
+                dst = self._raw_schema(self._connect("dst"),
+                                       self._on("dst", t))
             except SystemExit as e:
                 res.append(Result("schema", scope, "error",
                                   str(e).split(":", 1)[-1].strip()[:160], "",
@@ -368,7 +451,8 @@ class GenericEngine(Engine):
                                   " readable before anything can be compared"))
                 continue
             more = (self._lengths_and_nulls(self._connect("src"), t),
-                    self._lengths_and_nulls(self._connect("dst"), t))
+                    self._lengths_and_nulls(self._connect("dst"),
+                                            self._on("dst", t)))
             res.append(self._schema_result(
                 scope, src, dst, more if all(m is not None for m in more)
                 else None))
@@ -481,7 +565,7 @@ class GenericEngine(Engine):
         across dialects, a count has. None where a side cannot be read."""
         empty = []
         try:
-            for t in self._tables():
+            for t in self._tables(db):
                 counts = []
                 for side in ("src", "dst"):
                     conn = self._connect(side)
@@ -499,7 +583,7 @@ class GenericEngine(Engine):
     def check_counts(self, db):
         bad = []
         blind = []
-        tables = self._tables()
+        tables = self._tables(db)
         gate = self._gate()
         for t in tables:
             with gate.unit():
@@ -567,7 +651,7 @@ class GenericEngine(Engine):
         """
         res = []
         key = self._key()
-        for t in self._tables():
+        for t in self._tables(db):
             scope = f"{db}.{t}" if db != "-" else t
             for side, where in (("source", "src"), ("target", "dst")):
                 try:
@@ -757,7 +841,8 @@ class GenericEngine(Engine):
         """The table's column names on one side, or () where the
         catalogue does not answer."""
         try:
-            return tuple(self._raw_schema(self._connect(which), table))
+            return tuple(self._raw_schema(self._connect(which),
+                                          self._on(which, table)))
         except (Exception, SystemExit):  # noqa: BLE001 - unread, said
             return ()
 
@@ -826,10 +911,13 @@ class GenericEngine(Engine):
         """Every row of one side, its columns in `columns`' order."""
         conn = self._connect(which)
         cols = ", ".join(conn.dialect.quote(c) for c in columns)
+        pred = self._filter(table)
+        on = self._on(which, table)
         try:
-            return conn.query(f"SELECT {cols} FROM"
-                              f" {self._from(conn, table)}", list)
+            return conn.query(f"SELECT {cols} FROM {self._from(conn, on)}"
+                              + (f" WHERE {pred}" if pred else ""), list)
         except Exception as e:  # noqa: BLE001 - said as the table's error
+            self._grant_refused(which, "reading rows", on, e)
             raise SystemExit(f"cannot read {table} on the"
                              f" {'source' if which == 'src' else 'target'}:"
                              f" {str(e).splitlines()[-1][:160]}")
@@ -919,7 +1007,7 @@ class GenericEngine(Engine):
     def check_data(self, db, table=None, stream=None):
         res = []
         gate = self._gate()
-        for t in ([table] if table else self._tables()):
+        for t in ([table] if table else self._tables(db)):
             scope = f"{db}.{t}" if db != "-" else t
             try:
                 got = self._row_parity(db, scope, t, gate)
@@ -1552,7 +1640,7 @@ class GenericEngine(Engine):
 
     def list_move_tables(self, db):
         return [(t.rpartition(".")[0], t.rpartition(".")[2])
-                for t in self._tables()]
+                for t in self._tables(db)]
 
     def copy_rungs(self):
         """The ways a table is copied through the driver, climbed by
@@ -1638,7 +1726,7 @@ class GenericEngine(Engine):
         src_call, src_style = self._dbapi("src")
         dst_call, dst_style = self._dbapi("dst")
         src_t = self._from(self._connect("src"), table)
-        dst_t = self._from(self._connect("dst"), table)
+        dst_t = self._from(self._connect("dst"), self._on("dst", table))
         after = st.get("after") if way == "key-order" else None
         if after is not None:
             where, params = self._keyed_where(
@@ -1664,11 +1752,14 @@ class GenericEngine(Engine):
         ck.save()
         cols = ", ".join(self._quote("src", c) for c in columns)
         sql, params = f"SELECT {cols} FROM {src_t}", ()
+        conds = [f"({pred})"] if (pred := self._filter(table)) else []
         if after is not None:
             where, params = self._keyed_where(
                 "src", src_style, key, [self._uncarried(v) for v in after],
                 op=">")
-            sql += f" WHERE {where}"
+            conds.append(where)
+        if conds:
+            sql += " WHERE " + " AND ".join(conds)
         if way == "key-order":
             sql += " ORDER BY " + ", ".join(self._quote("src", k)
                                             for k in key)
@@ -1679,10 +1770,14 @@ class GenericEngine(Engine):
         at = [columns.index(k) for k in key] if way == "key-order" else []
         most = max(1, int(chunk or self.BATCH_ROWS))
         cursor = src_call(lambda c: c.cursor())
-        if params:
-            src_call(lambda c: cursor.execute(sql, params))
-        else:
-            src_call(lambda c: cursor.execute(sql))
+        try:
+            if params:
+                src_call(lambda c: cursor.execute(sql, params))
+            else:
+                src_call(lambda c: cursor.execute(sql))
+        except Exception as e:  # noqa: BLE001 - a refusal said as its grant
+            self._grant_refused("src", "reading rows", table, e)
+            raise
         size = min(most, 1000)
         try:
             while True:
@@ -1845,7 +1940,7 @@ class GenericEngine(Engine):
         for side in ("src", "dst"):
             self._ensure_fence(side)
         tables = {}
-        for t in self._tables():
+        for t in self._tables(db):
             column, _ = self.follow_way(t)
             tables[t] = {"column": column,
                          "at": self._highest("src", t, column)}
@@ -1899,7 +1994,7 @@ class GenericEngine(Engine):
             return
         call, style = self._dbapi("dst")
         at = [columns.index(k) for k in self._key()]
-        dst_t = self._from(self._connect("dst"), table)
+        dst_t = self._from(self._connect("dst"), self._on("dst", table))
         marks, _ = self._marks(style, columns)
         insert = (f"INSERT INTO {dst_t} ("
                   + ", ".join(self._quote("dst", c) for c in columns)
@@ -2112,7 +2207,7 @@ class GenericEngine(Engine):
         held = durable.read_state(state, "tables")
         res, now = [], dict(held or {})
         try:
-            for t in self._tables():
+            for t in self._tables(db):
                 column, choice = self.follow_way(t)
                 if column is None:
                     res.append(Result("delta", f"{db}.{t}", "skip",

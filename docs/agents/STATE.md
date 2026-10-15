@@ -65,7 +65,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1415, not yet 1370, test owed 1037, yes 930. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1415, not yet 1365, test owed 1037, yes 935. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -92,7 +92,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | geminidb-cassandra | 0/9 | 1/22 | 0/1 | 0/7 | 0/4 | 0/6 | 0/5 | 1/1 | 1/1 | 0/1 | 3/57 |
 | geminidb-mongo | 0/9 | 1/24 | 0/6 | 0/7 | 0/3 | 0/5 | 0/5 | 1/1 | 1/1 | 0/1 | 3/62 |
 | geminidb-redis | 0/7 | 1/12 | - | 0/7 | 0/1 | 1/3 | 0/5 | 1/1 | 1/1 | 0/1 | 4/38 |
-| generic | 1/10 | 5/39 | 1/6 | 1/7 | 0/6 | 3/6 | 0/4 | 0/1 | 0/1 | 0/1 | 11/81 |
+| generic | 6/10 | 5/39 | 1/6 | 1/7 | 0/6 | 3/6 | 0/4 | 0/1 | 0/1 | 0/1 | 16/81 |
 | hetero | 4/10 | 6/40 | 1/2 | 2/5 | - | 6/8 | 2/5 | - | - | - | 21/70 |
 | iceberg | 0/9 | 0/24 | 0/6 | 0/5 | 1/3 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/59 |
 | kafka | 5/9 | 15/17 | 5/5 | 5/7 | 0/1 | 5/6 | 4/5 | 1/1 | 1/1 | 0/1 | 41/53 |
@@ -128,16 +128,16 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 | item | yes | test owed | not yet | n/a |
 |---|---|---|---|---|
-| scope.listings | the rest (20) | ase datastore db2 dcdb firestore gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm neo4j neptune oceanbase oceanbase-oracle polardbx qdrant spanner timestream | copybook couchbase db2i db2zos delta duckdb generic hetero iceberg parquet saas sapodp sqlite | kinesis pubsub |
-| scope.deep | cassandra clickhouse cockroachdb cosmosdb db2 dynamodb kafka mongodb mssql mysql opensearch oracle postgres redis teradata tidb | the rest (24) | copybook couchbase delta generic iceberg neo4j neptune parquet sqlite | kinesis pubsub saas sapodp timestream |
-| scope.copy | bigquery cassandra clickhouse cockroachdb cosmosdb dsql dynamodb kafka mongodb mssql mysql opensearch oracle postgres redis redshift snowflake teradata tidb | the rest (20) | copybook couchbase db2i db2zos delta duckdb generic hetero iceberg parquet saas sapodp sqlite | kinesis pubsub |
+| scope.listings | the rest (21) | ase datastore db2 dcdb firestore gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm neo4j neptune oceanbase oceanbase-oracle polardbx qdrant spanner timestream | copybook couchbase db2i db2zos delta duckdb hetero iceberg parquet saas sapodp sqlite | kinesis pubsub |
+| scope.deep | cassandra clickhouse cockroachdb cosmosdb db2 dynamodb generic kafka mongodb mssql mysql opensearch oracle postgres redis teradata tidb | the rest (24) | copybook couchbase delta iceberg neo4j neptune parquet sqlite | kinesis pubsub saas sapodp timestream |
+| scope.copy | the rest (20) | ase bigtable datastore db2 dcdb firestore gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm neo4j neptune oceanbase oceanbase-oracle polardbx qdrant spanner timestream | copybook couchbase db2i db2zos delta duckdb hetero iceberg parquet saas sapodp sqlite | kinesis pubsub |
 | scope.repair | cassandra clickhouse cosmosdb dynamodb generic hetero kafka mongodb mssql mysql opensearch oracle postgres redis redshift snowflake sqlite teradata tidb | the rest (25) | ase copybook delta duckdb iceberg parquet | kinesis pubsub saas sapodp |
 | scope.counters | mssql mysql oracle postgres tidb | cockroachdb db2 db2i db2zos dcdb dsql duckdb gaussdb oceanbase oceanbase-oracle polardbx | ase generic hetero redshift snowflake spanner sqlite | the rest (31) |
 | scope.objects | kafka mongodb mssql mysql oracle postgres tidb | the rest (22) | ase bigtable couchbase datastore delta firestore generic hetero iceberg lindorm neo4j polardbx spanner timestream | copybook dynamodb geminidb-redis kinesis neptune parquet pubsub qdrant redis saas sapodp |
 | scope.ops | bigquery cassandra clickhouse cockroachdb cosmosdb dsql dynamodb hetero mongodb mssql mysql opensearch oracle postgres redis redshift snowflake tidb | the rest (20) | ase db2 generic kafka lindorm oceanbase-oracle | copybook datastore db2zos duckdb geminidb-redis parquet qdrant sqlite teradata timestream |
-| scope.row-filter | bigquery clickhouse cockroachdb dsql duckdb hetero mongodb mysql opensearch oracle postgres redshift sqlite teradata tidb | the rest (31) | geminidb-redis generic kafka redis saas sapodp | kinesis pubsub |
+| scope.row-filter | bigquery clickhouse cockroachdb dsql duckdb generic hetero mongodb mysql opensearch oracle postgres redshift sqlite teradata tidb | the rest (31) | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
 | scope.transforms | - | - | the rest (52) | kinesis pubsub |
-| scope.names | bigquery cassandra clickhouse cosmosdb dsql dynamodb hetero mongodb mysql opensearch oracle postgres teradata tidb | the rest (32) | geminidb-redis generic kafka redis saas sapodp | kinesis pubsub |
+| scope.names | bigquery cassandra clickhouse cosmosdb dsql dynamodb generic hetero mongodb mysql opensearch oracle postgres teradata tidb | the rest (32) | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
 | verify.value.one-plan | mssql postgres | dcdb mysql oceanbase polardbx tidb | the rest (39) | geminidb-redis kinesis neo4j pubsub qdrant redis saas sapodp |
 | verify.access.object-ownership | dsql mysql postgres tidb | clickhouse cockroachdb db2 db2i db2zos dcdb mssql oceanbase oracle redshift snowflake teradata | ase gaussdb generic hetero lindorm neo4j oceanbase-oracle polardbx spanner | the rest (29) |
 | verify.access.sequence-grants | postgres | cockroachdb dsql mssql oracle snowflake | db2 db2i db2zos dcdb gaussdb generic hetero oceanbase oceanbase-oracle polardbx spanner | the rest (37) |
