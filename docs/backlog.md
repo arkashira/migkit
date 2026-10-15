@@ -5494,6 +5494,20 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   downstream capture as LogMiner on an Oracle Free mining instance
   migkit owns; C6 RIOT-X's live mode made lossless by a resuming PSYNC
   client or an `OBJECT IDLETIME` sweep under `CLIENT NO-TOUCH`.
+  *Built 2026-10-16, partly (LT.C5; no Oracle server was reached):*
+  where the redo is mined is a climb (`oracle_logminer.place`): a named
+  standby, the source where its account holds the mining grants, or
+  migkit's own mining database (`mine_instance`, `archive_from`,
+  `archive_to`), the source's archived logs shipped to it once each by
+  `carriers.move_file`, checked to read there at the SCNs the source wrote
+  them at, and mined with the dictionary the source wrote into its redo;
+  a skipped sequence or an SCN range no log covers stops the read
+  (`ShipGap`); each place's window lag (archive switch + ship + mining)
+  is measured and ranks it. Not done: a sandbox run with a second Oracle
+  Free as the mining database (stand-ins only,
+  `tests/test_oracle_mines_on_its_own_instance.py`); migkit does not build
+  the source's redo dictionary itself (an offered source change); shipped
+  logs behind every saved position are not yet removed.
   *Built 2026-10-11, partly (LT.C2, LT.C3; no broker was reached):*
   `KafkaEngine` keeps a copied partition's offsets identical where they
   can be exact, and otherwise (with `offsets: map` and a client that runs

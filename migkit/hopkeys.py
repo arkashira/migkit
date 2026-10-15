@@ -967,6 +967,23 @@ ENDPOINT_OPTIONS = {
     "mine_standby": Key("a physical standby of the source the redo is"
                         " mined on instead (host:port/service)", "str",
                         ("oracle",)),
+    "mine_off_source": Key("the source mines nothing: its redo is mined on"
+                           " the standby or the mining database named",
+                           "bool", ("oracle",)),
+    "mine_instance": Key("a database migkit mines the source's shipped"
+                         " archived redo on (host:port/service)", "str",
+                         ("oracle",)),
+    "mine_instance_user": Key("the user that database is mined as, where"
+                              " not the side's own", "str", ("oracle",)),
+    "mine_instance_password": Key("that user's password reference",
+                                  "secret", ("oracle",)),
+    "archive_from": Key("where the source's archived redo is read (a"
+                        " directory or an object store)", "str",
+                        ("oracle",)),
+    "archive_to": Key("where the mining database reads the shipped"
+                      " archived redo", "str", ("oracle",)),
+    "archive_seen_as": Key("that place's path as the mining database sees"
+                           " it, where not the same", "str", ("oracle",)),
     "redo_reader": Key("where a redo-file reader run beside the redo"
                        " listens (host:port)", "str", ("oracle",)),
     "redo_reader_dsn": Key("how that reader reaches the database, where"

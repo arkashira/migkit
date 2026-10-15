@@ -1093,7 +1093,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the standby mine_standby names is the standby of another database (DBID <...>, the source's is <...>)
 
+* <...>: the source's redo can be mined nowhere - <...>
+
 * <...>: a change to it came through, and it has no primary key, so the change cannot be placed on the target. Give it a key, or leave it out of the hop
+
+* <...>: no dictionary the source wrote into its archived redo is at or before SCN <...>, where the read stands, so the mining database cannot read its tables there: run once on the source begin dbms_logmnr_d.build(options => dbms_logmnr_d.store_in_redo_logs); end; - then copy the tables again from a point after it
 
 * <...>.<...>: the redo holds a change LogMiner cannot read back as a row (a type or a storage it does not support), at SCN <...>. Nothing after it was handed on; leave the table out of the hop, or move it again after
 

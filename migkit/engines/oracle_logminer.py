@@ -220,7 +220,12 @@ def readiness(eng, side, db, strict=False):
     have = granted(eng, side, db)
     short = [p for p in ("LOGMINING", "SELECT ANY TRANSACTION")
              if p not in have]
-    if short:
+    if short and _elsewhere(eng._endpoint(side)):
+        rows.append(("pass", "the reader's grants",
+                     f"the account lacks {', '.join(short)}, and the redo"
+                     " is mined elsewhere than the source, which needs"
+                     " none of them"))
+    elif short:
         rows.append(("fail", "the reader's grants",
                      f"the account lacks {', '.join(short)}, which mining"
                      f" the redo needs: grant {', '.join(short).lower()} to"
@@ -558,6 +563,266 @@ def standby_gate(eng, side, db, conn):
     return int(applied)
 
 
+# ---- where the redo is mined ---------------------------------------------
+#
+# Mining on the source asks it for grants, supplemental logging it already
+# has, and the CPU of the mining; where it refuses that (the grants are not
+# given, or the hop says the source mines nothing), the redo is mined
+# elsewhere: on a physical standby that applies it, or on a database
+# migkit runs itself, to which the source's archived logs are shipped and
+# mined there with the dictionary the source wrote into its redo. The
+# positions are the source's SCNs end to end: a shipped log is checked to
+# read on the mining database at the SCNs the source wrote it at.
+
+SOURCE, STANDBY, INSTANCE = "source", "standby", "own instance"
+#: what mining on the source needs its account to hold
+MINING_GRANTS = ("LOGMINING", "SELECT ANY TRANSACTION")
+#: {(hop, side, db): {place: [seconds a window's change lagged, ...]}}
+_LAGS = {}
+
+
+class ShipGap(SystemExit):
+    """A run of the source's archived logs with one missing (a sequence
+    skipped, deleted, or an SCN range no log covers): the changes in it
+    would be lost without a word, so the read stops instead."""
+
+
+def _elsewhere(ep):
+    """Where the hop names another database to mine on."""
+    o = ep.options
+    return bool(o.get("mine_standby")) or bool(
+        o.get("mine_instance") and o.get("archive_from")
+        and o.get("archive_to"))
+
+
+def places():
+    """The ways the redo is mined, by where: the first that holds taken,
+    the measured lag ranking them where each was measured."""
+    from ..decide import Need, Rung
+    return (
+        Rung(STANDBY, "mining on a physical standby of the source",
+             needs=(Need("a standby named", lambda f: f["standby"],
+                         "{rung} is not used: the hop names no"
+                         " mine_standby"),),
+             because="the source does no mining at all, and the standby"
+                     " has the redo as far as it has applied it",
+             leaves="nothing"),
+        Rung(SOURCE, "mining on the source",
+             needs=(Need("the source mining", lambda f: not f["off source"],
+                         "{rung} is not used: the hop says the source mines"
+                         " nothing (mine_off_source)"),
+                    Need("the mining grants", lambda f: not f["short"],
+                         lambda f: "mining on the source needs"
+                         f" {', '.join(f['short'])}, which its account"
+                         " lacks")),
+             because="the redo is read where it is written: the least lag",
+             leaves="nothing"),
+        Rung(INSTANCE, "mining on migkit's own mining database, the"
+                       " archived redo shipped to it",
+             needs=(Need("a mining database", lambda f: f["instance"],
+                         "{rung} is not used: the hop names no"
+                         " mine_instance"),
+                    Need("the archive reachable", lambda f: f["archive"],
+                         "{rung} needs where the source's archived logs are"
+                         " read (archive_from) and where the mining"
+                         " database reads them (archive_to)"),
+                    Need("a dictionary in the redo",
+                         lambda f: f["dictionary"] is not None,
+                         "the source has written no dictionary into its"
+                         " archived redo, which mining it elsewhere reads"
+                         " the tables by: run once on the source"
+                         " begin dbms_logmnr_d.build(options =>"
+                         " dbms_logmnr_d.store_in_redo_logs); end; and"
+                         " alter system archive log current")),
+             because="the source only archives its redo, as it does"
+                     " anyway; the lag is an archive switch, the ship and"
+                     " the mining",
+             footprint=1,
+             leaves="the shipped archived logs, where the mining database"
+                    " reads them"))
+
+
+def place(eng, side, db):
+    """The climb of `places` for this source: what its account holds, what
+    the hop names, the dictionary its redo has - and the lag each place
+    was measured at here."""
+    from ..decide import Facts, climb
+    ep = eng._endpoint(side)
+    o = ep.options
+    lags = {k: sum(v) / len(v) for k, v in
+            _LAGS.get((id(eng.hop), side, db), {}).items() if v}
+    got = climb(db, places(), Facts(
+        {"standby": bool(o.get("mine_standby")),
+         "off source": str(o.get("mine_off_source", "")).lower()
+         in ("1", "true", "yes"),
+         "instance": bool(o.get("mine_instance")),
+         "archive": bool(o.get("archive_from") and o.get("archive_to"))},
+        short=lambda: [p for p in MINING_GRANTS
+                       if p not in granted(eng, side, db)],
+        dictionary=lambda: dictionary_scn(eng, side, db)),
+        costs=lags or None, prove=False)
+    if got.rung is None:
+        raise SystemExit(f"{db}: the source's redo can be mined nowhere -"
+                         f" {got.reason}")
+    return got
+
+
+def lagged(eng, side, db, where, seconds):
+    """A window's lag measured: the place's from now on ranks by it."""
+    got = _LAGS.setdefault((id(eng.hop), side, db), {}).setdefault(where,
+                                                                   [])
+    got.append(float(seconds))
+    del got[:-20]
+
+
+def dictionary_scn(eng, side, db, before=None):
+    """The first SCN of the newest dictionary the source wrote into its
+    archived redo (at or before `before`), or None."""
+    sql = ("select max(first_change#) from v$archived_log where"
+           " dictionary_begin = 'YES' and deleted = 'NO' and status = 'A'")
+    args = ()
+    if before is not None:
+        sql += " and first_change# <= :1"
+        args = (int(before),)
+    got = eng._rows(side, db, sql, args)
+    return int(got[0][0]) if got and got[0][0] is not None else None
+
+
+def archived(eng, side, db, start):
+    """The source's archived logs from `start` on, one destination, each
+    {thread, seq, first, next, name, bytes, dict, at}, in order - held to
+    `contiguous`."""
+    rows = eng._rows(side, db, (
+        "select thread#, sequence#, first_change#, next_change#, name,"
+        " blocks * block_size, dictionary_begin, first_time from"
+        " v$archived_log where status = 'A' and deleted = 'NO' and"
+        " name is not null and next_change# > :1 and dest_id = (select"
+        " min(dest_id) from v$archived_log where status = 'A') order by"
+        " thread#, sequence#"), (int(start),))
+    logs = [dict(zip(("thread", "seq", "first", "next", "name", "bytes",
+                      "dict", "at"), r)) for r in rows]
+    contiguous(logs, start)
+    return logs
+
+
+def contiguous(logs, start):
+    """Stops with `ShipGap` where the logs leave a gap: per thread, the
+    first must reach back to `start`, and each must begin where the one
+    before it ended, the next sequence."""
+    by = {}
+    for g in logs:
+        by.setdefault(int(g["thread"]), []).append(g)
+    for thread, run in by.items():
+        if int(run[0]["first"]) > int(start):
+            raise ShipGap(
+                f"the source's archived redo of thread {thread} begins at"
+                f" SCN {run[0]['first']}, after {start} where the read"
+                " stands: the logs between were deleted or never archived,"
+                " and the changes in them cannot be read. Restore them to"
+                " the archive, or copy the tables again")
+        for a, b in zip(run, run[1:]):
+            if int(b["seq"]) != int(a["seq"]) + 1 \
+                    or int(b["first"]) != int(a["next"]):
+                raise ShipGap(
+                    f"the source's archived redo of thread {thread} has a"
+                    f" gap after sequence {a['seq']} (SCN {a['next']}; the"
+                    f" next log is sequence {b['seq']} from SCN"
+                    f" {b['first']}): restore the missing log to the"
+                    " archive - the changes in it are read nowhere else")
+
+
+def reach(logs):
+    """The SCN every thread's archived redo has reached: a window mined on
+    shipped logs ends below it."""
+    by = {}
+    for g in logs:
+        by[int(g["thread"])] = max(by.get(int(g["thread"]), 0),
+                                   int(g["next"]))
+    return min(by.values()) - 1 if by else None
+
+
+def switch_seconds(logs):
+    """The source's measured time between archive switches, from the logs'
+    first times: what a change waits before it can be shipped."""
+    times = sorted(g["at"] for g in logs if g.get("at") is not None)
+    gaps = [(b - a).total_seconds() for a, b in zip(times, times[1:])
+            if hasattr(b - a, "total_seconds")]
+    return sum(gaps) / len(gaps) if gaps else None
+
+
+class Ship:
+    """The source's archived logs moved to where migkit's mining database
+    reads them, each once, its digest kept, the move timed and its
+    positions checked once the mining database has it."""
+
+    def __init__(self, eng, side, db, clock=time.monotonic):
+        from .. import carriers
+        ep = eng._endpoint(side)
+        o = ep.options
+        self.eng, self.side, self.db, self.clock = eng, side, db, clock
+        self.src = carriers.at(o["archive_from"],
+                               said="the source's archived redo")
+        self.dst = carriers.at(o["archive_to"],
+                               said="where the mining database reads it")
+        self.seen_as = str(o.get("archive_seen_as") or o["archive_to"])
+        self.link = None
+        self.shipped = {}
+        self.seconds = []
+
+    def path(self, g):
+        return self.seen_as.rstrip("/") + "/" + _base(g["name"])
+
+    def ship(self, logs):
+        """[path the mining database reads, ...] for `logs`, each moved
+        where it is not there whole already."""
+        from .. import carriers
+        out = []
+        for g in logs:
+            key = (int(g["thread"]), int(g["seq"]))
+            name = _base(g["name"])
+            if key not in self.shipped:
+                have = self.dst.size(name)
+                if have is None or have != self.src.size(name):
+                    t = self.clock()
+                    moved = carriers.move_file(self.src, name, self.dst,
+                                               link=self.link)
+                    self.seconds.append(self.clock() - t)
+                    del self.seconds[:-20]
+                    self.link = getattr(self.dst, "link", None) or self.link
+                    digest = moved.digest
+                else:
+                    digest = None
+                self.shipped[key] = (self.path(g), digest, int(g["first"]),
+                                     int(g["next"]))
+            out.append(self.shipped[key][0])
+        return out
+
+
+
+def _base(name):
+    return str(name).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def aligned(conn, logs, ship):
+    """Stops where a shipped log reads on the mining database at other SCNs
+    than the source wrote it at: the wrong file, or one cut short."""
+    got = {(int(t), int(s)): (int(lo), int(hi)) for t, s, lo, hi in
+           conn.cursor().execute(
+               "select thread_id, log_id, low_scn, next_scn from"
+               " v$logmnr_logs").fetchall()}
+    for g in logs:
+        key = (int(g["thread"]), int(g["seq"]))
+        want = (int(g["first"]), int(g["next"]))
+        if got.get(key) != want:
+            ship.shipped.pop(key, None)
+            raise ShipGap(
+                f"the shipped log of thread {key[0]} sequence {key[1]}"
+                f" reads on the mining database at SCNs {got.get(key)},"
+                f" and the source wrote it at {want}: it is shipped again"
+                " at the next read; where it stays so, the archive holds"
+                " another file under its name")
+
+
 # ---- the reader ----------------------------------------------------------
 
 class Miner:
@@ -573,6 +838,7 @@ class Miner:
         self.conn = self.cur = None
         self.held = None
         self.ddl = None
+        self.where, self.ship, self.shipping = None, None, []
         self.samples = _SAMPLES.setdefault(
             (id(eng.hop), side, db), [])
         self.shapes = {}
@@ -584,11 +850,30 @@ class Miner:
         root where `mine_service` names it (a database before 21c mines
         only there); or on a physical standby where `mine_standby` names
         one, so the source does no mining at all - gated (`standby_gate`)
-        and not run here: this machine's sandbox has no Data Guard."""
+        and not run here: this machine's sandbox has no Data Guard; or on
+        migkit's own mining database (`mine_instance`), the source's
+        archived logs shipped to it (`Ship`). Where is decided (`place`)."""
         if self.conn is not None:
             return self.conn
         ep = self.eng._endpoint(self.side)
-        standby = ep.options.get("mine_standby")
+        self.where = place(self.eng, self.side, self.db).path
+        self.ship = None
+        if self.where == INSTANCE:
+            self.ship = Ship(self.eng, self.side, self.db)
+            self.conn = self.eng._dedicated(
+                self.side, dsn=ep.options["mine_instance"],
+                user=ep.options.get("mine_instance_user"),
+                password=ep.option_secret("mine_instance_password"))
+            self.standby = False
+            # the shipped logs are the whole container's redo: a source in
+            # a pluggable database is told apart by its name in it
+            con = self.eng._rows(self.side, self.db, "select sys_context("
+                                 "'userenv', 'con_name') from dual")[0][0]
+            self.pdb = None if con == "CDB$ROOT" else con
+            self.root = True
+            return self.conn
+        standby = ep.options.get("mine_standby") \
+            if self.where == STANDBY else None
         service = ep.options.get("mine_service")
         self.conn = self.eng._dedicated(
             self.side, dsn=standby or (self.eng._dsn(ep, service)
@@ -629,8 +914,19 @@ class Miner:
 
     def _add_logs(self, start, end):
         """Mining from the root of a container database: the logs covering
-        the window are named to LogMiner, the archived ones first."""
+        the window are named to LogMiner, the archived ones first. On
+        migkit's own mining database they are the shipped ones, checked
+        to read at the SCNs the source wrote them at (`aligned`)."""
         cur = self.conn.cursor()
+        if self.ship is not None:
+            logs = [g for g in self.shipping if int(g["first"]) <= end]
+            first = True
+            for n in self.ship.ship(logs):
+                cur.execute("begin dbms_logmnr.add_logfile(:1, :2); end;",
+                            [n, 1 if first else 3])
+                first = False
+            aligned(self.conn, logs, self.ship)
+            return
         names = [n for (n,) in cur.execute(
             "select name from v$archived_log where deleted = 'NO' and"
             " status = 'A' and name is not null and next_change# > :1 and"
@@ -656,9 +952,16 @@ class Miner:
         self._open()
         if self.root:
             self._add_logs(start, end)
+        # elsewhere than the source the online catalogue is another
+        # database's: the dictionary is the one the source wrote into its
+        # redo, kept current through the DDL mined after it
+        dictionary = ("dbms_logmnr.dict_from_redo_logs +"
+                      " dbms_logmnr.ddl_dict_tracking"
+                      if self.ship is not None
+                      else "dbms_logmnr.dict_from_online_catalog")
         self.conn.cursor().execute(
             "begin dbms_logmnr.start_logmnr(startscn => :1, endscn => :2,"
-            " options => dbms_logmnr.dict_from_online_catalog +"
+            f" options => {dictionary} +"
             " dbms_logmnr.committed_data_only); end;", [start, end])
         cur = self.conn.cursor()
         cur.arraysize = 2000
@@ -670,7 +973,13 @@ class Miner:
                " ssn from v$logmnr_contents where seg_owner = :1 and"
                f" operation_code in ({codes})")
         owner = self.eng._owner(self.side, self.db)
-        if self.root:
+        if self.ship is not None:
+            if self.pdb:
+                cur.execute(sql + " and src_con_name = :2", [owner,
+                                                             self.pdb])
+            else:
+                cur.execute(sql, [owner])
+        elif self.root:
             pdb = self.eng._rows(self.side, self.db, "select sys_context("
                                                      "'userenv', 'con_name')"
                                                      " from dual")[0][0]
@@ -718,7 +1027,33 @@ class Miner:
             end = min(end, standby_gate(self.eng, self.side, self.db,
                                         self.conn))
             self.samples[-1] = (at, end, low)
+        switch = 0.0
+        if self.ship is not None:
+            # only an archived log can be shipped: the window ends where
+            # every thread's archived redo has reached, and is mined from
+            # the dictionary the source wrote at or before it
+            since = dictionary_scn(self.eng, self.side, self.db,
+                                   before=start)
+            if since is None:
+                raise SystemExit(
+                    f"{self.db}: no dictionary the source wrote into its"
+                    f" archived redo is at or before SCN {start}, where the"
+                    " read stands, so the mining database cannot read its"
+                    " tables there: run once on the source begin"
+                    " dbms_logmnr_d.build(options =>"
+                    " dbms_logmnr_d.store_in_redo_logs); end; - then copy"
+                    " the tables again from a point after it")
+            self.shipping = archived(self.eng, self.side, self.db, since)
+            got = reach(self.shipping)
+            end = min(end, got if got is not None else start)
+            self.samples[-1] = (at, end, low)
+            switch = switch_seconds(self.shipping) or 0.0
+        began = time.monotonic()
         self._start(start, max(end, start))
+        # the lag a change of this window had: the switch that archived it,
+        # then its ship and the mining, which `_start` does
+        lagged(self.eng, self.side, self.db, self.where,
+               switch + time.monotonic() - began)
         return at
 
     def _settled(self, at, token):
@@ -1106,6 +1441,21 @@ def assess(eng, side, db):
                 " a mined transaction in")
     except Exception:  # noqa: BLE001 - optional
         pass
+    try:
+        got = place(eng, side, db)
+        lags = _LAGS.get((id(eng.hop), side, db), {}).get(got.path)
+        detail = f"{got.rung.said}: {got.reason}"
+        if got.path == INSTANCE:
+            switch = switch_seconds(archived(
+                eng, side, db, dictionary_scn(eng, side, db) or 0))
+            detail += ("; a change waits for the archive switch, measured"
+                       f" every {switch:.0f} s here" if switch is not None
+                       else "; the archive switch is not measured yet")
+        detail += (f"; a window's lag measured {sum(lags) / len(lags):.1f} s"
+                   if lags else "")
+        add("pass", "where the redo is mined", detail)
+    except SystemExit as e:
+        add("fail", "where the redo is mined", str(e))
     level, detail, _ = reader_check(eng, side, db)
     add(level, "reader rate", detail)
     return items
