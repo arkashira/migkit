@@ -3873,6 +3873,14 @@ fallback and the source-change offer. Flat, to be made smart:
    limit (at 1M rows: copy 8s, proof 24-26s). Canonical JSON digested on
    the server where the engine can render it canonically (sorted keys,
    one number form), in Python only where it cannot, same digest.
+   T3 (2026-10-16): the leaves hash PostgreSQL's JSON in SQL
+   (`canon.json_sql`, `Side.json_in_sql`), read it as text where folded
+   here, and fold a side here with the reason said (`canon.JSON_ROUNDED`,
+   `JSON_UNPROVED`). Not done: MySQL's JSON in SQL (UNPROVED, mysql.py's
+   owner); `PostgresEngine._json_text_sql`/`JSON_IN_SQL`/`JSON_DIGITS` to
+   read canon's; `neutral_digest` callers passing the chosen hash to
+   `canon.digest_expr(way=)`; a JSON key column is still read parsed; the
+   server tests are written, not run.
 8. **Quieting the target's triggers during a load is not carried into
    range worker processes** - a table copied by ranges in parallel fires
    its triggers; one rule for triggers and keys during any write into the

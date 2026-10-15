@@ -1098,7 +1098,10 @@ def _postgres(col, cls):
                 f" else to_char({c}, 'YYYY-MM-DD HH24:MI:SS.US') end")
     if cls == "time":
         return f"to_char({c}, 'HH24:MI:SS.US')"
-    if cls in ("json", JSON_ONE):
+    if cls == "json":
+        # canon's own text (`json_sql`), each number as its value
+        return json_sql("postgres", c)
+    if cls == JSON_ONE:
         # a `json` column keeps the text it was handed, spacing and duplicate
         # keys and all; `jsonb` is the normalised form. `to_jsonb` rather
         # than `::jsonb`, which an array does not take
@@ -2165,6 +2168,30 @@ class Limits(NamedTuple):
     binary_collation: str = None
     auth_plugins: frozenset = None
     keywords: frozenset = None
+    #: the declared types whose values the server writes as canon's JSON
+    #: text itself (`json_sql`); None where that is not proved
+    json_types: frozenset = None
+    #: the server encodings in which it orders an object's keys by the
+    #: bytes canon orders them by
+    json_encodings: frozenset = None
+    #: a document holding a number of this many digits or more is folded
+    #: in this process (`JSON_DIGITS`)
+    json_digits: int = None
+
+
+#: the digits `render_value` keeps of a number - Python's decimal context,
+#: in which `normalize` rounds a longer one; the server's text keeps all
+FOLD_DIGITS = 28
+#: a document holding a run of this many digits is folded here on every
+#: side, so the digest stays the fold's whichever server holds it
+JSON_DIGITS = FOLD_DIGITS + 1
+#: why a JSON column is folded in this process, by the engine its server
+#: has not been proved to write canon's JSON text on
+JSON_UNPROVED = {
+    "mysql": "MySQL writes `1.10` back as `1.1` and `100000000000000000000`"
+             " as `1e20`, and a rendering of its JSON in SQL is not yet held"
+             " to canon's text on a server",
+}
 
 
 #: each engine's defaults, from its documentation: InnoDB's DYNAMIC rows
@@ -2173,7 +2200,10 @@ class Limits(NamedTuple):
 #: 32,767), PostgreSQL's NAMEDATALEN-1 63, MySQL 64, SQL Server and Oracle
 #: 12.2+ 128
 LIMITS = {
-    "postgres": Limits(identifier=63),
+    "postgres": Limits(identifier=63,
+                       json_types=frozenset({"json", "jsonb", "hstore"}),
+                       json_encodings=frozenset({"UTF8", "UTF-8"}),
+                       json_digits=JSON_DIGITS),
     "mysql": Limits(identifier=64, key_bytes=3072, char_bytes=4,
                     binary_collation="utf8mb4_0900_bin"),
     "mssql": Limits(identifier=128, key_bytes=900, char_bytes=2),
@@ -2194,6 +2224,88 @@ def limits(engine, version=None, **asked):
             "mariadb" in text or _re.match(r"\s*[1-7]\.", text)):
         got = got._replace(binary_collation="utf8mb4_bin")
     return got._replace(**{k: v for k, v in asked.items() if v is not None})
+
+
+def _pg_literal(text):
+    """A PostgreSQL string constant reading the same whatever
+    `standard_conforming_strings` says."""
+    if "\\" in text:
+        return "E'" + text.replace("\\", "\\\\").replace("'", "''") + "'"
+    return "'" + text.replace("'", "''") + "'"
+
+
+def json_sql(engine, c):
+    """SQL for canon's JSON text of column `c` (`json_text`) where the
+    engine's server writes it, else None. PostgreSQL: `jsonb`'s own text -
+    an object's keys by their length and then their bytes, the last of a
+    key given twice, `", "` and `": "` between, a string escaped as JSON
+    escapes it - with each number outside a string written as its value,
+    the zeros ending its fraction dropped and a point with nothing after
+    it too (`1.10` -> `1.1`, `2.0` -> `2`); `jsonb` never writes an
+    exponent. A string is matched whole first, so a number inside one is
+    never touched, and `"5"` stays a string beside the number 5."""
+    if dialect(engine) != "postgres":
+        return None
+    string = r'("(?:[^"\\]|\\.)*")'
+    both = _pg_literal(r"\1\2")
+    t = f"to_jsonb({c})::text"
+    t = (f"regexp_replace({t}, "
+         f"{_pg_literal(string + r'|([0-9]\.[0-9]*[1-9])0+(?![0-9])')},"
+         f" {both}, 'g')")
+    return (f"regexp_replace({t}, "
+            f"{_pg_literal(string + r'|([0-9])\.0+(?![0-9])')},"
+            f" {both}, 'g')")
+
+
+def json_guard(engine, text_expr):
+    """SQL true where a document's text (`json_sql`'s) holds a run of
+    `Limits.json_digits` digits - a number the fold here would round
+    (`FOLD_DIGITS`), so that side is folded here; None where the engine
+    writes no JSON in SQL."""
+    got = limits(engine)
+    if not got.json_digits or json_sql(engine, "x") is None:
+        return None
+    return f"({text_expr} ~ '[0-9.]{{{int(got.json_digits)},}}')"
+
+
+_LONG_NUMBER = _re.compile(r"[0-9.]{%d,}" % JSON_DIGITS)
+
+
+def json_rounds(text):
+    """Whether a document's text holds a run of `JSON_DIGITS` digits, as
+    `json_guard` asks of it in SQL."""
+    if text is None:
+        return False
+    if isinstance(text, (bytes, bytearray, memoryview)):
+        text = bytes(text).decode("utf-8", "replace")
+    return bool(_LONG_NUMBER.search(str(text)))
+
+
+#: what is said of a side folded here because a document `json_rounds`
+JSON_ROUNDED = (f"a document holds a number of {JSON_DIGITS} or more digits,"
+                f" which this process keeps to {FOLD_DIGITS}: the side is"
+                " folded here so both sides round it alike")
+
+
+def json_on_server(engine, declared, encoding=None):
+    """(True, None) where the engine's server writes canon's JSON text for
+    columns of these declared types in a database of this encoding, else
+    (False, why)."""
+    name = dialect(engine)
+    got = limits(name)
+    if not got.json_types or json_sql(name, "x") is None:
+        return False, JSON_UNPROVED.get(name, f"{name} is not proved to"
+                                              " write JSON as canon does")
+    off = sorted({str(d).lower() for d in declared}
+                 - {t.lower() for t in got.json_types})
+    if off:
+        return False, (f"a column declared {', '.join(off)} is not one"
+                       f" whose JSON {name} writes as canon does")
+    if got.json_encodings and encoding is not None and \
+            str(encoding).upper() not in got.json_encodings:
+        return False, (f"the database is in {encoding}, which orders an"
+                       " object's keys by other bytes than canon's")
+    return True, None
 
 
 def ddl_type(engine, cls, numbers=(), key=False, bounds=None):
@@ -4250,20 +4362,39 @@ _DIGEST_SHIFT = 8 * _DIGEST_BYTES - 4 * DIGEST_HEX
 DIGEST_BITS = DIGEST_HEX * 4
 
 
-def digest_expr(engine, row_expr):
+#: each row hash's hex digits in an engine's SQL (`digest_expr`), the
+#: hashes the leaves time (`leaves.HASHES`); PostgreSQL over the text's
+#: UTF-8 bytes (`{b}`), MySQL over its text (`{t}`)
+DIGEST_HASHES = {
+    "postgres": {"md5": "md5({b})", "sha256": "encode(sha256({b}), 'hex')"},
+    "mysql": {"md5": "md5({t})", "sha256": "sha2({t}, 256)",
+              "sha1": "sha1({t})"},
+}
+
+
+def digest_expr(engine, row_expr, way="md5"):
     """Aggregate yielding one number for a whole table, comparable across
-    engines. Order-independent, so neither side has to sort."""
+    engines. Order-independent, so neither side has to sort. `way` is the
+    row hash - the one a pair's probe measured fastest and equal on both
+    sides (`leaves.fastest_hash`), md5 unless one was; ValueError where
+    the engine's SQL has no such hash."""
     engine = dialect(engine)
+    hashes = DIGEST_HASHES.get(engine, {})
+    if engine in DIGEST_HASHES and way not in hashes:
+        raise ValueError(f"no {way} in {engine}'s SQL")
     if engine == "mysql":
-        return (f"coalesce(sum(cast(conv(substr(md5({row_expr}),1,"
+        hexed = hashes[way].format(t=row_expr)
+        return (f"coalesce(sum(cast(conv(substr({hexed},1,"
                 f"{DIGEST_HEX}),16,10) as decimal(65,0))), 0)")
     if engine == "postgres":
         # the row's UTF-8 bytes, as MySQL and this process hash: `md5(text)`
         # hashes the database's own encoding, and in a LATIN1 database `é`
         # is one byte there and two everywhere else
-        return (f"coalesce(sum(('x'||substr(md5(convert_to({row_expr},"
-                f" 'UTF8')),1,{DIGEST_HEX}))"
+        hexed = hashes[way].format(b=f"convert_to({row_expr}, 'UTF8')")
+        return (f"coalesce(sum(('x'||substr({hexed},1,{DIGEST_HEX}))"
                 f"::bit({DIGEST_BITS})::bigint::numeric), 0)")
+    if engine == "sqlite" and way != "md5":
+        raise ValueError(f"no {way} in sqlite's registered digest")
     if engine == "sqlite":
         # SQLite has neither md5 nor a wide enough number. Measured: `sum()`
         # over 60-bit values raises `integer overflow` once the total passes

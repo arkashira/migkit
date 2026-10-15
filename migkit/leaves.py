@@ -213,9 +213,11 @@ class Side:
         hashed in this process, as `neutral_digest` folds them there - and
         on those as well where a column's class is one whose SQL rendering
         is not the one this process writes (`canon.FOLDED_HERE`), as
-        `neutral_digest` does."""
+        `neutral_digest` does. JSON is the one such class a server can
+        write as canon does (`json_in_sql`): there the side hashes in SQL
+        too, and the digest is the fold's either way."""
         if any(c in canon.FOLDED_HERE for _, c in self.cols):
-            return False
+            return self.json_in_sql()
         if getattr(self.eng, "PROVED_DIALECT", None):
             # a server speaking PostgreSQL's or MySQL's SQL without being
             # either: in that SQL once its rendering is proved on the
@@ -251,6 +253,76 @@ class Side:
         names = [n for n, _ in self.cols]
         return [names.index(k) for k in self.key]
 
+    @property
+    def folded(self):
+        """Why this side's JSON is folded in this process, or None where
+        its server writes it (`json_in_sql`) or it holds no JSON."""
+        if not any(c in canon.FOLDED_HERE for _, c in self.cols):
+            return None
+        return None if self.json_in_sql() else self.__dict__["_json_why"]
+
+    def json_in_sql(self):
+        """Whether the server writes every column of this side that is
+        rendered in this process elsewhere as canon's JSON text, and so
+        hashes the rows itself: each such column JSON
+        (`canon.json_on_server` on its declared type and the database's
+        encoding) and no document holding a number the fold here rounds
+        (`canon.json_guard`, asked once). Decided once a side and said,
+        with the reason, where not."""
+        if "_json" in self.__dict__:
+            return self.__dict__["_json"]
+        why = None
+        odd = sorted({c for _, c in self.cols
+                      if c in canon.FOLDED_HERE and c != "json"})
+        reader = getattr(self.eng, "_json_in_sql", None)
+        if odd:
+            why = (f"a column of class {', '.join(odd)}, which no server"
+                   " writes as canon does")
+        elif (getattr(self.eng, "PROVED_DIALECT", None) or self.dialect
+              or getattr(self.eng, "CANON_ENGINE", None) not in SQL_ENGINES):
+            why = "its server is not one whose JSON canon is held to"
+        else:
+            ok, why = canon.json_on_server(self.eng.CANON_ENGINE, ())
+            if ok and (reader is None or reader(
+                    self.side, self.db, self.table, self.cols) is None):
+                ok, why = False, ("a JSON column's declared type or the"
+                                  " database's encoding is not one its"
+                                  " server writes as canon does")
+            if ok and self._json_rounds():
+                ok, why = False, canon.JSON_ROUNDED
+        self.__dict__["_json"] = why is None
+        self.__dict__["_json_why"] = why
+        if why is not None:
+            from . import runlog
+            runlog.event("leaf json", f"{self.table}: the {self.side} side's"
+                         f" JSON folded in this process: {why}",
+                         side=self.side, reason=why)
+        return why is None
+
+    def _json_rounds(self):
+        """Whether a JSON document of this side holds a number the fold
+        here rounds (`canon.json_guard`): one statement, stopping at the
+        first."""
+        guard = " or ".join(canon.json_guard(
+            self.eng.CANON_ENGINE, canon.expr(self.eng.CANON_ENGINE,
+                                              _q(self, n), c))
+            for n, c in self.cols if c == "json")
+        where = f" and ({self.where})" if self.where else ""
+        rows = self.eng.run_rule(self.side, self.db, (
+            f"select 1 from {self.eng._qualified(self.side, self.db, self.table)}"
+            f" where ({guard}){where} limit 1"))
+        return bool(rows)
+
+    def as_text(self):
+        """The JSON columns read as the server's text of them where this
+        side is folded here and its engine reads so: a document the
+        driver hands over parsed lost what canon's text keeps - a JSON
+        `null` came as SQL's NULL, and a string `"5"` as the text the
+        fold then read as the number 5. Not a key's, which is read back
+        by its value."""
+        return tuple(n for n, c in self.cols
+                     if c == "json" and n not in self.key)
+
 
 SQL_ENGINES = ("postgres", "mysql")
 
@@ -284,26 +356,20 @@ class Hasher:
 
 # --- SQL ---------------------------------------------------------------------
 
-#: each hash's hex digits in PostgreSQL's SQL over the text's UTF-8
-#: bytes, as MySQL and this process hash them (`canon.digest_expr`) - a
-#: LATIN1 database's own bytes are not; sha1 is an extension's there
-_PG_HEX = {"md5": "md5({b})", "sha256": "encode(sha256({b}), 'hex')"}
-_MY_HEX = {"md5": "md5({t})", "sha256": "sha2({t}, 256)",
-           "sha1": "sha1({t})"}
-
-
 def _h(engine, expr, salt, way="md5"):
     """SQL for the 60-bit hash of a text expression, behind the salt, or
-    None where the engine's SQL has no such hash."""
+    None where the engine's SQL has no such hash: each hash's hex digits
+    as the table digest writes them (`canon.DIGEST_HASHES`) - PostgreSQL's
+    over the text's UTF-8 bytes, as MySQL and this process hash them; sha1
+    is an extension's there."""
+    hashes = canon.DIGEST_HASHES.get(engine, {})
+    if way not in hashes:
+        return None
     if engine == "postgres":
-        if way not in _PG_HEX:
-            return None
-        hexed = _PG_HEX[way].format(
+        hexed = hashes[way].format(
             b=f"convert_to('{salt}'||{expr}, 'UTF8')")
         return f"('x'||substr({hexed},1,{HEX}))::bit({BITS})::bigint"
-    if way not in _MY_HEX:
-        return None
-    hexed = _MY_HEX[way].format(t=f"concat('{salt}', {expr})")
+    hexed = hashes[way].format(t=f"concat('{salt}', {expr})")
     return f"cast(conv(substr({hexed},1,{HEX}),16,10) as unsigned)"
 
 
@@ -480,10 +546,65 @@ def _range_pred(s, spec, buckets):
 
 # --- reading ---------------------------------------------------------------
 
+def _text_read(s):
+    """`Side.as_text` where the side's engine reads a column as its
+    server's text (`neutral_batches(as_text=)`), else ()."""
+    want = s.as_text()
+    return want if want and _reads_text(s.eng) else ()
+
+
+def _reads_text(eng):
+    """Whether `eng.neutral_batches` takes `as_text`: the first class
+    defining it says, past one that hands every keyword on (a masking
+    wrapper's `**kw`) to the next."""
+    import inspect
+
+    def said(f):
+        try:
+            got = inspect.signature(f).parameters
+        except (TypeError, ValueError):
+            return False
+        if "as_text" in got:
+            return True
+        return None if any(p.kind is p.VAR_KEYWORD
+                           for p in got.values()) else False
+    for k in type(eng).__mro__:
+        f = k.__dict__.get("neutral_batches")
+        if f is not None:
+            got = said(f)
+            if got is not None:
+                return got
+    got = getattr(eng, "neutral_batches", None)
+    return bool(got is not None and said(got))
+
+
+def _first_rows(s, n):
+    """This side's first `n` rows in key order, its JSON as text where it
+    reads so (`_text_read`)."""
+    scope = {"where": s.where} if s.where else {}
+    text = _text_read(s)
+    if not text:
+        return s.eng.neutral_read(s.side, s.db, s.table, s.cols, None, n,
+                                  **scope)[0]
+    got = s.eng.neutral_batches(s.side, s.db, s.table, s.cols, n,
+                                as_text=text, **scope)
+    try:
+        return list(next(got, []))
+    finally:
+        got.close()
+
+
 def _rows(s, size=10_000):
     """Every row of a side read into this process: by key in turns where
     the engine resumes by key, else in batches."""
     scope = {"where": s.where} if s.where else {}
+    text = _text_read(s)
+    if text:
+        # in key order, through one cursor the server keeps
+        for batch in s.eng.neutral_batches(s.side, s.db, s.table, s.cols,
+                                           size, as_text=text, **scope):
+            yield from batch
+        return
     if s.key and getattr(s.eng, "RESUMES_BY_KEY", True):
         after = None
         while True:
@@ -1535,9 +1656,7 @@ def probe(s, spec, ways, n=PROBE_ROWS):
     does not. `why` is None where the way may be used, else the reason;
     `seconds` None where it never ran."""
     from dataclasses import replace
-    scope = {"where": s.where} if s.where else {}
-    rows, _ = s.eng.neutral_read(s.side, s.db, s.table, s.cols, None, n,
-                                 **scope)
+    rows = _first_rows(s, n)
     out = {}
     for way in ways:
         sp = replace(spec, hash=way)
