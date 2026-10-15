@@ -1661,8 +1661,8 @@ targets instead of falling back.
 `indexes.ForeignKeyWindow` on the `dropped-fks` set-aside record (a key not
 put back stops the move with the statement, `indexes.NotPutBack`;
 `tests/test_foreign_keys_go_back_or_the_move_stops.py`, scripted target).
-Not yet wired around the streaming copy in `movers.py` (another ticket's
-file), not run on a server, and `check`/`cutover` do not read `dropped-fks`.
+Not yet wired around the streaming copy in `movers.py`, and not run on a
+server. `cutover` and the PostgreSQL check do read `dropped-fks` (e149c96).
 
 *Found on the way, and done (2026-09-24):* the PostgreSQL dump path's load
 could only be run by a superuser. As a plain owner, the foreign keys'
@@ -5562,6 +5562,13 @@ the gaps nothing above covers yet, now items of their own.
 * **W9. Compiled end to end at the very top of the rate.** R19 lever 9
   compiles the decoder; above ~100k changes a second sustained the apply
   side (collapse, render, write) needs the same, measured first.
+  PARTLY (7c09b12, `applyway`): a batch is applied by rows or collapsed by
+  columns and each table's net rows handed to the engine's bulk way, the
+  second climbed to through `decide` only where the rows way applies
+  slower than the source changes, on the measured rate.
+  *Not done:* a compiled collapse, render and write; the Arrow handoff
+  was dropped, measured no gain; the ~100k changes a second ceiling is
+  not measured on a server; tests are on fakes.
 
 ## Where the paid tools and the clouds still lead (added 2026-09-24)
 
@@ -8474,6 +8481,11 @@ across the code; `init` writes a static template and asks nothing. So:
    against a real server pair.
 9. **Every message says what to do next**, in plain words, with the
    exact command or statement.
+   PARTLY (f81e87f): `docs/research/next-step-audit-2026-10-15.md` lists
+   every operator message of `cli`, `report`, `guide`, `doctor` and `verdict`, says
+   whether it names the next step, and ranks and words the thirty first
+   fixes. *Not done:* the messages are not rewritten; the audit is the
+   list, not the fix.
 
 Measured by: time from nothing to a verified move for a new operator
 (scripted in docker with each engine pair), number of config lines a
@@ -9558,7 +9570,7 @@ guarantees. Complexity belongs inside migkit, not in operator configuration.
 | P0-MINIMAL-INPUT.idempotency | Safe repetition, retry and resume across the entire workflow | Every side-effecting unit has stable operation identity, known preconditions, durable progress and verified postconditions. After interruption, reconcile actual state before repeating an operation; retain valid completed work and prevent duplicate effects. Use native transactional or idempotent mechanisms where available and compensate only where explicitly safe and authorized. State exact limits where external systems cannot guarantee atomicity or exactly-once effects. Repeated execution of the same task against the same valid context produces the same intended outcome without accumulating extra effects. |
 | P0-MINIMAL-INPUT.acceptance | Prove minimal effort and strong guarantees together | Use sandbox end-to-end scenarios across applicable engines, shapes and workflows. Demonstrate setup with the smallest necessary input set, correct discovery and scope, automatic strategy selection, consistent outcomes, truthful guarantee reporting and safe repeated runs. Inject interruption before and after side effects, stale evidence, changed scope, concurrent writes and partial permissions. Measure operator inputs/actions alongside completion time, resource use and retry waste. A shorter configuration that shifts work to manual steps, conceals ambiguity or weakens guarantees does not pass. |
 
-Not done (INIT, 2026-10-16): `migkit init` now reads the engine of an address that names none off the server's own answer (`engineat`: PostgreSQL, MySQL with its version, SQL Server with its version, MongoDB, Redis, Kafka, ClickHouse/OpenSearch/Couchbase over HTTP; a host alone is knocked on at every engine's port; one question with the port's engine proposed where none answers), says the statements a missing grant needs, and keeps an address's databases in the hop written. Left: Oracle, Cassandra, Db2 and Teradata knocks; the brand behind a protocol switching the engine after sign-in (CockroachDB, TiDB); LOBs, partitions, change-reading depth, target emptiness and the measured link rate said by the guide; the server test is written, not run.
+Not done (INIT, 2026-10-16): `migkit init` now reads the engine of an address that names none off the server's own answer (`engineat`: PostgreSQL, MySQL with its version, SQL Server with its version, MongoDB, Redis, Kafka, ClickHouse/OpenSearch/Couchbase over HTTP; a host alone is knocked on at every engine's port; one question with the port's engine proposed where none answers), says the statements a missing grant needs, and keeps an address's databases in the hop written. Then (e3ccafe): Oracle, Cassandra, Db2 and Teradata are read off the wire too, and the brand behind a protocol (CockroachDB, TiDB) switches the engine after sign-in. Left: LOBs, partitions, change-reading depth, target emptiness and the measured link rate said by the guide; the server test is written, not run.
 
 Best is evaluated against the task's explicit guarantees and authorized limits,
 using measured evidence rather than an absolute or unproved marketing claim.
@@ -10460,4 +10472,4 @@ P0-VALIDATE.mysql-query-lifecycle, P0-CONNECTION-PROGRESS and P0-ETA-ALL.
 
 Done: a standalone source is followed by a bucket sweep (`MongoEngine.FOLLOW_WAYS`, `_sweep_round`): dbHash per collection as the unchanged proof, then raw-BSON bucket digests keyed by the canonical `_id` hash (`leaves.bytes_hash`, `id_bucket`), only changed buckets re-read and written; depth D1 with "convert to a single-node replica set" (`changedepth.mongodb`, `MongoEngine.change_depths`).
 
-Not done: the oplog rung (`FOLLOW_WAYS` "oplog", `_oplog_follow`) is proved on fakes only (tests/test_a_mongodb_replica_set_is_followed_by_its_oplog.py, written, not run); no live test on a 4.0 replica set or with a refused stream yet; "per range" is its declared consistency because the ladder has no level between per range and as of one moment; the standalone server test is written, not run; `change_parity.MongoStandaloneVerifier` is an older flat duplicate of this item, to be retired.
+Not done: the oplog rung (`FOLLOW_WAYS` "oplog", `_oplog_follow`) is proved on fakes only (tests/test_a_mongodb_replica_set_is_followed_by_its_oplog.py, written, not run); no live test on a 4.0 replica set or with a refused stream yet; "per range" is its declared consistency because the ladder has no level between per range and as of one moment; the standalone server test is written, not run; `change_parity.py`, the older flat duplicate of this item, is deleted (a5ddd41).
