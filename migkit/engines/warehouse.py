@@ -62,6 +62,11 @@ from .bigquery_changes import BigQueryChanges
 from .bigquery_checks import BigQueryChecks
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 
+
+def _is_ddl(change):
+    from .. import canon
+    return canon.is_ddl(change)
+
 #: the declared type from `information_schema.columns`, with the numbers a
 #: counterpart needs, in the standard's spelling
 DECLARED = ("case when data_type in ('numeric', 'decimal', 'NUMBER')"
@@ -343,6 +348,7 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         self._target_only(side, "apply changes")
         seen = twoway.seen_of(twoway.batch_seen(self))
         by_table = {}
+        changes = self._in_version_order(changes)
         for table, (kind, key, values) in self._net_rows(side, db, changes):
             if any(isinstance(v, canon.Added) for v in values.values()):
                 raise SystemExit(f"{table}: a counter's change adds to the"
@@ -350,8 +356,15 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
                                  " two-way hop does")
             by_table.setdefault(str(self.local_table(table)).split(".")[-1],
                                 []).append((kind, dict(key), dict(values)))
+        by_table = {t: self._not_late(side, db, t, rows)
+                    for t, rows in by_table.items()}
+        by_table = {t: rows for t, rows in by_table.items() if rows}
         if by_table:
+            import time
+            began = time.monotonic()
             self._apply_batch(side, db, by_table, seen)
+            self._landed(sum(len(r) for r in by_table.values()),
+                         time.monotonic() - began)
         return len(changes)
 
     def _journal_rows(self, table, rows, n, fp):
@@ -397,6 +410,165 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         if not got or got[0][0] is None:
             return None
         return {"batch": int(got[0][0]), "token": json.loads(got[0][1])}
+
+    # ---- a continuous hop: batches sized from what was measured -------------
+
+    #: the landing this warehouse's own batch apply uses (`_apply_batch`),
+    #: by `decide.warehouse_landing`'s names; `_landing_way` refines it
+    LANDING = "merge"
+    #: the (rows, seconds) samples a landing's start and cost a row are fit
+    #: from: the most recent, so a warehouse that slows is seen to
+    LANDING_SAMPLES = 32
+
+    def _landing_way(self, side):
+        return self.LANDING
+
+    def _has_stage(self, side):
+        return False
+
+    def _stream_offsets(self, side):
+        """Whether its streaming device keeps the offset it committed, so a
+        batch streamed again is refused rather than doubled."""
+        return False
+
+    def _landed(self, rows, seconds):
+        way = self._landing_way("dst")
+        got = self.__dict__.setdefault("_landings", {}).setdefault(way, [])
+        got.append((int(rows), float(seconds)))
+        del got[:-self.LANDING_SAMPLES]
+
+    @staticmethod
+    def landing_fit(samples):
+        """(seconds a batch starts in, seconds a row) by least squares over
+        `samples` [(rows, seconds)], or None until two batches of different
+        sizes were timed - one size cannot tell a start from a row's cost."""
+        if len({r for r, _ in samples}) < 2:
+            return None
+        n = len(samples)
+        mx = sum(r for r, _ in samples) / n
+        my = sum(t for _, t in samples) / n
+        sxx = sum((r - mx) ** 2 for r, _ in samples)
+        per_row = sum((r - mx) * (t - my) for r, t in samples) / sxx
+        per_row = max(per_row, 0.0)
+        return max(my - per_row * mx, 0.0), per_row
+
+    def _rate(self, got, asked):
+        """Changes a second the tail gives, smoothed over its reads."""
+        last = self.__dict__.get("_asked")
+        self._asked = asked
+        if last is None or asked <= last:
+            return self.__dict__.get("_tail_rate")
+        now = got / (asked - last)
+        was = self.__dict__.get("_tail_rate")
+        self._tail_rate = now if was is None else 0.5 * was + 0.5 * now
+        return self._tail_rate
+
+    def landing_facts(self, side, rate):
+        """The facts `decide.warehouse_landing` climbs on: the tail's rate,
+        each landing's measured start and cost a row, what the warehouse
+        offers."""
+        facts = {"rate": rate, "ledger": True,
+                 "stream_offsets": self._stream_offsets(side),
+                 "stage": self._has_stage(side)}
+        for way, samples in self.__dict__.get("_landings", {}).items():
+            fit = self.landing_fit(samples)
+            if fit is not None:
+                facts[f"{way}_startup"], facts[f"{way}_per_row"] = fit
+        return facts
+
+    def tail_limit(self, side, db, got, asked, limit, log=None):
+        """How many changes the tail's next read takes: the batch that keeps
+        the lag lowest while the landing keeps up (`decide.warehouse_landing`)
+        once the landing was timed at two sizes; the tail's own size until
+        then, and where no landing keeps up - the tail is then behind and
+        its own sizing reads more a batch."""
+        rate = self._rate(got, asked)
+        if rate is None:
+            return limit
+        choice, sized = decide.warehouse_landing(
+            self.landing_facts(side, rate))
+        if sized is None:
+            return limit
+        rows, interval, lag = sized
+        if choice.path != self.__dict__.get("_landing_said"):
+            self._landing_said = choice.path
+            decide.record(self.hop, choice, log, work=f"the feed of {db}",
+                          way=choice.said,
+                          reason=f"{rows:,} rows a batch, a batch every"
+                                 f" {interval or 0:.1f}s, {lag:.1f}s lag")
+        return max(1, rows)
+
+    # ---- late and out-of-order rows: merged by key and version ------------
+
+    def versions(self):
+        """{table: the column whose value orders a row's versions}, handed
+        down by what feeds this target from more than one place
+        (`hop.versions`); a single tail's batches are in the source's own
+        order, and the ledger refuses one applied twice."""
+        return dict(getattr(self.hop, "versions", None) or {})
+
+    def _in_version_order(self, changes):
+        """`changes`, each versioned table's in its version order, the rest
+        where they were: the change a key is left with is its newest."""
+        by = self.versions()
+        if not by:
+            return changes
+
+        def version(c):
+            col = by.get(str(self.local_table(c.get("table"))).split(".")[-1])
+            return (c.get("values") or {}).get(col) if col else None
+        out = list(changes)
+        places = {}
+        for i, c in enumerate(out):
+            if not _is_ddl(c) and version(c) is not None:
+                places.setdefault(c.get("table"), []).append(i)
+        for at in places.values():
+            ordered = sorted((out[i] for i in at), key=version)
+            for i, c in zip(at, ordered):
+                out[i] = c
+        return out
+
+    def _not_late(self, side, db, table, rows):
+        """A versioned table's rows less those older than the version the
+        target holds for their key: a late row never overwrites a newer
+        one. A delete carries no version and is taken."""
+        col = self.versions().get(table)
+        if not col:
+            return rows
+        keyed = [(k, v) for kind, k, v in rows if kind != "delete"
+                 and v.get(col) is not None]
+        if not keyed:
+            return rows
+        names = sorted(keyed[0][0])
+        held = {}
+        target = self._qualified(side, db, table)
+        quoted, cv = [self._q(n) for n in names], self._q(col)
+        for i in range(0, len(keyed), 500):
+            part = keyed[i:i + 500]
+            where = " or ".join(
+                "(" + " and ".join(f"{q} = {MARK}" for q in quoted) + ")"
+                for _ in part)
+            args = [k[n] for k, _ in part for n in names]
+            for got in self._rows(side, db, f"select {', '.join(quoted)},"
+                                            f" {cv} from {target}"
+                                            f" where {where}", args):
+                held[tuple(got[:-1])] = got[-1]
+        out = []
+        for kind, k, v in rows:
+            now = held.get(tuple(k[n] for n in names))
+            if kind == "delete" or v.get(col) is None or now is None:
+                out.append((kind, k, v))
+                continue
+            try:
+                late = v[col] < now
+            except TypeError:
+                raise SystemExit(
+                    f"{table}: {col} on the target and in the change are not"
+                    " of one kind, so which version is newer cannot be told;"
+                    " give the column one type on both sides") from None
+            if not late:
+                out.append((kind, k, v))
+        return out
 
     def _apply_batch(self, side, db, by_table, seen):
         raise NotImplementedError
@@ -1203,6 +1375,12 @@ class RedshiftEngine(_CatalogWarehouse):
                            " order by 1")])]
 
     # ---- the stage --------------------------------------------------------
+
+    def _landing_way(self, side):
+        return "files" if self._stage(side) else "merge"
+
+    def _has_stage(self, side):
+        return self._stage(side) is not None
 
     def _stage(self, side):
         """(bucket, prefix, role) where the endpoint names an S3 stage the
@@ -2044,6 +2222,16 @@ class SnowflakeEngine(FoldsToCapitals, _CatalogWarehouse):
                     f" {self._q('_migkit_cols')} varchar)")
         return name, dict(cols)
 
+    def _landing_way(self, side):
+        return "stream" if self._stream_offsets(side) else "files"
+
+    def _has_stage(self, side):
+        return True
+
+    def _stream_offsets(self, side):
+        return bool((self._endpoint(side).options or {})
+                    .get("private_key_file"))
+
     def _channel_props(self, side):
         """What a streaming channel signs in with, or None where the
         endpoint signs in by password, which a channel does not take."""
@@ -2518,6 +2706,14 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
         arrays = [arrow_array(self._arrow_type(at[n]), [r[i] for r in rows])
                   for i, n in enumerate(names)]
         return pa.Table.from_arrays(arrays, names=list(names))
+
+    LANDING = "stream"
+
+    def _has_stage(self, side):
+        return True
+
+    def _stream_offsets(self, side):
+        return True
 
     def _loads_left(self, side):
         """Load jobs the project may still run today, by its own job

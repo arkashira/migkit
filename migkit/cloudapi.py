@@ -537,6 +537,97 @@ OPERATIONS = {
 # --- AWS ---------------------------------------------------------------------
 
 #: where the AWS CLI's chain found its credentials, in words
+# --- a provider's zero-ETL integration into its warehouse (S4) --------------
+
+@dataclass(frozen=True)
+class ZeroEtl:
+    """A provider's own continuous feed from one of its databases into its
+    warehouse: what it starts from and lands in, the promises it states it
+    keeps (`decide.FEED_PROMISES`' words), the lag it documents, and the
+    adapter's method running it ("" with `why_not` where none does)."""
+    name: str
+    said: str
+    provider: str
+    #: (product, engine) pairs of the source, engine "" for any
+    sources: tuple
+    target: str
+    keeps: tuple
+    documented_lag: float
+    runs: str = ""
+    why_not: str = ""
+    #: what it does not carry, which the promise of every row then lacks
+    gaps: tuple = ()
+
+
+ZERO_ETL = {
+    "aws": (
+        ZeroEtl("aws-zero-etl", "AWS's zero-ETL integration into Redshift",
+                "aws", (("rds", "mysql"), ("rds", "aurora-mysql"),
+                        ("rds", "aurora-postgresql"), ("rds", "postgres")),
+                "redshift", ("every row", "deletes", "the source's order"),
+                documented_lag=15.0, runs="run_zero_etl",
+                gaps=("a table with no primary key",)),),
+    "azure": (
+        ZeroEtl("azure-mi-link", "Azure's Managed Instance link", "azure",
+                (("sqlmi", ""), ("sql", "sqlserver")), "sqlmi",
+                ("every row", "deletes", "the source's order"),
+                documented_lag=5.0,
+                why_not=NOT_RUN.format(who="Azure",
+                                       what="a Managed Instance link")),),
+    "gcp": (
+        ZeroEtl("gcp-alloydb-bigquery", "Google's AlloyDB stream into"
+                " BigQuery", "gcp", (("alloydb", ""),), "bigquery",
+                ("every row", "deletes"), documented_lag=60.0,
+                why_not=NOT_RUN.format(who="Google",
+                                       what="an AlloyDB stream into"
+                                            " BigQuery"),
+                gaps=("a table with no primary key",)),),
+}
+
+
+def zero_etl(source, target):
+    """The provider's zero-ETL integration from instance `source` into
+    warehouse `target` (`Instance`s, `target.product` naming the
+    warehouse), or None where the provider offers none for the pair."""
+    if not _same_provider(source, target):
+        return None
+    for z in ZERO_ETL.get(source.provider, ()):
+        if z.target == target.product and any(
+                p == source.product and (not e or e == source.engine)
+                for p, e in z.sources):
+            return z
+    return None
+
+
+def feed_facts(source, target, adapter=None, gaps=(), measured_lag=None):
+    """The facts `decide.warehouse_feed` climbs on for the provider's side:
+    whether the provider offers an integration for the pair, the promises
+    it keeps here - every row is not kept where the source holds one of
+    the integration's `gaps` (`gaps`: the ones the assessment found) - and
+    whether migkit runs it. Its lag is the one measured here
+    (`measured_lag`), else the one the provider documents. Verified is
+    kept by both ways: migkit's own check runs on the warehouse after the
+    integration, never the provider's word."""
+    z = zero_etl(source, target)
+    if z is None:
+        return {"offered": False,
+                "not_offered": f"{source.provider or 'the provider'} offers"
+                               f" no zero-ETL integration from"
+                               f" {source.product or 'this source'} into"
+                               f" {target.product or 'this target'}"}
+    keeps = set(z.keeps) | {"verified"}
+    lacking = [g for g in gaps if g in z.gaps]
+    if lacking:
+        keeps.discard("every row")
+    runs = bool(z.runs and (adapter is None or adapter.runner(z)))
+    return {"offered": True, "integration": z.name,
+            "provider_keeps": tuple(sorted(keeps)),
+            "provider_lag": (measured_lag if measured_lag is not None
+                             else z.documented_lag),
+            "provider_gaps": tuple(lacking), "runs": runs,
+            "why_not": z.why_not or None}
+
+
 AWS_WHERE = {
     "env": "the environment (AWS_ACCESS_KEY_ID)",
     "shared-credentials-file": "the CLI's credentials file",
@@ -1422,6 +1513,53 @@ class Aws(Adapter):
             log(f"{', '.join(waiting)} take effect at {self.id}'s next"
                 " restart")
         return {n: rows[n]["value"] for n in values}
+
+    #: an integration's states that will not become active
+    INTEGRATION_FAILED = ("failed", "needs_attention", "deleting")
+
+    def integration(self, name):
+        """{"status", "errors", "arn"} of the zero-ETL integration `name`,
+        or None where the provider holds none by that name."""
+        try:
+            got = self._rds().describe_integrations(
+                IntegrationIdentifier=name).get("Integrations") or []
+        except Exception as e:  # noqa: BLE001 - asked again, or refused
+            if "IntegrationNotFound" in _aws_code(e):
+                return None
+            raise
+        if not got:
+            return None
+        x = got[0]
+        return {"status": str(x.get("Status") or "").lower(),
+                "errors": [str(e.get("ErrorMessage") or e.get("ErrorCode"))
+                           for e in x.get("Errors") or ()],
+                "arn": x.get("IntegrationArn") or ""}
+
+    def run_zero_etl(self, source_arn, target_arn, name, log):
+        """The zero-ETL integration `name` from `source_arn` into
+        `target_arn` made where it is not there yet, and waited for until
+        the provider says it is active: {"arn", "status"}. One already
+        there is waited for, never made twice."""
+        had = self.integration(name)
+        if had is None:
+            log(f"making the zero-ETL integration {name}")
+            self._rds().create_integration(SourceArn=source_arn,
+                                           TargetArn=target_arn,
+                                           IntegrationName=name)
+
+        def ask():
+            got = self.integration(name)
+            if got is None:
+                return None
+            if got["status"] in self.INTEGRATION_FAILED:
+                raise SystemExit(
+                    f"the zero-ETL integration {name} is {got['status']}"
+                    + (f": {'; '.join(got['errors'])}" if got["errors"]
+                       else "") + " - see its errors in the provider's"
+                    " console, then run again")
+            return got if got["status"] == "active" else None
+        got = until(ask, f"the zero-ETL integration {name}", log)
+        return {"arn": got["arn"], "status": got["status"]}
 
     def _apply_states(self):
         """The provider's word, per member, for whether its parameter

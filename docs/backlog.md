@@ -5542,6 +5542,8 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   moving only changed blocks, then fast-forwarded; a zero-ETL-like
   continuous hop for any source and warehouse, keyless tables and
   additive DDL without a resync.
+  Not done (W12B): AWS's integration is made and waited for; Azure's MI link and Google's AlloyDB stream are registered and refused as not yet run; `decide.warehouse_feed` is not yet asked by the flow.
+  Not done (W12B): the landing sizes the tail and late rows are dropped by `hop.versions`, but each warehouse still lands through its own device rather than switching way by the choice; the zero-ETL lag is documented, not yet read from the target; capabilities declare neither rung (owned elsewhere); none of it has run on a real account.
 
 ## Where migkit would still lose with every item above done (2026-09-28)
 

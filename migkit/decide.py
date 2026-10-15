@@ -3337,3 +3337,136 @@ def worker_budget(facts):
     if key != "budget" and scale:
         n = int(n * float(scale))
     return max(1, n), choice
+
+
+# --- a continuous hop into a warehouse (LT.P3, S4) --------------------------
+
+#: the share of a batch's interval its landing may take: the rest is the
+#: headroom a burst of the tail is absorbed in without falling behind
+LANDING_SHARE = 0.5
+
+
+def _seconds(v):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x >= 0 else None
+
+
+def batch_for(rate, startup, per_row, share=LANDING_SHARE):
+    """(rows a batch, seconds between batches, lag) a landing keeps up
+    with a tail of `rate` changes a second in: the fewest rows whose landing
+    (`startup` seconds plus `per_row` a row, both measured) takes no more
+    than `share` of the time the tail takes to write them, since the lag a
+    row sees is its wait for the batch plus the batch's landing. None where
+    no batch keeps up: the landing's own cost a row is at or above what
+    the tail gives it."""
+    rate, startup, per_row = (_seconds(rate), _seconds(startup),
+                              _seconds(per_row))
+    if rate is None or startup is None or per_row is None:
+        return None
+    if rate == 0:
+        return 1, None, startup + per_row
+    room = share - per_row * rate
+    if room <= 0:
+        return None
+    rows = max(1, math.ceil(startup * rate / room))
+    interval = rows / rate
+    return rows, interval, interval + startup + per_row * rows
+
+
+def warehouse_landing(facts):
+    """(the `Choice`, (rows, interval, lag)) of how a continuous hop lands
+    its batches in a warehouse: the warehouse's streaming insert, staged
+    files loaded every interval, or merge statements - each sized from the
+    tail's measured rate and that landing's measured start and cost a row
+    (`batch_for`), and ranked by the lag a row sees. Every rung lands a
+    batch with its line in the ledger in one transaction (or the
+    streaming device's own offset, where it keeps one), so none is ranked
+    on a weaker promise; one that cannot keep up with the tail is passed
+    over, never chosen to fall behind."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    sized = {}
+    for name in ("stream", "files", "merge"):
+        got = batch_for(f.get("rate"), f.get(f"{name}_startup"),
+                        f.get(f"{name}_per_row"))
+        if got is not None:
+            sized[name] = got
+
+    def keeps_up(name):
+        return Need("a batch that keeps up", lambda f: name in sized,
+                    lambda f: ("the landing was not measured"
+                               if _seconds(f.get(f"{name}_startup")) is None
+                               or _seconds(f.get(f"{name}_per_row")) is None
+                               or _seconds(f.get("rate")) is None
+                               else "its cost a row is more than the tail"
+                                    " gives it: it would fall behind"))
+    once = Need("each batch landed exactly once",
+                lambda f: bool(f.get("ledger")),
+                "{rung} needs the ledger written in the batch's"
+                " transaction")
+    rungs = (
+        Rung("stream", "the warehouse's streaming insert",
+             needs=(Need("a streaming device keeping its offset",
+                         lambda f: bool(f.get("stream_offsets")),
+                         "the warehouse offers no streaming insert that"
+                         " keeps its offset"), keeps_up("stream")),
+             because="the shortest start a batch"),
+        Rung("files", "staged files loaded every interval",
+             needs=(Need("a stage", lambda f: bool(f.get("stage")),
+                         "the target names no stage to load files from"),
+                    once, keeps_up("files")),
+             because="the lowest cost a row"),
+        Rung("merge", "merge statements a batch",
+             needs=(once, keeps_up("merge")),
+             because="no stage or streaming device needed"))
+    costs = Costs({n: lag for n, (_, _, lag) in sized.items()})
+    choice = climb("the continuous hop's landing", rungs, f, costs=costs)
+    return choice, sized.get(choice.path)
+
+
+#: the guarantees a feed into a warehouse is held to, strongest first
+FEED_PROMISES = ("every row", "deletes", "the source's order", "verified")
+
+
+def warehouse_feed(facts):
+    """The `Choice` between the provider's zero-ETL integration and
+    migkit's own continuous hop. A way is ranked only where it keeps every
+    promise the hop asks (`FEED_PROMISES` it lists in `promises`): the
+    provider's integration is offered for what it states it keeps, and is
+    verified by migkit's own check either way, so it never stands on the
+    provider's word. Among those kept, the measured lag (seconds) and cost
+    (the same unit for both) rank them; an integration not measured yet
+    ranks on its documented lag."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    asked = tuple(f.get("promises") or FEED_PROMISES)
+    kept = set(f.get("provider_keeps") or ())
+
+    def lag(name):
+        x = _seconds(f.get(f"{name}_lag"))
+        c = _seconds(f.get(f"{name}_cost"))
+        return None if x is None else x * (1 + (c or 0))
+    rungs = (
+        Rung("provider", "the provider's zero-ETL integration",
+             needs=(Need("an integration offered for this pair",
+                         lambda f: bool(f.get("offered")),
+                         lambda f: f.get("not_offered")
+                         or "the provider offers none for this pair"),
+                    Need("every promise the hop asks",
+                         lambda f: all(p in kept for p in asked),
+                         lambda f: "it does not keep "
+                         + ", ".join(p for p in asked if p not in kept)),
+                    Need("an integration migkit runs",
+                         lambda f: bool(f.get("runs")),
+                         lambda f: f.get("why_not")
+                         or "migkit does not yet run it")),
+             because="the provider carries the rows with nothing to run"),
+        Rung("own", "migkit's own continuous hop",
+             needs=(Need("a change tail on the source",
+                         lambda f: bool(f.get("tail")),
+                         "the source gives no change tail"),),
+             because="every promise kept by migkit's own ledger"))
+    costs = Costs({n: v for n in ("provider", "own")
+                   if (v := lag(n)) is not None})
+    return climb("the feed into the warehouse", rungs, f, costs=costs)

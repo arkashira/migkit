@@ -1231,6 +1231,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: a counter's change adds to the value where it stands, which only a two-way hop does
 
+* <...>: <...> on the target and in the change are not of one kind, so which version is newer cannot be told; give the column one type on both sides
+
 * <...> has no key on the target, and a change is applied by its key
 
 * the <...> needs `account`, the Snowflake account identifier
@@ -1838,6 +1840,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...> cannot be changed on <...>
 
 * <...> runs with the provider's default parameter group <...>, which is never changed: give it a group of its own first
+
+* the zero-ETL integration <...> is <...>: <...> | <...> - see its errors in the provider's console, then run again
 
 * no Google Cloud credentials: looked at the key file GOOGLE_APPLICATION_CREDENTIALS names, gcloud's application default login and the instance's service account
 

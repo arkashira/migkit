@@ -4858,6 +4858,11 @@ class HeteroEngine(Engine):
                 # its size - the schema asked again, the position
                 # written, a statement a table - is paid less often
                 s.limit = min(s.limit * 2, self.TAIL_BATCH_MOST)
+            # a target that times its landings sizes the next read from
+            # the tail's rate and its own measured cost (a warehouse)
+            sized = getattr(self.dst_engine, "tail_limit", None)
+            if sized is not None:
+                s.limit = sized("dst", db, len(got), asked, s.limit, log)
             changes, s.carried = s.carried + got, []
             s.read_at = token = read_to
             cut = self._commit_cut(changes) if can_cut else None
