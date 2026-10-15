@@ -3339,7 +3339,6 @@ def worker_budget(facts):
     return max(1, n), choice
 
 
-<<<<<<< HEAD
 # --- a continuous hop into a warehouse (LT.P3, S4) --------------------------
 
 #: the share of a batch's interval its landing may take: the rest is the
@@ -3503,8 +3502,6 @@ def change_read(facts, costs=None):
     each gave a batch (`costs`: {"stream": s, "poll": s})."""
     return climb("reading the source's log", CHANGE_READS, facts,
                  costs=costs)
-||||||| c95da9db
-=======
 def _edge_fact(name):
     return lambda f: bool(f.get(name))
 
@@ -3545,4 +3542,3 @@ def chunk_edges(work, facts):
     key taken now, else the key read in order - never the key's minimum
     and maximum divided alone."""
     return climb(work, CHUNK_EDGES, facts, need=("edges",))
->>>>>>> w12j
