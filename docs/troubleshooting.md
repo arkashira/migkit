@@ -801,6 +801,18 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> transactions committed before the change position are still out of sight of any read after <...>s (transaction ids <...>) - a synchronous standby that does not answer holds a commit this way. A copy read now would miss them and the change tail starts after them, so nothing was copied. Make the standby answer, or take it out of synchronous_standby_names, and move again.
 
+* <...>: no way to follow the source's changes - <...>
+
+* <...>: the source's WAL files from <...> were not read: <...>
+
+* <...>: the WAL names relation file <...>, which no table holds now - it was dropped, emptied or rewritten after the change, and its rows cannot be read again by their place. Compare the database again, then follow from there
+
+* <...>: <...> has no primary key, and a change its WAL records name by place cannot be written to the target by key - give it one
+
+* <...>: rows were taken out of <...> (block <...>) before <...>, where this follow began holding its keys, and the WAL does not say which: compare the table again, then follow
+
+* <...>: <...> was made after this follow began holding its tables' keys, so a row taken out of it could not be named: move it, then follow
+
 * two_way: a tail applies into <...> under a replication origin of migkit's (<...>), and <...> applies into it too. Leaving out what migkit applied there would leave out what the other applies, and those changes would never reach the other side. Tear the two-way tail into this side down (move --mode cdc --drop), or the other; its next start chooses another way to mark what it applies
 
 * no primary key on <...> - a change to a keyless table cannot be addressed on the target, and applying it by matching every column would hit every duplicate. The change is still in the slot and every call will stop here again, because peeking never throws anything away. Give the table a key or a unique REPLICA IDENTITY, or step past it with: select pg_replication_slot_advance(<...>, pg_current_wal_lsn()); -- skips everything pending, including this

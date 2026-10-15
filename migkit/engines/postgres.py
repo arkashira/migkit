@@ -2985,7 +2985,7 @@ select json_build_object(
                    " ('lost', 'unreserved')")
 
     def _slot_ready(self, side, db, resuming_from=None, ask=None,
-                    make=None):
+                    make=None, below=False):
         """Make sure the slot exists and is one migkit can read. Returns its
         name. `ask(sql)` answers a statement's text, by default through the
         client program; the tail asks on the connection it keeps
@@ -3000,7 +3000,8 @@ select json_build_object(
         changes in it, and a tail that silently started from "now" would skip
         everything written between the full load and the first call. The slot
         has to exist **before** the rows are copied, which is why this is
-        callable on its own.
+        callable on its own. `below` True returns None where the server
+        cannot keep a slot and a way below one follows it (`follow_way`).
         """
         name = self.slot_name()
         if ask is None:
@@ -3008,6 +3009,13 @@ select json_build_object(
                 return self._psql(side, db, sql)
         got = ask("select plugin from pg_replication_slots"
                   f" where slot_name = {_literal(name)}").strip()
+        if not got and below:
+            # `below`: a reader that follows the WAL's physical records
+            # where no slot can be made takes None (`FOLLOW_WAYS`)
+            level = ask("show wal_level").strip()
+            if level != "logical" and self.follow_way(
+                    db, side, level).path != "logical slot":
+                return None
         if not got and resuming_from:
             raise SystemExit(
                 f"the slot {name} is gone from the source, and the tail had"
@@ -3341,7 +3349,11 @@ select json_build_object(
         7.3s on one connection.
         """
         ask = self._slot_text(side, db)
-        name = self._slot_ready(side, db, resuming_from=token, ask=ask)
+        name = self._slot_ready(side, db, resuming_from=token, ask=ask,
+                                below=True)
+        if name is None:
+            return self._wal_changes(side, db, token, limit,
+                                     self.follow_way(db, side))
         standby = bool((self.hop.options or {}).get("standby"))
         rows_of = self._slot_rows_waited if standby else self._slot_rows
         if token and standby:
@@ -3384,6 +3396,409 @@ select json_build_object(
                 last is None or self.position_reached(upto, last)):
             last = upto
         return out, last
+
+    #: how a source's changes are followed: its logical slot where the
+    #: WAL carries rows; else, at wal_level replica, the WAL's physical
+    #: records read through the server's own functions or, where the WAL
+    #: directory is reachable from here, its reading program. A physical
+    #: record names a relation file and a block, not a row: the blocks
+    #: committed changes touched are read again by their rows' place and
+    #: told apart by key from what the follow held there before
+    #: (`_wal_changes`), so a row stands as of the read, later than its
+    #: record - the slot, where it holds, is never traded for that
+    FOLLOW_WAYS = (
+        Rung("logical slot", "the source's logical slot",
+             needs=(Need("a log that carries rows",
+                         lambda f: str(f["wal_level"]) == "logical",
+                         lambda f: f"wal_level is {f['wal_level']} on the"
+                                   " source, and a logical slot needs"
+                                   " 'logical'"),),
+             holds={"consistent": "as of one moment",
+                    "idempotent": "converges", "resumable": "goes on"},
+             because="every change with its row, in commit order",
+             leaves="a slot on the source"),
+        Rung("wal inspect", "the source's WAL records, read by the server",
+             needs=(Need("a WAL that records every row's change",
+                         lambda f: str(f["wal_level"]) != "minimal",
+                         "wal_level is minimal on the source: a table made"
+                         " or emptied in a transaction writes no record of"
+                         " its rows - alter system set wal_level ="
+                         " 'replica' (a restart)"),
+                    Need("PostgreSQL 15 or later",
+                         lambda f: int(f["version"] or 0) >= 150000,
+                         lambda f: f"the source is version {f['version']},"
+                                   " and reading WAL records in the server"
+                                   " came with 15"),
+                    Need("the WAL reading functions",
+                         lambda f: f["wal functions"] in ("installed",
+                                                          "creatable"),
+                         lambda f: str(f["wal functions"])),
+                    Need("the right to read the server's WAL",
+                         lambda f: f["wal read granted"] is True,
+                         "the source's user may not read the server's WAL:"
+                         " grant pg_read_server_files to it"),
+                    Need("the WAL kept until it is read",
+                         lambda f: f["wal kept"] is True,
+                         lambda f: str(f["wal kept"]))),
+             holds={"consistent": "per range", "idempotent": "converges",
+                    "resumable": "goes on"},
+             because="the blocks committed changes touched, their rows read"
+                     " again by place and told apart by key: a row as of"
+                     " the read, a removed row named by the key held for"
+                     " its place",
+             leaves="the WAL reading functions on the source where they"
+                    " were made, and the followed tables' keys in memory"),
+        Rung("wal dump", "the source's WAL files, read on this machine",
+             needs=(Need("a WAL that records every row's change",
+                         lambda f: str(f["wal_level"]) != "minimal",
+                         "wal_level is minimal on the source: a table made"
+                         " or emptied in a transaction writes no record of"
+                         " its rows - alter system set wal_level ="
+                         " 'replica' (a restart)"),
+                    Need("the WAL reading program",
+                         lambda f: bool(f["wal program"]),
+                         "no program on this machine reads WAL files: give"
+                         " the hop wal_program"),
+                    Need("the WAL directory here",
+                         lambda f: bool(f["wal dirs"]),
+                         "the source's WAL directory is not reachable from"
+                         " this machine: give the hop wal_dir, or"
+                         " wal_archive where segments are archived"),
+                    Need("the WAL kept until it is read",
+                         lambda f: f["wal kept"] is True
+                         or len(f["wal dirs"]) > 1,
+                         lambda f: str(f["wal kept"]))),
+             holds={"consistent": "per range", "idempotent": "converges",
+                    "resumable": "goes on"},
+             because="the blocks committed changes touched, their rows read"
+                     " again by place and told apart by key, the records"
+                     " read from the files without the server's functions",
+             leaves="the followed tables' keys in memory"),
+    )
+
+    def _wal_ask(self, side, db, sql, args=None):
+        """The rows of one statement the WAL follow asks, on the slot's
+        kept connection; a refusal for want of a grant stops as the grant
+        (`MissingGrant`)."""
+        from . import enterprise_connectors as ec
+        try:
+            return self._slot_rows(side, db, sql, args)
+        except Exception as e:  # noqa: BLE001 - a grant is said as one
+            if ec.is_grant_error("postgres", e):
+                raise ec.MissingGrant(
+                    "postgres", "reading the server's WAL",
+                    "pg_read_server_files, or superuser", e) from e
+            raise
+
+    def _follow_facts(self, side, db, known=None):
+        """What `FOLLOW_WAYS` read, each asked once and only where a rung
+        still in the running needs it."""
+        from ..decide import Facts
+        cached = self.__dict__.setdefault("_follow_facts_held", {})
+        if (side, db) in cached:
+            cached[(side, db)].update(known or {})
+            return cached[(side, db)]
+        opts = self.hop.options or {}
+
+        def one(sql):
+            return self._wal_ask(side, db, sql)[0][0]
+
+        def functions():
+            have, avail, sup = self._wal_ask(
+                side, db, "select exists (select 1 from pg_extension where"
+                " extname = 'pg_walinspect'), exists (select 1 from"
+                " pg_available_extensions where name = 'pg_walinspect'),"
+                " (select rolsuper from pg_roles where rolname ="
+                " current_user)")[0]
+            if have:
+                return "installed"
+            if avail and sup:
+                return "creatable"
+            if avail:
+                return ("the WAL reading functions are not made in this"
+                        " database and only a superuser makes them:"
+                        " create extension pg_walinspect")
+            return "the source's server has no WAL reading functions"
+
+        def granted():
+            return bool(one(
+                "select (select rolsuper from pg_roles where rolname ="
+                " current_user) or pg_has_role(current_user,"
+                " 'pg_read_server_files', 'member') or (exists (select 1"
+                " from pg_extension where extname = 'pg_walinspect') and"
+                " has_function_privilege('pg_get_wal_records_info(pg_lsn,"
+                " pg_lsn)', 'execute'))"))
+
+        def kept():
+            keep, archive = self._wal_ask(
+                side, db, "select coalesce(current_setting('wal_keep_size',"
+                " true), current_setting('wal_keep_segments', true), '0'),"
+                " current_setting('archive_mode')")[0]
+            if str(keep).strip() not in ("0", "0MB", ""):
+                return True
+            return ("nothing keeps the source's WAL until it is read: no"
+                    " slot holds it at wal_level replica, and a checkpoint"
+                    " recycles it - alter system set wal_keep_size ="
+                    " '4GB'" + ("" if str(archive) in ("on", "always") else
+                                ", or archive it and give the hop"
+                                " wal_archive"))
+
+        def dirs():
+            out = [d for d in (opts.get("wal_dir"),) if d]
+            if not out:
+                try:
+                    data = one("show data_directory")
+                except Exception:  # noqa: BLE001 - not said, not here
+                    data = None
+                if data and os.path.isdir(os.path.join(data, "pg_wal")):
+                    out.append(os.path.join(data, "pg_wal"))
+            out = [d for d in out if os.path.isdir(d)]
+            arch = opts.get("wal_archive")
+            return out + ([arch] if out and arch and os.path.isdir(arch)
+                          else [])
+
+        def program():
+            import shutil
+            return shutil.which(str(opts.get("wal_program") or "pg_waldump"))
+
+        facts = cached[(side, db)] = Facts(known, **{
+            "wal_level": lambda: str(one("show wal_level")),
+            "version": lambda: int(one("show server_version_num")),
+            "wal functions": functions, "wal read granted": granted,
+            "wal kept": kept, "wal dirs": dirs, "wal program": program})
+        return facts
+
+    def _follow_costs(self):
+        """Seconds a WAL record took to follow on each way, as this hop
+        measured them (`_wal_changes`); nothing where a way never ran."""
+        from ..decide import Costs, HopCosts
+        kept, out = HopCosts(self.hop, "follow/"), Costs()
+        for rung in self.FOLLOW_WAYS:
+            per = kept.get(f"{rung.name} records")
+            if per is not None:
+                out[rung.name] = per
+        return out
+
+    @classmethod
+    def follow_choice(cls, facts, costs=None):
+        """The `decide.Choice` of the way the source's changes are
+        followed, from `_follow_facts` and `_follow_costs`."""
+        from ..decide import climb
+        return climb("following the source's changes", cls.FOLLOW_WAYS,
+                     facts, costs=costs)
+
+    def follow_way(self, db, side="src", wal_level=None):
+        """`follow_choice` for one side's database, its facts read once
+        and the choice kept for the run. Where no way holds and the right
+        to read the WAL is what the reading by the server lacked, that
+        grant is the blocker; else the reasons stop the run."""
+        from . import enterprise_connectors as ec
+        held = self.__dict__.setdefault("_follow_ways", {})
+        if (side, db) in held:
+            return held[(side, db)]
+        facts = self._follow_facts(
+            side, db, {"wal_level": wal_level} if wal_level else None)
+        way = self.follow_choice(facts, self._follow_costs())
+        if way.rung is None:
+            if any(r.name == "wal inspect" and "pg_read_server_files" in why
+                   for r, why in way.passed):
+                raise ec.MissingGrant("postgres", "reading the server's WAL",
+                                      "pg_read_server_files")
+            raise SystemExit(f"{db}: no way to follow the source's changes"
+                             f" - {way.reason}")
+        held[(side, db)] = way
+        return way
+
+    def _wal_end(self, side, db):
+        return str(self._wal_ask(
+            side, db, "select (case when pg_is_in_recovery() then"
+            " pg_last_wal_replay_lsn() else pg_current_wal_flush_lsn()"
+            " end)::text")[0][0])
+
+    def _wal_gone(self, db, start):
+        return SystemExit(
+            f"{db}: the source's WAL from {start} is gone, and with it the"
+            " changes after that point: nothing kept them without a slot."
+            " Raise wal_keep_size or keep an archive (wal_archive), then"
+            " move again with --mode full+cdc")
+
+    def _wal_read(self, side, db, way, start, end, limit):
+        """The WAL records from `start` to `end`, `limit` at most, oldest
+        first (`wal_record`), the way `way` reads them."""
+        facts = self._follow_facts(side, db)
+        if way.path == "wal inspect":
+            import psycopg2
+            if facts["wal functions"] == "creatable":
+                self._wal_ask(side, db,
+                              "create extension if not exists pg_walinspect")
+            try:
+                rows = self._wal_ask(
+                    side, db, "select start_lsn::text, xid::text,"
+                    " resource_manager, record_type, description,"
+                    " coalesce(block_ref, '') from pg_get_wal_records_info("
+                    "%s::pg_lsn, %s::pg_lsn) limit %s",
+                    (start, end, int(limit)))
+            except psycopg2.Error as e:
+                if "removed" in str(e) or "could not" in str(e):
+                    raise self._wal_gone(db, start) from e
+                raise
+            return [wal_record(*r) for r in rows]
+        out, said = [], ""
+        for where in facts["wal dirs"]:
+            got = subprocess.run(
+                [facts["wal program"], "-p", where, "-s", start, "-e", end,
+                 "-n", str(int(limit))], capture_output=True, text=True,
+                check=False)
+            out = waldump_records(got.stdout)
+            if out:
+                return out
+            said = (got.stderr.split("error:", 1)[-1].strip().splitlines()
+                    or [""])[0]
+            if got.returncode == 0:
+                return out
+        if "could not find" in said or "could not open" in said:
+            raise self._wal_gone(db, start)
+        raise SystemExit(f"{db}: the source's WAL files from {start} were"
+                         f" not read: {said or 'nothing came back'}")
+
+    def _wal_tables(self, side, db):
+        """{schema.table: its key's columns} of the tables in scope that
+        hold rows (a partitioned table's leaves, not the table itself)."""
+        out = {}
+        for (name,) in self._wal_ask(
+                side, db, "select n.nspname || '.' || c.relname from"
+                " pg_class c join pg_namespace n on n.oid = c.relnamespace"
+                " where c.relkind = 'r' and n.nspname not in ('pg_catalog',"
+                " 'information_schema') and n.nspname not like 'pg_toast%'"):
+            if self.in_scope(db, name):
+                out[name] = self.neutral_key(side, db, name)
+        return out
+
+    def _wal_block_rows(self, side, db, table, blocks):
+        """{block: [row as a dict]} of the rows `table` holds now in
+        `blocks`, read by their place."""
+        sch, tbl = self._split(table)
+        where = " or ".join(["(ctid >= %s::tid and ctid < %s::tid)"]
+                            * len(blocks))
+        args = [x for b in sorted(blocks) for x in (f"({b},0)",
+                                                    f"({b + 1},0)")]
+        out = {}
+        for blk, row in self._wal_ask(
+                side, db, "select (ctid::text::point)[0]::bigint,"
+                f" to_jsonb(t) from {_ident(sch)}.{_ident(tbl)} t"
+                f" where {where}", args):
+            out.setdefault(int(blk), []).append(
+                row if isinstance(row, dict) else json.loads(row))
+        return out
+
+    def _wal_ledger(self, side, db, at):
+        """The follow's memory of which keys each block of each table in
+        scope held, as of `at`: what names a row a record took out of its
+        block, since a physical record does not."""
+        ledger = {"at": at, "keys": {}, "tables": self._wal_tables(side, db)}
+        for table, key in ledger["tables"].items():
+            if not key:
+                continue
+            sch, tbl = self._split(table)
+            cols = ", ".join(_ident(k) for k in key)
+            held = ledger["keys"][table] = {}
+            for blk, keys in self._wal_ask(
+                    side, db, "select (ctid::text::point)[0]::bigint,"
+                    f" to_jsonb(array[{cols}]) from"
+                    f" {_ident(sch)}.{_ident(tbl)}"):
+                keys = keys if isinstance(keys, list) else json.loads(keys)
+                held.setdefault(int(blk), set()).add(
+                    json.dumps(keys, sort_keys=True))
+        return ledger
+
+    def _wal_changes(self, side, db, token, limit, way):
+        """(changes, position) of the WAL from `token` on, read the way
+        `way` says (`FOLLOW_WAYS`): the first call, with no position,
+        holds the keys of the tables in scope and starts at the WAL's end.
+        A record's blocks are read again by their rows' place; a key held
+        there and found in none of the blocks read is a delete, every row
+        found an insert or an update. What cannot be resolved stops the
+        follow and says why: a relation file no table holds now (dropped,
+        emptied or rewritten), a table with no key, a row taken out of a
+        block before the keys were held."""
+        from .. import canon
+        from ..decide import HopCosts
+        started = time.monotonic()
+        held = self.__dict__.setdefault("_wal_ledgers", {})
+        end = self._wal_end(side, db)
+        if token is None or (side, db) not in held:
+            held[(side, db)] = self._wal_ledger(side, db, end)
+            if token is None:
+                return [], end
+        ledger = held[(side, db)]
+        oid, spc = self._wal_ask(
+            side, db, "select oid, dattablespace from pg_database where"
+            " datname = current_database()")[0]
+        while True:
+            records = self._wal_read(side, db, way, token, end, limit)
+            touched, open_at = wal_touched(records, int(oid))
+            if not (open_at == token and len(records) >= limit):
+                break
+            limit = int(limit) * 2  # one transaction longer than a batch
+        names = {}
+        for (tsp, rel), blocks in touched.items():
+            got = self._wal_ask(
+                side, db, "select n.nspname || '.' || c.relname, c.relkind"
+                " from pg_class c join pg_namespace n on n.oid ="
+                " c.relnamespace where c.oid = pg_filenode_relation(%s, %s)",
+                (0 if int(tsp) == int(spc) else int(tsp), int(rel)))
+            if not got:
+                raise SystemExit(
+                    f"{db}: the WAL names relation file {rel}, which no"
+                    " table holds now - it was dropped, emptied or"
+                    " rewritten after the change, and its rows cannot be"
+                    " read again by their place. Compare the database"
+                    " again, then follow from there")
+            name, kind = got[0]
+            if kind == "r" and name in ledger["tables"]:
+                names[name] = blocks
+            elif kind == "r" and self.in_scope(db, name):
+                raise SystemExit(
+                    f"{db}: {name} was made after this follow began holding"
+                    " its tables' keys, so a row taken out of it could not"
+                    " be named: move it, then follow")
+        out = []
+        for table, blocks in sorted(names.items()):
+            key = ledger["tables"][table]
+            if not key:
+                raise SystemExit(
+                    f"{db}: {table} has no primary key, and a change its"
+                    " WAL records name by place cannot be written to the"
+                    " target by key - give it one")
+            early = sorted(b for b, gone in blocks.items() if gone
+                           and _lsn_int(gone) < _lsn_int(ledger["at"]))
+            if early:
+                raise SystemExit(
+                    f"{db}: rows were taken out of {table} (block"
+                    f" {early[0]}) before {ledger['at']}, where this"
+                    " follow began holding its keys, and the WAL does not"
+                    " say which: compare the table again, then follow")
+            mine = ledger["keys"].setdefault(table, {})
+            before = set().union(*(mine.get(b, set()) for b in blocks))
+            now, after = self._wal_block_rows(side, db, table, blocks), set()
+            for blk in blocks:
+                mine[blk] = set()
+                for row in now.get(blk, ()):
+                    k = json.dumps([row.get(c) for c in key], sort_keys=True)
+                    mine[blk].add(k)
+                    after.add(k)
+                    out.append(canon.change(
+                        "update" if k in before else "insert", table,
+                        {c: row.get(c) for c in key}, row))
+            for k in sorted(before - after):
+                out.append(canon.change("delete", table,
+                                        dict(zip(key, json.loads(k)))))
+        upto = open_at or (records[-1]["lsn"] if len(records) >= limit
+                           else end)
+        HopCosts(self.hop, "follow/").saw(
+            f"{way.path} records", max(len(records), 1),
+            time.monotonic() - started)
+        return out, upto
 
     def _log_end(self, ask, target, two_way):
         """(where the log is now, whether the server leaves out what
@@ -10070,13 +10485,20 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
 
     def change_depths(self):
         """{database.table: (depth, the statement that raises it or "")}
-        of the source's tables in scope (`changedepth`): from wal_level
+        of the source's tables in scope (`changedepth`): from wal_level,
+        the way below a slot that follows it at replica (`follow_way`),
         and each table's replica identity and primary key. Read-only; one
         catalogue question a database."""
         from .. import changedepth
         wal = self._psql("src", "postgres", "show wal_level")
         seen = {}
         for db in self.databases():
+            way = None
+            if wal.strip() == "replica":
+                try:
+                    way = self.follow_way(db, "src", wal.strip()).path
+                except (SystemExit, Exception):  # noqa: BLE001 - no way
+                    way = None
             for r in self._psql(
                     "src", db,
                     "select n.nspname || '.' || c.relname || '|' ||"
@@ -10090,7 +10512,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 name, ident, key = r.split("|")
                 if self.in_scope(db, name):
                     seen[f"{db}.{name}"] = changedepth.postgres(
-                        wal, ident, key in ("t", "true"))
+                        wal, ident, key in ("t", "true"), way)
         return seen
 
     def assess(self):
@@ -13566,3 +13988,96 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         except RuntimeError:
             pass
         return sample
+
+
+#: a block a WAL record touches, as the server prints it: tablespace,
+#: database and relation file, the fork where it is not the main one,
+#: and the block
+_WAL_BLOCK = re.compile(r"rel (\d+)/(\d+)/(\d+)(?: fork (\w+))? blk (\d+)")
+_WAL_LINE = re.compile(r"rmgr: (\S+)\s.*?tx:\s*(\d+), lsn: ([0-9A-Fa-f]+/"
+                       r"[0-9A-Fa-f]+), prev [^,]*, desc: (\S+)\s?(.*)")
+#: the heap's records that change which rows a block holds, and those of
+#: them that take a row out of the block they name last
+_WAL_ROW_KINDS = {"INSERT", "MULTI_INSERT", "UPDATE", "HOT_UPDATE", "DELETE"}
+_WAL_ROW_GONE = {"UPDATE", "HOT_UPDATE", "DELETE"}
+
+
+def wal_record(lsn, xid, rmgr, kind, desc, refs):
+    """One WAL record as both readers give it: its position, transaction,
+    resource manager, kind (its `+INIT` dropped), description and the
+    blocks it names - (tablespace, database, file, fork, block), in the
+    order the record lists them."""
+    blocks = tuple((int(s), int(d), int(r), f or "main", int(b))
+                   for s, d, r, f, b in _WAL_BLOCK.findall(refs or ""))
+    return {"lsn": str(lsn), "xid": int(xid or 0), "rmgr": str(rmgr),
+            "kind": str(kind).split("+")[0].upper(), "desc": str(desc or ""),
+            "blocks": blocks}
+
+
+def waldump_records(text):
+    """The records of the WAL reading program's lines; a line it prints
+    that is not a record is left."""
+    out = []
+    for line in str(text).splitlines():
+        m = _WAL_LINE.search(line)
+        if m:
+            rmgr, xid, lsn, kind, rest = m.groups()
+            desc = rest.split("blkref #", 1)[0].rstrip(", ")
+            out.append(wal_record(lsn, xid, rmgr, kind, desc, rest))
+    return out
+
+
+def _wal_ended(rec):
+    """(xids, committed) a transaction record ends: the transaction and
+    the subtransactions it lists, or () where it ends none."""
+    kind = rec["kind"]
+    if rec["rmgr"] != "Transaction" or not kind.startswith(("COMMIT",
+                                                            "ABORT")):
+        return (), False
+    xids = {rec["xid"]} if rec["xid"] else set()
+    sub = re.search(r"subxacts:\s*([\d ]+)", rec["desc"])
+    if sub:
+        xids |= {int(x) for x in sub.group(1).split()}
+    return tuple(xids), kind.startswith("COMMIT")
+
+
+def _lsn_int(lsn):
+    hi, lo = str(lsn).split("/")
+    return (int(hi, 16) << 32) | int(lo, 16)
+
+
+def wal_touched(records, database):
+    """(touched, open_at) of a run of WAL records, oldest first.
+
+    `touched` is {(tablespace, file): {block: position of the last row
+    taken out of it, or None}}: the main-fork blocks of `database`'s
+    relations whose rows transactions committed in the run changed - an
+    aborted transaction's records change nothing a reader sees. `open_at`
+    is the first record of a transaction the run does not end, or None:
+    the run is whole only before it, so a read goes on from there and
+    sees all of that transaction once it ends."""
+    ends = {}
+    for rec in records:
+        xids, committed = _wal_ended(rec)
+        for x in xids:
+            ends[x] = committed
+    touched = {}
+    for rec in records:
+        if rec["rmgr"] not in ("Heap", "Heap2") \
+                or rec["kind"] not in _WAL_ROW_KINDS:
+            continue
+        if rec["xid"] not in ends:
+            return touched, rec["lsn"]
+        if not ends[rec["xid"]]:
+            continue
+        blocks = [b for b in rec["blocks"]
+                  if b[1] == database and b[3] == "main"]
+        for i, (spc, _, rel, _, blk) in enumerate(blocks):
+            at = touched.setdefault((spc, rel), {})
+            # an update names the new row's block first and the old one's
+            # after where the two differ: the last block named lost a row
+            if rec["kind"] in _WAL_ROW_GONE and i == len(blocks) - 1:
+                at[blk] = rec["lsn"]
+            else:
+                at.setdefault(blk, None)
+    return touched, None

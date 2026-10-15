@@ -5383,7 +5383,15 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   `PARTIAL_JSON` row images - exact by re-reading the row at the change
   (small). R9: PostgreSQL at `wal_level=replica` reaches convergent
   change reading through `pg_walinspect`/`pg_waldump` on the WAL archive
-  (walminer 4 is paid). R2: SQL Server without CT/CDC - restore the
+  (walminer 4 is paid). R9 built 2026-10-16 (`PostgresEngine.FOLLOW_WAYS`:
+  slot, then the server's WAL functions, then the WAL files read here;
+  D2 per keyed table, `_wal_changes`, tests in
+  `test_a_postgres_replica_wal_is_followed_by_its_records.py`). Not done:
+  the keys held per block live in memory only, so a follow resumed by a
+  new process refuses any row removed before it began holding them;
+  a table without a key is refused, not handed to a digest diff; a
+  partition's changes are its leaf's name, not its root's; no sandbox
+  run against a replica-level server yet. R2: SQL Server without CT/CDC - restore the
   source's log-backup chain onto a SQL Server migkit owns and read the
   log there: no privilege and no setting on the source (`sp_replcmds`
   needs a published database - not a way round). R4/R5: Oracle without

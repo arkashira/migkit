@@ -35,11 +35,25 @@ def mysql(log_bin, binlog_format, row_image, row_metadata, has_key):
     return "D4", ""
 
 
-def postgres(wal_level, replica_identity, has_key):
+_LOGICAL = "alter system set wal_level = 'logical' (a restart)"
+
+
+def postgres(wal_level, replica_identity, has_key, way=None):
     """The same for one PostgreSQL table; `replica_identity` is its
-    `relreplident` letter (d default, n nothing, f full, i an index)."""
-    if str(wal_level).lower() != "logical":
-        return "D0", "alter system set wal_level = 'logical' (a restart)"
+    `relreplident` letter (d default, n nothing, f full, i an index), and
+    `way` how its changes are followed where the WAL carries no rows
+    (`PostgresEngine.FOLLOW_WAYS`): its physical records name the blocks
+    a change touched, read again by place and told apart by key - which
+    rows changed, their values read again (D2), and a table with no key
+    only as one that changed (D1)."""
+    level = str(wal_level).lower()
+    if level == "minimal":
+        return "D0", "alter system set wal_level = 'replica' (a restart)"
+    if level != "logical":
+        if way in ("wal inspect", "wal dump"):
+            return ("D2", _LOGICAL) if has_key else (
+                "D1", "give the table a primary key")
+        return "D0", _LOGICAL
     ident = str(replica_identity).lower()
     if ident == "f":
         return "D4", ""
