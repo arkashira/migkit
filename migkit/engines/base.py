@@ -1203,6 +1203,10 @@ class Engine:
                           "no partitioned tables")
         if not lines:
             path.unlink(missing_ok=True)
+            if unread:
+                return Result("deep", f"{db} partitions", "error",
+                              f"{len(tables)} partitioned tables: incomplete scan;"
+                              f" not read in the digest: {'; '.join(unread[:5])}")
             counted = sum(1 for s, d in tables.values() for n, p in s.items()
                           if p.get("digest") is None
                           or (d.get(n) or {}).get("digest") is None)
@@ -1211,9 +1215,7 @@ class Engine:
                           " partitions: schemes match and every partition"
                           " holds the same rows on both sides"
                           + (f" ({counted} compared by count only)"
-                             if counted else "")
-                          + (f"; not in the digest: {'; '.join(unread[:3])}"
-                             if unread else ""))
+                             if counted else ""))
         listing = []
         for table in sorted(tables):
             s, d = tables[table]
@@ -5145,6 +5147,12 @@ class Engine:
         connection migkit opens to one side, as the database itself says
         of it - or None where it cannot be asked."""
         return None
+
+    def _read_pool(self, db, workers=None):
+        from ..ranges import ReadPool, current_pool, current_coordinator
+        parent = current_pool() or getattr(self, "_active_read_pool", None) or getattr(self.hop, "_read_pool", None)
+        coordinator = current_coordinator() or getattr(self, "_slot_coordinator", None) or getattr(self.hop, "_slot_coordinator", None)
+        return ReadPool(self.hop, self, db, workers, parent=parent, coordinator=coordinator)
 
     def capacity(self, side, db):
         """What this side's server can give a move, for `sizing`: any of

@@ -1825,6 +1825,14 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
                 for r in rs:
                     r.setdefault("position", position)
             out.extend(rs)
+            try:
+                prog_file = hop.report_dir(d) / "check-progress.jsonl"
+                prog_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(prog_file, "a") as pf:
+                    for r in rs:
+                        pf.write(json.dumps(r, default=str) + "\n")
+            except Exception:
+                pass
         if before is not None:
             after = drift.shape(watch, "src", d)
             moved = drift.changed_tables(before, after)
@@ -1861,7 +1869,10 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
                                                    checks))
 
     results = []
-    pool = ThreadPoolExecutor(max_workers=max(1, int(workers or 1)))
+    if not dbs:
+        return results, timings
+    from .ranges import ReadPool
+    pool = ReadPool(hop, eng, dbs[0], max(1, int(workers or 1)))
     futs = {pool.submit(run_db, d): d for d in dbs}
     try:
         for fut in as_completed(futs):
@@ -1876,9 +1887,12 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
                 if show is not None:
                     show(r)
             if timer is not None:
-                chat(f"  progress {done_jobs}/{total_jobs},"
+                active = sum(1 for f in futs if f.running())
+                eta_res = timer.eta_detailed(done_jobs, total_jobs)
+                conf = f" ({int(eta_res.confidence * 100)}% conf)" if eta_res.confidence > 0 and done_jobs < total_jobs else ""
+                chat(f"  progress {done_jobs}/{total_jobs} ({active} active),"
                      f" elapsed {human_secs(timer.elapsed())},"
-                     f" eta {timer.eta(done_jobs, total_jobs)}")
+                     f" eta {timer.eta(done_jobs, total_jobs)}{conf}")
     except KeyboardInterrupt:
         running = sum(1 for f in futs if f.running())
         if running:
@@ -1984,13 +1998,27 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
     workers = hop.workers
     summary_path = hop.report_dir() / "summary.json"
     prev, prev_at = {}, None
-    if resume and summary_path.exists():
-        prev = {(r["check"], r["scope"]): r
-                for r in json.loads(summary_path.read_text())}
-        prev_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
-            summary_path.stat().st_mtime))
-        # an answer is about the scope it was taken under: one taken under
-        # another is taken again, whatever the source's schema did since
+    if resume:
+        if summary_path.exists():
+            try:
+                prev = {(r["check"], r["scope"]): r
+                        for r in json.loads(summary_path.read_text())}
+                prev_at = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(
+                    summary_path.stat().st_mtime))
+            except Exception:
+                pass
+        for d in dbs:
+            prog_file = hop.report_dir(d) / "check-progress.jsonl"
+            if prog_file.exists():
+                try:
+                    for line in prog_file.read_text().splitlines():
+                        if line.strip():
+                            r = json.loads(line)
+                            k = (r.get("check"), r.get("scope"))
+                            if k[0] and k[1] and k not in prev:
+                                prev[k] = r
+                except Exception:
+                    pass
         other = [r for r in prev.values() if hop.scope_changed(r)]
         if other:
             prev = {k: r for k, r in prev.items()

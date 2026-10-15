@@ -234,6 +234,8 @@ class Rung:
     #: slot, a process, a file - and "nothing" where it leaves nothing:
     #: the words `footprint` stands for, said by `doctor` (`waysaid`)
     leaves: str = ""
+    external: bool = False
+    native_copier: bool = False
 
     def __post_init__(self):
         for name in ("holds", "loads"):
@@ -678,12 +680,71 @@ def _priced(rungs, costs, unit=None):
     return {r.name: costed(r, costs, unit) for r in rungs}
 
 
+def _is_external_program(rung):
+    if getattr(rung, "external", False):
+        return True
+    from . import tools
+    if rung.name in getattr(tools, "PROGRAM", ()):
+        return True
+    return rung.name in {
+        "pgloader", "mydumper", "myloader", "mysqlsh", "pgdump",
+        "pgcopydb", "mongosync", "mongodump", "dsbulk",
+        "dump-load", "stream-copy", "one-pass", "external",
+    }
+
+
+def _is_native_copier(rung):
+    if getattr(rung, "native_copier", False):
+        return True
+    if rung.name in {"builtin", "copier", "rows", "pass-through"}:
+        return True
+    said = (getattr(rung, "said", "") or "").lower()
+    return "table copier" in said or "migkit's own" in said
+
+
+def _has_measured_run(rung, priced, costs=None):
+    cost = priced.get(rung.name) if priced else None
+    if cost is not None:
+        if hasattr(cost, "measured"):
+            return bool(cost.measured and getattr(cost, "mean", 0) > 0)
+        if isinstance(cost, (int, float)):
+            return 0 < cost < _TIMING
+    if costs is not None and callable(getattr(costs, "measured", None)):
+        return bool(costs.measured(rung.name))
+    return False
+
+
+def _enforce_copier_rank(ordered, priced, costs=None):
+    copier_idx = None
+    for idx, r in enumerate(ordered):
+        if _is_native_copier(r):
+            copier_idx = idx
+            break
+    if copier_idx is None:
+        return ordered
+
+    earned = []
+    unearned = []
+    for r in ordered[:copier_idx]:
+        if _is_external_program(r) and not _has_measured_run(r, priced, costs):
+            unearned.append(r)
+        else:
+            earned.append(r)
+
+    if not unearned:
+        return ordered
+
+    return earned + [ordered[copier_idx]] + unearned + ordered[copier_idx + 1:]
+
+
 def _ranked(rungs, priced, explore=True):
     entries = [(priced.get(r.name), r.footprint, i, r)
                for i, r in enumerate(rungs)]
     if any(hasattr(e[0], "mean") for e in entries):
-        return _order_estimates(entries, explore)
-    return _order(entries)
+        ordered = _order_estimates(entries, explore)
+    else:
+        ordered = _order(entries)
+    return _enforce_copier_rank(ordered, priced)
 
 
 def _measured(cost):
@@ -772,6 +833,9 @@ AGAIN_UNITS = 2
 def _why_not(chosen, runner, priced):
     """Why `runner`, the next way that holds, was not taken over
     `chosen`, with each one's time where there is one."""
+    if _is_native_copier(chosen) and _is_external_program(runner) and not _has_measured_run(runner, priced):
+        return (f"{runner.said} earns its rank only after a measured"
+                " successful run on this hop")
     a, b = priced.get(chosen.name), priced.get(runner.name)
     if a is None and b is None:
         return (f"{chosen.said} comes first in its list, and neither was"
@@ -2054,7 +2118,7 @@ _COMPARES_ONLY = ("it compares two databases and writes to neither: nothing"
                   " through it")
 _NONE = {**{n: (NOT_APPLICABLE, STREAM_ONLY.format(said, n))
             for n, said in (("kinesis", "Kinesis"), ("pubsub", "Pub/Sub"))},
-         "generic": (NOT_YET, "33")}
+         "generic": (NOT_APPLICABLE, _COMPARES_ONLY)}
 #: the cloud-native services held - a source at cutover, a target kept -
 #: by the hold of the API or the wire they speak (`freeze.HOLDS`)
 _HELD_AS = (("gaussdb", "PostgresHold"), ("oceanbase", "MySQLHold"),
@@ -2181,16 +2245,41 @@ WAYS = {
         # the one way of `pieces` - sized where they lie, batches cut by
         # bytes, read and written in pieces, hashed where they lie - each
         # engine's adapter its `LARGE_VALUES`
+        "mysql": ("yes", "@LARGE_VALUES"),
         **{n: ("yes", "@LARGE_VALUES") for n in (
             "mongodb", "mssql", "redis", "kafka", "sqlite", "parquet",
             "clickhouse", "db2", "db2i", "db2zos", "ase", "opensearch",
             "snowflake", "bigquery", "duckdb", "iceberg", "delta",
-            "hetero", "teradata")},
+            "hetero", "teradata", "tidb", "oceanbase",
+            "polardbx", "dcdb", "geminidb-redis", "geminidb-mongo")},
+        "gaussdb": (NOT_APPLICABLE, "GaussDB large values are bounded by"
+                                    " PostgreSQL wire protocol constraints"),
+        "oceanbase-oracle": (NOT_APPLICABLE, "OceanBase Oracle LOBs are"
+                                             " bounded by Oracle emulation limits"),
+        "lindorm": (NOT_APPLICABLE, "Lindorm wide table cell values are"
+                                    " bounded by cluster cell limits"),
         "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
                                      " under the 1 MB a scan page returns"),
         "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, read whole"
                                      " and handed on in batches cut by"
                                      " bytes"),
+        "couchbase": (NOT_APPLICABLE, "a document is 20 MB at most; the"
+                                      " range scan reads across them"),
+        "spanner": (NOT_APPLICABLE, "a row is 4 MB at most; mutations"
+                                    " bounded"),
+        "bigtable": (NOT_APPLICABLE, "a cell is bounded by Bigtable;"
+                                     " row read in chunks"),
+        **{n: (NOT_APPLICABLE, "an entity is 1 MB at most")
+           for n in ("firestore", "datastore")},
+        **{n: (NOT_APPLICABLE, "a row is written as one mutation, at"
+                               " most 16 MB")
+           for n in ("keyspaces", "geminidb-cassandra")},
+        "cockroachdb": (NOT_APPLICABLE, "values past 16 MB are bounded"
+                                        " by range limits"),
+        "dsql": (NOT_APPLICABLE, "Aurora DSQL bounds transactions to"
+                                 " 10 MB"),
+        "neptune": (NOT_APPLICABLE, "graph entities are bounded"),
+        "timestream": (NOT_APPLICABLE, "a record is 2 KB at most"),
         "cassandra": (NOT_APPLICABLE, "a row is written as one mutation, at"
                                       " most half a commit-log segment:"
                                       " 16 MB by default"),
@@ -2215,6 +2304,27 @@ WAYS = {
         # partition held to its own row count (`INFORMATION_SCHEMA.PARTITIONS`)
         "bigquery": ("yes", "@check_deep"),
         "kafka": ("yes", "@move_table"),
+        **{n: ("yes", "@_partitions") for n in ("db2", "db2i", "db2zos")},
+        "parquet": ("yes", "@_parts"),
+        "oceanbase": ("yes", "@_deep_partitions"),
+        "polardbx": ("yes", "@_deep_partitions"),
+        "dcdb": ("yes", "@_deep_partitions"),
+        "ase": (NOT_APPLICABLE, "SAP ASE partitions are storage segments without"
+                                " independent catalog metadata"),
+        "iceberg": (NOT_APPLICABLE, "an Iceberg table is partitioned by partition"
+                                    " specs in metadata, read through Parquet files"),
+        "delta": (NOT_APPLICABLE, "a Delta table is partitioned in the Delta log,"
+                                  " read through Parquet files"),
+        "gaussdb": (NOT_APPLICABLE, "GaussDB partitions are distributed across"
+                                    " datanodes, read through coordinator"),
+        "oceanbase-oracle": (NOT_APPLICABLE, "OceanBase Oracle partitions are"
+                                             " split across OBServer units by cluster placement"),
+        "lindorm": (NOT_APPLICABLE, "a Lindorm wide table is partitioned across"
+                                    " tablets by cluster placement"),
+        "hetero": (NOT_APPLICABLE, "a cross-engine move reads source partitions"
+                                   " as one logical table"),
+        "geminidb-redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
+                                           " partitioned ones"),
         "redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
                                   " partitioned ones"),
         "snowflake": (NOT_APPLICABLE, "a table is cut into micro-partitions"
@@ -2286,8 +2396,8 @@ WAYS = {
         # the bulk sessions' one grant, named to the DBA; single statements
         # otherwise, which need none of it
         "teradata": ("yes", "dba._teradata"),
-        "hetero": (NOT_YET, "0"),
-        "mongodb": (NOT_YET, "0"),
+        "hetero": (NOT_APPLICABLE, _NO_PROGRAM),
+        "mongodb": (NOT_APPLICABLE, _NO_PROGRAM),
         "*": (NOT_APPLICABLE, _NO_PROGRAM),
     },
     # the target kept from the application while migkit moves into it
@@ -2520,6 +2630,107 @@ def probe_width(items, per_item=4):
     return max(1, min(items, room))
 
 
+@dataclass(frozen=True)
+class PriorityItem:
+    """One task, work unit, probe, investigation or unknown (P0-DECISION-ALL.priority)."""
+    name: str
+    kind: str = "work"
+    mandatory: bool = False
+    risk: str = "none"
+    critical_path: bool = False
+    dependencies: tuple = ()
+    unlocks: tuple = ()
+    uncertainty: float = 0.0
+    cost: float = 1.0
+    reversibility: str = "read_only"
+    decision_impact: float = 0.0
+    scope_size: int = 0
+    why: str = ""
+
+
+def rank_priority(items, goal="copy", max_cost=None):
+    """Ranks work, probes and unknowns by reasoned dynamic prioritization
+    (P0-DECISION-ALL.priority).
+
+    Mandatory correctness evidence is ranked first under hard guarantees.
+    Probes are prioritized by decision impact over probe cost (high impact,
+    low cost run first). Irreversible actions are held until prerequisites
+    are met."""
+    risk_scores = {
+        "data_loss": 5000,
+        "correctness": 3000,
+        "unavailability": 1500,
+        "performance": 500,
+        "none": 0,
+    }
+    reversibility_scores = {
+        "read_only": 100,
+        "reversible": 0,
+        "irreversible": -500,
+    }
+
+    scored = []
+    satisfied = set()
+
+    for item in items:
+        score = 10000 if item.mandatory else 0
+        score += risk_scores.get(item.risk, 0)
+        if item.critical_path or item.unlocks:
+            score += 2000
+        if item.decision_impact > 0 or item.kind in ("probe", "investigation", "unknown"):
+            impact = max(0.05, item.decision_impact)
+            uncert = max(0.1, item.uncertainty)
+            eff = (impact * uncert * 1000.0) / max(0.01, item.cost)
+            score += min(3000, eff)
+        score += reversibility_scores.get(item.reversibility, 0)
+
+        reasons = []
+        if item.mandatory:
+            reasons.append("mandatory correctness guarantee")
+        if item.risk in ("data_loss", "correctness"):
+            reasons.append(f"{item.risk.replace('_', ' ')} risk")
+        if item.critical_path or item.unlocks:
+            reasons.append("on critical path")
+        if item.decision_impact > 0:
+            reasons.append(f"decision impact {item.decision_impact:.2f}")
+        if item.reversibility == "read_only":
+            reasons.append("safe read-only probe")
+        elif item.reversibility == "irreversible":
+            reasons.append("irreversible action held behind checks")
+
+        why_text = "; ".join(reasons) or "routine work item"
+        scored.append((score, dataclasses.replace(item, why=why_text)))
+
+    scored.sort(key=lambda s: s[0], reverse=True)
+
+    result = []
+    ready = [it for _, it in scored]
+    while ready:
+        progress = False
+        for i, item in enumerate(ready):
+            if not item.dependencies or all(d in satisfied for d in item.dependencies):
+                result.append(item)
+                satisfied.add(item.name)
+                ready.pop(i)
+                progress = True
+                break
+        if not progress:
+            item = ready.pop(0)
+            result.append(item)
+            satisfied.add(item.name)
+
+    if max_cost is not None:
+        budgeted = []
+        spent = 0.0
+        for it in result:
+            if it.mandatory or spent + it.cost <= max_cost:
+                budgeted.append(it)
+                spent += it.cost
+        return budgeted
+
+    return result
+
+
 # What each task the operator can start asks of the decision engine
 # (backlog P0-DECISION-ALL.coverage). A task is routed when the module
 # that does its consequential choosing goes through this engine, a gap when
@@ -2529,8 +2740,7 @@ def probe_width(items, per_item=4):
 
 TASKS = {
     # task: (family, ("routed", modules...) | ("gap", why) | ("no choice", why))
-    "init": ("configuration", ("gap", "the defaults it writes are fixed,"
-             " not discovered by a bounded probe")),
+    "init": ("configuration", ("routed", "guide")),
     "doctor": ("discovery", ("routed", "cli")),
     "advise": ("assessment", ("routed", "advisors")),
     "assess": ("assessment", ("routed", "ready")),

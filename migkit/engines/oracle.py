@@ -424,6 +424,9 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
                 "raw": "lengthb({c})"},
         types=("varchar2", "nvarchar2", "char", "nchar", "clob", "nclob",
                "blob", "raw"),
+        piece="dbms_lob.substr({c}, {n}, {at})",
+        append="{c} = {c} || {v}",
+        appends=("clob", "nclob", "varchar2", "nvarchar2"),
         sample="sample ({pct})")
     #: what `assess` asks before anything moves: the tables no key names a
     #: row of, and text stored twice as UTF-8 on the source

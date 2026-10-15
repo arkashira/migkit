@@ -167,3 +167,56 @@ def test_progress_persists_between_runs(pair, tmp_path):
     left = json.loads((tmp_path / "checkpoint.json").read_text())
     assert "shop.big" not in left["tables"] or not \
         left["tables"]["shop.big"].get("done")
+
+
+def test_composite_text_key_ranges_preserve_all_rows(pair, tmp_path):
+    for name in (SRC, DST):
+        result = _sql(name, """
+            create database if not exists shop;
+            drop table if exists shop.composite_rows;
+            create table shop.composite_rows (
+                id varchar(40), seq int, payload varchar(40),
+                primary key (id, seq));
+            insert into shop.composite_rows values
+                ('a', 1, 'one'), ('a', 2, 'two'), ('a', 3, 'three'),
+                ('b', 1, 'four'), ('c', 1, 'five'), ('z', 1, 'six');
+        """)
+        assert result.returncode == 0, result.stderr
+    engine = _engine(tmp_path, 100)
+    whole, rows, _ = engine._diff_table("shop", "composite_rows")
+    assert whole.status == "ok" and rows == 6
+    engine.hop.slice = 2
+    chunked, rows, _ = engine._diff_table("shop", "composite_rows")
+    assert chunked.status == "ok" and rows == 6
+    assert _nums(chunked.detail) == _nums(whole.detail)
+    assert "(1 chunks" not in chunked.detail
+    result = _sql(DST, "insert into shop.composite_rows values"
+                       " ('0', 1, 'before'), ('zz', 1, 'after');")
+    assert result.returncode == 0, result.stderr
+    different, _, _ = engine._diff_table("shop", "composite_rows")
+    assert different.status == "diff"
+
+
+def test_large_columns_are_sized_by_complete_key_ranges(pair, tmp_path):
+    for name in (SRC, DST):
+        result = _sql(name, """
+            create database if not exists shop;
+            drop table if exists shop.lob_ranges;
+            create table shop.lob_ranges(id varchar(40), seq int,
+                a longtext, b longtext, primary key(id, seq));
+            insert into shop.lob_ranges values
+                ('a',1,'x','one'),('a',2,'largest','two'),('b',1,'y','three');
+        """)
+        assert result.returncode == 0, result.stderr
+    engine = _engine(tmp_path, 2)
+    result = engine._lob_check("shop")
+    assert result.status == "ok", result.detail
+    failed = engine._q
+
+    def unavailable(side, sql, *args, **kwargs):
+        if side == "src" and "max(length(" in sql:
+            raise RuntimeError("permission denied")
+        return failed(side, sql, *args, **kwargs)
+
+    engine._q = unavailable
+    assert engine._lob_check("shop").status == "error"

@@ -498,3 +498,56 @@ def test_the_second_reading_installs_in_migkits_words(monkeypatch, tmp_path):
     low = " ".join(said).lower()
     assert said and not [t for t in TOOLS + ("validator", "google", "pso")
                          if t in low], said
+
+
+def test_mysql_query_cancels_before_replay(monkeypatch):
+    from migkit.engines import mysql
+    from migkit.util import with_retry
+    engine = mysql.MySQLEngine(_hop("mysql"))
+    events = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def mogrify(self, sql, args):
+            return sql
+
+        def execute(self, sql, args):
+            events.append("execute")
+            if events.count("execute") == 1:
+                raise RuntimeError("lost connection")
+
+        def fetchall(self):
+            return [(1,)]
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def thread_id(self):
+            return 42
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(engine, "_conn", lambda side: Connection())
+    monkeypatch.setattr(engine, "_cancel_query",
+                        lambda *args: events.append("cancel"))
+    monkeypatch.setattr(mysql, "with_retry",
+                        lambda fn, **kw: with_retry(fn, base=0))
+    assert engine._q("src", "select 1") == [(1,)]
+    assert events == ["execute", "cancel", "close", "execute", "close"]
+
+    events.clear()
+
+    def refuses(*args):
+        raise RuntimeError("permission denied")
+
+    monkeypatch.setattr(engine, "_cancel_query", refuses)
+    with pytest.raises(RuntimeError, match="automatic replay refused"):
+        engine._q("src", "select 1")
+    assert events == ["execute", "close"]

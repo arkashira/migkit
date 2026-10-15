@@ -533,17 +533,28 @@ def propose(found):
     """The goal the facts point to: a target that already holds the
     source's tables is proved equal; a source whose changes can be
     followed is cut over with the least downtime; any other is copied."""
+    from . import decide
     target = (found.get("sides") or {}).get("target") or {}
     have = {str(t).split(".")[-1] for t, f in (target.get("facts") or {})
             .items() if isinstance(f, dict) and f.get("rows")}
     tables = {str(t).split(".")[-1] for t in found.get("tables") or []}
-    if tables and have and len(tables & have) * 2 >= len(tables):
-        return "verify"
-    follow = [n for n in found.get("needs") or [] if n.side == "source"
-              and n.follow]
-    if follow and all(n.ok for n in follow):
-        return "cutover"
-    return "copy"
+    has_target = bool(tables and have and len(tables & have) * 2 >= len(tables))
+    follow = [n for n in found.get("needs") or [] if getattr(n, "side", None) == "source"
+              and getattr(n, "follow", False)]
+    can_follow = bool(follow and all(getattr(n, "ok", False) for n in follow))
+
+    rungs = [
+        decide.Rung("verify", "proving tables already on the target",
+                    needs=(decide.Need("target already holds tables",
+                                       lambda f: f.get("has_target")),)),
+        decide.Rung("cutover", "following source changes with low downtime",
+                    needs=(decide.Need("source changes can be followed",
+                                       lambda f: f.get("can_follow")),)),
+        decide.Rung("copy", "copying the database"),
+    ]
+    facts = {"has_target": has_target, "can_follow": can_follow}
+    choice = decide.climb("goal", rungs, facts=facts)
+    return choice.path
 
 
 def plan(hop, found, goal, say):

@@ -11,6 +11,7 @@ import pytest
 from migkit import hopkeys
 from migkit.config import (Endpoint, Hop, build_hop, name_matches,
                            parse_ops, scope_patterns)
+from tests.conftest import needs_docker
 
 
 def _hop(engine="postgres", **kw):
@@ -417,7 +418,7 @@ def _logged(tmp_path, **kw):
     hop = _hop(**kw)
     hop.report_dir = lambda db=None, _p=tmp_path: (
         _p / db if db else _p)
-    (tmp_path / "appdb").mkdir(exist_ok=True)
+    (tmp_path / "appdb").mkdir(parents=True, exist_ok=True)
     return hop
 
 

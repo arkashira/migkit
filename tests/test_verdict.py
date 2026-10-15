@@ -202,3 +202,39 @@ def test_a_partition_without_a_digest_is_held_to_its_count():
     assert verdict.partition_differences(
         "t", {"p": _part(3, None)}, {"p": _part(2, "x")}) == [
         "t partition p: src=3 dst=2 rows"]
+
+
+def test_fingerprint_and_catalog_support_tuple_keys():
+    from migkit.catalog import Catalog, Column
+    records = [{"category": "parity.row-count", "scope": "db", "status": "ok"}]
+    scope_with_tuple_keys = {("public", "orders"): {"status": "ok"}}
+    fp = verdict.fingerprint(records, scope=scope_with_tuple_keys)
+    assert isinstance(fp, str) and len(fp) == 64
+    cat = Catalog(
+        tables=[("public", "orders")],
+        columns={("public", "orders"): [Column("id", "int")]},
+        keys={("public", "orders"): ("id",)},
+    )
+    shape = cat.shape()
+    assert "public.orders" in shape
+    d = cat.as_dict()
+    assert "public.orders" in d["tables"]
+
+
+def test_summarize_includes_by_database_grouping(tmp_path):
+    hop = _Hop(tmp_path)
+    records = [
+        {"category": "parity.row-count", "scope": "shop.orders", "status": "ok"},
+        {"category": "parity.row-count", "scope": "shop.customers", "status": "diff"},
+        {"category": "access.table-grants", "scope": "billing.invoices", "status": "ok"},
+    ]
+    summary = verdict.summarize(hop, records)
+    assert "by_database" in summary
+    assert "shop" in summary["by_database"]
+    assert "billing" in summary["by_database"]
+    assert summary["by_database"]["shop"]["status"] == "different"
+    assert summary["by_database"]["shop"]["issues"] == 1
+    assert summary["by_database"]["billing"]["status"] == "same"
+    assert summary["by_database"]["billing"]["issues"] == 0
+
+

@@ -147,25 +147,37 @@ class Catalog:
                             for t, cols in (columns or {}).items()})
 
     def _canon(self, table):
-        got = {"columns": [_canon_column(c)
-                           for c in self.columns.get(table) or []],
-               "key": list(self.keys.get(table) or ()),
-               "indexes": sorted(_canon_index(i)
-                                 for i in self.indexes.get(table) or []),
-               "fks": sorted(_canon_fk(f)
-                             for f in self.fks.get(table) or [])}
-        if self.others.get(table):
-            got["others"] = sorted(str(o) for o in self.others[table])
+        t_key = ".".join(str(x) for x in table) if isinstance(table, (tuple, list)) else str(table)
+        cols = self.columns.get(table) or self.columns.get(t_key) or []
+        keys = self.keys.get(table) or self.keys.get(t_key) or ()
+        ixs = self.indexes.get(table) or self.indexes.get(t_key) or []
+        fks = self.fks.get(table) or self.fks.get(t_key) or []
+        others = self.others.get(table) or self.others.get(t_key) or []
+        got = {"columns": [_canon_column(c) for c in cols],
+               "key": list(keys),
+               "indexes": sorted(_canon_index(i) for i in ixs),
+               "fks": sorted(_canon_fk(f) for f in fks)}
+        if others:
+            got["others"] = sorted(str(o) for o in others)
         return got
 
     def fingerprint(self, table):
         """The hash of what the server says about `table`."""
-        text = json.dumps(self._canon(table), sort_keys=True,
+        def _sanitize(o):
+            if isinstance(o, dict):
+                return {".".join(str(x) for x in k) if isinstance(k, (tuple, list)) else str(k): _sanitize(v)
+                        for k, v in o.items()}
+            if isinstance(o, (list, tuple)):
+                return [_sanitize(x) for x in o]
+            return o
+        text = json.dumps(_sanitize(self._canon(table)), sort_keys=True,
                           separators=(",", ":"))
         return hashlib.sha256(text.encode()).hexdigest()
 
     def shape(self):
-        return Shape({t: self.fingerprint(t) for t in self.tables})
+        def _str_key(k):
+            return ".".join(str(x) for x in k) if isinstance(k, (tuple, list)) else str(k)
+        return Shape({_str_key(t): self.fingerprint(t) for t in self.tables})
 
     def explain(self, other, table, engine=None, added="added",
                 dropped="dropped"):
@@ -229,17 +241,20 @@ class Catalog:
 
     def as_dict(self):
         """The catalogue as JSON takes it, to keep beside a run."""
-        return {"tables": list(self.tables),
-                "columns": {t: [list(c) for c in cols]
+        def _str_key(k):
+            return ".".join(str(x) for x in k) if isinstance(k, (tuple, list)) else str(k)
+
+        return {"tables": [_str_key(t) for t in self.tables],
+                "columns": {_str_key(t): [list(c) for c in cols]
                             for t, cols in self.columns.items()},
-                "keys": {t: list(k) for t, k in self.keys.items()},
-                "indexes": {t: [[i.name, list(i.columns), i.unique,
+                "keys": {_str_key(t): list(k) for t, k in self.keys.items()},
+                "indexes": {_str_key(t): [[i.name, list(i.columns), i.unique,
                                  i.definition] for i in ixs]
                             for t, ixs in self.indexes.items()},
-                "fks": {t: [[f.name, list(f.columns), f.ref_table,
+                "fks": {_str_key(t): [[f.name, list(f.columns), f.ref_table,
                              list(f.ref_columns), f.on_delete, f.on_update]
                             for f in fks] for t, fks in self.fks.items()},
-                "others": {t: sorted(o) for t, o in self.others.items()}}
+                "others": {_str_key(t): sorted(o) for t, o in self.others.items()}}
 
     @classmethod
     def from_dict(cls, got):

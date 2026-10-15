@@ -7,11 +7,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .. import fencing
+from .. import fencing, pieces
 from ..config import scoped
 from ..decide import Need, Rung
 from ..tableway import DIRECT, Way
-from ..util import keepalive as _keepalive, run, which, with_retry
+from ..util import keepalive as _keepalive, run, which, with_retry, retryable
 from .base import Engine, RepairAction, Result, rows_counted
 
 SKIP_DBS = {"mysql", "sys", "performance_schema", "information_schema"}
@@ -261,6 +261,19 @@ class MySQLEngine(Engine):
     ENGINE_FAMILY = "mysql"
     checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = True
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, read and written in pieces, wide values hashed where they lie",
+        length={"blob": "length({c})", "longblob": "length({c})", "mediumblob": "length({c})",
+                "tinyblob": "length({c})", "text": "length({c})", "longtext": "length({c})",
+                "mediumtext": "length({c})", "tinytext": "length({c})", "varchar": "length({c})",
+                "char": "length({c})", "binary": "length({c})", "varbinary": "length({c})",
+                "json": "length({c})"},
+        types=("blob", "longblob", "mediumblob", "tinyblob", "text", "longtext",
+               "mediumtext", "tinytext", "varchar", "char", "binary", "varbinary", "json"),
+        piece="substring({c}, {at}, {n})",
+        append="{c} = concat({c}, {v})",
+        appends=("longtext", "mediumtext", "text", "tinytext", "longblob", "mediumblob", "blob", "tinyblob"),
+        md5="md5({c})", md5_classes=("bytes", "text"))
 
     #: The sql_mode every write to the target runs under, whatever the
     #: server's own is: strict, so a value the column cannot hold stops the
@@ -299,9 +312,8 @@ class MySQLEngine(Engine):
                        read_timeout=15, write_timeout=rt,
                        local_infile=opener is not pymysql.connect,
                        init_command=(
-                           "set session sql_mode ="
-                           f" '{self.WRITE_SQL_MODE}'"
-                           if side == "dst" else None))
+                           f"set session time_zone = '+00:00', sql_mode = '{self.WRITE_SQL_MODE}'"
+                           if side == "dst" else "set session time_zone = '+00:00'"))
             c._read_timeout = rt
             _keepalive(getattr(c, "_sock", None))
             return c
@@ -309,6 +321,9 @@ class MySQLEngine(Engine):
         # that is not there only delays saying "no"
         return (with_retry(_open, label=f"mysql connect {side}") if retry
                 else _open())
+
+    def _connect(self, side, retry=True):
+        return self._conn(side, retry=retry)
 
     CANON_ENGINE = "mysql"
     OWN_PATHS_READ_COLUMN_MAPPING = False
@@ -2470,6 +2485,70 @@ class MySQLEngine(Engine):
             return {"version": r[0][0], "version_comment": r[0][1]}
         return (one("src"), one("dst"))
 
+    def _cancel_query(self, side, thread_id, statement):
+        control = self._conn(side, retry=False)
+        try:
+            control._read_timeout = min(control._read_timeout or 15, 15)
+            with control.cursor() as cur:
+                cur.execute("select COMMAND, INFO, USER from information_schema.PROCESSLIST"
+                            " where ID=%s", (thread_id,))
+                row = cur.fetchone()
+                if not row:
+                    return
+                cmd, info, user = (row[0] or "").strip(), row[1], row[2]
+                ep = self.hop.source if side == "src" else self.hop.target
+                if ep and getattr(ep, "user", None) and user and user != ep.user:
+                    return
+
+                if cmd.lower() == "sleep":
+                    try:
+                        cur.execute(f"KILL CONNECTION {int(thread_id)}")
+                    except Exception as err:
+                        if not err.args or err.args[0] != 1094:
+                            raise
+                    deadline = time.monotonic() + 15
+                    while True:
+                        cur.execute("select ID from information_schema.PROCESSLIST"
+                                    " where ID=%s", (thread_id,))
+                        if not cur.fetchone():
+                            return
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("server connection termination unconfirmed")
+                        time.sleep(0.1)
+
+                if info != statement:
+                    return
+
+                try:
+                    cur.execute(f"KILL QUERY {int(thread_id)}")
+                except Exception as err:
+                    if not err.args or err.args[0] != 1094:
+                        raise
+
+                deadline = time.monotonic() + 15
+                killed_conn = False
+                while True:
+                    cur.execute("select COMMAND, INFO from information_schema.PROCESSLIST"
+                                " where ID=%s", (thread_id,))
+                    row = cur.fetchone()
+                    if not row or row[1] != statement:
+                        return
+                    if time.monotonic() >= deadline:
+                        if not killed_conn:
+                            try:
+                                cur.execute(f"KILL CONNECTION {int(thread_id)}")
+                                killed_conn = True
+                                deadline = time.monotonic() + 5
+                                continue
+                            except Exception as err:
+                                if not err.args or err.args[0] != 1094:
+                                    raise
+                                return
+                        raise RuntimeError("server query cancellation unconfirmed")
+                    time.sleep(0.1)
+        finally:
+            control.close()
+
     def _q(self, side, sql, args=None, fresh=False):
         # retry the connect+query as a unit so a TLS/socket blip clears
         def once():
@@ -2482,8 +2561,19 @@ class MySQLEngine(Engine):
                                         " information_schema_stats_expiry = 0")
                         except Exception:
                             pass
-                    cur.execute(sql, args)
-                    return cur.fetchall()
+                    statement = cur.mogrify(sql, args)
+                    try:
+                        cur.execute(sql, args)
+                        return cur.fetchall()
+                    except Exception as err:
+                        if retryable(err):
+                            try:
+                                self._cancel_query(side, conn.thread_id(), statement)
+                            except Exception:
+                                raise RuntimeError(
+                                    "server query cancellation could not be confirmed;"
+                                    " automatic replay refused") from None
+                        raise
             finally:
                 conn.close()
         return with_retry(once, label=f"mysql query {side}")
@@ -2926,6 +3016,132 @@ class MySQLEngine(Engine):
         from .. import rowtext
         return rowtext.mysql_row(self._cols(db, t))
 
+    def _charset_counts(self, db, columns):
+        import copy
+        from .. import checkpoint, durable, ranges, sizing
+
+        grouped = {}
+        for table, column in columns:
+            grouped.setdefault(table, []).append(column)
+        reader = copy.copy(self)
+        reader.hop = copy.copy(self.hop)
+        reader.hop.slice = min(max(1, self.hop.slice), 10000)
+        jobs = []
+        for table, names in grouped.items():
+            parts, key = reader._checksum_ranges(db, table,
+                                                 self._pk_cols(db, table))
+            for lo, hi in parts:
+                for side in ('src', 'dst'):
+                    jobs.append((side, table, names, key, lo, hi))
+        if not jobs:
+            return {}
+        plan = sizing.estimate(self.hop, self, db, units=len(jobs))
+        pace = sizing.Pace(plan.start, plan.most,
+                           resources=sizing.resources(self, db, self.hop),
+                           memory=sizing.Memory(sizing.WORKER_MEMORY))
+        slots = ranges.Slots(plan.most, pace=pace)
+        totals, completed = {}, [0]
+        lock = threading.Lock()
+        path = self.hop.report_dir(db) / 'deep-charset-progress.json'
+
+        def read(job):
+            side, table, names, key, lo, hi = job
+            exprs = []
+            for name in names:
+                col = self._my_ident(name)
+                exprs.append(
+                    f"coalesce(sum(char_length(convert({col} using utf8mb4))"
+                    f" - char_length(replace(convert({col} using utf8mb4),"
+                    " _utf8mb4 0xEFBFBD, ''))),0)")
+            k = key if (key and (key.startswith("`") or key.startswith("("))) else (self._my_ident(key) if key else "")
+            predicate = checkpoint.where(k, lo, hi) if k else ''
+            where = f' where {predicate}' if predicate else ''
+            sql = ('select count(*), ' + ', '.join(exprs) + ' from '
+                   + self._scope(side, db, table) + where)
+            row = self._q(side, sql)[0]
+            if len(row) != len(names) + 1:
+                raise RuntimeError('charset aggregate returned incomplete columns')
+            with lock:
+                for name, value in zip(names, row[1:]):
+                    ident = (side, table, name)
+                    totals[ident] = totals.get(ident, 0) + int(value)
+                completed[0] += 1
+                durable.write_atomic(path, json.dumps({
+                    'completed': completed[0], 'planned': len(jobs),
+                    'concurrency': pace.limit,
+                    'phase': 'charset', 'status': 'running',
+                    'table': table, 'side': side,
+                    'resume_supported': False}))
+            return int(row[0])
+
+        try:
+            slots.each(jobs, read)
+        except Exception:
+            durable.write_atomic(path, json.dumps({
+                'completed': completed[0], 'planned': len(jobs),
+                'phase': 'charset', 'status': 'incomplete',
+                'resume_supported': False}))
+            raise
+        durable.write_atomic(path, json.dumps({
+            'completed': completed[0], 'planned': len(jobs),
+            'concurrency': pace.limit, 'phase': 'charset', 'status': 'complete',
+            'resume_supported': False}))
+        return totals
+
+    def _charset_check(self, db, ddb=None):
+        ddb = ddb or self._d("dst", db)
+        csq = ("select table_name, column_name, character_set_name"
+               " from information_schema.columns where table_schema=%s"
+               " and character_set_name is not null"
+               " and table_name not like 'migkit%%'")
+        scs = {(r[0], r[1]): r[2] for r in self._scoped_rows(
+            db, self._q("src", csq, (db,)))}
+        dcs = {(r[0], r[1]): r[2] for r in self._scoped_rows(
+            db, self._q("dst", csq, (ddb,)))}
+        WIDTH = {"utf8mb4": 4, "utf8mb3": 3, "utf8": 3, "latin1": 1,
+                 "latin2": 1, "ascii": 1}
+        csbad = []
+        for k, s2 in sorted(scs.items()):
+            d2 = dcs.get(k)
+            if d2 and d2 != s2:
+                note = f"{k[0]}.{k[1]}: charset {s2} -> {d2}"
+                if WIDTH.get(d2, 9) < WIDTH.get(s2, 0):
+                    note += " (DOWNGRADE, drops/truncates multibyte chars)"
+                csbad.append(note)
+        tcols = self._scoped_rows(db, self._q(
+            "src", "select distinct table_name, column_name"
+                   " from information_schema.columns where table_schema=%s"
+                   " and data_type in ('char','varchar','text','tinytext',"
+                   "'mediumtext','longtext') and table_name not like"
+                   " 'migkit%%'", (db,)))
+        if not tcols:
+            if csbad:
+                return Result("deep", f"{db} charset", "diff",
+                              "; ".join(csbad[:6]), "",
+                              "keep the target column utf8mb4 and re-load the"
+                              " affected rows over a utf8mb4 connection")
+            return Result("deep", f"{db} charset", "ok",
+                          "text column charsets match, no text columns to scan")
+        try:
+            counts = self._charset_counts(db, tcols[:30])
+        except Exception as e:
+            failed_cols = ", ".join(f"{t}.{c}" for t, c in tcols[:30][:5])
+            return Result("deep", f"{db} charset", "error",
+                          f"replacement-character scan incomplete: could not read {failed_cols}: {e}")
+        for t, col in tcols[:30]:
+            sv = counts[('src', t, col)]
+            dv = counts[('dst', t, col)]
+            if dv > sv:
+                csbad.append(f'{t}.{col}: {dv - sv} extra U+FFFD replacement'
+                             ' chars on target')
+        if csbad:
+            return Result("deep", f"{db} charset", "diff",
+                          "; ".join(csbad[:6]), "",
+                          "keep the target column utf8mb4 and re-load the"
+                          " affected rows over a utf8mb4 connection")
+        return Result("deep", f"{db} charset", "ok",
+                      "text column charsets match, no replacement-char excess")
+
     def check_counts(self, db):
         st, dt = set(self._tables("src", db)), set(self._tables("dst", db))
         res = []
@@ -2944,7 +3160,7 @@ class MySQLEngine(Engine):
                            )[0][0]
 
         common = sorted(st & dt)
-        with ThreadPoolExecutor(max_workers=max(2, self.hop.workers)) as pool:
+        with self._read_pool(db, max(2, self.hop.workers)) as pool:
             futs = {t: (pool.submit(cnt, "src", t), pool.submit(cnt, "dst", t))
                     for t in common}
             for t in common:
@@ -3096,7 +3312,7 @@ class MySQLEngine(Engine):
                 return self._diff_table(d, tbl)
 
         per = {}
-        with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
+        with self._read_pool(db, self.hop.workers) as pool:
             futs = {pool.submit(guarded, db, t): t for t in tables}
             for fu in as_completed(futs):
                 r, ra, rb = fu.result()
@@ -3293,6 +3509,70 @@ class MySQLEngine(Engine):
             return "ok", f"{rows}hashdiff 0 differences (reladiff)", ra, rb
         return "diff", "", ra, rb
 
+    def _checksum_ranges(self, db, t, pks):
+        scope = f"{db}.{t}"
+        from .. import checkpoint as _cp
+        pk_ranges, col = [(None, None)], None
+        if len(pks) == 1:
+            n = self._q("src", f"select count(*) from"
+                               f" {self._scope('src', db, t)}")[0][0]
+            if n > self.hop.slice:
+                mm = self._q("src", f"select min(`{pks[0]}`), max(`{pks[0]}`)"
+                                    f" from {self._scope('src', db, t)}")[0]
+                if mm[0] is not None and str(mm[0]).lstrip("-").isdigit():
+                    col = pks[0]
+                    cp_path = str(self.hop.report_dir(db) / "checkpoint.json")
+                    cp = _cp.Checkpoint(cp_path)
+                    chunk = cp.chunk_for(scope, max(1, self.hop.slice))
+                    pk_ranges = _cp.plan_ranges(int(mm[0]), int(mm[1]), chunk)
+
+        if pks and not col:
+            import pymysql.converters
+
+            def _escape_item(v):
+                if isinstance(v, str):
+                    return "CONVERT(X'" + v.encode("utf8").hex() + "' USING utf8mb4)"
+                elif isinstance(v, bytes):
+                    return "X'" + v.hex() + "'"
+                else:
+                    return pymysql.converters.escape_item(v, "utf8mb4")
+
+            quoted_cols = ["`" + p.replace("`", "``") + "`" for p in pks]
+            order_clause = ", ".join(quoted_cols)
+            composite = len(pks) > 1
+            bounds = []
+            after = None
+            chunk = max(1, self.hop.slice)
+            while True:
+                if composite:
+                    placeholders = ", ".join(["%s"] * len(pks))
+                    predicate = f" where ({order_clause}) > ({placeholders})" if after is not None else ""
+                    args = tuple(after) + (chunk - 1,) if after is not None else (chunk - 1,)
+                    rows = self._q("src", f"select {order_clause} from"
+                                   f" {self._scope('src', db, t)}{predicate}"
+                                   f" order by {order_clause} limit %s, 1", args)
+                    if not rows:
+                        break
+                    after = tuple(rows[0])
+                    bound = "(" + ", ".join(_escape_item(v) for v in after) + ")"
+                else:
+                    candidate = quoted_cols[0]
+                    predicate = f" where {candidate} > %s" if after is not None else ""
+                    args = (after, chunk - 1) if after is not None else (chunk - 1,)
+                    rows = self._q("src", f"select {candidate} from"
+                                   f" {self._scope('src', db, t)}{predicate}"
+                                   f" order by {candidate} limit %s, 1", args)
+                    if not rows:
+                        break
+                    after = rows[0][0]
+                    bound = _escape_item(after)
+                bounds.append(bound)
+            if bounds:
+                col = f"({order_clause})" if composite else pks[0]
+                pk_ranges = _cp.plan_from_boundaries(bounds)
+
+        return pk_ranges, col
+
     def _diff_table(self, db, t):
         scope = f"{db}.{t}"
         expr = self._row_expr(db, t)
@@ -3314,24 +3594,18 @@ class MySQLEngine(Engine):
         # row with a smaller key - exactly the kind of difference worth
         # catching.
         from .. import checkpoint as _cp
-        pk_ranges, col = [(None, None)], None
-        if len(pks) == 1:
-            n = self._q("src", f"select count(*) from"
-                               f" {self._scope('src', db, t)}")[0][0]
-            if n > self.hop.slice:
-                mm = self._q("src", f"select min(`{pks[0]}`), max(`{pks[0]}`)"
-                                    f" from {self._scope('src', db, t)}")[0]
-                if mm[0] is not None and str(mm[0]).lstrip("-").isdigit():
-                    col = pks[0]
-                    cp_path = str(self.hop.report_dir(db) / "checkpoint.json")
-                    cp = _cp.Checkpoint(cp_path)
-                    chunk = cp.chunk_for(scope, max(1, self.hop.slice))
-                    pk_ranges = _cp.plan_ranges(int(mm[0]), int(mm[1]), chunk)
+        pk_ranges, col = self._checksum_ranges(db, t, pks)
 
         key_expr = self._key_expr(db, t)
 
         def clause(lo, hi):
-            w = _cp.where(f"`{col}`", lo, hi) if col else ""
+            if not col:
+                c = ""
+            elif col.startswith("`") or col.startswith("("):
+                c = col
+            else:
+                c = f"`{col}`"
+            w = _cp.where(c, lo, hi) if col else ""
             return f"where {w}" if w else ""
 
         ranges = [clause(lo, hi) for lo, hi in pk_ranges]
@@ -3352,7 +3626,7 @@ class MySQLEngine(Engine):
         bad_ranges, kinds = [], set()
         rows_a = rows_b = sum_a = sum_b = 0
         whole = None
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with self._read_pool(db, 4) as pool:
             futs = {}
             for lo, hi in todo:
                 w = clause(lo, hi)
@@ -3868,18 +4142,40 @@ class MySQLEngine(Engine):
             return Result("deep", f"{db} lobs", "error",
                           "could not size the large columns:"
                           f" {str(e).splitlines()[-1][:90]}")
-        findings = []
+        from .. import checkpoint as _cp
+        grouped = {}
         for table, column in cols:
-            q = "select coalesce(max(length(`{}`)), 0) from `{}`.`{}`"
+            grouped.setdefault(table, []).append(column)
+        findings = []
+        for table, columns in grouped.items():
+            ranges, col = self._checksum_ranges(db, table, self._pk_cols(db, table))
+            sizes = {}
+            expressions = ", ".join(
+                f"coalesce(max(length({self._my_ident(c)})), 0)"
+                for c in columns)
+
+            def read(side, lo, hi):
+                c = col if (col and (col.startswith("`") or col.startswith("("))) else (self._my_ident(col) if col else "")
+                predicate = _cp.where(c, lo, hi) if c else ""
+                where = f" where {predicate}" if predicate else ""
+                return self._q(side, f"select count(*), {expressions} from"
+                               f" {self._scope(side, db, table)}{where}")[0]
+
             try:
-                src = int(self._q("src", q.format(column, db, table))[0][0])
-            except Exception:
-                continue
-            try:
-                dst = int(self._q("dst", q.format(column, ddb, table))[0][0])
-            except Exception:
-                dst = None
-            findings.append((table, column, src, dst, limit))
+                with self._read_pool(db) as pool:
+                    pending = [(side, pool.submit(read, side, lo, hi))
+                               for lo, hi in ranges for side in ('src', 'dst')]
+                    for side, future in pending:
+                        maxima = sizes.setdefault(side, [0] * len(columns))
+                        row = future.result()[1:]
+                        if len(row) != len(columns):
+                            raise RuntimeError('LOB aggregate returned incomplete columns')
+                        sizes[side] = [max(a, int(b)) for a, b in zip(maxima, row)]
+            except Exception as e:
+                return Result("deep", f"{db} lobs", "error",
+                              f"could not completely size {table} ({', '.join(columns)}): {e}")
+            findings.extend((table, c, sizes["src"][i], sizes["dst"][i], limit)
+                            for i, c in enumerate(columns))
         return self._lob_result(
             db, findings, "server's max_allowed_packet",
             "raise the mover's LOB size limit above the biggest value, or"
@@ -5078,55 +5374,7 @@ class MySQLEngine(Engine):
                 shifts.append(line)
         res.append(verdict.timeshift_result(db, shifts))
 
-        # charset corruption: a text column downgraded from utf8mb4 to a
-        # narrower charset (utf8mb3/latin1) on the target truncates or drops
-        # 4-byte characters (emoji, astral CJK), and a lossy transcode leaves
-        # U+FFFD replacement characters - both silent.
-        csq = ("select table_name, column_name, character_set_name"
-               " from information_schema.columns where table_schema=%s"
-               " and character_set_name is not null"
-               " and table_name not like 'migkit%%'")
-        scs = {(r[0], r[1]): r[2] for r in self._scoped_rows(
-            db, self._q("src", csq, (db,)))}
-        dcs = {(r[0], r[1]): r[2] for r in self._scoped_rows(
-            db, self._q("dst", csq, (ddb,)))}
-        WIDTH = {"utf8mb4": 4, "utf8mb3": 3, "utf8": 3, "latin1": 1,
-                 "latin2": 1, "ascii": 1}
-        csbad = []
-        for k, s2 in sorted(scs.items()):
-            d2 = dcs.get(k)
-            if d2 and d2 != s2:
-                note = f"{k[0]}.{k[1]}: charset {s2} -> {d2}"
-                if WIDTH.get(d2, 9) < WIDTH.get(s2, 0):
-                    note += " (DOWNGRADE, drops/truncates multibyte chars)"
-                csbad.append(note)
-        tcols = self._scoped_rows(db, self._q(
-            "src", "select distinct table_name, column_name"
-                   " from information_schema.columns where table_schema=%s"
-                   " and data_type in ('char','varchar','text','tinytext',"
-                   "'mediumtext','longtext') and table_name not like"
-                   " 'migkit%%'", (db,)))
-        for t, col in tcols[:30]:
-            q = ("select coalesce(sum(char_length(convert(`{c}` using utf8mb4))"
-                 " - char_length(replace(convert(`{c}` using utf8mb4),"
-                 " _utf8mb4 0xEFBFBD, ''))),0) from `{d}`.`{t}`")
-            try:
-                sv = int(self._q("src", q.format(c=col, d=db, t=t))[0][0])
-                dv = int(self._q("dst", q.format(c=col, d=ddb, t=t))[0][0])
-            except Exception:
-                continue
-            if dv > sv:
-                csbad.append(f"{t}.{col}: {dv - sv} extra U+FFFD replacement"
-                             " chars on target")
-        if csbad:
-            res.append(Result("deep", f"{db} charset", "diff",
-                              "; ".join(csbad[:6]), "",
-                              "keep the target column utf8mb4 and re-load the"
-                              " affected rows over a utf8mb4 connection"))
-        else:
-            res.append(Result("deep", f"{db} charset", "ok",
-                              "text column charsets match, no replacement-char"
-                              " excess"))
+        res.append(self._charset_check(db, ddb))
 
         # partitioned tables (mysql): a missing partition sends rows to the
         # MAXVALUE catch-all, a changed method/expression reroutes them, and
@@ -5467,14 +5715,11 @@ class MySQLEngine(Engine):
         hop masks is left out of the digest: it holds the target's own
         text, which the pair proves through the hop's transforms."""
         from .. import rowtext
-        try:
-            cols = self._cols(db, t)
-            masked = self.hop.masks(db, t, columns=list(cols))
-            expr = (rowtext.mysql_row([c for c in cols if c not in masked])
-                    if masked else self._row_expr(db, t))
-            return self._partition_read(side, db, t, parts, expr, there)
-        except Exception:  # noqa: BLE001 - counted, then
-            return self._partition_read(side, db, t, parts, None, there)
+        cols = self._cols(db, t)
+        masked = self.hop.masks(db, t, columns=list(cols))
+        expr = (rowtext.mysql_row([c for c in cols if c not in masked])
+                if masked else self._row_expr(db, t))
+        return self._partition_read(side, db, t, parts, expr, there)
 
     def _partition_read(self, side, db, t, parts, expr, there=None):
         dbn = self._d(side, db)
@@ -5869,28 +6114,37 @@ class MySQLEngine(Engine):
         two counts per column is what catches it.
         """
         bad = []
+        failed = {}
         for tbl, col in self._text_columns(db):
             q = (f"select sum(`{col}` is null), sum(`{col}` = '')"
                  f" from `%s`.`{tbl}`")
             try:
                 sv = self._q("src", q % db)[0]
                 dv = self._q("dst", q % ddb)[0]
-            except Exception:
+            except Exception as e:
+                failed[f"{tbl}.{col}"] = str(e).splitlines()[-1][:90]
                 continue
             s = (int(sv[0] or 0), int(sv[1] or 0))
             d = (int(dv[0] or 0), int(dv[1] or 0))
             if s != d:
                 bad.append(f"{tbl}.{col}: src null/empty={s[0]}|{s[1]}"
                            f" dst={d[0]}|{d[1]}")
+        if failed:
+            detail = "; ".join(f"{col} ({err})" for col, err in failed.items())
+            return [Result("deep", f"{db} nullempty", "error",
+                           f"incomplete scan: could not read {len(failed)} columns: {detail}",
+                           category="value.null-empty")]
         if bad:
             return [Result("deep", f"{db} nullempty", "diff",
                            f"{len(bad)} text columns differ in NULL vs"
                            " empty-string split (semantic flip): "
                            + "; ".join(bad[:5]), "",
                            "normalize with NULLIF(col,'') / COALESCE per"
-                           " column intent; decide which side is canonical")]
+                           " column intent; decide which side is canonical",
+                           category="value.null-empty")]
         return [Result("deep", f"{db} nullempty", "ok",
-                       "NULL vs empty-string consistent on text columns")]
+                       "NULL vs empty-string consistent on text columns",
+                       category="value.null-empty")]
 
     def _deep_float(self, db, ddb):
         """FLOAT and DOUBLE are approximations, so a checksum over them is
@@ -5903,13 +6157,15 @@ class MySQLEngine(Engine):
         cols = self._scoped_rows(
             db, self._q("src", q, (db,) + self.FLOATY))[:30]
         bad = []
+        failed = {}
         for tbl, col in cols:
             agg = (f"select count(`{col}`), coalesce(sum(`{col}`),0),"
                    f" coalesce(max(abs(`{col}`)),0) from `%s`.`{tbl}`")
             try:
                 sn, ss, smax = self._q("src", agg % db)[0]
                 dn, ds, dmax = self._q("dst", agg % ddb)[0]
-            except Exception:
+            except Exception as e:
+                failed[f"{tbl}.{col}"] = str(e).splitlines()[-1][:90]
                 continue
             if int(sn or 0) != int(dn or 0):
                 bad.append(f"{tbl}.{col}: non-null count src={sn} dst={dn}")
@@ -5920,15 +6176,22 @@ class MySQLEngine(Engine):
             scale = max(abs(ss), abs(ds), float(smax or 0), float(dmax or 0), 1.0)
             if abs(ss - ds) > scale * 1e-9:
                 bad.append(f"{tbl}.{col}: sum src={ss!r} dst={ds!r}")
+        if failed:
+            detail = "; ".join(f"{col} ({err})" for col, err in failed.items())
+            return [Result("deep", f"{db} float", "error",
+                           f"incomplete scan: could not read {len(failed)} columns: {detail}",
+                           category="value.precision")]
         if bad:
             return [Result("deep", f"{db} float", "diff",
                            f"{len(bad)} float/double columns drift beyond"
                            " tolerance: " + "; ".join(bad[:5]), "",
                            "a mover that changed the column's precision will"
-                           " do this; compare the column definitions first")]
+                           " do this; compare the column definitions first",
+                           category="value.precision")]
         return [Result("deep", f"{db} float", "ok",
                        f"{len(cols)} float/double columns within tolerance"
-                       if cols else "no float/double columns")]
+                       if cols else "no float/double columns",
+                       category="value.precision")]
 
     def _deep_unenforced_checks(self, db, ddb):
         """MySQL's version of PostgreSQL's NOT VALID.

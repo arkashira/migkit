@@ -125,6 +125,10 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None,
     facts = facts or {}
     filtered = bool(movers._filtered_here(hop, db))
     rungs = ways(via)
+    costs = None
+    if hop is not None:
+        from .decide import HopCosts
+        costs = HopCosts(hop)
     out = []
     for ident in sorted(tables):
         parts = movers._asked(hop, ident)
@@ -133,7 +137,7 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None,
         name = _name(ident, parts, qualifier)
         fact = facts.get(ident) or facts.get(name) or {}
         about = _about(fact)
-        if hop.excluded(db, *asked):
+        if movers._left_out(hop, db, ident, roots):
             need = (LEFT,)
         else:
             need = ("carried",) + (
@@ -143,7 +147,7 @@ def plan(hop, db, via, tables, qualifier="public", facts=None, choice=None,
                 ("keyless",) if fact.get("key") is False else ()) + (
                 ("renamed",) if movers._renamed(hop, db, asked) else ()) + (
                 masking_needs(hop, db, asked))
-        got = climb(name, rungs, need=need)
+        got = climb(name, rungs, need=need, costs=costs)
         mine = (choice.get(name) or choice.get(parts[-1])
                 if got.path == BULK else None)
         if mine is not None and mine.rung:

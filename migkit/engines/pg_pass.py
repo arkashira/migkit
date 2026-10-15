@@ -45,7 +45,7 @@ DIGEST_OPTIONS = "-c lc_monetary=C"
 #: a loading or snapshot-holding session is never ended by a server's
 #: default timeout while it works or waits for the next range (the
 #: statement's own is off in every session, `postgres.SESSION`)
-LOAD_OPTIONS = "-c idle_in_transaction_session_timeout=0"
+LOAD_OPTIONS = "-c idle_in_transaction_session_timeout=0 -c session_replication_role=replica"
 
 #: what a source's refusal of a snapshot a read asked for reads like
 _SNAPSHOT_GONE = ("invalid snapshot identifier", "could not import the"

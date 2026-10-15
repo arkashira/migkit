@@ -207,14 +207,20 @@ def wide_bytes(data):
             f"{hashlib.md5(data, usedforsecurity=False).hexdigest()}")
 
 
-def wide_text(value):
+def wide_limit(hop=None):
+    from . import tuning
+    return int(tuning.value("canon.WIDE", hop))
+
+
+def wide_text(value, hop=None):
     """The digest text of a text value over `WIDE` bytes as UTF-8, or None
     where it is not that wide. A string of n characters is n to 4n bytes,
     so only one between WIDE/4 and WIDE characters is encoded to tell."""
-    if len(value) * 4 <= WIDE:
+    limit = wide_limit(hop)
+    if len(value) * 4 <= limit:
         return None
     data = value.encode("utf-8", "surrogatepass")
-    return wide_bytes(data) if len(data) > WIDE else None
+    return wide_bytes(data) if len(data) > limit else None
 
 
 def digest_value(cls, value):
@@ -223,8 +229,9 @@ def digest_value(cls, value):
     server hashed where it lies (`pieces.Hashed`), which is what it wrote."""
     if type(value) is _Hashed:
         return value.text()
+    limit = wide_limit()
     if cls == "bytes" and isinstance(value, (bytes, bytearray, memoryview)) \
-            and len(value) > WIDE:
+            and len(value) > limit:
         return wide_bytes(value)
     if cls == "text" and isinstance(value, str):
         got = wide_text(value)

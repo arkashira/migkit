@@ -113,6 +113,7 @@ COST = {
     ("mysql", "gtid_tag"): (277.0, 155.0),
     ("mysql", "comment"): (197.0, 136.0),
     ("mysql", "table"): (325.0, 199.0),
+    ("mariadb", "gtid_domain"): (180.0, 140.0),
     ("mariadb", "skip_flag"): (237.0, 152.0),
     ("mariadb", "table"): (575.0, 189.0),
 }
@@ -194,6 +195,14 @@ def _comment(f):
     return None
 
 
+def _gtid_domain(f):
+    if not f.get("mariadb"):
+        return "GTID domain is MariaDB's"
+    if not f.get("gtid_domain"):
+        return "MariaDB GTID domain is not configured"
+    return None
+
+
 def _skip_flag(f):
     if not f.get("mariadb"):
         return "skip_replication is MariaDB's"
@@ -216,6 +225,9 @@ RUNGS = (
     Rung("comment", "mysql", frozenset({APART}),
          "a comment on every statement applied",
          "the table migkit_origin, for its proof", _comment),
+    Rung("gtid_domain", "mysql", frozenset({APART, EXACT}),
+         "a GTID domain of migkit's own (gtid_domain_id)", "",
+         _gtid_domain),
     Rung("skip_flag", "mysql", frozenset({APART}),
          "the transaction marked for skip (skip_replication)",
          "the table migkit_origin, for its proof", _skip_flag),

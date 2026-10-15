@@ -494,3 +494,86 @@ def reladiff_rung(rows=None, table_bytes=None, threads=1, engines=(),
             "bisection_threshold": threshold, "threads": max(1, int(threads)),
             "depth": depth, "checksums_per_level": factor,
             "facts": facts, "chosen": chosen, "reason": reason}
+
+
+def validation_ladder(hop=None, table=""):
+    """Validation methods as decision rungs for standalone validation (P0-VALIDATE.decide)."""
+    from .decide import Need, Rung
+    from .util import which
+
+    return (
+        Rung(
+            "digest",
+            "in-database range digests",
+            gives=frozenset({"checksum", "byte exact", "exact", "consistent as of"}),
+            needs=(
+                Need("both servers support range digest",
+                     lambda f: bool(f.get("can_digest", True)),
+                     "server does not support in-database digest hash"),
+            ),
+            because="fastest verification using native in-database checksums",
+            footprint=0,
+            leaves="nothing on the servers",
+        ),
+        Rung(
+            "bisection",
+            "bisecting diff localizer",
+            gives=frozenset({"checksum", "localizes diffs", "resume by chunk"}),
+            needs=(
+                Need("bisection tool available",
+                     lambda f: bool(f.get("reladiff_installed", True)),
+                     "bisecting comparison tool not installed"),
+                Need("key on table",
+                     lambda f: bool(f.get("key", True)),
+                     "bisection requires key columns"),
+            ),
+            because="pinpoints exact differing keys with logarithmic bisection",
+            footprint=1,
+            leaves="temporary comparison state on local machine",
+        ),
+        Rung(
+            "second_reader",
+            "independent second reader",
+            gives=frozenset({"independent verification", "cross-engine"}),
+            needs=(
+                Need("second reader installed",
+                     lambda f: bool(f.get("dvt_installed", False) or which("data-validation")),
+                     "independent second reader not installed"),
+            ),
+            because="third-party independent verification engine across engines",
+            footprint=1,
+            leaves="validation output in local directory",
+        ),
+        Rung(
+            "row_hash",
+            "streaming row hashes",
+            gives=frozenset({"carried", "keyless", "row filter", "checksum"}),
+            because="neutral client-side row hash comparison",
+            footprint=0,
+            leaves="nothing on the servers",
+        ),
+        Rung(
+            "count",
+            "row counts and metadata",
+            gives=frozenset({"count only"}),
+            because="fast table row count and metadata check",
+            footprint=0,
+            leaves="nothing on the servers",
+        ),
+    )
+
+
+def plan_validation(table, facts=None, need=(), costs=None, explore=True):
+    """Select the best validation method for table via the shared decision engine (P0-VALIDATE.decide)."""
+    from .decide import Facts, climb
+    f = facts if isinstance(facts, Facts) else Facts(facts or {})
+    ladder = validation_ladder(f.get("hop"), table)
+    return climb(table, ladder, f, need=need, costs=costs, explore=explore)
+
+
+def replan_validation(table, run_check, facts=None, need=(), costs=None, where=None, log=None):
+    """Run validation with automatic replanning to fallback rungs on failure (P0-VALIDATE.decide)."""
+    from .decide import Facts, attempt
+    f = facts if isinstance(facts, Facts) else Facts(facts or {})
+    ladder = validation_ladder(f.get("hop"), table)
+    return attempt(table, ladder, run_check, facts=f, need=need, costs=costs, where=where, log=log)

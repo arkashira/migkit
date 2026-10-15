@@ -221,3 +221,17 @@ def urgent(by_mover):
                     out.append((label, COSTLY[kind]))
                     break
     return sorted(out)
+
+
+def is_replication_artifact(name, schema=None):
+    if schema and (bookkeeping(schema) or whose(schema)):
+        return True
+    return bool(whose(name) or bookkeeping(name))
+
+
+def artifact_origin(name, schema=None):
+    if schema:
+        origin = bookkeeping(schema) or whose(schema)
+        if origin:
+            return origin
+    return whose(name) or bookkeeping(name)

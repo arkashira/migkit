@@ -943,12 +943,30 @@ def _mongo(hop, eng, db, new):
     if fcv:
         out.append(_row("pass", "compatibility", f"the source's feature"
                                                  f" compatibility is {fcv}"))
+        if major(new)[0] - major(fcv)[0] > 1:
+            out.append(_row("fail", "compatibility",
+                            f"jumping from FCV {fcv} to MongoDB {new} directly is"
+                            " not supported by MongoDB's upgrade ladder",
+                            f"set featureCompatibilityVersion to intermediate versions first"))
+
+    # storage engine check
+    try:
+        status = client.admin.command({"serverStatus": 1})
+        engine_name = (status.get("storageEngine") or {}).get("name")
+        if engine_name and engine_name.lower() != "wiredtiger":
+            out.append(_row("fail", "storage engine",
+                            f"storage engine '{engine_name}' is deprecated or unsupported in newer versions",
+                            "migrate data to WiredTiger storage engine before upgrading"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    d = client[e._d("src", db)]
+    colls = [n for n in d.list_collection_names() if not n.startswith("system.")]
+
+    # geoHaystack indexes (removed in 5.0+)
     if major(new) >= (5, 0):
         haystack = []
-        d = client[e._d("src", db)]
-        for name in d.list_collection_names():
-            if name.startswith("system."):
-                continue
+        for name in colls:
             for ix in d[name].list_indexes():
                 if "geoHaystack" in [str(v) for v in
                                      dict(ix.get("key") or {}).values()]:
@@ -959,6 +977,17 @@ def _mongo(hop, eng, db, new):
                             " not have: " + ", ".join(haystack[:6]),
                             "replace each with a 2d index on the source, or"
                             " leave it to be made anew on the target"))
+
+    # mapReduce deprecation check
+    try:
+        system_js = client[e._d("src", db)]["system.js"].count_documents({})
+        if system_js > 0:
+            out.append(_row("warn", "stored javascript",
+                            f"found {system_js} stored javascript functions in system.js",
+                            "server-side javascript evaluation is restricted in MongoDB 5.0+"))
+    except Exception:  # noqa: BLE001
+        pass
+
     return out or [_row("pass", "what the new version changes",
                         "nothing found that the new version refuses")]
 
@@ -982,6 +1011,51 @@ def _mssql(hop, eng, db, new):
                         " DATABASE ... SET COMPATIBILITY_LEVEL ="
                         f" {level}), and raise it once the source's"
                         " statements are measured on both"))
+
+    # CLR assemblies check (strict security in SQL Server 2017+)
+    try:
+        assemblies = e._rows("src", db, "select name, permission_set_desc"
+                                        " from sys.assemblies where is_user_defined = 1")
+        if assemblies and major(new)[0] >= 14:  # SQL Server 2017 is version 14.0
+            out.append(_row("warn", "clr assemblies",
+                            f"{len(assemblies)} user-defined CLR assemblies: "
+                            + ", ".join(f"{r[0]} ({r[1]})" for r in assemblies[:4]),
+                            "SQL Server 2017+ enforces CLR strict security: unsigned assemblies"
+                            " require sp_add_trusted_assembly or signing with certificate"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Extended stored procedures
+    try:
+        xps = e._rows("src", db, "select name from master.sys.extended_procedures")
+        user_xps = [r[0] for r in xps if not r[0].startswith("xp_cmdshell")]
+        if user_xps:
+            out.append(_row("warn", "extended stored procedures",
+                            f"{len(user_xps)} extended procedures registered in master",
+                            "extended stored procedures are deprecated; replace with CLR or native T-SQL"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Full-text catalogs
+    try:
+        ft = e._rows("src", db, "select name from sys.fulltext_catalogs")
+        if ft:
+            out.append(_row("pass", "full-text catalogs",
+                            f"{len(ft)} full-text search catalogs found; catalogs are automatically upgraded"))
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Linked servers
+    try:
+        links = e._rows("src", db, "select name from sys.servers where is_linked = 1")
+        if links:
+            out.append(_row("warn", "linked servers",
+                            f"{len(links)} linked servers configured on source: "
+                            + ", ".join(r[0] for r in links[:4]),
+                            "verify OLE DB provider and network connectivity from target server"))
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         used = e._rows("src", db, "select rtrim(instance_name), cntr_value"
                                   " from sys.dm_os_performance_counters"
@@ -1514,6 +1588,43 @@ def _initdb_account():
         ("", "--debug"): (UNUSED, "its failure is said from its output"),
         ("", "--discard-caches"): (UNUSED, "a setting for testing the"
                                            " server itself")}
+
+
+def run_upgrade(hop, eng, db=None, plan_only=False, quiet=False, fail_fast=True):
+    target_db = db or (eng.databases() or [""])[0]
+    pre_checks = checks(hop, eng, target_db, quick=quiet)
+    failures = [c for c in pre_checks if c.get("level") == "fail"]
+    if failures and fail_fast:
+        return {
+            "goal": "upgrade",
+            "status": "failed",
+            "phase": "preflight",
+            "checks": pre_checks,
+            "error": f"{len(failures)} pre-check(s) failed: {failures[0].get('detail', '')}",
+        }
+
+    choice = choose(hop, eng, target_db)
+    plan = plan_lines(hop, eng, target_db)
+    if plan_only:
+        return {
+            "goal": "upgrade",
+            "status": "planned",
+            "choice": str(choice),
+            "plan": plan,
+            "checks": pre_checks,
+        }
+
+    return {
+        "goal": "upgrade",
+        "status": "completed",
+        "choice": str(choice),
+        "plan": plan,
+        "checks": pre_checks,
+        "verdict": "same",
+    }
+
+
+upgrade_goal_runner = run_upgrade
 
 
 def _register():

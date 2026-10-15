@@ -236,4 +236,8 @@ def migkit_op(name, command, hop, args=(), conf=None, reports=None,
 def __getattr__(name):
     if name == "MigkitOperator":
         return _airflow_operator()
+    if name in ("export_workflow", "export_airflow_dag", "export_dagster_job", "export_argo_workflow"):
+        from . import workflow_exporter
+        return getattr(workflow_exporter, name)
     raise AttributeError(name)
+

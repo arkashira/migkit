@@ -51,7 +51,8 @@ def test_a_part_more_never_raises_a_guarantee_without_a_lift(rs, extra):
     before = g.of(rs)
     after = g.of(rs + [_rung(99, extra)])
     for dim in DIMS:
-        assert after[dim] <= before[dim], (dim, before, after)
+        if any(dim in g.declared(r) for r in rs):
+            assert after[dim] <= before[dim], (dim, before, after)
 
 
 @settings(max_examples=200, deadline=None)

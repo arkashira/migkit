@@ -48,7 +48,7 @@ def deny_pattern(words):
 # deliberately fake values used in docs and examples
 ALLOW = re.compile(
     r"xxxx|example|placeholder|<[a-z_-]+>|CHANGE_ME|your-|my-|dummy|sample"
-    r"|0\.0\.0\.0|127\.0\.0\.1|localhost"
+    r"|0\.0\.0\.0|(?<!\d)0{12}(?!\d)|127\.0\.0\.1|localhost"
     r"|10\.0\.0\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.16\.\d{1,3}\.\d{1,3}"
     r"|192\.0\.2\.\d{1,3}"
     r"|password:\s*\"secret\"|password=\"secret\"")

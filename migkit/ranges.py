@@ -13,6 +13,7 @@ The workers are the move's, shared by every table in flight: a table
 copied beside others does not multiply them.
 """
 import contextlib
+import contextvars
 import threading
 from dataclasses import dataclass, field
 
@@ -21,6 +22,118 @@ _NOLOCK = contextlib.nullcontext()
 #: the least rows a range holds when a table is split for workers
 LEAST = 50_000
 
+_current_pool_var = contextvars.ContextVar("current_read_pool", default=None)
+_current_coordinator_var = contextvars.ContextVar("current_coordinator", default=None)
+_active_lease_var = contextvars.ContextVar("active_lease", default=None)
+
+
+def current_pool():
+    return _current_pool_var.get()
+
+
+def current_coordinator():
+    return _current_coordinator_var.get()
+
+
+class _Lease:
+    def __init__(self, slots, borrowed=False, parent_lease=None):
+        self.slots = slots
+        self.root = slots.root
+        self.borrowed = borrowed
+        self.parent_lease = parent_lease
+
+
+class ReadPool:
+    def __init__(self, hop, engine=None, db=None, workers=None, parent=None, coordinator=None):
+        import concurrent.futures as cf
+        from . import sizing
+
+        if parent is None:
+            parent = current_pool() or getattr(engine, "_active_read_pool", None) or getattr(hop, "_read_pool", None)
+        if coordinator is None and parent is not None:
+            coordinator = getattr(parent, "slots", None)
+        if coordinator is None:
+            coordinator = current_coordinator() or getattr(engine, "_slot_coordinator", None) or getattr(hop, "_slot_coordinator", None)
+
+        self.parent = parent
+        self.coordinator = coordinator
+
+        plan = None
+        if hop is not None and engine is not None and db is not None:
+            try:
+                plan = sizing.estimate(hop, engine, db)
+            except Exception:
+                plan = None
+
+        plan_most = plan.most if plan is not None else (int(workers) if workers else 4)
+        plan_start = plan.start if plan is not None else min(2, plan_most)
+
+        most = min(plan_most, max(1, int(workers))) if workers else plan_most
+        if coordinator is not None:
+            most = min(most, coordinator.workers)
+        elif parent is not None and getattr(parent, "slots", None) is not None:
+            most = min(most, parent.slots.workers)
+
+        resources = {}
+        if engine is not None and db is not None and hop is not None:
+            try:
+                resources = sizing.resources(engine, db, hop)
+            except Exception:
+                resources = {}
+        self.pace = sizing.Pace(min(plan_start, most), most,
+                               resources=resources,
+                               memory=sizing.Memory(sizing.WORKER_MEMORY))
+
+        parent_slots = coordinator or (parent.slots if parent is not None else None)
+        self.slots = Slots(most, pace=self.pace, parent=parent_slots)
+        self.pool = cf.ThreadPoolExecutor(max_workers=most)
+
+    def submit(self, fn, *args, **kwargs):
+        import time
+
+        ctx = contextvars.copy_context()
+
+        def read():
+            lease = self.slots._take()
+            token = _active_lease_var.set(lease)
+            pool_token = _current_pool_var.set(self)
+            coord_token = _current_coordinator_var.set(self.slots)
+            began = time.monotonic()
+            weight = 0
+            try:
+                result = fn(*args, **kwargs)
+                weight = _weight(result)
+                return result
+            finally:
+                try:
+                    _current_coordinator_var.reset(coord_token)
+                    _current_pool_var.reset(pool_token)
+                    _active_lease_var.reset(token)
+                finally:
+                    self.slots._give(lease)
+                    if self.pace is not None:
+                        self.pace.done(weight, time.monotonic() - began)
+
+        return self.pool.submit(ctx.run, read)
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        return self.pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    def __enter__(self):
+        self._pool_token = _current_pool_var.set(self)
+        self._coord_token = _current_coordinator_var.set(self.slots)
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            self.shutdown(wait=True, cancel_futures=exc[0] is not None)
+        finally:
+            if hasattr(self, "_coord_token"):
+                _current_coordinator_var.reset(self._coord_token)
+            if hasattr(self, "_pool_token"):
+                _current_pool_var.reset(self._pool_token)
+        return False
+
 
 class Slots:
     """How many ranges the whole move copies at once: at most `workers`,
@@ -28,27 +141,56 @@ class Slots:
     told by every range that finishes how many rows it moved in how
     long."""
 
-    def __init__(self, workers, pace=None):
+    def __init__(self, workers, pace=None, parent=None):
         self.workers = max(1, int(workers))
-        self.pace = pace
-        self._cv = threading.Condition()
+        self.parent = parent
+        self.root = parent.root if parent is not None else self
+        if parent is not None:
+            self.workers = min(self.workers, self.root.workers)
+        self.pace = pace if pace is not None else (parent.pace if parent is not None else None)
+        self._cv = self.root._cv if parent is not None else threading.Condition()
         self._busy = 0
 
-    def _take(self):
-        # and only where this machine's memory holds one more worker
-        # (`sizing.Memory`): one of the widest rows waits for room, where it
-        # was started beside the others and the move was killed for it
-        with self._cv:
-            while self._busy >= (min(self.workers, self.pace.limit)
-                                 if self.pace else self.workers) or (
-                    self.pace is not None
-                    and not self.pace.admit(self._busy)):
-                self._cv.wait(0.5)
-            self._busy += 1
+    def _take(self, parent_lease=None):
+        if parent_lease is None:
+            parent_lease = _active_lease_var.get()
+        if parent_lease is not None and getattr(parent_lease, "root", None) is not self.root:
+            parent_lease = None
 
-    def _give(self):
         with self._cv:
-            self._busy -= 1
+            while True:
+                if self._busy >= self.workers:
+                    self._cv.wait(0.1)
+                    continue
+
+                if parent_lease is not None and not parent_lease.borrowed:
+                    parent_lease.borrowed = True
+                    self._busy += 1
+                    return _Lease(self, borrowed=True, parent_lease=parent_lease)
+
+                root = self.root
+                root_limit = (min(root.workers, root.pace.limit)
+                              if root.pace else root.workers)
+                can_admit = root.pace.admit(root._busy) if root.pace else True
+
+                if root._busy < root_limit and can_admit:
+                    if self is not root:
+                        root._busy += 1
+                    self._busy += 1
+                    return _Lease(self, borrowed=False)
+
+                self._cv.wait(0.1)
+
+    def _give(self, lease=None):
+        with self._cv:
+            if lease is not None and lease.borrowed:
+                self._busy -= 1
+                if lease.parent_lease is not None:
+                    lease.parent_lease.borrowed = False
+            else:
+                self._busy -= 1
+                if self is not self.root:
+                    self.root._busy -= 1
             self._cv.notify_all()
 
     def each(self, items, fn):
@@ -60,25 +202,31 @@ class Slots:
         items = list(items)
 
         def one(item):
-            self._take()
+            lease = self._take()
+            token = _active_lease_var.set(lease)
+            coord_token = _current_coordinator_var.set(self)
             began = time.monotonic()
+            weight = 0
             try:
                 got = fn(item)
+                weight = _weight(got)
+                return got
             finally:
-                self._give()
-            if self.pace is not None:
-                self.pace.done(_weight(got), time.monotonic() - began)
-            return got
+                try:
+                    _current_coordinator_var.reset(coord_token)
+                    _active_lease_var.reset(token)
+                finally:
+                    self._give(lease)
+                    if self.pace is not None:
+                        self.pace.done(weight, time.monotonic() - began)
         if self.workers < 2 or len(items) < 2:
-            # in this thread, and still within the slots: a table of one
-            # range copied beside a split one counts against them too
             for item in items:
                 one(item)
             return
         failed = None
         pool = cf.ThreadPoolExecutor(min(self.workers, len(items)))
         try:
-            futs = [pool.submit(one, item) for item in items]
+            futs = [pool.submit(contextvars.copy_context().run, one, item) for item in items]
             for f in cf.as_completed(futs):
                 if f.cancelled():
                     continue
@@ -558,18 +706,25 @@ BUCKET_ROWS = 1_000_000
 MOST_BUCKET_BITS = 6
 
 
-def bucket_bits(rows):
+def bucket_rows(hop=None):
+    from . import tuning
+    return int(tuning.value("ranges.BUCKET_ROWS", hop))
+
+
+def bucket_bits(rows, hop=None):
     """Bits of the row hash a table's buckets are cut by: about
     `BUCKET_ROWS` a bucket, at least two buckets."""
-    n = max(2, -(-int(rows or 0) // BUCKET_ROWS))
+    limit = bucket_rows(hop)
+    n = max(2, -(-int(rows or 0) // limit))
     return min(MOST_BUCKET_BITS, (n - 1).bit_length())
 
 
-def _keyless_parts():
+def _keyless_parts(hop=None):
     from . import decide
     R, N = decide.Rung, decide.Need
+    limit = bucket_rows(hop)
     large = N("a table large enough to repay a scan a bucket",
-              lambda f: (f.get("rows") or 0) >= 2 * BUCKET_ROWS,
+              lambda f: (f.get("rows") or 0) >= 2 * limit,
               "the table is small enough that starting it over costs less"
               " than reading it once a bucket")
     return (

@@ -165,8 +165,9 @@ class Plan:
     """Where a move starts (`start`), how far its pace may go (`most`), and
     each factor's own number, for the log."""
 
-    def __init__(self, start, most, factors):
+    def __init__(self, start, most, factors, unknown_capacity=None):
         self.start, self.most, self.factors = start, most, factors
+        self.unknown_capacity = unknown_capacity or []
 
     def line(self):
         firm = sorted(((n, why) for why, (n, soft) in self.factors.items()
@@ -174,10 +175,12 @@ class Plan:
         soft = sorted(((n, why) for why, (n, s) in self.factors.items()
                        if s), key=lambda x: x[0])
         said = [f"{why} {n}" for n, why in (soft[:2] + firm[:2])]
+        unmeasured = f"; unknown capacity on {', '.join(self.unknown_capacity)}" if self.unknown_capacity else ""
         return (f"{self.start} at a time to start"
                 + (f", up to {self.most} as it goes" if self.most
                    > self.start else "")
-                + (f" ({'; '.join(said)})" if said else ""))
+                + (f" ({'; '.join(said)})" if said else "")
+                + unmeasured)
 
 
 def capacity(eng, side, db):
@@ -222,6 +225,7 @@ def estimate(hop, eng, db, units=None, here=None, sides=None, model=None):
                f" {_bytes(widest[1])} ({widest[0]})")
         f[why] = (max(1, int((here["memory"] - RESERVE_MEMORY) // held)),
                   False)
+    unknown = []
     for side, name in (("src", "the source's"), ("dst", "the target's")):
         c = sides.get(side) or {}
         other = side == "dst" or bool(c.get("replica"))
@@ -238,6 +242,7 @@ def estimate(hop, eng, db, units=None, here=None, sides=None, model=None):
                                             // 2)), True)
         else:
             f[f"{name} CPUs, not readable,"] = (UNREAD, True)
+            unknown.append(name)
     if units:
         f["the work there is"] = (max(1, int(units)), False)
     if getattr(hop, "workers_set", False) and getattr(hop, "workers", None):
@@ -254,7 +259,7 @@ def estimate(hop, eng, db, units=None, here=None, sides=None, model=None):
     # nothing firm read: no more than twice where it starts
     most = min(firm) if firm else 2 * max(1, min(soft or [UNREAD]))
     start = max(1, min([most] + soft))
-    return Plan(start, max(start, most), f)
+    return Plan(start, max(start, most), f, unknown_capacity=unknown)
 
 
 def connections_share(c, side):

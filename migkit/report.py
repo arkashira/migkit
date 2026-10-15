@@ -112,7 +112,10 @@ OBJ_LABEL = {"table": "tables", "view": "views", "matview": "mviews",
 def _objects_section(hop, dbs):
     data = {}
     for d in dbs:
-        p = hop.report_dir(d) / "objects.json"
+        rdir = hop.report_dir(d) if hasattr(hop, "report_dir") and callable(hop.report_dir) else None
+        if not rdir:
+            continue
+        p = Path(rdir) / "objects.json"
         if p.exists():
             data[d] = json.loads(p.read_text())
     if not data:
@@ -270,12 +273,15 @@ def render(hop, results, generated=None, decided=None, taken=None):
         sev = "error" if st not in ("diff", "warn", "skip") else ""
         fix = r.get("fix_hint", "")
         fix_html = f'<div class="fix">{html.escape(fix)}</div>' if fix else ""
+        origin = r.get("artifact_origin")
+        origin_badge = (f' <span class="fix" style="margin:0;padding:2px 6px;font-size:11px;">'
+                        f'{html.escape(origin)} artifact</span>') if origin else ""
         cards.append(
             f'<div class="finding {sev}"><div class="head">'
             # rows the hop keeps by the changes it does not carry
             f'{_chip(st, "KEPT" if r.get("kept_by_hop") else None)}'
             f'<span>{html.escape(str(r.get("check", "")))} &middot; '
-            f'{html.escape(str(r.get("scope", "")))}</span></div>'
+            f'{html.escape(str(r.get("scope", "")))}</span>{origin_badge}</div>'
             f'<div class="what">{html.escape(str(r.get("detail", "")))}</div>'
             f'{fix_html}{_excerpt(str(r.get("detail", "")), r.get("report", ""))}</div>')
     if not cards:
@@ -300,6 +306,11 @@ def render(hop, results, generated=None, decided=None, taken=None):
     objects_html = _objects_section(hop, dbs)
     scope_html = _scope_section(hop, taken) + _service_section(hop,
                                                                 results)
+    from . import result_scope
+    envelope = result_scope.build_grouped_summary(results, hop)
+    db_summary_html = result_scope.format_html(envelope)
+    commercial_html = result_scope.format_commercial_comparison_html(
+        ["aws_dms", "tencent_dts", "oracle_veridata", "redgate_sql_data_compare"])
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -311,6 +322,7 @@ def render(hop, results, generated=None, decided=None, taken=None):
 <div class="route">{html.escape(src)} &rarr; {html.escape(dst)}</div></div>
 {banner}
 {scope_html}
+{db_summary_html}
 <div class="tiles">{"".join(tiles)}</div>
 <div class="card"><h2>status</h2>
 <table><thead><tr><th>db</th>
@@ -318,6 +330,7 @@ def render(hop, results, generated=None, decided=None, taken=None):
 </tr></thead><tbody>{"".join(rows)}</tbody></table></div>
 {objects_html}
 <div class="card"><h2>issues</h2>{"".join(cards)}</div>
+{commercial_html}
 </div></body></html>"""
 
 

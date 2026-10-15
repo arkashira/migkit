@@ -10730,10 +10730,11 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 known[(db, t)] = int((row or {}).get("largest") or 0)
             except Exception:  # noqa: BLE001 - not sized: as asked
                 known[(db, t)] = 0
-        widest = known[(db, t)]
         if not widest:
             return most
-        return max(0, min(int(most), self.DIGEST_MEMORY // (2 * widest) - 1))
+        from .. import tuning
+        mem = int(tuning.value("postgres.DIGEST_MEMORY", getattr(self, "hop", None)))
+        return max(0, min(int(most), mem // (2 * widest) - 1))
 
     #: the types whose values a row's digest takes as their length and md5
     #: where they are wider than `canon.WIDE`: `octet_length` reads their
@@ -12350,8 +12351,17 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             cpus = None
         if cpus is None and int(workers) > 8:
             cpus = int(workers) // 2
+        if cpus is None:
+            try:
+                mpw = self._psql(side, db, "select current_setting('max_parallel_workers', true)").strip()
+                if mpw and mpw.isdigit() and int(mpw) > 0:
+                    cpus = int(mpw)
+            except Exception:
+                cpus = None
         if cpus:
             out["cpus"] = cpus
+        else:
+            out["unknown_capacity"] = True
         return out
 
     # --- what the resource model measures (`migkit.model`) ----------------

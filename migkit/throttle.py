@@ -47,6 +47,11 @@ LAG_SECONDS = 30.0
 # of replica lag by default; 5s is set, not measured, so an ordinary wobble
 # does not brake every table.
 REPLICA_RISE = 5.0
+
+
+def replica_rise(hop=None):
+    from . import tuning
+    return tuning.value("throttle.REPLICA_RISE", hop)
 # Never sample health more often than this: the probe must not become load.
 PROBE_EVERY = 5.0
 # Backoff bounds per wait.
@@ -71,16 +76,17 @@ class Health:
         #: distance behind its primary
         self.replica = bool(replica)
 
-    def stressed(self, least_lag=None):
+    def stressed(self, least_lag=None, hop=None):
         """Why this side wants the work to back off, or "". `least_lag`
         is the least lag this run has seen of it, for a replica's brake."""
         if self.busy_ratio is not None and self.busy_ratio >= BUSY_RATIO:
             return f"sessions at {self.busy_ratio:.0%} of the limit"
         if self.lag_seconds is not None and self.lag_seconds >= LAG_SECONDS:
             return f"replication {self.lag_seconds:.0f}s behind"
+        rise_limit = replica_rise(hop)
         if self.replica and self.lag_seconds is not None \
                 and least_lag is not None \
-                and self.lag_seconds - least_lag >= REPLICA_RISE:
+                and self.lag_seconds - least_lag >= rise_limit:
             return (f"the replica read fell {self.lag_seconds - least_lag:.0f}s"
                     " further behind its primary while it was read")
         return ""

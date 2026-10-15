@@ -1355,6 +1355,35 @@ class Hop:
         bare PostgreSQL name outside its schema."""
         return not self.excluded(db, *self.parts_of(table, engine))
 
+    def takes_partition(self, db, leaf, root):
+        """Whether a partition (leaf: [schema, name]) is taken by the hop,
+        given its partitioned table (root: [schema, name]):
+        - If a rule specifically names the partition itself (by its own name
+          or schema.name), that rule decides.
+        - Otherwise, it goes by its table (root)."""
+        leaf_parts = [leaf] if isinstance(leaf, str) else list(leaf)
+        root_parts = [root] if isinstance(root, str) else list(root)
+        leaf_names = [leaf_parts[-1], ".".join(leaf_parts)]
+        root_names = [root_parts[-1], ".".join(root_parts)]
+        fold = self.folds_case()
+
+        for pat in (self.exclude or ()):
+            if any(name_matches(c, pat, fold) for c in leaf_names):
+                if not any(name_matches(rc, pat, fold) for rc in root_names):
+                    return False
+                if pat in leaf_names and pat not in root_names:
+                    return False
+
+        for pat in (self.include or ()):
+            if any(name_matches(c, pat, fold) for c in leaf_names):
+                if not any(name_matches(rc, pat, fold) for rc in root_names):
+                    return True
+                if pat in leaf_names and pat not in root_names:
+                    return True
+
+        return not self.excluded(db, *root_parts)
+
+
     def parts_of(self, table, engine=None, bare_in=None):
         """A table's listed name (`public.orders`, `orders`,
         `public."v1.orders"`) as the parts every rule of the hop is asked
@@ -2357,10 +2386,32 @@ def get_hop(name):
     read, and a name that is not one is said with the nearest that is."""
     import copy
     import difflib
+    from . import addresses
+    if addresses.is_address(name) or "://" in str(name):
+        engine, ep, dbs = addresses.parse(str(name), "source")
+        raw = {
+            "engine": engine,
+            "source": ep,
+            "target": copy.deepcopy(ep),
+            "databases": dbs,
+        }
+        return build_hop("connection-only", raw, {})
     data, memo = _checked()
     hops = data.get("hops") or {}
     key = next((k for k in hops if str(k) == str(name)), None)
     if key is None:
+        src = os.environ.get("MIGKIT_SOURCE")
+        dst = os.environ.get("MIGKIT_TARGET")
+        if src and dst:
+            s_eng, s_ep, s_dbs = addresses.parse(src, "source")
+            t_eng, t_ep, t_dbs = addresses.parse(dst, "target")
+            raw = {
+                "engine": s_eng,
+                "source": s_ep,
+                "target": t_ep,
+                "databases": s_dbs or t_dbs,
+            }
+            return build_hop(str(name), raw, {})
         names = [str(k) for k in hops]
         near = difflib.get_close_matches(str(name), names, n=1, cutoff=0.6)
         raise SystemExit(f"unknown hop {name}"

@@ -132,6 +132,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 from . import canon
+from .barriers import TombstoneLedger
 
 TABLE = "migkit_origin"
 #: the whole-row policies a hop named before rules were per column; each
@@ -782,7 +783,7 @@ def _whole_row(kind, word, ranks):
 
 
 def settle(table_rules, classes, ranks, made, before, after, here,
-           keys=(), hints=None):
+           keys=(), hints=None, tombstones=None, table="", key=None):
     """What a batch's changes to one row come to, held to the target's row
     as it is now (`here`, None where it has none): `made` whether the
     batch's first change of it made it, `before` the row its first change
@@ -791,6 +792,11 @@ def settle(table_rules, classes, ranks, made, before, after, here,
     each set column's form (`_collection`). Pure: the same arguments give
     the same answer at either end, which is what makes the two agree."""
     hints = hints or {}
+    if tombstones is not None and key is not None and after is not None:
+        by_col = getattr(table_rules.default, "by", None)
+        v = after.get(by_col) if by_col else None
+        if tombstones.is_tombstoned(table, key, version=v):
+            return Settled("tombstone_suppressed", "keep", "tombstone", "tombstone")
     if made:
         if here is None:
             return Settled()
@@ -813,6 +819,8 @@ def settle(table_rules, classes, ranks, made, before, after, here,
         word = (table_rules.delete_missing if after is None
                 else table_rules.delete_vs_update)
         outcome, decision = _whole_row(kind, word, ranks)
+        if tombstones is not None and key is not None and after is None and outcome != "keep":
+            tombstones.record(table, key)
         return Settled(kind, outcome, decision, word)
     if before is None:
         # no before image: a row the target changed too is not seen
@@ -826,6 +834,10 @@ def settle(table_rules, classes, ranks, made, before, after, here,
     if after is None:
         word = table_rules.delete_vs_update
         outcome, decision = _whole_row("delete_origin_differs", word, ranks)
+        if tombstones is not None and key is not None and outcome != "keep":
+            by_col = getattr(table_rules.default, "by", None)
+            v = before.get(by_col) if before and by_col else None
+            tombstones.record(table, key, version=v)
         return Settled("delete_origin_differs", outcome, decision, word)
     return _merge("update_origin_differs", table_rules, classes, ranks,
                   before, after, here, keys, hints)
@@ -1073,7 +1085,7 @@ def _key_text(classes, key, names):
     return tuple(_text(classes.get(k, "text"), key[k]) for k in names)
 
 
-def resolve(pair, db, changes, log):
+def resolve(pair, db, changes, log, tombstones=None):
     """The changes to apply, each row held to the target's row as it is
     now (`settle`): a column only the target changed left out of what is
     written, one both changed settled by its rule, a counter moved by
@@ -1145,7 +1157,9 @@ def resolve(pair, db, changes, log):
                     " it - its changes go on")
             continue
         got = settle(tr, classes, ranks, made, before, after, here,
-                     set(keynames), hints)
+                     set(keynames), hints,
+                     tombstones=tombstones or getattr(pair, "_tombstones", None),
+                     table=table, key=key)
         if got.outcome == "blind":
             blind = True
             got = Settled()

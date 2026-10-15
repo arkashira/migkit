@@ -68,20 +68,21 @@ TUNABLES = {t.name: t for t in (
     Tunable("canon.WIDE", "the bytes past which a value is digested where"
             " it lies, not carried whole", _attr("canon", "WIDE"),
             "the largest value both servers digested in less time than"
-            " carrying it took"),
+            " carrying it took", adopted=True),
     Tunable("ranges.BUCKET_ROWS", "the rows of one bucket of a keyless"
             " table's hash", _attr("ranges", "BUCKET_ROWS"),
             "the rows one leaf scan hashed in the time a range is meant to"
-            " take"),
+            " take", adopted=True),
     Tunable("throttle.REPLICA_RISE", "the seconds a replica may fall"
             " further behind while it is read", _attr("throttle",
                                                       "REPLICA_RISE"),
             "the rise in the replica's lag that went with its reads"
-            " slowing"),
+            " slowing", adopted=True),
     Tunable("postgres.DIGEST_MEMORY", "the memory one PostgreSQL digest"
             " may hold", _attr("engines.postgres", "DIGEST_MEMORY",
                                "PostgresEngine"),
-            "the most a digest was seen to hold, with room over it"),
+            "the most a digest was seen to hold, with room over it",
+            adopted=True),
 )}
 
 _LOCK = threading.Lock()

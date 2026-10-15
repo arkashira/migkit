@@ -9045,6 +9045,225 @@ and operator workflow meet the criteria above. No implementation is included
 in this backlog change.
 
 
+### P0-VALIDATE.unattended: finish from a connection-only hop
+
+Owner clarification and observed validation failures, 2026-10-13. Status:
+OPEN. The normal operator supplies each side's endpoint, user, password and
+port, starts the intended task and waits for a trustworthy result. Discovery,
+method selection, deep validation, resource management, progress, recovery and
+reporting belong to migkit. No private launcher, runtime patch, manual worker
+tuning or repeated operator intervention is an acceptable completion path.
+Reuse P0-MINIMAL-INPUT, P0-AUTO-RESOURCES, P0-RESUME-ALL and the validation
+items above; this is evidence and acceptance for those owners, not a second
+controller. Destructive actions still require authorization; missing scope
+must not silently authorize access to every database.
+
+Observed in a read-only PostgreSQL validation run: `Hop.takes_partition` was
+called but absent from the installed code; its existing regression module
+could not collect because `needs_docker` was undefined, and another existing
+scope test referenced an absent `movers._left_out`. The structural comparison
+failed while fingerprinting a schema because JSON dictionary keys included
+tuples. Finishing required a private launcher restoring historical scope
+methods and adapting fingerprint serialization. CPU discovery failed and
+sizing reported a fallback of four CPUs while the target had two vCPUs;
+independent monitoring showed approximately 94% target CPU during a long
+checksum. That establishes missing capacity evidence, not proof that a
+particular concurrency value caused the slowdown. Large partitions exposed
+long periods without a completed database result. Raw comparisons also mixed
+application differences with replication staging/bookkeeping objects and
+managed ownership differences. These are workflow failures even where
+individual checks eventually succeed.
+
+| ID | Deliverable | Acceptance criteria |
+|---|---|---|
+| P0-VALIDATE.unattended.setup | Connection-only normal setup | Discover engine/version, supported access, existing task scope and dependencies from the hop and authorized metadata. Derive safe operational settings and the complete applicable check set, including deep checks and consistency boundaries. Ask only for irreducible intent or authorization. No algorithm, worker, timeout, deep-mode or checkpoint settings are required to obtain the strongest supported complete result. Explain unsupported guarantees before costly work. |
+| P0-VALIDATE.unattended.preflight | A runnable, compatible installed verifier | Check required method contracts and supported dependency/API versions before expensive reads. Fix the missing partition-scope integration and tuple-key schema fingerprinting in their shared owners; preserve deterministic, complete fingerprints without dropping keys or objects. Existing regression modules must collect and exercise the installed entry point. No runtime monkeypatch or custom launcher is required. A failed prerequisite is an actionable incomplete result, never a skipped check or a clean verdict. |
+| P0-VALIDATE.unattended.capacity | Observe and adapt without manual tuning | Use provider metadata and bounded engine/load probes when privileged CPU discovery is unavailable. Record unknown capacity explicitly; a fallback is not a measurement. Budget outer tasks, ranges, connections and server-side parallel workers together, accounting for both endpoints and other runs. Adapt work size, method and concurrency at safe boundaries from measured CPU, I/O, latency and progress, preserving full coverage and consistent evidence. Never provision resources or change database settings implicitly. |
+| P0-VALIDATE.unattended.progress | Durable progress through the slowest object | Persist and stream completed table/range/check evidence before the whole database ends. Report the current endpoint/object, last progress, measured rows/bytes, bottleneck and bounded ETA uncertainty without log inspection. Split large partitions and JSON/LOB work where correctness permits; manage snapshot lifetime and resume valid units automatically after interruption. A changed method or consistency window invalidates incompatible proofs. No full rescan of valid completed units and no downgrade to sampling or counts-only evidence. |
+| P0-VALIDATE.unattended.scope | Useful results and safe repair boundaries | Derive replication artifacts from task identity, catalogs and ownership rather than broad name-prefix exclusions. Separate application mismatches, protocol state, approved owner mappings and unknown differences while retaining raw evidence. Never classify an unexplained difference as expected. Keep sequence collision, grants, missing/extra/changed rows and unsupported checks visible. Generated SQL must not treat live replication internals as application repair targets or imply permission to apply it. |
+| P0-VALIDATE.unattended.proof | Prove the operator can leave it running | Through the installed command, run sandbox end-to-end cases with only connection fields and recoverable task intent. Cover restricted CPU probes, asymmetric capacity, nested parallelism, large partitioned JSON/LOB data, concurrent writes, replication artifacts, owner changes, injected data/schema/sequence/grant defects, dependency incompatibility and repeated interruption/resume. Measure operator actions, completion time, endpoint load and retry waste against a fixed baseline. Acceptance requires no private scripts, manual tuning, hidden omissions or human monitoring to reach the correct final result; follow the repository final-suite cadence. |
+
+All items remain OPEN. This records requirements and observed failures only;
+the temporary operational workarounds do not close implementation work.
+
+Owner clarification, 2026-10-13: this unattended contract applies to every
+current and future process, not only deep validation. The existing shared
+decision engine owns what to do, how to do it, how much work to admit and
+the effective values: methods, composition, ordering, batch/range sizes,
+concurrency at every level, throughput limits, timeouts, retry/backoff and
+recovery. Discover facts, measure representative work, choose within the
+required guarantees, execute, verify and reconsider remaining work as
+conditions change. Startup-only sizing, a fixed fallback presented as
+measured capacity, or a private script making these choices does not meet
+acceptance. Missing facts require safe bounded discovery or an explicit
+unsupported guarantee, never silent assumptions or manual operator tuning.
+
+Extend P0-DECISION-ALL.coverage and P0-AUTO-RESOURCES.route with each task's
+actual choices and effective values, their evidence and the shared owner
+that selected them; include managed-mover diagnosis and native retry/resume.
+Preserve deterministic safety constraints and authorization boundaries.
+Acceptance must exercise installed workflows under changing capacity,
+permissions, data shape and failures, proving that decisions adapt without
+operator intervention while coverage, ordering, consistency and resume
+guarantees hold. The normal user provides connection access and irreducible
+business intent, then receives progress and a verified result; no hidden
+human controller is part of the claimed automatic workflow.
+
+
+### P0-VALIDATE.mysql-query-lifecycle: no orphaned scans or blind replay
+
+Owner-authorized permanent fix, 2026-10-13. Status: OPEN; local implementation
+and sandbox evidence are partial, not completion. Reuse the existing query,
+checkpoint, resource-budget and decision owners; do not add a private controller.
+
+Observed: a full checksum on a roughly 350 GB table with a composite text
+primary key fell back to one unbounded scan. Client read deadlines were one
+hour; whole-query retries started four identical server scans roughly one hour
+apart while the older scans remained active. Current-run salt and server client
+PID attributes established ownership. Deep LOB sizing also repeated full scans
+per column, and source scan errors could be skipped. These observations do not
+establish a network failure as the initial trigger.
+
+Required before DONE:
+
+Owner clarification, 2026-10-14: recovery is a shared contract for every task
+and phase (move, CDC, check, verify and deep), across every current and future
+engine, engine pair, adapter and external execution backend. MySQL is the
+observed incident, not the implementation boundary. This is an engine-neutral
+recovery contract, with engine-specific reconciliation supplied by adapters.
+Reuse and connect existing ledgers, journals and durable state owners.
+Track a coverage matrix by engine, pair, operation and phase; mark unsupported
+recovery explicitly. No engine may claim resumability based only on another
+engine's tests. Acceptance requires fault/restart evidence for each supported
+path, including external worker/process state and native CDC positions.
+
+- Persist a task/phase/object/work-unit ledger with planned, running,
+  committed, interrupted, failed and uncertain states; retain attempts,
+  ownership, evidence, checkpoint positions and decision history outside temp
+  directories. A completed report is not a workflow recovery ledger.
+- Recover automatically after network loss, process termination, host reboot
+  and partial source/target failure. Reconcile in-flight server work and write
+  outcomes before retry; never blindly replay an uncertain write or query.
+- Resume all still-valid completed work, including completed tables and deep
+  LOB ranges. Validate endpoint identity, scope, schema, plan and snapshot/CDC
+  consistency before reuse. Expression/range fingerprints alone do not prove
+  unchanged data. If evidence is invalid, explain and rerun only the affected
+  units or dependency boundary; never silently reuse stale evidence.
+- Let the shared decision engine adapt query strategy, work size, concurrency,
+  rate and pauses to pressure on both source and target (CPU, memory, I/O,
+  latency, connections, locks and CDC lag), with hysteresis and bounded budgets.
+  Preserve completed coverage when replanning; do not silently downgrade full
+  verification to sampling or discard progress whenever batch size changes.
+- Prove restart recovery at each phase and commit boundary, including uncertain
+  outcomes, stale evidence, concurrent runs, unavailable telemetry and repeated
+  disconnects. Demonstrate no duplicate effects, orphan queries or reruns of
+  valid completed units, and expose the exact remaining work to the operator.
+
+
+- Reconcile exact connection/statement ownership, cancel and confirm server
+  termination before replay. When permissions, visibility or connectivity make
+  confirmation impossible, refuse replay with an actionable incomplete result.
+  Handle cancellation races, already-completed statements, disconnects and
+  process interruption without affecting other runs, applications or native DTS.
+- Bound and checkpoint complete checks for text, composite and skewed keys,
+  including very large repeated key prefixes. Preserve target-only rows at both
+  outer boundaries, full value fidelity, filters/mappings and required consistency.
+  Resume only compatible evidence; no sampling substitution or silent omissions.
+- Group LOB checks and use bounded work units. Persist completed maxima and
+  their validity conditions; a failed required scan is ERROR/incomplete, not PASS.
+- Use the shared decision engine to choose/adapt work-unit size and nested
+  source/target/server concurrency from actual rate and pressure. Prevent retry
+  amplification and coordinate overlapping verification runs automatically.
+- Publish current object/range, attempts, cancellation outcome, last progress
+  and uncertainty while work runs. Logs buffered until database completion do
+  not satisfy this acceptance criterion.
+- Prove the installed entry point on real sandbox databases with slow reads,
+  socket deadlines, unavailable cancellation permissions, interruption/resume,
+  skew, composite/text keys, target-only rows and simultaneous unrelated work.
+  Show no orphaned/overlapping attempts, no duplicate scan of valid completed
+  units, unchanged full-check correctness and no interference with other work.
+  Reconcile full-suite collection failures and record remaining gaps explicitly.
+
+Local patch: query cancellation/reconciliation, key-prefix ranges, grouped
+ranged LOB sizing and explicit LOB scan errors. Live sandbox checks establish
+retry non-overlap, text/composite checksum equality, outer-boundary detection
+and honest LOB failure reporting. Durable LOB resume, adaptive skew handling,
+installed workflow completion and complete regression proof remain owed.
+
+Owner priority, 2026-10-14: address this incident among the first implementation
+items, before feature expansion. Million-key ranges can still exceed query
+deadlines because LOB bytes and row cost vary. A failed whole-range query
+replays almost an hour of work; cancelling orphan attempts alone is not a fix.
+Measure byte/time cost, subdivide only outstanding coverage, preserve valid
+completed intervals during replanning and checkpoint each bounded sub-unit.
+Use adaptive shared decision budgets, not a longer timeout as the sole repair.
+Status remains OPEN: existing cancellation and fixed-range patches are partial;
+no automatic cost-aware planning or complete sub-unit recovery is proven.
+
+Additional observed case, 2026-10-15: deep charset replacement-character
+counting issues an unbounded aggregate over a large table, separately from
+LOB maxima. The live source statement scanned order_items.note for over
+18 minutes. Bound and checkpoint every required deep scan, including charset
+and rendering/normalization probes; grouping only LOB scans is insufficient.
+Classify live SQL by its actual operation: char_length/replace aggregates are
+not LOB maxima. Preserve full coverage and aggregate correctness when splitting.
+This observation does not establish a timeout, replay or network failure.
+Code evidence from the same investigation: replacement-character scanning
+catches any source/target exception and continues; an empty findings list then
+emits OK. Required failed scans must remain ERROR/incomplete, with explicit
+column coverage (the current loop selects at most 30 columns). Never equate
+absence of findings with a successfully completed scan. Target SQL fingerprints
+reappeared on new connections during monitoring; record actual attempt causes
+to distinguish replay from completed work, without assuming timeout or network.
+
+
+
+Owner acceptance extension, 2026-10-15: maximize measured end-to-end verification
+throughput with full correctness and continuous adaptation across all engines,
+pairs, adapters and check/deep/verify phases. This is a shared decision-engine
+contract, not a MySQL-only optimization.
+
+- Build a shared scan plan: fuse compatible column checks, charset/replacement
+  counts, LOB maxima and other aggregates when doing so reduces total cost.
+  Preserve each check's semantics, coverage, null handling and evidence; fusion
+  must not create oversized expressions, packets or unbounded memory use.
+- Estimate row/byte/LOB and query cost from bounded probes and live timings.
+  Maintain a durable central work queue with cost-aware units, critical-path
+  scheduling, bounded work stealing and explicit engine/backend capabilities.
+- Revisit strategy, work-unit size, concurrency and rate during execution using
+  measured useful throughput and source/target CPU, memory, I/O, latency, locks,
+  connections and CDC lag. Use hysteresis and shared resource budgets; stop
+  increasing concurrency when it harms throughput, correctness or stability.
+- Replan only outstanding work and preserve valid committed coverage. Recover
+  after network/process/host failure using per-unit ledger/state, exact query
+  ownership and uncertain-outcome reconciliation; never silently replay writes.
+- Prove equivalence to complete verification under the required snapshot/CDC
+  fence, including disjoint/exhaustive coverage, aggregate merging, target-only
+  rows, skew, large values and NULL/encoding edge cases. Sampling is not an
+  implicit substitute for full verification. Required failed scans stay
+  incomplete/error, never OK because findings are empty.
+- Benchmark complete workflows, not only cached small queries: compare elapsed
+  time, useful throughput, coverage/correctness, endpoint pressure and restart
+  recovery with the baseline. Publish per-engine/path evidence and calibrated
+  remaining-work ETA; record unsupported paths and residual gaps explicitly.
+
+Status: OPEN. Existing local recovery tuning does not satisfy this acceptance.
+
+Local implementation update, 2026-10-15: MySQL charset deep now has a
+fused-column bounded-range path using shared sizing.Pace and ranges.Slots,
+source/target concurrency, shared resource signals and explicit incomplete
+scan errors. It writes per-unit progress, explicitly not a resumable result
+ledger. Focused mocked tests prove merged replacement counts including NULL
+and target-only rows, concurrent execution and honest interrupted-read status.
+Live sandbox equivalence/performance, automatic cost-based range sizing,
+global nested budgets and all-engine integration remain unproven. The already
+running worker retains its loaded sequential implementation to avoid losing
+in-memory completed deep results. This is partial implementation, not DONE.
+
+Dependencies: P0-DECISION-ALL, P0-RESUME-ALL, P0-ETA-ALL and
+P0-CONNECTION-PROGRESS. Prioritize with the first incident-recovery work.
+
+
 ## P0-DECISION-ALL: intelligent decisions throughout every task
 
 Owner clarification, 2026-10-05. Status: OPEN. The decision engine is the
@@ -9876,3 +10095,140 @@ Persist scoped/versioned work identity, dependencies, completed evidence, pendin
 Use shared decision/execution/persistence owners for automatic recovery/replanning where safe. Handle connection loss, process/host/controller crash, timeout, cancellation, resource pressure and restart; differentiate explicit pause/cancel from transient failure so no automation overrides user intent. Safely invalidate cached evidence on schema/scope/method/source-window changes. Maintain compatibility/version migration for saved state and authoritative artifact lineage.
 
 Acceptance: inventory every execution entry point and work unit with its resume contract, guarantees and proof; no unsupported path hidden behind a broad claim. Sandbox interruption before/after effects, during checkpoint publication and after ambiguous acknowledgements must resume to the correct final state without duplication, loss or weaker coverage. Cover nested parallel work, changing resources, repeated resume, upgrades, cutover critical sections and rollback. Test per-task/per-engine coverage plus representative full workflows under repository final-suite cadence. Extends P0-RESILIENCE-ALL, P0-ARTIFACTS, P0-VALIDATE.no-silent-skip and P0-DECISION-ALL; no parallel recovery controller.
+
+
+## P0-ETA-ALL: calibrated remaining-time estimates across every engine and task
+
+Owner request, 2026-10-14. Status: OPEN. Current verification estimates elapsed
+time against completed phase counts, which do not represent remaining work on
+large or skewed tables. Reuse the shared decision engine, durable work ledger
+and resource telemetry; do not add a separate estimator/controller.
+
+Required before DONE:
+
+- Cover every engine, pair, adapter and task, including move, CDC, check,
+  verify and deep. Estimate outstanding work from actual units, rows/bytes,
+  scan/query cost and dependencies rather than equally weighted phase counts.
+  Distinguish known remaining work from undiscovered or unmeasured work.
+- Use observed throughput and per-unit duration, recent pressure on both
+  endpoints, concurrent work and the dependency critical path. Avoid double
+  counting parallel durations. Include retries, reconciliation and cooldowns;
+  distinguish active-work estimates from wall-clock completion estimates.
+- Publish a time range, confidence, measurement timestamp, evidence and scope
+  alongside the central estimate. During warmup, missing telemetry, blocked
+  connectivity, unknown backlog or changing workload, report insufficient
+  evidence or conditional ETA instead of an invented precise deadline. Define
+  CDC catch-up ETA separately; never promise completion if ingest outruns apply.
+- Persist estimation history and valid completed work across interruption and
+  reboot. Recompute remaining work after resume, invalidation, repartitioning
+  or resource-budget changes without discarding valid progress. Flag stale
+  estimates and explain material revisions; use smoothing without hiding stalls.
+- Establish an empirical accuracy and coverage gate before claiming reliable
+  ETA. Record predictions at multiple horizons against actual completion;
+  measure median and tail absolute/relative errors, interval coverage and
+  bias by engine, task, scale and pressure. Set explicit release thresholds
+  from representative observed runs, including network loss, throttling, skew,
+  retries and resume. Do not claim reliability from one fast happy-path test.
+
+Dependencies: P0-RESUME-ALL, P0-DECISION-ALL, P0-VALIDATE.unattended.capacity,
+P0-VALIDATE.unattended.progress and P0-VALIDATE.mysql-query-lifecycle.
+
+
+## P0-CONNECTION-PROGRESS: detect and reconcile client/server progress mismatch
+
+Owner request, 2026-10-14. Status: OPEN. Priority: first incident-recovery work
+alongside P0-VALIDATE.mysql-query-lifecycle, before feature expansion. Applies
+to every engine, adapter and external worker where observations are available.
+
+Observed live incident: a verifier worker waited in SSL poll while its exactly
+attributed server connection was idle (Sleep) for approximately 48 minutes.
+Closing only that verified idle connection caused the same worker to reconnect
+and continue bounded LOB reads, without restarting the process. The exact
+packet/tunnel/TLS failure was not captured; do not claim a proven network fault.
+New connections and a SELECT 1 probe succeeded during investigation.
+
+Existing MySQL behavior uses a 3600-second application read deadline and
+best-effort TCP keepalive; keepalive configuration errors are suppressed.
+No automatic client/server progress-mismatch reconciliation is established.
+A separate diagnostic socket showed configured keepalive, which does not
+establish the effective settings or packet behavior of the failed socket.
+
+Required before DONE:
+
+- Persist attempt start, exact server-session ownership, operation, work-unit
+  position, query/result timestamps, last useful progress and retry reason.
+  Exclude credentials and sensitive query literals from telemetry.
+- Distinguish server computation, result transfer, application read stalls,
+  idle sessions, locks and unavailable observations. An idle server alone is
+  not proof of failure; classify the operation and driver/protocol stage.
+- Use bounded operation-specific progress/deadline budgets selected by the
+  shared decision engine. Expose actual keepalive availability/settings and
+  failures; transport liveness must not substitute for application progress.
+- When a mismatch is substantiated, cancel/release only the exactly owned
+  session and reconcile its outcome before retry. Preserve completed units
+  and accumulated deep results. Never automatically replay uncertain writes.
+  When ownership or outcome cannot be established, report actionable unknown.
+- Capture safe timestamped client/server/tunnel evidence before recovery where
+  available, including bounded failure-class telemetry. Prove fault recovery
+  with server-idle/client-wait, stalled transfer, disconnect, slow legitimate
+  queries, stale session IDs and unavailable privileges on each supported path.
+  Bound stall detection/recovery time and show unrelated sessions unaffected.
+
+Dependencies: P0-RESUME-ALL, P0-DECISION-ALL,
+P0-VALIDATE.mysql-query-lifecycle and P0-ETA-ALL.
+
+
+## P0-VERIFY-EXECUTION: default adaptive verification plans, not fixed nested loops
+
+Owner rejection and requirement, 2026-10-15. Status: OPEN. Priority: first
+implementation work with #502 and #504. Increasing workers or adding a Pace
+class does not satisfy this requirement. All current/future engines, pairs,
+adapters and external backends must use the normal shared execution contract;
+no operator flag or manual tuning is required to activate it.
+
+Observed gaps and required acceptance:
+
+- Audit actual entry-point-to-query paths for check, deep, verify, delta, move
+  and CDC. Record whether sizing, pacing, resource probes, progress, ledger and
+  safe recovery are called, merely present, bypassed or unsupported. Static
+  absence of a local Pace reference is only a candidate, not proof of bypass.
+- Replace fixed per-column/per-side full scans and private nested pools with a
+  dependency-aware shared scan plan. Fuse compatible column/check aggregates
+  into one bounded read when cheaper; preserve semantics, limits, full coverage,
+  consistency and independent evidence. Avoid reading a huge table once per
+  column, and avoid duplicating scans already covered by valid evidence.
+- Choose the verification strategy as well as concurrency: compare measured
+  end-to-end cost and correctness constraints of compatible engines/tools,
+  grouped scans, indexed ranges and hierarchical localization. Full validation
+  still covers every required row; localization of differences is not a
+  substitute for establishing full parity. Sampling is never a silent fallback.
+- Run independent source/target work concurrently and distribute pending units
+  through a shared cost-aware queue. Coordinate outer and nested worker budgets
+  across databases/checks so separate pools cannot multiply endpoint pressure.
+  Sequential paths require an explicit consistency, capability or dependency
+  reason, with a visible unsupported-path status where no safe parallel path exists.
+- Adapt query strategy, unit boundaries, concurrency and rate from useful
+  throughput, measured row/byte/LOB cost and both endpoints' CPU, memory, I/O,
+  locks, connections and lag. Use bounded probes, hysteresis and backpressure.
+  Fixed ID widths, fixed worker counts and one startup sizing decision are not
+  completion. Never mutate already running units during replanning.
+- Preserve every valid committed unit during plan changes, network loss and
+  reboot; reconcile uncertain outcomes and exact query ownership. Keep distinct
+  semantics for result aggregation, snapshot validity and CDC positions. Failed
+  required scans stay incomplete/error; no swallowed exceptions or false OK.
+- Publish live phase/table/range, coverage, useful rate, decision history,
+  stalls and calibrated ETA. Prove automatic adoption by installed normal entry
+  points on each engine/path, not only helper tests or private recovery scripts.
+- Benchmark baseline versus complete workflows on representative scale, sparse
+  and skewed keys, large values, cold/warm cache, constrained endpoints and
+  interrupted runs. Demonstrate faster total completion with equal correctness,
+  bounded endpoint pressure and no duplicate effects or discarded valid work.
+
+Partial local work is not DONE: shared ReadPool/Pace wiring and fused MySQL
+charset/LOB reads exist locally; four focused mocked tests passed. Runtime
+sandbox/end-to-end proof, global nested budgets, dynamic cost-based splitting,
+complete strategy planning and all-adapter adoption remain open. The existing
+long-running verifier still holds its earlier sequential implementation.
+
+Dependencies: P0-DECISION-ALL, P0-AUTO-RESOURCES.adapt, P0-RESUME-ALL,
+P0-VALIDATE.mysql-query-lifecycle, P0-CONNECTION-PROGRESS and P0-ETA-ALL.

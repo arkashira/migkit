@@ -2529,9 +2529,14 @@ def _include_problems(where, raw, probe):
         return out
     try:
         got = scope_patterns(got)
-        excluded = scope_patterns(raw.get("exclude"))
     except SystemExit as e:
         return [Problem("error", f"{where}.include", str(e))]
+    try:
+        excluded = scope_patterns(raw.get("exclude"))
+    except SystemExit as e:
+        if not out:
+            out.append(Problem("error", f"{where}.exclude", str(e)))
+        return out
     fold = probe.folds_case()
     for i, p in enumerate(got):
         if not isinstance(p, str) or not p.strip() or p.strip() != p \

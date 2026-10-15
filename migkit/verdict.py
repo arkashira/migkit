@@ -931,6 +931,23 @@ def _counts(records, key):
     return out
 
 
+def _by_database(records):
+    out = {}
+    for r in records:
+        sc = str(r.get("scope", "")).strip()
+        db_name = sc.split()[0].split(".")[0] if sc else "global"
+        info = out.setdefault(db_name, {"totals": {}, "issues": 0, "status": "same"})
+        st = r.get("status") or "unknown"
+        info["totals"][st] = info["totals"].get(st, 0) + 1
+        if st in ("diff", "error"):
+            info["issues"] += 1
+            info["status"] = "different" if st == "diff" else "error"
+        elif st in ("warn", "skip", "incomplete") and info["status"] == "same":
+            info["status"] = "incomplete"
+    return out
+
+
+
 def fingerprint(records, scope=None):
     """Stable hash of the findings, ignoring wording and ordering.
 
@@ -946,7 +963,16 @@ def fingerprint(records, scope=None):
     """
     rows = sorted((r.get("category", ""), str(r.get("scope", "")),
                    r.get("status", "")) for r in records)
-    canonical = json.dumps([rows, scope] if scope else rows,
+
+    def _json_safe(o):
+        if isinstance(o, dict):
+            return {".".join(str(x) for x in k) if isinstance(k, (tuple, list)) else str(k): _json_safe(v)
+                    for k, v in sorted(o.items(), key=lambda i: ".".join(str(x) for x in i[0]) if isinstance(i[0], (tuple, list)) else str(i[0]))}
+        if isinstance(o, (list, tuple)):
+            return [_json_safe(x) for x in o]
+        return o
+
+    canonical = json.dumps([_json_safe(rows), _json_safe(scope)] if scope else _json_safe(rows),
                            separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -1008,6 +1034,29 @@ def contract_said(table, value):
     return (f"{table}: {', '.join(op for op in OPS if op in got)}"
             + "".join(f"; {op}s are not carried - {_LEAVES[op]}"
                       for op in left))
+def _classify_finding(r):
+    from . import leftovers
+    scope = str(r.get("scope", "")).strip()
+    parts = scope.replace("/", ".").split()
+    target_ident = parts[-1] if parts else ""
+    table_parts = target_ident.split(".")
+    tbl = table_parts[-1] if table_parts else ""
+    sch = table_parts[-2] if len(table_parts) > 1 else None
+    origin = leftovers.artifact_origin(tbl, sch)
+    is_artifact = bool(origin)
+    return {
+        "category": r.get("category", ""),
+        "check": r.get("check", ""),
+        "scope": r.get("scope", ""),
+        "status": r.get("status", ""),
+        "defect_class": "replication_artifact" if is_artifact else "application_defect",
+        "is_replication_artifact": is_artifact,
+        **({"artifact_origin": origin} if origin else {}),
+        "detail": r.get("detail", ""),
+        "report": r.get("report", ""),
+        "fix_hint": r.get("fix_hint", ""),
+        **({"kept_by_hop": r["kept_by_hop"]} if r.get("kept_by_hop") else {}),
+    }
 
 
 def summarize(hop, records, engine=None, load=None, coverage=None):
@@ -1075,19 +1124,12 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
                                 or got.status == "error"),
         "totals": totals,
         "by_category": _counts(records, "category"),
+        "by_database": _by_database(records),
         "fingerprint": fingerprint(records, _narrowing(hop, scope)),
         **({"load": load} if load else {}),
         **({"digests_unwritten": unwritten} if unwritten else {}),
         "findings": [
-            {"category": r.get("category", ""),
-             "check": r.get("check", ""),
-             "scope": r.get("scope", ""),
-             "status": r.get("status", ""),
-             "detail": r.get("detail", ""),
-             "report": r.get("report", ""),
-             "fix_hint": r.get("fix_hint", ""),
-             **({"kept_by_hop": r["kept_by_hop"]}
-                if r.get("kept_by_hop") else {})}
+            _classify_finding(r)
             for r in records
             if r.get("status") not in ("ok", "skip") or r.get("stale")
         ],

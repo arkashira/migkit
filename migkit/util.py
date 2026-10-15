@@ -1,10 +1,11 @@
+import math
 import shutil
 import subprocess
 import sys
 import sysconfig
 import time
-
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 _BASE = Path(__file__).resolve().parent.parent
 
@@ -277,17 +278,171 @@ def stamp(when=None):
     return at.isoformat(timespec="seconds")
 
 
-class Timer:
-    def __init__(self):
-        self.t0 = time.monotonic()
+class ETA(NamedTuple):
+    seconds: Optional[float]
+    lower_bound: Optional[float]
+    upper_bound: Optional[float]
+    confidence: float
+    formatted: str
+
+    def __str__(self):
+        return self.formatted
+
+
+class CalibratedETA:
+    def __init__(self, t0=None, alpha=0.3, warmup_samples=3, clock=None):
+        self.clock = clock or time.monotonic
+        self.t0 = self.clock() if t0 is None else float(t0)
+        self.alpha = float(alpha)
+        self.warmup_samples = int(warmup_samples)
+        self._last_time = None
+        self._last_done = None
+        self._last_cost = None
+        self._sample_count = 0
+        self._smoothed_rate = None
+        self._smoothed_cost_rate = None
+        self._rates = []
+        self._cost_rates = []
 
     def elapsed(self):
-        return time.monotonic() - self.t0
+        return self.clock() - self.t0
 
-    def eta(self, done, total):
-        if not done or not total:
-            return "?"
-        return human_secs(self.elapsed() / done * (total - done))
+    def update(self, done, cost=None, timestamp=None):
+        now = self.clock() if timestamp is None else float(timestamp)
+        done = float(done)
+        cost = float(cost) if cost is not None else None
+
+        if self._last_time is None:
+            prev_t = self.t0
+            prev_done = 0.0
+            prev_cost = 0.0 if cost is not None else None
+        else:
+            prev_t = self._last_time
+            prev_done = self._last_done
+            prev_cost = self._last_cost
+
+        dt = now - prev_t
+        ddone = done - prev_done
+        dcost = (cost - prev_cost) if (cost is not None and prev_cost is not None) else None
+
+        if dt <= 0:
+            return
+
+        recorded = False
+        if ddone > 0:
+            r = ddone / dt
+            self._rates.append(r)
+            if len(self._rates) > 50:
+                self._rates.pop(0)
+            if self._smoothed_rate is None:
+                self._smoothed_rate = r
+            else:
+                self._smoothed_rate = self.alpha * r + (1.0 - self.alpha) * self._smoothed_rate
+            self._last_done = done
+            recorded = True
+
+        if dcost is not None and dcost > 0:
+            cr = dcost / dt
+            self._cost_rates.append(cr)
+            if len(self._cost_rates) > 50:
+                self._cost_rates.pop(0)
+            if self._smoothed_cost_rate is None:
+                self._smoothed_cost_rate = cr
+            else:
+                self._smoothed_cost_rate = self.alpha * cr + (1.0 - self.alpha) * self._smoothed_cost_rate
+            self._last_cost = cost
+            recorded = True
+
+        if recorded:
+            self._sample_count += 1
+            self._last_time = now
+
+    record = update
+
+    def eta_detailed(self, done, total, remaining_cost=None, timestamp=None):
+        now = self.clock() if timestamp is None else float(timestamp)
+        if total is None or total <= 0:
+            return ETA(None, None, None, 0.0, "?")
+
+        if done > 0 and (self._last_done is None or done > self._last_done):
+            self.update(done=done, timestamp=now)
+
+        if done >= total or (remaining_cost is not None and remaining_cost <= 0):
+            return ETA(0.0, 0.0, 0.0, 1.0, human_secs(0))
+
+        if remaining_cost is not None:
+            rem = float(remaining_cost)
+            if self._smoothed_cost_rate is not None and self._smoothed_cost_rate > 0:
+                rate = self._smoothed_cost_rate
+                rates = self._cost_rates
+            else:
+                rate = self._smoothed_rate
+                rates = self._rates
+        else:
+            rem = float(total - done)
+            rate = self._smoothed_rate
+            rates = self._rates
+
+        if rate is None or rate <= 0:
+            elapsed = now - self.t0
+            if done > 0 and elapsed > 0:
+                rate = done / elapsed
+            else:
+                rate = None
+
+        if self._sample_count < self.warmup_samples:
+            if rate is not None and rate > 0:
+                sec = rem / rate
+                lb = max(0.0, sec * 0.2)
+                ub = sec * 5.0
+                conf = round(min(0.4, self._sample_count * 0.15), 2)
+                return ETA(sec, lb, ub, conf, "? (warmup)")
+            return ETA(None, None, None, 0.0, "? (warmup)")
+
+        if rate is None or rate <= 0:
+            return ETA(None, None, None, 0.0, "?")
+
+        sec = rem / rate
+        n = len(rates)
+        if n >= 2:
+            mean = sum(rates) / n
+            var = sum((x - mean) ** 2 for x in rates) / (n - 1)
+            std = math.sqrt(var)
+            cv = std / mean if mean > 0 else 1.0
+        else:
+            cv = 0.0
+            std = 0.0
+
+        se = std / math.sqrt(max(1, n))
+        delta_r = 1.96 * se
+        r_low = max(0.05 * rate, rate - delta_r)
+        r_high = rate + delta_r
+        t_low = rem / r_high
+        t_high = rem / r_low
+        delta = (t_high - t_low) / 2.0
+
+        lb = max(0.0, sec - delta)
+        ub = sec + delta
+
+        fn = min(1.0, n / 6.0)
+        fvar = max(0.1, 1.0 - min(0.9, cv))
+        fprog = 0.8 + 0.2 * min(1.0, done / total)
+        conf = round(min(1.0, max(0.1, fn * fvar * fprog)), 2)
+
+        if conf >= 0.75 or delta < 0.5:
+            formatted = human_secs(sec)
+        else:
+            formatted = f"~{human_secs(sec)} (±{human_secs(delta)})"
+
+        return ETA(sec, lb, ub, conf, formatted)
+
+    def eta(self, done, total, remaining_cost=None, timestamp=None):
+        return self.eta_detailed(done, total, remaining_cost=remaining_cost, timestamp=timestamp).formatted
+
+
+class Timer(CalibratedETA):
+    def __init__(self, t0=None, alpha=0.3, warmup_samples=3):
+        super().__init__(t0=t0, alpha=alpha, warmup_samples=warmup_samples)
 
 
 class PrivateFile:

@@ -285,6 +285,14 @@ class Ladder:
         self.undo_dir = self.target.hop.report_dir(db) / "undo"
         self.found = self.sides = self.kept = None
         self.why_not = ""
+        from . import leftovers
+        leaf = str(self.table).split(".")[-1]
+        schema = str(self.table).split(".")[-2] if "." in str(self.table) else None
+        artifact_source = leftovers.artifact_origin(leaf, schema)
+        if artifact_source:
+            self.why_not = (f"{self.table} is a replication/mover bookkeeping"
+                            f" artifact ({artifact_source}); not an application"
+                            f" repair target")
         try:
             self.found = self.target.repair_found(db, self.table)
             if not getattr(self.target, "ROWS_PUT_BACK", True):
@@ -593,6 +601,8 @@ class Ladder:
         """The plan's line: the way that would be taken, what it does to
         the target, about how long, and how a rollback puts it back."""
         if not self.ready:
+            if "replication/mover bookkeeping artifact" in self.why_not:
+                return f"{self.table}: not repairable ({self.why_not})"
             return (f"{self.table}: {self.named:,} rows to be repaired by"
                     f" key ({self.why_not})")
         got = decide.climb(f"{self.db}.{self.table}: the repair", RUNGS,
@@ -636,6 +646,10 @@ class Ladder:
         out = Outcome(self.table)
         began = time.monotonic()
         if not self.ready:
+            if "replication/mover bookkeeping artifact" in self.why_not:
+                out.way = ""
+                out.said = out.reason = self.why_not
+                return out
             self.eng.apply(self.db, self.action)
             out.said = f"{self.named:,} rows repaired by key"
             out.reason = self.why_not

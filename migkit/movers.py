@@ -25,6 +25,7 @@ from .tools import IMAGES, PROGRAM
 from .tools import names as tool_names
 from .tooluse import TOPPED, UNUSED, USED
 from .util import PrivateFile, report_name, tool_env, which  # noqa: F401
+from .fk_window import ForeignKeyWindow as _ForeignKeyWindow, hold_or_sequence_dependent_tables
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper", "mysqlsh",
         "pgloader", "mongodump", "mongosync", "riotx", "native", "pgpull",
@@ -181,12 +182,15 @@ def choice(engine, table="", hop=None, go=False):
                   legs=lambda: legs.facts(hop),
                   rtt=lambda: legs.round_trips(hop))
     ladder = _ladder()
+    costs = None
     if hop is not None:
+        from .decide import HopCosts
+        costs = HopCosts(hop)
         # a way that needs a change on the source takes the hop's answer
         # to it (`sourcechange`): offered, never assumed
         sourcechange.put_answers(hop, facts, ladder)
     return climb(table or engine, ladder, facts,
-                 ("resume by chunk",) if table else ())
+                 ("resume by chunk",) if table else (), costs=costs)
 
 
 def chosen(engine, table="", hop=None, go=False):
@@ -2525,6 +2529,19 @@ def _asked(hop, name, roots=None):
     from .util import split_table
     name = str((roots or {}).get(name, name))
     return [p for p in split_table(_names_engine(hop), name) if p]
+
+
+def _left_out(hop, db, table, roots=None):
+    """Whether `table` (or partition) is left out by the hop."""
+    if roots and table in roots:
+        from .util import split_table
+        eng = _names_engine(hop)
+        leaf = [p for p in split_table(eng, str(table)) if p]
+        root = [p for p in split_table(eng, str(roots[table])) if p]
+        if hasattr(hop, "takes_partition"):
+            return not hop.takes_partition(db, leaf, root)
+    return hop.excluded(db, *_asked(hop, table, roots))
+
 
 
 def rules_by_name(hop):
