@@ -8283,6 +8283,30 @@ range digest, the fenced re-check, exact batches or the final proof.
    target share a provider, checksums taken while streaming (S3's
    CRC64NVME comes free) - never a second read to verify.
 
+   Done (R20.5-R20.7, part, 2026-10-16): `planner.overlap` lays a move's
+   copies on its lanes, each table's index builds once it lands, each
+   range's check once it lands and the tail once the first table is in
+   (only where a position before every read follows the changes); three
+   ways - every table as soon as a lane is free, within the foreign
+   keys' waves, one after another - ranked by their makespan through
+   `decide` and each proved by `guarantees.breaks` on its own schedule,
+   said in `progress.json` (`overlap_said`). `movers.choose_compression`
+   packs one sample at three levels across the codec's range (bounded:
+   no higher level once one is slower than the link), checks each comes
+   back, and picks per leg from the link and both sides' free cores;
+   `Compressing.boundary` chooses again when the measure moves by more
+   than a tie. `carriers.move_file` copies inside one object store
+   (ranged part copies), else moves parallel ranged parts, each part's
+   digest taken as it streams and checked as the store takes it, the
+   whole checked at the end; part size and streams from `measure_link`
+   (round trip, one stream, streams doubled while the rate rises).
+   Tested: `tests/test_phases_overlap_and_legs_are_measured.py`.
+   Not done: the engines' copy does not run on `overlap`'s schedule yet
+   (it plans and says it); the relay's legs do not call
+   `choose_compression` yet; Azure and Google stores move as one stream;
+   a copy inside the store is checked against the parts it reported,
+   not against the source object's own checksum.
+
 **Verifying**
 8. **The proof kept up as the data moves (incremental multiset
    hashing):** the digest is a sum of row hashes, so it can be

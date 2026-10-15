@@ -834,7 +834,7 @@ class Ewma:
 
 
 def progress(where, pace, total_rows, model=None, done=False, ways=(),
-             eta=None):
+             eta=None, overlap=None):
     """What the move has done and how long is left, kept as
     `progress.json` beside its reports for `watch` and the metrics: rows
     done, the recent rate (the pace's moving average), the time left of
@@ -843,7 +843,8 @@ def progress(where, pace, total_rows, model=None, done=False, ways=(),
     before the one the model named from its probes. `done` once the copy
     has ended: its whole rate then. `eta` answers the copy's own estimate
     from its units (`Engine.forecast`), kept with its range, confidence
-    and evidence for `watch`."""
+    and evidence for `watch`; `overlap` the phases' `Overlap`, said with
+    it."""
     import os
     import time
     rate, rows = pace.recent, pace.total
@@ -868,6 +869,10 @@ def progress(where, pace, total_rows, model=None, done=False, ways=(),
                      "way": w.get("chosen"),
                      "seconds_a_row": w.get("seconds_a_row")}
                     for w in ways or ()][:50]}
+    if overlap is not None:
+        # which phases run beside which (`overlap`), as planned
+        got["overlap"] = overlap.as_evidence()
+        got["overlap_said"] = overlap.lines()
     if eta is not None and not done:
         try:
             e = eta()
@@ -968,3 +973,185 @@ class CatchUp:
         self.sample()
         got = self.phases()
         return got[0].line() if got else ""
+
+
+# ---- phases overlapped (backlog R20.5) --------------------------------------
+
+@dataclass
+class Overlap:
+    """When each phase of each table runs: its copy, its index builds
+    once it lands (beside the next tables' copy), its ranges' checks as
+    each lands (beside the next range's load), and the tail once the
+    first table is in where a position before every read follows the
+    changes. `way` is the rung `decide` admitted, `refused` why the ones
+    above it were not."""
+    way: str
+    said: str
+    copies: tuple = ()          #: ((table, start, end), ...)
+    builds: tuple = ()
+    checks: tuple = ()
+    tail: float = None          #: when the tail starts
+    makespan: float = 0.0
+    serial: float = 0.0         #: the same phases one after another
+    refused: tuple = ()         #: ((way, why), ...)
+
+    def lines(self):
+        out = [f"phases: {self.said}, ~{_took(self.makespan)}"
+               + (f" against ~{_took(self.serial)} one after another"
+                  if self.serial > self.makespan * 1.01 else "")]
+        if self.builds:
+            beside = sum(1 for t, s, _ in self.builds
+                         if s < self._copy_end())
+            out.append(f"index builds: {beside} of {len(self.builds)}"
+                       " start while other tables still copy")
+        if self.checks:
+            early = sum(1 for _, s, _ in self.checks if s < self._end_of())
+            out.append(f"checks: {early} of {len(self.checks)} ranges"
+                       " checked while later ones load")
+        if self.tail is not None:
+            out.append(f"tail: starts at ~{_took(self.tail)}"
+                       + (", once the first table is in"
+                          if self.tail < self._copy_end() else
+                          ", after the copy"))
+        out += [f"not {w}: {why}" for w, why in self.refused]
+        return out
+
+    def _copy_end(self):
+        return max((e for _, _, e in self.copies), default=0.0)
+
+    def _end_of(self):
+        return max((e for _, _, e in self.copies + self.builds),
+                   default=0.0)
+
+    def as_evidence(self):
+        return {"way": self.way, "said": self.said,
+                "copies": [list(c) for c in self.copies],
+                "builds": [list(b) for b in self.builds],
+                "checks": [list(c) for c in self.checks],
+                "tail": self.tail, "makespan": self.makespan,
+                "serial": self.serial,
+                "refused": [list(r) for r in self.refused]}
+
+
+def _lanes(order, copy, at_once, after):
+    """((table, start, end), ...) of `order` on `at_once` lanes, each
+    table started no earlier than every table `after(table)` names
+    ends."""
+    lanes = [0.0] * max(int(at_once or 1), 1)
+    ends, out = {}, []
+    for t in order:
+        i = min(range(len(lanes)), key=lanes.__getitem__)
+        start = max([lanes[i]] + [ends[p] for p in after(t) if p in ends])
+        ends[t] = start + float(copy[t])
+        lanes[i] = ends[t]
+        out.append((t, start, ends[t]))
+    return tuple(out)
+
+
+def _after_lanes(copies, work, start_of):
+    """((table, start, end), ...) of `work` ({table: seconds}) on one lane
+    of its own, each started no earlier than `start_of(table, copy)`."""
+    free, out = 0.0, []
+    for t, s, e in sorted(copies, key=lambda c: c[2]):
+        if not work.get(t):
+            continue
+        start = max(free, start_of(t, s, e))
+        free = start + float(work[t])
+        out.append((t, start, free))
+    return tuple(out)
+
+
+def _range_checks(copies, check, ranges):
+    free, out = 0.0, []
+    landed = []
+    for t, s, e in copies:
+        n = max(int((ranges or {}).get(t) or 1), 1)
+        each = float(check.get(t) or 0) / n
+        landed += [(s + (e - s) * (k + 1) / n, t, each) for k in range(n)
+                   if each]
+    for at, t, each in sorted(landed):
+        start = max(free, at)
+        free = start + each
+        out.append((t, start, free))
+    return tuple(out)
+
+
+def overlap(semantics, copy, build=None, check=None, at_once=1,
+            fks="during", shared=False, followed=False, ranges=None,
+            costs=None):
+    """`Overlap` of a move's phases from what each table's copy, index
+    builds and check take (seconds, {table: s}; `phases`' rates give
+    them) and the foreign keys between the tables (`guarantees.read`'s
+    `Semantics`). Three ways, through `decide`: every table as soon as a
+    lane is free, largest first; the same within the waves the foreign
+    keys make (`guarantees.barriers`); each phase after the one before.
+    A way is admitted only where `guarantees.breaks` finds nothing it
+    loses on its schedule - an overlap never buys speed with what the
+    move must keep."""
+    from . import decide, guarantees
+    build, check = build or {}, check or {}
+    names = sorted(copy, key=lambda t: (-float(copy[t]), t))
+    sem = {t: s for t, s in (semantics or {}).items() if t in copy}
+    waves, _ = guarantees.barriers(sem) if sem else ([tuple(names)], [])
+    wave_of = {t: i for i, w in enumerate(waves) for t in w}
+    by_wave = sorted(names, key=lambda t: (wave_of.get(t, 0),
+                                           -float(copy[t]), t))
+    parents = {t: tuple(p for p in sem[t].parents if p in copy)
+               if t in sem else () for t in names}
+
+    def planned(way):
+        if way == "free":
+            copies = _lanes(names, copy, at_once, lambda t: ())
+        else:
+            copies = _lanes(by_wave, copy, at_once,
+                            (lambda t: parents[t]) if fks == "during"
+                            else (lambda t: ()))
+        end = max((e for _, _, e in copies), default=0.0)
+        if way == "serial":
+            builds = _after_lanes(copies, build, lambda t, s, e: end)
+            last = max((e for _, _, e in builds), default=end)
+            checks = _after_lanes(copies, check, lambda t, s, e: last)
+            tail = max((e for _, _, e in checks), default=last)
+        else:
+            builds = _after_lanes(copies, build, lambda t, s, e: e)
+            checks = _range_checks(copies, check, ranges)
+            tail = (min((e for _, _, e in copies), default=0.0)
+                    if followed else end)
+        span = max([e for _, _, e in copies + builds + checks] + [tail])
+        sched = guarantees.Schedule(
+            order=tuple(t for t, _, _ in copies), times=copies,
+            at_once=at_once, fks=fks,
+            snapshot="one" if shared else "per table", caught_up=followed)
+        return copies, builds, checks, tail, span, sched
+
+    got = {w: planned(w) for w in ("free", "waves", "serial")}
+    said = {"free": "overlapped, every table as soon as a lane is free",
+            "waves": "overlapped within the waves the foreign keys make",
+            "serial": "one after another"}
+    refused = {}
+
+    def proof(w):
+        def prove(_facts):
+            why = guarantees.breaks(got[w][5], sem)
+            if why:
+                refused[w] = "; ".join(why)
+                return refused[w]
+            return None
+        return prove
+
+    rungs = [decide.Rung(w, said[w], prove=proof(w), leaves="nothing")
+             for w in ("free", "waves", "serial")]
+    spend = costs if costs is not None else {w: got[w][4] for w in got}
+    choice = decide.climb("phases of the move", rungs, costs=spend,
+                          explore=False)
+    serial = got["serial"][4]
+    if choice.rung is None:
+        return Overlap("", "no order keeps what the move must", serial=serial,
+                       makespan=serial,
+                       refused=tuple((said[k], v) for k, v
+                                     in sorted(refused.items())))
+    w = choice.path
+    copies, builds, checks, tail, span, _ = got[w]
+    return Overlap(w, said[w], copies, builds, checks, tail, span, serial,
+                   tuple((said[k], v) for k, v in sorted(refused.items())
+                         if k != w))

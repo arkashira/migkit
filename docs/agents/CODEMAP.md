@@ -115,14 +115,14 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/masking.py` - Values from the rows, masked where the hop asks, wherever a person or a report sees them (G2).
 - `migkit/mirror.py` - A Kafka cluster copied through the cluster mirror Kafka ships (backlog F7.mm2).
 - `migkit/model.py` - Every resource a move uses, in one model: which one binds, how many at once carry it, what it takes of this machine's memory, and why (backl Classes: Stage, Model.
-- `migkit/movers.py` - Best-tool movers. Classes: Beside, builds_beside, client_defaults, Ran.
+- `migkit/movers.py` - Best-tool movers. Classes: Beside, builds_beside, client_defaults, Ran, Squeeze, Leg.
 - `migkit/nanotime.py` - A timestamp or a time of day that keeps the digits past the microsecond. Classes: Datetime9, Time9.
 - `migkit/notify.py` - Telling the team, wherever it is, what a migration is doing (backlog 32, R23.10).
 - `migkit/ownership.py` - Who an object belongs to, and whose privileges it runs with.
 - `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text.
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Rung, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
-- `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp.
+- `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Keyless.
 - `migkit/ready.py` - Right the first time, not a runbook to recover with (backlog R23, 6). Classes: Item.
 - `migkit/redact.py` - One way of hiding secrets in what migkit writes or says (audit 2026-10-01, SEC12). Classes: Redactor.

@@ -8827,3 +8827,221 @@ def run_via(via, hop, db, workers, go, log):
     finally:
         _SIZES = None
     return got if isinstance(got, Ran) else Ran(got, via)
+
+
+# ---- compression chosen by measurement (backlog R20.6) ---------------------
+
+def frame_codec():
+    """(compress(data, level), decompress(data), levels): the frame
+    format this machine has, its whole range of levels, the fastest
+    first."""
+    try:
+        import zstandard
+    except ImportError:
+        import zlib
+        return (lambda d, k: zlib.compress(d, k), zlib.decompress,
+                tuple(range(1, 10)))
+    top = int(getattr(zstandard, "MAX_COMPRESSION_LEVEL", 19))
+    return (lambda d, k: zstandard.ZstdCompressor(level=k).compress(d),
+            lambda d: zstandard.ZstdDecompressor().decompress(d),
+            tuple(range(1, top + 1)))
+
+
+def cpu_headroom():
+    """Cores this machine has free now: its cores less the last minute's
+    load, never below none."""
+    import os
+    cores = os.cpu_count() or 1
+    try:
+        load = os.getloadavg()[0]
+    except (AttributeError, OSError):
+        load = 0.0
+    return max(float(cores) - load, 0.0)
+
+
+class Squeeze:
+    """One level measured on a sample: the share of the bytes left
+    (`ratio`), and the bytes a second one core packs and unpacks."""
+
+    def __init__(self, level, ratio, packs, unpacks):
+        self.level, self.ratio = level, ratio
+        self.packs, self.unpacks = packs, unpacks
+
+    @property
+    def name(self):
+        return "plain" if self.level is None else f"level {self.level}"
+
+    @property
+    def said(self):
+        return ("sent as it is" if self.level is None
+                else f"compressed at level {self.level}")
+
+
+def probe_levels(levels):
+    """Three levels across the codec's own range: its fastest, a third
+    and two thirds of the way up."""
+    levels = tuple(levels)
+    picked = [levels[0], levels[len(levels) // 3],
+              levels[2 * len(levels) // 3]]
+    return tuple(dict.fromkeys(picked))
+
+
+def probe_compression(sample, codec=None, clock=time.perf_counter,
+                      link=None, cores=None):
+    """[Squeeze] of one sample batch at three levels, each packed, timed,
+    unpacked and compared with the sample - a level whose bytes do not
+    come back is not offered. Bounded: a higher level is not tried once
+    one is slower on every free core here than the link takes the bytes
+    as they are (`link`, `cores`), as every higher level only packs
+    slower."""
+    pack, unpack, levels = codec or frame_codec()
+    sample = bytes(sample)
+    out = []
+    if not sample:
+        return out
+    for k in probe_levels(levels):
+        t0 = clock()
+        packed = pack(sample, k)
+        t1 = clock()
+        back = unpack(packed)
+        t2 = clock()
+        if back != sample:
+            continue
+        sq = Squeeze(k, len(packed) / len(sample),
+                     len(sample) / max(t1 - t0, 1e-9),
+                     len(sample) / max(t2 - t1, 1e-9))
+        out.append(sq)
+        if link and cores is not None and sq.packs * cores < link:
+            break
+    return out
+
+
+def leg_rate(sq, link, near_cores, far_cores):
+    """(bytes of the data a second, what sets it) over a leg: the link,
+    or the CPU packing on the near side or unpacking on the far one."""
+    if sq is None or sq.level is None:
+        return float(link), "the link"
+    got = [(sq.packs * near_cores, "the CPU packing on the near side"),
+           (link / sq.ratio if sq.ratio else float("inf"), "the link"),
+           (sq.unpacks * far_cores, "the CPU unpacking on the far side")]
+    return min(got, key=lambda x: x[0])
+
+
+class Leg:
+    """One leg data passes: its link's measured bytes a second, and the
+    cores free on each end of it (the far end's taken as this machine's
+    where it was not measured)."""
+
+    def __init__(self, name, link, near_cores=None, far_cores=None):
+        self.name, self.link = name, float(link)
+        self.near_cores = (cpu_headroom() if near_cores is None
+                           else float(near_cores))
+        self.far_cores = (self.near_cores if far_cores is None
+                          else float(far_cores))
+        self.far_measured = far_cores is not None
+
+    def moved(self, link=None, near_cores=None, far_cores=None):
+        got = Leg(self.name, self.link if link is None else link,
+                  self.near_cores if near_cores is None else near_cores,
+                  self.far_cores if far_cores is None else far_cores)
+        got.far_measured = self.far_measured or far_cores is not None
+        return got
+
+
+def _compression_choice(leg, probed):
+    from . import decide
+    ways = [Squeeze(None, 1.0, 0.0, 0.0)] + sorted(
+        probed, key=lambda s: s.level)
+    by, rungs, costs, passed = {}, [], decide.Costs(), []
+    for sq in ways:
+        rate, binds = leg_rate(sq, leg.link, leg.near_cores, leg.far_cores)
+        if rate <= 0:
+            passed.append(f"{sq.said}: no core free to do it")
+            continue
+        by[sq.name] = (sq, rate, binds)
+        rungs.append(decide.Rung(sq.name, sq.said, leaves="nothing"))
+        costs[sq.name] = 1.0 / rate
+    choice = decide.climb(f"compression on {leg.name}", rungs, costs=costs,
+                          prove=False, explore=False)
+    return choice, by, passed
+
+
+class Compressing:
+    """Whether and how much a leg compresses, chosen through `decide`
+    from the sample's measure against the leg's link and cores, and
+    chosen again at a safe boundary (a batch committed, a range done)
+    where the measure moved: a level changes only where the new one is
+    faster by more than a tie (`decide.TIE`), so noise does not flap
+    it."""
+
+    def __init__(self, leg, probed):
+        self.leg, self.probed = leg, list(probed)
+        self.changes = []
+        self._take(*_compression_choice(leg, self.probed))
+
+    def _take(self, choice, by, passed):
+        self.choice, self.passed = choice, passed
+        self.squeeze, self.rate, self.binds = by[choice.path]
+
+    @property
+    def level(self):
+        return self.squeeze.level
+
+    def boundary(self, link=None, near_cores=None, far_cores=None):
+        """The level for what goes after a safe boundary, with the leg's
+        new measure; the change said in `changes`."""
+        leg = self.leg.moved(link, near_cores, far_cores)
+        choice, by, passed = _compression_choice(leg, self.probed)
+        now, _ = leg_rate(self.squeeze, leg.link, leg.near_cores,
+                          leg.far_cores)
+        self.leg = leg
+        from . import decide
+        _, rate, _ = by[choice.path]
+        if choice.path != self.squeeze.name \
+                and rate > now * (1 + decide.TIE):
+            before = self.squeeze.said
+            self._take(choice, by, passed)
+            self.changes.append(f"{leg.name}: {before} -> {self.squeeze.said}"
+                                f" (~{_bytes_said(rate)}/s, set by"
+                                f" {self.binds})")
+        else:
+            self.rate = now
+        return self.level
+
+    def line(self):
+        far = "" if self.leg.far_measured else \
+            ", the far side's cores taken as this machine's"
+        return (f"{self.leg.name}: {self.squeeze.said}, ~"
+                f"{_bytes_said(self.rate)}/s set by {self.binds} (link"
+                f" ~{_bytes_said(self.leg.link)}/s, {self.leg.near_cores:g}"
+                f" cores free here{far})")
+
+    def as_evidence(self):
+        return {"leg": self.leg.name, "level": self.level,
+                "rate": self.rate, "binds": self.binds,
+                "link": self.leg.link, "near_cores": self.leg.near_cores,
+                "far_cores": self.leg.far_cores,
+                "probed": [{"level": s.level, "ratio": s.ratio,
+                            "packs": s.packs, "unpacks": s.unpacks}
+                           for s in self.probed],
+                "passed": list(self.passed), "changes": list(self.changes)}
+
+
+def choose_compression(legs, sample, codec=None, clock=time.perf_counter):
+    """{leg name: Compressing} for each leg of a move: the sample probed
+    once, each leg choosing from it - so a fast link sends plain and a
+    slow one compresses harder, and a leg with no core to spare does
+    not compress."""
+    legs = list(legs)
+    fastest = max((lg.link for lg in legs), default=None)
+    cores = min((lg.near_cores for lg in legs), default=None)
+    probed = probe_compression(sample, codec, clock, fastest, cores)
+    return {lg.name: Compressing(lg, probed) for lg in legs}
+
+
+def _bytes_said(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"

@@ -268,8 +268,17 @@ class S3Store(Store):
     def _key(self, name):
         return self.prefix + name
 
-    def _transfer(self):
+    #: the `Link` measured to this store, where one was (`move_file`)
+    link = None
+
+    def _transfer(self, size=None):
         from boto3.s3.transfer import TransferConfig
+        if self.link is not None and size:
+            plan = part_plan(size, self.link, most=min(UPLOAD_PART,
+                                                       SNOWBALL_PART))
+            return TransferConfig(multipart_threshold=plan.part,
+                                  multipart_chunksize=plan.part,
+                                  max_concurrency=plan.streams)
         return TransferConfig(multipart_threshold=64 * 2 ** 20,
                               multipart_chunksize=min(UPLOAD_PART,
                                                       SNOWBALL_PART),
@@ -277,11 +286,12 @@ class S3Store(Store):
 
     def put(self, name, path):
         self._s3().upload_file(str(path), self.bucket, self._key(name),
-                               Config=self._transfer())
+                               Config=self._transfer(
+                                   os.path.getsize(path)))
 
     def fetch(self, name, path):
         self._s3().download_file(self.bucket, self._key(name), str(path),
-                                 Config=self._transfer())
+                                 Config=self._transfer(self.size(name)))
 
     def size(self, name):
         from botocore.exceptions import ClientError
@@ -811,3 +821,352 @@ def carriers_needed(total, limits):
     if not limits.capacity:
         return None
     return max(1, math.ceil(total / limits.capacity))
+
+
+# ---- files as parallel ranged parts (backlog R20.7) ------------------------
+
+#: an S3 multipart upload's own limits: a part 5 MiB at least (the last
+#: excepted), 5 GiB at most, 10,000 parts
+S3_PART_LEAST, S3_PART_MOST, S3_PARTS = 5 * 2 ** 20, 5 * 2 ** 30, 10_000
+#: a part long enough that its request's round trip is this share of it
+TRIP_SHARE = 0.01
+
+
+@dataclass(frozen=True)
+class Link:
+    """What a file's way between two stores measured: the bytes a second
+    of every stream together, of one stream, and a request's round trip
+    in seconds."""
+    rate: float
+    per_stream: float
+    rtt: float
+    streams: int = 1
+    whence: str = "measured"
+
+
+@dataclass(frozen=True)
+class PartPlan:
+    size: int
+    part: int
+    streams: int
+    parts: int
+    why: str = ""
+
+
+def part_plan(size, link, least=S3_PART_LEAST, most=S3_PART_MOST,
+              count=S3_PARTS):
+    """The part size and how many go at once for a file of `size` bytes
+    over `link`: as many streams as one stream's rate fills the link
+    with, each part long enough that a round trip is `TRIP_SHARE` of it,
+    within the store's own least, most and count of parts."""
+    size = int(size or 0)
+    streams = max(1, math.ceil(link.rate / link.per_stream)) \
+        if link.per_stream else 1
+    part = int(link.per_stream * link.rtt / TRIP_SHARE) \
+        if link.per_stream and link.rtt else least
+    floor = math.ceil(size / count) if count else 0
+    part = max(part, least, floor)
+    if most:
+        part = min(part, most)
+    part = max(part, 1)
+    parts = max(1, math.ceil(size / part))
+    streams = min(streams, parts)
+    return PartPlan(size, part, streams, parts,
+                    f"{parts} parts of {part} bytes, {streams} at a time:"
+                    f" one stream ~{link.per_stream:.0f} B/s of a link"
+                    f" ~{link.rate:.0f} B/s, a round trip {link.rtt:.3f}s"
+                    f" ({link.whence})")
+
+
+def measure_link(read_range, size, clock=None, most_streams=None):
+    """`Link` of a store's ranged reads (`read_range(start, end)` ->
+    bytes) on a file of `size`: a one-byte read times the round trip,
+    a range read alone times one stream, and the streams are doubled
+    while the bytes a second of all of them still rise by more than a
+    tie (`decide.TIE`) - bounded by the file, never by a fixed count."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    clock = clock or time.perf_counter
+    if not size:
+        return Link(0.0, 0.0, 0.0, 1, "nothing to read")
+    t0 = clock()
+    read_range(0, 1)
+    rtt = clock() - t0
+    piece = max(1, min(size, S3_PART_LEAST))
+    t0 = clock()
+    got = len(read_range(0, piece))
+    one = got / max(clock() - t0, 1e-9)
+    best, streams = one, 1
+    most = most_streams or max(1, size // piece)
+    while streams * 2 <= most:
+        n = streams * 2
+        starts = [(i * piece) % max(size - piece + 1, 1) for i in range(n)]
+        t0 = clock()
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            total = sum(len(b) for b in pool.map(
+                lambda s: read_range(s, s + piece), starts))
+        rate = total / max(clock() - t0, 1e-9)
+        if rate <= best * (1 + decide.TIE):
+            break
+        best, streams = rate, n
+    return Link(best, one, rtt, streams)
+
+
+class Streamed:
+    """What a file's parts carried, hashed as they streamed: each part's
+    MD5 (what an object store says of a part it took) and SHA-256, the
+    whole as a SHA-256 of the parts' in order."""
+
+    def __init__(self):
+        self.parts = {}
+
+    def saw(self, i, data):
+        self.parts[i] = (hashlib.md5(data, usedforsecurity=False).hexdigest(),
+                         hashlib.sha256(data).hexdigest(), len(data))
+
+    def digest(self):
+        h = hashlib.sha256()
+        for i in sorted(self.parts):
+            h.update(bytes.fromhex(self.parts[i][1]))
+        return h.hexdigest()
+
+    def multipart_etag(self):
+        """The ETag an object store gives an object of these parts."""
+        md5s = b"".join(bytes.fromhex(self.parts[i][0])
+                        for i in sorted(self.parts))
+        return (hashlib.md5(md5s, usedforsecurity=False).hexdigest()
+                + f"-{len(self.parts)}")
+
+    def size(self):
+        return sum(p[2] for p in self.parts.values())
+
+
+class Moved:
+    """A file moved: the way, the plan, its digest and what proved it."""
+
+    def __init__(self, way, plan, digest, proved):
+        self.way, self.plan, self.digest, self.proved = (way, plan, digest,
+                                                         proved)
+
+    def line(self):
+        return f"{self.way}: {self.plan.why}; {self.proved}"
+
+
+def _local_read_range(store, name):
+    path = store.local(name)
+
+    def read(start, end):
+        with open(path, "rb") as f:
+            return os.pread(f.fileno(), end - start, start)
+    return read
+
+
+def _s3_read_range(store, name):
+    def read(start, end):
+        got = store._s3().get_object(Bucket=store.bucket,
+                                     Key=store._key(name),
+                                     Range=f"bytes={start}-{end - 1}")
+        return got["Body"].read()
+    return read
+
+
+def read_range_of(store, name):
+    """`read_range(start, end)` of a file in `store`, or None where the
+    store cannot read a range."""
+    if isinstance(store, S3Store):
+        return _s3_read_range(store, name)
+    if store.local(name) is not None:
+        return _local_read_range(store, name)
+    return None
+
+
+def _same_s3(a, b):
+    return (isinstance(a, S3Store) and isinstance(b, S3Store)
+            and (a.endpoint or "") == (b.endpoint or "")
+            and (a.region or "") == (b.region or "")
+            and (a.profile or "") == (b.profile or ""))
+
+
+def _ranges(plan):
+    return [(i, i * plan.part, min(plan.size, (i + 1) * plan.part))
+            for i in range(plan.parts)]
+
+
+def _parallel(plan, each):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=plan.streams) as pool:
+        return list(pool.map(lambda r: each(*r), _ranges(plan)))
+
+
+def _server_side(src, name, dst, dst_name, plan):
+    s3, key = dst._s3(), dst._key(dst_name)
+    up = s3.create_multipart_upload(Bucket=dst.bucket, Key=key)["UploadId"]
+    source = {"Bucket": src.bucket, "Key": src._key(name)}
+
+    def each(i, start, end):
+        got = s3.upload_part_copy(
+            Bucket=dst.bucket, Key=key, UploadId=up, PartNumber=i + 1,
+            CopySource=source, CopySourceRange=f"bytes={start}-{end - 1}")
+        return {"PartNumber": i + 1,
+                "ETag": got["CopyPartResult"]["ETag"]}
+    try:
+        done = _parallel(plan, each)
+        s3.complete_multipart_upload(Bucket=dst.bucket, Key=key,
+                                     UploadId=up,
+                                     MultipartUpload={"Parts": done})
+    except BaseException:
+        s3.abort_multipart_upload(Bucket=dst.bucket, Key=key, UploadId=up)
+        raise
+    md5s = b"".join(bytes.fromhex(p["ETag"].strip('"')) for p in done)
+    want = hashlib.md5(md5s, usedforsecurity=False).hexdigest() \
+        + f"-{len(done)}"
+    head = s3.head_object(Bucket=dst.bucket, Key=key)
+    if head["ETag"].strip('"') != want or \
+            int(head["ContentLength"]) != plan.size:
+        dst.delete(dst_name)
+        raise BadCopy(f"{dst_name}: the store's copy is not the parts it"
+                      " said it wrote - moved again whole")
+    return Moved("copied inside the store", plan, want,
+                 "every part's digest the store returned, and the whole's")
+
+
+def _to_s3(read, dst, dst_name, plan):
+    import base64
+    s3, key = dst._s3(), dst._key(dst_name)
+    up = s3.create_multipart_upload(Bucket=dst.bucket, Key=key)["UploadId"]
+    seen = Streamed()
+
+    def each(i, start, end):
+        data = read(start, end)
+        seen.saw(i, data)
+        md5 = seen.parts[i][0]
+        got = s3.upload_part(Bucket=dst.bucket, Key=key, UploadId=up,
+                             PartNumber=i + 1, Body=data,
+                             ContentMD5=base64.b64encode(
+                                 bytes.fromhex(md5)).decode())
+        if got["ETag"].strip('"') != md5:
+            raise BadCopy(f"{dst_name}: part {i + 1} arrived other than"
+                          " it was sent")
+        return {"PartNumber": i + 1, "ETag": got["ETag"]}
+    try:
+        done = _parallel(plan, each)
+        s3.complete_multipart_upload(Bucket=dst.bucket, Key=key,
+                                     UploadId=up,
+                                     MultipartUpload={"Parts": done})
+    except BaseException:
+        s3.abort_multipart_upload(Bucket=dst.bucket, Key=key, UploadId=up)
+        raise
+    head = s3.head_object(Bucket=dst.bucket, Key=key)
+    if head["ETag"].strip('"') != seen.multipart_etag() or \
+            int(head["ContentLength"]) != plan.size:
+        dst.delete(dst_name)
+        raise BadCopy(f"{dst_name}: the store holds other bytes than were"
+                      " streamed to it")
+    return Moved("parallel ranged parts", plan, seen.digest(),
+                 "each part checked as the store took it, and the whole")
+
+
+def _to_local(read, dst, dst_name, plan):
+    dest = dst.local(dst_name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".partial")
+    seen = Streamed()
+    fd = os.open(tmp, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        os.ftruncate(fd, plan.size)
+
+        def each(i, start, end):
+            data = read(start, end)
+            if len(data) != end - start:
+                raise BadCopy(f"{dst_name}: part {i + 1} came short")
+            seen.saw(i, data)
+            os.pwrite(fd, data, start)
+        _parallel(plan, each)
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        raise
+    os.close(fd)
+    if seen.size() != plan.size or tmp.stat().st_size != plan.size:
+        tmp.unlink(missing_ok=True)
+        raise BadCopy(f"{dst_name}: {seen.size()} bytes of {plan.size}"
+                      " arrived")
+    os.replace(tmp, dest)
+    durable.sync_dir(dest.parent)
+    return Moved("parallel ranged parts", plan, seen.digest(),
+                 "every part hashed as it streamed, the whole sized")
+
+
+class BadCopy(SystemExit):
+    """A moved file whose bytes are not what was sent: taken away again."""
+
+
+def _one_stream(src, name, dst, dst_name, plan):
+    import tempfile
+    path = src.local(name)
+    if path is None:
+        fd, tmp = tempfile.mkstemp(prefix="migkit-part-")
+        os.close(fd)
+        try:
+            src.fetch(name, tmp)
+            dst.put(dst_name, tmp)
+        finally:
+            os.unlink(tmp)
+    else:
+        dst.put(dst_name, path)
+    return Moved("one stream", plan, "", "the store's own transfer")
+
+
+FILE_WAYS = (
+    decide.Rung("server side", "copied inside the store",
+                needs=(decide.Need("one object store on both sides",
+                                   lambda f: f["same store"]),),
+                because="no byte crosses this machine", leaves="nothing"),
+    decide.Rung("ranged parts", "parallel ranged parts",
+                needs=(decide.Need("a ranged read of the source",
+                                   lambda f: f["ranged"]),
+                       decide.Need("a store taking parts",
+                                   lambda f: f["parts"]),),
+                leaves="nothing"),
+    decide.Rung("one stream", "the store's own transfer",
+                leaves="nothing"),
+)
+
+
+def move_file(src, name, dst, dst_name=None, link=None, clock=None):
+    """`Moved`: a dump file, Parquet or spool file from one store to
+    another as the way the stores allow - copied inside one object store,
+    else as parallel ranged parts hashed while they stream and checked at
+    the end, else the store's own transfer - chosen through `decide`,
+    the parts' size and number from the link measured on the file
+    (`measure_link`) where `link` is not given."""
+    dst_name = dst_name or name
+    size = src.size(name)
+    if size is None:
+        raise SystemExit(f"{name} is not in {src.said}")
+    read = read_range_of(src, name)
+    facts = {"same store": _same_s3(src, dst) and size > 0,
+             "ranged": read is not None and size > 0,
+             "parts": isinstance(dst, S3Store) or dst.local(dst_name)
+             is not None}
+    if link is None and read is not None and size:
+        link = measure_link(read, size, clock)
+    if link is not None and isinstance(dst, S3Store):
+        dst.link = link
+    if isinstance(dst, S3Store):
+        plan = part_plan(size, link) if link else None
+    else:
+        plan = part_plan(size, link, least=1, most=None, count=None) \
+            if link else None
+    if plan is None:
+        plan = PartPlan(size, size, 1, 1, "one part: nothing to measure on")
+    choice = decide.climb(f"moving {name}", FILE_WAYS, facts=facts,
+                          prove=False)
+    if choice.path == "server side":
+        return _server_side(src, name, dst, dst_name, plan)
+    if choice.path == "ranged parts":
+        if isinstance(dst, S3Store):
+            return _to_s3(read, dst, dst_name, plan)
+        return _to_local(read, dst, dst_name, plan)
+    return _one_stream(src, name, dst, dst_name, plan)

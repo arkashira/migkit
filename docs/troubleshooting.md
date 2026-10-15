@@ -1781,6 +1781,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * ship: no carrier the hop names can be written here - <...>
 
+* <...> is not in <...>
+
 * charset: <...> - a character set, or {to, collation, repair}}
 
 * charset: repair: <...> - double-encoded or none
