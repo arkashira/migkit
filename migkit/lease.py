@@ -214,6 +214,10 @@ class Lease:
         self.what = what
         self.me = f"{socket.gethostname()}:{os.getpid()}:{id(self)}"
         self.took_over = None
+        #: where it was taken over: the seconds from the last renewal the
+        #: one before wrote to this holder's taking it - how long the hop
+        #: went with no holder heard from, measured, not the term assumed
+        self.unheld = None
         #: the number this holding carries, where the lease is `fenced`
         self.fenced, self.fence = fenced, None
         self._term = term
@@ -232,7 +236,7 @@ class Lease:
     def acquire(self):
         def decide(have):
             now = time.time()
-            self.took_over = None
+            self.took_over = self.unheld = None
             if have and have.get("holder") and have.get("holder") != self.me:
                 if have.get("expires", 0) > now and not self._dead(have):
                     raise Held(
@@ -244,9 +248,11 @@ class Lease:
                         f" - or, if it is gone, for the lease to lapse"
                         f" ({int(have['expires'] - now)}s)")
                 self.took_over = have
+                heard = have.get("renewed") or have.get("since")
+                self.unheld = max(0.0, now - float(heard)) if heard else None
             got = {"holder": self.me, "host": socket.gethostname(),
                    "pid": os.getpid(), "what": self.what,
-                   "since": now, "expires": now + self.term()}
+                   "since": now, "renewed": now, "expires": now + self.term()}
             if self.fenced:
                 # one above every number this lease was ever taken with,
                 # kept when it was let go
@@ -282,7 +288,8 @@ class Lease:
                 # longer holds anything, and must not write it back
                 lost.append(have)
                 return KEEP
-            return {**have, "expires": time.time() + self.term()}
+            now = time.time()
+            return {**have, "renewed": now, "expires": now + self.term()}
         with self._renewing:
             if self.lost is not None:
                 return False

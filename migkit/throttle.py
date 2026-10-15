@@ -100,7 +100,8 @@ class Throttle:
     """
 
     def __init__(self, permits, probe=None, clock=time.monotonic,
-                 sleeper=time.sleep):
+                 sleeper=time.sleep, hop=None):
+        self.hop = hop
         self.max_permits = max(1, int(permits))
         self.permits = self.max_permits
         self._probe = probe
@@ -120,6 +121,16 @@ class Throttle:
         #: the least lag a replica read has shown this run: where it stood
         #: before the work's weight, which its brake holds the rise to
         self.least_lag = None
+        #: stressed checks in a row with no relief between them: each cut
+        #: is twice the one before (1, 2, 4 ...), since the last did not
+        #: take the server out of stress
+        self.unrelieved = 0
+        #: why the health probe could not answer -> how often: the
+        #: latency signal carried the work alone those times
+        self.unprobed = {}
+        #: the replica's rise in lag that went with its reads slowing,
+        #: once said to `tuning`
+        self.rise_measured = None
 
     # ---- the signal ----
 
@@ -156,9 +167,13 @@ class Throttle:
         self._last_probe_at = now
         try:
             self._last_health = self._probe()
-        except Exception:
+        except Exception as e:  # noqa: BLE001 - counted, and said in summary
             # a probe that fails must never stop the check it is protecting
             self._last_health = None
+            why = f"{type(e).__name__}: {str(e).splitlines()[0][:120]}" \
+                if str(e) else type(e).__name__
+            with self._lock:
+                self.unprobed[why] = self.unprobed.get(why, 0) + 1
         h = self._last_health
         if h is not None and h.replica and h.lag_seconds is not None:
             self.least_lag = (h.lag_seconds if self.least_lag is None
@@ -169,10 +184,27 @@ class Throttle:
         """Why we should back off, or empty string."""
         h = self._health()
         if h is not None:
-            why = h.stressed(self.least_lag)
+            why = h.stressed(self.least_lag, self.hop)
             if why:
                 return why
-        return self._slow()
+        slow = self._slow()
+        if slow:
+            self._measure_rise(h)
+        return slow
+
+    def _measure_rise(self, h):
+        """Where reads slowed on a replica whose lag rose with them, the
+        rise is what `throttle.REPLICA_RISE` should have been: said to
+        `tuning` once a run, so the next run brakes there."""
+        if self.rise_measured is not None or h is None or not h.replica \
+                or h.lag_seconds is None or self.least_lag is None:
+            return
+        rise = h.lag_seconds - self.least_lag
+        if rise <= 0:
+            return
+        from . import tuning
+        self.rise_measured = rise
+        tuning.observe("throttle.REPLICA_RISE", rise, self.hop)
 
     # ---- the gate ----
 
@@ -192,11 +224,16 @@ class Throttle:
                 if why:
                     self.reasons[why] = self.reasons.get(why, 0) + 1
                     # narrow first: fewer things in flight is the real fix,
-                    # sleeping is only how we wait for it to take effect
-                    self.permits = max(1, self.permits - 1)
+                    # sleeping is only how we wait for it to take effect;
+                    # a cut the server did not answer is doubled
+                    self.permits = max(1, self.permits
+                                       - (1 << min(self.unrelieved, 16)))
+                    self.unrelieved += 1
                     self.narrowed_to = min(self.narrowed_to, self.permits)
-                elif self.permits < self.max_permits and not self._slow():
-                    self.permits += 1
+                else:
+                    self.unrelieved = 0
+                    if self.permits < self.max_permits and not self._slow():
+                        self.permits += 1
                 clear = not why or out_of_patience
                 if clear and self._in_flight < self.permits:
                     self._in_flight += 1
@@ -236,11 +273,17 @@ class Throttle:
             # said out loud: the numbers below were measured while the server
             # was still unhappy, because waiting forever is not an option
             out["proceeded_under_stress"] = self.proceeded_under_stress
+        if self.unprobed:
+            out["unprobed"] = dict(self.unprobed)
         return out
 
     def line(self):
         s = self.summary()
         if not s:
+            if self.unprobed:
+                why = next(iter(self.unprobed))
+                return (f"the server's health could not be read ({why});"
+                        " its own query times alone paced the work")
             return ""
         why = next(iter(s["reasons"]), "")
         return (f"throttled {s['waits']}x ({s['waited_seconds']}s),"

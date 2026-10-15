@@ -1,176 +1,176 @@
-"""Workflow exporter for Apache Airflow, Dagster, and Argo Workflows (R23.8)."""
-from typing import Any, Dict, List, Optional
+"""A hop's whole move as a scheduler's workflow (backlog R23.8): an
+Airflow DAG, a Dagster job or an Argo workflow, each step a migkit command
+through `integrations` - the task, the op and the shipped workflow
+template (`deploy/argo/migkit-workflowtemplate.yaml`) - so the workflow
+holds no logic of its own, only the order.
+
+The steps are the commands a person types, in the order they are typed
+(`STEPS`): assess the hop, show the move's plan, move, check, cut over. A
+step that fails stops the steps after it, as a person would stop.
+"""
+import shlex
+
+#: step -> the command and its arguments; one place, read by every target
+STEPS = {
+    "assess": ("assess", ()),
+    "plan": ("move", ("--mode", "full")),
+    "copy": ("move", ("--mode", "full", "--go")),
+    "verify": ("check", ()),
+    "cutover": ("move", ("--mode", "cdc", "--drop", "--go")),
+}
+DEFAULT_PHASES = tuple(STEPS)
 
 
-DEFAULT_PHASES = ["assess", "plan", "copy", "verify", "cutover"]
+def _steps(phases):
+    phases = tuple(phases or DEFAULT_PHASES)
+    unknown = [p for p in phases if p not in STEPS]
+    if unknown:
+        raise ValueError(f"no workflow step {', '.join(map(repr, unknown))};"
+                         f" the steps are {', '.join(STEPS)}")
+    if len(set(phases)) != len(phases):
+        raise ValueError("a workflow step is named twice: "
+                         + ", ".join(phases))
+    return [(p, *STEPS[p]) for p in phases]
 
 
-def export_airflow_dag(hop_name: str, phases: Optional[List[str]] = None,
-                       dag_id: Optional[str] = None, schedule: Optional[str] = None,
-                       fail_on_difference: bool = True) -> str:
-    actual_dag_id = dag_id or f"migkit_migration_{hop_name.replace('-', '_')}"
-    step_phases = phases if phases else DEFAULT_PHASES
-    sched_str = repr(schedule) if schedule else "None"
+def _name(hop_name, sep):
+    return "".join(c if c.isalnum() else sep for c in hop_name).strip(sep)
 
+
+def _yaml(text):
+    return '"' + str(text).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def export_airflow_dag(hop_name, phases=None, dag_id=None, schedule=None,
+                       fail_on_difference=True):
+    dag_id = dag_id or f"migkit_{_name(hop_name, '_')}"
+    steps = _steps(phases)
     lines = [
-        '"""Auto-generated Airflow DAG for migkit database migration."""',
-        "from datetime import datetime, timedelta",
+        f'"""migkit: the move of hop {hop_name}, step by step."""',
+        "from datetime import datetime",
+        "",
         "from airflow import DAG",
         "from migkit.integrations import MigkitOperator",
         "",
-        "default_args = {",
-        "    'owner': 'data-platform',",
-        "    'depends_on_past': False,",
-        "    'retries': 1,",
-        "    'retry_delay': timedelta(minutes=2),",
-        "}",
-        "",
-        f"with DAG(",
-        f"    dag_id={actual_dag_id!r},",
-        f"    default_args=default_args,",
-        f"    description='Automated database migration workflow for hop {hop_name}',",
-        f"    schedule_interval={sched_str},",
-        f"    start_date=datetime(2026, 1, 1),",
-        f"    catchup=False,",
-        f"    tags=['migkit', 'migration', {hop_name!r}],",
+        "with DAG(",
+        f"    dag_id={dag_id!r},",
+        f"    schedule={schedule!r},",
+        "    start_date=datetime(2026, 1, 1),",
+        "    catchup=False,",
+        "    max_active_runs=1,",
+        f"    tags=['migkit', {hop_name!r}],",
         ") as dag:",
-        "",
     ]
-
-    task_names = []
-    for p in step_phases:
-        t_id = f"task_{p}"
-        task_names.append(t_id)
-        cmd = p if p != "copy" else "move"
-        args_str = "['--mode', 'full']" if p == "copy" else "[]"
-        lines.extend([
-            f"    {t_id} = MigkitOperator(",
-            f"        task_id={t_id!r},",
-            f"        command={cmd!r},",
+    for phase, command, args in steps:
+        lines += [
+            f"    {phase} = MigkitOperator(",
+            f"        task_id={phase!r},",
+            f"        command={command!r},",
             f"        hop={hop_name!r},",
-            f"        args={args_str},",
-            f"        fail_on_difference={fail_on_difference},",
-            f"    )",
-            "",
-        ])
-
-    chain = " >> ".join(task_names)
-    lines.append(f"    {chain}")
+            f"        args={list(args)!r},",
+            f"        fail_on_difference={bool(fail_on_difference)!r},",
+            "    )",
+        ]
+    lines.append("    " + " >> ".join(p for p, _, _ in steps))
     return "\n".join(lines) + "\n"
 
 
-def export_dagster_job(hop_name: str, phases: Optional[List[str]] = None,
-                       job_name: Optional[str] = None,
-                       fail_on_difference: bool = True) -> str:
-    actual_job_name = job_name or f"migkit_{hop_name.replace('-', '_')}_job"
-    step_phases = phases if phases else DEFAULT_PHASES
-
+def export_dagster_job(hop_name, phases=None, job_name=None,
+                       fail_on_difference=True):
+    """Each op after the first waits on the one before (`after`), so the
+    job runs the steps in order and stops at the first that fails."""
+    job_name = job_name or f"migkit_{_name(hop_name, '_')}"
+    steps = _steps(phases)
     lines = [
-        '"""Auto-generated Dagster Job for migkit database migration."""',
-        "from dagster import job, Out",
+        f'"""migkit: the move of hop {hop_name}, step by step."""',
+        "from dagster import job",
         "from migkit.integrations import migkit_op",
         "",
     ]
-
-    op_names = []
-    for p in step_phases:
-        op_id = f"op_{p}"
-        op_names.append(op_id)
-        cmd = p if p != "copy" else "move"
-        args_str = "['--mode', 'full']" if p == "copy" else "[]"
+    for i, (phase, command, args) in enumerate(steps):
         lines.append(
-            f"{op_id} = migkit_op(name={op_id!r}, command={cmd!r}, "
-            f"hop={hop_name!r}, args={args_str}, fail_on_difference={fail_on_difference})"
-        )
-
-    lines.extend([
-        "",
-        f"@job(name={actual_job_name!r})",
-        f"def {actual_job_name}():",
-    ])
-
-    prev_res = None
-    for idx, op in enumerate(op_names):
-        res_var = f"res_{idx}"
-        if prev_res:
-            lines.append(f"    {res_var} = {op}()")
-        else:
-            lines.append(f"    {res_var} = {op}()")
-        prev_res = res_var
-
+            f"{phase} = migkit_op({phase!r}, {command!r}, {hop_name!r},"
+            f" args={list(args)!r},"
+            f" fail_on_difference={bool(fail_on_difference)!r},"
+            f" after={i > 0!r})")
+    lines += ["", "", f"@job(name={job_name!r})", f"def {job_name}():"]
+    prev = None
+    for phase, _, _ in steps:
+        lines.append(f"    done_{phase} = {phase}("
+                     + (f"after=done_{prev}" if prev else "") + ")")
+        prev = phase
     return "\n".join(lines) + "\n"
 
 
-def export_argo_workflow(hop_name: str, phases: Optional[List[str]] = None,
-                         workflow_name: Optional[str] = None,
-                         image: str = "ghcr.io/org/migkit:latest") -> str:
-    actual_wf_name = workflow_name or f"migkit-{hop_name.replace('_', '-')}"
-    step_phases = phases if phases else DEFAULT_PHASES
-
+def export_argo_workflow(hop_name, phases=None, workflow_name=None,
+                         template="migkit", image="migkit:latest",
+                         fail_on_difference=True):
+    """A workflow of the shipped template's step (`templateRef`): the
+    container and its secrets stay in the one template."""
+    name = workflow_name or f"migkit-{_name(hop_name, '-').lower()}"
+    steps = _steps(phases)
     lines = [
         "apiVersion: argoproj.io/v1alpha1",
         "kind: Workflow",
         "metadata:",
-        f"  generateName: {actual_wf_name}-",
+        f"  generateName: {name}-",
         "  labels:",
         "    app.kubernetes.io/managed-by: migkit",
-        f"    migkit.io/hop: {hop_name}",
         "spec:",
-        "  entrypoint: migration-dag",
+        "  entrypoint: move",
+        "  arguments:",
+        "    parameters:",
+        "      - name: hop",
+        f"        value: {_yaml(hop_name)}",
+        "      - name: image",
+        f"        value: {_yaml(image)}",
+        "      - name: fail-on-difference",
+        f"        value: {_yaml(str(bool(fail_on_difference)).lower())}",
+        # a step taken from another template runs with this workflow's
+        # volumes, not that template's: the same two it mounts
+        "  volumes:",
+        "    - name: hops",
+        "      secret:",
+        "        secretName: migkit-hops",
+        "    - name: state",
+        "      persistentVolumeClaim:",
+        "        claimName: migkit-state",
         "  templates:",
-        "  - name: migration-dag",
-        "    dag:",
-        "      tasks:",
+        "    - name: move",
+        "      dag:",
+        "        tasks:",
     ]
-
-    prev_task = None
-    for p in step_phases:
-        task_name = f"step-{p}"
-        cmd = p if p != "copy" else "move"
-        args_str = "--mode full" if p == "copy" else ""
-        lines.append(f"      - name: {task_name}")
-        lines.append(f"        template: run-migkit-cmd")
-        if prev_task:
-            lines.append(f"        dependencies: [{prev_task}]")
-        lines.append(f"        arguments:")
-        lines.append(f"          parameters:")
-        lines.append(f"          - name: command")
-        lines.append(f"            value: \"{cmd}\"")
-        lines.append(f"          - name: args")
-        lines.append(f"            value: \"{args_str}\"")
-        prev_task = task_name
-
-    lines.extend([
-        "",
-        "  - name: run-migkit-cmd",
-        "    inputs:",
-        "      parameters:",
-        "      - name: command",
-        "      - name: args",
-        "    container:",
-        f"      image: {image}",
-        "      command: [python3, -m, migkit.integrations]",
-        "      env:",
-        "      - name: MIGKIT_COMMAND",
-        "        value: \"{{inputs.parameters.command}}\"",
-        f"      - name: MIGKIT_HOP",
-        f"        value: \"{hop_name}\"",
-        "      - name: MIGKIT_ARGS",
-        "        value: \"{{inputs.parameters.args}}\"",
-        "      - name: MIGKIT_FAIL_ON_DIFFERENCE",
-        "        value: \"true\"",
-    ])
-
+    prev = None
+    for phase, command, args in steps:
+        lines += [
+            f"          - name: {phase}",
+            "            templateRef:",
+            f"              name: {template}",
+            "              template: migkit",
+        ]
+        if prev:
+            lines.append(f"            depends: {prev}")
+        lines += [
+            "            arguments:",
+            "              parameters:",
+            "                - name: hop",
+            f"                  value: {_yaml(hop_name)}",
+            "                - name: command",
+            f"                  value: {_yaml(command)}",
+            "                - name: args",
+            f"                  value: {_yaml(shlex.join(args))}",
+        ]
+        prev = phase
     return "\n".join(lines) + "\n"
 
 
-def export_workflow(target: str, hop_name: str, **kwargs: Any) -> str:
-    target_lower = target.lower()
-    if target_lower == "airflow":
-        return export_airflow_dag(hop_name, **kwargs)
-    elif target_lower == "dagster":
-        return export_dagster_job(hop_name, **kwargs)
-    elif target_lower == "argo":
-        return export_argo_workflow(hop_name, **kwargs)
-    else:
-        raise ValueError(f"unsupported workflow target '{target}'; expected 'airflow', 'dagster', or 'argo'")
+TARGETS = {"airflow": export_airflow_dag, "dagster": export_dagster_job,
+           "argo": export_argo_workflow}
+
+
+def export_workflow(target, hop_name, **kwargs):
+    got = TARGETS.get(str(target).lower())
+    if got is None:
+        raise ValueError(f"no workflow target {target!r}; the targets are"
+                         f" {', '.join(TARGETS)}")
+    return got(hop_name, **kwargs)

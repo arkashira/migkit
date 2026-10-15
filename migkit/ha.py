@@ -590,7 +590,7 @@ def lock(hop, say):
     store = shared.store_for(hop, say)
     ls = _lease.Lease(hop.report_dir() / "lease.json", "move", remote=store,
                       fenced=True, term=term())
-    said = None
+    said = beat_said = None
     while True:
         try:
             ls.acquire()
@@ -610,8 +610,12 @@ def lock(hop, say):
                 said = who
             try:
                 beat(hop, store, "standing by")
-            except Exception:  # noqa: BLE001 - health is said, not needed
-                pass
+            except Exception as e:  # noqa: BLE001 - health is said, not needed
+                if beat_said != _first(e):
+                    say(f"this machine's standby beat did not reach the"
+                        f" machines' store ({_first(e)}); it stands by"
+                        " unseen by `machines` until it does")
+                    beat_said = _first(e)
             time.sleep(term() / 3)
         except Exception as e:  # noqa: BLE001 - a store out of reach
             # a machine standing by keeps standing by while the store is
@@ -626,7 +630,9 @@ def lock(hop, say):
         was = ls.took_over
         say(f"took {hop.name} over from {was.get('host')} process"
             f" {was.get('pid')}, whose lease had lapsed (number"
-            f" {was.get('fence')}); this machine's is {ls.fence}")
+            f" {was.get('fence')}); this machine's is {ls.fence}"
+            + (f"; the hop had no holder heard from for {ls.unheld:.1f}s"
+               if ls.unheld is not None else ""))
     try:
         got.take()
     except BaseException:
@@ -640,7 +646,9 @@ def lock(hop, say):
         audit.append(hop.report_dir() / "changelog.jsonl",
                      {"op": "took-over", "from": ls.took_over.get("host"),
                       "pid": ls.took_over.get("pid"),
-                      "fence": got.token.number})
+                      "fence": got.token.number,
+                      **({"unheld_seconds": round(ls.unheld, 3)}
+                         if ls.unheld is not None else {})})
     return got
 
 

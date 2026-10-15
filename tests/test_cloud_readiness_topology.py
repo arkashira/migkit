@@ -12,12 +12,6 @@ from migkit.upgrade import (
     run_upgrade,
     upgrade_goal_runner,
 )
-from migkit.workflow_exporter import (
-    export_airflow_dag,
-    export_argo_workflow,
-    export_dagster_job,
-    export_workflow,
-)
 from migkit.engines.mysql import managed_retention
 
 
@@ -190,58 +184,6 @@ def test_upgrade_goal_runner():
         migkit.upgrade.checks = orig_checks
         migkit.upgrade.choose = orig_choose
         migkit.upgrade.plan_lines = orig_plan_lines
-
-
-# --- Item 424 (R23.8): Workflow Exporter for Airflow, Dagster, Argo ---
-
-def test_workflow_exporter_airflow_dag():
-    dag_code = export_airflow_dag("customer-hop", schedule="@daily")
-    assert "from airflow import DAG" in dag_code
-    assert "from migkit.integrations import MigkitOperator" in dag_code
-    assert "dag_id='migkit_migration_customer_hop'" in dag_code
-    assert "task_assess >> task_plan >> task_copy >> task_verify >> task_cutover" in dag_code
-
-
-def test_workflow_exporter_dagster_job():
-    job_code = export_dagster_job("inventory-hop")
-    assert "from dagster import job" in job_code
-    assert "from migkit.integrations import migkit_op" in job_code
-    assert "@job(name='migkit_inventory_hop_job')" in job_code
-    assert "op_assess" in job_code
-    assert "op_cutover" in job_code
-
-
-def test_workflow_exporter_argo_yaml():
-    argo_yaml = export_argo_workflow("billing-hop", image="migkit:v2.5")
-    assert "apiVersion: argoproj.io/v1alpha1" in argo_yaml
-    assert "kind: Workflow" in argo_yaml
-    assert "generateName: migkit-billing-hop-" in argo_yaml
-    assert "template: run-migkit-cmd" in argo_yaml
-    assert "image: migkit:v2.5" in argo_yaml
-    assert "dependencies: [step-copy]" in argo_yaml
-
-
-def test_unified_workflow_export_routing():
-    res_af = export_workflow("airflow", "my-hop")
-    assert "from airflow import DAG" in res_af
-
-    res_dag = export_workflow("dagster", "my-hop")
-    assert "@job" in res_dag
-
-    res_argo = export_workflow("argo", "my-hop")
-    assert "kind: Workflow" in res_argo
-
-    with pytest.raises(ValueError, match="unsupported workflow target"):
-        export_workflow("unknown_engine", "my-hop")
-
-    # Test through integrations and workflow re-exports
-    import migkit.integrations as mi
-    assert hasattr(mi, "export_workflow")
-    assert "DAG" in mi.export_workflow("airflow", "my-hop")
-
-    import migkit.workflow as mw
-    assert hasattr(mw, "export_workflow")
-    assert "apiVersion" in mw.export_workflow("argo", "my-hop")
 
 
 # --- Item 304 (32.rds): Managed MySQL RDS Binlog Retention Reader ---

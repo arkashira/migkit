@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (172 modules)
+## `migkit/` (168 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -30,7 +30,6 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/archive.py` - Old rows moved to cheaper storage (backlog P0-SCENARIOS): the rows a rule picks carried to an archive, proved there, and removed from the so Classes: Table.
 - `migkit/assist.py` - Help from a language model, from any provider, off unless configured (backlog 43).
 - `migkit/audit.py` - The run's own record of what migkit did, written so a changed record shows.
-- `migkit/audit_guard.py` - Audit hardening and contracts across tail state, startup checks, schema drift, MySQL unified connections, neutral shape comparison, and tool Classes: Position, DurableTailState, ConcurrentTailError, SingleFollowLoopGuard, StartupValidationReport, SchemaDriftReport.
 - `migkit/avrostream.py` - Changes as Avro messages through a schema registry, in Debezium's envelope: `before`, `after`, `source`, `op` and `ts_ms`, the key a record  Classes: Encoder.
 - `migkit/backupseed.py` - SQL Server's own backup, restored on the target: a database's pages carried whole, and its changes followed from the version the restored co Classes: MsFacts.
 - `migkit/barriers.py` - Barriers, tombstones, and neutral write markers across engines (BAR-1, BAR-2, BAR-3, P0-DEPTH.tombstones, P0-DE.3). Classes: Tombstone, TombstoneLedger, NeutralMark, SequenceTag, BatchSequenceLedger, TargetWriteAttribution.
@@ -120,7 +119,6 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text.
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Rung, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Hashed, hashing, Way, Sql, ReadPlan, DigestPlan.
-- `migkit/pipeline_ha.py` - (no docstring) Classes: DatabaseStressMetrics, ThrottleState, AdaptiveMoverThrottler, LeaseRecord, FencingViolation, AtomicLeaseStore.
 - `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Keyless.
 - `migkit/ready.py` - Right the first time, not a runbook to recover with (backlog R23, 6). Classes: Item.
@@ -145,7 +143,6 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/schedule.py` - A hop that runs on a schedule of its own. Classes: NotDue, Slot.
 - `migkit/schemaformats.py` - Messages framed by a schema registry that carry JSON Schema or Protobuf rather than Avro (backlog R4.formats), read and - for JSON Schema -  Classes: Undecodable, JsonEncoder, ProtoFile.
 - `migkit/second_reader.py` - An independent second reading of the data, run out of process. Classes: Narrowing.
-- `migkit/security_audit.py` - Security audit, cryptographic integrity, transparent at-rest encryption, scorecard hardening, format-preserving encryption, and immutable au Classes: TransparentProgramSpool, SecureTempFile, SecureTempDir, FormatPreservingCipher, TokenizeRule, InFlightColumnTokenizer.
 - `migkit/seedtools.py` - What the seed on media (`ship`, `carriers`) asks of each library it wraps, against what each offers (backlog 0f): the compression of a part,
 - `migkit/servicecheck.py` - What another tool's own check said, held table by table against what migkit found (backlog P0-SCOPE.5). Classes: Claims.
 - `migkit/session.py` - One run of migkit: the command an operator started on a hop, and what is kept of it (backlog R23.1, R23.8, R23.10). Classes: Decisions.
@@ -189,8 +186,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/verifiers.py` - What migkit asks of each verifier it wraps, read off the code, with every feature it does not use given its reason (backlog 0f). Classes: ChangeIntervals.
 - `migkit/waysaid.py` - What `doctor` says of the ways a hop stands on: the way the whole database moves, the way its changes are followed, and how deeply each tabl
 - `migkit/wording.py` - What the operator reads while migkit works, in migkit's own words. Classes: Tally, DebugLog, Step.
-- `migkit/workflow.py` - Deep and adaptive workflow contracts across migration phases (backlog P0-WORKFLOW-DEPTH). Classes: PhaseContract, WorkflowState, Hypothesis, SemanticsModel.
-- `migkit/workflow_exporter.py` - Workflow exporter for Apache Airflow, Dagster, and Argo Workflows (R23.8).
+- `migkit/workflow_exporter.py` - A hop's whole move as a scheduler's workflow (backlog R23.8): an Airflow DAG, a Dagster job or an Argo workflow, each step a migkit command 
 - `migkit/workload.py` - Whether the target answers the source's own queries as well as the source does (backlog 24, problems file G1; R23, 4).
 - `migkit/zones.py` - The time zone the data is written in, against the one the server declares (backlog 23).
 

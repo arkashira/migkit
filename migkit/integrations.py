@@ -214,13 +214,15 @@ def _airflow_operator():
 # ---- Dagster ----------------------------------------------------------------
 
 def migkit_op(name, command, hop, args=(), conf=None, reports=None,
-              fail_on_difference=True):
+              fail_on_difference=True, after=False):
     """A Dagster op running a migkit command on a hop: it returns `run`'s
     result and fails (`dagster.Failure`, with the evidence's path) where
-    the command does."""
-    from dagster import Failure, MetadataValue, op
+    the command does. `after`: the op waits on the op before it (its
+    input `after`), so a job runs the steps in order
+    (`workflow_exporter`)."""
+    from dagster import Failure, In, MetadataValue, Nothing, op
 
-    @op(name=name)
+    @op(name=name, ins={"after": In(Nothing)} if after else None)
     def _migkit(context):
         got = run(command, hop, args, conf, reports)
         context.log.info(said(got))
