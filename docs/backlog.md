@@ -10873,7 +10873,6 @@ table's rows their own way, not through `decide.row_parity`; the row
 text rung on SQL Server reads a range of the whole table (no key
 cuts yet). Proved in tests/test_units_and_row_text_reach_every_engine.py.
 
-<<<<<<< HEAD
 ## Left after wave 9
 
 What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs/backlog-index.md` (2026-10-16). The next wave is cut from this list; an item is out of it only when its row is DONE.
@@ -10918,8 +10917,6 @@ What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs
 ### W10C (2026-10-16) row parity on every engine, units on restart
 Done: MySQL and generic row parity through `decide.row_parity`; SQL Server row text a key range at a time (`scan_cuts`); `attempts.reconcile_units` closes units an earlier run left open before the move or check replays; same-engine pairs keep a ledger file a side (`side_mark`).
 Not done: a same-engine pair's inner engines must say their side (`pair_side`), the hop's options cannot; range-level units of a move live in the engines' range copiers (not cli) and are not opened there yet; MySQL/generic row parity keep no measured costs between tables yet.
-||||||| e756b16d
-=======
 * **Not done (w11c, BAR-3 / P0-DE.2 / R25.3)** - the engines' apply paths do
   not yet call `freeze.name_write` per batch (they belong to other owners):
   migkit's writes into a target nothing keeps are named today by the change
@@ -10927,4 +10924,3 @@ Not done: a same-engine pair's inner engines must say their side (`pair_side`), 
   hold rung, the rungs refused above it and the rung's `loads`/`leaves`, not
   connections, memory or spool as numbers. No `migkit` command exports the
   change sheet or writes a run's evidence back yet.
->>>>>>> w11c
