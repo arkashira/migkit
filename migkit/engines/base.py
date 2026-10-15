@@ -5328,6 +5328,27 @@ class Engine:
         local = self.__dict__.get("_unit_local")
         return getattr(local, "now", None) if local else None
 
+    @contextlib.contextmanager
+    def work_unit(self, kind, name, level="table", parent="", parts=None):
+        """One unit of a task (`kind`: move, check, verify, deep) - a
+        table, or a partition or range of `parent` - opened in the attempt
+        ledger for as long as it runs (`attempts.Monitor.unit`), so its
+        estimate reads it running between its statements and owed again
+        where it fails; the statements this thread sends inside are kept
+        under it (`attempt_unit`)."""
+        from ..util import TASK_KINDS
+        with self.attempts().unit(name, kind, level, parent, parts), \
+                self.attempt_unit(TASK_KINDS.get(kind, kind), name):
+            yield
+
+    def session_health(self):
+        """What each side's sessions said of it lately, from the attempt
+        ledger (`attempts.Ledger.session_health`): lost answers, waits on
+        an answer the server stopped sending, keepalives that could not be
+        set - for an estimate to widen its range by and say why."""
+        ledger = self.attempts().ledger
+        return tuple(ledger.session_health(side) for side in ("src", "dst"))
+
     def capacity(self, side, db):
         """What this side's server can give a move, for `sizing`: any of
         `cpus`, `free_connections` (its limit less those reserved and in

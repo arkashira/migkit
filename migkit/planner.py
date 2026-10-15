@@ -871,8 +871,9 @@ def progress(where, pace, total_rows, model=None, done=False, ways=(),
             e = eta()
             got["eta"] = e.as_evidence()
             got["eta_said"] = e.operator_line()
-        except Exception:  # noqa: BLE001 - the progress is kept without it
-            pass
+        except Exception as e:  # noqa: BLE001 - kept without it, said why
+            got["eta_error"] = type(e).__name__ + (
+                ": " + str(e).splitlines()[0][:120] if str(e) else "")
     from . import durable
     durable.write_json(os.path.join(str(where), "progress.json"), got)
 

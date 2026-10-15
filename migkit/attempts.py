@@ -24,6 +24,8 @@ would have ended it. So:
   (`transport`), not assumed from what was asked.
 """
 import collections
+import contextlib
+import os
 import sys
 import threading
 import time
@@ -51,6 +53,8 @@ SAID = {
 
 #: the waits kept per operation: what its patience is measured from
 DURATIONS_KEPT = 256
+#: a side's latest attempts its session health is read over
+HEALTH_SEEN = 64
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,9 @@ class Attempt:
     ended: float = 0.0
     #: the wall time at the clock's zero, so a later run reads its times
     epoch: float = 0.0
+    #: the run that made it (`Ledger.run`): one left in flight by an
+    #: earlier run was cut off, not running
+    run: str = ""
     transport: dict = field(default_factory=dict)
     abandon: object = field(default=None, repr=False)
 
@@ -152,6 +159,46 @@ def transport(sock, deadline=None, asked=None):
     return got
 
 
+class SessionHealth:
+    """What one side's sessions said of it lately (`Ledger.session_health`),
+    read as `throttle.Health` is: `stressed()` says why work there may take
+    longer, or "". `widen` is how far an estimate's upper end opens for it
+    and `trust` what its confidence keeps, both from the share of those
+    attempts that went wrong - measured, not assumed."""
+
+    def __init__(self, side, seen=0, lost=0, stuck=0, bare=0):
+        self.side, self.seen = side, int(seen)
+        self.lost, self.stuck, self.bare = int(lost), int(stuck), int(bare)
+
+    @property
+    def share(self):
+        return min(1.0, (self.lost + self.stuck + self.bare)
+                   / max(1, self.seen))
+
+    @property
+    def widen(self):
+        return 1.0 + max(0.5, 2.0 * self.share)
+
+    @property
+    def trust(self):
+        return max(0.3, min(0.7, 1.0 - self.share))
+
+    def stressed(self, *_, **__):
+        where = "source" if self.side == "src" else "target"
+        said = []
+        if self.lost:
+            said.append(f"{self.lost} of its last {self.seen} answers were"
+                        " lost and read again")
+        if self.stuck:
+            said.append(f"{self.stuck} wait on an answer the {where} has"
+                        " stopped sending")
+        if self.bare:
+            said.append(f"keepalives could not be set on {self.bare}"
+                        " connections, so a lost answer waits to the read"
+                        " deadline")
+        return f"the {where}'s sessions: " + "; ".join(said) if said else ""
+
+
 class Ledger:
     """The attempts of one run's units and the waits each operation took,
     kept in one file (`durable`) so a restart reads what was measured and
@@ -162,8 +209,16 @@ class Ledger:
         self._lock = threading.Lock()
         self.attempts = {}
         self.durations = {}
+<<<<<<< HEAD
         #: operations by identity (`faults.Owned.key`): state, tries, fault
         self.operations = {}
+||||||| 7c40b782
+=======
+        #: the units opened (`unit_opened`), by name
+        self.records = {}
+        #: this run's mark on what it opens and attempts
+        self.run = os.urandom(6).hex()
+>>>>>>> worktree-agent-abe14b67862374ad8
         if path:
             from .durable import read_state
             got = read_state(path, "cache")
@@ -171,6 +226,7 @@ class Ledger:
                 self.attempts = dict(got.get("attempts") or {})
                 self.durations = {k: list(v) for k, v in
                                   (got.get("durations") or {}).items()}
+<<<<<<< HEAD
                 self.operations = dict(got.get("operations") or {})
 
     def owned(self, key):
@@ -191,6 +247,10 @@ class Ledger:
         with self._lock:
             return {k: dict(v) for k, v in self.operations.items()
                     if v.get("state") in ("began", "unknown", "running")}
+||||||| 7c40b782
+=======
+                self.records = dict(got.get("units") or {})
+>>>>>>> worktree-agent-abe14b67862374ad8
 
     def waits(self, operation):
         with self._lock:
@@ -209,44 +269,163 @@ class Ledger:
 
     def units(self, kind="move", operation=None, now=None):
         """The units the attempts worked, as the estimate reads them
-        (`util.Unit`, `util.forecast`): a unit every attempt of which ended
-        well is done, timed from its first start to its last end; one whose
-        last attempt failed and none runs is owed again; one still in
-        flight is running, with the seconds since any of its attempts last
-        made useful progress (`idle`), which says a stall. `operation`
-        narrows to one; an attempt kept before the wall time was is not
-        timed."""
-        from .util import Unit
+        (`util.Unit`, `util.forecast`). A unit opened here (`unit_opened`:
+        a table, a partition, a range) is read from its own record, so a
+        table between two of its statements is running, not done: done
+        once closed well, timed from its last opening to its close; owed
+        again where it closed failing or an earlier run ended with it
+        open; running while open in this run, with the share of its parts
+        closed and, from the statements in flight under it or its parts,
+        the seconds since any made useful progress (`idle`), which says a
+        stall. Its parts roll up into it, and its openings and the extra
+        statements its retries took are its attempts. A unit no record
+        holds is read from its statements alone: done once every one ended
+        well, its kind unknown unless `operation` narrows them to one. An
+        attempt kept before the wall time was is not timed."""
         now = time.time() if now is None else float(now)
-        by = collections.defaultdict(list)
         with self._lock:
-            for r in self.attempts.values():
-                if r.get("unit") and r.get("epoch") and (
-                        not operation or r.get("operation") == operation):
-                    by[r["unit"]].append(dict(r))
-        out = []
-        for name, rs in sorted(by.items()):
-            at = [float(r["epoch"]) for r in rs]
-            tries = sum(int(r.get("retries") or 0) for r in rs) + len(rs)
-            began = min(e + float(r.get("started") or 0.0)
-                        for e, r in zip(at, rs))
-            live = [(e, r) for e, r in zip(at, rs)
-                    if r.get("stage") != "done"]
-            if live:
-                moved = max(e + float(r.get("progress") or r.get("sent")
-                                      or r.get("started") or 0.0)
-                            for e, r in live)
-                out.append(Unit(name, kind, state="running", attempts=tries,
-                                idle=max(0.0, now - moved)))
-            elif any(r.get("reason") for r in rs):
-                out.append(Unit(name, kind, state="failed", attempts=tries))
-            else:
-                end = max(e + float(r.get("ended") or 0.0)
-                          for e, r in zip(at, rs))
-                out.append(Unit(name, kind, state="done", attempts=tries,
-                                seconds=max(0.0, end - began) or None,
-                                ended=end))
-        return out
+            records = {n: dict(r) for n, r in self.records.items()}
+            rows = [dict(r) for r in self.attempts.values()
+                    if r.get("unit") and r.get("epoch")]
+
+        def top(name):
+            seen = set()
+            while records.get(name, {}).get("parent") and name not in seen:
+                seen.add(name)
+                name = records[name]["parent"]
+            return name
+        held, loose = collections.defaultdict(list), \
+            collections.defaultdict(list)
+        for r in rows:
+            if r["unit"] in records:
+                held[top(r["unit"])].append(r)
+            elif not operation or r.get("operation") == operation:
+                loose[r["unit"]].append(r)
+        roots = collections.defaultdict(list)
+        for n, r in records.items():
+            if r.get("kind", kind) == kind:
+                roots[top(n)].append((n, r))
+        out = [self._recorded(root, recs, held.get(root, ()), kind, now)
+               for root, recs in sorted(roots.items())]
+        return out + [self._unrecorded(n, rs, kind if operation else "",
+                                       now)
+                      for n, rs in sorted(loose.items()) if n not in roots]
+
+    def _live(self, r):
+        """A statement still in flight in this run."""
+        return r.get("stage") != "done" and r.get("run", self.run) in (
+            self.run, "")
+
+    def _idle(self, statements, now):
+        """Seconds since the statements in flight last made progress; None
+        where none is in flight - between statements the client works, and
+        no wait is seen to call a stall."""
+        live = [r for r in statements if self._live(r)]
+        if not live:
+            return None
+        moved = max(float(r["epoch"]) + float(
+            r.get("progress") or r.get("sent") or r.get("started") or 0.0)
+            for r in live)
+        return max(0.0, now - moved)
+
+    def _recorded(self, root, recs, statements, kind, now):
+        from .util import Unit
+        own = dict(recs).get(root)
+        parts = [r for n, r in recs if n != root]
+
+        def state(r):
+            if r.get("state") == "open":
+                return "running" if r.get("run") == self.run else "failed"
+            return r.get("state") or "failed"
+        tries = sum(int(r.get("retries") or 0) for r in statements)
+        if own is not None:
+            st, opens = state(own), int(own.get("opens") or 1)
+            began, ended = own.get("started"), own.get("ended")
+        else:
+            # a unit not opened itself is what its parts show
+            states = {state(r) for r in parts}
+            st = next(x for x in ("running", "failed", "done")
+                      if x in states or x == "done")
+            opens = max(int(r.get("opens") or 1) for r in parts)
+            began = min(float(r.get("started") or 0.0) for r in parts)
+            ended = max(float(r.get("ended") or 0.0) for r in parts)
+        if st == "done":
+            ended = float(ended or 0.0)
+            return Unit(root, kind, state="done", attempts=opens + tries,
+                        seconds=max(0.0, ended - float(
+                            ended if began is None else began)) or None,
+                        ended=ended)
+        if st == "failed":
+            return Unit(root, kind, state="failed", attempts=opens + tries)
+        expected = int((own or {}).get("parts") or 0)
+        closed = sum(1 for r in parts if r.get("state") == "done")
+        return Unit(root, kind, state="running", attempts=opens + tries,
+                    idle=self._idle(statements, now),
+                    share=min(1.0, closed / expected) if expected else None)
+
+    def _unrecorded(self, name, rs, kind, now):
+        from .util import Unit
+        at = [float(r["epoch"]) for r in rs]
+        tries = sum(int(r.get("retries") or 0) for r in rs) + len(rs)
+        began = min(e + float(r.get("started") or 0.0)
+                    for e, r in zip(at, rs))
+        if any(self._live(r) for r in rs):
+            return Unit(name, kind, state="running", attempts=tries,
+                        idle=self._idle(rs, now))
+        # a statement an earlier run left in flight was cut off with it
+        if any(r.get("reason") or r.get("stage") != "done" for r in rs):
+            return Unit(name, kind, state="failed", attempts=tries)
+        end = max(e + float(r.get("ended") or 0.0) for e, r in zip(at, rs))
+        return Unit(name, kind, state="done", attempts=tries,
+                    seconds=max(0.0, end - began) or None, ended=end)
+
+    def unit_opened(self, name, kind="move", level="table", parent="",
+                    parts=None, at=None):
+        """A unit of work begins: a table, or a partition or a range of
+        the `parent` it is one of `parts` of. Opened again after it failed
+        or an earlier run ended with it open, it is a retry."""
+        at = time.time() if at is None else float(at)
+        with self._lock:
+            was = self.records.get(name) or {}
+            again = was.get("state") in ("open", "failed")
+            self.records[name] = {
+                "kind": kind, "level": level, "parent": parent or "",
+                "parts": int(parts) if parts else None, "state": "open",
+                "started": at, "ended": None, "run": self.run, "reason": "",
+                "opens": int(was.get("opens") or 0) + 1 if again else 1}
+        self.flush()
+
+    def unit_closed(self, name, ok, reason="", at=None):
+        """A unit of work ends: done, or failed and owed again, `reason`
+        the failure's class - never its text."""
+        at = time.time() if at is None else float(at)
+        with self._lock:
+            r = self.records.get(name)
+            if r is None:
+                return
+            r.update(state="done" if ok else "failed", ended=at,
+                     reason="" if ok else (reason or "failed"))
+        self.flush()
+
+    def session_health(self, side):
+        """What `side`'s sessions said of it over its latest attempts in
+        this run (`SessionHealth`): answers lost and read again, waits on
+        an answer the server stopped sending, and connections whose
+        keepalives could not be set."""
+        with self._lock:
+            rs = [dict(r) for r in self.attempts.values()
+                  if r.get("side") == side and r.get("epoch")
+                  and r.get("run", self.run) == self.run]
+        rs.sort(key=lambda r: float(r["epoch"]) + float(
+            r.get("ended") or r.get("progress") or r.get("started") or 0.0))
+        rs = rs[-HEALTH_SEEN:]
+        lost = sum(1 for r in rs
+                   if int(r.get("closes") or 0) or r.get("kind") == GONE)
+        stuck = sum(1 for r in rs if self._live(r) and (
+            r.get("kind") == CLIENT_STALL or (
+                r.get("kind") == IDLE and int(r.get("idle_reads") or 0) >= 2)))
+        bare = sum(1 for r in rs if (r.get("transport") or {}).get("error"))
+        return SessionHealth(side, len(rs), lost, stuck, bare)
 
     def put(self, attempt):
         """Keep `attempt`; written to the file where it is a unit's."""
@@ -263,7 +442,13 @@ class Ledger:
         with self._lock:
             text = json.dumps({"attempts": self.attempts,
                                "durations": self.durations,
+<<<<<<< HEAD
                                "operations": self.operations},
+||||||| 7c40b782
+                               "durations": self.durations},
+=======
+                               "units": self.records},
+>>>>>>> worktree-agent-abe14b67862374ad8
                               sort_keys=True, default=str)
         write_atomic(self.path, text)
 
@@ -291,9 +476,11 @@ class Monitor:
         now = self.clock()
         a = Attempt(side, operation, unit, position, session, reads, now,
                     now, transport=dict(transport or {}), abandon=abandon,
-                    epoch=self.wall() - now)
+                    epoch=self.wall() - now, run=self.ledger.run)
         before = self.ledger.earlier(a.key)
-        if before:
+        # the next statement after one that ended well is no retry
+        if before and (before.get("reason")
+                       or before.get("stage") != "done"):
             a.retries = int(before.get("retries", 0)) + 1
             a.reason = before.get("reason", "")
             a.closes = int(before.get("closes", 0))
@@ -310,6 +497,23 @@ class Monitor:
             self._thread.start()
         self._wake.set()
         return a
+
+    @contextlib.contextmanager
+    def unit(self, name, kind="move", level="table", parent="", parts=None):
+        """The unit of work inside, opened and closed in the ledger
+        (`Ledger.unit_opened`): done where it ends well, failed - owed
+        again - where it raises, the class of what it raised kept."""
+        self.ledger.unit_opened(name, kind, level, parent, parts,
+                                at=self.wall())
+        ok, why = False, ""
+        try:
+            yield
+            ok = True
+        except BaseException as e:
+            why = type(e).__name__
+            raise
+        finally:
+            self.ledger.unit_closed(name, ok, why, at=self.wall())
 
     def answered(self, a):
         a.answered = a.progress = self.clock()

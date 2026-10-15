@@ -10589,15 +10589,27 @@ opens the range, and where every running unit is so the line says
 evidence, next step. Proved on fakes in
 `tests/test_every_long_loop_says_its_eta.py`.
 
-Not done: the empirical accuracy and coverage gate (predictions at several
-horizons against actual completion, error and interval-coverage by engine,
-task, scale and pressure, release thresholds) - needs representative sandbox
-runs. The attempt ledger knows statements, not whole units: a table between
-two of its statements reads as done until the next begins, and the move's
-units are matched to attempts by table name only, so the move estimate
-holds where the engines name the unit by its table. The tail's own loop
-(`_tail`) prints no catch-up line itself; `watch` says it. The move does not
-pass side health (`throttle.Health`) into its estimate yet.
+Built 2026-10-16 (W6A3): the attempt ledger keeps units, not only
+statements (`attempts.Ledger.unit_opened`/`unit_closed`, `Monitor.unit`,
+`Engine.work_unit`): a table, partition or range is running until closed,
+parts roll up with their share, a unit an earlier run left open is owed
+again; the move opens a unit per table. A task found done scores the
+estimates said of it (`EstimateHistory.calibration`); where fewer ended in
+range than their stated confidence, `util.forecast` and `catch_up` lower
+the confidence and widen the range and say so; the report says the
+calibration. `_tail` says its own catch-up line (`cli._tail_said`). The
+move's estimate takes side session health (`Engine.session_health`: lost
+answers, stalled waits, failed keepalives). A failing move estimate is said
+with its reason (`eta_error`). Proved on fakes in
+`tests/test_every_long_loop_says_its_eta.py`.
+
+Not done: representative sandbox runs for the accuracy gate by engine,
+scale and pressure, and release thresholds. Range threads (`ranges.Slots`)
+do not open their own part units, so a table's statements on other threads
+are not under it and its idle is said only from its own thread. The pair
+engine and its inner engines keep separate ledgers on one file, so unit
+records may be overwritten on disk (in memory they hold). Checks and deep
+loops do not open units yet.
 
 
 ## P0-CONNECTION-PROGRESS: detect and reconcile client/server progress mismatch

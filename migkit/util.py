@@ -516,6 +516,21 @@ STALL_UNITS = 4.0
 #: the newer half of the window this many times faster or slower than the
 #: older half is a workload changing under the estimate
 SHIFT = 2.0
+#: the latest estimates of one kind of task held to how it really ended
+CALIBRATION_LAST = 10
+#: estimates scored before their record may lower a confidence
+CALIBRATION_LEAST = 3
+#: estimates of one task scored at most, spread over its run
+SCORED_A_TASK = 10
+
+
+def kind_of(scope):
+    """The kind of task a forecast's scope names (`TASK_KINDS`), or None
+    for a scope of its own."""
+    for kind, said in TASK_KINDS.items():
+        if scope == said or str(scope).startswith(said + " of "):
+            return kind
+    return None
 
 
 class Unit(NamedTuple):
@@ -540,29 +555,40 @@ class Unit(NamedTuple):
     #: seconds since a running unit last made useful progress, as its
     #: attempts say (`attempts.Ledger.units`); None where not watched
     idle: Optional[float] = None
+    #: the share of a running unit its closed parts make; None where it
+    #: was not cut into parts
+    share: Optional[float] = None
 
 
 def merge_units(listed, measured):
     """The units a task lists (`listed`: their rows and bytes from the
     catalogue) held to what their attempts measured (`measured`: state,
-    seconds, attempts, when each ended and how long a running one has
-    made no progress), matched by name; a measured unit the listing does
-    not hold is work found while it ran, and is added."""
-    took = {u.name: u for u in measured or ()}
+    seconds, attempts, when each ended, the share its closed parts make
+    and how long a running one has made no progress), matched by name
+    where the measured one is of the task's kind or of none said; a
+    measured unit of the task's kind the listing does not hold is work
+    found while it ran, and is added. A unit of another kind is another
+    task's, and is left out."""
+    listed = list(listed or ())
+    kinds = {u.kind for u in listed}
+    took = {u.name: u for u in measured or ()
+            if not u.kind or not kinds or u.kind in kinds}
     out = []
-    for u in listed or ():
+    for u in listed:
         m = took.pop(u.name, None)
         if m is None:
             out.append(u)
             continue
+        if m.state == "running" and m.share is not None and u.rows:
+            u = u._replace(done_rows=max(u.done_rows, u.rows * m.share))
         out.append(u._replace(
             state=m.state, seconds=m.seconds, attempts=max(u.attempts,
                                                           m.attempts),
             ended=m.ended, idle=m.idle,
             cooldown=max(u.cooldown, m.cooldown),
             done_rows=u.rows if m.state == "done" and u.rows else
-            u.done_rows))
-    return out + list(took.values())
+            u.done_rows, share=m.share))
+    return out + [m for m in took.values() if m.kind]
 
 
 def _quantile(xs, q):
@@ -817,11 +843,16 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
     for h in health or ():
         why = h.stressed() if h is not None else ""
         if why:
-            conf *= 0.7
+            # a side's own measure of how much of its work went wrong, or
+            # the pressure's fixed allowance where it says none
+            conf *= float(getattr(h, "trust", 0.7))
+            widen = float(getattr(h, "widen", 1.5))
             if hi is not None:
-                hi *= 1.5
+                hi = max(hi * widen, wall * widen)
             evidence.append(f"a side is under pressure ({why}): the work"
-                            " is held back and may take longer")
+                            " is held back and may take longer"
+                            + (f", the range opened {widen:.1f} times"
+                               if hi is not None else ""))
             step = ("nothing to do; the work slows itself while a side is"
                     " under pressure")
     last = max((u.ended for u in this_run if u.ended), default=None)
@@ -859,6 +890,8 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
                     f"stalled: no unit finished for {human_secs(now - last)}",
                     "stalled", "look at what the running units wait on: a"
                     " lock, a connection or a side out of room", active)
+    conf, lo, hi = _held_to_record(history, kind, conf, lo, hi, wall,
+                                   evidence)
     conf = round(max(0.05, min(1.0, conf)), 2)
     rng = (f"{human_secs(lo)} to {human_secs(hi)}" if hi is not None
            else f"at least {human_secs(lo)}")
@@ -870,6 +903,34 @@ def forecast(units, kind="move", scope="", workers=None, health=(),
                 f" {int(conf * 100)}% confidence)"
                 + (f"; {len(stuck)} stalled" if stuck else ""), how, step,
                 active)
+
+
+def _held_to_record(history, kind, conf, lo, hi, wall, evidence):
+    """The confidence and range of an estimate held to how the latest
+    estimates of its kind of task ended (`EstimateHistory.calibration`):
+    where fewer of them ended inside their range than the confidence they
+    stated, the confidence is lowered to the share that did and the range
+    opened by their median error, and that is said. (conf, lo, hi)."""
+    if history is None or wall is None:
+        return conf, lo, hi
+    try:
+        cal = history.calibration(kind)
+    except Exception:  # noqa: BLE001 - an unreadable record holds nothing
+        return conf, lo, hi
+    if not cal or cal["n"] < CALIBRATION_LEAST \
+            or cal["coverage"] >= cal["stated"]:
+        return conf, lo, hi
+    err = cal["error"]
+    evidence.append(
+        f"the last {cal['n']} estimates of {TASK_KINDS.get(kind, kind)}"
+        f" ended inside their range {cal['inside']} times against the"
+        f" {cal['stated']:.0%} confidence they said, off by {err:.0%} at"
+        " the median: the confidence is lowered to what they kept and the"
+        " range opened by that error")
+    conf = min(conf, conf * cal["coverage"] / cal["stated"])
+    lo = None if lo is None else min(lo, wall * max(0.0, 1.0 - err))
+    hi = None if hi is None else max(hi, wall * (1.0 + err))
+    return conf, lo, hi
 
 
 def catch_up(backlog, ingest, applied, scope="", now=None, spread=(),
@@ -921,7 +982,9 @@ def catch_up(backlog, ingest, applied, scope="", now=None, spread=(),
     hi = backlog / (worst - ingest) if worst > ingest else None
     if hi is None:
         ev.append("at the slowest apply rate measured the gap would grow")
-    conf = round(min(1.0, len(rates) / 6.0) if rates else 0.3, 2)
+    conf = min(1.0, len(rates) / 6.0) if rates else 0.3
+    conf, lo, hi = _held_to_record(history, "follow", conf, lo, hi, sec, ev)
+    conf = round(conf, 2)
     rng = (f"{human_secs(lo)} to {human_secs(hi)}" if hi is not None
            else f"at least {human_secs(lo)}, unbounded at the slowest rate")
     return made(sec, lo, hi, conf, f"{human_secs(sec)} ({rng},"
@@ -936,9 +999,13 @@ class EstimateHistory:
     rather than from nothing, says an earlier estimate that has gone
     stale, and explains a revision that leaves the earlier range."""
 
-    def __init__(self, path, stale_after=STALE_SECONDS):
+    def __init__(self, path, stale_after=STALE_SECONDS, keep_every=0.0):
         self.path = Path(path)
         self.stale_after = float(stale_after)
+        #: an estimate like the last one kept, younger than this many
+        #: seconds, is said but not written again: a loop that asks every
+        #: second keeps its journal short
+        self.keep_every = float(keep_every)
 
     def _lines(self):
         from . import durable
@@ -1028,10 +1095,87 @@ class EstimateHistory:
             if revised:
                 ev.append(revised)
         got = eta._replace(stale=stale, revised=revised, evidence=tuple(ev))
+        if prev is not None and not revised and eta.basis != "done" \
+                and prev.get("basis") == eta.basis \
+                and now - float(prev.get("at") or 0.0) < self.keep_every:
+            return got
         durable.append_line(self.path, json.dumps(
             {"scope": eta.scope, "estimate": dict(got.as_evidence(), at=now)},
             default=str))
+        if eta.basis == "done":
+            self._score(eta.scope, now)
         return got
+
+    def _score(self, scope, now):
+        """A task found done: each timed estimate said of it since it was
+        last scored held to when it really ended - inside its range or
+        not, its error against the time that was left, the confidence it
+        stated - kept for its kind (`calibration`). At most
+        `SCORED_A_TASK`, spread over the run, so a loop that asked often
+        does not outweigh one that asked seldom."""
+        import json
+        from . import durable
+        since, said = None, []
+        for e in self._lines():
+            if e.get("scope") != scope:
+                continue
+            if e.get("scored") is not None:
+                since, said = float(e.get("upto") or 0.0), []
+            est = e.get("estimate")
+            if isinstance(est, dict) and est.get("seconds") is not None \
+                    and est.get("basis") in ("measured", "conditional") \
+                    and (since is None
+                         or float(est.get("at") or 0.0) > since):
+                said.append(est)
+        if not said:
+            return
+        step = max(1, math.ceil(len(said) / SCORED_A_TASK))
+        scored = []
+        for est in said[::step][-SCORED_A_TASK:]:
+            at = float(est["at"])
+            lo, hi = est.get("lower_bound"), est.get("upper_bound")
+            inside = (lo is None or now >= at + float(lo)) and (
+                hi is None or now <= at + float(hi))
+            took = max(1.0, now - at)
+            scored.append({
+                "inside": bool(inside),
+                "error": round(abs(at + float(est["seconds"]) - now) / took,
+                               4),
+                "stated": float(est.get("confidence") or 0.0)})
+        durable.append_line(self.path, json.dumps(
+            {"scope": scope, "kind": kind_of(scope), "upto": now,
+             "scored": scored}))
+
+    def calibration(self, kind, last=CALIBRATION_LAST):
+        """How the latest `last` scored estimates of `kind` held: {"n",
+        "inside" (how many ended inside their range), "coverage" (that
+        share), "stated" (the confidence they said, on average), "error"
+        (their median error against the time that was left)}, or None
+        where none is scored."""
+        got = []
+        for e in self._lines():
+            if e.get("kind") == kind and isinstance(e.get("scored"), list):
+                got.extend(x for x in e["scored"] if isinstance(x, dict))
+        got = got[-int(last):]
+        if not got:
+            return None
+        inside = sum(1 for x in got if x.get("inside"))
+        return {"n": len(got), "inside": inside,
+                "coverage": inside / len(got),
+                "stated": sum(float(x.get("stated") or 0.0) for x in got)
+                / len(got),
+                "error": _quantile([float(x.get("error") or 0.0)
+                                    for x in got], 0.5)}
+
+    def calibrations(self):
+        """{kind: `calibration`} for every kind of task scored here, for
+        the report."""
+        kinds = []
+        for e in self._lines():
+            k = e.get("kind")
+            if k and isinstance(e.get("scored"), list) and k not in kinds:
+                kinds.append(k)
+        return {k: self.calibration(k) for k in kinds}
 
 
 class PrivateFile:

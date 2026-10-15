@@ -3278,14 +3278,18 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
     where = hop.report_dir(d)
     ways = getattr(eng, "measured_ways", None) or (lambda: [])
     listed = _move_units(eng, d, tables)
+    history = _eta_history(hop)
+
+    def eta(limit=None):
+        return eng.forecast("move", d, units=listed, attempts=True,
+                            workers=limit, history=history,
+                            health=_session_health(eng))
     pace = sizing.Pace(
         max(1, min(start, most)), most,
         resources=sizing.resources(eng, d, hop, _side_health, m),
         memory=sizing.Memory(m.worker_memory),
         report=lambda p: planner.progress(
-            where, p, total, m, ways=ways(),
-            eta=lambda: eng.forecast("move", d, units=listed, attempts=True,
-                                     workers=p.limit)))
+            where, p, total, m, ways=ways(), eta=lambda: eta(p.limit)))
     before = ranges.active
     # the ranges every table in flight copies share the move's workers
     ranges.active = ranges.Slots(most, pace=pace)
@@ -3305,6 +3309,11 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
                 at_once = max(1, min(at_once, joint.tables))
             with movers.builds_beside(log):
                 _copy_tables_in(hop, eng, d, tables, chunk, ck, at_once)
+        # the copy found done holds its estimates to when it ended
+        try:
+            eta(pace.limit)
+        except Exception:  # noqa: BLE001 - the move ended without it
+            pass
         # what the copy measured of itself, which the next plan stands on
         m.observe(ways(), pace.total, pace.took(), pace.limit)
         resource_model.tune_probe_floor(hop, m, pace.total, pace.took())
@@ -3322,6 +3331,30 @@ def _copy_tables(hop, eng, d, tables, chunk, ck):
             planner.progress(where, pace, total, m, done=True, ways=ways())
         except OSError:
             pass
+
+
+def _eta_history(hop):
+    """The hop's estimate journal (`util.EstimateHistory`) for a loop that
+    asks often: an estimate like the last is written at most every
+    `TAIL_SAID_EVERY` seconds."""
+    from .util import EstimateHistory
+    return EstimateHistory(hop.report_dir() / "eta-history.jsonl",
+                           keep_every=TAIL_SAID_EVERY)
+
+
+def _session_health(eng):
+    """What the sides' sessions said lately (`Engine.session_health`), or
+    nothing where the engine keeps no attempts."""
+    try:
+        return tuple(eng.session_health())
+    except Exception:  # noqa: BLE001 - an estimate without it
+        return ()
+
+
+def _work_unit(eng, kind, name):
+    """`Engine.work_unit`, or nothing where the engine keeps no ledger."""
+    fn = getattr(eng, "work_unit", None)
+    return fn(kind, name) if fn else contextlib.nullcontext()
 
 
 def _move_units(eng, d, tables):
@@ -3381,7 +3414,8 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
             tables = sorted(tables, key=lambda x: at[
                 f"{x[0]}.{x[1]}" if x[0] else x[1]])
         for sch, t in tables:
-            _copy_table(eng, d, sch, t, chunk, ck, log)
+            with _work_unit(eng, "move", f"{sch}.{t}" if sch else t):
+                _copy_table(eng, d, sch, t, chunk, ck, log)
             failpoint.hit("table.done")
             _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
         return
@@ -3400,7 +3434,8 @@ def _copy_tables_in(hop, eng, d, tables, chunk, ck, workers):
         from . import failpoint
         gate.gate()
         try:
-            _copy_table(eng, d, sch, t, chunk, ck, log)
+            with _work_unit(eng, "move", f"{sch}.{t}" if sch else t):
+                _copy_table(eng, d, sch, t, chunk, ck, log)
             failpoint.hit("table.done")
             _changelog(hop, {"op": "move", "db": d, "table": f"{sch}.{t}"})
         finally:
@@ -4282,7 +4317,9 @@ def _tail_held(hop, eng, db, go):
         shared.push()
         shared.start()
     try:
-        eng.tail_apply(db, go, path, lambda m: console.print(m))
+        with (_tail_said(hop, eng, db, console.print) if go
+              else contextlib.nullcontext()):
+            eng.tail_apply(db, go, path, lambda m: console.print(m))
     finally:
         if shared and go:
             shared.stop()
@@ -5771,9 +5808,12 @@ def _move_said(hop, d):
         out.append(
             f"move: {p.get('workers')} at a time"
             + (f", the copy left: {p['eta_said']}" if p.get("eta_said")
-               else f", ~{human_secs(p['eta_copy'])} of the copy left at"
+               else f", no time estimate: {p['eta_error']}"
+               if p.get("eta_error") else "")
+            + (f", ~{human_secs(p['eta_copy'])} of the copy left at"
                f" the recent {human_int(int(p['rate']))} rows/s"
-               if p.get("eta_copy") is not None and p.get("rate") else "")
+               if not p.get("eta_said") and p.get("eta_copy") is not None
+               and p.get("rate") else "")
             + (f", {p['binding']} binding" if p.get("binding") else "")
             + (f"; held down by {p['held_by']}" if p.get("held_by")
                else ""))
@@ -5784,17 +5824,54 @@ def _move_said(hop, d):
     return out
 
 
-def _follow_said(eng, d, ahead):
+def _follow_said(eng, d, ahead, history=None):
     """The tail's catch-up estimate (`Engine.forecast` follow) from what
     `ahead` (`planner.CatchUp`) last sampled: the changes behind, the rate
     they arrive at and the rate they are applied at - "falling behind"
-    where the arrivals outrun the apply. "" where no tail runs here."""
+    where the arrivals outrun the apply. "" where no tail runs here.
+    `history` keeps it, so a catch-up found done scores the estimates
+    said of it."""
     if ahead.now.get("applied") is None:
         return ""
     got = eng.forecast("follow", d, backlog=ahead.now.get("behind"),
                        ingest=ahead.rates["arrived"].value,
-                       applied=ahead.rates["applied"].value)
+                       applied=ahead.rates["applied"].value, history=history)
     return f"catch-up: {got.operator_line()}"
+
+
+#: seconds between the catch-up lines a running tail says, as `watch`
+#: samples by default
+TAIL_SAID_EVERY = 30.0
+
+
+@contextlib.contextmanager
+def _tail_said(hop, eng, db, say, every=TAIL_SAID_EVERY, ahead=None):
+    """While a tail runs here, its own catch-up line every `every` seconds
+    (`_follow_said`, from `_catch_up`'s samples), kept in the hop's
+    estimate journal; a line the same as the last is not said again. A
+    sample that cannot be read is skipped, never the tail."""
+    stop = threading.Event()
+    ahead = ahead or _catch_up(hop, eng, db)
+    history = _eta_history(hop)
+
+    def run():
+        last = ""
+        while not stop.wait(every):
+            try:
+                ahead.sample()
+                said = _follow_said(eng, db, ahead, history)
+            except Exception:  # noqa: BLE001 - the tail goes on without it
+                continue
+            if said and said != last:
+                say(f"  {db}: {said}")
+                last = said
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=5.0)
 
 
 def _catch_up(hop, eng, d):

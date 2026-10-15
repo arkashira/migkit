@@ -226,6 +226,11 @@ def _time_left_section(hop):
     except Exception:  # noqa: BLE001 - no estimate kept, no section
         return ""
     rows = []
+    try:
+        held = EstimateHistory(
+            hop.report_dir() / "eta-history.jsonl").calibrations()
+    except Exception:  # noqa: BLE001 - no record, no calibration
+        held = {}
     for scope, e in sorted(latest.items()):
         age = time.time() - float(e.get("at") or 0.0)
         old = (f" (said {human_secs(age)} ago: stale, measured again on the"
@@ -238,7 +243,32 @@ def _time_left_section(hop):
         return ""
     return ('<div class="card"><h2>time left</h2><table><thead><tr>'
             "<th>task</th><th>estimate</th><th>next</th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table></div>")
+            f"<tbody>{''.join(rows)}</tbody></table>"
+            f"{_calibration_said(held)}</div>")
+
+
+def _calibration_said(held):
+    """How the estimates of each kind of task held against when the task
+    really ended (`util.EstimateHistory.calibration`): how many ended
+    inside their range against the confidence they stated, and their
+    median error - so the reader knows how far to trust the times above."""
+    from .util import CALIBRATION_LEAST, TASK_KINDS
+    said = []
+    for kind, cal in sorted(held.items()):
+        if not cal:
+            continue
+        trusted = ("" if cal["n"] < CALIBRATION_LEAST
+                   or cal["coverage"] >= cal["stated"] else
+                   ": below what they said, so new estimates say less")
+        said.append(
+            f"<li>{html.escape(TASK_KINDS.get(kind, kind))}: {cal['inside']}"
+            f" of the last {cal['n']} estimates ended inside their range"
+            f" (they said {cal['stated']:.0%} confidence), off by"
+            f" {cal['error']:.0%} at the median{trusted}</li>")
+    if not said:
+        return ("<p>calibration: no task has ended since its estimates"
+                " were kept, so none is held to how it ended yet</p>")
+    return f"<p>calibration</p><ul>{''.join(said)}</ul>"
 
 
 def render(hop, results, generated=None, decided=None, taken=None):
