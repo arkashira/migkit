@@ -8437,6 +8437,11 @@ typical hop needs (target: the two addresses and nothing else), and
 questions the guide asks (target: none beyond the addresses and a
 password).
 
+Not done (2026-10-16): `tools/ease_measure.py` measures the address-only
+init, move and full check on every two-server sandbox profile, plus
+PostgreSQL/MySQL cross-engine moves. Live timings remain unmeasured
+because the local sandbox is stopped; no verified time is claimed.
+
 ### R22. Every resource in one model: workers, connections, hops, time and the machine to run on (added 2026-09-29)
 
 The owner: "take everything - the machine migkit runs on, the network
