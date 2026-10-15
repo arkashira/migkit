@@ -1091,3 +1091,59 @@ def topology_verify(facts, rows):
                          f" on: {came[:3]!r}")
         return TopologyCheck(proof.ok and not came, tuple(lines))
     return TopologyCheck(False, (f"{kind!r} is not a known topology",))
+
+
+# --- how a table's storage decides the copy (access methods, table engines) ----
+
+def storage_copy_facts(eng, db):
+    """The facts of the copy way: each side's storage per table as the
+    engine reads it (`tableengine.observed`) - a PostgreSQL access method
+    (heap or an extension's columnar one) or a ClickHouse table engine -
+    and the storage the physical copy can carry: pages of a plain heap
+    (`Engine.table_storage` a string where the engine does not read it)."""
+    from . import tableengine
+    seen = tableengine.observed(eng, db)
+    return decide.Facts({"source": seen["src"], "target": seen["dst"],
+                         "not_read": seen.get("not_read")})
+
+
+def _storage_read(f):
+    return f.get("source") is not None and f.get("target") is not None
+
+
+def _plain_heap(tables):
+    return all(m in ("heap", "mergetree") for m in (tables or {}).values())
+
+
+def storage_copy_case(facts):
+    """The way a database is copied, decided from its tables' storage: the
+    physical way (pages, parts) only where every table of both sides is a
+    plain heap or MergeTree - an extension's columnar access method, a
+    table engine that merges rows or one that holds none of its own
+    (memory, remote, null) is not a page of the same shape, so the rows are
+    read and written (the logical way), and each table that is not plain
+    is named. Storage that was not read is said, and the logical way kept:
+    it carries every row of any of them."""
+    physical = decide.Rung(
+        "physical", "pages or parts copied as they are", frozenset({"copy"}),
+        needs=(decide.Need("storage read on both sides", _storage_read,
+                           lambda f: f.get("not_read")
+                           or "the storage was not read"),
+               decide.Need("every table a plain heap or MergeTree",
+                           lambda f: _plain_heap(f.get("source"))
+                           and _plain_heap(f.get("target")),
+                           lambda f: "tables stored otherwise: " + ", ".join(
+                               sorted(t for side in ("source", "target")
+                                      for t, m in (f.get(side) or {}).items()
+                                      if m not in ("heap", "mergetree"))[:5]))),
+        because="every table is stored the plain way on both sides")
+    logical = decide.Rung(
+        "logical", "rows read and written", frozenset({"copy"}),
+        footprint=1, because="it carries every row whatever the storage")
+    choice = decide.climb("copy way by storage", (physical, logical), facts,
+                          need=("copy",))
+    odd = sorted({t: m for side in ("source", "target")
+                  for t, m in (facts.get(side) or {}).items()
+                  if m not in ("heap", "mergetree")}.items())
+    return ScenarioDecision("copy way by storage", choice, tuple(
+        f"{t}: stored as {m}, not copied as pages" for t, m in odd[:5]))

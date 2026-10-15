@@ -481,14 +481,28 @@ class ClickHouseEngine(NeutralCopier, Engine):
                     client.command(f"delete from {q} where {cond}",
                                    parameters=params,
                                    settings={"lightweight_deletes_sync": 2})
-            client.insert(table,
-                          [[canon.write_value("clickhouse", c, v)
-                            for (_, c), v in zip(columns, r)]
-                           for r in written],
-                          column_names=names, database=self._d(side, db))
+            block = self._block_for(side, db, table) or len(written)
+            for start in range(0, len(written), block):
+                client.insert(table,
+                              [[canon.write_value("clickhouse", c, v)
+                                for (_, c), v in zip(columns, r)]
+                               for r in written[start:start + block]],
+                              column_names=names, database=self._d(side, db))
         finally:
             client.close()
         return len(rows)
+
+    def _block_for(self, side, db, table):
+        """`insert_blocks` of one table, read once a run; None where it
+        could not be read, the batch then written whole."""
+        cache = self.__dict__.setdefault("_insert_blocks", {})
+        at = (side, db, table)
+        if at not in cache:
+            try:
+                cache[at] = self.insert_blocks(side, db, table)
+            except Exception:  # noqa: BLE001 - one reading fewer
+                cache[at] = None
+        return cache[at]
 
     def _ticks(self, client, side, db, table, names, rows):
         """A time going into a `DateTime64` of more than six digits as the
@@ -1991,6 +2005,86 @@ class ClickHouseEngine(NeutralCopier, Engine):
                       lambda m: "CREATE TABLE "
                       + self._qualified("dst", db, table), text, count=1)
         self.neutral_create_code("dst", db, made)
+
+    #: tables that are only a query or a window on others, not storage
+    _NOT_STORAGE = ("View", "MaterializedView", "LiveView", "WindowView")
+
+    def table_storage(self, side, db):
+        """{table: its storage engine, lowercase and without
+        `Replicated` or `Shared`} of `side`'s tables (`Engine.table_storage`):
+        replication changes where a table's parts live, not what its rows
+        are, so ReplicatedReplacingMergeTree is ReplacingMergeTree."""
+        out = {}
+        for name, engine in self._rows(
+                side, db, "select name, engine from system.tables where"
+                          " database = {d:String} and engine not in"
+                          " {skip:Array(String)}",
+                {"d": self._d(side, db), "skip": list(self._NOT_STORAGE)}):
+            kind = str(engine)
+            for lead in ("Replicated", "Shared"):
+                if kind.startswith(lead):
+                    kind = kind[len(lead):]
+            out[name] = kind.lower()
+        return out
+
+    @classmethod
+    def storage_traits(cls, name, side, observed=None):
+        """What a ClickHouse table engine promises, by its name. The
+        MergeTree family that merges rows at a background merge (replacing,
+        collapsing, summing, aggregating) holds `merged` rows - what a
+        copy writes is not what a later merge leaves - and a target that
+        is another server's tables is that server's."""
+        from .. import tableengine
+        from ..tableengine import Traits
+        if side == "dst" and name in tableengine.ONE_WAY:
+            return tableengine.ONE_WAY[name]
+        got = cls.STORAGE.get(str(name or "").lower())
+        if got is None:
+            return None
+        said, holds = got
+        return Traits(said, False, False, "table", holds=holds,
+                      compressed=holds == "rows")
+
+    #: {engine: (how it is said, what it holds)}
+    STORAGE = {
+        "mergetree": ("MergeTree", "rows"),
+        "replacingmergetree": ("ReplacingMergeTree", "merged"),
+        "collapsingmergetree": ("CollapsingMergeTree", "merged"),
+        "versionedcollapsingmergetree": ("VersionedCollapsingMergeTree",
+                                         "merged"),
+        "summingmergetree": ("SummingMergeTree", "merged"),
+        "aggregatingmergetree": ("AggregatingMergeTree", "merged"),
+        "log": ("Log", "rows"), "tinylog": ("TinyLog", "rows"),
+        "stripelog": ("StripeLog", "rows"),
+        "memory": ("Memory", "memory"), "set": ("Set", "memory"),
+        "join": ("Join", "memory"), "buffer": ("Buffer", "memory"),
+        "null": ("Null", "nothing"), "merge": ("Merge", "union"),
+        "distributed": ("Distributed", "remote"),
+        "url": ("URL", "remote"), "s3": ("S3", "remote"),
+        "file": ("File", "remote"), "mysql": ("MySQL", "remote"),
+        "postgresql": ("PostgreSQL", "remote"),
+        "dictionary": ("Dictionary", "virtual"),
+        "generaterandom": ("GenerateRandom", "virtual")}
+
+    def insert_blocks(self, side, db, table, rows_total=None):
+        """How many rows one native insert block holds: sized by the
+        table's measured row width and the target's memory
+        (`_pull_settings`' block), never a fixed count - a block is one
+        part, so too small a block makes parts the server must merge and
+        too large one breaks its memory limit. At least
+        `KEYS_A_STATEMENT` rows, so the delete-by-key before it is one
+        question per thousand keys at most."""
+        got = self._rows(side, db, "select sum(data_uncompressed_bytes)"
+                                   " / greatest(sum(rows), 1) from"
+                                   " system.parts where database ="
+                                   " {d:String} and table = {t:String} and"
+                                   " active",
+                         {"d": self._d(side, db), "t": table})
+        width = float(got[0][0]) if got and got[0][0] else 64.0
+        most = int(self.BLOCK_MOST // max(1.0, width))
+        if rows_total is not None:
+            most = min(most, max(int(rows_total), 1))
+        return max(self.KEYS_A_STATEMENT, most)
 
     def _partition_order(self, db, table):
         """The source's partitions in the order of their key's values -

@@ -36,7 +36,10 @@ the tenant column, so a key is one source's; `offset` - each source's
 integer keys shifted by its own offset (`offsets: {value: N}`), and every
 column referring to them by the same; `remap` - the offsets worked out by
 migkit, source by source, a stride apart that holds ten times the largest
-key, kept (`consolidate-keys.json`) so a later run shifts the same way.
+key, kept (`consolidate-keys.json`) so a later run shifts the same way;
+`prefix` - a text key led by its source's value and `PREFIX_SEP`, so a key
+stays one column and no two sources' keys can meet (a value that holds the
+separator is refused: `a:` + `b:c` would be `a:b` + `c`).
 
 **Counters merged**: once the rows are in, every counter on the target is
 raised past every source's keys (`settle_target`), and the proof asks it.
@@ -52,7 +55,9 @@ from dataclasses import dataclass, field
 
 GOAL = "consolidate"
 OPTION = "consolidate"
-RULES = ("refuse", "tenant", "offset", "remap")
+RULES = ("refuse", "tenant", "offset", "remap", "prefix")
+#: what ends a source's value in a key `prefix` leads
+PREFIX_SEP = ":"
 BATCH = 1000
 EXAMPLES = 3
 #: what `remap` leaves each source above its largest key, as a multiple:
@@ -258,6 +263,16 @@ def _integer_key(pair, db, table):
         "integer" else None
 
 
+def _text_key(pair, db, table):
+    """The table's key columns where every one is text, or None."""
+    src = pair.src_engine
+    key = list(src.neutral_key("src", db, table) or [])
+    if not key:
+        return None
+    cls = _classes(src, "src", db, table)
+    return key if all(cls.get(k) == "text" for k in key) else None
+
+
 def _stride(hop, eng, group_, tables):
     """`remap`'s stride: a power of ten at least `ROOM` times the largest
     key any source holds in any table - worked out once and kept beside
@@ -314,10 +329,13 @@ def offset_of(hop, eng, s, group_, tables):
     return 0
 
 
-def _key_facts(hop, pair, db, table, clash, rule):
+def _key_facts(hop, pair, db, table, clash, rule, values=()):
     from .decide import Facts
-    return Facts({"rule": rule, "clash": bool(clash)},
-                 integer=lambda: _integer_key(pair, db, table) is not None)
+    return Facts({"rule": rule, "clash": bool(clash),
+                  "separated": not any(PREFIX_SEP in str(v)
+                                       for v in values)},
+                 integer=lambda: _integer_key(pair, db, table) is not None,
+                 text=lambda: _text_key(pair, db, table) is not None)
 
 
 def key_ways():
@@ -345,6 +363,20 @@ def key_ways():
              footprint=1,
              because="the keys stay one column, each source's in its own"
                      " range"),
+        Rung("prefix", "each source's text keys led by its value",
+             frozenset({"keys apart"}),
+             needs=(Need("keys: prefix", lambda f: f["rule"] == "prefix",
+                         "the hop's rule leads no key with its source"),
+                    Need("a text key", lambda f: f["text"],
+                         "the table's key has a column that is not text,"
+                         " and only text is led by a value"),
+                    Need("source values without the separator",
+                         lambda f: f["separated"],
+                         f"a source's value holds {PREFIX_SEP!r}, so two"
+                         " prefixed keys could be one")),
+             footprint=1,
+             because="every key is its source's value and its own key,"
+                     " in the one column"),
         Rung("apart", "the keys as they are",
              frozenset({"keys apart"}),
              needs=(Need("no key two sources hold",
@@ -354,13 +386,14 @@ def key_ways():
              because="no two sources hold one key"))
 
 
-def key_way(hop, pair, db, table, clash):
+def key_way(hop, pair, db, table, clash, values=()):
     """The `decide.Choice` of how `table`'s keys are kept apart; its rung
     None where none holds - the refusal says why each could not."""
     from . import decide
     rule = settings(hop)["keys"]
     return decide.climb(f"{db}.{table}: keys apart", key_ways(),
-                        _key_facts(hop, pair, db, table, clash, rule),
+                        _key_facts(hop, pair, db, table, clash, rule,
+                                   values),
                         ("keys apart",))
 
 
@@ -376,6 +409,8 @@ class TablePlan:
     shifted: dict = field(default_factory=dict)
     #: the `decide.Choice` the way was taken by
     choice: object = None
+    #: {parent table: its way} of the tables `shifted` refers to
+    by: dict = field(default_factory=dict)
 
 
 def _fk_shifts(pair, db, table, ways):
@@ -383,7 +418,7 @@ def _fk_shifts(pair, db, table, ways):
     whose keys are shifted: they are shifted by the same offset."""
     out = {}
     for child, cc, parent, pc in pair.src_engine.foreign_keys("src", db):
-        if child != table or ways.get(parent) != "offset":
+        if child != table or ways.get(parent) not in ("offset", "prefix"):
             continue
         if len(cc) != 1:
             raise SystemExit(f"{table} refers to {parent} by"
@@ -405,7 +440,8 @@ def table_plans(hop, eng, db, group_=None):
     names = dict(pairs)
     ways, wrong, chosen = {}, [], {}
     for t in _tables(hop, pair, db):
-        c = key_way(hop, pair, db, t, clash.get(t))
+        c = key_way(hop, pair, db, t, clash.get(t),
+                    [s.value for s in group_])
         if c.rung is None:
             key, both = clash.get(t, ([], []))
             shown = "; ".join(f"({', '.join(map(str, k))}) in"
@@ -425,7 +461,8 @@ def table_plans(hop, eng, db, group_=None):
         out.append(TablePlan(t, names.get(t)
                              or pair._leaf(pair._rename(t, db)),
                              list(pair.src_engine.neutral_key("src", db, t)
-                                  or []), w, shifted, chosen[t]))
+                                  or []), w, shifted, chosen[t],
+                             {x: ways[x] for x in shifted.values()}))
     return out, wrong
 
 
@@ -471,24 +508,26 @@ def _shifted_apart(hop, eng, db, p, group_, there):
     each shifted by its offset, that meet - `remap`'s stride outgrown, or
     offsets the hop chose too close - and a shifted key past the target
     column's range."""
-    from . import canon
+    from . import canon, topology
     dst = _pair(eng).dst_engine
-    spans, wrong = [], []
+    spans, spaces, wrong = [], {}, []
     for s in group_:
         off = offset_of(hop, eng, s, group_, [p.table])
         _, texts = _key_texts(s, eng, p.table)
         keys = [int(x[0]) for x in texts or ()]
         if keys:
-            spans.append((min(keys) + off, max(keys) + off, s.name, off))
-    spans.sort()
-    for a, b in zip(spans, spans[1:]):
-        if b[0] <= a[1]:
-            wrong.append(f"{p.table}: {a[2]}'s keys shifted by {a[3]:,}"
-                         f" reach {a[1]:,} and {b[2]}'s shifted by"
-                         f" {b[3]:,} start at {b[0]:,} - the ranges meet:"
-                         " offsets further apart (or, under remap, a new"
-                         " stride: consolidate-keys.json removed before any"
-                         " row is written)")
+            lo, hi = min(keys) + off, max(keys) + off
+            spans.append((lo, hi, s.name, off))
+            spaces[s.name] = {p.table: topology.KeySpace(lo=lo, hi=hi)}
+    held = {x[2]: x for x in spans}
+    for table, a, b, key in topology.overlaps(spaces, [p.table]):
+        x, y = sorted((held[a], held[b]))[:2]
+        wrong.append(f"{table}: {x[2]}'s keys shifted by {x[3]:,} reach"
+                     f" {x[1]:,} and {y[2]}'s shifted by {y[3]:,} start at"
+                     f" {y[0]:,} (both would hold {key:,}) - the ranges"
+                     " meet: offsets further apart (or, under remap, a new"
+                     " stride: consolidate-keys.json removed before any row"
+                     " is written)")
     if p.target in there and spans:
         declared = dict(dst.neutral_columns("dst", db, p.target)).get(
             p.key[0])
@@ -511,14 +550,32 @@ def _tenant_column(value):
     return "text", (64,)
 
 
+def _led_wider(columns, p):
+    """`columns` with the text columns a `prefix` leads - the table's key,
+    and those naming another prefixed table's - room for the longest value
+    the tenant column holds and the separator."""
+    led = set(p.key) if p.way == "prefix" else set()
+    led |= {c for c, parent in p.shifted.items()
+            if p.by.get(parent) == "prefix"}
+    room = _tenant_column("")[1][0] + len(PREFIX_SEP)
+    out = []
+    for c in columns:
+        name, cls, numbers = c[0], c[1], c[2]
+        if name in led and numbers and isinstance(numbers[0], int):
+            c = (name, cls, (numbers[0] + room,) + tuple(numbers[1:])) \
+                + tuple(c[3:])
+        out.append(c)
+    return out
+
+
 def _make(hop, pair, db, p, value, log):
     """The target's table, made where it is not there: the source's
     columns, the tenant column, and the key the way needs."""
     got = settings(hop)
     columns, key = pair._target_shape(db, p.table, p.target)
     cls, numbers = _tenant_column(value)
-    columns = list(columns) + [(got["column"], cls, numbers,
-                                {"null": False})]
+    columns = _led_wider(columns, p) + [(got["column"], cls, numbers,
+                                         {"null": False})]
     if p.way == "tenant" and key:
         key = [got["column"]] + list(key)
     ddl = pair.dst_engine.neutral_create("dst", db, p.target, columns, key)
@@ -536,15 +593,25 @@ def tenant_where(dst, column, value):
     return f"{dst._quote_ident(column)} = {_literal(dst, value)}"
 
 
-def _shift(row, names, p, offsets):
+def _shift(row, names, p, offsets, value=None):
+    """`row` as the target holds it: the keys of an `offset` table, and
+    the columns naming them, moved by the source's offset; those of a
+    `prefix` table, and the columns naming them, led by the source's
+    `value`."""
     out = list(row)
     for i, n in enumerate(names):
         if out[i] is None:
             continue
-        if p.way == "offset" and n in p.key:
+        if n in p.shifted:
+            parent = p.shifted[n]
+            if p.by.get(parent) == "prefix":
+                out[i] = f"{value}{PREFIX_SEP}{out[i]}"
+            else:
+                out[i] = int(out[i]) + offsets[parent]
+        elif p.way == "offset" and n in p.key:
             out[i] = int(out[i]) + offsets[p.table]
-        elif n in p.shifted:
-            out[i] = int(out[i]) + offsets[p.shifted[n]]
+        elif p.way == "prefix" and n in p.key:
+            out[i] = f"{value}{PREFIX_SEP}{out[i]}"
     return out
 
 
@@ -708,7 +775,7 @@ def follow_changes(shape, pair, me, changes):
     def shifted(values, p, offsets):
         names = list(values)
         return dict(zip(names, _shift([values[n] for n in names], names, p,
-                                      offsets)))
+                                      offsets, me.value)))
     for c in changes:
         got = shape.get(c["table"])
         if got is None:
@@ -775,7 +842,8 @@ def _carry(hop, pair, db, p, me, offsets, log):
     where = src.row_filter(db, *hop.parts_of(p.table))
     n = 0
     for rows in src._every_row("src", db, p.table, src_cols, where):
-        batch = [_shift(r, names, p, offsets) + [me.value] for r in rows]
+        batch = [_shift(r, names, p, offsets, me.value) + [me.value]
+                 for r in rows]
 
         def run(choice, batch=batch):
             write = (dst.neutral_write if choice.rung.name == "bulk"
@@ -843,7 +911,8 @@ def prove(hop, eng, db):
             a, b = ({}, {}) if key else (Counter(), Counter())
             for rows in src._every_row("src", db, p.table, sc, where):
                 for r in rows:
-                    texts = pair._row_text(sc, _shift(r, names, p, offsets))
+                    texts = pair._row_text(sc, _shift(r, names, p, offsets,
+                                                           s.value))
                     if key:
                         a[tuple(texts[i] for i in at)] = _hash(texts)
                     else:
@@ -997,6 +1066,35 @@ def _mysql_counters(dst, db):
 def check(hop, eng, db):
     """`check` of a consolidation hop: the proof."""
     return prove(hop, eng, db)
+
+
+def topology_decision(hop, eng, db, group_=None, plans=None):
+    """The group as a many-to-one topology (`scenarios.topology_case`): each
+    source's key space of every table with a whole-number key, as the
+    target will hold it (`topology.KeySpace` over the keys it holds, shifted
+    by its offset), a conflict rule named only where the hop refuses none
+    - so the follow's ladder is decided on the same math as the copy's key
+    check, and says what it keeps."""
+    from . import scenarios, topology
+    group_ = group_ if group_ is not None else group(hop, eng, db)
+    if plans is None:
+        plans, _ = table_plans(hop, eng, db, group_)
+    spaces = {s.name: {} for s in group_}
+    for p in plans:
+        if p.way in ("tenant", "prefix"):
+            continue
+        for s in group_:
+            _, texts = _key_texts(s, eng, p.table)
+            keys = [int(x[0]) for x in texts or ()
+                    if p.way in ("offset", "apart")]
+            if keys:
+                off = offset_of(hop, eng, s, group_, [p.table])
+                spaces[s.name][p.table] = topology.KeySpace(
+                    lo=min(keys) + off, hi=max(keys) + off)
+    facts = scenarios.topology_facts(
+        "many-to-one", [s.name for s in group_], [hop.target_db(db)],
+        {p.table: {"key": p.key} for p in plans}, spaces)
+    return scenarios.topology_case(facts)
 
 
 def plan_lines(hop, eng, db):
