@@ -1196,6 +1196,7 @@ LINKED = {
     "move.bulk": ("capability", "bulk-move"),
     "move.large-values": ("shape", "large values"),
     "move.partitioned": ("shape", "partitioned"),
+    "move.spread": ("shape", "spread target"),
     "cutover.freeze": ("shape", "writes held"),
     "cutover.read-only-target": ("shape", "read-only target"),
     "cutover.counters": ("capability", "sequences"),
@@ -2671,7 +2672,10 @@ UNPROVED = {
     "tail.table-states": "mssql oracle db2i dsql couchbase sapodp saas hetero",
     "assess.versions": "clickhouse mssql oracle cassandra",
     "verify.structure.partitions": "mssql oracle clickhouse teradata",
-    "move.partitioned": "mssql oracle teradata",
+    # db2's, Parquet's and the MySQL-wire services' own partition reads have
+    # run against no server of theirs
+    "move.partitioned": "mssql oracle teradata db2 db2i db2zos parquet "
+                        "oceanbase polardbx dcdb",
     "assess.engine-checks": "db2i sapodp clickhouse opensearch mssql cassandra",
     "schema.create": "db2i db2zos kafka",
     "assess.capacity": "kafka opensearch mssql oracle cassandra teradata redshift snowflake cosmosdb",
@@ -2963,6 +2967,136 @@ for _item in (
         "cutover.drain"):
     UNPROVED[_item] = f"{UNPROVED.get(_item, '')} bigquery".strip()
 del _item
+
+
+#: ways the code has gained on these engines since their cells were
+#: declared - most inherited from the engine whose API or wire each speaks
+#: (DB2's on i and z/OS, Cassandra's on Keyspaces and GeminiDB, MongoDB's
+#: and Redis's on GeminiDB, PostgreSQL's on GaussDB, MySQL's on OceanBase
+#: and TDSQL) - and run in no test on that engine: no longer missing, and
+#: not yet a way until a test proves it there. Where a cell said the
+#: thing does not exist on the engine, the inherited way runs there all
+#: the same, so what it does there is owed too
+_GAINED = {
+    "sqlite": (
+        "scope.objects"),
+    "db2": (
+        "scope.listings scope.copy scope.repair scope.counters "
+        "scope.objects verify.access.object-ownership "
+        "verify.identity.sequence-collision "
+        "verify.identity.sequence-parity verify.movement.target-ahead "
+        "verify.structure.collection-options verify.structure.columns "
+        "verify.structure.foreign-keys verify.structure.indexes "
+        "verify.structure.keys verify.structure.materialized-views "
+        "verify.structure.objects verify.structure.partitions "
+        "verify.structure.row-security verify.structure.schema-diff "
+        "verify.structure.sharding verify.structure.triggers "
+        "verify.structure.unvalidated-constraints verify.value.charset "
+        "verify.value.collation verify.value.generated "
+        "verify.value.narrowing verify.value.null-empty "
+        "verify.value.precision verify.value.rendering "
+        "verify.value.timezone verify.repair verify.repair-undo "
+        "assess.preflight"),
+    "db2i": (
+        "scope.repair scope.counters scope.objects "
+        "verify.access.object-ownership "
+        "verify.identity.sequence-collision "
+        "verify.identity.sequence-parity verify.movement.target-ahead "
+        "verify.structure.collection-options verify.structure.columns "
+        "verify.structure.foreign-keys verify.structure.indexes "
+        "verify.structure.keys verify.structure.materialized-views "
+        "verify.structure.objects verify.structure.partitions "
+        "verify.structure.row-security verify.structure.schema-diff "
+        "verify.structure.sharding verify.structure.triggers "
+        "verify.structure.unvalidated-constraints verify.value.charset "
+        "verify.value.collation verify.value.generated "
+        "verify.value.narrowing verify.value.null-empty "
+        "verify.value.precision verify.value.rendering "
+        "verify.value.timezone verify.repair verify.repair-undo "
+        "assess.preflight"),
+    "db2zos": (
+        "scope.repair scope.counters scope.objects "
+        "verify.access.object-ownership "
+        "verify.identity.sequence-collision "
+        "verify.identity.sequence-parity verify.movement.target-ahead "
+        "verify.structure.collection-options verify.structure.columns "
+        "verify.structure.foreign-keys verify.structure.indexes "
+        "verify.structure.keys verify.structure.materialized-views "
+        "verify.structure.objects verify.structure.partitions "
+        "verify.structure.row-security verify.structure.schema-diff "
+        "verify.structure.sharding verify.structure.triggers "
+        "verify.structure.unvalidated-constraints verify.value.charset "
+        "verify.value.collation verify.value.generated "
+        "verify.value.narrowing verify.value.null-empty "
+        "verify.value.precision verify.value.rendering "
+        "verify.value.timezone verify.repair verify.repair-undo "
+        "assess.preflight"),
+    "duckdb": (
+        "scope.deep scope.counters scope.objects"),
+    "gaussdb": (
+        "scope.objects verify.structure.schema-diff verify.repair-undo "
+        "verify.rows-apart assess.versions assess.brands "
+        "assess.preflight assess.handwork schema.foreign-keys "
+        "schema.views move.create-missing operations.fencing"),
+    "oceanbase": (
+        "scope.objects verify.structure.collection-options "
+        "verify.structure.triggers verify.value.rendering "
+        "assess.preflight"),
+    "polardbx": (
+        "assess.preflight"),
+    "dcdb": (
+        "scope.objects verify.structure.collection-options "
+        "verify.structure.triggers verify.value.rendering "
+        "assess.preflight"),
+    "keyspaces": (
+        "scope.listings scope.deep scope.copy scope.repair "
+        "scope.objects verify.access.table-grants "
+        "verify.movement.target-ahead "
+        "verify.structure.collection-options verify.structure.columns "
+        "verify.structure.indexes verify.structure.materialized-views "
+        "verify.structure.objects verify.structure.schema-diff "
+        "verify.structure.triggers verify.value.charset "
+        "verify.value.narrowing verify.value.null-empty "
+        "verify.value.precision verify.value.timezone verify.repair "
+        "verify.repair-undo verify.rows-apart verify.tables "
+        "assess.versions assess.brands assess.preflight assess.capacity "
+        "schema.indexes move.sized move.load-window move.create-missing"),
+    "geminidb-cassandra": (
+        "scope.listings scope.deep scope.copy scope.repair "
+        "scope.objects verify.access.table-grants "
+        "verify.movement.target-ahead "
+        "verify.structure.collection-options verify.structure.columns "
+        "verify.structure.indexes verify.structure.materialized-views "
+        "verify.structure.objects verify.structure.schema-diff "
+        "verify.structure.triggers verify.value.charset "
+        "verify.value.narrowing verify.value.null-empty "
+        "verify.value.precision verify.value.timezone verify.repair "
+        "verify.repair-undo verify.rows-apart verify.tables "
+        "assess.versions assess.brands assess.preflight assess.capacity "
+        "schema.indexes move.sized move.load-window move.create-missing"),
+    "geminidb-redis": (
+        "scope.listings scope.deep scope.copy "
+        "verify.access.table-grants verify.movement.target-ahead "
+        "verify.rows-apart verify.tables verify.table assess.preflight "
+        "assess.capacity assess.handwork cutover.drain"),
+    "geminidb-mongo": (
+        "scope.listings scope.objects scope.ops scope.row-filter "
+        "scope.names verify.access.table-grants verify.value.charset "
+        "verify.value.collation verify.value.narrowing "
+        "verify.value.precision verify.value.rendering "
+        "verify.value.timezone verify.tables assess.preflight "
+        "assess.writers schema.indexes schema.views schema.routines "
+        "move.load-window"),
+}
+for _engine, _items in _GAINED.items():
+    for _item in _items.split():
+        DEPTH_GAPS.get(_item, {}).pop(_engine, None)
+    _owed(_engine, _items)
+# DB2's identity columns are carried and checked at cutover, owed a server
+for _engine in ("db2", "db2i", "db2zos"):
+    GAPS[_engine].pop("sequences", None)
+    _owed(_engine, "cutover.counters")
+del _engine, _items
 
 
 @functools.lru_cache(maxsize=None)

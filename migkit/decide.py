@@ -648,7 +648,7 @@ def rank(rungs, costs=None, unit=None, explore=True):
     for a unit (`costmodel.CostModel`), by what each costs on `unit`
     (`_order_estimates`); by one number a rung otherwise, as always."""
     rungs = list(rungs)
-    return _ranked(rungs, _priced(rungs, costs, unit), explore)
+    return _ranked(rungs, _priced(rungs, costs, unit), explore, costs)
 
 
 def _estimating(costs):
@@ -703,12 +703,16 @@ def _is_native_copier(rung):
 
 
 def _has_measured_run(rung, priced, costs=None):
+    """Whether `rung` ran here and was timed: an `Estimate` measured on at
+    least one unit, or a number a hop's own rates keep (`Costs`,
+    `HopCosts`: a number always was measured). A prediction, however
+    fast, never is."""
+    from .costmodel import MEASURED_TRUTH
     cost = priced.get(rung.name) if priced else None
-    if cost is not None:
-        if hasattr(cost, "measured"):
-            return bool(cost.measured and getattr(cost, "mean", 0) > 0)
-        if isinstance(cost, (int, float)):
-            return 0 < cost < _TIMING
+    if cost is not None and hasattr(cost, "truth"):
+        return cost.truth == MEASURED_TRUTH and cost.n > 0 and cost.mean > 0
+    if isinstance(cost, (int, float)):
+        return 0 < cost < _TIMING
     if costs is not None and callable(getattr(costs, "measured", None)):
         return bool(costs.measured(rung.name))
     return False
@@ -737,14 +741,14 @@ def _enforce_copier_rank(ordered, priced, costs=None):
     return earned + [ordered[copier_idx]] + unearned + ordered[copier_idx + 1:]
 
 
-def _ranked(rungs, priced, explore=True):
+def _ranked(rungs, priced, explore=True, costs=None):
     entries = [(priced.get(r.name), r.footprint, i, r)
                for i, r in enumerate(rungs)]
     if any(hasattr(e[0], "mean") for e in entries):
         ordered = _order_estimates(entries, explore)
     else:
         ordered = _order(entries)
-    return _enforce_copier_rank(ordered, priced)
+    return _enforce_copier_rank(ordered, priced, costs)
 
 
 def _measured(cost):
@@ -1129,7 +1133,7 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
     kept, short = _strongest(kept)
     out = sorted(out + short, key=lambda x: at[id(x[0])])
     priced = _priced(kept, costs, unit)
-    ranked = _ranked(kept, priced, explore)
+    ranked = _ranked(kept, priced, explore, costs)
     order, passed = list(ranked), []
     if keep:
         held = [r for r in ranked if r.name == keep]
@@ -2118,7 +2122,7 @@ _COMPARES_ONLY = ("it compares two databases and writes to neither: nothing"
                   " through it")
 _NONE = {**{n: (NOT_APPLICABLE, STREAM_ONLY.format(said, n))
             for n, said in (("kinesis", "Kinesis"), ("pubsub", "Pub/Sub"))},
-         "generic": (NOT_APPLICABLE, _COMPARES_ONLY)}
+         "generic": (NOT_YET, "P0-PARITY.small")}
 #: the cloud-native services held - a source at cutover, a target kept -
 #: by the hold of the API or the wire they speak (`freeze.HOLDS`)
 _HELD_AS = (("gaussdb", "PostgresHold"), ("oceanbase", "MySQLHold"),
@@ -2245,21 +2249,24 @@ WAYS = {
         # the one way of `pieces` - sized where they lie, batches cut by
         # bytes, read and written in pieces, hashed where they lie - each
         # engine's adapter its `LARGE_VALUES`
-        "mysql": ("yes", "@LARGE_VALUES"),
         **{n: ("yes", "@LARGE_VALUES") for n in (
             "mongodb", "mssql", "redis", "kafka", "sqlite", "parquet",
             "clickhouse", "db2", "db2i", "db2zos", "ase", "opensearch",
             "snowflake", "bigquery", "duckdb", "iceberg", "delta",
-            "hetero", "teradata", "tidb", "oceanbase",
-            "polardbx", "dcdb", "geminidb-redis", "geminidb-mongo")},
-        "gaussdb": (NOT_APPLICABLE, "GaussDB large values are bounded by"
-                                    " PostgreSQL wire protocol constraints"),
-        "oceanbase-oracle": (NOT_APPLICABLE, "OceanBase Oracle LOBs are"
-                                             " bounded by Oracle emulation limits"),
-        "lindorm": (NOT_APPLICABLE, "Lindorm wide table cell values are"
-                                    " bounded by cluster cell limits"),
+            "hetero", "teradata")},
+        # the engines added since, and the services on another's wire:
+        # the widest value each takes and what it does past it are not yet
+        # measured on a server of the kind, and an inherited adapter is
+        # not that measurement
+        **{n: (NOT_YET, "P0-PARITY.lv.new") for n in (
+            "tidb", "oceanbase", "oceanbase-oracle", "polardbx", "dcdb",
+            "gaussdb", "lindorm", "geminidb-redis", "geminidb-mongo",
+            "keyspaces", "geminidb-cassandra", "cockroachdb", "dsql",
+            "couchbase", "spanner", "bigtable", "firestore", "datastore",
+            "neptune", "timestream")},
         "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
                                      " under the 1 MB a scan page returns"),
+<<<<<<< HEAD
         "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, less than"
                                      " a piece: read whole in batches cut"
                                      " by bytes and written in"
@@ -2281,6 +2288,32 @@ WAYS = {
                                  " 10 MB"),
         "neptune": (NOT_APPLICABLE, "graph entities are bounded"),
         "timestream": (NOT_APPLICABLE, "a record is 2 KB at most"),
+||||||| 7901f35
+        "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, read whole"
+                                     " and handed on in batches cut by"
+                                     " bytes"),
+        "couchbase": (NOT_APPLICABLE, "a document is 20 MB at most; the"
+                                      " range scan reads across them"),
+        "spanner": (NOT_APPLICABLE, "a row is 4 MB at most; mutations"
+                                    " bounded"),
+        "bigtable": (NOT_APPLICABLE, "a cell is bounded by Bigtable;"
+                                     " row read in chunks"),
+        **{n: (NOT_APPLICABLE, "an entity is 1 MB at most")
+           for n in ("firestore", "datastore")},
+        **{n: (NOT_APPLICABLE, "a row is written as one mutation, at"
+                               " most 16 MB")
+           for n in ("keyspaces", "geminidb-cassandra")},
+        "cockroachdb": (NOT_APPLICABLE, "values past 16 MB are bounded"
+                                        " by range limits"),
+        "dsql": (NOT_APPLICABLE, "Aurora DSQL bounds transactions to"
+                                 " 10 MB"),
+        "neptune": (NOT_APPLICABLE, "graph entities are bounded"),
+        "timestream": (NOT_APPLICABLE, "a record is 2 KB at most"),
+=======
+        "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, read whole"
+                                     " and handed on in batches cut by"
+                                     " bytes"),
+>>>>>>> worktree-agent-a4ca2bacb9aa1b491
         "cassandra": (NOT_APPLICABLE, "a row is written as one mutation, at"
                                       " most half a commit-log segment:"
                                       " 16 MB by default"),
@@ -2305,25 +2338,18 @@ WAYS = {
         # partition held to its own row count (`INFORMATION_SCHEMA.PARTITIONS`)
         "bigquery": ("yes", "@check_deep"),
         "kafka": ("yes", "@move_table"),
+        # read by the code, each partition held to its own count, and owed a
+        # test on that engine (`capabilities.UNPROVED`)
         **{n: ("yes", "@_partitions") for n in ("db2", "db2i", "db2zos")},
         "parquet": ("yes", "@_parts"),
         "oceanbase": ("yes", "@_deep_partitions"),
         "polardbx": ("yes", "@_deep_partitions"),
         "dcdb": ("yes", "@_deep_partitions"),
-        "ase": (NOT_APPLICABLE, "SAP ASE partitions are storage segments without"
-                                " independent catalog metadata"),
-        "iceberg": (NOT_APPLICABLE, "an Iceberg table is partitioned by partition"
-                                    " specs in metadata, read through Parquet files"),
-        "delta": (NOT_APPLICABLE, "a Delta table is partitioned in the Delta log,"
-                                  " read through Parquet files"),
-        "gaussdb": (NOT_APPLICABLE, "GaussDB partitions are distributed across"
-                                    " datanodes, read through coordinator"),
-        "oceanbase-oracle": (NOT_APPLICABLE, "OceanBase Oracle partitions are"
-                                             " split across OBServer units by cluster placement"),
-        "lindorm": (NOT_APPLICABLE, "a Lindorm wide table is partitioned across"
-                                    " tablets by cluster placement"),
-        "hetero": (NOT_APPLICABLE, "a cross-engine move reads source partitions"
-                                   " as one logical table"),
+        # partitioned tables exist on these and none is read by its own
+        # partitions yet; a pair is read as its engines are
+        **{n: (NOT_YET, "R13") for n in (
+            "ase", "iceberg", "delta", "gaussdb", "oceanbase-oracle",
+            "lindorm", "hetero")},
         "geminidb-redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
                                            " partitioned ones"),
         "redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
@@ -2397,8 +2423,8 @@ WAYS = {
         # the bulk sessions' one grant, named to the DBA; single statements
         # otherwise, which need none of it
         "teradata": ("yes", "dba._teradata"),
-        "hetero": (NOT_APPLICABLE, _NO_PROGRAM),
-        "mongodb": (NOT_APPLICABLE, _NO_PROGRAM),
+        "hetero": (NOT_YET, "0"),
+        "mongodb": (NOT_YET, "0"),
         "*": (NOT_APPLICABLE, _NO_PROGRAM),
     },
     # the target kept from the application while migkit moves into it
@@ -2649,87 +2675,131 @@ class PriorityItem:
     why: str = ""
 
 
-def rank_priority(items, goal="copy", max_cost=None):
-    """Ranks work, probes and unknowns by reasoned dynamic prioritization
-    (P0-DECISION-ALL.priority).
+#: what an item guards against, worst first: an item guarding against a
+#: worse loss goes first whatever it costs - a guarantee is never traded
+#: for time
+RISKS = ("data_loss", "correctness", "unavailability", "performance", "none")
+#: what an item leaves behind, its rung's footprint: the tie-breaker
+LEAVES = ("read_only", "reversible", "irreversible")
 
-    Mandatory correctness evidence is ranked first under hard guarantees.
-    Probes are prioritized by decision impact over probe cost (high impact,
-    low cost run first). Irreversible actions are held until prerequisites
-    are met."""
-    risk_scores = {
-        "data_loss": 5000,
-        "correctness": 3000,
-        "unavailability": 1500,
-        "performance": 500,
-        "none": 0,
-    }
-    reversibility_scores = {
-        "read_only": 100,
-        "reversible": 0,
-        "irreversible": -500,
-    }
 
-    scored = []
-    satisfied = set()
+def _priority_cost(item, costs, unit):
+    """(rung, what it costs): what `costs` measured or predicted of the
+    item's name, the item's own figure - a prediction - where they say
+    nothing."""
+    from .costmodel import MEASURED_TRUTH, PREDICTED, Estimate
+    rung = Rung(item.name, item.name, footprint=LEAVES.index(
+        item.reversibility) if item.reversibility in LEAVES else len(LEAVES))
+    got = costed(rung, costs, unit)
+    if isinstance(got, (int, float)):
+        got = Estimate(float(got), truth=MEASURED_TRUTH, source="this hop",
+                       n=1.0)
+    if got is None or not got.mean:
+        got = Estimate(max(float(item.cost), 0.0), truth=PREDICTED,
+                       source="the item's own figure")
+    return rung, got
 
-    for item in items:
-        score = 10000 if item.mandatory else 0
-        score += risk_scores.get(item.risk, 0)
-        if item.critical_path or item.unlocks:
-            score += 2000
-        if item.decision_impact > 0 or item.kind in ("probe", "investigation", "unknown"):
-            impact = max(0.05, item.decision_impact)
-            uncert = max(0.1, item.uncertainty)
-            eff = (impact * uncert * 1000.0) / max(0.01, item.cost)
-            score += min(3000, eff)
-        score += reversibility_scores.get(item.reversibility, 0)
 
-        reasons = []
-        if item.mandatory:
-            reasons.append("mandatory correctness guarantee")
-        if item.risk in ("data_loss", "correctness"):
-            reasons.append(f"{item.risk.replace('_', ' ')} risk")
-        if item.critical_path or item.unlocks:
-            reasons.append("on critical path")
-        if item.decision_impact > 0:
-            reasons.append(f"decision impact {item.decision_impact:.2f}")
-        if item.reversibility == "read_only":
-            reasons.append("safe read-only probe")
-        elif item.reversibility == "irreversible":
-            reasons.append("irreversible action held behind checks")
+def _priority_value(item, by_name, seen=frozenset()):
+    """What doing `item` is worth to the choices after it: the chance it
+    changes one (its uncertainty times that choice's weight), and the
+    worth of every item that waits on it."""
+    own = max(item.uncertainty, 0.0) * max(item.decision_impact, 0.0)
+    after = [by_name[n] for n in item.unlocks if n in by_name] + [
+        o for o in by_name.values() if item.name in o.dependencies]
+    seen = seen | {item.name}
+    return own + sum(_priority_value(o, by_name, seen)
+                     for o in after if o.name not in seen)
 
-        why_text = "; ".join(reasons) or "routine work item"
-        scored.append((score, dataclasses.replace(item, why=why_text)))
 
-    scored.sort(key=lambda s: s[0], reverse=True)
+def rank_priority(items, goal="copy", max_cost=None, costs=None, unit=None):
+    """`items` (`PriorityItem`) in the order to do them (backlog
+    P0-DECISION-ALL.priority): each a rung, costed as every rung is - by
+    what `costs` measured of it here (`Costs`, `HopCosts`, a
+    `costmodel.CostModel`), its own figure only where nothing was.
 
-    result = []
-    ready = [it for _, it in scored]
-    while ready:
-        progress = False
-        for i, item in enumerate(ready):
-            if not item.dependencies or all(d in satisfied for d in item.dependencies):
-                result.append(item)
-                satisfied.add(item.name)
-                ready.pop(i)
-                progress = True
-                break
-        if not progress:
-            item = ready.pop(0)
-            result.append(item)
-            satisfied.add(item.name)
+    The guarantees order first and are never traded: mandatory evidence,
+    then the worse loss guarded against (`RISKS`), then the critical
+    path. Within that, the items that settle a choice go by what each
+    costs for the choice it settles - a cheap probe that may change a
+    decision before a long copy it decides - the rest by what they cost,
+    and a tie to what each leaves behind (`LEAVES`). An item never runs
+    before what it waits on, and an irreversible one never before every
+    mandatory item. `max_cost` keeps the items that fit, mandatory ones
+    always."""
+    items = list(items)
+    by_name = {it.name: it for it in items}
+    priced, rungs, value = {}, {}, {}
+    for it in items:
+        rungs[it.name], priced[it.name] = _priority_cost(it, costs, unit)
+        value[it.name] = _priority_value(it, by_name)
 
-    if max_cost is not None:
-        budgeted = []
-        spent = 0.0
-        for it in result:
-            if it.mandatory or spent + it.cost <= max_cost:
-                budgeted.append(it)
-                spent += it.cost
-        return budgeted
+    def tier(it):
+        return (not it.mandatory,
+                RISKS.index(it.risk) if it.risk in RISKS else len(RISKS),
+                not (it.critical_path or it.unlocks),
+                not value[it.name])
 
-    return result
+    ordered = []
+    for key in sorted({tier(it) for it in items}):
+        group = [it for it in items if tier(it) == key]
+        per = {it.name: (priced[it.name].scaled(1.0 / value[it.name])
+                         if value[it.name] else priced[it.name])
+               for it in group}
+        ordered += _ranked([rungs[it.name] for it in group], per, False)
+    ordered = [by_name[r.name] for r in ordered]
+
+    mandatory = {it.name for it in items if it.mandatory}
+    result, done, waiting = [], set(), list(ordered)
+
+    def ready(it):
+        wait = {d for d in it.dependencies if d in by_name}
+        if it.reversibility == "irreversible":
+            wait |= mandatory - {it.name}
+        return wait <= done
+
+    while waiting:
+        nxt = next((it for it in waiting if ready(it)), None)
+        stuck = nxt is None
+        nxt = nxt or waiting[0]
+        waiting.remove(nxt)
+        done.add(nxt.name)
+        result.append(dataclasses.replace(nxt, why=_priority_why(
+            nxt, priced[nxt.name], value[nxt.name], stuck)))
+
+    if max_cost is None:
+        return result
+    budgeted, spent = [], 0.0
+    for it in result:
+        cost = priced[it.name].mean
+        if it.mandatory or spent + cost <= max_cost:
+            budgeted.append(it)
+            spent += cost
+    return budgeted
+
+
+def _priority_why(item, cost, value, stuck):
+    reasons = []
+    if item.mandatory:
+        reasons.append(f"mandatory {item.risk.replace('_', ' ')} guarantee"
+                       if item.risk in ("data_loss", "correctness")
+                       else "mandatory correctness guarantee")
+    elif item.risk in ("data_loss", "correctness", "unavailability"):
+        reasons.append(f"{item.risk.replace('_', ' ')} risk")
+    if item.critical_path or item.unlocks:
+        reasons.append("on critical path")
+    if value:
+        reasons.append(f"may change a choice worth {value:.2f}")
+    reasons.append(f"costs {cost.said()}" if cost.mean else "costs nothing")
+    if item.reversibility == "read_only":
+        reasons.append("safe read-only probe")
+    elif item.reversibility == "irreversible":
+        reasons.append("irreversible action held behind its prerequisites"
+                       " and every mandatory check")
+    if stuck:
+        reasons.append("its prerequisites wait on each other: taken in"
+                       " rank order")
+    return "; ".join(reasons)
 
 
 # What each task the operator can start asks of the decision engine

@@ -148,3 +148,53 @@ def test_standalone_validation_automatic_replanning_on_failure():
     assert result == "validated_ok"
     assert ran == ["digest", "bisection"]
     assert choice.rung.name == "bisection"
+
+
+# --- the unlock read off what the hop measured (CRIT0 1) -------------------
+
+class _Said:
+    """A cost model that answers with one `Estimate` a rung."""
+
+    def __init__(self, **got):
+        self.got = got
+
+    def estimate(self, name, unit=None):
+        return self.got.get(name)
+
+    def get(self, name, default=None):
+        got = self.got.get(name)
+        return got.mean if got else default
+
+
+def test_a_program_timed_on_this_hop_earns_its_rank_under_hop_costs(tmp_path):
+    hop = _hop(tmp_path)
+    prog = Rung("pgloader", "the one-pass load", external=True)
+    copier = Rung("builtin", "the table copier", native_copier=True)
+    costs = HopCosts(hop)
+    assert [r.name for r in rank([prog, copier], costs=costs)] == [
+        "builtin", "pgloader"]
+    planner.record_rate(hop, "pgloader", 10_000, 2.0)
+    planner.record_rate(hop, "builtin", 10_000, 5.0)
+    assert [r.name for r in rank([prog, copier], costs=HopCosts(hop))] == [
+        "pgloader", "builtin"]
+    choice = climb("copy", [prog, copier], costs=HopCosts(hop))
+    assert choice.rung.name == "pgloader"
+
+
+def test_a_program_only_predicted_faster_never_unlocks():
+    from migkit.costmodel import MEASURED_TRUTH, PREDICTED, Estimate
+    prog = Rung("pgloader", "the one-pass load", external=True)
+    copier = Rung("builtin", "the table copier", native_copier=True)
+    guessed = _Said(pgloader=Estimate(1.0, truth=PREDICTED, n=0),
+                    builtin=Estimate(9.0, truth=MEASURED_TRUTH, n=3))
+    assert [r.name for r in rank([prog, copier], costs=guessed)] == [
+        "builtin", "pgloader"]
+    assert climb("copy", [prog, copier], costs=guessed).rung.name == \
+        "builtin"
+    # a measured label on no unit at all is no run either
+    empty = _Said(pgloader=Estimate(1.0, truth=MEASURED_TRUTH, n=0),
+                  builtin=Estimate(9.0, truth=MEASURED_TRUTH, n=3))
+    assert rank([prog, copier], costs=empty)[0].name == "builtin"
+    timed = _Said(pgloader=Estimate(1.0, truth=MEASURED_TRUTH, n=2),
+                  builtin=Estimate(9.0, truth=MEASURED_TRUTH, n=3))
+    assert rank([prog, copier], costs=timed)[0].name == "pgloader"
