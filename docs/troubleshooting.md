@@ -1871,6 +1871,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * no stream client can write the target here (<...>): migkit doctor --install puts it in place
 
+* <...>: the target refused <...> for a message and took one sent after it; sending it again would put it out of order. Nothing past the last saved position is counted as copied
+
+* the target refused <...>: <...>
+
 * <...> is not a managed service migkit knows; it knows <...> and more (`migkit/data/managed.yaml`)
 
 * the <...> is named <...> (<...>), and it runs <...> - name the service it is (managed: {service: ...})

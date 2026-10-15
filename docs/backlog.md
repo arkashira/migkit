@@ -7934,15 +7934,27 @@ To build, in the order they pay:
    compress, else lz4, else none; in the decision record),
    idempotent and transactional producers carried
    (`test_the_stream_client_and_codec_are_chosen_by_facts.py`, doubles).
-   Not done: the consumer and the topic admin still on the pure client
-   (poll/seek/watermark semantics and isolation level to be matched and
-   proved on a server); a codec the brokers refuse at send stops the
-   copy rather than stepping down to lz4; the server tests not run on the
-   compiled client. Users' client quotas stay on the pure client: they
-   are DescribeClientQuotas/AlterClientQuotas, which the compiled admin
-   has no call for (not a config resource). Noticed: `apply` calls
-   `delete_consumer_groups`, which the 3.x pure admin names
-   `delete_groups`.
+   Then (2026-10-16): the consumer and the admin go through the client
+   chosen for their side (`_client_way(side)`: a side signing in by
+   AWS_MSK_IAM reads through the pure one) - `NativeConsumer` answers
+   the pure client's calls, positions set as an assignment with offsets
+   before the next fetch; `NativeAdmin` answers create_topics,
+   delete_records, the group calls and the broker list, and `Admin`
+   sends any call it lacks (API versions, log directories, producer
+   states, client quotas, configs, ACLs and SCRAM users) through the
+   pure one, the call and why in the decision record. A codec refused at
+   send time steps down the ladder (`Stepping`, `_stepped`, the refusal a
+   fact of the climb) and the refused messages go again in order; a
+   landed message after a refused one of its topic stops the copy rather
+   than reorder. The codec sample is per topic (`_sampled`). The group
+   calls are found by attribute (`kafkaclient.call_of`), not by version.
+   Not done: configs, topic descriptions, ACLs and SCRAM users read
+   through the compiled admin (their answers are read only in the pure
+   client's shape); a transactional producer is not stepped down (a
+   refusal ends its transaction); the position past a transaction's
+   marker as the compiled consumer reports it, and the whole of it on a
+   server, not measured; the engine still imports the pure client's
+   `TopicPartition`, so the pure client stays installed.
 
 ### R19. Faster than the fastest, without giving up a row (added
 2026-09-28, the owner: "can we beat them with logic, technique or

@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from .. import pieces
+from .. import kafkaclient, pieces
 from .base import Engine, RepairAction, Result
 
 
@@ -92,23 +92,31 @@ class KafkaEngine(Engine):
         finally:
             log.removeHandler(handler)
 
-    def _client_way(self):
-        """The stream client the target is written through
-        (`kafkaclient.client_way`), chosen once for the engine's life and
-        kept in the run's decision record."""
-        got = self.__dict__.get("_client_choice")
-        if got is None:
+    def _client_way(self, side="dst"):
+        """The stream client a side is read and written through
+        (`kafkaclient.client_way`) - its producer, consumers and admin -
+        chosen once a side for the engine's life by how that side signs
+        in, and kept in the run's decision record."""
+        held = self.__dict__.setdefault("_client_choice", {})
+        if side not in held:
             from .. import decide, kafkaclient
-            iam = str((self.hop.target.options or {}).get("sasl_mechanism") or ""
+            ep = self.hop.source if side == "src" else self.hop.target
+            iam = str((ep.options or {}).get("sasl_mechanism") or ""
                       ).upper() == "AWS_MSK_IAM"
-            got = self.__dict__["_client_choice"] = kafkaclient.client_way(
+            held[side] = kafkaclient.client_way(
                 iam, costs=decide.HopCosts(self.hop, "kafka.client."))
-            decide.record(self.hop, got)
-        return got.path
+            decide.record(self.hop, held[side])
+        return held[side].path
 
     def _zstd_target(self):
         """Whether the target's brokers take zstd: the Produce request's
-        version they answer with, else the version they run, else None."""
+        version they answer with, else the version they run, else None;
+        asked once for the engine's life."""
+        if "_zstd" not in self.__dict__:
+            self.__dict__["_zstd"] = self._zstd_asked()
+        return self.__dict__["_zstd"]
+
+    def _zstd_asked(self):
         from .. import kafkaclient
         produce = None
         try:
@@ -125,25 +133,63 @@ class KafkaEngine(Engine):
         return kafkaclient.target_takes_zstd(
             produce, self._numbers(self._versions()["dst"][0]))
 
-    def _codec(self, way):
-        """The codec a producer sends in (`kafkaclient.codec`), from the
-        first messages of what is to be sent (`_sample`) and the target's
-        brokers; kept in the run's decision record."""
+    def _sampled(self, topic, values):
+        """Keep the first messages to be sent to `topic` as what its
+        producer's codec is measured on (`_codec`); the first kept stand."""
+        from .. import kafkaclient
+        held = self.__dict__.setdefault("_samples", {})
+        if not held.get(topic):
+            held[topic] = kafkaclient.sample_of(values)
+
+    def _codec(self, way, topic=None):
+        """The codec a producer of `topic` sends in (`kafkaclient.codec`),
+        from the first messages to be sent to that topic (`_sampled`), the
+        target's brokers and the codecs the target refused for it at send
+        time; kept in the run's decision record."""
         from .. import decide, kafkaclient
         has_zstd, has_lz4 = kafkaclient.codecs_of(way)
         got = kafkaclient.codec(
-            self.__dict__.get("_sample") or [], self._zstd_target(),
-            has_zstd, has_lz4,
-            costs=decide.HopCosts(self.hop, "kafka.codec."))
+            self.__dict__.get("_samples", {}).get(topic) or [],
+            self._zstd_target(), has_zstd, has_lz4,
+            costs=decide.HopCosts(self.hop, "kafka.codec."),
+            refused=self.__dict__.get("_codec_refused", {}).get(topic))
         decide.record(self.hop, got)
         return None if got.path == "none" else got.path
 
-    def _producer(self, **extra):
+    def _stepped(self, way, topic, codec, why):
+        """The codec after the target refused `codec` for `topic` at send
+        time: the ladder climbed again with the refusal as a fact, the
+        step said and recorded; the copy goes on in it."""
+        import logging
+        self.__dict__.setdefault("_codec_refused", {}).setdefault(
+            topic, {})[codec or "none"] = why
+        got = self._codec(way, topic)
+        logging.getLogger("migkit").warning(
+            "%s: the target refused %s compression when sent (%s); sent"
+            " again in %s", topic or "the stream", codec, why,
+            got or "no compression")
+        return got
+
+    def _producer(self, topic=None, **extra):
+        """A producer of the target for `topic` (None: several topics),
+        in the codec chosen for it, stepping down where the target refuses
+        that codec at send time (`kafkaclient.Stepping`). A transactional
+        producer is not stepped: a send it had refused ends its
+        transaction, and is said where the transaction is committed."""
         from .. import kafkaclient
         way = self._client_way()
         kw = {"acks": "all", "request_timeout_ms": 15000,
               "max_request_size": 16 * 2 ** 20, **extra}
-        kw.setdefault("compression_type", self._codec(way))
+        if "compression_type" in kw or kw.get("transactional_id"):
+            kw.setdefault("compression_type", self._codec(way, topic))
+            return self._made(way, **kw)
+        return kafkaclient.Stepping(
+            lambda codec: self._made(way, compression_type=codec, **kw),
+            self._codec(way, topic),
+            lambda codec, why: self._stepped(way, topic, codec, why))
+
+    def _made(self, way, **kw):
+        from .. import kafkaclient
         if way == "native":
             return kafkaclient.NativeProducer(self._connection("dst"),
                                               **kw)
@@ -275,14 +321,23 @@ class KafkaEngine(Engine):
         sent, skipped = streamout.encoded(self.hop, db, changes,
                                           int(time.time() * 1000))
         sent = list(sent)
-        self.__dict__["_sample"] = [v for _, _, v in sent[:200]]
-        producer = self._producer()
+        by_topic = {}
+        for topic, key, value in sent:
+            by_topic.setdefault(topic, []).append((key, value))
+        producers = {}
         try:
-            for topic, key, value in sent:
-                producer.send(topic, value=value, key=key.encode())
-            producer.flush()
+            # a producer a topic, each in the codec its own messages
+            # measured; a key's messages are one topic's, in its order
+            for topic, msgs in by_topic.items():
+                self._sampled(topic, [v for _, v in msgs])
+                producers[topic] = producer = self._producer(topic=topic)
+                for key, value in msgs:
+                    producer.send(topic, value=value, key=key.encode())
+            for producer in producers.values():
+                producer.flush()
         finally:
-            producer.close()
+            for producer in producers.values():
+                producer.close()
         self._count_skipped(db, skipped)
         return len(changes)
 
@@ -409,13 +464,21 @@ class KafkaEngine(Engine):
         return True
 
     def _consumer(self, side, **extra):
+        """A consumer of a side, through the client chosen for it
+        (`_client_way`): the compiled one answers the pure one's calls."""
+        kw = {"request_timeout_ms": 15000, "consumer_timeout_ms": 10000,
+              "enable_auto_commit": False, **extra}
+        if self._client_way(side) == "native":
+            from .. import kafkaclient
+            return kafkaclient.NativeConsumer(
+                self._connection(side),
+                side="source" if side == "src" else "target", **kw)
         try:
             from kafka import KafkaConsumer
         except ImportError:
             raise SystemExit("pip install 'migkit[kafka]' for kafka support")
         return self._signed_in(side, lambda: KafkaConsumer(
-            **self._connection(side), request_timeout_ms=15000,
-            consumer_timeout_ms=10000, enable_auto_commit=False, **extra))
+            **self._connection(side), **kw))
 
     def databases(self):
         return [self.CLUSTER]
@@ -442,7 +505,7 @@ class KafkaEngine(Engine):
         try:
             if topic in dst.topics():
                 return None
-            brokers = len(dst._client.cluster.brokers()) or 1
+            brokers = len(kafkaclient.brokers_of(dst)) or 1
         finally:
             dst.close()
         read = self._topic_configs("src", [topic])
@@ -547,7 +610,7 @@ class KafkaEngine(Engine):
             return int(said)
         dst = self._consumer("dst")
         try:
-            return min(3, len(dst._client.cluster.brokers()) or 1)
+            return min(3, len(kafkaclient.brokers_of(dst)) or 1)
         finally:
             dst.close()
 
@@ -624,7 +687,7 @@ class KafkaEngine(Engine):
                     extra["enable_idempotence"] = True
                 if kind == "txn":
                     extra["transactional_id"] = f"migkit-copy.{topic}"
-                made = self._producer(**extra)
+                made = self._producer(topic=topic, **extra)
                 if kind == "txn":
                     made.init_transactions()
                 producers[kind] = made
@@ -685,8 +748,7 @@ class KafkaEngine(Engine):
                              ).values() for m in msgs if m.offset < end]
                     if batch:
                         # what the producers' codec is measured on
-                        self.__dict__.setdefault(
-                            "_sample", [m.value for m in batch[:200]])
+                        self._sampled(topic, [m.value for m in batch])
                     if not batch:
                         # past what a reader of committed messages is given
                         # - a transaction's marker, an aborted write - the
@@ -1144,7 +1206,30 @@ class KafkaEngine(Engine):
         return sorted(consumer.partitions_for_topic(topic) or [])
 
     def _admin(self, side):
-        from kafka.admin import KafkaAdminClient
+        """A side's admin (`kafkaclient.Admin`): each call through the
+        compiled admin where the side's client is the compiled one and it
+        answers that call, else through the pure one - which call went
+        that way and why kept in the run's decision record."""
+        from .. import decide, kafkaclient
+        native = None
+        if self._client_way(side) == "native":
+            native = kafkaclient.NativeAdmin(
+                self._connection(side),
+                side="source" if side == "src" else "target",
+                request_timeout_ms=15000)
+
+        def said(call, why):
+            decide.record(self.hop, {"work": "stream admin call",
+                                     "call": call, "side": side},
+                          way="pure", reason=f"{call}: {why}")
+        return kafkaclient.Admin(native, lambda: self._pure_admin(side),
+                                 said)
+
+    def _pure_admin(self, side):
+        try:
+            from kafka.admin import KafkaAdminClient
+        except ImportError:
+            raise SystemExit("pip install 'migkit[kafka]' for kafka support")
         return self._signed_in(side, lambda: KafkaAdminClient(
             **self._connection(side), request_timeout_ms=15000))
 
@@ -1240,9 +1325,7 @@ class KafkaEngine(Engine):
             # the attribute is `node_id` on this client (3.x) and was
             # `nodeId` on the 2.x one - measured, 3.0.11 has no `nodeId`
             # at all
-            first = list(admin._client.cluster.brokers())[0]
-            node = str(first.node_id if hasattr(first, "node_id")
-                       else first.nodeId)
+            node = str(kafkaclient.brokers_of(admin)[0])
             resp = admin.describe_configs(
                 [ConfigResource(ConfigResourceType.BROKER, node)],
                 config_filter="all")
@@ -1290,7 +1373,7 @@ class KafkaEngine(Engine):
     def _cluster_id(self, side):
         consumer = self._consumer(side)
         try:
-            return consumer._client.cluster.cluster_id
+            return kafkaclient.cluster_id_of(consumer)
         finally:
             consumer.close()
 
@@ -2165,7 +2248,7 @@ class KafkaEngine(Engine):
             if self.OFFSET_MAP in dst.topics():
                 self._map_topic_made = True
                 return
-            brokers = len(dst._client.cluster.brokers()) or 1
+            brokers = len(kafkaclient.brokers_of(dst)) or 1
         finally:
             dst.close()
         rf = int((self.hop.options or {}).get("replication_factor",
@@ -2565,7 +2648,7 @@ class KafkaEngine(Engine):
         """
         admin = self._admin(side)
         try:
-            groups = admin.list_groups()
+            groups = kafkaclient.call_of(admin, "list_groups")()
         finally:
             admin.close()
         out = set()
@@ -2583,7 +2666,7 @@ class KafkaEngine(Engine):
         not migkit's to compare, place or repair."""
         admin = self._admin(side)
         try:
-            got = admin.list_group_offsets(group)
+            got = kafkaclient.call_of(admin, "list_group_offsets")(group)
         finally:
             admin.close()
         per_group = got.get(group, got) if isinstance(got, dict) else {}
@@ -3379,20 +3462,22 @@ class KafkaEngine(Engine):
                             {"group": group, "topic": tp.topic,
                              "partition": tp.partition,
                              "offset": held.get(tp)}) + "\n")
-                    got = admin.alter_group_offsets(
+                    got = kafkaclient.call_of(
+                        admin, "alter_group_offsets")(
                         group, {tp: OffsetAndMetadata(offset, "", -1)
                                 for tp, offset in wanted.items()})
-                    bad = [f"{tp.topic}[{tp.partition}]: {err.__name__}"
-                           for tp, err in (got or {}).items()
-                           if err is not None
-                           and getattr(err, "__name__", "") != "NoError"]
+                    bad = [f"{tp.topic}[{tp.partition}]: {name}"
+                           for tp, name in (
+                               (tp, kafkaclient.error_name(err))
+                               for tp, err in (got or {}).items())
+                           if name]
                     if bad:
                         raise SystemExit(
                             f"the target refused offsets for {group}:"
                             f" {'; '.join(bad[:6])}. Offsets committed"
                             " before this one stand; nothing was deleted")
             for group in sorted(g for g in gone if g not in by_group):
-                admin.delete_consumer_groups([group])
+                kafkaclient.call_of(admin, "delete_groups")([group])
         finally:
             admin.close()
 
