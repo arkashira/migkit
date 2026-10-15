@@ -623,7 +623,9 @@ def address(text, ask, say):
         p, heard = found[0]
         engine = heard["engine"]
         version = f" {heard['version']}" if heard["version"] else ""
-        say(f"{host}:{p} answers as {engine}{version} (the server's own"
+        sure = "answers as" if "not yet verified" not in heard["said"] \
+            else "seems to answer as"
+        say(f"{host}:{p} {sure} {engine}{version} (the server's own"
             f" {heard['said']})")
     else:
         p = found[0][0] if found else last[0]
