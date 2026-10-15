@@ -317,3 +317,60 @@ def test_the_brand_route_is_the_registry():
     assert not unchanged.usable_brand(crdb)
     assert not unchanged.usable_brand(v.identify("postgres", {}))
     assert not unchanged.usable_brand(None)
+
+
+def _held(world, monkeypatch, tmp_path, **eng_attrs):
+    """A run whose engine is set as the cutover sets it, all else as the
+    proved run left it."""
+    from migkit.engines.mssql import MSSQLEngine
+    for k, v in eng_attrs.items():
+        monkeypatch.setattr(MSSQLEngine, k, v)
+    return world.run(monkeypatch, tmp_path)
+
+
+def test_the_cutovers_own_proof_reads_every_table(monkeypatch, tmp_path):
+    """Nothing moved, so the counters would pass both tables over; the
+    proof that goes into the flip never does."""
+    from migkit.engines.base import Engine
+    assert Engine.cutover_proof is False
+    world = World()
+    _proved(world, monkeypatch, tmp_path)
+    data, lines, reads = _held(world, monkeypatch, tmp_path,
+                               cutover_proof=True)
+    assert reads == 4
+    assert "unchanged" not in data.detail
+    assert any(ln.startswith("# dbo.orders read again")
+               and "goes into a cutover" in ln for ln in lines), lines
+
+
+def test_a_source_held_for_a_cutover_reads_every_table(
+        monkeypatch, tmp_path):
+    from migkit import freeze
+    world = World()
+    _proved(world, monkeypatch, tmp_path)
+    monkeypatch.setattr(freeze, "source_frozen", lambda hop, dbs: True)
+    data, lines, reads = world.run(monkeypatch, tmp_path)
+    assert reads == 4
+    assert "unchanged" not in data.detail
+    assert any("held for a cutover" in ln for ln in lines), lines
+
+
+def test_a_freeze_record_that_cannot_be_read_reads_every_table(
+        monkeypatch, tmp_path):
+    """A doubt reads."""
+    from migkit import freeze
+    world = World()
+    _proved(world, monkeypatch, tmp_path)
+
+    def broken(hop, dbs):
+        raise OSError("state file truncated")
+    monkeypatch.setattr(freeze, "source_frozen", broken)
+    data, lines, reads = world.run(monkeypatch, tmp_path)
+    assert reads == 4
+    assert "unchanged" not in data.detail
+    assert any("could not be read (state file truncated)" in ln
+               for ln in lines), lines
+    # the doubt gone, the quiet tables are passed over again
+    monkeypatch.setattr(freeze, "source_frozen", lambda hop, dbs: False)
+    _, _, reads = world.run(monkeypatch, tmp_path)
+    assert reads == 0

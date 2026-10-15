@@ -412,6 +412,25 @@ def test_a_server_that_says_nothing_more_keeps_its_family(monkeypatch):
                  "mysql://app@db1.example.com:3399/shop",
                  "kafka://db1.example.com:9092"):
         assert engineat.rebrand(text, "CHANGE_ME", said.append) == text
-    assert said == []
-    # only the two reached on a wire several brands speak were asked
+    # the refused sign-in is said once, through `say`, and nothing else is
+    assert said == ["db1.example.com:3306: signing in to read its version"
+                    " failed (nobody signs in here); kept as the mysql it"
+                    " greeted as"]
+    # only the two reached on a wire several brands speak were asked, once
     assert [p for _, _, p, *_ in signins] == [3307, 3306]
+
+
+def test_a_teradata_knock_is_said_unverified(monkeypatch):
+    """The gateway's answer is read off the published layout, not yet heard
+    from a real gateway: every report of it carries that doubt."""
+    _servers(monkeypatch, {1025: _td(b"\x00" * 40)})
+    said = []
+    engineat.address("app@db5.example.com:1025/x", None, said.append)
+    assert said == ["db5.example.com:1025 answers as teradata (the server's"
+                    f" own {engineat.TD_SAID})"], said
+    assert "not yet verified against a real gateway" in engineat.TD_SAID
+    choice, heard = engineat.identify("db5.example.com", 1025)
+    assert choice.path == "teradata"
+    assert "not yet verified" in heard["said"]
+    assert [k.said for k in engineat.KNOCKS
+            if k.family == "teradata"] == [engineat.TD_SAID]

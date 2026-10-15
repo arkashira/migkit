@@ -397,13 +397,23 @@ def _own(eng, db, c, gate):
     return pair_
 
 
-def _chunks(eng, replicate, db, t):
+#: the program's exit bits that still mean a whole run: 16 is "a chunk
+#: differs", the very answer read back; any other bit is a run that stopped
+_WHOLE_RUN = (0, 16)
+
+
+def _chunks(eng, replicate, db, t, since):
+    """This run's chunks of `t`: only rows the program wrote at or after
+    `since`, the source's clock read before it started (its statements carry
+    the source's time to the replica), so a run that stopped before clearing
+    the table never hands back the last run's answers as its own."""
     sch, tbl = replicate.split(".", 1)
     rows = eng._q("dst", f"select chunk, chunk_index, lower_boundary,"
                          f" upper_boundary, master_cnt, this_cnt,"
                          f" master_crc, this_crc from `{sch}`.`{tbl}`"
-                         " where db = %s and tbl = %s order by chunk",
-                  (db, t))
+                         " where db = %s and tbl = %s and ts >= %s"
+                         " order by chunk",
+                  (db, t, since))
     return [Chunk(db, t, int(r[0]), r[1], r[2], r[3], (r[4], r[5]),
                   (r[6], r[7])) for r in rows]
 
@@ -455,13 +465,13 @@ def check(eng, db, log=print, costs=None):
             if got.path != "replica checksum":
                 alone.append(t)
                 continue
+            since = eng._q("src", "select now()")[0][0]
             t0 = time.monotonic()
             with client_defaults(s, tg) as (fs, ft):
                 cmd = argv((client_dsn(s, fs), client_dsn(tg, ft)), db, t,
                            f["replicate"], lag, max_load(limit))
                 p = run(quiet_argv(cmd), check=False, timeout=None)
-            chunks = _chunks(eng, f["replicate"], db, t)
-            if p.returncode not in (0, 16) and not chunks:
+            if p.returncode not in _WHOLE_RUN:
                 f["replica checksum failed"] = (f"{t} could not be"
                                                 " checksummed")
                 return Result("deep", f"{db} replica checksum", "warn",
@@ -469,6 +479,7 @@ def check(eng, db, log=print, costs=None):
                               " digest stays the proof", "",
                               "migkit check reads every table with its"
                               " own digest")
+            chunks = _chunks(eng, f["replicate"], db, t, since)
             stream = time.monotonic() - t0
             t1 = time.monotonic()
             own = {c.chunk: _own(eng, db, c, gate) for c in chunks}

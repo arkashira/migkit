@@ -186,14 +186,17 @@ class _Replica:
     _REPL_FIELDS = {"sql": ("Replica_SQL_Running", "Slave_SQL_Running")}
 
     def __init__(self, brand="mysql", status=None, src=None, dst=None,
-                 positions=("0-1-5",), sizes=None, chunks=None):
+                 positions=("0-1-5",), sizes=None, chunks=None,
+                 written="2026-10-16 10:00:00"):
         from types import SimpleNamespace
         self.brand = brand
         self.status = status if status is not None else [{
             "Source_UUID": "u-1", "Replica_SQL_Running": "Yes"}]
         self.src = {"@@server_uuid": "u-1", "@@server_id": 1,
                     "@@gtid_current_pos": "0-1-90",
-                    "current_user()": "app@%", **(src or {})}
+                    "current_user()": "app@%",
+                    "now()": "2026-10-16 10:00:00", **(src or {})}
+        self.written = written
         self.dst = {"@@gtid_slave_pos": "0-1-90", **(dst or {})}
         self.positions = iter(positions)
         self.last = None
@@ -224,8 +227,10 @@ class _Replica:
         if sql.startswith("digest"):
             return [(10, "same")]
         if "migkit_checksums` where" in sql:
+            assert "ts >= %s" in sql
             return [(1, "PRIMARY", "1", "10", n, n, "c", "c")
-                    for n in [self.chunks.get(params[1], 10)]]
+                    for n in [self.chunks.get(params[1], 10)]
+                    if self.written >= params[2]]
         return [()]
 
     def _q_named(self, side, sql):
@@ -284,7 +289,7 @@ def test_a_mariadb_replica_is_told_by_its_gtid_positions():
     assert rs._gtid_set("junk") == {}
 
 
-def _checked(monkeypatch, eng, answer="yes"):
+def _checked(monkeypatch, eng, answer="yes", returncode=0):
     import contextlib
     import time as clock
     from migkit import movers, sourcechange, util
@@ -294,7 +299,7 @@ def _checked(monkeypatch, eng, answer="yes"):
         from types import SimpleNamespace
         ran.append(cmd[cmd.index("--tables") + 1])
         clock.sleep(0.02)
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=returncode)
     monkeypatch.setattr(util, "run", run)
     monkeypatch.setattr(util, "quiet_argv", lambda cmd: cmd)
     monkeypatch.setattr(util, "which", lambda p: "/bin/" + p)
@@ -329,6 +334,36 @@ def test_a_source_being_written_is_proved_through_the_stream(monkeypatch):
     got, ran, _, _ = _checked(monkeypatch, eng)
     assert ran == ["app.small", "app.big"], ran
     assert got.status == "ok" and "alone" not in got.detail
+
+
+def test_a_stopped_run_never_pairs_the_last_runs_chunks(monkeypatch):
+    # the last run's rows are still in the replicate table, fresh or stale:
+    # a run that stopped (sign-in, lag, load) is never this run's "ok"
+    for written in ("2026-10-16 10:00:00", "2026-10-15 09:00:00"):
+        for code in (1, 16 | 32, 128):
+            eng = _Replica(written=written)
+            got, ran, costs, _ = _checked(monkeypatch, eng, returncode=code)
+            assert ran == ["app.small"], ran
+            assert got.status == "warn", (code, got)
+            assert "did not run on app.small" in got.detail, got.detail
+            assert "replica checksum" not in costs, costs
+            assert not [q for _, q in eng.sql
+                        if "migkit_checksums` where" in q]
+
+
+def test_a_whole_run_reads_only_the_chunks_it_wrote(monkeypatch):
+    # exit 0, but the rows left in the table are older than this run
+    eng = _Replica(written="2026-10-15 09:00:00")
+    got, ran, _, _ = _checked(monkeypatch, eng)
+    assert ran == ["app.small"], ran
+    assert got.status == "warn", got
+    assert "no chunk came back from the replica" in got.detail, got.detail
+    assert ("src", "select now()") in eng.sql
+    # "a chunk differs" (exit 16) is a whole run's answer: still paired
+    eng = _Replica()
+    got, _, costs, _ = _checked(monkeypatch, eng, returncode=16)
+    assert "chunks equal by both readings" in got.detail, got
+    assert "replica checksum" in costs
 
 
 def test_unanswered_the_table_is_offered_and_nothing_runs(monkeypatch):

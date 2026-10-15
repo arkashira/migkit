@@ -207,9 +207,31 @@ class Engine:
     #: Where it reads only the server's, one comparison answers for every
     #: database the hop moves.
     SETTINGS_PER_DATABASE = False
+    #: set by the cutover's last check while it reads (`cutover._final_check`):
+    #: its proof never passes a table over (`_held_for_cutover`)
+    cutover_proof = False
 
     def __init__(self, hop):
         self.hop = hop
+
+    def _held_for_cutover(self, db):
+        """Why this check reads every table of `db`, or '': its proof goes
+        into a cutover - the cutover's own last check (`cutover_proof`), or
+        a check run while a source freeze is recorded
+        (`freeze.source_frozen`). A freeze record that cannot be read is a
+        doubt, and a doubt reads."""
+        if self.cutover_proof:
+            return "the proof goes into a cutover, which reads every table"
+        from .. import freeze
+        try:
+            frozen = freeze.source_frozen(self.hop, [db])
+        except Exception as e:  # noqa: BLE001 - a doubt reads every table
+            return ("whether the source is held for a cutover could not be"
+                    f" read ({str(e).strip()[:120]})")
+        if frozen:
+            return ("the source is held for a cutover, and the proof that"
+                    " goes into it reads every table")
+        return ""
 
     def digest_salt(self):
         """This run's salt for the row hashes a same-engine check sums on

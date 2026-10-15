@@ -304,6 +304,10 @@ def _hear_drda(b):
 _TD_HEADER = 52
 _TD_VERSIONS = (3, 4)
 _TD_CONFIG = (1, 13)
+#: what the knock heard, said with its doubt: every report of it is one
+TD_SAID = ("gateway's answer to a configuration request, read by the"
+           " protocol's published layout and not yet verified against a"
+           " real gateway")
 
 
 def _td_hello(_host, _port):
@@ -352,8 +356,7 @@ KNOCKS = (
     Knock("db2", "answer to an attribute exchange", ("db2", "db2zos",
                                                      "db2i"),
           _drda_hello, _hear_drda),
-    Knock("teradata", "gateway's answer to a configuration request",
-          ("teradata",), _td_hello, _hear_td),
+    Knock("teradata", TD_SAID, ("teradata",), _td_hello, _hear_td),
 )
 
 
@@ -550,14 +553,22 @@ def rebrand(text, password, say):
     login = user.rstrip("@").partition(":")[0]
     db = tail.lstrip("/").partition("?")[0].partition("/")[0]
     heard = {family: {"engine": family, "version": "", "note": ""}}
-    rungs = _ladder(family, lambda f: None,
-                    lambda: _said_after_sign_in(family, host, port, login,
-                                                password, db), heard)
+    signed = []
+
+    def sign_in():
+        signed.append(_said_after_sign_in(family, host, port, login,
+                                          password, db))
+        return signed[-1]
+    rungs = _ladder(family, lambda f: None, sign_in, heard)
     rungs.append(decide.Rung(family, f"the {family} it greeted as"))
     choice = decide.climb(f"the brand at {host}:{port}", rungs,
                           {"sign_in": True})
     got = heard.get(choice.path)
     if choice.path == family or got is None:
+        # the operator's sign-in was tried and refused: said, not swallowed
+        if signed and isinstance(signed[0], str):
+            say(f"{host}:{port}: signing in to read its version failed"
+                f" ({signed[0]}); kept as the {family} it greeted as")
         return text
     version = f" {got['version']}" if got["version"] else ""
     say(f"{host}:{port} signed in as {got['engine']}{version} (its own"

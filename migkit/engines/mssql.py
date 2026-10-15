@@ -778,6 +778,9 @@ class MSSQLEngine(DbapiRows, Engine):
                 marked[side], why = self._counters(side, db)
                 refused = refused or why
         may_skip = not table and not with_counts
+        # the proof that goes into a cutover, or one taken while the source
+        # is held for one, passes no table over (`_held_for_cutover`)
+        held = self._held_for_cutover(db) if may_skip else ""
         skipped = []
         if not table:
             bad += [f"{t} missing on target" for t in st if t not in dt]
@@ -786,9 +789,10 @@ class MSSQLEngine(DbapiRows, Engine):
         salt = self.digest_salt()
         for t in tables:
             if may_skip:
-                judged = unchanged.judge(
-                    "mssql", proof.get(t), marked["src"].get(t),
-                    marked["dst"].get(t))
+                judged = unchanged.Judgement(False, held) if held else \
+                    unchanged.judge("mssql", proof.get(t),
+                                    marked["src"].get(t),
+                                    marked["dst"].get(t))
                 if judged.skip:
                     skipped.append(t)
                     outcomes[t] = "ok"

@@ -1908,10 +1908,9 @@ def _final_check(hop, eng, d, before, left, say):
 
     def work():
         try:
-            # the proof that goes into the flip passes no table over, on
-            # an engine that would otherwise (`cutover_proof`)
-            if hasattr(eng, "cutover_proof"):
-                eng.cutover_proof = True
+            # the proof that goes into the flip passes no table over
+            # (`Engine.cutover_proof`)
+            eng.cutover_proof = True
             if _has_delta(hop, eng, d):
                 got = eng.delta_verify(d)
                 result["how"] = ("the rows changed since the last verified"
@@ -1933,8 +1932,7 @@ def _final_check(hop, eng, d, before, left, say):
         except Exception as e:  # noqa: BLE001 - a check that fails is a stop
             result["error"] = str(e).strip()[:300]
         finally:
-            if hasattr(eng, "cutover_proof"):
-                eng.cutover_proof = False
+            eng.cutover_proof = False
     t = threading.Thread(target=work, daemon=True)
     t.start()
     t.join(max(0.1, left()))
