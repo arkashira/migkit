@@ -8290,6 +8290,12 @@ across the code; `init` writes a static template and asks nothing. So:
 8. **The view helps too:** the dashboard gets a setup page doing what
    `init` does, for operators who prefer a form (behind the same
    roles and host checks).
+   Built (R21.8): `/new-hop` (`web/newhop.py`) calls `guide.run`, passwords
+   kept in the keychain. Not done: a task file or a password reference is
+   refused on the page (terminal only); the guide refuses a hops file that
+   holds `access:`, so a view with roles adds its hops by hand until the
+   guide reads past it; no REST route for it; the page is not yet run
+   against a real server pair.
 9. **Every message says what to do next**, in plain words, with the
    exact command or statement.
 

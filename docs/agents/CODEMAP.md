@@ -316,13 +316,14 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/storedcode/tsql_pg.py` - SQL Server's T-SQL procedures, functions and triggers in PostgreSQL's PL/pgSQL, by migkit's own rules. Classes: Node.
 - `migkit/storedcode/views.py` - Views held to the source by their rows, on the hop's own servers.
 
-## `migkit/web/` (14 modules)
+## `migkit/web/` (15 modules)
 
 - `migkit/web/__init__.py` - The web view and the API: several people, each signed in by the organisation's identity provider, each with a role on each hop, and a REST A
 - `migkit/web/api.py` - The REST API, version 1: one table of routes (`ROUTES`) that the server dispatches on and the OpenAPI document is written from - a route can Classes: Route, Answer, Ctx.
 - `migkit/web/app.py` - The web view and the API as one WSGI application (backlog W2). Classes: App.
 - `migkit/web/approve.py` - An approval given in the view, counted where the hop's approvals are counted (`approvals.require`) - beside the signatures approvers make wi
 - `migkit/web/identity.py` - Who is asking: signed in by the organisation's identity provider - OpenID Connect or SAML - or, on an install one operator runs without one, Classes: Refused, Principal, Oidc, Saml, Local.
+- `migkit/web/newhop.py` - A hop set up in the view (backlog R21.8): two addresses with a user and a password each, and the page does what `migkit init` does - it call Classes: Refused.
 - `migkit/web/roles.py` - Who may do what on which hop, in the view and the API (backlog W2).
 - `migkit/web/runner.py` - One run started from the view, in a process of its own: `python -m migkit.web.runner <run.json>` (`runs.start`).
 - `migkit/web/runs.py` - Runs started from the view or the API: the command line's own commands, run whole in a process of their own (backlog W2). Classes: Refused, Option, Action.

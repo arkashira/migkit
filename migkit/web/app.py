@@ -100,6 +100,7 @@ class App:
             Rule("/auth/saml/metadata", endpoint="saml_metadata"),
             Rule("/auth/local", endpoint="local_signin", methods=["POST"]),
             Rule("/setup", endpoint="setup", methods=["GET", "POST"]),
+            Rule("/new-hop", endpoint="new_hop", methods=["GET", "POST"]),
             Rule("/hops/<hop>", endpoint="hop_page"),
             Rule("/hops/<hop>/runs/<run>", endpoint="run_page"),
             Rule("/hops/<hop>/evidence/<run>", endpoint="evidence_page"),
@@ -326,7 +327,8 @@ class App:
         html = self.jinja.get_template(template).render(
             me=me[0] if me else None, csrf=csrf,
             prefs=me[2] if me else {}, s=self.settings,
-            admin=bool(me) and _is_admin(me[0]), **context)
+            admin=bool(me) and _is_admin(me[0]),
+            can_set_up=bool(me) and _can_set_up(me[0]), **context)
         return Response(html, status, mimetype="text/html")
 
     def _signed_in(self, request):
@@ -518,6 +520,84 @@ class App:
                        form=token, again=self.local.exists())
         self._set_form_cookie(r, token)
         return r
+
+    def _p_new_hop(self, request):
+        """A hop set up from two addresses: what `migkit init` does, by
+        the guide itself (`newhop`)."""
+        me = self._signed_in(request)
+        if me is None:
+            return self._to_signin(request)
+        from . import newhop, roles, views
+        principal = me[0]
+        hops, _ = views.loaded()
+        if not roles.may_set_up(principal, hops):
+            self.record({"op": "refused", "path": request.path,
+                         "by": principal.id, "status": 403,
+                         "why": "not an operator", "through": "web"})
+            return self._error(request, 403, "setting up a hop is for an"
+                                             " operator of a hop or a"
+                                             " global admin; ask one to"
+                                             " give you the operator role"
+                                             " in the hops file")
+        context = {"values": {}, "problems": [], "done": None}
+        status = 200
+        if request.method == "POST":
+            context["values"] = {k: v for k, v in request.form.items()
+                                 if "password" not in k and k != "csrf"}
+            if not self._csrf_ok(request, me[1]):
+                self.record({"op": "refused", "path": request.path,
+                             "why": "not from this view's page",
+                             "by": principal.id})
+                return self._error(request, 403, "not from this view's page")
+            values, problems = newhop.read(request.form)
+            if not problems and not roles.may_create(
+                    principal, values["name"]):
+                problems.append(
+                    f"your role does not cover a hop called"
+                    f" {values['name']!r}" if values["name"] else
+                    "give the hop a name your role covers - the hops file"
+                    " gives you operator on hops by name, and a hop is made"
+                    " under a name you can run")
+                self.record({"op": "refused", "path": request.path,
+                             "by": principal.id, "status": 403,
+                             "why": "no operator role on that name",
+                             "through": "web"})
+            if not problems:
+                from .. import config
+                try:
+                    got, said = newhop.create(values, config.CONF)
+                except newhop.Refused as e:
+                    problems.append(str(e))
+                else:
+                    self.record({"op": "hop-created", "by": principal.id,
+                                 "hop": got["name"], "goal": got["goal"],
+                                 "through": "web"})
+                    context["done"] = self._made(principal, got, said)
+            status = 200 if context["done"] else 422
+            if context["done"] is None and problems:
+                context["problems"] = problems
+        return self._page(request, "newhop.html", me, status=status,
+                          goals=_goals(), **context)
+
+    def _made(self, principal, got, said):
+        """What the page shows of a hop just made: what init said, the
+        commands it offers next, and the first of them as a button where
+        the runner starts it as written."""
+        from . import newhop, roles, runs, views
+        steps = newhop.next_steps(got)
+        hop, role = views.one(principal, got["name"])
+        button = None
+        if hop is not None and steps:
+            asked = newhop.offer(steps[0])
+            if asked is not None and roles.RANK[role] >= roles.RANK[
+                    runs.ACTIONS[asked[0]].need]:
+                action, params, writes = asked
+                button = {"command": steps[0], "action": action,
+                          "params": params, "writes": writes}
+        said = [line for line in said if line.strip() not in steps]
+        return {"name": got["name"], "said": said, "steps": steps,
+                "button": button, "visible": hop is not None,
+                "goal": got["goal"]}
 
     def _p_signout(self, request):
         me = self._signed_in(request)
@@ -721,6 +801,16 @@ def _metrics():
 def _is_admin(principal):
     from . import roles
     return roles.is_admin(principal)
+
+
+def _can_set_up(principal):
+    from . import roles, views
+    return roles.may_set_up(principal, views.loaded()[0])
+
+
+def _goals():
+    from .. import hopkeys
+    return [(name, g["what"]) for name, g in hopkeys.GOALS.items()]
 
 
 def _may(role):

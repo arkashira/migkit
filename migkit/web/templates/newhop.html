@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}A new hop - migkit{% endblock %}
+{% block main %}
+{% if done %}
+<section class="card">
+  <h1>Hop {{ done.name }} is set up</h1>
+  <p class="muted">What was found, as <code>migkit init</code> says it:</p>
+  <pre class="output">{{ done.said|join("\n") }}</pre>
+  <h2>Next</h2>
+  <ul class="said">{% for step in done.steps %}<li><code>{{ step }}</code></li>{% endfor %}</ul>
+  {% if done.button %}
+  <form data-api="/api/v1/hops/{{ done.name|urlencode }}/runs" data-go-run="{{ done.name }}" class="row">
+    <input type="hidden" name="action" value="{{ done.button.action }}">
+    {% for k, v in done.button.params.items() %}
+    {% if v is sameas true %}<input type="checkbox" name="{{ k }}" checked hidden>{% else %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endif %}
+    {% endfor %}
+    <button type="submit"{% if done.button.writes %} data-confirm="Run {{ done.button.command }}? It writes."{% endif %}>Run {{ done.button.command }}</button>
+  </form>
+  {% elif done.steps %}
+  <p class="muted">The first command is run at a terminal.</p>
+  {% endif %}
+  <p>{% if done.visible %}<a href="/hops/{{ done.name|urlencode }}">Open {{ done.name }}</a> or {% endif %}<a href="/">see all hops</a> or <a href="/new-hop">set up another</a>.</p>
+</section>
+{% else %}
+<section class="card narrow">
+  <h1>A new hop</h1>
+  <p class="muted">Where the data is now, and where it should go. migkit
+  connects, says what it found, proposes what the hop is for and writes
+  the smallest configuration - what <code>migkit init</code> does. A
+  password is kept in this machine's keychain and is never put in an
+  address.</p>
+  {% for p in problems %}<p class="note error">{{ p }}</p>{% endfor %}
+  <form method="post" action="/new-hop">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <h3>The source</h3>
+    <label>Address <input name="source" value="{{ values.source }}" placeholder="postgres://db1:5432/shop" autocomplete="off" required></label>
+    <label>User <input name="source_user" value="{{ values.source_user }}" autocomplete="off"></label>
+    <label>Password <input name="source_password" type="password" autocomplete="new-password"></label>
+    <h3>The target</h3>
+    <label>Address <input name="target" value="{{ values.target }}" placeholder="mysql://db2/shop" autocomplete="off" required></label>
+    <label>User <input name="target_user" value="{{ values.target_user }}" autocomplete="off"></label>
+    <label>Password <input name="target_password" type="password" autocomplete="new-password"></label>
+    <h3>If you know it</h3>
+    <label>Name <input name="name" value="{{ values.name }}" autocomplete="off" placeholder="migkit names it from the address"></label>
+    <label>What the hop is for <select name="goal">
+      <option value="">migkit proposes it from what it finds</option>
+      {% for g, what in goals %}<option value="{{ g }}"{% if values.goal == g %} selected{% endif %}>{{ g }} - {{ what|truncate(70) }}</option>{% endfor %}
+    </select></label>
+    <button type="submit">Connect and set it up</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

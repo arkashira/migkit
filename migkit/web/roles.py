@@ -43,10 +43,15 @@ not give: a view shared with a company's whole directory shows nothing
 to someone nobody named. The one exception is the single operator of an
 install without a provider (`identity.Local`), who is the admin of every
 hop - there is nobody else to give a role to.
+
+A hop made in the view (`newhop`) has no role on it yet: a global admin
+may make any, anyone else only one whose name the file already gives them
+operator on (`may_create`).
 """
 import fnmatch
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 #: the roles, weakest first; each holds every one before it
 ROLES = ("viewer", "operator", "approver", "admin")
@@ -183,6 +188,28 @@ def may(principal, hop, need, conf=None):
     """Whether the person holds `need` (or a role above it) on `hop`."""
     got = role(principal, hop, conf)
     return got is not None and RANK[got] >= RANK[need]
+
+
+def may_create(principal, name, conf=None):
+    """Whether the person may make a hop called `name` (set up in the
+    view): a global admin any; anyone else only one whose name gives them
+    operator, so what they make is theirs to run - a hop is judged by
+    its name before it exists, as it will be once it does."""
+    if principal is None:
+        return False
+    if is_admin(principal, conf):
+        return True
+    if not name:
+        return False
+    return may(principal, SimpleNamespace(name=name, options={}),
+               "operator", conf)
+
+
+def may_set_up(principal, hops, conf=None):
+    """Whether the person has any claim to the set-up page: a global
+    admin, or one who is an operator of a hop at least."""
+    return is_admin(principal, conf) or any(
+        may(principal, h, "operator", conf) for h in hops.values())
 
 
 def anyone_approves(hop, conf=None):

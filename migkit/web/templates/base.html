@@ -14,6 +14,7 @@
   {% if me %}
   <nav>
     <a href="/">Hops</a>
+    {% if can_set_up %}<a href="/new-hop">New hop</a>{% endif %}
     <a href="/api">API</a>
     <a href="/account">Account</a>
     {% if admin %}<a href="/admin">Admin</a>{% endif %}
