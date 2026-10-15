@@ -8619,7 +8619,11 @@ across the code; `init` writes a static template and asks nothing. So:
    every operator message of `cli`, `report`, `guide`, `doctor` and `verdict`, says
    whether it names the next step, and ranks and words the thirty first
    fixes. *Not done:* the messages are not rewritten; the audit is the
-   list, not the fix.
+   list, not the fix. W12N: verdict priorities 16-20 and 29 are rewritten
+   with the exact check command; the other 24 sit in `cli.py` and
+   `guide.py` (owned by other tickets) and are listed under "Skipped
+   (owned)" in the audit. Priority 29 names no command yet: the partition
+   line gets no hop name.
 
 Measured by: time from nothing to a verified move for a new operator
 (scripted in docker with each engine pair), number of config lines a

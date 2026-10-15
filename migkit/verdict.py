@@ -176,6 +176,10 @@ def _narrowed(coverage):
         for k, v in sorted(coverage.items()))
 
 
+def _hop_name(hop):
+    return getattr(hop, "name", "") or "<hop>"
+
+
 def _named(rows, n=4):
     scopes = sorted({str(r.get("scope", "")) for r in rows})
     return ", ".join(scopes[:n]) + (" ..." if len(scopes) > n else "")
@@ -194,6 +198,7 @@ def decide(records, hop=None, coverage=None):
     never as a pass. Each answer is first held to the changes the hop
     carries (`hold`): rows it keeps are a note, never a `same` row."""
     records = list(records)
+    name = _hop_name(hop)
     if hop is not None:
         hold(hop, records)
     notes = _notes(hop, records)
@@ -227,18 +232,24 @@ def decide(records, hop=None, coverage=None):
     if bad:
         odd = [r for r in bad if r.get("status") not in STATUSES]
         why = (f"{len(bad)} answer{'s' if len(bad) > 1 else ''} could not"
-               f" be taken: {_named(bad)}")
+               f" be taken: {_named(bad)}. Open the named checks in the"
+               " report, resolve their connection or permission errors, then"
+               f" run `migkit check {name}`")
         if odd:
             why += ("; an answer migkit has no word for ("
                     + ", ".join(sorted({str(r.get('status')) for r in odd}))
-                    + ") is taken as not verified")
+                    + ") is taken as not verified; keep the report for"
+                      " investigation")
         return Decision("error", why, tuple(sev))
     if diff:
         return Decision("different", f"{len(diff)} differ: {_named(diff)}",
                         tuple(sev))
     if not records:
         return Decision("incomplete", "nothing was compared: no answer at"
-                        " all", tuple(sev))
+                        " all. Run `migkit doctor`, check that the hop selects"
+                        " visible databases and tables, then run"
+                        f" `migkit check {name}`. Do not treat this run as"
+                        " verified", tuple(sev))
     if stale:
         return Decision("incomplete", f"{len(stale)} answers were taken"
                         " while the source's schema changed:"
@@ -251,13 +262,21 @@ def decide(records, hop=None, coverage=None):
     if reused:
         return Decision("incomplete", f"{len(reused)} answers were reused"
                         " from an earlier run and the source may have"
-                        f" changed since: {_named(reused)}", tuple(sev))
+                        f" changed since: {_named(reused)}. Run"
+                        f" `migkit check {name}` without `--resume` to take"
+                        " fresh answers", tuple(sev))
     if not ok:
         return Decision("incomplete", "every answer was skipped - nothing"
-                        f" was compared: {_named(skip)}", tuple(sev))
+                        f" was compared: {_named(skip)}. Read each skip"
+                        " reason in the report, resolve its missing"
+                        " prerequisite or unsupported comparison, then run"
+                        f" `migkit check {name}` again. A required skipped"
+                        " check stays unproved", tuple(sev))
     if coverage:
         return Decision("incomplete", "the run was narrowed to "
-                        + _narrowed(coverage), tuple(sev))
+                        + _narrowed(coverage) + ". To verify the whole"
+                        f" configured hop, run `migkit check {name}` without"
+                        " --db, --table, --only or --exclude", tuple(sev))
     kept = [r for r in ok if r.get("kept_by_hop")]
     why = "; ".join(
         ([f"{len(ok)} compared the same; not compared: {_named(skip)}"]
@@ -660,7 +679,10 @@ def partition_differences(table, src, dst):
     for n in sorted(set(only_src) - {s for s, _ in pairs}):
         rows = int(only_src[n].get("rows") or 0)
         lines.append((0, f"{table} partition {n}: missing on target"
-                         + (f", the source's holds {_rows(rows)}" if rows
+                         + (f", the source's holds {_rows(rows)}. Resolve the"
+                            " partition definition with the database owner,"
+                            " then review the schema plan and check the"
+                            " affected rows again" if rows
                             else " (empty on the source)")))
     for n in sorted(only_dst):
         rows = int(only_dst[n].get("rows") or 0)
