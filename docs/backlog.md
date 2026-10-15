@@ -2751,6 +2751,7 @@ its schema version, which migkit should read (26.versions):
   where migkit changes the target's schema itself (the schema fix, a DDL
   the tail applies), said that the application's tool does not know of
   it.
+  Not done (APPVERS, 2026-10-16): built and proved on stand-ins only - every engine through the neutral contract (`Engine.history_*`), 15 tool shapes, failed/out-of-order/checksum, the cutover gate (`cutover._version_rows`), migkit's own changes with how each tool records them; owed: a server test per engine (SQL Server, Oracle, Snowflake and the rest never asked), schemachange's history in its own METADATA database (not in the hop's), a history table the hop excludes is not read on the neutral path, `migration_versions.py` duplicates this module and should fold into it.
 
 **27. SQL Server depth.** Closed as untestable on this arm64 machine. Either
 find an x86 runner, or list it plainly in section H of

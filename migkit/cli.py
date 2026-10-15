@@ -1850,6 +1850,10 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
                 shape_file.parent.mkdir(parents=True, exist_ok=True)
                 shape_file.write_text(json.dumps(after))
         if "schema" in local_map[d]:
+            from . import appversions
+            # every engine's, where its own schema check did not say them
+            if not appversions.said_in(out):
+                out.extend(r.__dict__ for r in eng.check_app_versions(d))
             for side, when, said in drift.since_the_move(hop, eng, d):
                 who = "source" if side == "src" else "target"
                 # said, not judged: whether the two sides still agree is

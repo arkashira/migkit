@@ -518,6 +518,29 @@ class HeteroEngine(Engine):
         return self._comparable_columns(db, self.src_engine, src_table,
                                         self.dst_engine, dst_table, how)
 
+    def _side(self, side):
+        return self.src_engine if side == "src" else self.dst_engine
+
+    def history_tables(self, side, db):
+        return self._side(side).history_tables(side, db)
+
+    def history_columns(self, side, db, ref):
+        return self._side(side).history_columns(side, db, ref)
+
+    def history_rows(self, side, db, ref, columns, where=""):
+        return self._side(side).history_rows(side, db, ref, columns, where)
+
+    def own_schema_changes(self, db):
+        """The mapping's, and across two engines the schema migkit
+        converted: the recorded migrations were written for the source's."""
+        out = super().own_schema_changes(db)
+        if self.src_engine.CANON_ENGINE != self.dst_engine.CANON_ENGINE:
+            out.append(f"the {self.dst_name} target's tables made by"
+                       f" migkit from the {self.src_name} source's, while"
+                       " the migrations recorded were written for"
+                       f" {self.src_name}")
+        return out
+
     def check_schema(self, db, only=None):
         """Whether the two sides hold the same columns at all.
 

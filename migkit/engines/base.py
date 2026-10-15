@@ -1897,35 +1897,72 @@ class Engine:
     def history_tables(self, side, db):
         """{lower-cased name: how this engine names it} of the tables in
         `db` an application's migration tool keeps its history in
-        (`appversions`); empty where the engine cannot say."""
-        return {}
+        (`appversions`), among those its `neutral_tables` lists; empty
+        where the engine cannot list them."""
+        from .. import appversions
+        try:
+            return appversions.named(self.neutral_tables(side, db))
+        except NotImplementedError:
+            return {}
+
+    def history_columns(self, side, db, ref):
+        """[(column, declared type)] of one such table."""
+        return list(self.neutral_columns(side, db, ref))
 
     def history_rows(self, side, db, ref, columns, where=""):
-        """The rows of one such table, `columns` of those satisfying
-        `where`, as tuples."""
-        raise NotImplementedError
+        """The rows of one such table, `columns` of those whose `where`
+        column holds true, as tuples - read through `neutral_read`, in
+        this engine's own quoting."""
+        from .. import appversions
+        types = dict(self.history_columns(side, db, ref))
+        cols = [(c, types.get(c, "")) for c in columns]
+        out, after = [], None
+        while True:
+            rows, after = self.neutral_read(side, db, ref, cols, after=after,
+                                            limit=1000)
+            out += [tuple(r) for r in rows]
+            if after is None or not rows:
+                break
+        if where:
+            at = list(columns).index(where)
+            out = [r for r in out if appversions._true(r[at])]
+        return out
+
+    def own_schema_changes(self, db):
+        """What migkit makes of the target's schema that no migration of
+        the application's made: tables renamed and columns kept, dropped
+        or renamed by the hop's mapping."""
+        from ..movers import renames_any
+        rules = (self.hop.mapping or {}).get("columns") or {}
+        out = ["tables renamed by the hop's mapping"] \
+            if renames_any(self.hop) else []
+        if rules:
+            out.append(f"the columns of {len(rules)} tables kept, dropped or"
+                       " renamed by the hop's mapping ("
+                       + ", ".join(sorted(map(str, rules))[:4]) + ")")
+        return out
 
     def check_app_versions(self, db):
         """Whether the application's migration tool records the same
         migrations on both sides: [Result], none where neither side keeps
-        such a history."""
+        such a history; and, where migkit changed the target's schema
+        itself, how the tool records that."""
         from .. import appversions
         try:
-            reads = {side: appversions.applied(
-                lambda side=side: self.history_tables(side, db),
-                lambda ref, cols, where, side=side: self.history_rows(
-                    side, db, ref, cols, where))
-                for side in ("src", "dst")}
+            src, dst = appversions.read(self, db)
         except Exception as e:  # noqa: BLE001 - a side that would not say
-            return [Result("schema", f"{db} application migrations", "skip",
-                           f"the migration history could not be read:"
-                           f" {str(e)[:120]}")]
-        return [Result("schema", f"{db} {tool} history", status, detail,
-                       fix_hint="" if status == "ok" else
-                       "run the application's migration tool on the side"
-                       " that lacks them, or compare the history tables")
-                for status, tool, detail in appversions.compare(
-                    reads["src"], reads["dst"])]
+            return [Result("schema", f"{db} application migration history",
+                           "skip", f"the migration history could not be"
+                           f" read: {str(e)[:120]}")]
+        res = [Result("schema", f"{db} {a.said} history", a.status,
+                      a.detail, fix_hint=a.fix)
+               for a in appversions.apart(src, dst)]
+        quote = (getattr(self, "dst_engine", None) or self)._quote_ident
+        res += [Result("schema", f"{db} {said} unrecorded history", "warn",
+                       detail, fix_hint=how)
+                for _, said, detail, how in appversions.unrecorded(
+                    dst, self.own_schema_changes(db), quote)]
+        return res
 
     def check_params(self, db):
         return [Result("params", db, "skip",

@@ -4000,27 +4000,33 @@ select json_build_object(
         return "\n".join(keep)
 
     def history_tables(self, side, db):
-        from ..appversions import TOOLS
-        names = sorted({n for ns, _, _ in TOOLS.values() for n in ns})
+        from ..appversions import NAMES
         got = self._psql(side, db, "select schemaname || '|' || tablename"
                          " from pg_tables where lower(tablename) in ("
-                         + ", ".join(f"'{n}'" for n in names) + ") and"
+                         + ", ".join(_literal(n) for n in NAMES) + ") and"
                          " schemaname not in ('pg_catalog',"
                          " 'information_schema')")
         out = {}
         for line in got.splitlines():
             schema, _, table = line.partition("|")
             # the schema the connection finds first wins, as the tool's does
-            out.setdefault(table.lower(),
-                           f'"{schema}"."{table}"')
+            out.setdefault(table.lower(), _ident(schema) + "." + _ident(table))
         return out
+
+    def history_columns(self, side, db, ref):
+        got = self._psql(side, db, "select attname || '|' ||"
+                         " format_type(atttypid, atttypmod) from pg_attribute"
+                         f" where attrelid = {_literal(ref)}::regclass and"
+                         " attnum > 0 and not attisdropped order by attnum")
+        return [tuple(line.split("|", 1)) for line in got.splitlines()
+                if line]
 
     def history_rows(self, side, db, ref, columns, where=""):
         import json
-        cols = ", ".join(f'"{c}"' for c in columns)
+        cols = ", ".join(_ident(c) for c in columns)
         got = self._psql(side, db, f"select coalesce(json_agg(json_build_array"
                                    f"({cols})), '[]') from {ref}"
-                         + (f' where "{where}"' if where else ""))
+                         + (f" where {_ident(where)}" if where else ""))
         return json.loads(got or "[]")
 
     def check_schema(self, db):

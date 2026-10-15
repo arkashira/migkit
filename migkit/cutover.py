@@ -597,6 +597,7 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
                 add("warn", f"{d}: who can write through the freeze could"
                             f" not be read ({e})")
         out += _shape_rows(hop, eng, d, gate)
+        out += _version_rows(eng, d, gate)
         out += _set_aside_rows(hop, d, gate)
         # the target's hold read back, or the writes that are not migkit's
         # named - drift, at the gate's level
@@ -788,6 +789,24 @@ def _shape_rows(hop, eng, d, gate):
         return [(gate, f"{d}: the schema differs - " + "; ".join(said[:3])
                  + (" ..." if len(said) > 3 else ""))]
     return [("ok", f"{d}: the schema is the same on both sides")]
+
+
+def _version_rows(eng, d, gate):
+    """The application's migration history held side to side: a migration
+    recorded on the source only, failed on the target, or with two
+    checksums at the gate's level; one on the target only, and migkit's
+    own schema changes the tool does not know of, said."""
+    from . import appversions
+    try:
+        src, dst = appversions.read(eng, d)
+        changes = eng.own_schema_changes(d)
+    except Exception as e:  # noqa: BLE001 - said, not a stop
+        return [("warn", f"{d}: the application's migration history could"
+                         f" not be read ({str(e).strip()[:120]})")]
+    quote = (getattr(eng, "dst_engine", None) or eng)._quote_ident
+    return [(gate if level == "gate" else "warn", f"{d}: {what}")
+            for level, what in appversions.at_cutover(src, dst, changes,
+                                                      quote)]
 
 
 def _set_aside_rows(hop, d, gate):

@@ -26,7 +26,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/advisors.py` - (no docstring)
 - `migkit/anchor.py` - Signed checkpoints of the audit record, kept in a bucket that cannot be rewritten (backlog R5.anchor). Classes: Refused, Blocked.
 - `migkit/approvals.py` - A step the hop says needs approval waits for it: approvers sign the step's request with their own SSH keys, and migkit checks each signature
-- `migkit/appversions.py` - The schema version each side stands on, from the application's own migration history table (backlog 26.versions).
+- `migkit/appversions.py` - The schema version each side stands on, from the application's own migration history table (backlog 26.versions). Classes: Tool, History, Apart.
 - `migkit/archive.py` - Old rows moved to cheaper storage (backlog P0-SCENARIOS): the rows a rule picks carried to an archive, proved there, and removed from the so Classes: Table.
 - `migkit/assist.py` - Help from a language model, from any provider, off unless configured (backlog 43).
 - `migkit/audit.py` - The run's own record of what migkit did, written so a changed record shows.
