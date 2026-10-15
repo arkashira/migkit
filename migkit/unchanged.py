@@ -44,32 +44,194 @@ going into a cutover decision, every table is read.
 # trusted. Shared-memory statistics landed in 15.
 MIN_PG_MAJOR = 15
 
-# Software whose statistics migkit has actually measured the marker against.
-#
-# Deliberately an allow-list rather than a list of brands to avoid. This
-# module's failure mode is skipping a scan and reporting the table as proved
-# equal, so "nothing is known against that brand" is not a good enough reason
-# to trust it - and a wire-compatible fork is free to answer every question
-# here plausibly and wrongly.
-#
-# Measured on CockroachDB v23.2.5, which speaks the PostgreSQL protocol:
-# `pg_stat_all_tables` exists and is empty (`select count(*)` returns 0) and
-# `pg_class.relfilenode` is 0 for every relation. A marker built there is the
-# same string forever, so every table would skip its scan on every run. The
-# only thing stopping that today is that CockroachDB reports `server_version`
-# as 13.0.0 and the version gate refuses anything below 15 - a safety that is
-# an accident of a number the brand is free to change.
-TRUSTED_BRANDS = {"postgres"}
+class Counters:
+    """Where one kind of server keeps its modification counters, and what
+    has to hold before they are believed.
+
+    A table is skipped on a measured fact that holds now - the counters are
+    the ones the last proof saw (same server start, not reset, not
+    rewritten), the server lets them be read, the source is not held for a
+    cutover - and never because of what the server is called. The pieces
+    are named, so a table that is read again can be told why.
+    """
+    kind = ""
+    family = ""
+    pieces = ()
+    #: the pieces that are counters: down is a reset, up is a write
+    counted = ()
+    meaning = {}
+    #: why this kind's counters are not read yet; "" where they are
+    owed = ""
+
+    def refusal(self, facts, role="src"):
+        """Why the counters of a server that answered `facts` are not to be
+        believed, or ''. Asked before a marker is built."""
+        return self.owed
+
+    def dead(self, marker):
+        """Why a marker is the same string forever (a server that keeps no
+        such counters), or ''."""
+        return ""
+
+    def parts(self, marker):
+        got = str(marker).split("|")
+        return dict(zip(self.pieces, got)) if len(got) == len(self.pieces) \
+            else {}
+
+    def explain(self, before, now):
+        """What moved between two markers, in words."""
+        a, b = self.parts(before), self.parts(now)
+        if not a or not b:
+            return ["the marker is not one this kind of server writes"]
+        said = []
+        for piece in self.pieces:
+            if a[piece] == b[piece]:
+                continue
+            text = self.meaning.get(piece, f"{piece} changed")
+            if piece in self.counted:
+                try:
+                    went = "down" if float(b[piece]) < float(a[piece]) \
+                        else "up"
+                except ValueError:
+                    went = "up"
+                text = text[went]
+            said.append(f"{text} ({a[piece]} -> {b[piece]})")
+        return said
+
+    def evidence(self, marker):
+        """What the marker says, for the line that skips a table."""
+        return ""
+
+
+class PostgresCounters(Counters):
+    kind = family = "postgres"
+    pieces = ("inserts", "updates", "deletes", "file", "size", "columns")
+    counted = ("inserts", "updates", "deletes")
+    meaning = {
+        "inserts": {"up": "rows were inserted",
+                    "down": "the statistics were reset"},
+        "updates": {"up": "rows were updated",
+                    "down": "the statistics were reset"},
+        "deletes": {"up": "rows were deleted",
+                    "down": "the statistics were reset"},
+        "file": "the table was emptied or rewritten",
+        "size": "the table's size changed",
+        "columns": "a column was added, dropped or changed"}
+
+    def refusal(self, facts, role="src"):
+        if not usable_postgres(facts.get("server_version")):
+            return (f"statistics before PostgreSQL {MIN_PG_MAJOR} can lose"
+                    " a message")
+        return ""
+
+    def dead(self, marker):
+        if self.parts(marker).get("file") == "0":
+            return ("the server keeps no file identity per table, so an"
+                    " emptied table would look the same")
+        return ""
+
+
+class SqlServerCounters(Counters):
+    """`sys.dm_db_index_usage_stats` counts the statements that wrote an
+    index (`user_updates`) and is cleared when the server starts or the
+    database closes, so it is only read beside the server's start time. The
+    table's row count and pages (`sys.dm_db_partition_stats`) catch what it
+    does not count, a TRUNCATE; the statistics' modification counter
+    (`sys.dm_db_stats_properties`), which the server keeps through a
+    restart, catches a clearing of the usage counters that no restart
+    explains.
+
+    A table with no usage row has no marker (no counter is not zero writes),
+    and neither has a database that closes when idle.
+
+    Not caught: a row changed in place, in a column no statistics lead
+    with, while the database was taken offline and online with no restart.
+    Not measured on a server.
+    """
+    kind = family = "mssql"
+    pieces = ("started", "created", "updates", "last_write", "rows",
+              "pages", "columns", "shape", "altered", "stat_changes",
+              "stat_at", "scope")
+    counted = ("updates", "rows", "pages", "stat_changes")
+    meaning = {
+        "started": "the server restarted, so its counters began again",
+        "created": "the database was created again",
+        "updates": {"up": "the table was written to",
+                    "down": "the usage counters were cleared"},
+        "last_write": "a write was counted after the proof",
+        "rows": {"up": "rows were added", "down": "rows were removed"},
+        "pages": {"up": "the table grew", "down": "the table shrank"},
+        "columns": "a column was added or dropped",
+        "shape": "a column was changed",
+        "altered": "the table was altered",
+        "stat_changes": {"up": "rows were modified",
+                         "down": "the statistics were rebuilt"},
+        "stat_at": "the statistics were rebuilt",
+        "scope": "the hop's scope changed"}
+
+    def refusal(self, facts, role="src"):
+        if facts.get("started") in (None, "", "NULL"):
+            return "the server does not say when it started"
+        if str(facts.get("auto_close")) != "0":
+            return "the database closes when idle, which clears its counters"
+        if str(facts.get("state")) != "0":
+            return "the database is not online"
+        if role == "src" and str(facts.get("read_only")) != "0":
+            return ("the source is held read-only: the proof that goes into"
+                    " a cutover reads every table")
+        return ""
+
+    def dead(self, marker):
+        if self.parts(marker).get("started") in ("", "NULL"):
+            return "the server does not say when it started"
+        return ""
+
+    def evidence(self, marker):
+        p = self.parts(marker)
+        return (f"server up since {p['started']}, {p['updates']} writes"
+                f" counted, the last {p['last_write']}, {p['rows']} rows")
+
+
+class Unread(Counters):
+    """A kind whose counters are not read yet: every table is read."""
+
+    def __init__(self, kind, family, owed):
+        self.kind, self.family, self.owed = kind, family, owed
+
+
+#: the counters of each kind of server; a kind not here has none read, and
+#: a table of it is read every time
+COUNTERS = {c.kind: c for c in (
+    PostgresCounters(),
+    SqlServerCounters(),
+    # Measured on CockroachDB v23.2.5, which speaks the PostgreSQL protocol:
+    # `pg_stat_all_tables` exists and is empty and `pg_class.relfilenode` is
+    # 0 for every relation, so a marker built there is the same string
+    # forever and every table would skip its scan on every run
+    Unread("cockroachdb", "postgres",
+           "pg_stat_all_tables is empty and relfilenode is 0 on every"
+           " table; its own counters are not read yet"),
+    # a coordinator's statistics describe shell tables whose rows live on
+    # the workers
+    Unread("citus", "postgres",
+           "the coordinator's statistics describe shell tables, not the"
+           " rows on the workers"),
+    Unread("mysql", "mysql", "its per-table counters are not read yet"),
+)}
+
+#: the kinds whose counters are declared and neither read nor proved
+UNPROVED = {k: c.owed for k, c in COUNTERS.items() if c.owed}
 
 
 def usable_brand(brand):
-    """Whether a marker from this software may be trusted at all.
-
-    An unidentified server is refused for the same reason an unmeasured one
-    is: the answer to "is this safe to skip" cannot be yes when the answer to
-    "what is this" is unknown.
-    """
-    return getattr(brand, "name", None) in TRUSTED_BRANDS
+    """Whether a marker from this software may be trusted at all: the
+    counters of its kind are read (`COUNTERS`). An unidentified server is
+    refused for the same reason a kind not listed is: "is this safe to
+    skip" cannot be answered yes when "what counters does it keep" is not
+    known."""
+    entry = COUNTERS.get(getattr(brand, "name", None))
+    return (entry is not None and not entry.owed
+            and entry.family == getattr(brand, "family", None))
 
 
 def server_major(text):
@@ -97,7 +259,7 @@ def marker(parts):
     parts = list(parts)
     if not parts or any(p is None for p in parts):
         return None
-    return "|".join(str(p) for p in parts)
+    return "|".join(str(p).replace("|", "/") for p in parts)
 
 
 def unchanged(before, after):
@@ -124,6 +286,51 @@ def skippable(stored, src_now, dst_now):
         return False
     return (unchanged(stored.get("src"), src_now)
             and unchanged(stored.get("dst"), dst_now))
+
+
+class Judgement:
+    """Whether a table may be skipped, and why: the evidence when it may,
+    what moved or what cannot be relied on when it may not."""
+
+    def __init__(self, skip, why):
+        self.skip, self.why = skip, why
+
+    def __bool__(self):
+        return self.skip
+
+
+def judge(kind, stored, src_now, dst_now):
+    """`skippable`, for a kind of server in `COUNTERS`, with the reason.
+
+    Every refusal is a sentence, so a table that is read again says why: no
+    earlier proof, a marker that cannot be built, counters that are dead on
+    this server, or the pieces that moved since the proof (a restart, a
+    reset, a write).
+    """
+    entry = COUNTERS.get(kind)
+    if entry is None or entry.owed:
+        return Judgement(False, (entry.owed if entry else "")
+                         or f"no counters are read for {kind}")
+    if not isinstance(stored, dict) or not stored:
+        return Judgement(False, "no earlier proof of this table")
+    said = []
+    for side, now in (("src", src_now), ("dst", dst_now)):
+        before = stored.get(side)
+        where = "source" if side == "src" else "target"
+        if not now:
+            return Judgement(False, f"the {where}'s counters cannot be read"
+                                    " for this table")
+        dead = entry.dead(now)
+        if dead:
+            return Judgement(False, f"the {where}: {dead}")
+        if not before:
+            return Judgement(False, "no earlier proof of this table")
+        if not unchanged(before, now):
+            moved = "; ".join(entry.explain(before, now))
+            return Judgement(False, f"the {where} moved since the proof:"
+                                    f" {moved}")
+        said.append(f"{where} {entry.evidence(now)}".strip())
+    return Judgement(True, "; ".join(said))
 
 
 def record(src_now, dst_now):

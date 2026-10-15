@@ -175,7 +175,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/tunnel.py` - A path to a server that cannot be reached directly, opened by migkit. Classes: Tunnel.
 - `migkit/twoway.py` - Two ways at once through migkit's own tails (backlog R3, P0-DEPTH 2). Classes: Rule, TableRules, Rules, Settled.
 - `migkit/ui.py` - The dashboard and `/metrics` (`migkit report --serve`). Classes: Collector, Handler.
-- `migkit/unchanged.py` - Proof that a table has not moved since it was last proved equal. Classes: Proof.
+- `migkit/unchanged.py` - Proof that a table has not moved since it was last proved equal. Classes: Counters, PostgresCounters, SqlServerCounters, Unread, Judgement, Proof.
 - `migkit/upgrade.py` - A major-version upgrade as a goal (backlog R23, 7).
 - `migkit/users.py` - Login/user sync source -> target, keeping the same password.
 - `migkit/userways.py` - How an account's password reaches the target, chosen by what the source shows and what the target takes (backlog P0-DECISION-ALL.coverage, t

@@ -670,6 +670,75 @@ class MSSQLEngine(DbapiRows, Engine):
                       lag_seconds=None if lag is None else float(lag),
                       replica=lag is not None)
 
+    #: what decides whether the counters below may be believed: when the
+    #: server started, whether the database closes when idle, is online and
+    #: is held read-only, and when it was created
+    COUNTER_FACTS_SQL = (
+        "select convert(varchar(33), i.sqlserver_start_time, 126),"
+        " d.is_auto_close_on, d.state, d.is_read_only,"
+        " convert(varchar(33), d.create_date, 126)"
+        " from sys.dm_os_sys_info i cross join sys.databases d"
+        " where d.database_id = db_id()")
+
+    #: each table's write counter and last write (usage statistics), rows
+    #: and pages, shape, last alteration, and the statistics' modification
+    #: counter and last rebuild; a NULL write counter is a table with no
+    #: usage row
+    COUNTER_ROWS_SQL = (
+        "select s.name + '.' + t.name, u.updates,"
+        " isnull(convert(varchar(33), u.last_write, 126), '-'),"
+        " p.n, p.pages, c.n, c.shape, convert(varchar(33), t.modify_date,"
+        " 126), isnull(m.modified, 0),"
+        " isnull(convert(varchar(33), m.rebuilt, 126), '-')"
+        " from sys.tables t join sys.schemas s on s.schema_id = t.schema_id"
+        " outer apply (select sum(cast(x.user_updates as bigint)) updates,"
+        " max(x.last_user_update) last_write"
+        " from sys.dm_db_index_usage_stats x"
+        " where x.database_id = db_id() and x.object_id = t.object_id) u"
+        " outer apply (select sum(case when ps.index_id in (0, 1) then"
+        " cast(ps.row_count as bigint) else 0 end) n,"
+        " sum(cast(ps.used_page_count as bigint)) pages"
+        " from sys.dm_db_partition_stats ps"
+        " where ps.object_id = t.object_id) p"
+        " outer apply (select count_big(*) n, isnull(checksum_agg("
+        "binary_checksum(k.column_id, k.name, k.system_type_id,"
+        " k.user_type_id, k.max_length, k.precision, k.scale,"
+        " k.is_nullable, k.collation_name)), 0) shape"
+        " from sys.columns k where k.object_id = t.object_id) c"
+        " outer apply (select sum(cast(sp.modification_counter as bigint))"
+        " modified, max(sp.last_updated) rebuilt from sys.stats st"
+        " cross apply sys.dm_db_stats_properties(st.object_id, st.stats_id)"
+        " sp where st.object_id = t.object_id) m")
+
+    def _counters(self, side, db):
+        """({table: marker}, why not): every table's marker on this side
+        from its modification counters (`unchanged.SqlServerCounters`), in
+        two statements; no marker and the reason where a measured fact says
+        the counters are not to be believed, or the server will not say
+        (no VIEW SERVER STATE)."""
+        from .. import unchanged
+        entry = unchanged.COUNTERS["mssql"]
+        try:
+            facts = self._cmd(side, db, self.COUNTER_FACTS_SQL)
+            if not facts:
+                return {}, "the server did not say how it keeps its counters"
+            started, auto_close, state, read_only, created = facts[0]
+            why = entry.refusal(
+                {"started": started, "auto_close": auto_close,
+                 "state": state, "read_only": read_only}, side)
+            if why:
+                return {}, why
+            rows = self._cmd(side, db, self.COUNTER_ROWS_SQL)
+        except Exception as e:  # noqa: BLE001 - no counters, no skipping
+            return {}, f"the server did not give its counters: {e}"
+        scope = self.hop.scope_fingerprint()
+        out = {}
+        for name, *rest in rows:
+            out[name] = unchanged.marker(
+                [None if v == "NULL" else v for v in
+                 [started, created, *rest, scope]])
+        return out, ""
+
     def check_data(self, db, table=None, stream=None, with_counts=False):
         # a table whose columns the hop maps, or that it renames, is
         # compared by the pair, which reads the mapping
@@ -696,12 +765,40 @@ class MSSQLEngine(DbapiRows, Engine):
         bad, left = [], []
         outcomes = {} if table else {t: "diff" for t in st if t not in dt}
         apart = {}
+        # What was proved equal last time and the counters it carried, read
+        # before any table is. A table named, or a row count taken from this
+        # pass, is read whole: the repair's check and the counts need every
+        # row, and what they do not need is the saving
+        from .. import unchanged
+        proof = unchanged.Proof(self.hop.report_dir(db) / "proof.json")
+        marked = {"src": {}, "dst": {}}
+        refused = ""
+        if not table:
+            for side in marked:
+                marked[side], why = self._counters(side, db)
+                refused = refused or why
+        may_skip = not table and not with_counts
+        skipped = []
         if not table:
             bad += [f"{t} missing on target" for t in st if t not in dt]
         rows_a = rows_b = 0
         bad_counts, settled = [], []
         salt = self.digest_salt()
         for t in tables:
+            if may_skip:
+                judged = unchanged.judge(
+                    "mssql", proof.get(t), marked["src"].get(t),
+                    marked["dst"].get(t))
+                if judged.skip:
+                    skipped.append(t)
+                    outcomes[t] = "ok"
+                    if stream:
+                        stream(f"{t}: unchanged since it was last proved"
+                               f" equal ({judged.why}); no rows read this"
+                               " run")
+                    continue
+                if stream and proof.get(t):
+                    stream(f"# {t} read again: {judged.why}")
             # each row's hash as the server writes the row out, the same
             # the drilldown compares, summed as a decimal so a row there
             # twice counts twice. It was BINARY_CHECKSUM(*), which leaves
@@ -778,6 +875,24 @@ class MSSQLEngine(DbapiRows, Engine):
                 else:
                     bad.append(f"{t} src={a} dst={b}")
                 outcomes[t] = "diff"
+        if not table:
+            for t in tables:
+                if t in skipped:
+                    continue
+                # the counters read before the scan, so never newer than the
+                # evidence they stand for; a table that came out different
+                # keeps none, since a proof of the wrong thing would let the
+                # next run skip it
+                if outcomes.get(t) == "ok":
+                    proof.set(t, marked["src"].get(t), marked["dst"].get(t))
+                else:
+                    proof.drop(t)
+            try:
+                proof.save()
+            except Exception:  # noqa: BLE001 - the next run reads it all
+                pass
+        if stream and refused and not table:
+            stream(f"# every table is read: {refused}")
         res = []
         if with_counts:
             bad_counts += [f"{t} missing on target" for t in st
@@ -790,6 +905,10 @@ class MSSQLEngine(DbapiRows, Engine):
                                   f"{len(tables)} tables, rows"
                                   f" {rows_a:,}=={rows_b:,}"
                                   " (from the checksum pass, no extra scan)"))
+        quiet = (f"; {len(skipped)} of {len(tables)} tables unchanged since"
+                 " their last proof and not read this run - a table named, a"
+                 " source held read-only and a check that counts every row"
+                 " read them all" if skipped else "")
         said = ("; left out of the row hash, as every copy writes them"
                 f" anew: {', '.join(left[:8])}"
                 + (f" and {len(left) - 8} more" if len(left) > 8 else "")
@@ -814,7 +933,8 @@ class MSSQLEngine(DbapiRows, Engine):
                      + ", ".join(settled[:8]) if settled else "")
             res.append(Result("data", db, "ok",
                               f"{len(tables)} tables, counts and every"
-                              " row's hash equal both sides" + again + said,
+                              " row's hash equal both sides" + again + quiet
+                              + said,
                               tables=outcomes,
                               table=str(table) if table else ""))
         for t in masked:

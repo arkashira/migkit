@@ -8217,6 +8217,12 @@ range digest, the fenced re-check, exact batches or the final proof.
 11. **Only what changed since the last proof:** tables and leaves
     untouched since they were last proved (modification counters,
     the tail's own record of keys touched) are not read again.
+    Not done (R20.11): `unchanged.COUNTERS` reads PostgreSQL and SQL
+    Server; MySQL and CockroachDB are declared in `unchanged.UNPROVED`
+    (their files are other tickets'); the two SQL Server counter
+    statements have not run on a server (stub tests only); postgres.py
+    still asks `usable_brand` and `skippable` rather than `judge`;
+    variants.py still names `TRUSTED_BRANDS` in a comment.
 12. **Parallel both sides at once**, the source's and the target's
     digest of the same range read at the same moment on separate
     connections, sized by the decision engine from both servers' load.
