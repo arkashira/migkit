@@ -5,18 +5,19 @@ import pytest
 
 from migkit import decide, scenarios, tableengine
 from migkit.cloudapi import Instance
-from migkit.cloud_readiness import Finding
 
 
 def managed():
-    src = Instance("aws", "rds", "source", version="15", klass="db.large")
+    src = Instance("aws", "rds", "source", version="15", klass="db.large",
+                   status="available", storage_gb=10,
+                   maintenance="sun:03:00-sun:04:00")
     dst = replace(src, id="target", version="16")
     offer = {"name": "provider-upgrade", "said": "the service's own in-place upgrade",
              "eligible": ((src.klass, dst.klass, "15", "16"),),
              "execute": lambda: "completed", "startup_seconds": 60,
              "bytes_per_second": 100, "duration_source": "provider duration and rehearsal"}
     return decide.Facts({"source": src, "target": dst, "api_reachable": True,
-                         "readiness": [], "offers": (offer,), "size_bytes": 1000})
+                         "offers": (offer,), "size_bytes": 1000})
 
 
 @pytest.mark.parametrize("label", ["EC2 to RDS", "RDS to Aurora",
@@ -35,18 +36,53 @@ def test_managed_paths_need_provider_eligibility_not_service_names(label):
     assert scenarios.managed_case(facts).choice.path is None
 
 
-@pytest.mark.parametrize("key,value,reason", [
-    ("api_reachable", False, "reachable provider API"),
-    ("size_bytes", None, "measured size"),
-    ("readiness", [Finding("fail", "network", "target", "blocked")], "readiness"),
-    ("target", Instance("aws", "rds", "target"), "instance classes"),
-])
-def test_managed_missing_facts_refuse(key, value, reason):
+def test_managed_unreachable_api_refuses_with_the_error():
     facts = managed()
-    facts[key] = value
+    facts["api_reachable"] = False
+    facts["api_error"] = "no credentials"
+    got = scenarios.managed_case(facts)
+    assert got.choice.path is None
+    assert "was not reached: no credentials" in got.words()
+
+
+@pytest.mark.parametrize("change,reason", [
+    (lambda f: f.update(size_bytes=None), "does not say the measured size"),
+    (lambda f: f.update(target=replace(f["target"], klass="")), "target's klass"),
+    (lambda f: f.update(source=replace(f["source"], version="")), "source's version"),
+    (lambda f: f.update(target=replace(f["target"], status="")), "target's status"),
+    (lambda f: f.update(target=replace(f["target"], status="modifying")),
+     "the target is modifying, not available"),
+    (lambda f: f.update(source=replace(f["source"], status="stopped")),
+     "the source is stopped, not available"),
+    (lambda f: f.update(target=replace(f["target"], storage_gb=None)),
+     "does not say the target's storage"),
+    (lambda f: f.update(size_bytes=11 * 1024 ** 3), "the target holds 10 GiB"),
+    (lambda f: f.update(target=replace(f["target"], maintenance="")),
+     "does not say the target's maintenance window"),
+])
+def test_managed_gates_refuse_with_their_reason(change, reason):
+    facts = managed()
+    change(facts)
     result = scenarios.managed_case(facts)
     assert result.choice.path is None
     assert reason in result.words()
+
+
+@pytest.mark.parametrize("change", [
+    lambda f: f.update(size_bytes=None),
+    lambda f: f.update(target=replace(f["target"], storage_gb=None)),
+    lambda f: f.update(target=replace(f["target"], maintenance="")),
+    lambda f: f.update(target=replace(f["target"], status="")),
+])
+def test_a_fact_the_api_does_not_give_is_said_not_yet_never_assumed(change):
+    facts = managed()
+    change(facts)
+    assert "not yet: the provider's API does not say" in scenarios.managed_case(facts).words()
+
+
+def test_managed_case_says_the_window_it_read():
+    got = scenarios.managed_case(managed())
+    assert "maintenance window: sun:03:00-sun:04:00" in got.words()
 
 
 def test_managed_size_changes_cost_and_failed_verify_is_not_success():
@@ -246,25 +282,69 @@ def test_postgres_storage_reader_does_not_call_heap_memory(monkeypatch):
 
 
 def test_managed_facts_use_existing_cloud_owners(monkeypatch):
-    from migkit import clouds, cloud_readiness
+    from migkit import clouds
     src, dst = managed()["source"], managed()["target"]
     calls = []
     def location(eng, side, ep):
         calls.append(side)
         return clouds.Where("aws", "rds")
     monkeypatch.setattr(clouds, "of", location)
-    def audit(a, b):
-        assert a["klass"] == src.klass
-        assert b["version"] == dst.version
-        return []
-    monkeypatch.setattr(cloud_readiness, "audit", audit)
     hop = SimpleNamespace(source=object(), target=object())
     facts = scenarios.managed_facts(hop, object(),
                                     SimpleNamespace(instance=lambda: src),
                                     SimpleNamespace(instance=lambda: dst),
                                     managed()["offers"], 1000)
     assert calls == ["src", "dst"]
+    assert facts["api_reachable"] is True
+    assert facts["target"].maintenance == dst.maintenance
     assert scenarios.managed_case(facts).choice.path == "provider-upgrade"
+
+
+def test_an_api_that_does_not_answer_is_a_fact_not_an_exception(monkeypatch):
+    from migkit import clouds
+    monkeypatch.setattr(clouds, "of", lambda eng, side, ep: clouds.Where())
+    def down():
+        raise SystemExit("the provider refused the credentials")
+    hop = SimpleNamespace(source=object(), target=object())
+    facts = scenarios.managed_facts(hop, object(),
+                                    SimpleNamespace(instance=down),
+                                    SimpleNamespace(instance=lambda: None),
+                                    managed()["offers"], 1000)
+    assert facts["api_reachable"] is False
+    assert facts["api_error"] == "the provider refused the credentials"
+    got = scenarios.managed_case(facts)
+    assert got.choice.path is None
+    assert "the provider refused the credentials" in got.words()
+
+
+def test_the_plan_says_the_case_from_what_the_providers_state(monkeypatch):
+    from migkit import clouds, managed as catalogue
+    facts = managed()
+    monkeypatch.setattr(clouds, "of", lambda eng, side, ep: clouds.Where("aws", "rds"))
+    monkeypatch.setattr(catalogue, "api_conf", lambda hop, eng, which: ("aws", {}))
+    adapter = SimpleNamespace(instance=lambda: facts["source"])
+    monkeypatch.setattr(catalogue, "adapter", lambda hop, eng, which: adapter)
+    eng = SimpleNamespace(table_sizes=lambda db, quick=False: {
+        "a": {"bytes": 600}, "b": {"bytes": 400}})
+    hop = SimpleNamespace(source=object(), target=object())
+    lines = scenarios.plan_lines(hop, eng, "db", offers=facts["offers"])
+    text = "\n".join(lines)
+    assert "managed service change" in text
+    assert "the service's own in-place upgrade" in text
+    assert "source: db.large, version 15, available, 10 GiB" in text
+    assert "window sun:03:00-sun:04:00" in text
+    none = "\n".join(scenarios.plan_lines(hop, eng, "db"))
+    assert "no eligible provider operation was read" in none
+
+
+def test_the_plan_asks_nothing_of_a_side_with_no_provider_api(monkeypatch):
+    from migkit import managed as catalogue
+    monkeypatch.setattr(catalogue, "api_conf",
+                        lambda hop, eng, which: (None, "run by its owner"))
+    def adapter(*a):
+        raise AssertionError("no provider API should be asked")
+    monkeypatch.setattr(catalogue, "adapter", adapter)
+    assert scenarios.plan_lines(object(), object(), "db") == []
 
 
 def test_unsupported_target_storage_and_fulltext_loss_refuse():

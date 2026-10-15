@@ -7,10 +7,12 @@ from __future__ import annotations
 import enum
 import hashlib
 import time
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import decide
+from .capabilities import NOT_YET
 
 
 class CharsetMigrationHelper:
@@ -566,23 +568,132 @@ class ScenarioDecision:
                           self.choice.reason, *self.details))
 
 
+#: the words a provider's API gives for an instance that takes work
+RUNNING = frozenset({"available", "active", "running", "runnable", "ready",
+                     "normal", "online"})
+GIB = 1024 ** 3
+
+
+def _not_yet(what):
+    return f"{NOT_YET}: the provider's API does not say {what}"
+
+
+def _instances(f):
+    return f.get("source"), f.get("target")
+
+
+def _unknown(f, fields):
+    """What of `fields` an instance of the pair does not carry."""
+    return [f"{side}'s {name}" for side, inst in zip(("source", "target"),
+                                                    _instances(f))
+            for name in fields if not (inst and getattr(inst, name))]
+
+
+def _status_holds(f):
+    src, dst = _instances(f)
+    return bool(src and dst and src.status and dst.status
+                and src.status.lower() in RUNNING
+                and dst.status.lower() in RUNNING)
+
+
+def _status_why(f):
+    unread = _unknown(f, ("status",))
+    if unread:
+        return _not_yet(", ".join(unread))
+    return "; ".join(f"the {side} is {inst.status}, not available"
+                     for side, inst in zip(("source", "target"), _instances(f))
+                     if inst.status.lower() not in RUNNING)
+
+
+def _room(f):
+    dst, size = f.get("target"), f.get("size_bytes")
+    return (size is not None and dst is not None and dst.storage_gb is not None
+            and dst.storage_gb * GIB >= size)
+
+
+def _room_why(f):
+    dst, size = f.get("target"), f.get("size_bytes")
+    if size is None:
+        return _not_yet("the measured size of the data to place")
+    if not dst or dst.storage_gb is None:
+        return _not_yet("the target's storage")
+    return (f"the target holds {dst.storage_gb} GiB and the data measures"
+            f" {size / GIB:.1f} GiB")
+
+
+def provider_needs(offer):
+    """What a provider operation needs, each with the reason it is refused:
+    the API answering, the instances' classes and versions, the pair being
+    one the provider offers the operation for, both instances available,
+    room for the data, a maintenance window known, an owner to run it and
+    a duration read from the provider and the measured size. A fact the API
+    does not give is said as not yet, never assumed."""
+    def known(f):
+        return not _unknown(f, ("klass", "version"))
+
+    def eligible(f):
+        src, dst = _instances(f)
+        return (known(f) and (src.klass, dst.klass, src.version, dst.version)
+                in offer.get("eligible", ()))
+
+    def duration(f):
+        size = f.get("size_bytes")
+        return (size is not None and size >= 0
+                and bool(offer.get("duration_source"))
+                and offer.get("startup_seconds", -1) >= 0
+                and offer.get("bytes_per_second", 0) > 0)
+
+    def duration_why(f):
+        if f.get("size_bytes") is None:
+            return _not_yet("the measured size of the data to place")
+        return (f"{offer['said']} has no documented startup, rate and source"
+                " of its duration")
+
+    return (
+        decide.Need("a reachable provider API",
+                    lambda f: f.get("api_reachable") is True,
+                    lambda f: "the provider's API was not reached: "
+                              + (f.get("api_error") or "it was not asked")),
+        decide.Need("known instance classes and engine versions", known,
+                    lambda f: _not_yet(", ".join(_unknown(
+                        f, ("klass", "version"))))),
+        decide.Need("eligible instance classes and engine versions", eligible,
+                    f"the provider does not offer {offer['said']} between"
+                    " these instance classes and versions"),
+        decide.Need("both instances available", _status_holds, _status_why),
+        decide.Need("room on the target for the measured data", _room,
+                    _room_why),
+        decide.Need("a known maintenance window on the target",
+                    lambda f: bool(f.get("target") and f["target"].maintenance),
+                    lambda f: _not_yet("the target's maintenance window")),
+        decide.Need("a migkit execution owner",
+                    lambda f: callable(offer.get("execute")),
+                    f"no execution owner runs {offer['said']}"),
+        decide.Need("documented duration and measured size and rate",
+                    duration, duration_why))
+
+
 def managed_facts(hop, eng, source_api, target_api, offers, size_bytes):
-    """Read provider instances and readiness without changing either side.
+    """Read provider instances without changing either side: reachability,
+    class, version, status, storage and maintenance window as the
+    provider's API states them. An API that does not answer is a fact
+    (`api_reachable`), not an exception.
 
     Offers are the provider's eligible operations for these instance classes
     and versions, with duration evidence and the execution owner attached.
     """
-    from dataclasses import asdict
-    from . import cloud_readiness, clouds
-    src, dst = source_api.instance(), target_api.instance()
-    a, b = asdict(src), asdict(dst)
-    a.update(getattr(hop, "cloud_src", {}) or {})
-    b.update(getattr(hop, "cloud_dst", {}) or {})
+    from . import clouds
+    src = dst = None
+    error = ""
+    try:
+        src, dst = source_api.instance(), target_api.instance()
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - said as the reason
+        error = (str(e).strip().splitlines() or [type(e).__name__])[-1][:160]
     return decide.Facts({
-        "source": src, "target": dst, "api_reachable": True,
+        "source": src, "target": dst, "api_reachable": src is not None,
+        "api_error": error,
         "locations": (clouds.of(eng, "src", hop.source),
                       clouds.of(eng, "dst", hop.target)),
-        "readiness": cloud_readiness.audit(a, b),
         "offers": tuple(offers), "size_bytes": size_bytes,
     })
 
@@ -596,44 +707,28 @@ def managed_case(facts, verified=None):
     """
     from .costmodel import Estimate, PREDICTED
     rungs, costs = [], {}
+    size = facts.get("size_bytes")
     for offer in facts.get("offers", ()):
         name = offer["name"]
-        def eligible(f, o=offer):
-            src, dst = f.get("source"), f.get("target")
-            return bool(src and dst and src.klass and dst.klass
-                        and src.version and dst.version
-                        and (src.klass, dst.klass, src.version, dst.version)
-                        in o.get("eligible", ()))
-        def duration(f, o=offer):
-            size = f.get("size_bytes")
-            return (size is not None and size >= 0
-                    and bool(o.get("duration_source"))
-                    and o.get("startup_seconds", -1) >= 0
-                    and o.get("bytes_per_second", 0) > 0)
-        rung = decide.Rung(
+        rungs.append(decide.Rung(
             name, offer["said"], frozenset({"managed path", "full verify"}),
-            needs=(
-                decide.Need("a reachable provider API",
-                            lambda f: f.get("api_reachable") is True),
-                decide.Need("eligible instance classes and engine versions", eligible),
-                decide.Need("a migkit execution owner",
-                            lambda f, o=offer: callable(o.get("execute"))),
-                decide.Need("cloud readiness without failures",
-                            lambda f: f.get("readiness") is not None and not any(
-                                r.level == "fail" for r in f["readiness"])),
-                decide.Need("documented duration and measured size and rate", duration)),
+            needs=provider_needs(offer),
             prove=(lambda f: None if verified() is True else
                    "migkit's full verify did not pass") if verified else None,
             because="the provider offers this path for both instance classes"
-                    " and versions; migkit must verify the result")
-        rungs.append(rung)
-        if duration(facts):
-            seconds = offer["startup_seconds"] + facts["size_bytes"] / offer["bytes_per_second"]
+                    " and versions; migkit must verify the result"))
+        if (size is not None and size >= 0 and offer.get("duration_source")
+                and offer.get("startup_seconds", -1) >= 0
+                and offer.get("bytes_per_second", 0) > 0):
+            seconds = offer["startup_seconds"] + size / offer["bytes_per_second"]
             costs[name] = Estimate(seconds, seconds, truth=PREDICTED,
                                    source=offer["duration_source"])
     choice = decide.climb("the managed service path", rungs, facts,
                           need=("managed path", "full verify"), costs=costs)
     details = ["provider completion is followed by migkit's full verify"]
+    target = facts.get("target")
+    if target is not None and target.maintenance:
+        details.append(f"the target's maintenance window: {target.maintenance}")
     if not rungs:
         details.append("no eligible provider operation was read; consider the existing logical move")
     return ScenarioDecision("managed service change", choice, tuple(details))
@@ -829,3 +924,51 @@ def storage_alter(table, source, target, **facts):
         name = ".".join(quote(part) for part in table.split("."))
         return f"ALTER TABLE {name} SET ACCESS METHOD {quote(target)}"
     raise ValueError("MySQL storage changes use the schema step's in-place handler")
+
+
+def _read_words(side, inst):
+    if inst is None:
+        return f"{side}: not read"
+    given = [f"{inst.klass or 'class not given'}",
+             f"version {inst.version or 'not given'}",
+             inst.status or "status not given",
+             f"{inst.storage_gb} GiB" if inst.storage_gb is not None
+             else "storage not given",
+             f"window {inst.maintenance}" if inst.maintenance
+             else "window not given"]
+    return f"{side}: " + ", ".join(given)
+
+
+def managed_lines(facts):
+    """The plan's lines of the managed service change: the case decided on
+    what the providers' APIs state, and those facts as read."""
+    got = managed_case(facts)
+    out = [f"  {got.words()}"]
+    if facts.get("api_reachable") is True:
+        out.append("  as the provider states it - "
+                   + "; ".join(_read_words(s, facts.get(k)) for s, k in
+                               (("source", "source"), ("target", "target"))))
+    return out
+
+
+def plan_lines(hop, eng, db, offers=()):
+    """The plan's lines of the cases decided here, said before anything is
+    written: the managed service change, where both sides are services
+    whose provider's API migkit drives. `offers` are the provider
+    operations catalogued for the pair; with none, the case says so and the
+    logical move stands. A side with no API asks nothing."""
+    from . import managed
+    if any(managed.api_conf(hop, eng, w)[0] is None for w in ("src", "dst")):
+        return []
+    try:
+        sized = eng.table_sizes(db, quick=True) if db else None
+    except Exception:  # noqa: BLE001 - unmeasured, said as not yet
+        sized = None
+    size = (sum(float(t.get("bytes") or 0) for t in sized.values())
+            if sized else None)
+
+    def api(which):
+        return SimpleNamespace(
+            instance=lambda: managed.adapter(hop, eng, which).instance())
+    return managed_lines(managed_facts(hop, eng, api("src"), api("dst"),
+                                       offers, size))

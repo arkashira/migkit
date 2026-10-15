@@ -19,10 +19,7 @@ ENTRY = {
 }
 
 #: unreached today, each owned by a ticket that wires or deletes it
-TODO = {
-    # TODO SCEN: the decided cases are wired into plan by that ticket
-    "migkit.scenarios",
-}
+TODO = set()
 
 
 def _name(path):

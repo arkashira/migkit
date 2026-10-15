@@ -4494,11 +4494,13 @@ def _move(hop_name, db, table, mode, chunk, do_drop, go):
         # the case between the two servers first - a fork change, a version
         # down, an edition change - and the way it decides
         from . import case as server_case
-        from . import upgrade
+        from . import scenarios, upgrade
         try:
-            for line in server_case.plan_lines(
-                    hop, eng, db or (eng.databases() or [""])[0]):
+            first = db or (eng.databases() or [""])[0]
+            for line in server_case.plan_lines(hop, eng, first):
                 console.print(f"  {line}")
+            for line in scenarios.plan_lines(hop, eng, first):
+                console.print(_esc(line))
         except Exception as e:  # noqa: BLE001 - the plan goes on
             console.print(f"  the case could not be worked out:"
                           f" {upgrade._quiet(str(e).strip()[:160])}")
