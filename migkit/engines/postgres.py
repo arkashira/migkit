@@ -3556,7 +3556,11 @@ select json_build_object(
              because="every change with its row, in commit order",
              leaves="a slot on the source"),
         Rung("wal inspect", "the source's WAL records, read by the server",
-             needs=(Need("a WAL that records every row's change",
+             needs=(Need("a key on the table",
+                         lambda f: f["no key"] is not True,
+                         "the table has no primary key, and a change its WAL"
+                         " records name by place is written by key"),
+                    Need("a WAL that records every row's change",
                          lambda f: str(f["wal_level"]) != "minimal",
                          "wal_level is minimal on the source: a table made"
                          " or emptied in a transaction writes no record of"
@@ -3585,9 +3589,14 @@ select json_build_object(
                      " the read, a removed row named by the key held for"
                      " its place",
              leaves="the WAL reading functions on the source where they"
-                    " were made, and the followed tables' keys in memory"),
+                    " were made, and the followed tables' keys beside the"
+                    " follow's position"),
         Rung("wal dump", "the source's WAL files, read on this machine",
-             needs=(Need("a WAL that records every row's change",
+             needs=(Need("a key on the table",
+                         lambda f: f["no key"] is not True,
+                         "the table has no primary key, and a change its WAL"
+                         " records name by place is written by key"),
+                    Need("a WAL that records every row's change",
                          lambda f: str(f["wal_level"]) != "minimal",
                          "wal_level is minimal on the source: a table made"
                          " or emptied in a transaction writes no record of"
@@ -3611,8 +3620,27 @@ select json_build_object(
              because="the blocks committed changes touched, their rows read"
                      " again by place and told apart by key, the records"
                      " read from the files without the server's functions",
-             leaves="the followed tables' keys in memory"),
+             leaves="the followed tables' keys beside the follow's"
+                    " position"),
+        Rung("digest diff", "the table copied again and held to its digest",
+             needs=(Need("a table without a key",
+                         lambda f: f["no key"] is True,
+                         "the table has a key, and its rows are told apart"
+                         " by it"),
+                    Need("the table copied again where its rows change",
+                         lambda f: f["digest way"] is True,
+                         lambda f: str(f["digest way"]))),
+             holds={"consistent": "per range", "idempotent": "converges",
+                    "resumable": "goes on"},
+             because="a table with no key whose blocks a committed change"
+                     " touched is copied again and held to the source's"
+                     " digest, never written by a key it does not have",
+             leaves="nothing beyond the follow's own"),
     )
+
+    #: batches kept as lines after the held keys' snapshot before the
+    #: snapshot is written again, as of the position kept then
+    WAL_KEYS_LINES = 256
 
     def _wal_ask(self, side, db, sql, args=None):
         """The rows of one statement the WAL follow asks, on the slot's
@@ -3703,7 +3731,9 @@ select json_build_object(
             "wal_level": lambda: str(one("show wal_level")),
             "version": lambda: int(one("show server_version_num")),
             "wal functions": functions, "wal read granted": granted,
-            "wal kept": kept, "wal dirs": dirs, "wal program": program})
+            "wal kept": kept, "wal dirs": dirs, "wal program": program,
+            "no key": lambda: False,
+            "digest way": lambda: "asked of one table, not a database"})
         return facts
 
     def _follow_costs(self):
@@ -3833,7 +3863,8 @@ select json_build_object(
         """The follow's memory of which keys each block of each table in
         scope held, as of `at`: what names a row a record took out of its
         block, since a physical record does not."""
-        ledger = {"at": at, "keys": {}, "tables": self._wal_tables(side, db)}
+        ledger = {"at": at, "keys": {}, "tables": self._wal_tables(side, db),
+                  "position": None, "lines": 0}
         for table, key in ledger["tables"].items():
             if not key:
                 continue
@@ -3848,6 +3879,112 @@ select json_build_object(
                 held.setdefault(int(blk), set()).add(
                     json.dumps(keys, sort_keys=True))
         return ledger
+
+    def _wal_keys_path(self, side, db):
+        """Where the follow's held keys are kept, beside its position
+        (`tailctl.token_path`): a snapshot, and after it a line a batch
+        of the blocks it read again (`.jsonl`)."""
+        return self.hop.report_dir(db) / f"wal-keys-{side}.json"
+
+    def _wal_keep(self, side, db, ledger, position):
+        """The held keys written whole as of `position`, the lines after
+        the last snapshot emptied: the snapshot first, so a crash between
+        the two leaves lines that do not go on from it, read as nothing."""
+        from .. import durable
+        path = self._wal_keys_path(side, db)
+        durable.write_json(path, {
+            "at": ledger["at"], "position": position,
+            "tables": ledger["tables"],
+            "keys": {t: {str(b): sorted(ks) for b, ks in blocks.items()}
+                     for t, blocks in ledger["keys"].items()}})
+        durable.write_atomic(path.with_suffix(".jsonl"), b"")
+        ledger.update(position=position, lines=0)
+
+    def _wal_line(self, side, db, ledger, token, upto, blocks):
+        """One batch's blocks as the follow holds them now, added on the
+        disk after the snapshot: what it held at `upto`, read on from what
+        it held at `token`."""
+        line = json.dumps({"from": token, "position": upto, "blocks": {
+            t: {str(b): sorted(ledger["keys"][t].get(b, ())) for b in bs}
+            for t, bs in blocks.items()}}) + "\n"
+        fd = os.open(self._wal_keys_path(side, db).with_suffix(".jsonl"),
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line.encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        ledger.update(position=upto, lines=ledger["lines"] + 1)
+
+    def _wal_kept(self, side, db, token):
+        """The held keys as of `token`, read back from beside the position
+        (`_wal_keep`, `_wal_line`); None where none were kept as of it. A
+        follow resumed there names a row removed while it was down."""
+        from .. import durable
+        path = self._wal_keys_path(side, db)
+        snap = durable.read_state(path, "state") if token else None
+        if not isinstance(snap, dict):
+            return None
+        ledger = {"at": snap["at"], "position": snap["position"],
+                  "lines": 0, "tables": {t: list(k or ()) for t, k in
+                                         snap["tables"].items()},
+                  "keys": {t: {int(b): set(ks) for b, ks in blocks.items()}
+                           for t, blocks in snap["keys"].items()}}
+        try:
+            lines = path.with_suffix(".jsonl").read_text().splitlines()
+        except FileNotFoundError:
+            lines = []
+        for text in lines:
+            if str(ledger["position"]) == str(token):
+                return ledger
+            try:
+                one = json.loads(text)
+            except ValueError:
+                break  # cut as it was written: its position never kept
+            if str(one["from"]) != str(ledger["position"]):
+                break
+            for t, blocks in one["blocks"].items():
+                mine = ledger["keys"].setdefault(t, {})
+                for b, ks in blocks.items():
+                    mine[int(b)] = set(ks)
+            ledger.update(position=one["position"],
+                          lines=ledger["lines"] + 1)
+        return ledger if str(ledger["position"]) == str(token) else None
+
+    def _wal_digest_way(self, db, table):
+        """True where a table copied again reaches the target - the tail
+        copies again a table whose rows changed with no row event for
+        them - else why not: a hop whose `ddl` stops the tail there."""
+        from .. import tailtables
+        stops = getattr(self, "DDL_STOPS", ("truncate", "rename"))
+        if "truncate" not in stops or tailtables.policy(
+                self.hop, [db, *str(table).split(".")]) != "stop":
+            return True
+        return (f"the hop's ddl stops the tail where {table} would be"
+                " copied again: set ddl: apply, or park")
+
+    def _wal_keyless(self, side, db, table, way):
+        """The way a table with no key is followed at or below `way`
+        (`FOLLOW_WAYS`): copied again and held to its digest, else the
+        stop that says why neither holds."""
+        from ..decide import Facts, climb
+        base = self._follow_facts(side, db)
+        names = [r.name for r in self.FOLLOW_WAYS]
+        rungs = self.FOLLOW_WAYS[names.index(way.path)
+                                 if way.path in names else 1:]
+        facts = Facts({"no key": True}, **{
+            "digest way": lambda: self._wal_digest_way(db, table),
+            **{k: (lambda k=k: base[k]) for k in (
+                "wal_level", "version", "wal functions", "wal read granted",
+                "wal kept", "wal dirs", "wal program")}})
+        got = climb(f"following {table}'s changes", rungs, facts)
+        if got.rung is None or got.path != "digest diff":
+            raise SystemExit(
+                f"{db}: {table} has no primary key, and a change its WAL"
+                " records name by place cannot be written to the target"
+                " by key - give it one"
+                + (f" ({got.reason})" if got.reason else ""))
+        return got
 
     def _wal_changes(self, side, db, token, limit, way):
         """(changes, position) of the WAL from `token` on, read the way
@@ -3865,10 +4002,15 @@ select json_build_object(
         held = self.__dict__.setdefault("_wal_ledgers", {})
         end = self._wal_end(side, db)
         if token is None or (side, db) not in held:
-            held[(side, db)] = self._wal_ledger(side, db, end)
+            held[(side, db)] = self._wal_kept(side, db, token) \
+                or self._wal_ledger(side, db, end)
             if token is None:
+                self._wal_keep(side, db, held[(side, db)], end)
                 return [], end
         ledger = held[(side, db)]
+        going_on = str(ledger.get("position")) == str(token)
+        if going_on and ledger["lines"] >= self.WAL_KEYS_LINES:
+            self._wal_keep(side, db, ledger, token)
         oid, spc = self._wal_ask(
             side, db, "select oid, dattablespace from pg_database where"
             " datname = current_database()")[0]
@@ -3904,10 +4046,9 @@ select json_build_object(
         for table, blocks in sorted(names.items()):
             key = ledger["tables"][table]
             if not key:
-                raise SystemExit(
-                    f"{db}: {table} has no primary key, and a change its"
-                    " WAL records name by place cannot be written to the"
-                    " target by key - give it one")
+                self._wal_keyless(side, db, table, way)
+                out.append(canon.ddl(table, "reload"))
+                continue
             early = sorted(b for b, gone in blocks.items() if gone
                            and _lsn_int(gone) < _lsn_int(ledger["at"]))
             if early:
@@ -3933,6 +4074,12 @@ select json_build_object(
                                         dict(zip(key, json.loads(k)))))
         upto = open_at or (records[-1]["lsn"] if len(records) >= limit
                            else end)
+        read = {t: blocks for t, blocks in names.items()
+                if ledger["tables"][t]}
+        if going_on and (read or str(upto) != str(token)):
+            self._wal_line(side, db, ledger, token, upto, read)
+        elif not going_on:
+            self._wal_keep(side, db, ledger, upto)
         HopCosts(self.hop, "follow/").saw(
             f"{way.path} records", max(len(records), 1),
             time.monotonic() - started)

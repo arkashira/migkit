@@ -8951,15 +8951,16 @@ class MySQLEngine(Engine):
                     " range could not be proved")
         return ""
 
-    def _range_digest_sql(self, side, db, t, where="", columns=None):
+    def _range_digest_sql(self, side, db, t, where="", columns=None,
+                          way="md5"):
         """The one statement both servers answer for a range of a table:
-        its rows and the digest `neutral_digest` takes of them, over the
-        columns both render (`_comparable_columns`, read once a table's
-        copy where the caller keeps them)."""
+        its rows and the digest `neutral_digest` takes of them by the row
+        hash `way`, over the columns both render (`_comparable_columns`,
+        read once a table's copy where the caller keeps them)."""
         from .. import canon
         sc, dc, _ = columns or self._comparable_columns(db, self, t, self, t)
         row = canon.row_expr("mysql", sc if side == "src" else dc)
-        return (f"select count(*), {canon.digest_expr('mysql', row)}"
+        return (f"select count(*), {canon.digest_expr('mysql', row, way)}"
                 f" from `{self._d(side, db)}`.`{t}`"
                 + (f" where {where}" if where else ""))
 

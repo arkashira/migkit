@@ -916,11 +916,15 @@ def _plan_table(w, src_t):
     entry["format"] = fmt.path
     entry["because"]["format"] = fmt.reason
     # the row hash every digest of the parts is taken by, here and where
-    # they land: the one the pair chose for the table; md5 for the load's
-    # lines, whose digest line the source's client writes by md5
+    # they land: the one the pair chose for the table (kept in the hop's
+    # ledger), the load's lines' digest line by it too where the source's
+    # digest takes it
+    from . import leaves
     chosen = getattr(w.pair, "digest_way", None)
-    entry["way"] = chosen(db, src_t) if callable(chosen) \
-        and fmt.path != "load lines" else "md5"
+    entry["way"] = chosen(db, src_t) if callable(chosen) else "md5"
+    if fmt.path == "load lines" \
+            and entry["way"] not in leaves.digest_ways(w.eng):
+        entry["way"] = "md5"
     if fmt.path == "binary copy":
         sch, tbl = w.eng._split(src_t)
         entry["copy_columns"] = w.eng._copy_cols(db, sch, tbl)
@@ -1222,7 +1226,8 @@ class _Exporter:
         pass_cols = list(zip(entry["load"]["names"], entry["load"]["kinds"]))
         ns = types.SimpleNamespace(eng=my, db=w.db, table=leaf,
                                    columns=pass_cols,
-                                   digest_cols=(cols, cols, []))
+                                   digest_cols=(cols, cols, []),
+                                   way=_way(entry))
         proc = my_pass.TableCopy._source(ns, where, entry["key"][0]
                                          if entry["key"] else None)
         try:
@@ -1848,7 +1853,8 @@ class _Loader:
                                        tgt.entry["load"]["kinds"], r)
                 warned = int(cur.warning_count or 0)
                 cur.execute(my._range_digest_sql("dst", w.db, leaf, where,
-                                                 (cols, cols, [])))
+                                                 (cols, cols, []),
+                                                 way=_way(tgt.entry)))
                 n, d = cur.fetchone()
             got = (int(n), str(d))
             if warned or taken != int(part["rows"]) or got != (

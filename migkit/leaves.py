@@ -1790,6 +1790,72 @@ def digest_ways(eng):
                             if w != "md5" and takes and w in sql)
 
 
+#: the row hash each table's digests were chosen to take, kept for the
+#: hop beside its positions (`kept_way`, `keep_way`)
+WAYS_FILE = "digest-ways.json"
+
+
+def _ways_path(hop):
+    at = getattr(hop, "report_dir", None)
+    return None if at is None else at() / WAYS_FILE
+
+
+def kept_way(hop, db, leaf):
+    """The row hash a table of this hop's digests take, as `keep_way`
+    recorded it when it was chosen; None where none was."""
+    from . import durable
+    path = _ways_path(hop)
+    got = (durable.read_state(path, "state") if path else None) or {}
+    return got.get(f"{db}.{leaf}")
+
+
+def keep_way(hop, db, leaf, way):
+    """`way` recorded as the row hash a table's digests take, so a later
+    run - a ship exported where the target is not asked, a localizing
+    walk - takes the same one and never chooses again."""
+    from . import durable
+    path = _ways_path(hop)
+    if path is None:
+        return way
+    with durable.locked(path):
+        got = durable.read_state(path, "state") or {}
+        if got.get(f"{db}.{leaf}") != way:
+            got[f"{db}.{leaf}"] = way
+            durable.write_json(path, got)
+    return way
+
+
+#: how a pair's table digests take their row hash (`pair_way`): the
+#: fastest both take and equal on both, measured; md5 where it cannot be
+PAIR_WAYS = (
+    decide.Rung("measured", "the fastest hash both sides' digests take and"
+                            " equal on both",
+                because="each hash both digests take, timed on both sides"
+                        " at once",
+                loads=_BOTH, leaves="nothing"),
+    decide.Rung("md5", "md5 of each row's canonical text",
+                because="the hash every engine's digest takes, where the"
+                        " faster ones could not be timed",
+                loads=_BOTH, leaves="nothing"),
+)
+
+
+def pair_way(pair, db, src_t, dst_t, sc, dc):
+    """(the `Choice`, the row hash) a table's digests take on both sides:
+    `PAIR_WAYS` climbed through `decide.attempt`, so a measure that fails
+    falls to md5 the way every ladder's rung falls, and says so."""
+    from . import runlog
+
+    def run(choice):
+        if choice.rung.name == "measured":
+            return pair_hash(pair, db, src_t, dst_t, sc, dc)
+        return "md5"
+    return decide.attempt(
+        f"{db}.{pair._leaf(src_t)}: the row hash of its digests", PAIR_WAYS,
+        run, facts=decide.Facts({}),
+        log=lambda m: runlog.event("leaf hash", m, level="warn"))
+
+
 def pair_hash(pair, db, src_t, dst_t, sc, dc):
     """The row hash both sides' digests of a table take: md5 where the
     two engines' digests share no other (`digest_ways`), else the hash
@@ -2002,7 +2068,9 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
         return f"; rows not localised: {strat.why_not}"
     salt = pair.digest_salt()
     work = f"{db}.{name}"
-    way, _ = fastest_hash(work, a, b, salt)
+    # the hash this table's digests were chosen to take, where one was:
+    # chosen again here, it could differ from the digests it localizes
+    way = kept_way(pair.hop, db, name) or fastest_hash(work, a, b, salt)[0]
     gens = None
     # a source written while it is read differs in leaves still being
     # written: those are read again by generations, which the sketch and

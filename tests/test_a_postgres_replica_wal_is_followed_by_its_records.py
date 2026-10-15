@@ -104,7 +104,11 @@ def test_wal_not_kept_is_refused_unless_an_archive_holds_it():
 
 def engine(rows=None, keys=None, scope=lambda db, t: True):
     e = PostgresEngine.__new__(PostgresEngine)
-    e.hop = SimpleNamespace(name="h", options={})
+    import tempfile
+    from pathlib import Path
+    kept = Path(tempfile.mkdtemp())
+    e.hop = SimpleNamespace(name="h", options={},
+                            report_dir=lambda db="": kept)
     e.in_scope = scope
     e.neutral_key = lambda side, db, t: list((keys or {}).get(t, ["id"]))
     e._split = lambda t: tuple(t.split("."))
@@ -210,8 +214,13 @@ def test_a_relation_file_no_table_holds_is_refused(monkeypatch):
     assert "relation file 16385" in str(got.value)
 
 
-def test_a_table_without_a_key_is_refused(monkeypatch):
+def test_a_table_without_a_key_is_refused_where_no_digest_way_holds(
+        monkeypatch):
     e = engine(Server({0: [{"id": 1}]}), keys={"public.items": []})
+    monkeypatch.setattr(e, "_follow_facts", lambda *a, **k: facts(),
+                        raising=False)
+    monkeypatch.setattr(e, "_wal_digest_way", lambda db, t: "ddl stops",
+                        raising=False)
     follow(e, [], monkeypatch, token=None)
     recs = [wal_record("0/20", 7, "Heap", "INSERT", "off: 2",
                        "blkref #0: rel 1663/5/16385 blk 0"),

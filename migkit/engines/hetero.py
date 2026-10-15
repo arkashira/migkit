@@ -997,22 +997,23 @@ class HeteroEngine(Engine):
         take and equal on both (`leaves.pair_hash`), and kept for the
         pair's life, so every comparison of it digests alike. Without the
         columns (a seed exported where the target is not asked), the one
-        chosen already, else md5."""
+        chosen already - in this run, or by the run that chose it and kept
+        it in the hop's ledger (`leaves.keep_way`) - else md5. A measure
+        that fails falls to md5 through the ladder (`leaves.pair_way`),
+        and only a measured choice is kept."""
         from .. import leaves
         ways = self.__dict__.setdefault("_digest_ways", {})
         at = (str(db), self._leaf(src_t))
+        if at not in ways:
+            kept = leaves.kept_way(self.hop, *at)
+            if kept:
+                ways[at] = kept
         if at not in ways and sc is None:
             return "md5"
         if at not in ways:
-            try:
-                ways[at] = leaves.pair_hash(self, db, src_t, dst_t, sc, dc)
-            except Exception as e:  # noqa: BLE001 - md5 is the rung below
-                from .. import runlog
-                runlog.event("leaf hash", f"{db}.{at[1]}: digested by md5,"
-                             " the hash every engine takes - the faster"
-                             f" ones could not be timed ({type(e).__name__})",
-                             level="warn")
-                ways[at] = "md5"
+            choice, way = leaves.pair_way(self, db, src_t, dst_t, sc, dc)
+            ways[at] = leaves.keep_way(self.hop, *at, way) \
+                if choice.rung.name == "measured" else way
         return ways[at]
 
     def _digests(self, db, src_t, src_cols, dst_t, dst_cols, wheres):

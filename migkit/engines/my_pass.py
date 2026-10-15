@@ -152,7 +152,8 @@ class TableCopy:
               + quote_name("mysql", self.table))
         w = f" where {where}" if where else ""
         digest = eng._range_digest_sql("src", self.db, self.table, where,
-                                       self.digest_cols)
+                                       self.digest_cols,
+                                       way=getattr(self, "way", "md5"))
         script = (f"set session time_zone = {_ql(SESSION_ZONE)};"
                   " set session transaction isolation level repeatable"
                   " read; start transaction with consistent snapshot,"

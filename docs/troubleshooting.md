@@ -815,9 +815,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the source's WAL files from <...> were not read: <...>
 
-* <...>: the WAL names relation file <...>, which no table holds now - it was dropped, emptied or rewritten after the change, and its rows cannot be read again by their place. Compare the database again, then follow from there
+* <...>: <...> has no primary key, and a change its WAL records name by place cannot be written to the target by key - give it one (<...>) | <...>
 
-* <...>: <...> has no primary key, and a change its WAL records name by place cannot be written to the target by key - give it one
+* <...>: the WAL names relation file <...>, which no table holds now - it was dropped, emptied or rewritten after the change, and its rows cannot be read again by their place. Compare the database again, then follow from there
 
 * <...>: rows were taken out of <...> (block <...>) before <...>, where this follow began holding its keys, and the WAL does not say which: compare the table again, then follow
 
