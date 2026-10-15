@@ -175,7 +175,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/traces.py` - A run as OpenTelemetry spans, beside the Prometheus metrics (backlog R23.8).
 - `migkit/transforms.py` - A column written other than as it was read, and proved as written (backlog P0-SCOPE.7: column transforms the check understands).
 - `migkit/troubleshooting.py` - The troubleshooting guide, read off the code (backlog 42).
-- `migkit/tuning.py` - Numbers set by reasoning, tuned from what runs measure (backlog P0-DEPTH, item 3, built with P0-SMART's knowledge base). Classes: Tunable.
+- `migkit/tuning.py` - Numbers set by reasoning, tuned from what runs measure (backlog P0-DEPTH, item 3, built with P0-SMART's knowledge base). Classes: Tunable, Dimension, Setting, Bound, Cause, Adjustment.
 - `migkit/tunnel.py` - A path to a server that cannot be reached directly, opened by migkit. Classes: Tunnel.
 - `migkit/twoway.py` - Two ways at once through migkit's own tails (backlog R3, P0-DEPTH 2). Classes: Rule, TableRules, Rules, Settled.
 - `migkit/ui.py` - The dashboard and `/metrics` (`migkit report --serve`). Classes: Collector, Handler.

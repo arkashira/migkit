@@ -10295,7 +10295,7 @@ the switch itself, comparative measurements against managed services.
 
 ## P0-AUTOTUNE-ALL: diagnose and tune the complete migration workflow
 
-Owner clarification, 2026-10-06. Status: OPEN. Retry/restart alone is not
+Owner clarification, 2026-10-06. Status: PARTLY (2026-10-16). Retry/restart alone is not
 intelligent recovery when an inappropriate setting or execution strategy is
 the cause. Reported example: unreasonable LOB sizing causes failure rather
 than automatic adjustment. This is operational feedback, not a claim that
@@ -10346,6 +10346,40 @@ This extends P0-DECISION-ALL, P0-AUTO-RESOURCES,
 P0-AUTONOMOUS-MIGRATION and P0-RESILIENCE-ALL. The target is deep dynamic
 handling of all applicable migration dimensions, not a special-case LOB patch.
 Implementation and actual comparative proof remain OPEN.
+
+Built 2026-10-16 (`migkit/tuning.py`, tests in
+`tests/test_autotune_every_dimension.py`):
+
+- Inventory: `DIMENSIONS` (the twelve dimensions above), each with where its
+  choice is made, its facts, the guarantee it keeps, its owner and its
+  scenario; `TUNABLES` extended with dimension, facts, bounds, guarantee,
+  owner (`LOCAL`/`SESSION`/`GLOBAL`/`PAID`) and scenario; `INVARIANTS` lists
+  the bounds correctness rests on, which `observe` refuses to tune;
+  `SETTINGS` and `may_set` keep a global server setting behind authorization.
+- Large values: `payload_bound` takes the catalogue's promise or the largest
+  over every row; a sampled largest certifies nothing, a JSON/XML stored size
+  never bounds its text, and expansion as sent is counted. `payload_way`
+  decides whole, pieces or stream through `decide.climb`, else a
+  `decide.Blocked` naming the limit and who may raise it; nothing is cut.
+- Cause to adjustment: `cause_of` classifies packet, timeout, memory, lock
+  and connection from the server's words (a lost connection past a known
+  limit is the packet). `Retune.failed` reconciles what the target holds,
+  costs smaller batch, pieces, stream, smaller ranges or another way and
+  picks one; identical work is never run again for a sizing cause. A failed
+  size is a ceiling, growth waits `STEADY` quiet units and doubles the wait
+  after a failed growth (no swinging). `succeeded` proves a tuning only when
+  the target is counted whole, then keeps the tuned size (`observe`).
+  `rebalance` cuts ranges predicted past `SKEW` times the median; `forecast`
+  feeds `util.forecast`. `run` drives a work's units through all of it.
+
+Not done: the fault classes are a local reading (`SIGNATURES`) until the
+P0-RESILIENCE-ALL catalogue owns them; the copiers (`pieces`, the pair
+copier, the engines' movers) do not yet call `Retune`/`payload_way`; the
+scenarios run on fake servers - end-to-end on the sandbox's servers, with
+intervention, time, resource use and retry waste measured against fixed and
+retry-only baselines, is owed (`tuning.SANDBOX_OWED`); concurrency, flow
+control, transport, conversion/validation and the consistency boundary have
+no tuning scenario yet (`tuning.UNPROVED`).
 
 
 ## P0-PRODUCT-TELEMETRY: complete usage evidence without customer data
