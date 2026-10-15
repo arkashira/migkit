@@ -1,12 +1,12 @@
 """What a load takes off a target to put back afterwards, kept on disk per
 process.
 
-A load that drops the target's secondary indexes or triggers saves their
-definitions first and puts them back on the way out. A process killed in
-between does not come back to do it. The next load used to save its own
-definitions over the same file, and the dead one's were gone - nothing
-left said those indexes or triggers had ever been there. So each load
-writes its own file, named for its host and process:
+A load that drops the target's secondary indexes, triggers or foreign keys
+saves their definitions first and puts them back on the way out. A process
+killed in between does not come back to do it. The next load used to save
+its own definitions over the same file, and the dead one's were gone -
+nothing left said those indexes or triggers had ever been there. So each
+load writes its own file, named for its host and process:
 * a later load finds the files whose process is gone and puts back what
   they list and the target no longer has, at its own end
 * a load that runs beside a live one (a repair beside a change tail)
@@ -24,7 +24,8 @@ def owner_of(host, pid):
 
 class SetAside:
     """One load's record of what it took off, under `kind` - the file-name
-    stem, `dropped-indexes` or `dropped-triggers`."""
+    stem, `dropped-indexes`, `dropped-triggers` or `dropped-fks`
+    (`indexes.ForeignKeyWindow`)."""
 
     _opened = 0
 

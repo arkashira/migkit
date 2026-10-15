@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (183 modules)
+## `migkit/` (181 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -84,7 +84,6 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
 - `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
 - `migkit/fencing.py` - A mover's token, carried into every transaction it writes, so that a mover which lost its hold is refused by the target itself (backlog W1). Classes: Fenced, Token.
-- `migkit/fk_window.py` - (no docstring) Classes: ForeignKeyWindow.
 - `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, GroupHold, PostgresHold, MySQLHold, TiDBHold, MongoHold.
 - `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog
 - `migkit/geo.py` - A shape - a geometry or a geography - as its SRID and its well-known binary, with x the longitude and y the latitude. Classes: Shape.
@@ -95,7 +94,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/hopkeys.py` - Every key a hop may say, in one place, and the configuration checked against it before anything runs (backlog R21). Classes: Key, Problem.
 - `migkit/huawei_sdk.py` - Huawei Cloud's API for migkit, run in the environment its SDK lives in.
 - `migkit/imports.py` - A hop from another tool's task (backlog R21: switching costs nothing). Classes: Imported.
-- `migkit/indexes.py` - Getting the indexes out of the way of a bulk load, and putting them back.
+- `migkit/indexes.py` - Getting the indexes out of the way of a bulk load, and putting them back. Classes: NotPutBack, ForeignKeyWindow.
 - `migkit/integrations.py` - migkit inside the team's tools: a task for Airflow and Dagster, a step for GitHub Actions and Argo Workflows, each a thin wrapper over migki
 - `migkit/interlock.py` - The interlock on the target (backlog R23, 3): before a step writes to a target - a copy, a stream, a repair, a cutover, users, a converted s
 - `migkit/intervals.py` - An interval as the three parts every engine that has one keeps apart: months, days, and a time of nanoseconds. Classes: Interval.
@@ -125,7 +124,6 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/notify.py` - Telling the team, wherever it is, what a migration is doing (backlog 32, R23.10).
 - `migkit/org_change.py` - Organisation change sheet exporter (Item 434, R25.3).
 - `migkit/ownership.py` - Who an object belongs to, and whose privileges it runs with.
-- `migkit/partitions.py` - (no docstring) Classes: PartitionInfo, PartitionChunk, PartitionRouter.
 - `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text.
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Rung, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Hashed, hashing, Way, Sql, ReadPlan, DigestPlan.

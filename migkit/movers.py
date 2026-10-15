@@ -25,7 +25,6 @@ from .tools import IMAGES, PROGRAM
 from .tools import names as tool_names
 from .tooluse import TOPPED, UNUSED, USED
 from .util import PrivateFile, report_name, tool_env, which  # noqa: F401
-from .fk_window import ForeignKeyWindow as _ForeignKeyWindow, hold_or_sequence_dependent_tables
 
 VIAS = ("auto", "builtin", "pgdump", "pgcopydb", "mydumper", "mysqlsh",
         "pgloader", "mongodump", "mongosync", "riotx", "native", "pgpull",

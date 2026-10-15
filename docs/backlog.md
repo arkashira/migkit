@@ -1657,6 +1657,12 @@ nothing loaded. Two causes:
 open: a foreign-key window, dropping and restoring the keys around the
 streaming copy the way the index window does. That keeps its speed on such
 targets instead of falling back.
+*Not done (2026-10-16, FIX-2):* the window is built once, in
+`indexes.ForeignKeyWindow` on the `dropped-fks` set-aside record (a key not
+put back stops the move with the statement, `indexes.NotPutBack`;
+`tests/test_foreign_keys_go_back_or_the_move_stops.py`, scripted target).
+Not yet wired around the streaming copy in `movers.py` (another ticket's
+file), not run on a server, and `check`/`cutover` do not read `dropped-fks`.
 
 *Found on the way, and done (2026-09-24):* the PostgreSQL dump path's load
 could only be run by a superuser. As a plain owner, the foreign keys'
