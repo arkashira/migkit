@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (181 modules)
+## `migkit/` (182 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -139,6 +139,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/render.py` - The canonical text of a column's values, with the rendering chosen once for the column rather than once for every value.
 - `migkit/repairlog.py` - A statement-level record of a repair, beside its undo (problems C3, backlog C3.repair). Classes: Record, CanonIO, DocumentIO, DumpIO, TableIO.
 - `migkit/repairways.py` - The way a table's rows are repaired, chosen by how far it drifted and what each way costs here (backlog P0-DEPTH 1). Classes: Sides, Span, Outcome, RepairCosts, Ladder.
+- `migkit/replicasum.py` - A MySQL target that is a native replica of the source, proved chunk by chunk through the replication stream, and every chunk proved again by Classes: Chunk.
 - `migkit/report.py` - (no docstring)
 - `migkit/reshard.py` - Resharding (backlog W7): rows of N sources placed on M targets by one function - a database split, many merged into one, a new shard key - e Classes: Side, Group, Function, Placed, Unplaced, Planned.
 - `migkit/result_scope.py` - (no docstring) Classes: PracticalProblem, DatabaseSummary, GroupedResultEnvelope.

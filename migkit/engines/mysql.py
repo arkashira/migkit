@@ -4925,6 +4925,18 @@ class MySQLEngine(Engine):
                       " source's" + (f"; still to apply: {behind[:120]}"
                                      if behind else ""))
 
+    def _replica_checksum(self, db):
+        """Where the target is a native replica of the source, every chunk
+        proved through the replication stream and by migkit's own digest
+        (`replicasum`); None where the target is not one."""
+        from .. import replicasum
+        try:
+            return replicasum.check(self, db)
+        except Exception as e:  # noqa: BLE001 - said, never as clean
+            return Result("deep", f"{db} replica checksum", "warn",
+                          f"{replicasum.SAID} could not finish: "
+                          + str(e).strip().splitlines()[0][:120])
+
     def stream_identity(self, side, db):
         """The server's own id: a binlog file and offset mean something in
         one server's log only."""
@@ -5246,7 +5258,7 @@ class MySQLEngine(Engine):
                self._temporal_meaning(db),
                self._time_zone_rules(db),
                self._capacity_gaps(db),
-               self._errant_transactions(db)]
+               self._errant_transactions(db), self._replica_checksum(db)]
         res = [r for r in res if r is not None]
         ddb = self._d("dst", db)
 

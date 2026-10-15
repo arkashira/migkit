@@ -1,0 +1,5 @@
+# the replica's copy of the checksum table: chunk, chunk_index, lower_boundary, upper_boundary, master_cnt, this_cnt, master_crc, this_crc
+1	PRIMARY	1	1000	1000	1000	a1b2c3d4	a1b2c3d4
+2	PRIMARY	1001	2000	1000	1000	0f0f0f0f	deadbeef
+3	PRIMARY	\N	1	0	0	0	0
+4	PRIMARY	2000	\N	0	0	0	0

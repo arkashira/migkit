@@ -124,6 +124,8 @@ PROGRAM = {
     "pgloader": Program("PostgreSQL", "pgloader", "pgloader"),
     "pt-table-sync": Program("GPL-2.0-only", "percona-toolkit",
                              "percona-toolkit", "repair program"),
+    "pt-table-checksum": Program("GPL-2.0-only", "percona-toolkit",
+                                 "percona-toolkit", "replica checksum"),
     # fetched from its vendor, at the build its terms decide (`build_of`)
     "atlas": Program("LicenseRef-Atlas-EULA", role="schema reader",
                      version_args=("version",), vendor="1.3.0"),
@@ -962,7 +964,7 @@ CAPABILITIES = [
      [], ["atlas", "liquibase"]),
     ("MySQL: verify and repair",
      "compare every row and object, repair with undo",
-     ["mysql"], ["pt-table-sync"]),
+     ["mysql"], ["pt-table-sync", "pt-table-checksum"]),
     ("MySQL: bulk move",
      "parallel load between MySQL databases",
      ["mysqldump"], ["mydumper", "myloader", "mysqlsh"]),

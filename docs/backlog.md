@@ -4577,6 +4577,13 @@ number: `docs/research/smart-decisions-2026-09-30.md`,
   (staged, then promoted in migkit's transaction so a batch stays
   exact), Oracle direct path load (the same), pt-table-checksum only on
   native replicas and always paired with migkit's sum digest.
+  (DEC.ptcs, 2026-10-16: `replicasum` - the rung, the pairing, the
+  account and the install are in; *Not done:* the server test
+  `tests/test_a_native_replica_is_proved_on_servers.py` is written and not
+  run; the checksum table is not yet a `decide.Change` offered to the
+  operator (it is written where the account may write it); MariaDB's
+  GTIDs are not fenced; the cost is recorded per row, never yet ranked
+  against a measured own-digest rate.)
 * **Close the structural four as far as they go:**
   * *Oracle at high rates:* migkit's own LogMiner reader (RDS-capable,
     no licence), mining on a standby where the edition allows it, a
