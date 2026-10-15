@@ -209,12 +209,12 @@ class Ledger:
         self._lock = threading.Lock()
         self.attempts = {}
         self.durations = {}
-        #: operations by identity (`faults.Owned.key`): state, tries, fault
-        self.operations = {}
         #: the units opened (`unit_opened`), by name
         self.records = {}
         #: this run's mark on what it opens and attempts
         self.run = os.urandom(6).hex()
+        #: operations by identity (`faults.Owned.key`): state, tries, fault
+        self.operations = {}
         if path:
             from .durable import read_state
             got = read_state(path, "cache")
@@ -222,6 +222,7 @@ class Ledger:
                 self.attempts = dict(got.get("attempts") or {})
                 self.durations = {k: list(v) for k, v in
                                   (got.get("durations") or {}).items()}
+                self.records = dict(got.get("units") or {})
                 self.operations = dict(got.get("operations") or {})
 
     def owned(self, key):
@@ -242,7 +243,6 @@ class Ledger:
         with self._lock:
             return {k: dict(v) for k, v in self.operations.items()
                     if v.get("state") in ("began", "unknown", "running")}
-                self.records = dict(got.get("units") or {})
 
     def waits(self, operation):
         with self._lock:
@@ -434,8 +434,8 @@ class Ledger:
         with self._lock:
             text = json.dumps({"attempts": self.attempts,
                                "durations": self.durations,
+                               "units": self.records,
                                "operations": self.operations},
-                               "units": self.records},
                               sort_keys=True, default=str)
         write_atomic(self.path, text)
 
