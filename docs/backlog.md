@@ -10270,7 +10270,7 @@ Implementation and actual comparative proof remain OPEN.
 
 ## P0-PRODUCT-TELEMETRY: complete usage evidence without customer data
 
-Owner requirement, 2026-10-06. Status: OPEN. Plan comprehensive metrics and
+Owner requirement, 2026-10-06. Status: PARTLY (2026-10-16). Plan comprehensive metrics and
 structured events describing migkit's behavior and actual usage outcomes to
 improve the product, decision quality, safety and performance. Customer
 database content must never leave the user's environment. Storage/backend
@@ -10337,6 +10337,35 @@ Acceptance criteria:
 This extends existing evidence/observability and local-learning owners; it does
 not replace detailed local diagnostics or authorize sending company material.
 All implementation and storage selection remain OPEN.
+
+Built 2026-10-16 (`migkit/telemetry.py`, proved by
+`tests/test_telemetry_carries_no_customer_data.py`, written not yet run):
+- Schema version 1: seven typed event kinds (run, decision, progress,
+  resources, recovery, coverage, intervention); every field a closed code,
+  a bucket, a bounded number or a flag. An unknown kind or field, a string
+  outside its codes, a wrong type or an oversize event is `Rejected` at the
+  producer, without repeating the value. Strategies are the ladders' own
+  ways by their words (no program named; a label made at run time is
+  `other`); reasons are `decide.WORDS` codes matched, never copied;
+  exceptions are kept by type only.
+- `session.step` emits a decision event per choice and a run event per
+  command (completion from the exit table, error category, buckets).
+- Local spool only: 4 files of 128 KiB, rotated, mode 0600, bounded queue
+  with a background writer, a full queue drops and counts. `Sink` has only
+  the local implementation.
+- Off: policy file (`MIGKIT_TELEMETRY_POLICY`, unreadable = off),
+  `MIGKIT_EGRESS` without `telemetry`, `MIGKIT_TELEMETRY=off`,
+  `migkit telemetry off`; off stops queueing and disposes of the spool.
+  `migkit telemetry show [--schema]` prints the state, the disclosure and
+  every kept event. Disclosure on the manual's Telemetry page and README.
+
+Not done: no destination, transport, receiver, retention or identifiers
+(storage undecided); progress, resources, recovery, coverage and
+intervention events have a schema but their owners (watch/ETA, resource
+coordinator, failure catalogue, verdict, approvals) do not emit them yet;
+crash reports and support bundles are not yet routed through the same
+boundary; the analysis loop is not built; canaries cover the decision and
+command paths only.
 
 ## P1-SOURCE-HIERARCHY: readable project and source organization
 

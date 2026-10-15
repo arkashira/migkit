@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (169 modules)
+## `migkit/` (170 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -163,6 +163,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/tailctl.py` - A running change tail as the rest of migkit sees it, and the one loop every tail runs. Classes: Running.
 - `migkit/tailtables.py` - A running tail's tables, each in a state of its own (backlog L1, L4, L5, L6; research: leapfrog live tail 2026-09-28, section 1.3). Classes: Store, Spool, TableSet.
 - `migkit/tally.py` - Rows counted and fingerprinted as they pass through a copy. Classes: Tally.
+- `migkit/telemetry.py` - Product telemetry: what migkit did, never what it carried (backlog P0-PRODUCT-TELEMETRY). Classes: Rejected, Run, Decision, Progress, Resources, Recovery.
 - `migkit/throttle.py` - Keep verification from becoming the outage it went looking for. Classes: Health, Throttle.
 - `migkit/tls.py` - Whether a connection to a server can be verified, asked of the server.
 - `migkit/tools.py` - What migkit can do on this machine, and how to make it able to do more. Classes: Program, Terms, Bundle.

@@ -214,8 +214,17 @@ VARS = {
     # ---- what leaves the machine ----------------------------------------
     "MIGKIT_EGRESS": Var("what may leave the machine, for every hop: none,"
                          " or the kinds that may (notify, traces, assist,"
-                         " evidence); all that is configured where unset",
-                         "list"),
+                         " evidence, anchor, telemetry); all that is"
+                         " configured where unset", "list"),
+    "MIGKIT_TELEMETRY": Var("product telemetry, kept on this machine and"
+                            " never sent: off stops it and deletes what"
+                            " was kept", "flag", True),
+    "MIGKIT_TELEMETRY_POLICY": Var("the organisation's policy file;"
+                                   " `telemetry: off` or `egress: none` in"
+                                   " it turns telemetry off for everyone",
+                                   "path", "/etc/migkit/policy.yaml"),
+    "MIGKIT_TELEMETRY_SPOOL": Var("where telemetry events are kept, where"
+                                  " not beside the state of runs", "path"),
     "MIGKIT_EGRESS_TO": Var("the hosts anything that leaves may go to:"
                             " names, shell patterns, addresses and"
                             " networks", "list"),

@@ -33,6 +33,7 @@ what was left out and whether the target is ready for the application.
 - [Cross-engine (hetero)](#cross-engine-hetero)
 - [How it compares](#how-it-compares)
 - [Safety model](#safety-model)
+- [Telemetry](#telemetry)
 - [License](#license)
 
 ## Why
@@ -192,6 +193,7 @@ off for a hop where the time matters more.
 | `history` | Audit trail: saved rollback states and every write migkit made, read from the local changelog and state journals. |
 | `rollback` | Restore target sequences from a saved state, put back the rows the repairs since it wrote, where the target still holds what they wrote; where the hop streamed back or cut over, the old source's counters raised past the new primary's. |
 | `users` | Sync logins source -> target keeping the same password. |
+| `telemetry` | Product telemetry: what migkit did, never what it carried. |
 <!-- /gen_docs: commands -->
 
 Every check is read-only and rerunnable. Every repair is dry-run unless
@@ -336,6 +338,27 @@ available on each engine and the gaps still being worked on.
   changelog ledger.
 - Movers are self-hosted only on a trusted network (or a cloud VM); managed
   services remain the recommended path over long-haul links.
+
+## Telemetry
+
+migkit keeps product telemetry about how it behaved - the command, the
+engines, the ways chosen and why (as codes), timings, resources, progress
+and estimate accuracy, error categories, recoveries, verified coverage and
+guarantees, how a run ended - so the product can learn which ways work.
+It never keeps rows, values, digests of them, statements, schemas, names
+of databases, tables, columns or accounts, addresses, paths, credentials,
+logs, stack traces or error messages: every field is a closed code, a
+bucket or a bounded number, and anything else is refused where the event
+is made.
+
+- Default: on, kept on this machine only, in a spool of a fixed size under
+  the state directory. Nothing is sent: no destination is chosen.
+- `migkit telemetry show` prints the state and every event kept
+  (`--schema` lists every field).
+- Off: `migkit telemetry off`, `MIGKIT_TELEMETRY=off`, `MIGKIT_EGRESS=none`,
+  or an organisation policy file (`/etc/migkit/policy.yaml`, or
+  `MIGKIT_TELEMETRY_POLICY`) saying `telemetry: off`. Off deletes what was
+  kept.
 
 ## Testing
 

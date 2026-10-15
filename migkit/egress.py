@@ -53,6 +53,8 @@ KINDS = {
     "assist": "findings and code to a language model",
     "evidence": "the evidence's digests in the run state's bucket",
     "anchor": "the audit record's checkpoints in the anchor bucket",
+    "telemetry": "product telemetry, kept locally until a destination is"
+                 " chosen",
 }
 
 NONE = ("none", "off", "false", "no", "0")

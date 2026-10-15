@@ -16,6 +16,8 @@ Around every command (`step`, which `cli` wraps each command in):
   (`--go`, `--apply`) is said done (`notify`)
 * the run's evidence is exported beside the hop's reports, where the run
   left anything to export
+* the ways chosen and the command's end are kept as product telemetry,
+  in codes and buckets only (`telemetry`)
 
 Nothing here decides anything or changes what a command does: a
 receiver that cannot be reached, a trace that cannot be sent, an export
@@ -154,7 +156,7 @@ def _first_line(text):
 def step(command, params, log=None):
     """One command as one run: see the module's docstring. `params` are
     the command's own (`hop_name`, `go`, `do_apply` read from them)."""
-    from . import decide, notify, runlog, traces
+    from . import decide, notify, runlog, telemetry, traces
     log = log or (lambda m: None)
     run = begin()
     hop = _hop(params.get("hop_name"))
@@ -168,8 +170,10 @@ def step(command, params, log=None):
     listening = Decisions(hop, log) if hop is not None else None
     if listening is not None:
         decide.LISTENERS.append(listening.heard)
+    told = telemetry.Command(command, params, hop)
+    decide.LISTENERS.append(told.heard)
     began = time.time()
-    failed, ok, ended, blocked = None, False, 0, None
+    failed, ok, ended, blocked, caught = None, False, 0, None, None
     try:
         with traces.command(command, hop, params, run):
             try:
@@ -183,21 +187,25 @@ def step(command, params, log=None):
             except SystemExit as e:
                 # a number is a verdict's exit (a difference found); words
                 # are migkit stopping, which is a failure to be told
+                caught = e
                 if isinstance(e.code, str) and e.code.strip():
                     failed = _first_line(e.code)
                 else:
                     ended = e.code
                 raise
-            except KeyboardInterrupt:
-                failed = "interrupted"
+            except KeyboardInterrupt as e:
+                failed, caught = "interrupted", e
                 raise
             except Exception as e:
-                failed = f"{type(e).__name__}: {_first_line(e)}"
+                failed, caught = f"{type(e).__name__}: {_first_line(e)}", e
                 raise
     finally:
         if listening is not None:
             with contextlib.suppress(ValueError):
                 decide.LISTENERS.remove(listening.heard)
+        with contextlib.suppress(ValueError):
+            decide.LISTENERS.remove(told.heard)
+        told.ended(ended, caught)
         if hop is not None:
             try:
                 if failed not in (None, "interrupted"):

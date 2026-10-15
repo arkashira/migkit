@@ -1038,6 +1038,23 @@ def page_troubleshooting():
                 blocks)
 
 
+def page_telemetry():
+    from migkit import telemetry
+    blocks = []
+    for i, (heading, text) in enumerate(telemetry.DISCLOSURE):
+        blocks += [H(heading, f"telemetry-{i}"), P(text)]
+    blocks += [H("Every field an event may have", "telemetry-fields"),
+               P("An event is one of these kinds, each field a closed code,"
+                 " a bucket or a bounded number; a field not listed here,"
+                 " or a value outside its codes, is refused where the event"
+                 " is made."),
+               Table(["Event", "Field", "Kind", "What it holds", "Codes"],
+                     telemetry.schema(), wide=True)]
+    return Page("telemetry", "Telemetry", "Telemetry",
+                "What migkit keeps about how it behaved, what it never"
+                " keeps, the default, and how to turn it off.", blocks)
+
+
 def evidence_parts():
     """(the files, what the export is, [(table, columns)], the JSON's keys,
     the CSV's columns), read off an export of a hop with nothing done."""
@@ -1421,7 +1438,7 @@ PAGES = (("index", "Overview"), ("quickstart", "Quickstart"),
          ("recipes", "Recipes"), ("options", "Hop options"),
          ("environment", "Environment"), ("commands", "Commands"),
          ("troubleshooting", "Troubleshooting"), ("evidence", "Evidence"),
-         ("web", "Web and API"),
+         ("web", "Web and API"), ("telemetry", "Telemetry"),
          ("releases", "Releases"))
 
 
@@ -1544,7 +1561,8 @@ BUILDERS = {"index": page_index, "quickstart": page_quickstart,
             "recipes": page_recipes, "options": page_options,
             "environment": page_environment, "commands": page_commands,
             "troubleshooting": page_troubleshooting,
-            "evidence": page_evidence, "web": page_web}
+            "evidence": page_evidence, "web": page_web,
+            "telemetry": page_telemetry}
 
 
 def _site_base():

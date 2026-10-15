@@ -6282,5 +6282,45 @@ def users_cmd(hop_name, mode, do_apply, pw_file):
     _users_run(hop_name, mode, do_apply, pw_file)
 
 
+
+@main.command("telemetry")
+@click.argument("action", type=click.Choice(["show", "off", "on"]),
+                default="show")
+@click.option("--schema", "with_schema", is_flag=True,
+              help="also print every field an event may have")
+def telemetry_cmd(action, with_schema):
+    """Product telemetry: what migkit did, never what it carried.
+
+    \b
+    show   the state, what is collected, and every event kept (nothing is
+           sent: no destination is chosen)
+    off    stop keeping events and delete those already kept
+    on     keep events again, unless a policy or the environment says off
+    """
+    from . import telemetry
+    if action != "show":
+        gone = telemetry.turn(action == "on")
+        click.echo(f"telemetry {action}"
+                   + (f"; {gone} spool file(s) deleted" if gone else ""))
+    on, why = telemetry.state()
+    if action == "show":
+        telemetry.flush()
+    sink = telemetry.Local()
+    click.echo(f"telemetry: {'on' if on else 'off'} - {why}")
+    if action != "show":
+        return
+    for heading, text in telemetry.DISCLOSURE:
+        click.echo(f"{heading}: {text.replace('`', '')}")
+    if with_schema:
+        for kind, field, kind_of, doc, bound in telemetry.schema():
+            click.echo(f"  {kind}.{field} ({kind_of}): {doc}"
+                       + (f" [{bound}]" if bound else ""))
+    events = sink.read()
+    click.echo(f"kept: {len(events)} event(s), {sink.bytes()} bytes in"
+               f" {sink.root}")
+    for event in events:
+        click.echo(json.dumps(event, sort_keys=True))
+
+
 if __name__ == "__main__":
     main()
