@@ -3801,7 +3801,7 @@ class KafkaHold(Hold):
         say(f"{len(made)} denies taken away")
 
     def writes(self, db):
-        from kafka import TopicPartition
+        TopicPartition = self.eng._partition(self.side)
         c = self.eng._consumer(self.side)
         try:
             tps = [TopicPartition(t, p) for t in self.topics([db])

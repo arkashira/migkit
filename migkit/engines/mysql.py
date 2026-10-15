@@ -445,6 +445,32 @@ class MySQLEngine(Engine):
                 return None
         return False
 
+    def server_semantics(self, side, db):
+        """The server's collation, its case rules for names and for values,
+        and how it renders a double (`Engine.server_semantics`)."""
+        from .. import upgrade
+        settings = {k: v[0] for k, v in upgrade._my_vars(self, side).items()}
+        rows = self._q(side, "select cast(1.2345678901234567e0 as char),"
+                             " 'a' = 'A'")
+        row = rows[0] if rows else (None, None)
+        return {"collation": settings.get("collation_server"),
+                "case_sensitivity": (settings.get("lower_case_table_names"),
+                                     row[1]),
+                "float_rendering": row[0]}
+
+    def table_storage(self, side, db):
+        """Each base table's engine (`Engine.table_storage`)."""
+        from .. import tableengine
+        return tableengine._engines(self, side, db)
+
+    @classmethod
+    def storage_traits(cls, name, side, observed=None):
+        """What a MySQL engine promises, by its name; a target that is
+        another server's tables, by that server's."""
+        from .. import tableengine
+        return ((tableengine.ONE_WAY.get(name) if side == "dst" else None)
+                or tableengine.TRAITS.get(name))
+
     def table_facts(self, side, db):
         """InnoDB's own row estimate and whether a primary key exists."""
         out = {}

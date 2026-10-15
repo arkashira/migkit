@@ -108,6 +108,21 @@ class KafkaEngine(Engine):
             decide.record(self.hop, held[side])
         return held[side].path
 
+    def _partition(self, *sides):
+        """The partition key the clients of `sides` take
+        (`TopicPartition(topic, partition)`), from the client chosen for
+        each (`_client_way`). The pure client takes only its own key, and
+        an admin call the compiled one does not answer goes through the
+        pure one; the compiled client takes any pair. So the pure client's
+        key wherever it is installed, else the plain pair both share
+        (`kafkaclient.TopicPartition`) - equal to the other as a dict key."""
+        from .. import kafkaclient
+        ways = {self._client_way(s) for s in sides or ("src", "dst")}
+        if ways == {"native"} and kafkaclient.pure_missing():
+            return kafkaclient.TopicPartition
+        from kafka import TopicPartition
+        return TopicPartition
+
     def _zstd_target(self):
         """Whether the target's brokers take zstd: the Produce request's
         version they answer with, else the version they run, else None;
@@ -255,7 +270,7 @@ class KafkaEngine(Engine):
         """{topic: sizes}: a message's key and value as the broker keeps
         them, over the last messages of each partition - `SIZE_SAMPLE` a
         topic at most, each measured and let go, fetched by bytes."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition(side)
 
         from .base import sizes_of
         consumer = self._consumer(side)
@@ -664,7 +679,7 @@ class KafkaEngine(Engine):
         one offset, every one proved as it lands; `mapped` - each batch and
         the source-to-target offsets it took are one transaction on the
         target (`_copy_mapped`); `plain` - sent and counted as before."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
 
         from ..wording import progress
 
@@ -839,7 +854,7 @@ class KafkaEngine(Engine):
     def moved_nothing(self, db):
         """Topics holding messages on the source and none on the target:
         what reached a partition is its end past its start."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
         try:
             src, dst = self._consumer("src"), self._consumer("dst")
         except Exception:  # noqa: BLE001 - None: cannot be asked
@@ -988,7 +1003,7 @@ class KafkaEngine(Engine):
         """{topic: {"begin": {partition: offset}, "end": {...}}} as the
         copier reads them - first offset, and the end a reader of
         committed messages is given - of the topics that are on the side."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition(side)
         consumer = self._consumer(side, isolation_level="read_committed")
         try:
             tps = {topic: [TopicPartition(topic, p)
@@ -1040,7 +1055,7 @@ class KafkaEngine(Engine):
 
     def _behind(self, db, state):
         """{topic: messages on the source past the saved positions}."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src")
         src = self._consumer("src")
         try:
             out = {}
@@ -1067,7 +1082,7 @@ class KafkaEngine(Engine):
         open: the tail passes it only once that transaction is over, so a
         drain to it is never proved while a write from before the freeze
         is outstanding."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition(side)
         consumer = self._consumer(side)
         try:
             out = {}
@@ -1134,7 +1149,7 @@ class KafkaEngine(Engine):
         committed offset to the partition's end, which is what its
         consumers have yet to read, all of it on the target once the tail
         has passed `at`."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src")
 
         from .. import tailctl
         try:
@@ -1241,7 +1256,7 @@ class KafkaEngine(Engine):
         which messages came after."""
         import json
 
-        from kafka import TopicPartition
+        TopicPartition = self._partition("dst")
         consumer = self._consumer("dst")
         try:
             topics = self._topics(consumer)
@@ -1689,7 +1704,7 @@ class KafkaEngine(Engine):
         brokers' own producer state (DescribeProducers). A producer that is
         neither idempotent nor transactional leaves no state to name. Raises
         where the client or the cluster does not have the call."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition(side)
         consumer = self._consumer(side)
         try:
             tps = [TopicPartition(t, p) for _, t in
@@ -2310,7 +2325,7 @@ class KafkaEngine(Engine):
         it."""
         import json
 
-        from kafka import TopicPartition
+        TopicPartition = self._partition("dst")
         consumer = self._consumer("dst", isolation_level="read_committed")
         try:
             if self.OFFSET_MAP not in consumer.topics():
@@ -3150,7 +3165,7 @@ class KafkaEngine(Engine):
         partition, the source's newest message is looked for on the target
         and what follows it counted (`_after`); a partition whose newest
         message is not found there cannot be told, and is said."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
         try:
             sc, dc = self._consumer("src"), self._consumer("dst")
             tops = [t for t in self._topics(sc) if t in dc.topics()]
@@ -3431,8 +3446,12 @@ class KafkaEngine(Engine):
         """
         import json
 
-        from kafka import TopicPartition
-        from kafka.structs import OffsetAndMetadata
+        from .. import kafkaclient
+        TopicPartition = self._partition("dst")
+        if TopicPartition is kafkaclient.TopicPartition:
+            OffsetAndMetadata = kafkaclient.OffsetAndMetadata
+        else:
+            from kafka.structs import OffsetAndMetadata
         carried = [json.loads(s) for s in (action.statements or [])
                    if str(s).startswith("{")]
         # the last check's rows may be from another scope: a position on a
@@ -3482,7 +3501,7 @@ class KafkaEngine(Engine):
             admin.close()
 
     def check_counts(self, db):
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
         sc, dc = self._consumer("src"), self._consumer("dst")
         bad = []
         n = 0
@@ -3540,7 +3559,7 @@ class KafkaEngine(Engine):
                              " (net of retention)", tables=named)]
 
     def check_data(self, db, table=None, stream=None):
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
 
         from ..throttle import Throttle
         sample = int(self.hop.options.get("sample", 200))
@@ -3686,7 +3705,7 @@ class KafkaEngine(Engine):
         the partitions (`topic[p]`) whose last `sample` messages differ,
         counted from those messages - at least what is apart, not all of
         it: the rows before the window were not read."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
         apart, hollow = {}, {}
         for item in bad:
             topic, part = item[:-1].rsplit("[", 1)
@@ -3853,7 +3872,7 @@ class KafkaEngine(Engine):
         it, in order: a message the source never wrote is found there, not
         left outside the window. A partition whose last source message is
         not on the target is missing."""
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
         topic = table[len(self.DRILL):]
         sample = int(self.hop.options.get("sample", 200))
         at = (getattr(self, "_fenced_at", None) or {}).get(topic, {})
@@ -3931,7 +3950,7 @@ class KafkaEngine(Engine):
         """
         import json
 
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
         state = self.hop.report_dir(db) / "delta-offsets.json"
 
         def ends(consumer):
@@ -4024,7 +4043,7 @@ class KafkaEngine(Engine):
         return res
 
     def watch_sample(self, db):
-        from kafka import TopicPartition
+        TopicPartition = self._partition("src", "dst")
         sc, dc = self._consumer("src"), self._consumer("dst")
         total = {"src": 0, "dst": 0}
         for side, c in (("src", sc), ("dst", dc)):

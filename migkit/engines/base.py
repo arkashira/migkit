@@ -2348,6 +2348,45 @@ class Engine:
         an engine has no cheap way to say."""
         return {}
 
+    def server_semantics(self, side, db):
+        """How `side`'s server compares and renders values - {"collation",
+        "case_sensitivity", "float_rendering"}, and "float_setting" where a
+        setting moves the rendering - read for a hardware, OS or
+        architecture change (`scenarios.architecture_facts`). A string
+        where this engine does not read them: the reason, as a decision
+        cell says it."""
+        from ..capabilities import NOT_YET
+        return (f"{NOT_YET}: collation, case rules and float rendering are"
+                f" not read on {self.CANON_ENGINE} (backlog"
+                " P0-SCENARIOS.arch)")
+
+    def table_storage(self, side, db):
+        """{table: its storage engine or access method, lowercase} of
+        `side`'s base tables, for a storage engine change
+        (`tableengine.observed`). A string where this engine does not read
+        them: the reason, as a decision cell says it."""
+        from ..capabilities import NOT_YET
+        return (f"{NOT_YET}: a table's storage engine is not read on"
+                f" {self.CANON_ENGINE} (backlog P0-SCENARIOS.engine)")
+
+    @classmethod
+    def storage_traits(cls, name, side, observed=None):
+        """What the storage engine `name` on `side` promises
+        (`tableengine.Traits`) - `observed` the traits read of it, where
+        its name alone does not say - or a string where this engine does
+        not say: the reason."""
+        from ..capabilities import NOT_YET
+        return (f"{NOT_YET}: what {name} promises is not known on"
+                f" {cls.CANON_ENGINE} (backlog P0-SCENARIOS.engine)")
+
+    @classmethod
+    def storage_rungs(cls):
+        """The ways a table's storage engine is changed on this engine
+        (`tableengine.decided`): in the definition migkit makes, or in
+        place on the target."""
+        from .. import tableengine
+        return tableengine.ways()
+
     def free_bytes(self, side, db):
         """What the side's disk has free, as the server reports it, or None
         where it reports nothing - which is PostgreSQL's and MySQL's

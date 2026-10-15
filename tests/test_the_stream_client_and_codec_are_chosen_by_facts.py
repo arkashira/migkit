@@ -642,3 +642,160 @@ def test_a_refusal_steps_that_topic_down_and_no_other(monkeypatch,
                         "UNSUPPORTED_COMPRESSION_TYPE") == "lz4"
     assert eng._codec("native", "a") == "lz4"
     assert eng._codec("native", "b") == "zstd"
+
+
+# --- the partition key, from the client chosen for its side (CRIT1 12) ----
+# The cluster mirror, the change-topic reader and the Kafka hold asked the
+# pure client for its key whatever client the side was read through, so a
+# machine with only the compiled client failed on an import.
+
+def _engine_on(ways):
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.kafka import KafkaEngine
+    hop = Hop(name="k", engine="kafka",
+              source=Endpoint(host="10.0.0.1", port=9092, user="",
+                              password=""),
+              target=Endpoint(host="10.0.0.2", port=9092, user="",
+                              password=""))
+    eng = KafkaEngine(hop)
+    eng._client_way = lambda side="dst": ways[side]
+    return eng
+
+
+@pytest.fixture
+def no_pure(monkeypatch):
+    """Only the compiled client here: importing the pure one fails."""
+    monkeypatch.setitem(sys.modules, "kafka", None)
+    monkeypatch.setattr(kafkaclient, "pure_missing", lambda: "not here")
+
+
+@pytest.fixture
+def pure_double(monkeypatch):
+    """The pure client installed, as a module with its own key."""
+    class PureTP(tuple):
+        def __new__(cls, topic, partition):
+            return super().__new__(cls, (topic, partition))
+    mod = types.ModuleType("kafka")
+    mod.TopicPartition = PureTP
+    monkeypatch.setitem(sys.modules, "kafka", mod)
+    monkeypatch.setattr(kafkaclient, "pure_missing", lambda: None)
+    return PureTP
+
+
+def test_the_plain_pair_where_only_the_compiled_client_is(no_pure):
+    eng = _engine_on({"src": "native", "dst": "native"})
+    tp = eng._partition("src", "dst")
+    assert tp is kafkaclient.TopicPartition
+    assert tp("orders", 3) == ("orders", 3)
+
+
+def test_the_pure_key_where_a_side_reads_through_the_pure_client(
+        pure_double):
+    eng = _engine_on({"src": "native", "dst": "pure"})
+    assert eng._partition("dst") is pure_double
+    assert eng._partition("src", "dst") is pure_double
+
+
+def test_the_pure_key_where_it_is_installed_beside_the_compiled_one(
+        pure_double):
+    # an admin call the compiled client does not answer goes through the
+    # pure one, which takes only its own key
+    eng = _engine_on({"src": "native", "dst": "native"})
+    assert eng._partition("src") is pure_double
+
+
+def test_both_keys_find_each_other_in_a_dict(pure_double):
+    held = {pure_double("orders", 0): 7}
+    assert held[kafkaclient.TopicPartition("orders", 0)] == 7
+
+
+class _PartsConsumer:
+    def __init__(self, parts, ends, polled=None):
+        self.parts, self.ends, self.polled = parts, ends, polled or {}
+        self.assigned, self.closed, self.asked = None, False, []
+
+    def topics(self):
+        return set(self.parts)
+
+    def partitions_for_topic(self, topic):
+        return set(self.parts.get(topic) or ())
+
+    def assign(self, tps):
+        self.assigned = list(tps)
+
+    def end_offsets(self, tps):
+        self.asked.extend(type(tp) for tp in tps)
+        return {tp: self.ends[tuple(tp)] for tp in tps}
+
+    def seek_to_beginning(self, *tps):
+        pass
+
+    def poll(self, timeout_ms=0, max_records=500):
+        got, self.polled = self.polled, {}
+        return got
+
+    def close(self):
+        self.closed = True
+
+
+def test_the_mirror_reads_its_offset_syncs_with_only_the_compiled_client(
+        no_pure):
+    import struct
+
+    from migkit import mirror
+    name = mirror._topic_name("syncs")
+    key = struct.pack(">h", 6) + b"orders" + struct.pack(">i", 2)
+    record = types.SimpleNamespace(key=key, value=struct.pack(">qq", 40, 9),
+                                   offset=0)
+    tp = kafkaclient.TopicPartition(name, 0)
+    consumer = _PartsConsumer({name: [0]}, {(name, 0): 1}, {tp: [record]})
+    eng = _engine_on({"src": "native", "dst": "native"})
+    eng._consumer = lambda side, **kw: consumer
+    assert mirror.read_table(eng, "syncs") == {("orders", 2): [(40, 9)]}
+    assert consumer.assigned == [(name, 0)]
+    assert consumer.closed
+
+
+def test_the_change_topic_reader_opens_with_only_the_compiled_client(
+        no_pure, monkeypatch):
+    from migkit import changetopic
+    from migkit.engines.kafka import KafkaEngine
+    consumer = _PartsConsumer({"cdc": [1, 0]}, {})
+    monkeypatch.setattr(KafkaEngine, "_client_way",
+                        lambda self, side="dst": "native")
+    monkeypatch.setattr(KafkaEngine, "_consumer",
+                        lambda self, side, **kw: consumer)
+    lanes = changetopic.KafkaLanes({"servers": "10.0.0.1:9092",
+                                    "topic": "cdc"})
+    assert lanes._open() is consumer
+    assert consumer.assigned == [("cdc", 0), ("cdc", 1)]
+    assert all(type(tp) is kafkaclient.TopicPartition
+               for tp in consumer.assigned)
+
+
+def _hold(eng, side):
+    from migkit import freeze
+    hold = freeze.KafkaHold.__new__(freeze.KafkaHold)
+    hold.hop, hold.side, hold.eng = eng.hop, side, eng
+    return hold
+
+
+def test_the_hold_counts_writes_with_only_the_compiled_client(no_pure):
+    consumer = _PartsConsumer({"orders": [0, 1]},
+                              {("orders", 0): 5, ("orders", 1): 7})
+    eng = _engine_on({"src": "native", "dst": "native"})
+    eng._consumer = lambda side, **kw: consumer
+    eng.list_move_tables = lambda db: [("", "orders")]
+    assert _hold(eng, "src").writes("cluster") == 12
+    assert consumer.asked == [kafkaclient.TopicPartition] * 2
+    assert consumer.closed
+
+
+def test_the_hold_hands_the_pure_key_to_a_side_read_through_it(
+        pure_double):
+    consumer = _PartsConsumer({"orders": [0]}, {("orders", 0): 3})
+    eng = _engine_on({"src": "pure", "dst": "native"})
+    eng._consumer = lambda side, **kw: consumer
+    eng.list_move_tables = lambda db: [("", "orders")]
+    assert _hold(eng, "src").writes("cluster") == 3
+    assert consumer.asked == [pure_double]

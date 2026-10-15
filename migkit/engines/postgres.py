@@ -1000,6 +1000,47 @@ class PostgresEngine(Engine):
             raise ValueError(f"{what} is not migkit's")
         self._psql("dst", db, f"alter subscription {name} enable")
 
+    def server_semantics(self, side, db):
+        """The database's collation and ctype with the collations it uses,
+        `extra_float_digits`, and how it renders a double and compares
+        case (`Engine.server_semantics`)."""
+        from .. import upgrade
+        settings = dict(upgrade._pg(
+            self, side, db,
+            "select name || chr(31) || setting from pg_settings where name"
+            " in ('lc_collate', 'lc_ctype', 'extra_float_digits')"))
+        rows = upgrade._pg(self, side, db,
+                           "select (1.2345678901234567::float8)::text"
+                           " || chr(31) || ('a' = 'A')::text")
+        row = rows[0] if rows else (None, None)
+        return {"collation": (settings.get("lc_collate"),
+                              upgrade.pg_collations(self, side, db)),
+                "case_sensitivity": (settings.get("lc_ctype"), row[1]),
+                "float_setting": settings.get("extra_float_digits"),
+                "float_rendering": row[0]}
+
+    def table_storage(self, side, db):
+        """Each table's access method (`Engine.table_storage`)."""
+        from .. import upgrade
+        return dict(upgrade._pg(
+            self, side, db,
+            "select n.nspname || '.' || c.relname || chr(31) || a.amname"
+            " from pg_class c join pg_namespace n on n.oid=c.relnamespace"
+            " join pg_am a on a.oid=c.relam where c.relkind='r'"
+            " and n.nspname not in ('pg_catalog','information_schema')"))
+
+    @classmethod
+    def storage_traits(cls, name, side, observed=None):
+        """An access method promises only what was observed of it: a name
+        such as columnar never promises a heap's."""
+        return (observed or {}).get(name)
+
+    @classmethod
+    def storage_rungs(cls):
+        """The access method altered on the copied table."""
+        from .. import tableengine
+        return tableengine.access_method_ways()
+
     def table_facts(self, side, db):
         """Rows as the planner's statistics estimate them (`row_estimate`:
         `None`, not 0, for a table whose count is not known) - and whether

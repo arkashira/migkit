@@ -244,7 +244,7 @@ def read_table(eng, kind):
     ...]} in order, `checkpoints` -> {(group, topic, p): (up, down)},
     `positions` -> {(topic, p): up}. Empty where the target has no such
     topic - the mirror never ran into it."""
-    from kafka import TopicPartition
+    TopicPartition = eng._partition("dst")
     name = _topic_name(kind)
     consumer = eng._consumer("dst")
     try:
@@ -366,8 +366,6 @@ def move(hop, db, workers, go, log):
     the source stood when it began; then each partition's position kept
     where migkit's copier keeps it. Raises where it fails; the caller holds
     the result to the source."""
-    from kafka import TopicPartition
-
     from . import runner as programs
     from .engines.kafka import KafkaEngine
     from .util import PrivateFile
@@ -392,6 +390,7 @@ def move(hop, db, workers, go, log):
     if why:
         raise SystemExit(f"{why}. Nothing has been copied")
     topics = [t for _, t in eng.list_move_tables(db)]
+    TopicPartition = eng._partition("src", "dst")
     src = eng._consumer("src", isolation_level="read_committed")
     dst = eng._consumer("dst")
     fence, before = {}, {}
@@ -483,8 +482,8 @@ def _keep_positions(eng, db, fence, before, saved):
     offset after the last message the mirror handed on, and how many it
     wrote on the target - so the copier or the tail after it goes on from
     there and counts nothing twice."""
-    from kafka import TopicPartition
     from . import checkpoint
+    TopicPartition = eng._partition("dst")
     path = eng.hop.report_dir(db) / "move.json"
     state = checkpoint.read_move(path) or {}
     dst = eng._consumer("dst")

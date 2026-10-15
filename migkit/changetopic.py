@@ -457,7 +457,7 @@ class KafkaLanes:
 
     def _open(self):
         if self._consumer is None:
-            from kafka import TopicPartition
+            TopicPartition = self.kafka._partition("src")
             self._consumer = self.kafka._consumer("src")
             tps = []
             for t in self.topics:

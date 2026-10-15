@@ -5,6 +5,10 @@ import pytest
 
 from migkit import cloudapi, decide, scenarios, tableengine
 from migkit.cloudapi import Instance
+from migkit.engines.base import Engine as BaseEngine
+from migkit.engines.mssql import MSSQLEngine
+from migkit.engines.mysql import MySQLEngine
+from migkit.engines.postgres import PostgresEngine
 
 
 UPGRADE = next(op for op in cloudapi.OPERATIONS["aws"]
@@ -253,7 +257,7 @@ def test_postgres_columnar_is_not_assumed_to_have_heap_semantics():
 
 
 def test_storage_reader_reads_both_servers_and_scope():
-    class Engine:
+    class Engine(MySQLEngine):
         CANON_ENGINE = "mysql"
         def _d(self, side, db):
             return db
@@ -262,13 +266,13 @@ def test_storage_reader_reads_both_servers_and_scope():
             return [("items", "MyISAM" if side == "src" else "InnoDB"), ("ignored", "MEMORY")]
         def in_scope(self, db, table):
             return table == "items"
-    assert tableengine.observed(Engine(), "db") == {"src": {"items": "myisam"},
+    assert tableengine.observed(Engine.__new__(Engine), "db") == {"src": {"items": "myisam"},
                                                             "dst": {"items": "innodb"}}
 
 
 def test_mysql_architecture_reader_reads_both_sides():
     calls = []
-    class Engine:
+    class Engine(MySQLEngine):
         CANON_ENGINE = "mysql"
         def _q(self, side, sql):
             calls.append(side)
@@ -276,7 +280,7 @@ def test_mysql_architecture_reader_reads_both_sides():
                 return [("collation_server", "utf8mb4_bin", "COMPILED"),
                         ("lower_case_table_names", "0", "COMPILED")]
             return [("1.2345678901234567", "false")]
-    facts = scenarios.architecture_facts(Engine(), "db", lambda side: hosts()[side])
+    facts = scenarios.architecture_facts(Engine.__new__(Engine), "db", lambda side: hosts()[side])
     assert calls == ["src", "src", "dst", "dst"]
     assert facts["src"]["collation"] == "utf8mb4_bin"
     assert scenarios.architecture_case(facts).choice.path == "architecture-logical"
@@ -293,14 +297,14 @@ def test_other_architecture_readers_keep_engine_collations(monkeypatch, engine):
         return [("1.2345678901234567", "false")]
     monkeypatch.setattr(upgrade, "_pg", pg)
     monkeypatch.setattr(upgrade, "pg_collations", lambda e, side, db: {"C": "1"})
-    class Engine:
+    class Engine(PostgresEngine if engine == "postgres" else MSSQLEngine):
         CANON_ENGINE = engine
         def _cmd(self, side, db, sql):
             calls.append(side)
             if "databasepropertyex" in sql:
                 return [("SQL_Latin1_General_CP1_CI_AS", 0)]
             return [("1.2345678901234567", "false")]
-    facts = scenarios.architecture_facts(Engine(), "db", lambda side: hosts()[side])
+    facts = scenarios.architecture_facts(Engine.__new__(Engine), "db", lambda side: hosts()[side])
     assert calls == ["src", "src", "dst", "dst"]
     expected = ("C", {"C": "1"}) if engine == "postgres" else "SQL_Latin1_General_CP1_CI_AS"
     assert facts["src"]["collation"] == expected
@@ -316,7 +320,8 @@ def test_postgres_storage_reader_does_not_call_heap_memory(monkeypatch):
         assert "pg_am" in sql
         return [("public.items", "heap" if side == "src" else "columnar")]
     monkeypatch.setattr(upgrade, "_pg", pg)
-    eng = SimpleNamespace(CANON_ENGINE="postgres", in_scope=lambda db, table: True)
+    eng = PostgresEngine.__new__(PostgresEngine)
+    eng.in_scope = lambda db, table: True
     assert tableengine.observed(eng, "db") == {
         "src": {"public.items": "heap"}, "dst": {"public.items": "columnar"}}
     assert calls == ["src", "dst"]
@@ -413,7 +418,7 @@ def test_size_ranks_only_safe_managed_paths():
 
 def test_postgres_access_method_reader_uses_the_existing_text_protocol():
     calls = []
-    class Engine:
+    class Engine(PostgresEngine):
         CANON_ENGINE = "postgres"
         def in_scope(self, db, table):
             return True
@@ -421,7 +426,7 @@ def test_postgres_access_method_reader_uses_the_existing_text_protocol():
             calls.append(side)
             assert "c.relname || chr(31) || a.amname" in sql
             return "public.items\x1f" + ("heap" if side == "src" else "columnar")
-    assert tableengine.observed(Engine(), "db") == {
+    assert tableengine.observed(Engine.__new__(Engine), "db") == {
         "src": {"public.items": "heap"}, "dst": {"public.items": "columnar"}}
     assert calls == ["src", "dst"]
 
@@ -441,3 +446,49 @@ def test_byte_order_difference_is_said_and_pages_refused():
     got = scenarios.architecture_case(facts)
     assert got.choice.path == "architecture-logical"
     assert "byte_order: 'little' to 'big'" in got.words()
+
+
+class _Unread(BaseEngine):
+    CANON_ENGINE = "redis"
+
+
+def test_an_engine_without_semantic_readers_is_not_yet_never_an_error():
+    eng = _Unread.__new__(_Unread)
+    facts = scenarios.architecture_facts(eng, "db", lambda side: hosts()[side])
+    got = scenarios.architecture_case(facts)
+    assert got.choice.path is None
+    assert "not yet" in got.choice.reason
+    assert "P0-SCENARIOS.arch" in got.choice.reason
+
+
+def test_an_engine_without_a_storage_reader_is_not_yet_never_an_error():
+    eng = _Unread.__new__(_Unread)
+    got = tableengine.observed(eng, "db")
+    assert got["src"] is None and got["dst"] is None
+    assert "P0-SCENARIOS.engine" in got["not_read"]
+
+
+@pytest.mark.parametrize("family", ["redis", "nosuchengine"])
+def test_a_storage_change_on_an_unread_engine_is_not_yet(family):
+    got = storage_case("items", "a", "b", family=family, supported=("b",),
+                       accepted=True, orphan_rows=0)
+    assert got.choice.path is None
+    assert "not yet" in got.choice.reason
+    assert "P0-SCENARIOS.engine" in got.choice.reason
+
+
+def test_the_storage_needs_read_the_facts_not_the_arguments():
+    change = tableengine.Change("items", "myisam", "innodb", "", there="")
+    rungs = decide.fenced(tableengine.ways(), *tableengine.storage_needs())
+    facts = decide.Facts({
+        "there": False, "source": "myisam", "target": "innodb",
+        "source_traits": tableengine.TRAITS["myisam"],
+        "target_traits": tableengine.TRAITS["innodb"],
+        "supported": ("innodb",), "accepted": True, "orphan_rows": 0,
+        "used_features": (), "alter_access_method": False})
+    assert decide.climb("t", rungs, facts, need=("engine changed",)).path \
+        == "definition"
+    facts["orphan_rows"] = 3
+    assert decide.climb("t", rungs, facts, need=("engine changed",)).path \
+        is None
+    assert change.table == "items"

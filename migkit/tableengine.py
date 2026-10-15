@@ -698,6 +698,23 @@ def ways():
              because="the target has the table in the old engine"))
 
 
+def access_method_ways():
+    """How a PostgreSQL table's access method is changed: altered on the
+    target after the copy, the server rebuilding the table in its own."""
+    from .decide import Need, Rung
+    return (
+        Rung("in place", "the table's access method altered after the copy",
+             frozenset({"engine changed"}),
+             needs=(Need("the server's ALTER TABLE SET ACCESS METHOD"
+                         " support", lambda f: f["alter_access_method"],
+                         "PostgreSQL access-method changes need ALTER"
+                         " TABLE SET ACCESS METHOD support"),
+                    Need("the copied table on the target",
+                         lambda f: f["there"])),
+             because="the target rebuilds the copied table using its own"
+                     " access method"),)
+
+
 def way(hop, db, change):
     """The `decide.Choice` of how `change` is made."""
     from . import decide
@@ -720,82 +737,110 @@ class Decided:
 
 def observed(eng, db):
     """Every scoped table's storage engine or access method, on both
-    sides: MySQL's engines (`_engines`), PostgreSQL's access methods."""
-    from . import upgrade
+    sides, as the engine reads them (`Engine.table_storage`); where it
+    does not, both sides None and `not_read` the reason."""
     out = {}
     for side in ("src", "dst"):
-        if eng.CANON_ENGINE == "mysql":
-            tables = _engines(eng, side, db)
-        elif eng.CANON_ENGINE == "postgres":
-            tables = dict(upgrade._pg(
-                eng, side, db,
-                "select n.nspname || '.' || c.relname || chr(31) || a.amname"
-                " from pg_class c join pg_namespace n on n.oid=c.relnamespace"
-                " join pg_am a on a.oid=c.relam where c.relkind='r'"
-                " and n.nspname not in ('pg_catalog','information_schema')"))
-        else:
-            raise ValueError(f"table storage is not read for"
-                             f" {eng.CANON_ENGINE}")
+        tables = eng.table_storage(side, db)
+        if isinstance(tables, str):
+            return {"src": None, "dst": None, "not_read": tables}
         out[side] = {t: n.lower() for t, n in tables.items()
                      if eng.in_scope(db, t)}
     return out
+
+
+def _known(traits):
+    return isinstance(traits, Traits)
+
+
+def _traits_why(f):
+    said = [t for t in (f["source_traits"], f["target_traits"])
+            if isinstance(t, str)]
+    return "; ".join(dict.fromkeys(said)) or (
+        "what " + " and ".join(n for n, t in (
+            (f["source"], f["source_traits"]),
+            (f["target"], f["target_traits"])) if not _known(t))
+        + " promises is not known")
+
+
+def _loss(f):
+    a, b = f["source_traits"], f["target_traits"]
+    return (not _known(a) or not _known(b) or b.holds != "rows"
+            or any(getattr(a, k) and not getattr(b, k)
+                   for k in ("transactions", "foreign_keys"))
+            or any(not getattr(b, k) for k in f["used_features"]))
+
+
+def _fk_safe(f):
+    b = f["target_traits"]
+    return _known(b) and (not b.foreign_keys or f["orphan_rows"] == 0)
+
+
+def storage_needs():
+    """What every way of a storage change needs first, read off the facts
+    `decided` gathers."""
+    from .decide import Need
+    return (
+        Need("known storage semantics on both servers",
+             lambda f: _known(f["source_traits"])
+             and _known(f["target_traits"]), _traits_why),
+        Need("the target's supported storage method",
+             lambda f: f["target"] in f["supported"]),
+        Need("accepted transaction, foreign-key, full-text and locking"
+             " consequences", lambda f: f["accepted"] and not _loss(f),
+             "storage consequences need acceptance; lost transactions,"
+             " foreign keys or durability are refused"),
+        Need("zero rows refused by target foreign keys", _fk_safe))
+
+
+def _engine_class(family):
+    """The engine class whose storage readers answer for `family` - a
+    canonical engine name or an engine - or None where none is known."""
+    if not isinstance(family, str):
+        return type(family)
+    from .engines import _class_for
+    return _class_for(family)
 
 
 def decided(change, *, family="mysql", supported=(), accepted=False,
             orphan_rows=None, used_features=(), observed_traits=None,
             alter_access_method=False):
     """`change` decided on what was observed of both servers, through the
-    schema step's own ways (`ways`): the target's supported methods, the
-    consequences accepted, no row a new foreign key refuses. A loss of
-    transactions, foreign keys or durability is refused, accepted or not.
-    A PostgreSQL access method is known only by the traits observed of it
-    (`observed_traits`): a name such as columnar never promises a heap's."""
+    ways the engine of `family` changes a table's storage
+    (`Engine.storage_rungs`), fenced by what every way needs
+    (`storage_needs`): the target's supported methods, the consequences
+    accepted, no row a new foreign key refuses. A loss of transactions,
+    foreign keys or durability is refused, accepted or not. What a method
+    promises is the engine's to say (`Engine.storage_traits`); a
+    PostgreSQL access method only by the traits observed of it
+    (`observed_traits`): a name such as columnar never promises a heap's.
+    An engine that does not say is not yet, with its reason."""
     from . import decide
+    from .capabilities import NOT_YET
     source, target = change.src.lower(), change.dst.lower()
-    if family == "mysql":
-        a, b = TRAITS.get(source), ONE_WAY.get(target) or TRAITS.get(target)
-    elif family == "postgres":
-        a, b = ((observed_traits or {}).get(source),
-                (observed_traits or {}).get(target))
+    cls = _engine_class(family)
+    if cls is None:
+        why = (f"{NOT_YET}: storage changes are not read for {family}"
+               " (backlog P0-SCENARIOS.engine)")
+        a = b = why
+        rungs = ways()
     else:
-        raise ValueError(f"storage changes are not read for {family}")
+        a = cls.storage_traits(source, "src", observed_traits)
+        b = cls.storage_traits(target, "dst", observed_traits)
+        rungs = cls.storage_rungs()
     detail = [f"{change.table}: {source} to {target}"]
-    if a is not None and b is not None:
+    if _known(a) and _known(b):
         detail.extend(f"{k}: {getattr(a, k)} to {getattr(b, k)}" for k in
                       ("transactions", "foreign_keys", "fulltext", "locks",
                        "holds"))
-    loss = (a is None or b is None or b.holds != "rows"
-            or any(getattr(a, k) and not getattr(b, k)
-                   for k in ("transactions", "foreign_keys"))
-            or any(not getattr(b, k) for k in used_features))
-    fk_safe = b is not None and (not b.foreign_keys or orphan_rows == 0)
-    needs = (
-        decide.Need("known storage semantics on both servers",
-                    lambda f: a is not None and b is not None),
-        decide.Need("the target's supported storage method",
-                    lambda f: target in supported),
-        decide.Need("accepted transaction, foreign-key, full-text and"
-                    " locking consequences", lambda f: accepted and not loss,
-                    "storage consequences need acceptance; lost"
-                    " transactions, foreign keys or durability are refused"),
-        decide.Need("zero rows refused by target foreign keys",
-                    lambda f: fk_safe))
-    rungs = decide.fenced(ways(), *needs)
-    if family == "postgres":
-        rungs = (decide.Rung(
-            "in place", "the table's access method altered after the copy",
-            frozenset({"engine changed"}),
-            needs=needs + (
-                decide.Need("the server's ALTER TABLE SET ACCESS METHOD"
-                            " support", lambda f: alter_access_method,
-                            "PostgreSQL access-method changes need ALTER"
-                            " TABLE SET ACCESS METHOD support"),
-                decide.Need("the copied table on the target",
-                            lambda f: f["there"])),
-            because="the target rebuilds the copied table using its own"
-                    " access method"),)
-    choice = decide.climb(f"{change.table}: storage engine change", rungs,
-                          decide.Facts({"there": bool(change.there)}),
+    facts = decide.Facts({
+        "there": bool(change.there), "source": source, "target": target,
+        "source_traits": a, "target_traits": b,
+        "supported": tuple(supported), "accepted": bool(accepted),
+        "orphan_rows": orphan_rows, "used_features": tuple(used_features),
+        "alter_access_method": bool(alter_access_method)})
+    choice = decide.climb(f"{change.table}: storage engine change",
+                          decide.fenced(rungs, *storage_needs()), facts,
                           need=("engine changed",))
     return Decided(choice, tuple(detail))
 

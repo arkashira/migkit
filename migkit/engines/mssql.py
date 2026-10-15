@@ -3043,6 +3043,20 @@ class MSSQLEngine(DbapiRows, Engine):
                       " order by ic.key_ordinal",
             (self._qualified(side, db, table),))]
 
+    def server_semantics(self, side, db):
+        """The database's collation, whether it compares case, and how it
+        renders a float (`Engine.server_semantics`)."""
+        rows = self._cmd(side, db,
+                         "select cast(databasepropertyex(db_name(),"
+                         " 'Collation') as nvarchar(128)), case when N'a' ="
+                         " N'A' then 0 else 1 end")
+        shown = self._cmd(side, db,
+                          "select convert(varchar(64), cast("
+                          "1.2345678901234567 as float), 3)")
+        row = rows[0] if rows else (None, None)
+        return {"collation": row[0], "case_sensitivity": row[1],
+                "float_rendering": shown[0][0] if shown else None}
+
     def table_facts(self, side, db):
         """{table: rows, bytes, index bytes, key} from the catalogue in one
         query: the rows the heap or clustered index holds and the pages in

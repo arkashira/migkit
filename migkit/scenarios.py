@@ -308,83 +308,104 @@ def managed_case(facts, verified=None):
 
 
 def architecture_facts(eng, db, platform_reader):
-    """Read settings on both servers and host facts through a bounded reader.
+    """The host facts of each server through a bounded reader, and how
+    each compares and renders values as its engine reads them
+    (`Engine.server_semantics`).
 
     The host reader returns architecture, OS and byte order of that server,
-    never those of the machine running migkit. Unknown facts stay unknown.
+    never those of the machine running migkit. Unknown facts stay unknown;
+    an engine that does not read its semantics leaves the reason why.
     """
-    from . import upgrade
-    engine = eng.CANON_ENGINE
     out = {}
     for side in ("src", "dst"):
         facts = dict(platform_reader(side))
-        if engine == "mysql":
-            settings = {k: v[0] for k, v in upgrade._my_vars(eng, side).items()}
-            facts.update(collation=settings.get("collation_server"),
-                         case_sensitivity=settings.get("lower_case_table_names"))
-            rows = eng._q(side, "select cast(1.2345678901234567e0 as char), 'a' = 'A'")
-            facts["case_sensitivity"] = (settings.get("lower_case_table_names"), rows[0][1])
-        elif engine == "postgres":
-            rows = upgrade._pg(eng, side, db,
-                               "select name || chr(31) || setting from pg_settings where name in"
-                               " ('lc_collate', 'lc_ctype', 'extra_float_digits')")
-            settings = dict(rows)
-            facts.update(collation=(settings.get("lc_collate"),
-                                    upgrade.pg_collations(eng, side, db)),
-                         case_sensitivity=settings.get("lc_ctype"),
-                         float_setting=settings.get("extra_float_digits"))
-            rows = upgrade._pg(eng, side, db,
-                               "select (1.2345678901234567::float8)::text || chr(31)"
-                               " || ('a' = 'A')::text")
-            facts["case_sensitivity"] = (settings.get("lc_ctype"), rows[0][1])
-        elif engine == "mssql":
-            rows = eng._cmd(side, db,
-                            "select cast(databasepropertyex(db_name(), 'Collation')"
-                            " as nvarchar(128)), case when N'a' = N'A' then 0 else 1 end")
-            facts.update(collation=rows[0][0], case_sensitivity=rows[0][1])
-            rows = eng._cmd(side, db,
-                            "select convert(varchar(64), cast(1.2345678901234567 as float), 3)")
+        read = eng.server_semantics(side, db)
+        if isinstance(read, str):
+            facts["not_read"] = read
         else:
-            raise ValueError(f"architecture settings are not read for {engine}")
-        facts["float_rendering"] = rows[0][0] if rows else None
+            facts.update(read)
         out[side] = facts
     return decide.Facts(out)
 
 
-def architecture_case(facts, schema_carries=()):
-    """Refuse unhandled semantic differences, route byte changes logically."""
-    a, b = facts.get("src", {}), facts.get("dst", {})
-    fields = ("architecture", "os", "byte_order", "collation",
-              "case_sensitivity", "float_rendering")
-    def unread(value):
-        return value is None or value == "" or (
-            isinstance(value, tuple) and (not value or unread(value[0])))
-    missing = [k for k in fields if unread(a.get(k)) or unread(b.get(k))]
-    differences = [k for k in fields if a.get(k) != b.get(k)]
-    unhandled = [k for k in differences if k in (
-        "collation", "case_sensitivity", "float_rendering", "float_setting")
-        and k not in schema_carries]
-    if a.get("float_setting") != b.get("float_setting") and "float_setting" not in schema_carries:
-        unhandled.append("float_setting")
-    needs = (
-        decide.Need("facts read from both servers", lambda f: not missing,
-                    "unread server facts: " + ", ".join(missing)),
+ARCH_FIELDS = ("architecture", "os", "byte_order", "collation",
+               "case_sensitivity", "float_rendering")
+#: what moves a value's meaning, carried only by the schema step
+SEMANTIC = ("collation", "case_sensitivity", "float_rendering",
+            "float_setting")
+
+
+def _unread(value):
+    return value is None or value == "" or (
+        isinstance(value, tuple) and (not value or _unread(value[0])))
+
+
+def _sides(f):
+    return f.get("src") or {}, f.get("dst") or {}
+
+
+def _arch_unread(f):
+    a, b = _sides(f)
+    return [k for k in ARCH_FIELDS if _unread(a.get(k)) or _unread(b.get(k))]
+
+
+def _arch_read_why(f):
+    said = sorted({side.get("not_read") for side in _sides(f)
+                   if side.get("not_read")})
+    return "; ".join(said) or "unread server facts: " + ", ".join(
+        _arch_unread(f))
+
+
+def _arch_differs(f):
+    a, b = _sides(f)
+    return [k for k in ARCH_FIELDS + ("float_setting",)
+            if a.get(k) != b.get(k)]
+
+
+def _arch_unhandled(f):
+    carried = f.get("schema_carries") or ()
+    return [k for k in _arch_differs(f) if k in SEMANTIC
+            and k not in carried]
+
+
+def _architecture_rungs():
+    shared = (
+        decide.Need("facts read from both servers",
+                    lambda f: not _arch_unread(f), _arch_read_why),
         decide.Need("semantic differences carried by the schema step",
-                    lambda f: not unhandled,
-                    "the schema step does not carry: " + ", ".join(unhandled)))
-    logical = decide.Rung("architecture-logical", "a logical move across hardware or OS",
-                          frozenset({"architecture change"}), needs=needs,
-                          because="values are decoded and encoded for the target")
-    physical = decide.Rung(
-        "architecture-pages", "a copy of the server's pages",
-        frozenset({"architecture change"}),
-        needs=needs + (decide.Need("the same architecture, OS and byte order",
-                                 lambda f: not any(k in differences for k in
-                                                   ("architecture", "os", "byte_order"))),))
-    choice = decide.climb("hardware / OS / architecture", (physical, logical), facts,
+                    lambda f: not _arch_unhandled(f),
+                    lambda f: "the schema step does not carry: "
+                              + ", ".join(_arch_unhandled(f))))
+    return decide.fenced((
+        decide.Rung("architecture-pages", "a copy of the server's pages",
+                    frozenset({"architecture change"}),
+                    needs=(decide.Need(
+                        "the same architecture, OS and byte order",
+                        lambda f: not any(k in _arch_differs(f) for k in
+                                          ("architecture", "os",
+                                           "byte_order"))),)),
+        decide.Rung("architecture-logical",
+                    "a logical move across hardware or OS",
+                    frozenset({"architecture change"}),
+                    because="values are decoded and encoded for the"
+                            " target")), *shared)
+
+
+ARCHITECTURE = _architecture_rungs()
+
+
+def architecture_case(facts, schema_carries=()):
+    """Refuse unhandled semantic differences, route byte changes logically:
+    the ladder (`ARCHITECTURE`) climbed on the facts read
+    (`architecture_facts`) and what the schema step carries."""
+    f = decide.Facts(dict(facts, schema_carries=tuple(schema_carries)))
+    choice = decide.climb("hardware / OS / architecture", ARCHITECTURE, f,
                           need=("architecture change",))
-    details = tuple(f"{k}: {a.get(k)!r} to {b.get(k)!r}" for k in fields)
-    return ScenarioDecision("hardware / OS / architecture change", choice, details)
+    a, b = _sides(f)
+    details = tuple(f"{k}: {a.get(k)!r} to {b.get(k)!r}"
+                    for k in ARCH_FIELDS)
+    return ScenarioDecision("hardware / OS / architecture change", choice,
+                            details)
 
 
 def run_managed_case(facts, verify, hop=None):
