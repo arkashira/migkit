@@ -10381,7 +10381,7 @@ Acceptance: inventory every execution entry point and work unit with its resume 
 
 ## P0-ETA-ALL: calibrated remaining-time estimates across every engine and task
 
-Owner request, 2026-10-14. Status: OPEN. Current verification estimates elapsed
+Owner request, 2026-10-14. Status: PARTLY (2026-10-16). Current verification estimates elapsed
 time against completed phase counts, which do not represent remaining work on
 large or skewed tables. Reuse the shared decision engine, durable work ledger
 and resource telemetry; do not add a separate estimator/controller.
@@ -10414,6 +10414,28 @@ Required before DONE:
 
 Dependencies: P0-RESUME-ALL, P0-DECISION-ALL, P0-VALIDATE.unattended.capacity,
 P0-VALIDATE.unattended.progress and P0-VALIDATE.mysql-query-lifecycle.
+
+Built 2026-10-16: `util.forecast` times the units left in the ledger (rows,
+bytes, or the unit time where unsized) at the recent window's median and
+10th/90th percentile rates, with retries, cooldowns, workers and the
+dependency critical path (`util.schedule`, parallel work counted once); what
+it stands on is a `decide.climb` over this run's units, an earlier run's kept
+rate (`HopCosts`, read lazily through `Facts`) or nothing measured. The `ETA`
+carries range, confidence, measured-at, evidence, scope, known work apart from
+unmeasured/undiscovered, active vs wall seconds and a next step; warmup,
+nothing measured and stalls give no time. `util.catch_up` is the separate CDC
+catch-up and says "falling behind" where ingest >= apply. `EstimateHistory`
+keeps estimates and finished units in the hop's ledger (`eta-history.jsonl`):
+resume measures from them, invalidated units are owed again, stale estimates
+and revisions out of the earlier range are said. `Engine.forecast(kind, db)`
+covers move, follow, check, verify and deep for every engine; `check` progress
+says it. Proved on fakes in `tests/test_calibrated_eta.py`.
+
+Not done: the empirical accuracy and coverage gate (predictions at several
+horizons against actual completion, error and interval-coverage by engine,
+task, scale and pressure, release thresholds) - needs representative sandbox
+runs. The move, tail and deep loops do not yet call `Engine.forecast` with
+their own units and health; only the check progress line does.
 
 
 ## P0-CONNECTION-PROGRESS: detect and reconcile client/server progress mismatch

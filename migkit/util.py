@@ -284,9 +284,28 @@ class ETA(NamedTuple):
     upper_bound: Optional[float]
     confidence: float
     formatted: str
+    #: measured, conditional, insufficient, stalled, behind or done
+    basis: str = ""
+    measured_at: Optional[str] = None
+    scope: str = ""
+    evidence: tuple = ()
+    #: the work known to be left: units, rows, bytes, unmeasured units
+    known_left: Optional[dict] = None
+    unmeasured: int = 0
+    #: seconds of work left with no concurrency, beside the wall time
+    active_seconds: Optional[float] = None
+    undiscovered: bool = False
+    stale: bool = False
+    revised: str = ""
+    next_step: str = ""
 
     def __str__(self):
         return self.formatted
+
+    def as_evidence(self):
+        """The estimate as data, for the ledger and the report."""
+        return {k: (list(v) if isinstance(v, tuple) else v)
+                for k, v in self._asdict().items()}
 
 
 class CalibratedETA:
@@ -396,8 +415,10 @@ class CalibratedETA:
                 lb = max(0.0, sec * 0.2)
                 ub = sec * 5.0
                 conf = round(min(0.4, self._sample_count * 0.15), 2)
-                return ETA(sec, lb, ub, conf, "? (warmup)")
-            return ETA(None, None, None, 0.0, "? (warmup)")
+                return ETA(sec, lb, ub, conf, "? (warmup)",
+                           basis="insufficient")
+            return ETA(None, None, None, 0.0, "? (warmup)",
+                       basis="insufficient")
 
         if rate is None or rate <= 0:
             return ETA(None, None, None, 0.0, "?")
@@ -443,6 +464,478 @@ class CalibratedETA:
 class Timer(CalibratedETA):
     def __init__(self, t0=None, alpha=0.3, warmup_samples=3):
         super().__init__(t0=t0, alpha=alpha, warmup_samples=warmup_samples)
+
+
+# ---- remaining work and when it ends (backlog P0-ETA-ALL) -------------------
+
+#: the kinds of task a forecast covers, in the words an operator reads
+TASK_KINDS = {"move": "the copy", "follow": "the change catch-up",
+              "check": "the checks", "verify": "the verification",
+              "deep": "the deep comparison"}
+#: finished units the recent window holds: older ones describe a server
+#: busier, or idler, than it is now
+WINDOW = 20
+#: finished units measured here before a time is said from them
+WARMUP_UNITS = 3
+#: an estimate older than this many seconds is stale
+STALE_SECONDS = 900.0
+#: no unit landing in this many median unit times, with units running,
+#: is a stall: smoothing would hide it, so it is said
+STALL_UNITS = 4.0
+#: the newer half of the window this many times faster or slower than the
+#: older half is a workload changing under the estimate
+SHIFT = 2.0
+
+
+class Unit(NamedTuple):
+    """One unit of work as the durable ledger holds it: a range, a table, a
+    database, a batch of changes. Its size is rows (or documents, events)
+    and/or bytes; neither known is work not yet measured."""
+    name: str
+    kind: str = "move"
+    rows: Optional[float] = None
+    bytes: Optional[float] = None
+    done_rows: float = 0.0
+    #: pending, running, done or failed (a failed one is owed again)
+    state: str = "pending"
+    #: the units it waits for
+    after: tuple = ()
+    #: seconds it took, once done
+    seconds: Optional[float] = None
+    attempts: int = 1
+    #: seconds it waits before it may run again (a backoff, a throttle)
+    cooldown: float = 0.0
+    ended: Optional[float] = None
+
+
+def _quantile(xs, q):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    k = (len(xs) - 1) * q
+    lo, hi = int(math.floor(k)), int(math.ceil(k))
+    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def _overlap(units):
+    """The most finished units that ran at one time: the concurrency the
+    run measured, where nobody says how many workers it has."""
+    edges = []
+    for u in units:
+        if u.ended is not None and u.seconds:
+            edges += [(u.ended - u.seconds, 1), (u.ended, -1)]
+    most = at = 0
+    for _, step in sorted(edges, key=lambda e: (e[0], e[1])):
+        at += step
+        most = max(most, at)
+    return most
+
+
+def schedule(times, after, workers, cooldown=None):
+    """(wall seconds, critical path seconds, active seconds) of running the
+    units `times` ({name: seconds}) on `workers` at once, each after the
+    units it waits for (`after`, {name: names}). Parallel work is counted
+    once: the wall time is the schedule's length, never the sum. The unit
+    with the longest path to the end goes first; a wait on a unit not in
+    `times` is a wait on finished work; a cycle is broken at its longest
+    unit rather than waited on for ever."""
+    import heapq
+    cooldown = cooldown or {}
+    deps = {n: {d for d in after.get(n, ()) if d in times and d != n}
+            for n in times}
+    below = {n: [m for m in times if n in deps[m]] for n in times}
+    tail = {}
+
+    def tail_of(n, path=()):
+        if n in tail:
+            return tail[n]
+        if n in path:
+            return 0.0
+        tail[n] = times[n] + cooldown.get(n, 0.0) + max(
+            (tail_of(m, path + (n,)) for m in below[n]), default=0.0)
+        return tail[n]
+
+    for n in times:
+        tail_of(n)
+    free = [0.0] * max(1, int(workers or 1))
+    ends, left = {}, set(times)
+    while left:
+        ready = [n for n in left if deps[n] <= set(ends)]
+        if not ready:
+            first = max(left, key=lambda n: (tail[n], n))
+            deps[first] = set()
+            ready = [first]
+        n = max(ready, key=lambda m: (tail[m], m))
+        start = max([heapq.heappop(free)] + [ends[d] for d in deps[n]])
+        ends[n] = start + cooldown.get(n, 0.0) + times[n]
+        heapq.heappush(free, ends[n])
+        left.discard(n)
+    return (max(ends.values(), default=0.0), max(tail.values(), default=0.0),
+            sum(times.values()))
+
+
+def _estimate_rungs():
+    """What an estimate stands on, best first, as the decision engine's
+    rungs: this run's own recent units, the rate an earlier run of the
+    hop kept, or nothing measured."""
+    from .decide import Need, Rung
+    return (
+        Rung("eta.window", "this run's recent units",
+             needs=(Need("finished units measured here",
+                         lambda f: f["measured"] >= f["warmup"],
+                         why=lambda f: f"{f['measured']} of {f['warmup']}"
+                         " units measured here so far"),),
+             because="the units this run finished last measure the servers"
+                     " and the link as they are now"),
+        Rung("eta.kept", "the rate an earlier run of this hop kept",
+             needs=(Need("an earlier run's rate",
+                         lambda f: f["kept_rate"] is not None,
+                         why="no earlier run of this hop kept a rate"),),
+             because="an earlier run on the same servers, until this one"
+                     " has measured its own"),
+        Rung("eta.none", "nothing measured yet",
+             because="no rate is measured, so no time is said"),
+    )
+
+
+def forecast(units, kind="move", scope="", workers=None, health=(),
+             now=None, kept_rate=None, undiscovered=False, history=None,
+             warmup=WARMUP_UNITS):
+    """When the remaining work of one task ends, from the work itself.
+
+    `units` are the ledger's units of the task, finished and not; what is
+    left is their rows and bytes not yet done, each unit timed at the
+    rates finished units measured in the recent window (`WINDOW`: its
+    median, its 10th and 90th percentiles for the range), widened by the
+    retries those units needed, with cooldowns waited out, and scheduled
+    on the workers under the units' dependencies (`schedule`: the critical
+    path and the concurrency, parallel work counted once). `health` is
+    what each side reports (`throttle.Health`); `kept_rate` rows a second
+    an earlier run kept, or a reader of it, asked only where this run has
+    not measured enough (`decide.Facts`); `undiscovered` that more units
+    may exist than are listed. `history` (`EstimateHistory`) keeps the
+    estimate and is read for the finished units, so a resumed run measures
+    from where it was, and says a revision or a stale earlier estimate.
+
+    An `ETA` with its range, confidence, when it was measured, evidence,
+    scope, the known work left apart from the unmeasured, and what to do
+    next - and no time where the evidence holds none: warmup, nothing
+    measured, a stall."""
+    from .decide import Facts, climb
+    now = time.time() if now is None else float(now)
+    scope = scope or TASK_KINDS.get(kind, kind)
+    units, earlier = list(units), []
+    if history is not None:
+        # a unit kept as finished and not listed is done work that stands;
+        # one listed again as owed is that unit's earlier time, evidence of
+        # the rate but not work done
+        listed = {u.name: u for u in units}
+        for u in history.finished(scope):
+            if u.name not in listed:
+                units.append(u)
+            elif listed[u.name].state != "done":
+                earlier.append(u)
+    this_run = [u for u in units if u.state == "done"
+                and u.seconds and u.seconds > 0]
+    finished = sorted(earlier + this_run, key=lambda u: (u.ended or 0.0))
+    left = [u for u in units if u.state != "done"]
+    window = finished[-WINDOW:]
+    row_rates = [u.rows / u.seconds for u in window if u.rows]
+    byte_rates = [u.bytes / u.seconds for u in window if u.bytes]
+    durations = [u.seconds for u in window]
+    evidence = []
+    facts = Facts({"measured": len(window), "warmup": int(warmup)},
+                  kept_rate=kept_rate if callable(kept_rate)
+                  else (lambda: kept_rate))
+    choice = climb(f"when {scope} ends", _estimate_rungs(), facts=facts)
+    rows_left = sum(max(0.0, u.rows - u.done_rows) for u in left
+                    if u.rows is not None)
+    bytes_left = sum(u.bytes for u in left
+                     if u.bytes is not None and u.rows is None)
+    unsized = [u for u in left if u.rows is None and u.bytes is None]
+    known = {"units": len(left), "rows": rows_left, "bytes": bytes_left,
+             "unmeasured_units": len(unsized)}
+    at = stamp(now)
+
+    def made(seconds, lo, hi, conf, words, how, step, active=None):
+        got = ETA(seconds, lo, hi, conf, words, basis=how, measured_at=at,
+                  scope=scope, evidence=tuple(evidence), known_left=known,
+                  unmeasured=len(unsized), active_seconds=active,
+                  undiscovered=bool(undiscovered), next_step=step)
+        return history.keep(got, now) if history is not None else got
+
+    if not left and not undiscovered:
+        evidence.append(f"all {len(units)} units are done")
+        return made(0.0, 0.0, 0.0, 1.0, human_secs(0), "done",
+                    "nothing is left to wait for")
+    evidence.append(f"stands on {choice.said}: {choice.reason}")
+    if choice.path == "eta.none":
+        evidence.append(f"{len(left)} units left, {len(unsized)} of them"
+                        " not yet measured")
+        return made(None, None, None, 0.0,
+                    f"not enough evidence yet: {len(window)} of {warmup}"
+                    " units measured", "insufficient",
+                    f"wait for {int(warmup) - len(window)} more units to"
+                    " finish; the time is said from them")
+    if choice.path == "eta.kept":
+        row_rates = [float(facts["kept_rate"])]
+        evidence.append(f"an earlier run kept {row_rates[0]:,.0f} rows a"
+                        " second; this run has not measured enough of its"
+                        " own")
+
+    def took(u, q):
+        """Seconds unit `u` takes at the rates' `q` quantile."""
+        share = 1.0 - (u.done_rows / u.rows if u.rows else 0.0)
+        if u.rows is not None and row_rates:
+            return max(0.0, u.rows - u.done_rows) / _quantile(row_rates, q)
+        if u.bytes is not None and byte_rates:
+            return u.bytes * share / _quantile(byte_rates, q)
+        if durations:
+            return _quantile(durations, 1.0 - q) * share
+        return 0.0
+
+    tries = sum(max(0, u.attempts - 1) for u in window)
+    retry = tries / max(1, len(window))
+    if tries:
+        evidence.append(f"{tries} extra attempts over {len(window)} finished"
+                        f" units: each unit left counts {1 + retry:.2f} times"
+                        " its own work")
+    failed = sum(1 for u in left if u.state == "failed")
+    if failed:
+        evidence.append(f"{failed} failed units are owed again")
+    cool = {u.name: u.cooldown for u in left if u.cooldown}
+    if cool:
+        evidence.append(f"{len(cool)} units wait out a cooldown"
+                        f" ({human_secs(max(cool.values()))} the longest)")
+    running = sum(1 for u in left if u.state == "running")
+    workers = int(workers or max(running, _overlap(window), 1))
+    after = {u.name: tuple(u.after) for u in left}
+    timed = {}
+    for which, q, factor in (("low", 0.9, 1.0), ("mid", 0.5, 1.0 + retry),
+                             ("high", 0.1, 1.0 + 2 * retry)):
+        timed[which] = schedule({u.name: took(u, q) * factor for u in left},
+                                after, workers, cool)
+    wall, critical, active = timed["mid"]
+    # a few alike units are still a few: the range is never narrower than
+    # what that many samples can say
+    few = 1.0 / math.sqrt(max(1, len(window)))
+    lo = min(timed["low"][0], wall * (1.0 - few / 2))
+    hi = max(timed["high"][0], wall * (1.0 + few))
+    evidence.append(f"{len(left)} units left, {workers} at a time:"
+                    f" {human_secs(active)} of work, the longest chain"
+                    f" {human_secs(critical)}")
+    conf = min(1.0, len(window) / 6.0) if choice.path == "eta.window" \
+        else 0.25
+    if len(row_rates) >= 2:
+        mid = _quantile(row_rates, 0.5)
+        spread = _quantile(row_rates, 0.9) - _quantile(row_rates, 0.1)
+        conf *= max(0.2, 1.0 - min(0.8, spread / mid / 2.0))
+    if choice.path == "eta.kept":
+        lo, hi = wall * 0.5, wall * 3.0
+    cond, step = "", "nothing to do: it goes on by itself"
+    if unsized and (row_rates or byte_rates):
+        conf *= max(0.2, 1.0 - len(unsized) / len(left))
+        cond = (f"if the {len(unsized)} units not yet measured are like"
+                " the ones finished, ")
+        step = "nothing to do; the range narrows as those units are sized"
+    if undiscovered:
+        conf *= 0.5
+        hi = None
+        cond = cond or "for the units found so far, "
+        evidence.append("more units may be found than are listed: the time"
+                        " covers the listed ones only")
+        step = "nothing to do; the time grows as more units are found"
+    half = len(window) // 2
+    if half >= 2:
+        old = _quantile(durations[:half], 0.5)
+        new = _quantile(durations[half:], 0.5)
+        if old and new and max(old / new, new / old) >= SHIFT:
+            conf *= 0.6
+            evidence.append(f"units now take {human_secs(new)} against"
+                            f" {human_secs(old)} before: the workload is"
+                            " changing")
+            lo = min(lo, wall * min(1.0, new / old))
+            if hi is not None:
+                hi = max(hi, wall * max(1.0, old / new))
+    for h in health or ():
+        why = h.stressed() if h is not None else ""
+        if why:
+            conf *= 0.7
+            if hi is not None:
+                hi *= 1.5
+            evidence.append(f"a side is under pressure ({why}): the work"
+                            " is held back and may take longer")
+            step = ("nothing to do; the work slows itself while a side is"
+                    " under pressure")
+    last = max((u.ended for u in this_run if u.ended), default=None)
+    usual = _quantile(durations, 0.5)
+    if running and last is not None and usual and \
+            now - last > STALL_UNITS * usual:
+        evidence.append(f"no unit has finished for {human_secs(now - last)},"
+                        f" {(now - last) / usual:.0f} times the usual unit")
+        return made(None, wall, None, round(min(conf, 0.1), 2),
+                    f"stalled: no unit finished for {human_secs(now - last)}",
+                    "stalled", "look at what the running units wait on: a"
+                    " lock, a connection or a side out of room", active)
+    conf = round(max(0.05, min(1.0, conf)), 2)
+    rng = (f"{human_secs(lo)} to {human_secs(hi)}" if hi is not None
+           else f"at least {human_secs(lo)}")
+    how = "conditional" if cond or choice.path == "eta.kept" else "measured"
+    return made(wall, lo, hi, conf, f"{cond}{human_secs(wall)} ({rng},"
+                f" {int(conf * 100)}% confidence)", how, step, active)
+
+
+def catch_up(backlog, ingest, applied, scope="", now=None, spread=(),
+             history=None):
+    """When a change tail catches up: `backlog` changes waiting, arriving
+    at `ingest` a second and applied at `applied` a second, both measured
+    over one recent window (`spread`: that window's apply rates, for the
+    range). Kept apart from the bulk work's estimate, and never a time
+    where the apply does not outrun what arrives: the gap then grows or
+    holds, and that is what is said."""
+    now = time.time() if now is None else float(now)
+    scope = scope or TASK_KINDS["follow"]
+    ev = []
+
+    def made(seconds, lo, hi, conf, words, how, step):
+        got = ETA(seconds, lo, hi, conf, words, basis=how,
+                  measured_at=stamp(now), scope=scope, evidence=tuple(ev),
+                  known_left={"changes": backlog}, next_step=step)
+        return history.keep(got, now) if history is not None else got
+
+    missing = [n for n, v in (("the changes waiting", backlog),
+                              ("the rate they arrive at", ingest),
+                              ("the rate they are applied at", applied))
+               if v is None]
+    if missing:
+        ev.append("not measured: " + ", ".join(missing))
+        return made(None, None, None, 0.0, "not enough evidence yet: "
+                    + ", ".join(missing) + " not measured", "insufficient",
+                    "let the tail run a little longer; the rates are"
+                    " measured as it goes")
+    ev.append(f"{backlog:,.0f} changes waiting, {ingest:,.1f} a second"
+              f" arrive, {applied:,.1f} a second applied")
+    if backlog <= 0:
+        return made(0.0, 0.0, 0.0, 1.0, "caught up", "done",
+                    "nothing to do: the tail is caught up")
+    gain = applied - ingest
+    if gain <= 0:
+        return made(None, None, None, 0.0,
+                    "falling behind: changes arrive as fast as or faster"
+                    " than they are applied, so no catch-up time can be"
+                    " given", "behind",
+                    "give the apply more room (more workers, larger"
+                    " batches) or wait for writes on the source to ease")
+    rates = [r for r in spread if r and r > 0]
+    worst, best = (min(rates), max(rates)) if len(rates) >= 2 \
+        else (applied, applied)
+    sec = backlog / gain
+    lo = backlog / max(gain, best - ingest)
+    hi = backlog / (worst - ingest) if worst > ingest else None
+    if hi is None:
+        ev.append("at the slowest apply rate measured the gap would grow")
+    conf = round(min(1.0, len(rates) / 6.0) if rates else 0.3, 2)
+    rng = (f"{human_secs(lo)} to {human_secs(hi)}" if hi is not None
+           else f"at least {human_secs(lo)}, unbounded at the slowest rate")
+    return made(sec, lo, hi, conf, f"{human_secs(sec)} ({rng},"
+                f" {int(conf * 100)}% confidence)", "measured",
+                "nothing to do: the tail is catching up")
+
+
+class EstimateHistory:
+    """The estimates said of a run and the units it finished, kept in the
+    run's ledger as journal lines (`durable.append_line`): a resumed run,
+    or one after a reboot, measures from the units already finished
+    rather than from nothing, says an earlier estimate that has gone
+    stale, and explains a revision that leaves the earlier range."""
+
+    def __init__(self, path, stale_after=STALE_SECONDS):
+        self.path = Path(path)
+        self.stale_after = float(stale_after)
+
+    def _lines(self):
+        from . import durable
+        return [e for e in durable.read_lines(self.path, "cache")
+                if isinstance(e, dict)]
+
+    def done(self, scope, unit, now=None):
+        """Keep a finished unit's measurement for `scope`."""
+        import json
+        from . import durable
+        ended = unit.ended if unit.ended is not None else \
+            (time.time() if now is None else float(now))
+        row = unit._replace(state="done", ended=ended)._asdict()
+        row["after"] = list(unit.after)
+        durable.append_line(self.path, json.dumps({"scope": scope,
+                                                   "unit": row}))
+
+    def finished(self, scope):
+        """The finished units kept for `scope`, each by its latest line."""
+        got = {}
+        for e in self._lines():
+            u = e.get("unit")
+            if e.get("scope") != scope or not isinstance(u, dict):
+                continue
+            u = dict(u, after=tuple(u.get("after") or ()))
+            try:
+                got[u["name"]] = Unit(**u)
+            except (TypeError, KeyError):
+                continue
+        return [u for u in got.values() if u.state == "done"]
+
+    def forget(self, scope, names):
+        """Units invalidated since they finished (a changed table, a new
+        partition): no longer counted done, so the ledger owes them again;
+        the rest of the finished work stands."""
+        import json
+        from . import durable
+        for n in names:
+            durable.append_line(self.path, json.dumps(
+                {"scope": scope, "unit": Unit(n, state="pending")._asdict()
+                 | {"after": []}}))
+
+    def last(self, scope):
+        """The last estimate kept for `scope` (a dict), or None."""
+        got = None
+        for e in self._lines():
+            if e.get("scope") == scope and isinstance(e.get("estimate"),
+                                                      dict):
+                got = e["estimate"]
+        return got
+
+    def keep(self, eta, now):
+        """`eta` held against the earlier estimate - stale where it is old,
+        a revision said where its end leaves the earlier range - and kept
+        as the latest."""
+        import json
+        from . import durable
+        prev = self.last(eta.scope)
+        stale, revised, ev = False, "", list(eta.evidence)
+        if prev is not None:
+            then = float(prev.get("at") or 0.0)
+            if now - then > self.stale_after:
+                stale = True
+                ev.append(f"the earlier estimate was {human_secs(now - then)}"
+                          " old and is measured again")
+            plo, phi = prev.get("lower_bound"), prev.get("upper_bound")
+            if eta.seconds is not None and plo is not None:
+                end = now + eta.seconds
+                if end < then + plo or (phi is not None and end > then + phi):
+                    was = then + (prev.get("seconds") or plo)
+                    revised = (f"revised {'later' if end > was else 'sooner'}"
+                               f" by {human_secs(abs(end - was))}, out of the"
+                               " earlier range: " + (eta.evidence[-1]
+                                                     if eta.evidence else
+                                                     "measured since"))
+            elif eta.seconds is None and prev.get("seconds") is not None:
+                revised = f"no time any more: {eta.formatted}"
+            if revised:
+                ev.append(revised)
+        got = eta._replace(stale=stale, revised=revised, evidence=tuple(ev))
+        durable.append_line(self.path, json.dumps(
+            {"scope": eta.scope, "estimate": dict(got.as_evidence(), at=now)},
+            default=str))
+        return got
 
 
 class PrivateFile:

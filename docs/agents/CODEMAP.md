@@ -179,7 +179,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/upgrade.py` - A major-version upgrade as a goal (backlog R23, 7).
 - `migkit/users.py` - Login/user sync source -> target, keeping the same password.
 - `migkit/userways.py` - How an account's password reaches the target, chosen by what the source shows and what the target takes (backlog P0-DECISION-ALL.coverage, t
-- `migkit/util.py` - (no docstring) Classes: CommandFailed, ETA, CalibratedETA, Timer, PrivateFile, Probes.
+- `migkit/util.py` - (no docstring) Classes: CommandFailed, ETA, CalibratedETA, Timer, Unit, EstimateHistory.
 - `migkit/variants.py` - Which brand is actually answering, and what that brand cannot do. Classes: Brand.
 - `migkit/vectors.py` - A vector - an embedding - as the numbers it holds, each exactly.
 - `migkit/verdict.py` - The one result shape, whatever engine produced it. Classes: Verdict, Refused, Usage, Decision, Held.

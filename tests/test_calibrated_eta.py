@@ -179,3 +179,240 @@ def test_timer_edge_cases():
     assert res_neg_cost.seconds == 0.0
     assert res_neg_cost.formatted == "0s"
 
+
+# ---- the work left (backlog P0-ETA-ALL) -------------------------------------
+# When a task ends is told from the work left in the ledger, not elapsed
+# time against phases done: rows and bytes left at the recent units' rate,
+# the workers and the dependency chain counted once, retries and cooldowns
+# in; a range, a confidence, when, evidence and scope beside the time; no
+# time where the evidence holds none; a tail's catch-up kept apart and never
+# promised while changes arrive faster than they are applied; the estimate
+# and the finished units kept so a resumed run goes on from them.
+
+from migkit import util  # noqa: E402
+from migkit.engines.base import Engine  # noqa: E402
+from migkit.throttle import Health  # noqa: E402
+from migkit.util import (EstimateHistory, Unit, catch_up,  # noqa: E402
+                         forecast, schedule)
+
+
+def _finished(n, rows=1000, seconds=10.0, start=100.0, attempts=1):
+    return [Unit(f"t{i}", rows=rows, seconds=seconds, state="done",
+                 ended=start + seconds * (i + 1), attempts=attempts)
+            for i in range(n)]
+
+
+def test_parallel_work_is_counted_once_and_the_chain_bounds_it():
+    assert schedule({k: 10.0 for k in "abcd"}, {}, 2) == (20.0, 10.0, 40.0)
+    assert schedule({"a": 10.0, "b": 10.0, "c": 10.0},
+                    {"b": ("a",), "c": ("b",)}, 8) == (30.0, 30.0, 30.0)
+    assert schedule({"b": 5.0}, {"b": ("gone",)}, 1)[0] == 5.0
+
+
+def test_a_cycle_does_not_hang_the_schedule():
+    assert schedule({"a": 1.0, "b": 2.0}, {"a": ("b",), "b": ("a",)},
+                    1)[0] == 3.0
+
+
+def test_the_time_comes_from_rows_left_at_the_measured_rate():
+    units = _finished(5) + [Unit(f"p{i}", rows=1000) for i in range(4)]
+    got = forecast(units, kind="move", workers=2, now=200.0)
+    assert got.basis == "measured"
+    # 4000 rows at 100 rows a second a worker, two workers
+    assert got.seconds == 20.0
+    assert got.lower_bound < got.seconds < got.upper_bound
+    assert got.active_seconds == 40.0
+    assert got.known_left == {"units": 4, "rows": 4000.0, "bytes": 0,
+                              "unmeasured_units": 0}
+    assert got.measured_at.endswith("+00:00")
+    assert got.scope == "the copy"
+    assert any("2 at a time" in e for e in got.evidence)
+    assert 0 < got.confidence <= 1
+
+
+def test_a_unit_half_done_owes_only_its_rows_left():
+    units = _finished(5) + [Unit("p", rows=1000, done_rows=500,
+                                 state="running")]
+    assert forecast(units, workers=1, now=160.0).seconds == 5.0
+
+
+def test_retries_and_cooldowns_make_it_longer():
+    left = [Unit(f"p{i}", rows=1000) for i in range(2)]
+    plain = forecast(_finished(6) + left, workers=1, now=170.0)
+    retried = forecast(_finished(6, attempts=2) + left, workers=1, now=170.0)
+    cooled = forecast(_finished(6) + [left[0]._replace(cooldown=30.0),
+                                      left[1]], workers=1, now=170.0)
+    assert retried.seconds == plain.seconds * 2
+    assert any("extra attempts" in e for e in retried.evidence)
+    assert cooled.seconds == plain.seconds + 30.0
+    assert any("cooldown" in e for e in cooled.evidence)
+
+
+def test_warmup_says_insufficient_evidence_not_a_time():
+    got = forecast(_finished(1) + [Unit("p", rows=1000)], now=120.0)
+    assert got.basis == "insufficient"
+    assert got.seconds is None and got.upper_bound is None
+    assert "not enough evidence" in got.formatted
+    assert "2 more units" in got.next_step
+    assert forecast([Unit("p")], now=1.0).seconds is None
+
+
+def test_an_earlier_runs_rate_is_read_only_where_needed():
+    asked = []
+
+    def kept():
+        asked.append(1)
+        return 50.0
+
+    measured = forecast(_finished(5) + [Unit("p", rows=1000)], now=200.0,
+                        kept_rate=kept)
+    assert asked == [] and measured.basis == "measured"
+    got = forecast([Unit("p", rows=1000)], now=1.0, kept_rate=kept)
+    assert asked == [1]
+    assert got.basis == "conditional" and got.seconds == 20.0
+    assert got.lower_bound < got.seconds < got.upper_bound
+    assert got.confidence <= 0.25
+
+
+def test_unmeasured_work_is_told_apart_from_known_work():
+    units = _finished(5) + [Unit("p", rows=1000), Unit("x")]
+    got = forecast(units, workers=1, now=200.0)
+    assert got.basis == "conditional"
+    assert got.unmeasured == 1 and got.known_left["unmeasured_units"] == 1
+    assert got.formatted.startswith("if the 1 units not yet measured")
+    assert got.seconds == 20.0
+
+
+def test_undiscovered_work_has_no_upper_bound():
+    got = forecast(_finished(5) + [Unit("p", rows=1000)], workers=1,
+                   now=200.0, undiscovered=True)
+    assert got.upper_bound is None and got.undiscovered
+    assert "at least" in got.formatted
+
+
+def test_a_stall_is_said_not_smoothed_over():
+    units = _finished(5) + [Unit("r", rows=1000, state="running")]
+    got = forecast(units, now=200.0)
+    assert got.basis == "stalled" and got.seconds is None
+    assert "wait on" in got.next_step
+    assert forecast(units, now=160.0).basis == "measured"
+
+
+def test_a_changing_workload_lowers_the_confidence():
+    fast = [Unit(f"f{i}", rows=1000, seconds=2.0, state="done",
+                 ended=10.0 + i) for i in range(4)]
+    slow = [Unit(f"s{i}", rows=1000, seconds=20.0, state="done",
+                 ended=100.0 + 20 * i) for i in range(4)]
+    left = [Unit("p", rows=1000)]
+    steady = forecast(_finished(8) + left, workers=1, now=190.0)
+    got = forecast(fast + slow + left, workers=1, now=190.0)
+    assert any("workload is changing" in e for e in got.evidence)
+    assert got.confidence < steady.confidence
+
+
+def test_pressure_on_a_side_widens_the_range_and_says_why():
+    units = _finished(6) + [Unit("p", rows=1000)]
+    calm = forecast(units, workers=1, now=170.0, health=[Health(0.1)])
+    busy = forecast(units, workers=1, now=170.0, health=[Health(0.99)])
+    assert busy.upper_bound > calm.upper_bound
+    assert busy.confidence < calm.confidence
+    assert any("under pressure" in e for e in busy.evidence)
+
+
+def test_catch_up_is_never_promised_while_ingest_outruns_apply():
+    behind = catch_up(1000, ingest=50.0, applied=40.0, now=1.0)
+    assert behind.basis == "behind" and behind.seconds is None
+    assert "apply more room" in behind.next_step
+    assert catch_up(1000, ingest=50.0, applied=50.0, now=1.0).seconds is None
+    got = catch_up(1000, ingest=50.0, applied=60.0, now=1.0,
+                   spread=(55.0, 58.0, 62.0, 65.0))
+    assert got.seconds == 100.0
+    assert got.lower_bound < 100.0 < got.upper_bound
+    assert got.scope == "the change catch-up"
+    assert catch_up(1000, 50.0, 60.0, now=1.0,
+                    spread=(45.0, 70.0)).upper_bound is None
+    assert catch_up(None, 1.0, 2.0, now=1.0).basis == "insufficient"
+
+
+def test_a_resumed_run_goes_on_from_the_units_kept(tmp_path):
+    history = EstimateHistory(tmp_path / "eta.jsonl")
+    for u in _finished(5):
+        history.done("s", u)
+    left = [Unit(f"p{i}", rows=1000) for i in range(4)]
+    got = forecast(left, scope="s", history=history, workers=2, now=200.0)
+    assert got.basis == "measured" and got.seconds == 20.0
+    assert history.last("s")["seconds"] == 20.0
+    history.forget("s", ["t0"])
+    assert sorted(u.name for u in history.finished("s")) == \
+        ["t1", "t2", "t3", "t4"]
+
+
+def test_a_revision_and_a_stale_estimate_are_said(tmp_path):
+    history = EstimateHistory(tmp_path / "eta.jsonl", stale_after=60.0)
+    for u in _finished(5):
+        history.done("s", u)
+    left = [Unit(f"p{i}", rows=1000) for i in range(4)]
+    first = forecast(left, scope="s", history=history, workers=4, now=200.0)
+    assert first.revised == "" and not first.stale
+    later = forecast(left, scope="s", history=history, workers=1, now=201.0)
+    assert later.revised.startswith("revised later by")
+    old = forecast(left, scope="s", history=history, workers=1, now=900.0)
+    assert old.stale
+    assert any("measured again" in e for e in old.evidence)
+
+
+def test_an_earlier_time_of_a_unit_owed_again_is_rate_not_progress(tmp_path):
+    history = EstimateHistory(tmp_path / "eta.jsonl")
+    for u in _finished(4):
+        history.done("s", u)
+    got = forecast([Unit(f"t{i}", rows=1000) for i in range(4)], scope="s",
+                   history=history, workers=1, now=200.0)
+    assert got.known_left["units"] == 4
+    assert got.seconds == 40.0
+
+
+class _Hop:
+    name = "fake"
+
+
+class _Listed(Engine):
+    def __init__(self, tables=None):
+        self.hop, self.tables = _Hop(), tables
+
+    def neutral_tables(self, side, db):
+        if self.tables is None:
+            raise RuntimeError("no listing")
+        return self.tables
+
+    def in_scope(self, db, table):
+        return table != "c"
+
+    def _rows_of(self, side, db, table):
+        return {"a": 1000}.get(table)
+
+
+def test_every_task_kind_goes_through_the_engine_contract(monkeypatch):
+    import migkit.planner as planner
+    kept = {}
+    monkeypatch.setattr(planner, "measured_rate",
+                        lambda hop, path: kept.get(path))
+    monkeypatch.setattr(planner, "record_rate",
+                        lambda hop, path, rows, seconds, **k:
+                        kept.__setitem__(path, rows / seconds))
+    eng = _Listed(["a", "b", "c"])
+    for kind in ("move", "check", "verify", "deep"):
+        got = eng.forecast(kind, "db1", now=1.0)
+        assert got.scope == f"{util.TASK_KINDS[kind]} of db1"
+        assert got.known_left["units"] == 2
+        assert got.known_left["unmeasured_units"] == 1
+        assert got.basis == "insufficient"
+    assert eng.forecast("move", "db1", units=_finished(3),
+                        now=200.0).basis == "done"
+    assert kept["eta.move"] == 100.0
+    again = eng.forecast("move", "db1", units=[Unit("a", rows=500)], now=1.0)
+    assert again.basis == "conditional" and again.seconds == 5.0
+    assert eng.forecast("follow", "db1", backlog=10, ingest=5.0, applied=1.0,
+                        now=1.0).basis == "behind"
+    lost = _Listed(None).forecast("check", "db1", now=1.0)
+    assert lost.undiscovered and lost.seconds is None
+

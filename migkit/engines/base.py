@@ -5429,6 +5429,51 @@ class Engine:
         import contextlib
         return contextlib.nullcontext()
 
+    def forecast(self, kind, db, units=None, backlog=None, ingest=None,
+                 applied=None, spread=(), history=None, **kw):
+        """When one task over `db` ends (`util.forecast`), the same for
+        every engine: `kind` is move, follow, check, verify or deep. A
+        follow is its catch-up (`util.catch_up`: the `backlog` of changes,
+        the `ingest` and `applied` rates). The rest are their `units`
+        from the ledger; where none are given, one a table in scope, sized
+        by the source catalogue's row estimate (`_rows_of`), a table with
+        none left unmeasured, and a listing that cannot be read leaves the
+        work undiscovered. The rate an earlier run of this hop kept is
+        read only where this run has not measured enough
+        (`decide.HopCosts`); a task found done keeps its own for the next
+        run."""
+        from .. import util
+        from ..decide import HopCosts
+        scope = f"{util.TASK_KINDS.get(kind, kind)} of {db}"
+        if kind == "follow":
+            return util.catch_up(backlog, ingest, applied, scope=scope,
+                                 spread=spread, history=history,
+                                 now=kw.get("now"))
+        undiscovered = bool(kw.pop("undiscovered", False))
+        if units is None:
+            try:
+                tables = [t for t in self.neutral_tables("src", db)
+                          if self.in_scope(db, t)]
+            except Exception:  # noqa: BLE001 - the work is not listed yet
+                tables, undiscovered = [], True
+            units = [util.Unit(str(t), kind, rows=self._rows_of("src", db, t))
+                     for t in tables]
+        kept = HopCosts(self.hop, "eta.")
+
+        def kept_rate():
+            per_row = kept.get(kind)
+            return 1.0 / per_row if per_row else None
+
+        got = util.forecast(units, kind=kind, scope=scope, history=history,
+                            kept_rate=kept_rate, undiscovered=undiscovered,
+                            **kw)
+        ran = [u for u in units if u.state == "done" and u.rows
+               and u.seconds]
+        if got.basis == "done" and ran:
+            kept.saw(kind, sum(u.rows for u in ran),
+                     sum(u.seconds for u in ran))
+        return got
+
     def _rows_of(self, side, db, table):
         """The catalogue's row estimate for one table, or None where it
         cannot be read."""

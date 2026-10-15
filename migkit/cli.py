@@ -1739,6 +1739,7 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
     timings = {}
     total_jobs = sum(len(v) for v in local_map.values())
     done_jobs = 0
+    finished_at = {}
 
     def stream(d):
         def s(line):
@@ -1900,11 +1901,16 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
                     show(r)
             if timer is not None:
                 active = sum(1 for f in futs if f.running())
-                eta_res = timer.eta_detailed(done_jobs, total_jobs)
-                conf = f" ({int(eta_res.confidence * 100)}% conf)" if eta_res.confidence > 0 and done_jobs < total_jobs else ""
+                finished_at[d] = time.time()
+                eta_res = _checks_eta(hop, eng, dbs, local_map, timings,
+                                      finished_at, futs, workers)
                 chat(f"  progress {done_jobs}/{total_jobs} ({active} active),"
                      f" elapsed {human_secs(timer.elapsed())},"
-                     f" eta {timer.eta(done_jobs, total_jobs)}{conf}")
+                     f" eta {eta_res.formatted}"
+                     + (f"; {eta_res.revised}" if eta_res.revised else "")
+                     + (f"; {eta_res.next_step}"
+                        if eta_res.basis in ("insufficient", "stalled")
+                        else ""))
     except KeyboardInterrupt:
         running = sum(1 for f in futs if f.running())
         if running:
@@ -1916,6 +1922,33 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
     return results, timings
+
+
+def _checks_eta(hop, eng, dbs, local_map, timings, finished_at, futs,
+                workers):
+    """When the checks of `dbs` end (`Engine.forecast`): a database is a
+    unit, timed by what its checks took (`timings`), kept in the hop's
+    ledger (`util.EstimateHistory`) so a resumed run measures from the
+    databases already checked."""
+    from .util import EstimateHistory, Unit
+    scope = ", ".join(dbs) if len(dbs) <= 3 else f"{len(dbs)} databases"
+    history = EstimateHistory(hop.report_dir() / "eta-history.jsonl")
+    running = {futs[f] for f in futs if f.running()}
+    kept = {u.name: u.ended for u in history.finished(
+        f"the checks of {scope}")}
+    units = []
+    for d in dbs:
+        if d in finished_at:
+            u = Unit(d, "check", seconds=sum(timings.get(d, {}).values())
+                     or None, state="done", ended=finished_at[d])
+            if kept.get(d) != finished_at[d]:
+                history.done(f"the checks of {scope}", u)
+        else:
+            u = Unit(d, "check", state="running" if d in running
+                     else "pending")
+        units.append(u)
+    return eng.forecast("check", scope, units=units, history=history,
+                        workers=max(1, int(workers or 1)))
 
 
 def _collided(hop, eng, dbs):
