@@ -131,7 +131,8 @@ def test_every_field_is_a_code_a_bucket_a_bound_number_or_a_flag():
     for cls in telemetry.KINDS.values():
         for f in dataclasses.fields(cls):
             assert f.metadata["type"] in ("one of", "some of", "whole",
-                                          "number", "flag"), f.name
+                                          "number", "flag", "opaque"), \
+                f.name
             if f.metadata["type"] in ("one of", "some of"):
                 values = f.metadata["values"]()
                 assert values and all(type(v) is str for v in values)
@@ -418,3 +419,129 @@ def test_off_in_the_middle_of_a_run_stops_queueing_and_disposes(spool,
     assert not list(spool.glob("events-*.jsonl"))
     assert telemetry.progressed("move", 1, 10, 1.0, 1.0) is False
     assert telemetry.flush(5) and not list(spool.glob("events-*.jsonl"))
+
+
+def test_each_unit_is_kept_by_an_opaque_id_with_its_own_outcome(spool):
+    from migkit import verdict
+    records = [{"scope": "canary_orders.public.canary_orders",
+                "status": "ok"},
+               {"scope": "canary_orders.public.canary_ssn_col",
+                "status": "diff", "detail": "123-45-6789",
+                "guarantees": ["correct:proved", "SELECT canary_ssn_col"]},
+               {"scope": "canary_orders", "status": "ok"},
+               {"scope": "canary_orders.t", "status": "ok",
+                "range": "123-45-6789..hunter2-canary-pw"}]
+    verdict.summarize(None, records)
+    blob = _kept(spool)
+    _no_canary(blob)
+    got = [e for e in _events(spool) if e["kind"] == "unit"]
+    assert len(got) == 4
+    assert got[0]["outcome"] == "diff" and got[0]["scope"] == "table"
+    assert {e["scope"] for e in got} == {"table", "database", "range"}
+    ids = [e["unit"] for e in got]
+    assert len(set(ids)) == 4
+    assert all(len(i) == 12 and set(i) <= set("0123456789abcdef")
+               for i in ids)
+    assert set(got[0]["guarantees"]) <= set(telemetry._guarantees())
+    assert "SELECT" not in str(got)
+    assert ids[0] == telemetry.unit_id(
+        "table", "canary_orders.public.canary_ssn_col")
+
+
+def test_an_id_is_the_same_in_every_run_of_one_install_and_not_another(
+        spool, tmp_path, monkeypatch):
+    first = telemetry.unit_id("table", "canary_orders")
+    monkeypatch.setattr(telemetry, "_SALT", None)
+    assert telemetry.unit_id("table", "canary_orders") == first
+    other = tmp_path / "other"
+    monkeypatch.setenv("MIGKIT_TELEMETRY_SPOOL", str(other))
+    monkeypatch.setattr(telemetry, "_SALT", None)
+    assert telemetry.unit_id("table", "canary_orders") != first
+
+
+def test_an_opaque_field_refuses_a_name_and_an_unknown_one():
+    ok = telemetry.make("unit", phase="verify", scope="table",
+                        unit="0123456789ab", outcome="ok")
+    assert ok["unit"] == "0123456789ab"
+    for bad in ("canary_orders", "0123456789AB", "0123456789abc", 12, ""):
+        with pytest.raises(telemetry.Rejected) as err:
+            telemetry.make("unit", phase="verify", scope="table",
+                           unit=bad, outcome="ok")
+        assert "canary" not in str(err.value)
+    with pytest.raises(telemetry.Rejected):
+        telemetry.make("unit", phase="verify", scope="canary_orders",
+                       unit="0123456789ab", outcome="ok")
+
+
+def test_only_the_units_that_did_not_compare_come_first_and_the_rest_are_cut(
+        spool, monkeypatch):
+    monkeypatch.setattr(telemetry, "UNITS_KEPT", 3)
+    records = [{"scope": f"db.t{i}", "status": "ok"} for i in range(5)]
+    records.append({"scope": "db.bad", "status": "diff"})
+    telemetry.verified(records, verdict_decision())
+    got = [e for e in _events(spool) if e["kind"] == "unit"]
+    assert len(got) == 3 and got[0]["outcome"] == "diff"
+
+
+def verdict_decision():
+    from migkit import verdict
+    return verdict.Decision("different", "", ())
+
+
+def test_eta_off_goes_for_every_phase_that_had_a_forecast(spool,
+                                                          monkeypatch):
+    from migkit import planner
+    monkeypatch.setattr(telemetry, "_PLANNED", {})
+    monkeypatch.setattr(telemetry, "_SETTLED", set())
+    plan = [planner.Phase("copy", 100.0), planner.Phase("catch-up", 50.0),
+            planner.Phase("check", 20.0),
+            planner.Phase("cutover", never=True, detail="canary_orders"),
+            planner.Phase("index builds")]
+    planner.phase_lines(plan)
+    assert telemetry._PLANNED == {"move": 100.0, "follow": 50.0,
+                                  "verify": 20.0}
+    assert telemetry.settled("follow", 100.0) is True
+    assert telemetry.settled("follow", 100.0) is False
+    assert telemetry.settled("assess", 5.0) is False
+    cmd = telemetry.Command("check", {})
+    telemetry.forecast("verify", 20.0)
+    time.sleep(0.01)
+    cmd.ended(0)
+    got = [e for e in _events(spool) if e["kind"] == "progress"]
+    by = {e["phase"]: e for e in got}
+    assert by["follow"]["eta_off"] == 2.0
+    assert by["verify"]["done"] == "100%" and by["verify"]["eta_off"] < 1
+    assert set(by) == {"follow", "verify"}
+
+
+def test_a_phase_that_reported_its_own_pace_is_not_said_twice(spool,
+                                                              monkeypatch):
+    monkeypatch.setattr(telemetry, "_PACE", {})
+    monkeypatch.setattr(telemetry, "_PLANNED", {"move": 10.0})
+    monkeypatch.setattr(telemetry, "_SETTLED", set())
+    telemetry.progressed("move", 5, 10, 1.0, 5.0, now=0.0)
+    telemetry.progressed("move", 10, 10, 1.0, 10.0, done=True, now=1.0)
+    assert telemetry.settled("move", 10.0) is False
+    got = [e for e in _events(spool) if e["kind"] == "progress"]
+    assert len(got) == 2
+
+
+def test_databases_moving_side_by_side_keep_their_own_estimate(spool,
+                                                              monkeypatch):
+    monkeypatch.setattr(telemetry, "_PACE", {})
+    monkeypatch.setattr(telemetry, "_SETTLED", set())
+    a, b = "/reports/canary_orders", "/reports/other"
+    telemetry.progressed("move", 100, 1000, 10.0, 10.0, now=0.0, where=a)
+    telemetry.progressed("move", 10, 100, 10.0, 1.0, now=0.0, where=b)
+    telemetry.progressed("move", 200, 1000, 10.0, 20.0, now=40.0, where=a)
+    telemetry.progressed("move", 20, 100, 10.0, 2.0, now=40.0, where=b)
+    assert len(telemetry._PACE) == 2
+    telemetry.progressed("move", 1000, 1000, 10.0, 100.0, done=True,
+                         now=80.0, where=a)
+    telemetry.progressed("move", 100, 100, 10.0, 10.0, done=True,
+                         now=80.0, where=b)
+    done = [e for e in _events(spool) if e["kind"] == "progress"
+            and e["done"] == "100%"]
+    assert [e["eta_off"] for e in done] == [1.0, 1.0]
+    assert telemetry._PACE == {}
+    assert "canary" not in _kept(spool).decode()

@@ -10828,3 +10828,45 @@ Not done (W9D, 2026-10-16): MySQL and the generic engine still prove a
 table's rows their own way, not through `decide.row_parity`; the row
 text rung on SQL Server reads a range of the whole table (no key
 cuts yet). Proved in tests/test_units_and_row_text_reach_every_engine.py.
+
+## Left after wave 9
+
+What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs/backlog-index.md` (2026-10-16). The next wave is cut from this list; an item is out of it only when its row is DONE.
+
+- `P0-DE.1` (row 2): PARTLY (review 2026-10-16: an external program could not earn its rank on a cost model's Estimate measured on no unit; unlock fixed to a measured run on at least one unit, under HopCosts too; the speed rules as rungs not re-measured
+- `P0-DE.2` (row 4): OPEN (review 2026-10-16: `doctor.py` was reached from nothing and is deleted (a5ddd41); `migkit doctor` says tools, hops and connectivity, not the rung each side and leg stands on or its footprint
+- `P0-DE.4` (row 6): not yet as not applicable with reasons no server measured - large values on the newer engines and services, partitions on GaussDB, ASE, Iceberg, Delta and pairs; put back to not yet with their rows; db2, Parquet and the MySQL-wire services' partition reads owed a test
+- `P0-DEPTH.calibrate` (row 111): missing: the calibration on the final run
+- `P0-DEPTH.json` (row 113): UNPROVED`). Not done: MySQL's JSON in SQL (declared unproved); `PostgresEngine._json_text_sql` is still its own copy of canon's; a JSON key column is read parsed; the server tests written, not run
+- `P0-DEPTH.triggers` (row 114): OPEN (review 2026-10-16: the range copy's load options set session_replication_role on the source export connection too, a superuser-only setting; the load side already owns it, superuser-gated
+- `P0-DEPTH.rank` (row 115): still a list of names, not a rung's own field everywhere
+- `P0-AUDIT` (row 117): open
+- `P0-PARITY.small` (row 135): OPEN (queued; grep: `decide.coverage()` missing grant not yet on MongoDB, the cross-engine pair and the generic engine; the generic engine is not yet on any of the 11 shapes; PARTLY (Redshift and Snowflake, branch worktree-agent-aac78db840f4c30b6: built and proved on stubs - the scope in the listing, the copy and the repair, versions and brands, a source's hold, Snowflake's readiness rows; built with the...
+- `P0-PARITY.lv.new` (row 136): Not done: `decide.coverage()` still says not yet for CockroachDB and DSQL and not applicable for Cosmos DB; Couchbase and Teradata say yes with the test owed (`capabilities.UNPROVED`); no server profile for any of the six, so no limit measured and no row moved; `pieces.ReadPlan` does not keep the first piece
+- `P0-CLOUDS.native` (row 150): IN PROGRESS (stopped, work in its worktree: 6 commits and 6 dirty files
+- `P0-CLOUDS.more` (row 151): OPEN (grep: `managed.distinct()` lists them; not among the twelve of P0-CLOUDS.native
+- `P0-SCENARIOS.brands` (row 158): BLOCKED (no server-side sign is known that is not an absence; it needs measuring on the real services
+- `P0-SCENARIOS.managed` (row 159): not yet, and `move`'s plan says it (`scenarios.plan_lines`). Not done: no catalogue of the providers' own operations (blue/green, upgrade) with eligibility and duration evidence, so the plan says no eligible operation was read; no live provider run
+- `P0-SCENARIOS.arch` (row 160): not yet), a failed read said in the case; `cloudapi.Operation.new_instance` marks each operation (blue/green, Aurora replica and snapshot, Azure Single to Flexible, the new `aws-class-restore`: a new instance; major upgrades: in place); `Aws.run_class_restore` runs the class restore through `Adapter.runner` and reads the class back, proved end to end on fakes with migkit's verify after (`run_managed_case`); a...
+- `P0-SCENARIOS.charset` (row 161): missing: Oracle's and Db2's column collations are not put to the target, ASE's and Teradata's character sets are not read
+- `P0-SCENARIOS.engine` (row 162): missing: ClickHouse table engines and PostgreSQL access methods are not compared
+- `P0-SCENARIOS.consolidate` (row 163): missing: following each source's changes into the shared target
+- `P0-SCOPE.open` (row 438): OPEN
+- `P0-PARITY.scope` (row 439): OPEN (grep: `capabilities.depth()` at 9fd2442, its 10 scope items: yes 37, test owed 92, not applicable 50, not yet 181 - the cells are named in STATE.md; PostgreSQL since: views and the confirm pass proved on a server; still open on PostgreSQL: column transforms - `transforms` is wired into no copy or check on any engine, `movers.mask_rules` knows only null and constant, and PostgreSQL's copy ways and its...
+- `P0-PARITY.verify` (row 440): OPEN (grep: `capabilities.depth()` at 9fd2442, its 39 verify items - the 30 deep-check categories, delta, fence, confirm, users, repair, exact undo, rows apart, tables, table: yes 124, test owed 74, not applicable 499, not yet 707; MySQL since: `verify.tables` and `verify.structure.schema-diff` proved on stubs, `verify.structure.triggers`, `verify.value.rendering` and `verify.structure.collection-options` built...
+- `P0-PARITY.tail` (row 441): OPEN (grep: `capabilities.depth()` at 9fd2442, its 6 tail items: yes 26, test owed 18, not applicable 59, not yet 113; the operation contract is `scope.ops`; Redis: NOT DONE, all five - it follows only through the server's own replica, which carries the whole server; a change reader of its own (the replica protocol's stream, parsed) is the missing piece; Kafka, 2026-10-11: states, a topic added at its seam, a...
+- `P0-PARITY.all` (row 443): missing: the ways - assess, schema, move, cutover, security, managed services and operations at {C}: yes 248, test owed 68, not applicable 261, not yet 539; MySQL since: `assess.preflight` and `cutover.rollback` proved on stubs, TiDB takes `assess.preflight` with it and owes its own test; evidence, observability and the forecast are one way for every engine, not read engine by engine); Redis (a real server):...
+- `P0-WORKFLOW-DEPTH.model` (row 456): OPEN (review 2026-10-16: `PhaseContract` does not exist; `planner.Phase` carries no prerequisites or required evidence contract
+- `P0-MINIMAL-INPUT.ownership` (row 463): OPEN (review 2026-10-16: `WorkflowState` does not exist; no automated phase-transition state
+- `P0-MINIMAL-INPUT.acceptance` (row 466): Not done: no live timing - the sandbox was stopped - so minimal effort and the guarantees are not yet proved together on a server; the 2026-10-15 claim of tests passing 100% is not backed by a run since the review
+- `P0-AUTO-RESOURCES.proof` (row 476): Missing: the end-to-end run the row names - a move that sizes itself, forecasts and nests leases against a real server, with the forecast checked against the time it took
+- `P0-DECISION-ALL.engines` (row 477): OPEN
+- `P0-SAFETY-INTEGRITY` (row 479): PARTLY 2026-10-16 (guarantees.Semantics read from catalogue + engine facts with explicit gaps; decide.admit / KEEPS_SEMANTICS admits schedules; joint plan barriered by foreign keys, admitted, and a refusal stops the move; keys-held read from the mover; target catalogue read; tail lanes, copy ranges and their marks ask decide.admit; all faults in PROVES, tests written, not run
+- `P0-RESILIENCE-ALL` (row 480): not yet wired, replan/isolate workflow and real-server compound runs unproved
+- `P0-AUTONOMOUS-MIGRATION` (row 481): open
+- `P0-PRODUCT-TELEMETRY` (row 483): not yet run; no destination, no transmission
+- `P0-AUTOTUNE-ALL` (row 482): PARTLY 2026-10-16 (inventory of every dimension, fact bounds, exact large-value bound, cause-to-adjustment retune with reconcile/verify/anti-oscillation on fake servers; cause_of reads faults.CATALOGUE, tuning.sized retunes the MySQL range copier on a sizing fault; payload_way before large-value tables and PostgreSQL/SQL Server/hetero copiers not wired, sandbox end-to-end and baselines owed
+- `P0-VALIDATE.unattended.proof` (row 501): OPEN
+- `P0-ETA-ALL` (row 503): open part units under their table, the check loop a unit a database, a pair's inner engines keep a ledger file each; statement-level unit boundaries and move health left
+- `P0-CONNECTION-PROGRESS` (row 504): on fakes only
+- `P0-VERIFY-EXECUTION` (row 505): still their own

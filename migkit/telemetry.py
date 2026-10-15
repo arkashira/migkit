@@ -97,6 +97,7 @@ PHASE_OF = {"assess": "assess", "advise": "assess", "doctor": "assess",
             "rollback": "rollback", "report": "report", "history": "report",
             "watch": "report", "monitor": "report", "state": "report",
             "ui": "report"}
+UNITS = ("table", "database", "range")
 COVERAGE = ("0", "<50%", "<90%", "<99%", "<100%", "100%")
 
 
@@ -297,6 +298,16 @@ def flag(doc):
                                                      "doc": doc})
 
 
+#: an opaque id: twelve hex digits of a salted hash, never a name
+OPAQUE = re.compile(r"[0-9a-f]{12}")
+
+
+def opaque(doc):
+    """A field holding an id made by `unit_id` and nothing else."""
+    return dataclasses.field(default=None, metadata={"type": "opaque",
+                                                     "doc": doc})
+
+
 def _sizes():
     return _bucket_names()
 
@@ -379,6 +390,23 @@ class Coverage:
     units: str = one_of(_sizes, "units compared")
 
 
+def _statuses():
+    from .engines.base import STATUSES
+    return tuple(STATUSES)
+
+
+@dataclasses.dataclass(frozen=True)
+class Unit:
+    """What a verification proved of one unit: a table, a database or a
+    range. The unit is an opaque id, the same on every machine only for
+    the install that made it."""
+    phase: str = one_of(lambda: PHASES, "the phase")
+    scope: str = one_of(lambda: UNITS, "what kind of unit it is")
+    unit: str = opaque("the unit, as a salted hash")
+    outcome: str = one_of(_statuses, "how the unit compared")
+    guarantees: tuple = some_of(_guarantees, "the guarantees it reached")
+
+
 @dataclasses.dataclass(frozen=True)
 class Intervention:
     """The operator stepping in."""
@@ -398,7 +426,7 @@ class Crash:
 
 KINDS = {"run": Run, "decision": Decision, "progress": Progress,
          "resources": Resources, "recovery": Recovery,
-         "coverage": Coverage, "intervention": Intervention,
+         "coverage": Coverage, "unit": Unit, "intervention": Intervention,
          "crash": Crash}
 
 
@@ -420,6 +448,10 @@ def _check(name, value, meta):
         if not (0 <= value <= meta["most"]) or value != value:
             raise Rejected(f"{name} is outside 0 to {meta['most']}")
         return int(value) if t == "whole" else round(float(value), 3)
+    if t == "opaque":
+        if type(value) is not str or not OPAQUE.fullmatch(value):
+            raise Rejected(f"{name} takes an id made by unit_id")
+        return value
     allowed = meta["values"]()
     if t == "one of":
         if type(value) is not str or value not in allowed:
@@ -710,6 +742,7 @@ class Command:
         self.chosen, self.decisions, self.fallbacks = {}, 0, 0
         #: the guarantees the ways chosen in this command reach
         self.reached = set()
+        reset_forecasts()
         global _CURRENT
         _CURRENT = self
 
@@ -763,6 +796,7 @@ class Command:
 
     def _ended(self, code, error):
         took = max(time.time() - self.began, 0.0)
+        settled(PHASE_OF.get(self.command, "report"), took)
         engine = getattr(self.hop, "engine", None)
         target = getattr(getattr(self.hop, "target", None), "engine",
                          None) or engine
@@ -824,16 +858,31 @@ def _emit(what, /, **fields):
 
 #: seconds between one phase's progress events; the last one always goes
 PROGRESS_EVERY = 30.0
+#: one phase of one work (a database's report directory) has its own pace:
+#: databases moving side by side must not reset each other's estimate. The
+#: key stays in memory and is never kept.
 _PACE = {}
+#: the seconds a phase was forecast to take, from the plan or an estimate
+_PLANNED = {}
+#: phases whose `eta_off` has gone in this command
+_SETTLED = set()
+#: the plan's phase names (`planner.Phase.name`) as the phases they run in
+_PLAN_PHASE = {"copy": "move", "index builds": "move",
+               "catch-up": "follow", "check": "verify",
+               "cutover": "cutover"}
+
+
+def _pace_key(phase, where):
+    return (phase, None if where is None else str(where))
 
 
 def progressed(phase, rows, total, rate, took, done=False, size=None,
-               now=None):
+               now=None, where=None):
     """`planner.progress`: where a phase stands, as buckets. The first
-    estimate of the whole phase is kept in memory, and once the phase is
-    done `eta_off` is the time it took over that estimate."""
+    estimate of the whole phase is kept in memory per `where`, and once
+    the phase is done `eta_off` is the time it took over that estimate."""
     now = time.monotonic() if now is None else now
-    key = phase
+    key = _pace_key(phase, where)
     seen = _PACE.get(key)
     left = (max(total - rows, 0) / rate) if rate and total else None
     if seen is None or took < seen["took"]:
@@ -849,11 +898,89 @@ def progressed(phase, rows, total, rate, took, done=False, size=None,
     if done:
         whole = _PACE.pop(key, seen)["whole"]
         off = took / whole if whole else None
+        _SETTLED.add(phase)
     return _emit("progress", phase=phase, rows=bucket(rows),
                  bytes=bucket(size) if size is not None else None,
                  rate=bucket(rate or 0), took=seconds_bucket(took),
                  eta_off=min(off, 1000) if off is not None else None,
                  done="100%" if done else coverage(rows, total))
+
+
+def forecast(phase, seconds):
+    """A phase's forecast time, kept in memory until the phase ends
+    (`settled`). Several forecasts for one phase add up."""
+    try:
+        if phase in PHASES and isinstance(seconds, (int, float)) \
+                and seconds > 0 and seconds == seconds \
+                and seconds != float("inf"):
+            _PLANNED[phase] = _PLANNED.get(phase, 0.0) + float(seconds)
+    except Exception:  # noqa: BLE001 - telemetry never stops a run
+        pass
+
+
+def forecast_plan(phases):
+    """`planner.phase_lines`: the plan's estimates, each added to the
+    phase it runs in. A phase the plan does not estimate adds nothing."""
+    for p in phases or ():
+        if getattr(p, "never", False):
+            continue
+        phase = _PLAN_PHASE.get(getattr(p, "name", None))
+        if phase and getattr(p, "p50", None):
+            forecast(phase, p.p50)
+
+
+def settled(phase, took):
+    """A phase over, whatever its kind: `eta_off` is the time it took
+    over its forecast. False where it had no forecast or has been said
+    (`progressed` says the phases that report their own pace)."""
+    planned = _PLANNED.pop(phase, None)
+    if not planned or phase in _SETTLED:
+        return False
+    _SETTLED.add(phase)
+    return _emit("progress", phase=phase, took=seconds_bucket(took),
+                 eta_off=min(max(took, 0.0) / planned, 1000), done="100%")
+
+
+def reset_forecasts():
+    _PLANNED.clear()
+    _SETTLED.clear()
+
+
+#: the salt that makes a unit's id the same for this install only
+_SALT = None
+
+
+def _salt():
+    """Sixteen random bytes kept beside the spool, so that an id means
+    the same unit in every run of this install and in no other. Where the
+    spool cannot be written the salt lives for this process only."""
+    global _SALT
+    if _SALT is None:
+        path = spool() / "unit.salt"
+        try:
+            _SALT = bytes.fromhex(path.read_text().strip())
+            if len(_SALT) != 16:
+                raise ValueError("salt")
+        except (OSError, ValueError):
+            _SALT = os.urandom(16)
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                             0o600)
+                with os.fdopen(fd, "w") as f:
+                    f.write(_SALT.hex())
+            except OSError:
+                pass
+    return _SALT
+
+
+def unit_id(scope, name):
+    """The opaque id of a unit: twelve hex digits of a keyed hash of its
+    kind and name. The name goes in, only the digits come out."""
+    import hashlib
+    import hmac
+    return hmac.new(_salt(), f"{scope}\0{name}".encode(),
+                    hashlib.sha256).hexdigest()[:12]
 
 
 def resourced(phase, allocated, used, memory=None, connections=None):
@@ -886,18 +1013,57 @@ def recovered(fault, path, tries, outcome, error=None):
                  else None)
 
 
+#: units named by one check at most; the ones that did not compare first
+UNITS_KEPT = 200
+
+
+def _unit_scope(record):
+    """(kind, name) of the unit a record answers for."""
+    scope = str(record.get("scope", "")).split()
+    name = scope[0] if scope else ""
+    if record.get("range"):
+        return "range", f"{name}\0{record.get('range')}"
+    return ("table" if "." in name.replace("(migra)", "") else
+            "database"), name
+
+
 def verified(records, decision):
     """`verdict.summarize`: how much of the scope a check compared and
     the verdict. The guarantees the ways reached are named only for a
-    check that came out the same."""
+    check that came out the same. Each unit is then kept by its opaque
+    id with its outcome and the guarantees its own answer names."""
     total = len(records)
     same = sum(1 for r in records if r.get("status") == "ok")
     reached = (sorted(_CURRENT.reached) if _CURRENT is not None
                and decision.status == "same" else ())
-    return _emit("coverage", phase="verify", verified=coverage(same, total),
-                 guarantees=tuple(reached)[:16],
-                 completion=completion(decision.exit),
-                 units=bucket(total))
+    got = _emit("coverage", phase="verify", verified=coverage(same, total),
+                guarantees=tuple(reached)[:16],
+                completion=completion(decision.exit),
+                units=bucket(total))
+    try:
+        _units_checked(records)
+    except Exception:  # noqa: BLE001 - telemetry never stops a run
+        pass
+    return got
+
+
+def _units_checked(records):
+    on, _ = state()
+    if not on:
+        return
+    allowed = set(_guarantees())
+    statuses = set(_statuses())
+    ordered = sorted(records, key=lambda r: r.get("status") == "ok")
+    for r in ordered[:UNITS_KEPT]:
+        status = r.get("status")
+        if status not in statuses:
+            continue
+        kind, name = _unit_scope(r)
+        own = {g for g in (r.get("guarantees") or ())
+               if isinstance(g, str)} & allowed
+        _emit("unit", phase="verify", scope=kind,
+              unit=unit_id(kind, name), outcome=status,
+              guarantees=tuple(sorted(own))[:16])
 
 
 def intervened(did, question=None, phase=None):
