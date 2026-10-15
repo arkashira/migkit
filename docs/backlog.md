@@ -3969,6 +3969,18 @@ they are three cross-cutting gaps, not 26 engine problems:
   2 MB a batch); linked piece items change what the application reads
   on the target and need the user's yes. None of the six has a server
   profile in `tests/servers.py`. TiDB's cell is `untested` at 3c33f9a.
+  *Part B (2026-10-16):* Cosmos DB transactional batches are cut by
+  count and by the 2 MB of the request body measured as sent
+  (`cosmosdb.transactional_batches`), an item past 2 MB named before
+  anything is sent; Couchbase reads and writes whole documents in
+  batches cut by bytes, a document past 20 MB named before its write
+  (cell `yes`, UNPROVED: no server); Teradata reads a byte value past a
+  piece by `SUBSTRING`, its first piece in the row's select
+  (`teradata._FirstPiece`, UNPROVED). Left: `pieces.ReadPlan` could keep
+  the first piece and read on from `limit + 1` (it reads the value again
+  from byte 1) - a hook in `pieces`; Couchbase `neutral_rows_by_key`
+  still asks 500 documents a request; an item between its UTF-8 and its
+  escaped 2 MB goes alone and the service decides.
 * **Read-only target** (BAR-3) - not yet on 24: the target kept from
   the application while migkit moves into it, or its writes named - the
   same hold-writes primitives the cutover's freezes use on the source

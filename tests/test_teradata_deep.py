@@ -666,7 +666,43 @@ def test_large_values_are_sized_where_they_lie(monkeypatch, tmp_path):
     assert 'coalesce(bytes("doc"), 0)' in seen[0]
     assert 'coalesce(octet_length("note"), 0)' in seen[0]
     assert isinstance(eng.LARGE_VALUES, pieces.Sql)
-    assert not eng.LARGE_VALUES.piece and not eng.LARGE_VALUES.append
+    assert eng.LARGE_VALUES.piece and not eng.LARGE_VALUES.append
+
+
+def test_a_long_byte_value_is_read_from_its_first_piece_on(monkeypatch,
+                                                            tmp_path):
+    import re
+
+    from migkit import pieces
+    monkeypatch.setattr(pieces, "PIECE", 4)
+    big, small = b"0123456789", b"ab"
+    cols = orders(code=None, name=None, amount=None, born=None,
+                  doc=column("doc", "BO", 0))
+    asked = []
+
+    def hook(host, low, args):
+        if '"shop"."orders"' not in low or "DBC" in low:
+            return None
+        asked.append(low)
+        head = low.split(" from ")[0]
+        if "where" not in low:
+            assert "case" not in head
+            assert 'substring("doc" from 1 for 4)' in head
+            return [(1, small, len(small)), (2, big[:4], len(big))]
+        if head.startswith('select bytes("doc")'):
+            return [(len(big),)]
+        at, n = map(int, re.search(r"from (\d+) for (\d+)\)",
+                                   head).groups())
+        assert args == (2,)
+        return [(big[at - 1:at - 1 + n],)]
+    systems, eng = pair(monkeypatch, tmp_path, hook=hook,
+                        src={"columns": {"orders": cols}})
+    rows = [r for b in eng.neutral_batches("src", "shop", "orders",
+                                           [("id", "int"), ("doc", "bytes")])
+            for r in b]
+    assert [(r[0], bytes(r[1])) for r in rows] == [(1, small), (2, big)]
+    # the first piece is read again with the rest, never joined twice
+    assert sum('from 1 for 4' in q and "where" in q for q in asked) == 1
 
 
 # ---- a repair, end to end, on two systems that keep rows ---------------------

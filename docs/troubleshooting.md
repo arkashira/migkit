@@ -1333,6 +1333,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> already exists on the target - migkit will not alter or replace a collection that is already there
 
+* <...>: the document <...> is <...> bytes, and Couchbase holds a document of <...> at most; nothing of this write was sent. Leave the row out of the hop, or keep the value elsewhere and the document a reference to it
+
 * <...>: the document <...> was not written (<...>)
 
 * Couchbase hands its changes out through its Kafka connector: say which topic it publishes to in the source's options - changes: {servers: host:9092, topic: <topic>} - with the connector's default source handler
@@ -1350,6 +1352,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...> has a column named id outside its key, and a Cosmos DB item's id is made from its key: rename the column with mapping.columns
 
 * <...> already exists on the target - migkit will not alter or replace a container that is already there
+
+* <...>: the item <...> is <...> bytes, and Cosmos DB holds an item of <...> at most; nothing of this write was sent. Leave the row out of the hop, or keep the value elsewhere and the item a reference to it
 
 * the account does not serve the all-versions-and-deletes change feed (<...>), and the latest-version one carries no delete: turn on continuous backup and the all-versions-and-deletes feature, or say change_feed: latest in the source's options - every delete is then found by check instead of followed
 

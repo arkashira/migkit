@@ -485,6 +485,41 @@ def _is_driver_error(e):
     return (type(e).__module__ or "").split(".")[0] == "teradatasql"
 
 
+class _FirstPiece:
+    """A read plan (`pieces.ReadPlan`) whose byte value is selected as its
+    first piece - the whole of one no longer than the plan's limit - in
+    place of the CASE that leaves a long one out: a substring of a LOB is
+    Teradata's own, a LOB under a CASE is not known to be. A value longer
+    than the limit (its length read beside it) is read in pieces by its
+    row's key as on every engine, from its first byte."""
+
+    def __init__(self, eng, *args, **kw):
+        super().__init__(eng, *args, **kw)
+        way = eng.LARGE_VALUES
+        for i, n in self.split:
+            self.exprs[i] = way.piece.format(c=eng._q(n), at=1,
+                                             n=int(self.limit))
+
+    def finish(self, raw):
+        k = len(self.names)
+        if self.split:
+            raw = [list(r) for r in raw]
+            for r in raw:
+                for j, (i, _) in enumerate(self.split):
+                    size = r[k + j]
+                    if size is not None and int(size) > self.limit:
+                        r[i] = None
+        return super().finish(raw)
+
+
+class _FirstPieceRead(_FirstPiece, pieces.ReadPlan):
+    pass
+
+
+class _FirstPieceDigest(_FirstPiece, pieces.DigestPlan):
+    pass
+
+
 class TeradataEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "teradata"
@@ -498,14 +533,16 @@ class TeradataEngine(DbapiRows, Engine):
     #: large values (`pieces`), sized where they lie: a byte value's length
     #: as the server keeps it (`BYTES`), a character value's by
     #: `OCTET_LENGTH`, a JSON or XML document's as the character large
-    #: object it casts to. They are read and written whole by the driver
-    #: (`lob_support`) in batches cut by bytes, never in pieces and never
-    #: hashed where they
-    #: lie: whether a LOB may sit under a CASE expression, and whether a
-    #: piece of one may be appended to a column, is not known without a
-    #: system, so neither is attempted
+    #: object it casts to. A byte value past a piece is read in pieces by
+    #: `SUBSTRING`, its first piece in the row's own select
+    #: (`_FirstPiece`); values are written whole by the driver
+    #: (`lob_support`) in batches cut by bytes, and never hashed where they
+    #: lie: whether a piece of a LOB may be appended to a column is not
+    #: known without a system, so it is not attempted
     LARGE_VALUES = pieces.Sql(
-        "sized by the server, read and written whole in batches cut by bytes",
+        "sized by the server, byte values read in pieces, written whole in"
+        " batches cut by bytes",
+        piece="substring({c} from {at} for {n})",
         length={"blob": "bytes({c})", "byte": "bytes({c})",
                 "varbyte": "bytes({c})", "clob": "octet_length({c})",
                 "char": "octet_length({c})", "varchar": "octet_length({c})",
@@ -781,9 +818,8 @@ class TeradataEngine(DbapiRows, Engine):
         parts = [p for p in (resume, f"({where})" if where else "") if p]
         cond = (" where " + " and ".join(parts)) if parts else ""
         order = (" order by " + ", ".join(refs)) if key and limit else ""
-        wide = self._wide_times(side, db, table)
-        return (self._select(", ".join(wide.get(n, self._q(n))
-                                       for n in names),
+        plan = self._read_plan(side, db, table, columns, key)
+        return (self._select(plan.select,
                              self._qualified(side, db, table), cond, order,
                              limit if key else None),
                 args, key, names)
@@ -864,6 +900,14 @@ class TeradataEngine(DbapiRows, Engine):
             return conn, cur
         return self._attempt(f"reading {table}", self._read_ways(), run,
                              facts)[1]
+
+    def _read_plan(self, side, db, table, columns, key=None):
+        """`DbapiRows._read_plan` with the first piece selected in place of
+        the CASE (`_FirstPiece`)."""
+        wide = self._wide_times(side, db, table)
+        plan = (_FirstPieceDigest if pieces.is_hashing(self)
+                else _FirstPieceRead)
+        return plan(self, side, db, table, columns, wide, key)
 
     @staticmethod
     def _fastexport_sql(sql):

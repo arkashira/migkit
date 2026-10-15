@@ -2260,11 +2260,12 @@ WAYS = {
                                     " bounded by cluster cell limits"),
         "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
                                      " under the 1 MB a scan page returns"),
-        "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, read whole"
-                                     " and handed on in batches cut by"
-                                     " bytes"),
-        "couchbase": (NOT_APPLICABLE, "a document is 20 MB at most; the"
-                                      " range scan reads across them"),
+        "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, less than"
+                                     " a piece: read whole in batches cut"
+                                     " by bytes and written in"
+                                     " transactional batches cut at the"
+                                     " 2 MB a request takes"),
+        "couchbase": ("yes", "@LARGE_VALUES"),
         "spanner": (NOT_APPLICABLE, "a row is 4 MB at most; mutations"
                                     " bounded"),
         "bigtable": (NOT_APPLICABLE, "a cell is bounded by Bigtable;"

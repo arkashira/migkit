@@ -14,8 +14,11 @@ container copied to another container comes back as it was. Any other key
 is the item's id (a key of several columns, their values as one JSON
 array), partitioned by `/id` for a key of one column and by the first key
 column's field for a key of more, so the rows of one value of it are
-written together in transactional batches of 100; `/ \\ ? #` - which an
-id may not hold - are written `%2F %5C %3F %23`.
+written together in transactional batches - of 100 items at most and
+each under the 2 MB the service takes a request, measured on the batch's
+body as it is sent (`transactional_batches`); an item past 2 MB, the
+most Cosmos DB holds, stops its write before anything of it is sent.
+`/ \\ ? #` - which an id may not hold - are written `%2F %5C %3F %23`.
 
 Rows are read one feed range at a time, the ranges side by side for a
 digest - so a container is verified by its partition key ranges, each
@@ -44,12 +47,46 @@ from .base import Engine, NeutralCopier, Result, clauses
 
 #: operations in one transactional batch, as the service allows
 BATCH_OPS = 100
+#: bytes of one request's body - a transactional batch's, or one item's -
+#: as the service takes them; an item is no larger
+REQUEST_BYTES = 2 * 2 ** 20
 #: items written side by side where each has a partition key of its own
 WRITERS = 8
 KEY = "id"
 AVAD, LATEST = "AllVersionsAndDeletes", "LatestVersion"
 ESCAPES = (("%", "%25"), ("/", "%2F"), ("\\", "%5C"), ("?", "%3F"),
            ("#", "%23"))
+
+
+def upsert_bytes(body):
+    """Bytes one upsert takes in a transactional batch's body: its
+    operation as compact JSON with every character past ASCII escaped, the
+    longer of the two ways the driver may send it."""
+    return len(json.dumps({"operationType": "Upsert", "resourceBody": body},
+                          separators=(",", ":")))
+
+
+def item_bytes(body):
+    """Bytes of an item as the service keeps it: compact JSON, UTF-8."""
+    return len(json.dumps(body, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8", "surrogatepass"))
+
+
+def transactional_batches(bodies, most_ops=BATCH_OPS,
+                          most_bytes=REQUEST_BYTES):
+    """Items of one partition key value as (batch, alone): `batch` the
+    items of one transactional batch, closed before the item that would
+    take it past `most_ops` operations or `most_bytes` of body (`[`, the
+    operations with a comma between, `]`); `alone` an item whose operation
+    is past `most_bytes` by itself, written by its own request."""
+    from .. import pieces
+    sized = [(b, upsert_bytes(b)) for b in bodies]
+    for got in pieces.by_bytes(sized, most_bytes - 1, most_ops,
+                               size=lambda p: p[1] + 1):
+        if len(got) == 1 and got[0][1] + 2 > most_bytes:
+            yield [], [got[0][0]]
+        else:
+            yield [b for b, _ in got], []
 
 
 class CosmosLanes:
@@ -722,9 +759,20 @@ class CosmosEngine(NeutralCopier, Engine):
         return out
 
     def _upsert(self, side, db, table, bodies):
-        """Items of one partition key value in transactional batches of
-        100; items with one each, side by side."""
+        """Items of one partition key value in transactional batches
+        (`transactional_batches`); items with one each, and one whose
+        operation no batch can hold, side by side. An item past
+        `REQUEST_BYTES` is named before any request is sent."""
         from .couchbase import forget_columns
+        for b in bodies:
+            n = item_bytes(b)
+            if n > REQUEST_BYTES:
+                raise SystemExit(
+                    f"{table}: the item {b.get(KEY)!r} is {n} bytes, and"
+                    f" Cosmos DB holds an item of {REQUEST_BYTES} at most;"
+                    " nothing of this write was sent. Leave the row out"
+                    " of the hop, or keep the value elsewhere and the"
+                    " item a reference to it")
         forget_columns(self)
         container = self._container(side, db, table)
         pk = self._pk_fields(side, db, table)
@@ -738,10 +786,12 @@ class CosmosEngine(NeutralCopier, Engine):
             if len(got) < 2:
                 continue
             part = [got[0].get(f) for f in pk]
-            for i in range(0, len(got), BATCH_OPS):
-                container.execute_item_batch(
-                    [("upsert", (b,)) for b in got[i:i + BATCH_OPS]],
-                    partition_key=part[0] if len(part) == 1 else part)
+            for batch, alone in transactional_batches(got):
+                single += alone
+                if batch:
+                    container.execute_item_batch(
+                        [("upsert", (b,)) for b in batch],
+                        partition_key=part[0] if len(part) == 1 else part)
         if single:
             with concurrent.futures.ThreadPoolExecutor(WRITERS) as pool:
                 list(pool.map(container.upsert_item, single))

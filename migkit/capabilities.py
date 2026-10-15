@@ -2684,7 +2684,9 @@ UNPROVED = {
     "schema.routines": "mongodb",
     "move.table-copy": "db2i db2zos snowflake bigquery dsql",
     "move.bulk": "hetero",
-    "move.large-values": "db2i db2zos snowflake bigquery teradata",
+    # no Couchbase runs in the tests, and Teradata's piece reads have not
+    # met a system
+    "move.large-values": "db2i db2zos snowflake bigquery teradata couchbase",
     # a sharded MongoDB, a Cassandra ring and a Vitess gate are clusters of
     # servers the tests do not start yet; their readings are proved on
     # stand-ins (`test_a_cluster_target_is_loaded_as_it_spreads_its_rows`)

@@ -38,10 +38,13 @@ import socket
 import struct
 from decimal import Decimal
 
+from .. import pieces
 from .base import Engine, NeutralCopier, Result
 
 #: documents written by one `upsert_multi`
 WRITE_BATCH = 500
+#: bytes of one document's body, the most the server holds
+DOC_BYTES = 20 * 2 ** 20
 #: the field a document's key is read into, for a collection migkit did
 #: not make
 KEY = "_key"
@@ -50,6 +53,12 @@ MAGIC_REQ, MAGIC_RES = 0x80, 0x81
 STAT, SASL_LIST, SASL_AUTH, SASL_STEP, SELECT_BUCKET = (
     0x10, 0x20, 0x21, 0x22, 0x89)
 AUTH_CONTINUE = 0x21
+
+
+def doc_bytes(body):
+    """Bytes of a document's body as the driver's JSON encoding sends it."""
+    return len(json.dumps(body, ensure_ascii=False).encode(
+        "utf-8", "surrogatepass"))
 
 
 class CouchbaseEngine(NeutralCopier, Engine):
@@ -63,6 +72,16 @@ class CouchbaseEngine(NeutralCopier, Engine):
     READS_AHEAD = False
 
     # ---- signing in ------------------------------------------------------
+
+    #: large values: a document is read and written whole, in batches cut
+    #: by bytes (`pieces.by_bytes`), each sized as the driver encodes it.
+    #: A value is never cut: the subdocument operations have no substring
+    #: and no append, and a document past `DOC_BYTES` stops its write
+    #: before anything of it is sent - pieces kept as documents of their
+    #: own would change what the application reads
+    LARGE_VALUES = pieces.Way(
+        "read and written whole in batches cut by bytes, a document past"
+        " 20 MB named before anything of its write is sent")
 
     def _ep(self, side):
         return self.hop.source if side == "src" else self.hop.target
@@ -183,7 +202,8 @@ class CouchbaseEngine(NeutralCopier, Engine):
         from couchbase.options import ScanOptions
         return self._collection(side, db, table).scan(
             RangeScan(), ScanOptions(ids_only=ids_only,
-                                     batch_item_limit=500))
+                                     batch_item_limit=500,
+                                     batch_byte_limit=pieces.BATCH_BYTES))
 
     def neutral_columns(self, side, db, table):
         described = self._described(side, db, table)
@@ -267,15 +287,11 @@ class CouchbaseEngine(NeutralCopier, Engine):
                              " SQL, and a collection is read by its keys")
         classes = self._classes(side, db, table)
         names = [n for n, _ in columns]
-        batch = []
-        for got in self._scan(side, db, table):
-            batch.append(self._row(names, classes, got.id,
-                                   got.content_as[dict]))
-            if len(batch) >= size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
+        # in batches of `size` documents or `pieces.BATCH_BYTES`, whichever
+        # a batch reaches first
+        yield from pieces.by_bytes(
+            (self._row(names, classes, got.id, got.content_as[dict])
+             for got in self._scan(side, db, table)), most_rows=size)
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):
@@ -371,9 +387,20 @@ class CouchbaseEngine(NeutralCopier, Engine):
     def _upsert_docs(self, side, db, table, docs):
         forget_columns(self)
         coll = self._collection(side, db, table)
-        items = list(docs.items())
-        for i in range(0, len(items), WRITE_BATCH):
-            got = coll.upsert_multi(dict(items[i:i + WRITE_BATCH]),
+        sized = []
+        for doc_id, body in docs.items():
+            n = doc_bytes(body)
+            if n > DOC_BYTES:
+                raise SystemExit(
+                    f"{table}: the document {doc_id} is {n} bytes, and"
+                    f" Couchbase holds a document of {DOC_BYTES} at most;"
+                    " nothing of this write was sent. Leave the row out of"
+                    " the hop, or keep the value elsewhere and the document"
+                    " a reference to it")
+            sized.append(((doc_id, body), n))
+        for part in pieces.by_bytes(sized, most_rows=WRITE_BATCH,
+                                    size=lambda p: p[1]):
+            got = coll.upsert_multi(dict(d for d, _ in part),
                                     return_exceptions=True)
             if not got.all_ok:
                 bad = next(iter(got.exceptions.items()))
