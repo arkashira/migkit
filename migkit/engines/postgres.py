@@ -2077,6 +2077,28 @@ select json_build_object(
             start = end
         return out
 
+    #: the target's sessions as a replica (`load_window`), carried to a
+    #: range worker's process (`Engine.session_hold`)
+    SESSION_HOLDS = ("_as_replica",)
+    WRITE_STATES_SQL = (
+        "select 'trigger ' || t.tgname, t.tgenabled <> 'D'"
+        " from pg_trigger t join pg_class c on c.oid = t.tgrelid"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " where n.nspname = {schema} and c.relname = {table}"
+        " and not t.tgisinternal"
+        " union all select 'key ' || k.conname, k.convalidated"
+        " from pg_constraint k join pg_class c on c.oid = k.conrelid"
+        " join pg_namespace n on n.oid = c.relnamespace"
+        " where n.nspname = {schema} and c.relname = {table}"
+        " and k.contype = 'f'")
+
+    def export_moment(self, db):
+        from . import pg_pass
+        v = self._server_version("src", db) or 0
+        export = pg_pass._Export(self, db, "pg_current_snapshot"
+                                 if v >= 130000 else "txid_current_snapshot")
+        return export.id, export.conn.close
+
     def replica_env(self, db):
         """The environment a target client needs to write as the window's
         connections do."""
@@ -2138,6 +2160,12 @@ select json_build_object(
                                                  after, limit, where)
         with self._connect(side, db) as conn:
             with conn.cursor() as cur:
+                moment = (self.__dict__.get("_moment") or {}).get(db) \
+                    if side == "src" else None
+                if moment and not getattr(conn, "autocommit", False):
+                    cur.execute("set transaction isolation level repeatable"
+                                " read, read only")
+                    cur.execute("set transaction snapshot %s", (moment,))
                 cur.execute(sql, args)
                 rows = [list(r) for r in cur.fetchall()]
         if not rows or not key:

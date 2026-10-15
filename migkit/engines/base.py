@@ -6487,16 +6487,26 @@ class Engine:
             with self._apply_session(side, db):
                 return self._apply_each(side, db, changes)
 
+        def named(n):
+            each = {}
+            for c in changes:
+                t = getattr(c, "table", None) or (
+                    c.get("table") if isinstance(c, dict) else None)
+                each[t] = each.get(t, 0) + 1
+            for t, rows in each.items():
+                self.named_write(db, t, "change", "tail batch", rows)
+            return n
+
         def undo(rung, error):
             self.__dict__["lane_retries"] = \
                 self.__dict__.get("lane_retries", 0) + 1
         # the one runtime fallback (`decide.attempt`): only the lanes'
         # failure switches; one of the batch's own transaction is raised as
         # it is - a connection lost there is the tail's to read again
-        return decide.attempt(
+        return named(decide.attempt(
             "applying a batch", _apply_ways(), run,
             decide.Facts({"lanes": bool(lanes)}), undo=undo,
-            switch=lambda e: isinstance(e, _LaneFailed))[1]
+            switch=lambda e: isinstance(e, _LaneFailed))[1])
 
     #: changes a batch holds before it is applied in lanes side by side
     LANES_FROM = 2000
@@ -7186,7 +7196,8 @@ class Engine:
         the source shares between its connections - or "" where each range
         is read as of its own mark. Said by the source, which is the side
         that knows whether its readers adopt one (`SHARED_SNAPSHOT`)."""
-        if getattr(self, "SHARED_SNAPSHOT", False):
+        if getattr(self, "SHARED_SNAPSHOT", False) or (
+                type(self).export_moment is not Engine.export_moment):
             return "one snapshot the source shares between its connections"
         return ""
 
@@ -7217,6 +7228,221 @@ class Engine:
             if _fks_off(hop, db):
                 return "after"
         return "during"
+
+    # --- one rule for every write into a table of the target ------------
+
+    #: the attributes holding what this engine's sessions writing into the
+    #: target are set to (`load_window`), carried to a range worker's
+    #: process so its sessions write as this one's do
+    SESSION_HOLDS = ()
+    #: a statement reading (trigger or key, enabled) for one table of the
+    #: target, `{schema}` and `{table}` as literals; None where none is read
+    WRITE_STATES_SQL = None
+
+    def write_states(self, side, db, table):
+        """{trigger or key: enabled} of `table` on `side`, read off the
+        server (`WRITE_STATES_SQL`); None where the engine reads none."""
+        sql = getattr(self, "WRITE_STATES_SQL", None)
+        if not sql:
+            return None
+        from ..util import split_table
+        sch, tbl = split_table(self.CANON_ENGINE or self.hop.engine, table)
+
+        def lit(s):
+            return "'" + str(s or "").replace("'", "''") + "'"
+        rows = self.run_rule(side, db, sql.format(schema=lit(sch),
+                                                  table=lit(tbl)))
+        return {str(r[0]): bool(r[1]) for r in rows or ()}
+
+    def session_hold(self, db):
+        """What this engine's target sessions are held to, as a range
+        worker's process adopts it (`adopt_session_hold`): never the
+        source's, whose sessions only read."""
+        return {a: sorted(map(str, self.__dict__.get(a) or ()))
+                for a in self.SESSION_HOLDS if self.__dict__.get(a)}
+
+    def adopt_session_hold(self, held):
+        for a, names in (held or {}).items():
+            if a in self.SESSION_HOLDS:
+                self.__dict__.setdefault(a, set()).update(names)
+
+    def table_hold(self, db, table, log=None):
+        """The one rule for triggers and deferred keys while `table` of the
+        target is written (`TableHold`): taken once for the table however
+        many range workers write it, given back after the last, and read
+        back as it was before."""
+        return TableHold(self, db, table, log)
+
+    # --- the one moment a table's ranges are read at --------------------
+
+    def export_moment(self, db):
+        """(token, close) of a snapshot of `db` the source exports for
+        other sessions to adopt (`adopt_moment`), kept until `close()`.
+        The engines whose source exports one say so by overriding this."""
+        raise self._no_canon("export a snapshot")
+
+    def adopt_moment(self, db, token):
+        """This process's reads of `db` on the source made at `token`, the
+        moment `export_moment` gave; None reads as of each read's own."""
+        moments = self.__dict__.setdefault("_moment", {})
+        if token:
+            moments[db] = token
+        else:
+            moments.pop(db, None)
+
+    def read_moment(self, db, log=None):
+        """The moment every range reader of a table of `db` adopts, as a
+        context manager yielding its token: one snapshot the source exports
+        where it exports one, else None - each range is then read as of its
+        own mark (`ranges.started`), which the source says. An export the
+        server refuses falls to that, said in the log."""
+        from .. import decide
+        exports = type(self).export_moment is not Engine.export_moment
+        rungs = (
+            decide.Rung("exported", "every range reader adopts one snapshot"
+                        " the source exports",
+                        needs=(decide.Need(
+                            "a source that exports a snapshot to other"
+                            " sessions", lambda f: f["exports"],
+                            "the source shares no snapshot between its"
+                            " sessions"),),
+                        because="the ranges of one table read one moment"),
+            decide.Rung("own", "each range read as of its own mark"))
+        got = decide.climb(f"{db}: the moment a table's ranges are read at",
+                           rungs, decide.Facts({"exports": exports}))
+
+        @contextlib.contextmanager
+        def held():
+            if got.rung is None or got.rung.name != "exported":
+                yield None
+                return
+            try:
+                token, close = self.export_moment(db)
+            except Exception as e:  # noqa: BLE001 - each range's own mark
+                if log:
+                    log(f"{db}: no snapshot shared between the range"
+                        f" readers ({str(e).strip()[:120]}); each range is"
+                        " read as of its own mark")
+                yield None
+                return
+            try:
+                yield token
+            finally:
+                close()
+        return held()
+
+    # --- what a large-value table is copied at --------------------------
+
+    def copy_sizes(self, db, table, columns, per_row=None, workers=1,
+                   log=None):
+        """(`tuning.Retune`, {column: way}) a copy writes `table` of the
+        target at: each column of a table whose rows are wider than a
+        piece carried as `tuning.payload_way` decides, and the batch cut
+        from the measured row width and the memory free here, shared by
+        the `workers` writing at once."""
+        from .. import pieces, sizing, tuning
+        ways = {}
+        if per_row and per_row * pieces.SENT_FACTOR > pieces.PIECE:
+            for name in columns:
+                try:
+                    got = tuning.engine_payload(self, "dst", db, table, name)
+                except tuning_blocked():
+                    raise
+                except Exception:  # noqa: BLE001 - a column not read
+                    continue
+                if got.rung is not None:
+                    ways[name] = got.rung.name
+        nbytes, rows = BATCH_BYTES, PAIR_ROWS
+        free = (sizing.host() or {}).get("memory")
+        if free:
+            nbytes = max(min(nbytes, free // (4 * max(int(workers or 1), 1))),
+                         int(per_row or 1))
+        if per_row:
+            rows = max(1, min(rows, nbytes // int(per_row)))
+        way = getattr(self, "LARGE_VALUES", None)
+        retune = tuning.Retune(
+            f"{db}.{table}", rows=rows, nbytes=nbytes,
+            limits=pieces._limits_of(self, "dst", db),
+            appendable=bool(way is not None and "pieces" in ways.values()),
+            streams="stream" in ways.values(), log=log, hop=self.hop,
+            engine=type(self).__module__.rsplit(".", 1)[-1])
+        if any(w != "whole" for w in ways.values()):
+            retune.size["way"] = next(w for w in ways.values()
+                                      if w != "whole")
+        return retune, ways
+
+    def named_write(self, db, table, kind, unit, rows=1):
+        """One write migkit made into `db` of the target named for the
+        unit that made it (`freeze.name_write`): every write's one door."""
+        hop = getattr(self, "hop", None)
+        if hop is None or not rows:
+            return False
+        from .. import freeze
+        return freeze.name_write(hop, db, table, kind, unit, rows)
+
+
+def tuning_blocked():
+    from ..decide import Blocked
+    return Blocked
+
+
+class TableHold:
+    """Triggers and deferred keys of one table of the target held while
+    it is written, whichever ranges and workers write it.
+
+    The first to take it reads the table's triggers and keys as they are
+    (`Engine.write_states`) and opens the target's load window for the
+    table (`Engine.load_window`); every later one only counts in. The
+    last to give it back closes the window and reads them again: one
+    that is not as it was stops the copy, naming it, rather than leaving
+    a target whose triggers or keys are off. What the window set on the
+    target's sessions (`Engine.session_hold`) is what a worker's process
+    adopts, so every range writes under the one rule."""
+
+    _held = {}
+    _lock = threading.RLock()
+
+    def __init__(self, eng, db, table, log=None):
+        self.eng, self.db, self.table, self.log = eng, db, table, log
+        self.key = (id(eng), str(db), str(table))
+        self.restored = None
+
+    def __enter__(self):
+        with self._lock:
+            got = self._held.get(self.key)
+            if got is not None:
+                got["users"] += 1
+                return got["session"]
+            before = self.eng.write_states("dst", self.db, self.table)
+            window = self.eng.load_window(self.db, self.log, [self.table])
+            window.__enter__()
+            session = self.eng.session_hold(self.db)
+            self._held[self.key] = {"users": 1, "window": window,
+                                    "before": before, "session": session}
+            return session
+
+    def __exit__(self, *exc):
+        with self._lock:
+            got = self._held[self.key]
+            got["users"] -= 1
+            if got["users"] > 0:
+                return False
+            del self._held[self.key]
+            got["window"].__exit__(*exc)
+            before = got["before"]
+            after = self.eng.write_states("dst", self.db, self.table)
+        if before is None:
+            return False
+        apart = sorted(k for k in set(before) | set(after or {})
+                       if before.get(k) != (after or {}).get(k))
+        self.restored = not apart
+        if apart and exc[0] is None:
+            from ..decide import Blocked
+            raise Blocked(
+                f"{self.table}: {', '.join(apart[:5])} on the target are not"
+                " as they were before the copy. Turn them back on before"
+                " the target takes writes; nothing else was changed")
+        return False
 
 
 class Enough(Exception):

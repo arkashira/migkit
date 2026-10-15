@@ -2462,10 +2462,15 @@ class HeteroEngine(Engine):
         # table is copied on its own
         slots = (ranges.active if ranges.active.workers > 1
                  else ranges.Slots(workers))
-        slots.each_process(
-            [(hop, db, src_t, dst_t, a, u, {"token": plain})
-             for a, u in todo],
-            _copy_range, finished, begin)
+        # one rule for the table's triggers and keys and one moment for its
+        # reads, taken once here for every range's process
+        with dst.table_hold(db, dst_t, log) as held, \
+                src.read_moment(db, log) as moment:
+            slots.each_process(
+                [(hop, db, src_t, dst_t, a, u,
+                  {"token": plain, "hold": held, "moment": moment})
+                 for a, u in todo],
+                _copy_range, finished, begin)
         outside()
         st["done"] = True
         ck.save()
@@ -2501,21 +2506,55 @@ class HeteroEngine(Engine):
                 else None)
         label = self.move_key(db, "", self._leaf(src_t))
         where = scope(src, k, src_where)
-        chunk = self._read_rows(db, src_t, 10 ** 9)
+        retune, _ = dst.copy_sizes(
+            db, dst_t, [n for n, _ in dst_cols], self._row_width(db, src_t),
+            int(getattr(self.hop, "workers", 1) or 1))
+        chunk = min(self._read_rows(db, src_t, 10 ** 9),
+                    retune.settings()["rows"])
         point, moved = None, 0
+        unit = f"{label} {after}..{upto}"
         while True:
             rows, last = src.neutral_read("src", db, src_t, src_cols, point,
                                           chunk, where=where)
             if not rows:
                 break
             rows, _ = self._flatten_absent(rows)
-            self._write_checked(db, label, dst_t, dst_cols, plan, [k], rows,
-                                lambda m: None)
+            self._write_sized(db, label, dst_t, dst_cols, plan, [k], rows,
+                              retune, unit)
+            dst.named_write(db, dst_t, "copy", unit, len(rows))
             moved += len(rows)
             if last is None:
                 break
             point = last
         return moved, way, fell
+
+    def _row_width(self, db, src_t):
+        """The table's bytes a row as the source counts them, or None."""
+        try:
+            facts = self.src_engine.table_facts("src", db).get(src_t) or {}
+            if facts.get("rows") and facts.get("bytes"):
+                return max(int(facts["bytes"]) // int(facts["rows"]), 1)
+        except Exception:  # noqa: BLE001 - no width known
+            return None
+        return None
+
+    def _write_sized(self, db, key, dst_t, dst_cols, plan, resumable, rows,
+                     retune, unit):
+        """A read's rows written at `retune`'s sizes (`tuning.sized`): a
+        failure a size answers goes again at the new size, each batch
+        replaced by its key so a part written before the failure is not
+        doubled."""
+        from .. import pieces, tuning
+
+        def write():
+            s = retune.settings()
+            for part in pieces.by_bytes(rows, s["bytes"],
+                                        max(1, s["rows"] // s["parts"]),
+                                        pieces.row_bytes):
+                self._write_checked(db, key, dst_t, dst_cols, plan,
+                                    resumable, list(part), lambda m: None)
+        return tuning.sized(retune, unit, write, lambda s: None,
+                            rows=lambda: len(rows))
 
     def _write_checked(self, db, key, dst_t, dst_cols, plan, resumable,
                        rows, log):
@@ -5208,8 +5247,11 @@ def _copy_range(item):
     if token is not None:
         fencing.arm(hop, token)
     try:
-        return HeteroEngine(hop).copy_range(db, src_t, dst_t, after, upto,
-                                            asked.get("way"))
+        eng = HeteroEngine(hop)
+        eng.dst_engine.adopt_session_hold(asked.get("hold"))
+        eng.src_engine.adopt_moment(db, asked.get("moment"))
+        return eng.copy_range(db, src_t, dst_t, after, upto,
+                              asked.get("way"))
     finally:
         if token is not None:
             fencing.disarm(hop, token)

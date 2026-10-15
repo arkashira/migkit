@@ -201,7 +201,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 
 - `migkit/engines/__init__.py` - (no docstring)
 - `migkit/engines/ase.py` - SAP ASE (Sybase) as one side of a pair (backlog 34). Classes: AseEngine.
-- `migkit/engines/base.py` - (no docstring) Classes: Result, RepairAction, Spread, Engine, Enough, Counted.
+- `migkit/engines/base.py` - (no docstring) Classes: Result, RepairAction, Spread, Engine, TableHold, Enough.
 - `migkit/engines/bigquery_changes.py` - BigQuery followed as a source: the rows that changed in a dataset, read from its tables' change history (`CHANGES()`) and handed on as the n Classes: BigQueryChanges.
 - `migkit/engines/bigquery_checks.py` - What a BigQuery dataset keeps beside its rows, read and held to the source's: the deep checks, the catalogue a pair reads, the assessment's  Classes: TooBig, BigQueryChecks.
 - `migkit/engines/bigtable.py` - Google Cloud Bigtable as a side of a pair (backlog P0-CLOUDS), through its Python SDK. Classes: BigtableEngine, BigtableLanes.
