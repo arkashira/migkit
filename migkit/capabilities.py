@@ -1246,9 +1246,10 @@ def _items():
         "scope.deep": ("its deep checks read only the tables the hop takes",
                        _every(("check_deep",), _SCOPE)),
         "verify.value.one-plan": (
-            "its NULL/empty and float value checks read a table once a"
-            " side, every column in one shared plan, cut into key ranges"
-            " where its statistics say how (`scan_cuts`)",
+            "its value checks - charset where it has one, NULL/empty and"
+            " float - read a table once a side, every column in one shared"
+            " plan, cut into key ranges where its statistics say how"
+            " (`scan_cuts`)",
             own("_deep_scans")),
         "scope.copy": ("the tables its copy lists are the hop's",
                        _every(("list_move_tables",), _SCOPE)),

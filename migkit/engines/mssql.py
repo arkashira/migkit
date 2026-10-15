@@ -841,13 +841,12 @@ class MSSQLEngine(DbapiRows, Engine):
                   + (f" where {pred}" if pred else "") + ") rows_hashed")
             try:
                 with gate.unit():
-                    a = self._cmd("src", db, cq)[0]
-                    b = self._cmd("dst", db, cq)[0]
+                    a, b = self._row_parity(db, t, row, cq, pred)
                     outside = 0 if not pred else int(self._cmd(
                         "dst", db, "select count_big(*) from "
                         + self._qualified("dst", db, t) + " t where "
                         + self._outside(pred))[0][0] or 0)
-            except RuntimeError as e:
+            except (RuntimeError, decide.Exhausted) as e:
                 bad.append(f"{t} error {e}")
                 outcomes[t] = "error"
                 continue
@@ -1232,7 +1231,7 @@ class MSSQLEngine(DbapiRows, Engine):
         for word, check in (
                 ("narrowing", self._deep_narrowing),
                 ("timeshift", self._deep_timeshift),
-                ("charset", self._deep_charset),
+                ("charset", lambda d: self._deep_charset(d, scans)),
                 ("collation", self._deep_collation),
                 ("generated", self._deep_generated),
                 ("nullempty",
@@ -1332,22 +1331,35 @@ class MSSQLEngine(DbapiRows, Engine):
             return 3
         return 2 if str(page) in ("932", "936", "949", "950") else 1
 
-    def _deep_charset(self, db):
+    def _row_parity(self, db, t, row, cq, pred):
+        """Each side's (rows, digest) of table `t`, by the way of proving
+        its rows alike `decide.row_parity` climbs: each server folding its
+        rows' hashes (`cq`), else every row's text (`row`, the row as the
+        server writes it out) brought here in order and compared
+        (`scanplan.row_text`) where a server cannot fold them."""
+        from .. import scanplan
+
+        def run(choice):
+            if choice.rung.name == "server digest":
+                return (tuple(self._cmd("src", db, cq)[0]),
+                        tuple(self._cmd("dst", db, cq)[0]))
+            sql = (f"select {row} from {self._qualified('src', db, t)} t"
+                   + (f" where {pred}" if pred else "") + " order by 1")
+            got = scanplan.row_text(lambda side, _: self._cmd(side, db, sql),
+                                    key_width=0)
+            return tuple((got.rows[s], got.digests[0][s])
+                         for s in ("src", "dst"))
+        return decide.row_parity(
+            f"{db}.{t}: its rows alike", run, decide.Facts({
+                "server digest": True, "key": None,
+                "rows read here": True}))[1]
+
+    def _deep_charset(self, db, scans=None):
         """A text column downgraded to a narrower character set on the
         target (an `nvarchar` made `varchar`, a UTF-8 collation made a
         code page) drops what it cannot hold - as `?`, with no error - and
         a lossy transcode leaves U+FFFD behind; both silent."""
-        q = ("select c.table_schema + '.' + c.table_name, c.column_name,"
-             " c.data_type, cast(collationproperty(c.collation_name,"
-             " 'CodePage') as int) from information_schema.columns c where"
-             " c.data_type in ('char', 'varchar', 'nchar', 'nvarchar',"
-             " 'text', 'ntext') and exists (select 1 from"
-             " information_schema.tables t where t.table_schema ="
-             " c.table_schema and t.table_name = c.table_name and"
-             " t.table_type = 'BASE TABLE')")
-        read = {side: {(r[0], r[1]): (r[2], r[3]) for r in
-                       self._scoped_rows(db, self._cmd(side, db, q))}
-                for side in ("src", "dst")}
+        read = self._charset_read(db)
         bad = []
         for k, (kind, page) in sorted(read["src"].items()):
             there = read["dst"].get(k)
@@ -1358,15 +1370,12 @@ class MSSQLEngine(DbapiRows, Engine):
                 note += " (DOWNGRADE, what the target cannot hold arrives" \
                         " as ?)"
             bad.append(note)
-        from ..scanplan import Aggregate
-        kinds = {(t, col): kind for (t, col), (kind, _) in read["src"].items()
-                 if kind not in ("text", "ntext") and (t, col) in read["dst"]}
-        aggs = [Aggregate("charset", t, col, (
-            "isnull(sum(case when charindex("
-            + ("nchar(65533)" if kind in self.UNICODE else "'?'")
-            + f", {self._q(col)}) > 0 then 1 else 0 end), 0)",))
-            for (t, col), kind in sorted(kinds.items())]
-        got = self._value_scan(db, aggs) if aggs else None
+        kinds = self._charset_kinds(read)
+        if scans is None:
+            aggs = self._charset_aggregates(kinds)
+            got = self._value_scan(db, aggs) if aggs else None
+        else:
+            got, aggs = scans, list(scans.of("charset"))
         unread = {}
         for agg in aggs:
             src, dst = got.value("src", agg), got.value("dst", agg)
@@ -1375,7 +1384,7 @@ class MSSQLEngine(DbapiRows, Engine):
             elif int(dst[0]) > int(src[0]):
                 bad.append(f"{agg.table}.{agg.name}: {int(dst[0]) - int(src[0])}"
                            " more rows hold " + (
-                               "U+FFFD" if kinds[(agg.table, agg.name)]
+                               "U+FFFD" if kinds.get((agg.table, agg.name))
                                in self.UNICODE else "a ?") + " on the target")
         if unread:
             return Result("deep", f"{db} charset", "error",
@@ -1389,6 +1398,36 @@ class MSSQLEngine(DbapiRows, Engine):
         return Result("deep", f"{db} charset", "ok",
                       "text columns hold the same character set, and no"
                       " replacement characters appeared on the target")
+
+    def _charset_read(self, db):
+        """Each side's text columns: (table, column) -> (type, code page)."""
+        q = ("select c.table_schema + '.' + c.table_name, c.column_name,"
+             " c.data_type, cast(collationproperty(c.collation_name,"
+             " 'CodePage') as int) from information_schema.columns c where"
+             " c.data_type in ('char', 'varchar', 'nchar', 'nvarchar',"
+             " 'text', 'ntext') and exists (select 1 from"
+             " information_schema.tables t where t.table_schema ="
+             " c.table_schema and t.table_name = c.table_name and"
+             " t.table_type = 'BASE TABLE')")
+        return {side: {(r[0], r[1]): (r[2], r[3]) for r in
+                       self._scoped_rows(db, self._cmd(side, db, q))}
+                for side in ("src", "dst")}
+
+    def _charset_kinds(self, read):
+        """(table, column) -> type of the text columns both sides hold
+        whose rows are counted for what they could not hold."""
+        return {(t, col): kind for (t, col), (kind, _) in read["src"].items()
+                if kind not in ("text", "ntext") and (t, col) in read["dst"]}
+
+    def _charset_aggregates(self, kinds):
+        """A column's rows holding what a narrower character set leaves
+        behind: U+FFFD in a Unicode column, '?' in a code page's."""
+        from ..scanplan import Aggregate
+        return [Aggregate("charset", t, col, (
+            "isnull(sum(case when charindex("
+            + ("nchar(65533)" if kind in self.UNICODE else "'?'")
+            + f", {self._q(col)}) > 0 then 1 else 0 end), 0)",))
+            for (t, col), kind in sorted(kinds.items())]
 
     #: unique and primary keys over text, with their collation and how
     #: many columns the key has
@@ -1553,10 +1592,13 @@ class MSSQLEngine(DbapiRows, Engine):
             count="count_big(*)")
 
     def _value_aggregates(self, db, which):
-        """The aggregates the NULL/empty and float checks (`which`) ask of
-        every column they read."""
+        """The aggregates the charset, NULL/empty and float checks
+        (`which`) ask of every column they read."""
         from ..scanplan import Aggregate
         out = []
+        if "charset" in which:
+            out += self._charset_aggregates(
+                self._charset_kinds(self._charset_read(db)))
         if "nullempty" in which:
             for t, col in self._columns_named(db, self.TEXT_COLUMNS):
                 c = self._q(col)
@@ -1573,11 +1615,12 @@ class MSSQLEngine(DbapiRows, Engine):
         return out
 
     def _deep_scans(self, db):
-        """The NULL/empty and float checks' one plan, or None where it
-        cannot be made - each check then reads, and says, on its own."""
+        """The charset, NULL/empty and float checks' one plan, or None
+        where it cannot be made - each check then reads, and says, on its
+        own."""
         try:
             return self._value_scan(db, self._value_aggregates(
-                db, ("nullempty", "float")))
+                db, ("charset", "nullempty", "float")))
         except Exception:  # noqa: BLE001 - each check says its own error
             return None
 

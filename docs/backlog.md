@@ -10651,13 +10651,15 @@ with its reason (`eta_error`). Proved on fakes in
 `tests/test_every_long_loop_says_its_eta.py`.
 
 Not done: representative sandbox runs for the accuracy gate by engine,
-scale and pressure, and release thresholds. Range threads (`ranges.Slots`)
-do not open their own part units, so a table's statements on other threads
-are not under it and its idle is said only from its own thread. The pair
-engine and its inner engines keep separate ledgers on one file, so unit
-records may be overwritten on disk (in memory they hold). Checks and deep
-loops do not open units yet.
+scale and pressure, and release thresholds. A deep plan's range workers
+open their own part units under their table, `verifiers.each_database`
+a unit a database, and a pair's inner engines keep a ledger file each
+(`attempts.ledger_path`) since W9D.
 
+
+Not done (W9D, 2026-10-16): move range workers (`ranges`) and the
+check loop in `cli` still open no part units; a pair whose two
+sides are the same engine shares one inner ledger file name.
 
 ## P0-CONNECTION-PROGRESS: detect and reconcile client/server progress mismatch
 
@@ -10812,3 +10814,8 @@ Done: a standalone source is followed by a bucket sweep (`MongoEngine.FOLLOW_WAY
 Not done: the oplog rung (`FOLLOW_WAYS` "oplog", `_oplog_follow`) is proved on fakes only (tests/test_a_mongodb_replica_set_is_followed_by_its_oplog.py, written, not run); no live test on a 4.0 replica set or with a refused stream yet; "per range" is its declared consistency because the ladder has no level between per range and as of one moment; the standalone server test is written, not run; `change_parity.py`, the older flat duplicate of this item, is deleted (a5ddd41).
 
 W6D note (6.fkwin, movers.choice, reshard): the foreign-key window now wraps the PostgreSQL streaming copy (`movers._fk_window`, `ForeignKeyWindow(hold=True)`); a whole database's untimed mover gets its trial through `decide.climb(trial=(names, seconds))`, a failed trial kept in `mover-trials.json`; `reshard._spread` refuses with its reason. Not done: the window is not opened around the dump and load (its triggers are already quiet) nor the one-table streaming copy (its rung needs `truncatable`, and concurrent windows on shared keys race); a whole-database trial's box is not enforced during the run, only a failure is kept; not run on a server.
+
+Not done (W9D, 2026-10-16): MySQL and the generic engine still prove a
+table's rows their own way, not through `decide.row_parity`; the row
+text rung on SQL Server reads a range of the whole table (no key
+cuts yet). Proved in tests/test_units_and_row_text_reach_every_engine.py.

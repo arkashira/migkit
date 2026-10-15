@@ -30,7 +30,7 @@ A read that fails stays failed (`Got.failed`): never a value of zero.
 import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import decide
 
@@ -375,6 +375,11 @@ def run(eng, db, aggregates, *, source, query, parts=None, markers=None,
         durable.write_atomic(progress, json.dumps(line, default=str))
 
     def one_table(table):
+        from . import attempts
+        with attempts.work_unit(eng, "deep", f"{db}.{table}"):
+            table_once(table)
+
+    def table_once(table):
         exprs = tables[table]
         wanted = list(exprs)
         mark = {s: (markers(s, table) if markers else None) for s in sides}
@@ -407,8 +412,18 @@ def run(eng, db, aggregates, *, source, query, parts=None, markers=None,
             sums, failed, rows = {}, {}, {}
             with lock:
                 state["planned"] += len(units)
+            at = {u: i for i, u in enumerate(units)}
 
             def unit(u):
+                # each range's worker opens its own part of the table
+                from . import attempts
+                with attempts.work_unit(
+                        eng, "deep", f"{db}.{table} {at[u] + 1}/{len(units)}",
+                        level="range", parent=f"{db}.{table}",
+                        parts=len(units)):
+                    return unit_read(u)
+
+            def unit_read(u):
                 side, chunk, pred = u
                 with lock:
                     state["table"], state["side"] = table, side
@@ -480,3 +495,114 @@ def run(eng, db, aggregates, *, source, query, parts=None, markers=None,
         evidence.save()
     say("incomplete" if got.failed else "complete")
     return got
+
+
+def canon_text(value):
+    """One value as canonical text: alike wherever two servers hold the
+    same value, whatever each renders - a number by its value not its
+    scale, bytes as hex, a time in ISO form, NULL as a byte no text
+    holds."""
+    import datetime
+    import decimal
+    if value is None:
+        return "\x00"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return str(value)
+        got = format(value.normalize(), "f")
+        return "0" if got in ("-0", "0") else got
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    return str(value)
+
+
+def row_canon(row):
+    """A row as one canonical text, its values in their order."""
+    return "\x1f".join(canon_text(v) for v in row)
+
+
+@dataclass
+class RowText:
+    """What `row_text` read: the rows of each side, each range's digest a
+    side, and the first row the two sides hold apart - (the range it is
+    in, its key, what each side holds of it) - or None where every row is
+    alike."""
+    rows: dict = field(default_factory=dict)
+    digests: list = field(default_factory=list)
+    first: tuple = None
+
+    @property
+    def alike(self):
+        return self.first is None and len(set(self.rows.values())) <= 1
+
+
+def row_text(rows, preds=("",), key_width=1, most=1, sides=("src", "dst")):
+    """Every row of both `sides` brought here as canonical text and
+    compared, a key range at a time (`preds`, from `bounded`), as many
+    ranges side by side as `most` and the run's slots allow (`together`).
+    `rows(side, pred)` yields a side's rows of the range in key order, the
+    key's `key_width` values first (0: the whole row is its own key, read
+    in its own order). Each range is hashed a side and its rows walked
+    together, so the first key the two hold apart is named - not just
+    that the table differs."""
+    import hashlib
+    import itertools
+    preds = list(preds) or [""]
+
+    def one(pred):
+        digest = {s: hashlib.blake2b(digest_size=16) for s in sides}
+        count = dict.fromkeys(sides, 0)
+        first = None
+        for pair in itertools.zip_longest(*(iter(rows(s, pred))
+                                            for s in sides)):
+            texts = []
+            for s, r in zip(sides, pair):
+                if r is None:
+                    texts.append(None)
+                    continue
+                t = row_canon(r)
+                digest[s].update(t.encode("utf-8", "surrogatepass") + b"\n")
+                count[s] += 1
+                texts.append(t)
+            if first is None and texts[0] != texts[1]:
+                held = next(r for r in pair if r is not None)
+                key = tuple(canon_text(v) for v in (
+                    held[:key_width] if key_width else held))
+                first = (key, {s: ("absent" if t is None else "differs")
+                               for s, t in zip(sides, texts)})
+        return count, {s: d.hexdigest() for s, d in digest.items()}, first
+
+    got = RowText(rows=dict.fromkeys(sides, 0))
+    for i, (count, digest, first) in enumerate(together(preds, one, most)):
+        for s in sides:
+            got.rows[s] += count[s]
+        got.digests.append(digest)
+        if got.first is None and first is not None:
+            got.first = (preds[i] or "whole table",) + first
+    return got
+
+
+def row_text_line(table, got):
+    """A table's OK/DIFF line from what `row_text` read: the rows and the
+    digest folded over every range, or the first key held apart."""
+    import hashlib
+    if got.alike:
+        whole = hashlib.blake2b(digest_size=16)
+        for d in got.digests:
+            whole.update(next(iter(d.values())).encode())
+        n = next(iter(got.rows.values()), 0)
+        return f"{table}: OK rows={n} checksum={whole.hexdigest()}"
+    if got.first is None:
+        rows = " ".join(f"{s}={n}" for s, n in got.rows.items())
+        return f"{table}: DIFF {rows}"
+    where, key, held = got.first
+    said = ", ".join(f"{s} {h}" for s, h in held.items())
+    rows = " ".join(f"{s}={n}" for s, n in got.rows.items())
+    return (f"{table}: DIFF {rows} first key={'|'.join(key)} ({said})"
+            f" where {where}")

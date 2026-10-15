@@ -6065,7 +6065,7 @@ select json_build_object(
             import re
             est, col = keyed.get(t, (None, None))
             facts = decide.Facts({"server digest": True, "key": col,
-                                  "rows read here": False})
+                                  "rows read here": True})
             need = (("resume by chunk",) if col and (
                 cp.resumed(t) or est is None) else ())
 
@@ -6075,6 +6075,8 @@ select json_build_object(
                     line = one_chunked(t, col)
                     if ": ERROR " in line:
                         raise RuntimeError(line.split(": ERROR ", 1)[1])
+                elif choice.rung.name == "row text":
+                    line = self._row_text(db, t, col, est)
                 else:
                     with gate.unit():
                         a, b = both(csum, t)
@@ -6120,17 +6122,23 @@ select json_build_object(
                 proof.drop(t)
             return line
 
-        lines, rc = [], 0
-        with ThreadPoolExecutor(max_workers=self.hop.workers) as pool:
-            for line in pool.map(one, tables):
-                lines.append(line)
-                if stream:
+        import threading
+        from .. import scanplan
+        said = threading.Lock()
+
+        def told(t):
+            line = one(t)
+            if stream:
+                with said:
                     stream(line)
-                # say what a failure is rather than inferring it from the
-                # absence of the word OK: an UNCHANGED line is neither, and
-                # treating it as a failure made a fully quiet run exit 1
-                if ": DIFF" in line or ": ERROR" in line:
-                    rc = 1
+            return line
+        # the tables as child slots of the run's read pool where it has
+        # one (`scanplan.together`), not a pool of their own beside it
+        lines = scanplan.together(tables, told, self.hop.workers)
+        # say what a failure is rather than inferring it from the absence
+        # of the word OK: an UNCHANGED line is neither, and treating it as
+        # a failure made a fully quiet run exit 1
+        rc = int(any(": DIFF" in x or ": ERROR" in x for x in lines))
         try:
             proof.save()
         except Exception:
@@ -7087,6 +7095,47 @@ select json_build_object(
     #: the server version a block range of a table is read by itself on,
     #: not by a scan of the whole table filtered
     TID_RANGES = 140000
+
+    def _row_text(self, db, t, col, rows=None):
+        """The `decide.ROW_PARITY` row text way for table `t`: every row of
+        both sides read here in the order of its integer key `col` (of the
+        whole row's text where it has none), a key range at a time - as
+        many ranges as the run's plan reads at once and `rows` holds - and
+        compared as canonical text (`scanplan.row_text`). The OK/DIFF line
+        names the first key the sides hold apart."""
+        from .. import scanplan
+        most = scanplan.plan_most(self, db)
+        preds = [""]
+        if col:
+            bounds = self._psql("src", db, f"select coalesce(min({_ident(col)}),"
+                                f"0)||chr(124)||coalesce(max({_ident(col)}),0)"
+                                f" from {self._scope(db, t)}").strip()
+            lo, hi = (int(x) for x in bounds.split("|"))
+            n = scanplan.cuts(rows, most) if rows is not None else most
+            preds = scanplan.bounded(_ident(col), [
+                str(lo + (hi - lo) * i // n) for i in range(1, n)]
+                if hi > lo else [])
+        order = _ident(col) if col else "1"
+        head = f"{_ident(col)}, " if col else ""
+
+        def read(side, pred):
+            conn = self._connect(side, db)
+            try:
+                cur = conn.cursor()
+                cur.execute(f"select {head}row_to_json(t)::text from"
+                            f" {self._scope(db, t)}"
+                            + (f" where {pred}" if pred else "")
+                            + f" order by {order}")
+                while True:
+                    batch = cur.fetchmany(5000)
+                    if not batch:
+                        return
+                    yield from batch
+            finally:
+                conn.close()
+        got = scanplan.row_text(read, preds, key_width=1 if col else 0,
+                                most=most)
+        return scanplan.row_text_line(t, got)
 
     def scan_cuts(self, db, table, most):
         """The predicates a deep check's plan reads `table` in, at most

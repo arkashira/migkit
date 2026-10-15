@@ -199,6 +199,53 @@ class SessionHealth:
         return f"the {where}'s sessions: " + "; ".join(said) if said else ""
 
 
+def engine_name(eng):
+    """The engine `eng` is, as a hop names it."""
+    own = getattr(eng, "CANON_ENGINE", "") or ""
+    return own or type(eng).__name__.lower().removesuffix("engine")
+
+
+def pair_side(eng):
+    """"src" or "dst" where `eng` is one of a pair's inner engines - the
+    side's engine of a hop moving between two engines - else ""."""
+    hop = getattr(eng, "hop", None)
+    if getattr(hop, "engine", "") != "hetero":
+        return ""
+    name = engine_name(eng)
+    if name == "hetero":
+        return ""
+    said = eng.__dict__.get("pair_side")
+    if said:
+        return said
+    from .engines import canonical
+    opts = getattr(hop, "options", None) or {}
+    for side, role, default in (("src", "source_engine", "mysql"),
+                                ("dst", "target_engine", "postgres")):
+        if (canonical(opts.get(role, default)) or opts.get(role)) == name:
+            return side
+    return ""
+
+
+def ledger_path(eng):
+    """Where `eng`'s attempts and units are kept, beside the hop's
+    reports: a pair's inner engine in a file of its own, named by its side
+    and engine, so neither side's unit records overwrite the other's or
+    the pair's."""
+    path = eng.hop.report_dir("") / "attempts.json"
+    side = pair_side(eng)
+    return path.with_name(f"attempts.{side}-{engine_name(eng)}.json") \
+        if side else path
+
+
+def work_unit(eng, kind, name, level="table", parent="", parts=None):
+    """`Engine.work_unit` of `eng`, or nothing where it keeps no ledger
+    (a reader handed in rather than an engine)."""
+    fn = getattr(eng, "work_unit", None)
+    if not callable(fn):
+        return contextlib.nullcontext()
+    return fn(kind, name, level, parent, parts)
+
+
 class Ledger:
     """The attempts of one run's units and the waits each operation took,
     kept in one file (`durable`) so a restart reads what was measured and

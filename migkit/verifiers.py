@@ -815,7 +815,8 @@ def each_database(hop, eng, dbs, fn, workers=None):
     """[(db, fn(db))] in the order of `dbs`, the databases read side by
     side under one read pool of the run (`ranges.ReadPool`), sized as
     `check` sizes its own: whatever a database's verify opens below it
-    borrows from that budget rather than multiplying it. A database whose
+    borrows from that budget rather than multiplying it. Each database is
+    a unit of the check in the attempt ledger (`Engine.work_unit`). A database whose
     `fn` raises gives (db, the exception), and the others still answer."""
     from .ranges import ReadPool
     dbs = list(dbs)
@@ -823,8 +824,13 @@ def each_database(hop, eng, dbs, fn, workers=None):
         return []
     pool = ReadPool(hop, eng, dbs[0], max(1, int(
         workers or getattr(hop, "workers", None) or 1)))
+    from . import attempts
+
+    def unit(d):
+        with attempts.work_unit(eng, "check", d, level="database"):
+            return fn(d)
     try:
-        futs = [pool.submit(fn, d) for d in dbs]
+        futs = [pool.submit(unit, d) for d in dbs]
         out = []
         for d, f in zip(dbs, futs):
             try:

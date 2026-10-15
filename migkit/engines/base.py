@@ -5277,7 +5277,7 @@ class Engine:
         if got is None:
             from .. import attempts
             try:
-                path = str(self.hop.report_dir("") / "attempts.json")
+                path = str(attempts.ledger_path(self))
             except Exception:  # noqa: BLE001 - kept in memory then
                 path = None
             got = self.__dict__.setdefault(
