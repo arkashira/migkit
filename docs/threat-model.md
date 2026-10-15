@@ -33,9 +33,37 @@ and each claim below names the test that holds it.
   dump-and-load move runs, a local copy of the source's data. That copy
   is readable by this user only, and it is removed when the move ends,
   whichever way it ends (`test_the_local_copy_is_private_and_goes.py`).
-  `at_rest` cannot seal a program's own dump; its option `scratch` puts
-  the copy on a volume the operator keeps encrypted or in memory
-  (`test_a_programs_files_go_where_at_rest_says.py`).
+  `at_rest` cannot seal a program's own dump; `at_rest.scratch` puts the
+  copy on a volume the operator keeps encrypted or in memory
+  (`test_a_programs_files_go_where_at_rest_says.py`). Every location and
+  its protection is in [At rest](#at-rest).
+
+## At rest
+
+What stays on the machine that runs migkit after a run, where it lives,
+and what protects it. The paths are the defaults: `MIGKIT_REPORTS` moves
+the report directories, `XDG_STATE_HOME` the state directory, and
+`MIGKIT_TELEMETRY_SPOOL` the telemetry spool. The directories migkit
+makes are `0700`; the state it writes through `durable` is `0600`.
+
+| what | where | protection |
+|---|---|---|
+| summaries and run records: `summary.json`, `verdict.json`, `report.html`, `runs/<run>.jsonl`, `commands.log` | `reports/<hop>/` | not encrypted. The run log and `commands.log` go through the redactor, so no secret the hop holds is written (`test_a_run_keeps_its_own_log.py`) |
+| the change record | `reports/<hop>/changelog.jsonl` | not encrypted. Each entry carries the hash of the one before, so an entry edited, removed or moved shows (`migkit/audit.py`) |
+| values: drilldowns, undo statements, two-way conflicts and parked rows, the evidence export (`data-*`, `undo*`, `conflicts*`, `evidence.*`, `tables.csv`) | the report directory | age-encrypted to the hop's `at_rest` recipients where it names them, plain otherwise (`migkit/evidence.py`, `HOLDS_VALUES`) |
+| a tail's spool of changes set aside for a table | `tail-spool/` beside the tail's state | each frame is pickled and compressed, and sealed to the `at_rest` recipients where named, plain otherwise (`tailtables._pack`) |
+| positions, checkpoints, cutover and move state, the lease | the report directory | written whole and synced, `0600`, by `durable`; not sealed. A position names a point in a stream, not a row |
+| the attempts ledger (`attempts*.json`) | the report directory | written by `durable`; holds each unit's timings and which run closed it; not sealed |
+| restore points, whole rows for an undo | `state_home()/restore-points/<hop>` (a mirror), or the bucket of `state: {backend: s3}` | sealed on the way out, by the first that applies: the `at_rest` recipients, then `MIGKIT_STATE_KEY`, else plain (`state.sealed`) |
+| the local copy of a dump-and-load source | the report directory, or `at_rest.scratch` | `0700` while it exists and removed when the move ends; `at_rest.scratch` names a volume the operator chose and keeps. Not sealed by migkit (`evidence.program_path`) |
+| the masking key and salt | `mask.key` in the state directory (`0600`); `mask.salt` in the hop's report directory | a shown value is a keyed HMAC-SHA256; the key never sits in a report (`migkit/masking.py`) |
+| telemetry events | `state_home()/telemetry`, `0700` | typed fields only, no free text, a bounded local spool, nothing sent (`migkit/telemetry.py`) |
+
+Three things are done to a value, and each only where its option asks:
+it is **encrypted** in a file that holds values, where the hop names
+recipients; it is **masked** in a report, where the hop's `mask` option
+asks; and it is **redacted** from every text migkit writes or sends,
+always (`migkit/redact.py`).
 
 ## Secrets
 
@@ -186,11 +214,15 @@ next move finds the list, and waits instead of writing beside them
 
 A restore point holds whole rows: the undo of a repair. It is kept in a
 mirror directory, or in a bucket, which may have more readers than this
-machine. With `MIGKIT_STATE_KEY` set, a restore point is encrypted
-before it leaves the working directory:
-* Fernet, with a key derived from the passphrase and the point's own
-  salt
-* without the passphrase, or with another one, it is not read back
+machine. It is sealed before it leaves the working directory
+(`state.sealed`), by the first of these that applies:
+* the hop's `at_rest` recipients, where it names them - the same age
+  encryption as the other files that hold values
+* `MIGKIT_STATE_KEY`:
+  * Fernet, with a key derived from the passphrase and the point's own
+    salt
+  * without the passphrase, or with another one, it is not read back
+* neither: the point is written as it is
 
 (`test_state.py`)
 
@@ -202,7 +234,12 @@ attestation (`.github/workflows/release.yml`).
 
 ## Not covered yet
 
-* The report's summaries (`report.html`, `summary.json`, `verdict.json`)
-  are not encrypted at rest. The files that hold values are, where the hop
-  names `at_rest` recipients (see above); for the summaries, use the
-  machine's disk encryption, and `mask` for the values in them.
+* The summaries and run records (`report.html`, `summary.json`,
+  `verdict.json`, `runs/*.jsonl`, `commands.log`), the change record, the
+  positions, checkpoints and the attempts ledger are not encrypted at rest.
+  For these, use the machine's disk encryption; `mask` covers the values
+  a summary shows.
+* Without `at_rest` recipients, a drilldown, an undo, a tail's spool and the
+  evidence export are plain files in the private report directory. A
+  dump's own files are plain while the move runs, whatever the recipients
+  (see `at_rest.scratch`).

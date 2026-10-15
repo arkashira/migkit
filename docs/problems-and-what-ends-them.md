@@ -1098,7 +1098,7 @@ itself first. The repair path built `insert into ... ("id", "v") values
 (...) on conflict ("id") do update set ...` with no `OVERRIDING` clause,
 and calling migkit's own `_apply_upsert` against a generated-always target
 produced the error above - with an ordinary table beside it as a control,
-so the failure was the identity column and not the path. `migkit apply`
+so the failure was the identity column and not the path. `migkit repair`
 could not repair a single row on such a target.
 
 It now looks the column up and emits `OVERRIDING SYSTEM VALUE` only where
@@ -1129,7 +1129,7 @@ server's to write, and it refuses anybody else's value - measured:
 **migkit: Ends it** - `test_generated_columns.py`, on both engines.
 `_apply_upsert` built its column list from the row it was repairing,
 generated column included, and against such a target answered `cannot
-insert a non-DEFAULT value into column "total"`. `migkit apply` could not
+insert a non-DEFAULT value into column "total"`. `migkit repair` could not
 repair a row in any table that had one.
 
 The fix is **not** the one C7 needed, which is why the two are written down
