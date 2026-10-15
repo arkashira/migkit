@@ -695,6 +695,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the cloud's copy is at the source's version and the hop does not name the version to upgrade it to: physical: {upgrade: {version: ...}}
 
+## Stored code carried to another engine
+
+* no code-conversion.json found for <...>
+
+* no draft fix for <...>
+
+* no proposed draft fix for <...>
+
+* proposed draft fix for <...> did not pass proof: <...>
+
 ## Users and grants
 
 * users: engine <...> not supported

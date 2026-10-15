@@ -438,6 +438,9 @@ class Conversion:
         #: per routine, the PL/SQL converter's own estimate, and the
         #: seconds migkit spent converting and proving it (`effort`)
         self.costs, self.seconds = {}, {}
+        #: per routine, draft fixes from candidate rewrites that were tried
+        #: and their proof verdicts; the first passing one is the proposed draft
+        self.draft_fixes = {}
 
     # ---- without a sandbox: as it always was --------------------------------
 
@@ -705,9 +708,74 @@ class Conversion:
             return self._chosen(r, c, made, verdict, reasons)
         self._record(r, "not converted", None, reasons=reasons,
                      constructs=self._constructs(r))
+        self._record_draft_fixes(r, tried, best, reasons)
         head = f"-- {r.kind} {r.name} not converted: no candidate proved"
         return (r.name, "\n".join([head] + [f"--   {x}" for x in reasons]),
                 "; ".join(reasons)[:300] or "no candidate proved")
+
+    def _record_draft_fixes(self, r, tried, best, reasons):
+        """Record draft fixes for a routine that failed conversion.
+
+        Each candidate version that was tried is recorded with its verdict.
+        If any version passed (ok or warn), the first such is marked as the
+        proposed draft fix. All are kept for operator review through approvals.
+        """
+        from .prove import Verdict
+
+        drafts = []
+        proposed = None
+
+        # Record all tried versions with their failure reasons
+        for sql, reason, args in tried:
+            # Determine status from reason (simplified)
+            status = "diff"
+            if "not proved" in reason.lower():
+                status = "not proved"
+            elif "parser refuses" in reason.lower():
+                status = "diff"
+            drafts.append({
+                "sql": sql,
+                "status": status,
+                "reason": reason,
+                "args": args,
+                "proposed": False,
+            })
+
+        # If there was a "best" (warn) version, add it as proposed
+        if best is not None:
+            c, made, verdict = best
+            proposed = {
+                "candidate": c.said,
+                "sql": made.sql,
+                "status": verdict.status,
+                "reason": verdict.reason,
+                "coverage": verdict.coverage,
+                "proposed": True,
+            }
+            # Also add to drafts if not already there
+            if not any(d["sql"] == made.sql for d in drafts):
+                drafts.append({
+                    "sql": made.sql,
+                    "status": verdict.status,
+                    "reason": verdict.reason,
+                    "args": verdict.first.get("args") if verdict.first else None,
+                    "proposed": True,
+                })
+
+        # If any tried version actually passed (shouldn't happen in this code path
+        # since we return early on "ok", but handle it for completeness)
+        for d in drafts:
+            if d["status"] == "ok" and proposed is None:
+                proposed = {"candidate": "unknown", **d}
+                proposed["proposed"] = True
+                break
+
+        self.draft_fixes[r.name] = {
+            "routine": f"{r.kind} {r.name}",
+            "proposed": proposed,
+            "alternatives": drafts,
+            "reasons": reasons,
+        }
 
     def _learn(self, proof, r, accepted, cands, facts):
         """A version other than the rules' proved where the rules' did
@@ -900,6 +968,8 @@ class Conversion:
                  "sandbox": "used" if self.used else
                  (self.why_not or "not named"),
                  **({"sequences": self.sequences} if self.sequences
+                    else {}),
+                 **({"draft_fixes": self.draft_fixes} if self.draft_fixes
                     else {})},
                 indent=1, default=str))
         except OSError:
@@ -957,3 +1027,62 @@ def translatable(pair, db):
         except Refused:
             pass
     return names
+
+
+def apply_draft_fix(hop, db, routine_name):
+    """Apply a proposed draft fix for a routine, through the approvals path.
+
+    Reads the draft fix from code-conversion.json, requires approval via
+    the hop's approvals (using the "repair" step), and applies the fix
+    to the target database.
+    """
+    import json
+    from .prove import Proof
+    from ..approvals import require
+
+    # Read the draft fixes
+    path = hop.report_dir(db) / "code-conversion.json"
+    if not path.exists():
+        raise SystemExit(f"no code-conversion.json found for {db}")
+    data = json.loads(path.read_text())
+    draft_fixes = data.get("draft_fixes", {})
+    if routine_name not in draft_fixes:
+        raise SystemExit(f"no draft fix for {routine_name}")
+    fix = draft_fixes[routine_name]
+    proposed = fix.get("proposed")
+    if not proposed:
+        raise SystemExit(f"no proposed draft fix for {routine_name}")
+    if proposed.get("status") not in ("ok", "warn"):
+        raise SystemExit(f"proposed draft fix for {routine_name} did not pass proof: {proposed.get('reason')}")
+
+    # Require approval (using "repair" step as the closest existing step)
+    detail = {"routine": fix["routine"], "sql": proposed["sql"]}
+    require(hop, "repair", db, detail=detail)
+
+    # Apply the fix
+    sql = proposed["sql"]
+    pair = _get_pair(hop)
+    proof = Proof(pair, db)
+    proof.open(True)
+    try:
+        from .routines import Routine
+        # Create a minimal routine object for the target
+        r = Routine(kind="function", name=routine_name)  # kind may vary
+        proof.b.create(sql.split(";"))
+    finally:
+        proof.close()
+
+    # Record the application
+    from .. import audit
+    audit.append(hop.report_dir() / "changelog.jsonl",
+                 {"op": "apply-draft-fix", "db": db, "routine": routine_name,
+                  "candidate": proposed.get("candidate")})
+
+
+def _get_pair(hop):
+    """Get the engine pair for a hop."""
+    from ..engines.base import get_engine
+    src = get_engine(hop, "src")
+    dst = get_engine(hop, "dst")
+    from ..engines.base import Pair
+    return Pair(hop, src, dst)
