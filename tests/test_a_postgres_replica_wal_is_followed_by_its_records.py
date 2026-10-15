@@ -77,7 +77,10 @@ def test_wal_level_minimal_is_refused_by_every_way():
         facts(wal_level="minimal", **{"wal program": "/bin/x",
                                       "wal dirs": ["/w"]}))
     assert got.rung is None
-    assert all("minimal" in why for _, why in got.passed)
+    why = {r.name: w for r, w in got.passed}
+    assert all("minimal" in why[r] for r in
+               ("logical slot", "wal inspect", "wal dump"))
+    assert "has a key" in why["digest diff"]
 
 
 def test_without_the_functions_the_files_are_read_on_this_machine():
