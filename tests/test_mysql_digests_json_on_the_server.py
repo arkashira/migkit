@@ -317,3 +317,24 @@ def test_the_mysql_server_digests_json_as_the_fold_does(pair, my,
     # the exponent document is folded here, and the digest is the fold's
     assert my.neutral_digest("src", pair.name, "docs", cols,
                              way=way) == whole_folded
+
+
+@needs_docker
+@pytest.mark.parametrize("row, changed", [
+    (0, '{"b": 1, "a": 3}'),
+    (1, '{"a": 1.2, "aa": [1.0, 100, -0.50]}'),
+])
+def test_a_changed_document_changes_the_digest(pair, my, monkeypatch, row,
+                                               changed):
+    """A document the server writes, changed, changes the table's digest,
+    and the digest stays the fold's."""
+    cols = [("id", "integer"), ("j", "json")]
+    where = f"id < {len(DOCS)}"
+    before = my.neutral_digest("src", pair.name, "docs", cols, where=where)
+    pair.src.sql(f"update docs set j = '{changed}' where id = {row}",
+                 pair.name)
+    after = my.neutral_digest("src", pair.name, "docs", cols, where=where)
+    assert after != before and after[0] == before[0]
+    monkeypatch.setattr(my, "_json_in_sql", lambda *a: None)
+    assert my.neutral_digest("src", pair.name, "docs", cols,
+                             where=where) == after

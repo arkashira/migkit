@@ -65,6 +65,10 @@ class _Masks:
     reads), so a value is taken through its transform once: by the
     outermost of them (`_held`)."""
 
+    #: its digest hands the row hash on to the engine's own
+    #: (`leaves.digest_ways`)
+    DIGEST_HANDS_ON = True
+
     def _held(self):
         import threading
         local = self.__dict__.get("_mask_local")
@@ -169,30 +173,34 @@ class _Masks:
                 return
             yield self._masked_rows(at, batch)
 
-    def neutral_digest(self, side, db, table, columns, where=None):
+    def neutral_digest(self, side, db, table, columns, where=None,
+                       way="md5"):
         """A masked table's digest as the target's would be: summed by the
         server over each masked column as its transform makes it, in the
         server's own SQL (`transforms.sql`, where the engine's digest takes
         a computed column and its SQL computes every transform alike);
         else its rows, masked, folded here as every engine that digests in
         this process folds them (`canon.fold_rows`). Never the server's
-        digest of the values as they are."""
+        digest of the values as they are. `way` is the row hash, which the
+        engine's own digest is asked only where it is not md5."""
+        hashed = {"way": way} if way != "md5" else {}
         at = self._mask_at(db, table, columns) \
             if side == "src" and not self._inside() else []
         if not at:
             return super().neutral_digest(side, db, table, columns,
-                                          where=where)
+                                          where=where, **hashed)
         computed = self._mask_sql(columns, at)
         if computed is not None:
             return super().neutral_digest(side, db, table, columns,
-                                          where=where, computed=computed)
+                                          where=where, computed=computed,
+                                          **hashed)
         from .. import canon
         n, total = 0, 0
         classes = [c for _, c in columns]
         for batch in self.neutral_batches(
                 "src", db, table, columns, 5000,
                 **({"where": where} if where else {})):
-            k, total = canon.fold_rows(classes, batch, total)
+            k, total = canon.fold_rows(classes, batch, total, way)
             n += k
         return n, total
 
@@ -983,11 +991,36 @@ class HeteroEngine(Engine):
     def _reader_where(self, db, src_t):
         return self._row_scope(db, src_t)
 
+    def digest_way(self, db, src_t, dst_t=None, sc=None, dc=None):
+        """The row hash every digest of this table takes on both sides of
+        this pair: chosen once a table, the fastest both engines' digests
+        take and equal on both (`leaves.pair_hash`), and kept for the
+        pair's life, so every comparison of it digests alike. Without the
+        columns (a seed exported where the target is not asked), the one
+        chosen already, else md5."""
+        from .. import leaves
+        ways = self.__dict__.setdefault("_digest_ways", {})
+        at = (str(db), self._leaf(src_t))
+        if at not in ways and sc is None:
+            return "md5"
+        if at not in ways:
+            try:
+                ways[at] = leaves.pair_hash(self, db, src_t, dst_t, sc, dc)
+            except Exception as e:  # noqa: BLE001 - md5 is the rung below
+                from .. import runlog
+                runlog.event("leaf hash", f"{db}.{at[1]}: digested by md5,"
+                             " the hash every engine takes - the faster"
+                             f" ones could not be timed ({type(e).__name__})",
+                             level="warn")
+                ways[at] = "md5"
+        return ways[at]
+
     def _digests(self, db, src_t, src_cols, dst_t, dst_cols, wheres):
         """(the source's, the target's) digest of a table: where both
         sides are one engine with a salted digest of its own
         (`same_engine_digest` - Oracle's SHA-256 sum), that, both behind
-        this run's salt; the digest every engine sums otherwise. A table
+        this run's salt; the digest every engine sums otherwise, by the
+        row hash chosen for the table (`digest_way`). A table
         the hop masks is summed from the source's rows as masked
         (`_Masks.neutral_digest`), never by the server over the values as
         they are."""
@@ -996,11 +1029,15 @@ class HeteroEngine(Engine):
         own = (_own_class(src) is _own_class(dst) and not masked
                and callable(getattr(src, "same_engine_digest", None)))
         salt = {"salt": self.digest_salt()} if own else {}
+        way = None if own else self.digest_way(db, src_t, dst_t, src_cols,
+                                               dst_cols)
 
         def one(eng, side, table, cols, where):
-            ask = eng.same_engine_digest if own else eng.neutral_digest
-            got = ask(side, db, table, cols,
-                      **({"where": where} if where else {}), **salt)
+            from .. import leaves
+            filt = {"where": where} if where else {}
+            got = eng.same_engine_digest(side, db, table, cols, **filt,
+                                         **salt) if own else \
+                leaves.digest_with(eng, side, db, table, cols, way, **filt)
             # kept for the evidence, with what takes it again: the columns
             # and their classes, the engine, the filter (`digests`)
             from .. import digests
@@ -1009,7 +1046,7 @@ class HeteroEngine(Engine):
                            if masked and side == "src" else digests.NEUTRAL,
                            salt=salt.get("salt"),
                            engine=getattr(eng, "CANON_ENGINE", None),
-                           columns=cols, where=where)
+                           columns=cols, where=where, way=way)
             return got
         return (one(src, "src", src_t, src_cols, wheres[0]),
                 one(dst, "dst", dst_t, dst_cols, wheres[1]))
@@ -1808,6 +1845,8 @@ class HeteroEngine(Engine):
         if not ks:
             return None
         lo, hi = int(min(ks)), int(max(ks))
+        from .. import leaves
+        way = self.digest_way(db, src_t, dst_t, sc, dc) if src_t else "md5"
 
         def rng(eng, name, extra):
             q = eng._quote_ident(name)
@@ -1815,9 +1854,9 @@ class HeteroEngine(Engine):
             return f"({extra}) and {r}" if extra else r
 
         def theirs():
-            got = self.dst_engine.neutral_digest(
-                "dst", db, dst_t, dc, where=rng(self.dst_engine, dst_key[0],
-                                                dst_where))
+            got = leaves.digest_with(
+                self.dst_engine, "dst", db, dst_t, dc, way,
+                where=rng(self.dst_engine, dst_key[0], dst_where))
             return int(got[0]), str(got[1])
 
         def ours():
@@ -1825,12 +1864,13 @@ class HeteroEngine(Engine):
             # source's server would sum the values as they are
             if src_t and _digests_ranges(self.src_engine) \
                     and not self._masks(db, src_t):
-                got = self.src_engine.neutral_digest(
-                    "src", db, src_t, sc, where=rng(self.src_engine, key[0],
-                                                    src_where))
+                got = leaves.digest_with(
+                    self.src_engine, "src", db, src_t, sc, way,
+                    where=rng(self.src_engine, key[0], src_where))
                 return int(got[0]), str(got[1])
             n, total = canon.fold_rows([c for _, c in sc],
-                                       ([r[i] for i in at] for r in rows))
+                                       ([r[i] for i in at] for r in rows),
+                                       0, way)
             return n, str(total)
         with cf.ThreadPoolExecutor(2) as pool:
             a, b = pool.submit(ours), pool.submit(theirs)
@@ -2530,13 +2570,15 @@ class HeteroEngine(Engine):
             log(f"{key}: done earlier; no column of it can be compared on"
                 " both sides, so it is skipped unchecked")
             return True
+        from .. import leaves
         src_where, dst_where = self._row_scope(db, src_t)
-        a = self.src_engine.neutral_digest(
-            "src", db, src_t, sc, **({"where": src_where} if src_where
-                                     else {}))
-        b = self.dst_engine.neutral_digest(
-            "dst", db, dst_t, dc, **({"where": dst_where} if dst_where
-                                     else {}))
+        way = self.digest_way(db, src_t, dst_t, sc, dc)
+        a = leaves.digest_with(
+            self.src_engine, "src", db, src_t, sc, way,
+            **({"where": src_where} if src_where else {}))
+        b = leaves.digest_with(
+            self.dst_engine, "dst", db, dst_t, dc, way,
+            **({"where": dst_where} if dst_where else {}))
         if (int(a[0]), str(a[1])) == (int(b[0]), str(b[1])):
             log(f"{key}: done earlier, and both sides still hold the same"
                 " rows - skipped")

@@ -403,7 +403,11 @@ def _tables(hop, session, left=None):
     for (db, table, where), sides in sorted(digests.read(hop, session,
                                                          left).items()):
         src, dst = sides.get("src"), sides.get("dst")
-        if src and dst:
+        apart = digests.unlike(src.get("way"), dst.get("way")) \
+            if src and dst else None
+        if apart:
+            status = "not comparable"
+        elif src and dst:
             same = (src.get("rows") == dst.get("rows")
                     and str(src.get("digest")) == str(dst.get("digest")))
             status = "same" if same else "different"
@@ -413,7 +417,10 @@ def _tables(hop, session, left=None):
         row = {"db": db, "table": words(table), "where": words(where),
                "status": status, "method": one.get("method"),
                "salt": one.get("salt"), "at": one.get("at"),
-               "session": one.get("session")}
+               "session": one.get("session"),
+               "way": one.get("way") or "md5"}
+        if apart:
+            row["why"] = apart
         for side, line in (("src", src), ("dst", dst)):
             if not line:
                 continue

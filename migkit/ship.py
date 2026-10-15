@@ -106,7 +106,7 @@ import time
 import zoneinfo
 from dataclasses import dataclass
 
-from . import canon, carriers, decide
+from . import canon, carriers, decide, leaves
 
 FORMAT = 1
 #: bytes of the source's rows a part holds, as the source's catalogue
@@ -915,6 +915,12 @@ def _plan_table(w, src_t):
                        _format_facts(w, src_t, entry))
     entry["format"] = fmt.path
     entry["because"]["format"] = fmt.reason
+    # the row hash every digest of the parts is taken by, here and where
+    # they land: the one the pair chose for the table; md5 for the load's
+    # lines, whose digest line the source's client writes by md5
+    chosen = getattr(w.pair, "digest_way", None)
+    entry["way"] = chosen(db, src_t) if callable(chosen) \
+        and fmt.path != "load lines" else "md5"
     if fmt.path == "binary copy":
         sch, tbl = w.eng._split(src_t)
         entry["copy_columns"] = w.eng._copy_cols(db, sch, tbl)
@@ -1027,16 +1033,23 @@ class _Feed:
             yield rows
 
 
-def _rows_pieces(batches, at, classes, stats):
+def _rows_pieces(batches, at, classes, stats, way="md5"):
     """The plain bytes of a part of rows: each batch pickled as it comes,
-    and folded into the part's digest over the digest's columns."""
+    and folded into the part's digest over the digest's columns by the
+    row hash `way`."""
     total, n = 0, 0
     for rows in batches:
         _, total = canon.fold_rows(classes, ([r[i] for i in at]
-                                             for r in rows), total)
+                                             for r in rows), total, way)
         n += len(rows)
         yield _dumps(rows)
     stats["rows"], stats["digest"] = n, str(total)
+
+
+def _way(entry):
+    """The row hash a table's part digests were taken by: md5 for a
+    manifest written before the hash was chosen."""
+    return entry.get("way") or "md5"
 
 
 def _digest_at(entry):
@@ -1133,14 +1146,15 @@ class _Exporter:
             digests.record(w.hop, w.db, entry["table"], "src", part["rows"],
                            part["digest"], method=digests.NEUTRAL,
                            columns=entry["digest_columns"],
-                           where=part["where"], engine=w.src.CANON_ENGINE)
+                           where=part["where"], engine=w.src.CANON_ENGINE,
+                           way=_way(entry))
 
     # -- the formats -------------------------------------------------------
 
     def rows_part(self, entry, n, batches, extra, late=None):
         at, classes = _digest_at(entry)
         return self._put(entry, n, lambda stats: _rows_pieces(
-            batches, at, classes, stats), extra, late)
+            batches, at, classes, stats, _way(entry)), extra, late)
 
     def binary_part(self, entry, n, where, extra):
         """A part in PostgreSQL's binary copy format, read under the
@@ -1179,7 +1193,7 @@ class _Exporter:
                     raise pg_pass.SnapshotLost(str(e)) from e
                 raise
             count, digest = _pg_digest(conn, qt, entry["digest_columns"],
-                                       where)
+                                       where, _way(entry))
             select = pg._copy_select(qt, entry["copy_columns"], where)
             with conn.cursor() as cur:
                 with cur.copy(f"copy ({select}) to stdout (format binary)"
@@ -1277,12 +1291,14 @@ class _Exporter:
         self.state.save()
 
 
-def _pg_digest(conn, qt, columns, where):
+def _pg_digest(conn, qt, columns, where, way="md5"):
     """(rows, digest) of a range on a PostgreSQL side, the neutral digest
-    the check takes (`canon.digest_expr`), in the session it is asked on."""
+    the check takes (`canon.digest_expr`) by the row hash `way`, in the
+    session it is asked on."""
     row = canon.row_expr("postgres", [tuple(c) for c in columns])
     got = conn.execute(
-        f"select count(*)::text, ({canon.digest_expr('postgres', row)})::text"
+        f"select count(*)::text,"
+        f" ({canon.digest_expr('postgres', row, way)})::text"
         f" from {qt}" + (f" where {where}" if where else "")).fetchone()
     return int(got[0]), str(got[1])
 
@@ -1641,6 +1657,7 @@ class _Target:
         self.sc, self.dc = sc, dc
         self.sc_at = [names.index(n) for n, _ in sc]
         self.same = [list(c) for c in sc] == entry["digest_columns"]
+        self.way = _way(entry)
         _, self.dst_where = pair._row_scope(db, src_t)
         key = entry["key"]
         self.key = key
@@ -1748,12 +1765,12 @@ class _Loader:
                 for batch in _batches_of(r):
                     _, fold_m = canon.fold_rows(
                         tgt.m_classes, ([row[i] for i in tgt.m_at]
-                                        for row in batch), fold_m)
+                                        for row in batch), fold_m, tgt.way)
                     if not tgt.same:
                         _, fold_s = canon.fold_rows(
                             [c for _, c in tgt.sc],
                             ([row[i] for i in tgt.sc_at] for row in batch),
-                            fold_s)
+                            fold_s, tgt.way)
                     n += len(batch)
                     rows = [[row[i] for i in tgt.to_src] for row in batch]
                     rows, _ = w.pair._flatten_absent(rows)
@@ -1798,7 +1815,7 @@ class _Loader:
                             for chunk in iter(lambda: r.read(1 << 16), b""):
                                 cp.write(chunk)
                 got = _pg_digest(conn, qt, tgt.entry["digest_columns"],
-                                 where)
+                                 where, _way(tgt.entry))
                 if got != (int(part["rows"]), str(part["digest"])):
                     raise Different(
                         f"the target holds {got[0]:,} rows digesting"
@@ -1871,8 +1888,8 @@ class _Loader:
         if entry["format"] != "rows":
             proved = "the target's digest of the part in its transaction"
         elif entry["cut"] == "ranges":
-            there = w.dst.neutral_digest("dst", w.db, tgt.dst_t, tgt.dc,
-                                         where=where)
+            there = leaves.digest_with(w.dst, "dst", w.db, tgt.dst_t,
+                                       tgt.dc, tgt.way, where=where)
             if (int(there[0]), str(there[1])) != (n, d):
                 raise Different(
                     f"the target holds {int(there[0]):,} rows digesting"
@@ -1886,7 +1903,8 @@ class _Loader:
         if part.get("upto") is not None:
             digests.record(w.hop, w.db, entry["table"], "dst", n, d,
                            method=digests.NEUTRAL, columns=columns,
-                           where=where, engine=w.dst.CANON_ENGINE)
+                           where=where, engine=w.dst.CANON_ENGINE,
+                           way=tgt.way)
         rec = {"rows": n, "digest": d, "relinked": relinked,
                "last": part.get("last"),
                "seconds": round(time.monotonic() - began, 3)}
@@ -2057,9 +2075,9 @@ class _Loader:
         total = sum(int(p["digest"]) for p in ts["parts"].values())
         dc = tgt.dc if entry["format"] == "rows" else [
             tuple(c) for c in entry["digest_columns"]]
-        there = w.dst.neutral_digest("dst", w.db, tgt.dst_t, dc,
-                                     **({"where": tgt.dst_where}
-                                        if tgt.dst_where else {}))
+        there = leaves.digest_with(w.dst, "dst", w.db, tgt.dst_t, dc,
+                                   tgt.way, **({"where": tgt.dst_where}
+                                               if tgt.dst_where else {}))
         if (int(there[0]), str(there[1])) != (rows, str(total)):
             raise SystemExit(
                 f"{entry['table']}: every part is in, and the target holds"
@@ -2070,10 +2088,10 @@ class _Loader:
         digests.record(w.hop, w.db, entry["table"], "src", rows, str(total),
                        method=digests.NEUTRAL, columns=tgt.sc
                        if entry["format"] == "rows" else dc,
-                       engine=w.src.CANON_ENGINE)
+                       engine=w.src.CANON_ENGINE, way=tgt.way)
         digests.record(w.hop, w.db, entry["table"], "dst", there[0],
                        there[1], method=digests.NEUTRAL, columns=dc,
-                       engine=w.dst.CANON_ENGINE)
+                       engine=w.dst.CANON_ENGINE, way=tgt.way)
         with self.state.lock:
             ts["done"] = True
         self.state.save()

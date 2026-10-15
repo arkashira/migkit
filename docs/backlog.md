@@ -8330,6 +8330,19 @@ range digest, the fenced re-check, exact batches or the final proof.
     still md5 (canon is another ticket's); server-side parallel workers
     as a session setting are not set; the sandbox tests are written, not
     run (no docker in this ticket).
+    Done (CF4): every table digest takes the hash the pair chose once a
+    table (`HeteroEngine.digest_way` over `leaves.pair_hash`, among the
+    hashes both engines' digests take, `leaves.digest_ways`): the check,
+    a batch's ranges, a table done earlier, a seed's parts (the hash kept
+    in the manifest; the load's lines stay md5) and a tail's kept digest;
+    the hash is recorded beside each digest and `digests.unlike` refuses
+    to compare two of different hashes. Proved by
+    `test_every_table_digest_takes_the_chosen_hash.py`. Not done: the
+    chosen hash is kept for the pair's life, not on disk, so a seed
+    exported in a run that never chose one is md5; the leaves' own
+    `fastest_hash` in `localize` is still asked apart; the WAL follow's
+    keys are not yet persisted and a keyless table is still refused
+    there (CF4 part C).
 11. **Only what changed since the last proof:** tables and leaves
     untouched since they were last proved (modification counters,
     the tail's own record of keys touched) are not read again.

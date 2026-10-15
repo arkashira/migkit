@@ -1652,8 +1652,10 @@ class TableSet:
         from . import canon
         pair = self._worker()
         dst_t = self._target(pair, st["name"])
-        if self._digest(pair.dst_engine, "dst", dst_t, st.get("columns")) \
-                != st.get("digest"):
+        kept = st.get("digest")
+        now = self._digest(pair.dst_engine, "dst", dst_t, st.get("columns"),
+                           self._kept_way(kept))
+        if (now or [])[:2] != (kept or [])[:2]:
             self.log(f"{leaf}: its target changed while it was out of the"
                      " tail - copying it instead")
             return self._fall_back(leaf, stop, st["name"])
@@ -1712,12 +1714,23 @@ class TableSet:
     def _target(self, pair, name):
         return pair._tail_target(pair._tail_targets(self.db), name, self.db)
 
-    def _digest(self, eng, side, table, cols):
+    def _digest(self, eng, side, table, cols, way="md5"):
+        """[rows, digest, row hash] of a table's side by the row hash
+        `way` (`leaves.digest_with`) - kept with it, so the side is taken
+        again by the same hash it was kept by."""
+        from . import leaves
         if not cols:
             return None
-        got = eng.neutral_digest(side, self.db, table,
-                                 [tuple(c) for c in cols])
-        return [int(got[0]), str(got[1])]
+        got = leaves.digest_with(eng, side, self.db, table,
+                                 [tuple(c) for c in cols], way)
+        return [int(got[0]), str(got[1]), way]
+
+    @staticmethod
+    def _kept_way(kept):
+        """The row hash a kept digest was taken by: md5 for one kept
+        before the hash was chosen (two numbers)."""
+        return kept[2] if isinstance(kept, list) and len(kept) > 2 \
+            else "md5"
 
     def _digest_removed(self, leaf, stop):
         """What the target of a table that left the tail holds, and the
@@ -1735,7 +1748,9 @@ class TableSet:
                 self.db, pair.src_engine, name, pair.dst_engine, dst_t)
         except Exception:  # noqa: BLE001 - its source is gone
             shape, dc = None, []
-        digest = self._digest(pair.dst_engine, "dst", dst_t, dc)
+        way = pair.digest_way(self.db, name) \
+            if callable(getattr(pair, "digest_way", None)) else "md5"
+        digest = self._digest(pair.dst_engine, "dst", dst_t, dc, way)
         if not stop.is_set():
             with self.lock:
                 self.events.append(("digested", leaf, {

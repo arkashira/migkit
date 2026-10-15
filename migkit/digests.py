@@ -74,21 +74,23 @@ def _plain(v):
 
 
 def record(hop, db, table, side, rows, digest, *, method, keys=None,
-           sql=None, salt=None, engine=None, columns=None, where=None):
+           sql=None, salt=None, engine=None, columns=None, where=None,
+           way=None):
     """One side's digest of one table, as the check took it: `rows`
     counted and `digest` summed by `method`, with the key digest where
     one rode along, the statement run where the server summed, the
     run's salt, the engine, the columns as (name, class) where values
-    were rendered one way on both sides, and the row filter or range the
-    digest was taken over. Never raises: a record that cannot be written
-    costs the export this line, not the check its answer."""
+    were rendered one way on both sides, the row hash it took (`way`,
+    `leaves.pair_hash`) and the row filter or range the digest was taken
+    over. Never raises: a record that cannot be written costs the export
+    this line, not the check its answer."""
     from . import session
     line = {"session": session.current(), "at": time.strftime("%F %T"),
             "db": str(db), "table": str(table), "side": side,
             "rows": _count(rows), "digest": str(digest), "method": method}
     for k, v in (("keys", keys), ("sql", sql), ("salt", salt),
                  ("engine", engine), ("columns", columns),
-                 ("where", where)):
+                 ("where", where), ("way", way)):
         if v not in (None, "", [], ()):
             line[k] = _plain(v)
     try:
@@ -105,6 +107,19 @@ def record(hop, db, table, side, rows, digest, *, method, keys=None,
                      f" be kept ({type(e).__name__}); the evidence lists"
                      " this table without it", level="warn", db=str(db),
                      table=str(table))
+
+
+def unlike(a, b, why=None):
+    """None where two digests were taken by the same row hash (md5 where
+    a line names none, as every digest before the hash was chosen), else
+    why the two are not compared: digests by different hashes differ
+    whatever the rows hold."""
+    a, b = a or "md5", b or "md5"
+    if a == b:
+        return None
+    return ((f"{why}: " if why else "") + f"a digest taken by {a} is not"
+            f" compared with one taken by {b} - both sides must be digested"
+            " by the same hash; take both again (`migkit check`)")
 
 
 def unwritten(session):

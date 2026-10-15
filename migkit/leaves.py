@@ -1735,16 +1735,19 @@ HASH_WAYS = (
 )
 
 
-def fastest_hash(work, a, b, salt, costs=None):
+def fastest_hash(work, a, b, salt, costs=None, among=None):
     """(way, Choice): the hash this table's leaves take - the rung of
     `HASH_WAYS` climbed on its measured rate (`probe`, both sides at
-    once), only among those whose SQL equals the fold here on both sides;
-    md5 where nothing else holds. Logged with what it stood on."""
+    once), only among those whose SQL equals the fold here on both sides
+    (and, where given, in `among`: the hashes both sides' table digests
+    take); md5 where nothing else holds. Logged with what it stood on."""
     costs = decide.Costs() if costs is None else costs
     spec = Spec("hash", salt=salt)
     facts = decide.Facts({"keyed": bool(a.key and b.key)},
                          probe=lambda: _probe_both(a, b, spec, costs))
-    got = decide.climb(work, HASH_WAYS, facts, costs=costs)
+    rungs = HASH_WAYS if among is None else tuple(
+        r for r in HASH_WAYS if r.name == "md5" or r.name in among)
+    got = decide.climb(work, rungs, facts, costs=costs)
     way = got.rung.name if got.rung is not None else "md5"
     timed = dict(facts["probe"]) if "probe" in facts else {}
     rows = timed.pop("rows", (0, None))[0]
@@ -1761,6 +1764,64 @@ def fastest_hash(work, a, b, salt, costs=None):
                  refused={w: why for w, (_, why) in timed.items() if why})
     return way, got
 
+
+
+def digest_ways(eng):
+    """The row hashes `eng`'s table digest takes (`neutral_digest`'s
+    `way`), md5 first: those its server's SQL writes
+    (`canon.DIGEST_HASHES`) where its digest takes a hash at all, md5
+    alone where it takes no other. A digest that hands the hash on to the
+    one it wraps (`DIGEST_HANDS_ON`: a masked source's) takes it only
+    where that one does too."""
+    import inspect
+    found = [c.__dict__["neutral_digest"] for c in type(eng).__mro__
+             if "neutral_digest" in c.__dict__]
+    if not found and callable(getattr(eng, "neutral_digest", None)):
+        found = [eng.neutral_digest]
+    found = found[:2 if getattr(eng, "DIGEST_HANDS_ON", False) else 1]
+    try:
+        takes = bool(found) and all(
+            "way" in inspect.signature(f).parameters for f in found)
+    except (TypeError, ValueError):
+        takes = False
+    sql = canon.DIGEST_HASHES.get(
+        canon.dialect(getattr(eng, "CANON_ENGINE", None) or ""), {})
+    return ("md5",) + tuple(w for w in HASHES
+                            if w != "md5" and takes and w in sql)
+
+
+def pair_hash(pair, db, src_t, dst_t, sc, dc):
+    """The row hash both sides' digests of a table take: md5 where the
+    two engines' digests share no other (`digest_ways`), else the hash
+    `fastest_hash` measures fastest and equal on both, among those they
+    share. Asked once a table (`HeteroEngine.digest_way` keeps it)."""
+    among = [w for w in digest_ways(pair.src_engine)
+             if w in digest_ways(pair.dst_engine)]
+    if among == ["md5"]:
+        return "md5"
+    got = sides(pair, db, src_t, dst_t, sc, dc, (None, None))
+    if got is None:
+        return "md5"
+    a, b = got
+    way, _ = fastest_hash(f"{db}.{pair._leaf(src_t)}", a, b,
+                          pair.digest_salt(), among=among)
+    return way
+
+
+def digest_with(eng, side, db, table, columns, way="md5", **kw):
+    """`eng.neutral_digest` of a table by the row hash `way`: md5 asked as
+    every engine's digest takes it; another only of an engine whose digest
+    takes it (`digest_ways`) - SystemExit, with the reason, where it does
+    not, since a digest by another hash is never compared with one by
+    `way` (`digests.unlike`)."""
+    if way != "md5":
+        if way not in digest_ways(eng):
+            from . import digests
+            raise SystemExit(digests.unlike(way, "md5", why=(
+                f"the {getattr(eng, 'CANON_ENGINE', None) or 'engine'}"
+                f" digest of {table} takes no {way}")))
+        kw["way"] = way
+    return eng.neutral_digest(side, db, table, columns, **kw)
 
 # --- leaves gathered in parallel ---------------------------------------------
 
