@@ -54,9 +54,9 @@ in these historical totals.
 | Status | S | M | L | Total |
 |---|---|---|---|---|
 | DONE | 106 | 145 | 33 | 284 |
-| PARTLY | 13 | 26 | 20 | 59 |
+| PARTLY | 13 | 27 | 21 | 61 |
 | IN PROGRESS | 0 | 1 | 7 | 8 |
-| OPEN | 16 | 32 | 10 | 58 |
+| OPEN | 16 | 31 | 9 | 56 |
 | BLOCKED | 10 | 4 | 6 | 20 |
 | NOT PURSUED | 8 | 1 | 0 | 9 |
 | **Total** | 153 | 209 | 76 | **438** |
@@ -73,9 +73,9 @@ in these historical totals.
 | conversion | 29 | 1 | 0 | 1 | 0 | 0 | 31 |
 | security | 10 | 5 | 0 | 1 | 2 | 1 | 19 |
 | ease of use | 19 | 2 | 1 | 3 | 1 | 1 | 27 |
-| operations/scale | 26 | 10 | 0 | 10 | 5 | 3 | 54 |
+| operations/scale | 26 | 12 | 0 | 8 | 5 | 3 | 54 |
 | tools used whole | 32 | 6 | 0 | 2 | 0 | 0 | 40 |
-| **Total** | 284 | 59 | 8 | 58 | 20 | 9 | **438** |
+| **Total** | 284 | 61 | 8 | 56 | 20 | 9 | **438** |
 
 ## Items
 
@@ -362,10 +362,10 @@ in these historical totals.
 | 278 | LT.C4 | Redis/Valkey two-site active-active rules | OPEN | L | two-way | L3951-3952, L4521-4522 |
 | 279 | LT.C5 | XStream's job: LogMiner on a migkit Oracle Free mining instance (mining on a standby) | OPEN | M | change follow | L3935, L3953, L4522-4524, L4547 |
 | 280 | LT.C6 | RIOT-X's live mode made lossless (PSYNC client or IDLETIME sweep) | OPEN | M | change follow | L4524-4525 |
-| 281 | LT.P1 | A mover that scales itself on the source's stress (range queue, k8s/ECS/SSH workers) | OPEN (review 2026-10-16: `migkit/pipeline_ha.py` and `AdaptiveMoverThrottler` do not exist; `throttle.py` slows verification on lag and load, it does not scale the mover's workers) | M | operations/scale | L4526-4528 |
+| 281 | LT.P1 | A mover that scales itself on the source's stress (range queue, k8s/ECS/SSH workers) | PARTLY (2026-10-16: the range queue is `claims` - one record per table in the store the hop's machines agree through, chosen by `shared.choose` from what the hop offers: bucket, shared directory or the target's own table; every claim conditional and numbered, the target fencing each range to its number; workers per machine sized by the decision engine and again every third of the term as machines join. Not built: migkit starting workers on k8s, ECS or over SSH itself) | M | operations/scale | L4526-4528 |
 | 282 | LT.P2 | Seeding from ZFS/LVM/EBS snapshots, only changed blocks, fast-forwarded | OPEN | M | move | L4528-4530, L7049-7052 |
 | 283 | LT.P3 | Zero-ETL-like continuous hop for any source and warehouse | OPEN | L | change follow | L4530-4531 |
-| 284 | W1 | Mover HA and scale-out: standby takeover within seconds; one table's ranges across machines with a conditional-write checkpoint | OPEN (review 2026-10-16: `migkit/pipeline_ha.py`, `MoverHACoordinator` and `AtomicLeaseStore` do not exist; `lease.py` holds a write lease, with no mover standby takeover or fencing epoch) | L | operations/scale | L4568-4573, L4955-4957 (31), L6244-6251 (R5); WAVE queue |
+| 284 | W1 | Mover HA and scale-out: standby takeover within seconds; one table's ranges across machines with a conditional-write checkpoint | PARTLY (2026-10-16: built in `ha` (standby takeover within the term), `lease` (a number one higher at every taking), `fencing` (the target refuses a lower number), `claims` (ranges across machines, conditional claim and done) and `fleet` (the taker puts the stopped mover's range claims back at once, reconciles what its ledger left open, audits a finished table for a range lost or twice); proved on fake stores by `test_a_standby_mover_takes_over_and_fences.py` and `test_a_lease_carries_a_number_the_next_holder_goes_above.py`, on containers by `test_a_standby_takes_the_move_over_where_it_stood.py` and `test_one_table_is_copied_across_machines.py`. Not done: `ha` does not call `fleet.take_over` yet; targets other than PostgreSQL and MySQL hold no number) | L | operations/scale | L4568-4573, L4955-4957 (31), L6244-6251 (R5); WAVE queue |
 | 285 | W2 | The estate: discovery, sizing from performance history, cost, fleet, REST API, Terraform provider, K8s operator, OIDC/SAML/SCIM | OPEN (review 2026-10-16: `pipeline_ha.py`, which sized from fixed thresholds on a toy simulator and was reached from no command, is deleted (31136fb); discovery, sizing from performance history, cost, fleet, REST API, Terraform provider, K8s operator and OIDC/SAML/SCIM are not built) | L | operations/scale | L4604-4629; P0-SCENARIOS L2866; WAVE 601f198, 9af737e |
 | 286 | W4.a | Transformation in flight (joins, enrichment, windows) as hop rules under the same verify: each batch of changes an Arrow table, the hop's `transform:` SQL run over it in DuckDB and the result written through the same exact batches, the verify running the same SQL over the source's rows | IN PROGRESS (stopped, work in its worktree: launched, no edits yet) (supersedes "ETL not pursued" and the 0e open question) | L | move | L783-787, L4635-4650; WAVE 'PAUSED 2026-10-01 07:17' |
 | 287 | W4.b | Format-preserving encryption and tokenization | OPEN | M | security | L4635-4650 |

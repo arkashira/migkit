@@ -5518,6 +5518,19 @@ the gaps nothing above covers yet, now items of their own.
   a standby is copied by the pair's table copier; a physical seed is
   refused with a standby; targets other than PostgreSQL and MySQL
   (MariaDB) cannot hold a number yet, and a standby is refused over them.
+  *Takeover of shared ranges (2026-10-16, `fleet`):* the machine that
+  takes a hop's lease over puts the stopped mover's range claims back at
+  once (`fleet.departed`, one conditional write), not after their own
+  term; reads what the stopped mover's ledger left open (`fleet.opened`,
+  read only) into an account of ranges done, taken back, held and left
+  (`fleet.reconcile`); and a finished table's record is audited for a
+  range lost or copied twice (`fleet.audit`). Proved on fake stores
+  (`test_a_standby_mover_takes_over_and_fences.py`, written, not run):
+  two movers, a lease lapse, the takeover, the stopped mover's late
+  write, done and renewal refused, every row once. *Not done:* `ha` and
+  `claims.copy` do not call `fleet.take_over` yet (the taker still waits
+  out a range claim's term), and nothing opens a range unit in the
+  ledger under `fleet.unit_name` while it copies.
 * **W2. The estate, not the hop.** Discovery of every database on a
   network or account, target sizing from the source's performance
   history (Azure's SKU recommendations, Fleet Advisor), cost of the
