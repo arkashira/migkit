@@ -332,3 +332,163 @@ def test_the_publication_is_made_and_taken_off_as_a_change(tmp_path,
     assert any(s.startswith("drop publication") for s in taken), taken
     assert any("pg_drop_replication_slot" in s for s in taken), taken
     assert sourcechange.left_on_source(hop) == []
+
+
+# --- the two ways costed (backlog P0-SMART.route) -----------------------------
+
+def _measured(rtt_ms=40.0, row_bytes=200.0):
+    known = {"target": dict(GOOD["target"]),
+             "source": dict(GOOD["source"], rows=1_000_000,
+                            bytes=row_bytes * 1_000_000,
+                            row_bytes=row_bytes),
+             "rtt_ms": rtt_ms}
+    from migkit import sourcechange
+    hop = _hop(server_to_server=True)
+    facts = decide.Facts({"engine": "postgres", "hop": hop, "go": False,
+                          "db": "app", "legs": known,
+                          "rtt": {"src": 45.0, "dst": 50.0},
+                          "published": ['"public"."t"']})
+    sourcechange.put_answers(hop, facts, legs.rungs())
+    return facts
+
+
+def test_every_way_of_the_legs_and_the_passes_says_what_it_loads():
+    """The guard: a rung of these lists without `loads` is one the cost
+    model can only guess at."""
+    from migkit import leaves
+    ways = [("legs", r) for r in legs.rungs()]
+    ways += [(p.name, r) for p in leaves.PASSES for r in p.rungs]
+    bare = [f"{part}/{r.name}" for part, r in ways if not r.loads]
+    assert not bare, bare
+    for _, r in ways:
+        assert all(isinstance(v, (int, float)) and v >= 0
+                   for _, v in r.loads), r
+
+
+def test_a_way_without_loads_has_no_prediction_from_the_resource_model():
+    """Negative: why the guard above holds every rung to saying it."""
+    from types import SimpleNamespace
+
+    from migkit import costmodel as cm
+    stages = {"source": SimpleNamespace(per_stream=10 * 2 ** 20)}
+    said = decide.Rung("said", "a way that says it", loads={"source": 1})
+    bare = decide.Rung("bare", "a way that does not")
+    m = cm.CostModel("t", (said, bare), knowledge=False,
+                     model=SimpleNamespace(stages=stages),
+                     unit={"rows": 1000, "bytes": 2 ** 20})
+    assert m.estimate("said") is not None
+    assert m.estimate("bare") is None
+
+
+def test_the_legs_costs_follow_the_measured_round_trip_and_row():
+    near = {r.name: r for r in legs.rungs(_measured(rtt_ms=1.0))}
+    far = {r.name: r for r in legs.rungs(_measured(rtt_ms=50.0))}
+    assert far["pgsubscribe"].startup == pytest.approx(
+        (legs.PULL_TRIPS + legs.SUBSCRIBE_TRIPS) * 0.05)
+    assert far["pgsubscribe"].startup > far["pgpull"].startup
+    assert near["pgsubscribe"].startup < far["pgsubscribe"].startup
+    # the pull's fetch is sized from the round trip and the row
+    assert far["pgpull"].trips == pytest.approx(
+        1000.0 / legs._fetch_rows(200.0, 0.05))
+    wide = {r.name: r for r in legs.rungs(_measured(row_bytes=50_000.0))}
+    assert wide["pgpull"].trips > far["pgpull"].trips
+    # the list wanted alone asks no server for these facts
+    asked = decide.Facts({}, legs=lambda: pytest.fail("asked the servers"))
+    assert {r.name for r in legs.rungs(asked)} == {"pgpull", "pgsubscribe"}
+
+
+def test_a_unit_is_the_sources_mean_row_over_the_servers_link():
+    assert legs.unit(_measured(), 250_000) == {
+        "rows": 250_000, "bytes": 50_000_000.0, "rtt": 0.04}
+    assert legs.unit(_measured())["rows"] == 1_000_000
+    # where the target never timed the source: this machine's farther side
+    assert legs.unit(_measured(rtt_ms=None), 10)["rtt"] == pytest.approx(
+        0.05)
+
+
+def _legs_trials(log=None):
+    from migkit import costmodel as cm
+    f = _measured()
+    ways = legs.rungs(f)
+    unit = legs.unit(f, 100_000)
+    m = cm.CostModel("app: server to server", ways,
+                     pair="postgres->postgres", knowledge=False, unit=unit)
+    return (decide.Trials("app: server to server", ways, f, model=m,
+                          unit=unit, log=log), unit,
+            {r.name: r for r in ways})
+
+
+def test_a_pull_measured_slower_loses_and_the_reason_names_it():
+    t, unit, _ = _legs_trials()
+    seconds = {"pgpull": 3.0, "pgsubscribe": 1.0}
+    tried = []
+    for _ in range(4):
+        got = t.pick(unit)
+        assert got.rung is not None, got.reason
+        tried.append(got.path)
+        t.took(got.path, 100_000, seconds[got.path], unit)
+    assert set(tried) == {"pgpull", "pgsubscribe"}, tried
+    got = t.pick(unit)
+    assert got.path == "pgsubscribe", got
+    words = got.reason.split("; measured here a unit: ", 1)
+    assert len(words) == 2, got.reason
+    # the chosen way first, each with what it was measured at
+    assert words[1].startswith("a temporary subscription on the target ~")
+    assert "the target pulling from the source ~" in words[1]
+    assert "measured" in words[1]
+
+
+def test_the_switch_from_the_pull_is_said_with_its_measurements():
+    said = []
+    t, unit, by = _legs_trials(log=said.append)
+    # the work stood on the pull, and both ways were measured since: the
+    # pull the slower on every range
+    t._on = by["pgpull"]
+    for _ in range(2):
+        t.took("pgpull", 100_000, 3.0, unit)
+        t.took("pgsubscribe", 100_000, 1.0, unit)
+    t._why = ""
+    assert t.pick(unit).path == "pgsubscribe"
+    assert said, "the switch was not said"
+    line = said[-1]
+    assert line.startswith("app: server to server: a temporary subscription"
+                           " on the target for what is left, where the"
+                           " target pulling from the source went before"), \
+        line
+    assert "~" in line and "measured" in line, line
+
+
+def test_each_range_the_pull_carries_is_timed_into_the_trials(monkeypatch):
+    class Cur:
+        rowcount = 250_000
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql):
+            pass
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+    monkeypatch.setattr(legs, "_connect", lambda *a, **k: Conn())
+    seen = []
+
+    class Timed:
+        def took(self, name, units, seconds, unit=None):
+            seen.append((name, units, unit))
+    lf = dict(_measured()["legs"])
+    work = [("public.big", "insert 1"), ("public.big", "insert 2")]
+    legs._run_ranges(_hop(), "app", work, 2, "none", None, Timed(), lf)
+    assert [s[:2] for s in seen] == [("pgpull", 250_000)] * 2
+    assert seen[0][2] == {"rows": 250_000, "bytes": 50_000_000.0,
+                          "rtt": 0.04}

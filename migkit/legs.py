@@ -235,7 +235,17 @@ select exists(select 1 from pg_largeobject_metadata),
                 where c.relkind in ('r', 'p')
                   and n.nspname not in ('pg_catalog', 'information_schema')
                   and n.nspname not like 'pg\\_%'
-                  and not pg_has_role(c.relowner, 'USAGE')))
+                  and not pg_has_role(c.relowner, 'USAGE'))),
+       (select coalesce(sum(pg_table_size(c.oid)), 0)::bigint
+          from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where c.relkind = 'r'
+           and n.nspname not in ('pg_catalog', 'information_schema')
+           and n.nspname not like 'pg\\_%'),
+       (select coalesce(sum(greatest(c.reltuples, 0)), 0)::bigint
+          from pg_class c join pg_namespace n on n.oid = c.relnamespace
+         where c.relkind = 'r'
+           and n.nspname not in ('pg_catalog', 'information_schema')
+           and n.nspname not like 'pg\\_%')
 """
 
 
@@ -262,16 +272,23 @@ def facts(hop, db=None):
     try:
         conn = _connect(hop.source, db)
         try:
-            lobs, version, wal, repl, slots, senders, publish = _one(
-                conn, SOURCE_FACTS_SQL)
+            (lobs, version, wal, repl, slots, senders, publish, size,
+             rows) = _one(conn, SOURCE_FACTS_SQL)
         finally:
             conn.close()
         out["source"] = {"large_objects": lobs, "version": version,
                          "wal_level": wal, "replication": bool(repl),
                          "free_slots": slots, "free_senders": senders,
-                         "may_publish": bool(publish)}
+                         "may_publish": bool(publish), "bytes": int(size or 0),
+                         "rows": int(rows or 0),
+                         "row_bytes": int(size) / int(rows) if rows else None}
     except Exception as e:  # noqa: BLE001
         out["source"] = {"error": _words(e)}
+    # the target's own round trip to the source, where a pull's proof timed
+    # it, and where the subscription's change on the source stands: what
+    # the two ways are costed and climbed on (`rungs`, `unit`)
+    out["rtt_ms"] = servers_seen(hop)
+    out["publication"] = _publication_stand({"legs": out, "hop": hop})
     return out
 
 
@@ -291,13 +308,67 @@ def _unasked(f):
     return None
 
 
-def rungs():
+#: round trips the temporary subscription takes before its first row, past
+#: the pull's: 2.0 seconds against the pull's 1.05 for one 40 MB range over
+#: a 50 ms link, alike at 0 ms (the module's table)
+SUBSCRIBE_TRIPS = 20
+#: round trips the pull takes to make its foreign server and import a
+#: schema's tables before its first fetch
+PULL_TRIPS = 4
+#: what a byte of each way passes, by the stages of the resource model
+#: (`model.Stage`): both read the source once, write the target once and
+#: cross the servers' own link once, never this machine's; the
+#: subscription's source also decodes its log for the slot
+LOADS = {"pgpull": {"source": 1, "target": 1, "link:servers": 1},
+         "pgsubscribe": {"source": 2, "target": 1, "link:servers": 1}}
+
+
+def _rtt_s(f):
+    """The servers' round trip to each other, seconds: the target's own to
+    the source where a pull's proof timed it, else this machine's to the
+    farther side, else 0."""
+    ms = ((f or {}).get("legs") or {}).get("rtt_ms")
+    if ms is None:
+        seen = [v for v in ((f or {}).get("rtt") or {}).values()
+                if isinstance(v, (int, float))]
+        ms = max(seen) if seen else None
+    return float(ms) / 1000 if ms is not None else 0.0
+
+
+def _known(f):
+    """The facts of `f` already read, never asking a server for one:
+    `rungs` is called where only the list is wanted (`doctor`,
+    `movers._ladder`)."""
+    if f is None:
+        return {}
+    return {k: dict.__getitem__(f, k) for k in ("legs", "rtt") if k in f}
+
+
+def unit(f, rows=None):
+    """A unit of the server-to-server work for `costmodel` - `rows` of it,
+    the source's whole where None: its bytes at the source's mean row and
+    the servers' round trip."""
+    src = ((f or {}).get("legs") or {}).get("source") or {}
+    n = int(rows if rows is not None else src.get("rows") or 0)
+    per = float(src.get("row_bytes") or 0)
+    return {"rows": n, "bytes": per * n, "rtt": _rtt_s(f)}
+
+
+def rungs(f=None):
     """The two ways a PostgreSQL database's rows go server to server, as
     `movers._ladder` rungs, in the order measured (see the module's
-    table): the needs each has of the hop and the servers, and the proof
-    the pull gives at the start of a move."""
+    table): the needs each has of the hop and the servers, the proof the
+    pull gives at the start of a move, and what each costs - the
+    resources a byte of it passes (`LOADS`), the round trips before its
+    first row and a thousand rows' fetches, from the round trip and row
+    width the facts `f` already hold (the floor's where they hold none) -
+    so `decide.Trials` with a cost model weighs them on measured ranges."""
     from .decide import Need, Rung
     from .movers import _moves
+    known = _known(f)
+    rtt = _rtt_s(known)
+    width = ((known.get("legs") or {}).get("source") or {}).get("row_bytes")
+    fetches = 1000.0 / _fetch_rows(width, rtt or 0.001)
     leave = Need("the hop's leave",
                  lambda f: allowed(f.get("hop")),
                  "{rung} leaves objects on the servers while it runs, and"
@@ -334,7 +405,8 @@ def rungs():
         prove=lambda f: (prove_pull(f["hop"], f.get("db"))
                          if f.get("go") else None),
         because="the rows cross the network once, from server to server",
-        footprint=1,
+        footprint=1, loads=LOADS["pgpull"], startup=PULL_TRIPS * rtt,
+        trips=fetches,
         leaves="on the target, while it runs: a foreign server, a user"
                " mapping with the source's credentials and a schema of"
                " foreign tables for each of the source's schemas, and the"
@@ -376,7 +448,8 @@ def rungs():
                          if f.get("go") else None),
         because="the rows cross the network once, in the servers' own"
                 " binary form",
-        footprint=2, changes=(PUBLICATION,),
+        footprint=2, changes=(PUBLICATION,), loads=LOADS["pgsubscribe"],
+        startup=(PULL_TRIPS + SUBSCRIBE_TRIPS) * rtt,
         leaves="a publication and a slot on the source, and a subscription"
                " on the target - all taken away when the copy ends")
     return (pull, subscribe)
@@ -752,9 +825,10 @@ def pull_move(hop, db, workers, go, log):
         Step(phase("pull", tables=len(carried), workers=workers,
                    routed=len(routed)))]
     try:
-        logged = facts(hop, db)["target"].get("logs_ddl")
+        lf = facts(hop, db)
     except Exception:  # noqa: BLE001
-        logged = None
+        lf = {}
+    logged = (lf.get("target") or {}).get("logs_ddl")
     steps[1:1] = _tls_note(hop)
     if logged:
         steps.insert(1, "# the target logs DDL statements, and one of them"
@@ -785,9 +859,11 @@ def pull_move(hop, db, workers, go, log):
             local = fp.import_tables(sch, tbls, fetch)
             for t in tbls:
                 work += _table_work(hop, eng, db, sch, t, local, known)
+        t = trials(hop, db, lf, log)
         with movers._IndexWindow(hop, db, workers, log):
-            _run_ranges(hop, db, work, workers, quiet, log)
+            _run_ranges(hop, db, work, workers, quiet, log, t, lf)
             fp.drop_credentials()
+        t.save()
     movers._pg_carry_sequences(hop, db, log)
     movers._pg_finish_created(hop, db, log)
     return steps
@@ -854,10 +930,34 @@ def _table_work(hop, eng, db, sch, tbl, local, known):
                              f" and {_q(key)} < {b}") for a, b in spans]
 
 
-def _run_ranges(hop, db, work, workers, quiet, log):
+def trials(hop, db, lf, log=None):
+    """The server-to-server ways' `decide.Trials` for one database, on a
+    cost model kept with the hop (`legs/`) whose prior is each way's
+    `LOADS` and round trips: every range the pull carries and every copy
+    the subscription makes is timed into it (`took`), so the next choice
+    between them stands on what this hop measured - and a switch is said
+    with the measurements it stood on."""
+    from . import sourcechange
+    from .costmodel import CostModel
+    from .decide import Facts, Trials
+    f = Facts({"engine": "postgres", "hop": hop, "db": db, "legs": lf},
+              rtt=lambda: round_trips(hop, db))
+    ways = rungs(f)
+    # the hop's answers to the subscription's change, as the move's own
+    # choice puts them
+    sourcechange.put_answers(hop, f, ways)
+    work = f"{db}: server to server"
+    typical = unit(f, RANGE_ROWS)
+    model = CostModel(work, ways, pair="postgres->postgres", unit=typical,
+                      hop=hop, prefix="legs/")
+    return Trials(work, ways, f, model=model, unit=typical, log=log)
+
+
+def _run_ranges(hop, db, work, workers, quiet, log, timed=None, lf=None):
     """Each statement on one of `workers` connections to the target, one
-    transaction each; the first failure stops the rest and is raised in
-    the target's words."""
+    transaction each and timed into the trials `timed` as a unit of the
+    pull at the source's mean row (`lf`, `facts`); the first failure stops
+    the rest and is raised in the target's words."""
     import queue
     todo = queue.Queue()
     for w in work:
@@ -880,9 +980,13 @@ def _run_ranges(hop, db, work, workers, quiet, log):
                         label, sql = todo.get_nowait()
                     except queue.Empty:
                         return
+                    t0 = time.monotonic()
                     cur.execute(sql)
                     n = cur.rowcount
                     conn.commit()
+                    if timed is not None and n > 0:
+                        timed.took("pgpull", n, time.monotonic() - t0,
+                                   unit({"legs": lf}, n))
                     with lock:
                         rows, ranges = done.get(label, (0, 0))
                         done[label] = (rows + max(n, 0), ranges + 1)
@@ -992,9 +1096,12 @@ def subscribe_move(hop, db, workers, go, log, poll=0.5):
                                            "published": _published(carried)},
                         on_source, db, log or (lambda m: None)):
                     try:
+                        t0 = time.monotonic()
                         _subscribe(dst, name, dials, binary)
                         _wait_copied(dst, name, len(carried), log, poll,
                                      stall.seconds())
+                        _timed_copy(hop, db, carried, time.monotonic() - t0,
+                                    log)
                     finally:
                         # the slot is the subscription's until it goes
                         _drop_copy(src, dst, name)
@@ -1007,6 +1114,21 @@ def subscribe_move(hop, db, workers, go, log, poll=0.5):
         dst.close()
     movers._pg_carry_sequences(hop, db, log)
     return steps
+
+
+def _timed_copy(hop, db, carried, seconds, log):
+    """The subscription's whole copy timed into the hop's trials, as one
+    unit of its rows: what the next choice against the pull reads."""
+    try:
+        lf = facts(hop, db)
+    except Exception:  # noqa: BLE001 - nothing timed, nothing learned
+        return
+    whole = unit({"legs": lf})
+    if whole["rows"] <= 0 or not carried:
+        return
+    t = trials(hop, db, lf, log)
+    t.took("pgsubscribe", whole["rows"], seconds, whole)
+    t.save()
 
 
 def _subscribe(dst, name, dials, binary):

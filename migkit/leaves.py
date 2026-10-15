@@ -1180,6 +1180,15 @@ def _two_readings(f):
     return bool(f.get("two readings") or f.get("disagreed"))
 
 
+#: what a byte of a table passes on each pass's way (`decide.Rung.loads`,
+#: the resource model's stages): read on both sides; folded into leaves
+#: here as well; read back across both links; read twice a side; nothing
+_BOTH = {"source": 1, "target": 1}
+_FOLDED = dict(_BOTH, cpu=1)
+_ACROSS = dict(_BOTH, **{"link:src": 1, "link:dst": 1})
+_TWICE = {"source": 2, "target": 2}
+_NOTHING = {"source": 0, "target": 0}
+
 PASSES = (
     decide.Part("prove", (
         _R("kept", "the leaves the tail kept up, only those touched lately"
@@ -1191,12 +1200,13 @@ PASSES = (
                      " and a tail whose position the kept leaves match"),),
            because="the proof kept as the data moved: only the leaves the"
                    " last changes touched are read",
-           footprint=1,
+           footprint=1, loads=_BOTH,
            fits=lambda ch: ch["keep"].name == "kept" or
            "the kept leaves are the ones the tail keeps"),
         _R("scan", "one scan a side for the table's digest and every leaf",
            gives=frozenset({"byte exact", "keyless"}),
-           because="every leaf of the digest comes out of the one scan"),
+           because="every leaf of the digest comes out of the one scan",
+           loads=_FOLDED),
     )),
     decide.Part("leaves", (
         _R("range", "leaves by ranges of the integer key, read back by its"
@@ -1210,11 +1220,11 @@ PASSES = (
                      "a side is read into this process whole, so a range"
                      " of its key is no cheaper to read back than a hash")),
            because="a range of an integer key holds the same rows on both"
-                   " sides and is read back by its index"),
+                   " sides and is read back by its index", loads=_BOTH),
         _R("hash", "leaves by a hash of the key's canonical text",
            gives=frozenset({"keyless"}),
            because="the key's canonical text hashes alike on both sides,"
-                   " whatever its type or collation"),
+                   " whatever its type or collation", loads=_FOLDED),
     )),
     decide.Part("localize", (
         _R("sketch", "a sketch of the differences, decoded here",
@@ -1235,11 +1245,11 @@ PASSES = (
                      " no more than the sketch")),
            prove=lambda f: f.get("sketch failed"),
            because="bytes in proportion to the differences, in one round"
-                   " trip"),
+                   " trip", loads=dict(_BOTH, cpu=2)),
         _R("leaf reads", "reading back only the leaves that differ",
            needs=(_chosen("leaf reads"),),
            because="only the leaves that differ are read, and each is held"
-                   " to its digest"),
+                   " to its digest", loads=_ACROSS),
         _R("groups", "the groups whose aggregates differ when read a second"
                      " way, their rows read back and held to the digests",
            needs=(_chosen("groups"),
@@ -1254,7 +1264,8 @@ PASSES = (
                      " text - and only integer across two engines")),
            prove=lambda f: f.get("groups failed"),
            because="the second reader's aggregates per group rule out the"
-                   " groups that agree, and only the others are read back"),
+                   " groups that agree, and only the others are read back",
+           loads=_TWICE),
         _R("bisection", "the bisecting reader over every column, each row it"
                         " names read back and held to the digests",
            needs=(_chosen("bisection"),
@@ -1271,7 +1282,7 @@ PASSES = (
                      " read both engines")),
            prove=lambda f: f.get("bisection failed"),
            because="measured the cheaper here, and what it names is held"
-                   " to migkit's own digests"),
+                   " to migkit's own digests", loads=dict(_ACROSS, **_TWICE)),
     )),
     decide.Part("confirm", (
         _R("generations", "what differs read again, generation by"
@@ -1284,16 +1295,19 @@ PASSES = (
            because="a source written while it is read differs in the"
                    " leaves still being written; each generation reads"
                    " again only what still differs, past the tail's"
-                   " position where one runs, until it holds still"),
+                   " position where one runs, until it holds still",
+           holds={"consistent": "as of one moment"}, loads=_TWICE),
         _R("fenced", "held to the totals, then asked again past the tail's"
                      " position", needs=(_N("a tail running",
                                             lambda f: bool(f.get("tail")),
                                             "no tail runs, so there is no"
                                             " position to wait past"),),
            because="a difference still arriving through the tail is"
-                   " waited for, not reported"),
+                   " waited for, not reported",
+           holds={"consistent": "as of one moment"}, loads=_BOTH),
         _R("totals", "held to the difference of the two tables' totals",
-           because="the rows found must add up to the whole difference"),
+           because="the rows found must add up to the whole difference",
+           holds={"consistent": "per range"}, loads=_BOTH),
     )),
     decide.Part("keep", (
         _R("kept", "leaves kept up by the tail between proofs",
@@ -1301,10 +1315,10 @@ PASSES = (
                      lambda f: bool(f.get("kept")),
                      "{rung} needs the hop to keep its proof (keep_proof)"
                      " and a tail whose position the kept leaves match"),),
-           footprint=1,
+           footprint=1, loads={"memory": 1},
            because="each change moves the leaves it touches on both sides"),
         _R("again", "read again at the next proof",
-           because="nothing is kept between proofs"),
+           because="nothing is kept between proofs", loads=_BOTH),
     )),
     decide.Part("second", (
         _R("none", "no second reading",
@@ -1315,7 +1329,7 @@ PASSES = (
                                  and f.get("localizer") != "bisection")),
                      "the hop asks for two readings, or migkit's own"
                      " digest disagreed"),),
-           because="migkit's own digest is the proof"),
+           because="migkit's own digest is the proof", loads=_NOTHING),
         _R("row hash", "a second reading by another reader's row hash",
            needs=(_N("two readings", _two_readings),
                   _N("the second reader installed for both engines",
@@ -1323,7 +1337,7 @@ PASSES = (
                      "the second reader is not installed, or does not"
                      " read both engines")),
            because="an independent reading, through another library and"
-                   " other SQL"),
+                   " other SQL", loads=_ACROSS),
         _R("bisection", "a second reading by bisection",
            fits=lambda ch: ch["localize"].name != "bisection" or (
                "the bisecting reader already localized the rows"),
@@ -1332,7 +1346,8 @@ PASSES = (
                      lambda f: bool(f.get("bisection reader")),
                      "the bisecting reader is not installed, or does not"
                      " read both engines")),
-           because="an independent reading that bisects the key range"),
+           because="an independent reading that bisects the key range",
+           loads=dict(_ACROSS, **_TWICE)),
     )),
 )
 
@@ -1349,8 +1364,11 @@ class _Localizer:
         return self.costs.get(f"localize/{name}", default)
 
 
-def strategy(work, facts, costs=None, keep=None):
-    """The passes for one table (`decide.compose` over `PASSES`).
+def strategy(work, facts, costs=None, keep=None, unit=None):
+    """The passes for one table, weighed whole (`decide.space` over
+    `PASSES`) on the leaves' measured rates for this table's `unit` (its
+    rows): per table, never one pass for the run, and only among the
+    combinations reaching the strongest guarantees any does.
 
     The localizer is climbed on its own first (`decide.climb`, on its own
     measured costs): the other passes cost what they cost whichever way
@@ -1362,7 +1380,8 @@ def strategy(work, facts, costs=None, keep=None):
                        costs=_Localizer(costs))
     if loc.rung is not None:
         facts["localizer"] = loc.rung.name
-    got = decide.compose(work, PASSES, facts, costs=costs, keep=keep)
+    got = decide.space(work, PASSES, facts, costs=costs, keep=keep,
+                       unit=unit).best
     if got and loc.rung is not None:
         got.reasons["localize"] = loc.reason
     return got
@@ -1568,7 +1587,7 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
     if a.key and rows <= pair.DRILL_CAP and not facts["written"]:
         return None
     costs = decide.HopCosts(pair.hop, "verify passes/")
-    strat = strategy(f"{db}.{name}", facts, costs)
+    strat = strategy(f"{db}.{name}", facts, costs, unit={"rows": rows})
     if not strat:
         return f"; rows not localised: {strat.why_not}"
     salt = pair.digest_salt()
@@ -1650,7 +1669,7 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
                                   costs=_Localizer(costs),
                                   switch=decide.only_blocked)
         # the rest of the passes, climbed with what the localizers said
-        strat = strategy(work, facts, costs) or strat
+        strat = strategy(work, facts, costs, unit={"rows": rows}) or strat
     if isinstance(found, Said):
         return found
     return Said(_clause(pair, db, name, a, b, found, strat, rows, gens))

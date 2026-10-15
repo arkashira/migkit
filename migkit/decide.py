@@ -519,8 +519,34 @@ class Trials:
                 if not self.model.measured(got.rung.name):
                     self._timing.add(got.rung.name)
             else:
-                self._settle(got)
+                got = self._said(got, u)
+                self._settle(got, u)
             return got
+
+    def _measurements(self, chosen, unit):
+        """The ways measured on this work, the chosen first, each with
+        what it was measured at on `unit` - or "" where fewer than two
+        were: what a choice between them stood on, in words."""
+        if chosen is None or self.model is None:
+            return ""
+        ways = [chosen] + [r for r in self.rungs if r.name != chosen.name]
+        got = []
+        for r in ways:
+            if not self.model.measured(r.name):
+                continue
+            e = self.model.estimate(r.name, unit)
+            if e is not None:
+                got.append(f"{r.said} {e.said()}")
+        return ", ".join(got) if len(got) > 1 else ""
+
+    def _said(self, got, unit):
+        """The choice with the measurements it stood on in its reason."""
+        words = self._measurements(got.rung, unit)
+        if not words:
+            return got
+        import dataclasses
+        return dataclasses.replace(
+            got, reason=f"{got.reason}; measured here a unit: {words}")
 
     def _may_explore(self, unit):
         """Whether this unit may try a way not measured here yet."""
@@ -558,14 +584,16 @@ class Trials:
                              f" {limit.most} at a time")
         return k
 
-    def _settle(self, got):
-        """The way the work stands on now; a change of it said."""
+    def _settle(self, got, unit=None):
+        """The way the work stands on now; a change of it said, with the
+        measurement it stood on."""
         if got.rung is None:
             return
         was, self._on = self._on, got.rung
         if was is None or was.name == got.rung.name or self.log is None:
             return
-        why = self._why or "what was measured since"
+        why = (self._why or self._measurements(got.rung, unit)
+               or "what was measured since")
         self.log(f"{self.work}: {got.rung.said} for what is left, where"
                  f" {was.said} went before - {why}")
         self._why = ""

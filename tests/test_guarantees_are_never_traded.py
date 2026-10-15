@@ -161,3 +161,34 @@ def test_the_strongest_is_the_first_guarantee_first():
     keep, out = g.reaching(["p", "r"], {"p": proved, "r": resumable}.get)
     assert keep == ["p"] and out[0][0] == "r"
     assert "correct" in out[0][1]
+
+
+def test_a_verify_pass_never_trades_a_guarantee_for_speed():
+    """The verify passes per table (`leaves.strategy`, weighed whole by
+    `decide.space`): on a source written while it was read, the confirm
+    held to the totals alone - measured the fastest by far - is left out
+    for one that reads until the differences hold still; where nothing
+    is written it is the only confirm, and taken."""
+    from migkit import leaves
+    costs = d.Costs({"confirm/totals": 0.001, "confirm/generations": 5.0,
+                     "confirm/fenced": 4.0})
+    written = {"kept": False, "key": "integer", "sql": True,
+               "written": True, "tail": True}
+    got = leaves.strategy("db.t", written, costs, unit={"rows": 10_000})
+    assert got, got.why_not
+    assert got.parts["confirm"].name in ("generations", "fenced"), got
+    assert dict(got.guarantees)["consistent"] == "as of one moment"
+    still = {"kept": False, "key": "integer", "sql": True,
+             "written": False, "tail": False}
+    got = leaves.strategy("db.t", still, costs, unit={"rows": 10_000})
+    assert got.parts["confirm"].name == "totals", got
+    # the guarantee, not the list's order, keeps the totals out: with the
+    # totals listed first it is still left out under writes
+    from migkit import guarantees as g
+    confirm = next(p for p in leaves.PASSES if p.name == "confirm")
+    by = {r.name: r for r in confirm.rungs}
+    assert g.of([by["totals"]])["consistent"] < g.of(
+        [by["generations"]])["consistent"]
+    kept, short = d._strongest([by["totals"], by["generations"]])
+    assert [r.name for r in kept] == ["generations"], kept
+    assert short and short[0][0].name == "totals"
