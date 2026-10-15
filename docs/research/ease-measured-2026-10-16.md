@@ -1,6 +1,6 @@
-# Address-only ease measurements
+# Address-only ease: method only, nothing measured yet
 
-Run `python tools/ease_measure.py` while the local sandbox is running.
+No pair has been measured: every run below was attempted with the local sandbox stopped, so no verified time, config-line count or question count is claimed. The table records the pairs the method covers. To measure, start the sandbox and run `python tools/ease_measure.py`; it writes this page again with the numbers.
 
 Each run starts with empty local configuration and state. Only two addresses and their passwords are supplied to init; no operator configuration is written. Generated configuration is not operator effort. Sandbox creation and seeding are outside the timer.
 
