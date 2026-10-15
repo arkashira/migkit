@@ -635,6 +635,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the cutover did not start, nothing was written: <...><...> | . To tear the stream down anyway, as an abandoned migration rather than a cutover: MIGKIT_CUTOVER=unproven
 
+* the cutover did not start, nothing was written: <...>
+
 * the stream was left up: <...> is still being written - <...>. Stop the application's writes (step 2) and run this again
 
 * the stream was left up: it has not carried everything the source has (<...> at <...>). Tearing it down now would lose that; run this again once it has caught up

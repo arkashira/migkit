@@ -26,13 +26,24 @@ schema does not name it.
 
 Only JSON Schema is written (`JsonEncoder`, `format: jsonschema` on a Kafka
 target). Protobuf is not, and says why (`WHY_NOT_WRITTEN`).
+
+The same file holds the neutral shape of a database's tables and the one
+comparer of two (backlog AUD-H, SC1): every engine's schema check reads its
+catalogue into `neutral` - per table the columns with their neutral class,
+capacity, nullability, default and collation, the key, the indexes, the
+foreign keys and the rest - and `compare` reports what differs the same way
+for every pair. Across two engines the shapes are compared as converted
+(class and capacity, not spelling); an aspect the two cannot be held to is
+named in `Comparison.unread`, never passed.
 """
 import base64
+import dataclasses
 import datetime
 import functools
 import json
 import re
 import struct
+import typing
 import uuid
 
 from . import registry as _registry
@@ -760,3 +771,275 @@ def _proto_record(sid, text, body):
         return _filled(msg, got)
     except Undecodable as e:
         raise Undecodable(f"schema {sid} (Protobuf): {e}")
+
+
+# --- the neutral shape of tables, and the one comparer ------------------------
+
+class Col(typing.NamedTuple):
+    name: str
+    #: migkit's class of the declared type (`canon.type_class`), None where
+    #: the engine's type has none
+    cls: object
+    #: the numbers a type is declared with: (50,) for varchar(50),
+    #: (10, 2) for numeric(10,2)
+    capacity: tuple
+    nullable: bool
+    default: object
+    collation: object
+    declared: str
+    extra: str
+
+
+@dataclasses.dataclass
+class NeutralTable:
+    columns: list
+    key: tuple = ()
+    #: {(columns, unique, definition)}
+    indexes: frozenset = frozenset()
+    #: {(columns, ref table, ref columns)}
+    fks: frozenset = frozenset()
+    others: frozenset = frozenset()
+
+
+@dataclasses.dataclass
+class Difference:
+    table: str
+    #: "table", "column", "type", "capacity", "null", "default", "extra",
+    #: "collation", "key", "index", "foreign key", "other"
+    kind: str
+    detail: str
+    #: "diff" stops a cutover; "note" is said (a target with more than the
+    #: source had)
+    level: str = "diff"
+
+
+@dataclasses.dataclass
+class Comparison:
+    differences: list = dataclasses.field(default_factory=list)
+    #: [(table, aspect, why)] the two sides cannot be held to each other in
+    unread: list = dataclasses.field(default_factory=list)
+    compared: int = 0
+
+    def diffs(self):
+        return [d for d in self.differences if d.level == "diff"]
+
+
+_CAPACITY = re.compile(r"\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)")
+_NUMBERED = re.compile(r"identity|auto_?increment|serial|generated|sequence",
+                       re.I)
+
+
+def capacity(declared):
+    """The numbers a declared type carries in its first parentheses."""
+    got = _CAPACITY.search(str(declared or ""))
+    return tuple(int(x) for x in got.groups() if x is not None) if got else ()
+
+
+def neutral(engine, catalog, takes=None):
+    """{table: NeutralTable} from a `catalog.Catalog` read on `engine`
+    (`canon` name). `takes(table)` leaves out what the hop does not move."""
+    from . import canon
+    out = {}
+    for t in catalog.tables:
+        if takes is not None and not takes(t):
+            continue
+        cols = [Col(c.name, canon.type_class(engine, c.declared),
+                    capacity(c.declared), bool(c.nullable), c.default,
+                    c.collation, str(c.declared or ""), c.extra or "")
+                for c in catalog.columns.get(t) or []]
+        out[t] = NeutralTable(
+            cols, tuple(catalog.keys.get(t) or ()),
+            frozenset((tuple(i.columns), bool(i.unique), i.definition or "")
+                      for i in catalog.indexes.get(t) or []),
+            frozenset((tuple(f.columns), f.ref_table, tuple(f.ref_columns))
+                      for f in catalog.fks.get(t) or []),
+            frozenset(str(o) for o in catalog.others.get(t) or []))
+    return out
+
+
+def _narrower(src, dst):
+    return any(d < s for s, d in zip(src, dst))
+
+
+def compare(src, dst, same_engine, pairs=None, columns=None):
+    """What differs between two `neutral` shapes, one `Difference` each.
+
+    `same_engine`: one engine's both sides, compared as declared (type
+    spelling, defaults, collation, definitions); across two engines by
+    class and capacity, a default by being there, and what the two cannot
+    be held to named in `unread`. `pairs` is [(source table, target table)]
+    (else tables pair by lower-cased name); `columns` is {source table:
+    {source column: target column}} for a mapping that renames."""
+    out = Comparison()
+    fold = (lambda x: x) if same_engine else str.lower
+    if pairs is None:
+        by = {fold(t): t for t in dst}
+        pairs = [(t, by[fold(t)]) for t in src if fold(t) in by]
+    names = dict(pairs)
+    taken = set(names.values())
+    for t in src:
+        if t not in names:
+            out.differences.append(Difference(
+                t, "table", "on the source and not on the target"))
+    for t in dst:
+        if t not in taken:
+            out.differences.append(Difference(
+                t, "table", "on the target and not on the source", "note"))
+    for st, dt in pairs:
+        if st not in src or dt not in dst:
+            continue
+        out.compared += 1
+        _table(out, st, src[st], dst[dt], same_engine, fold,
+               (columns or {}).get(st) or {}, names)
+    return out
+
+
+def _table(out, t, a, b, same, fold, renamed, names):
+    def add(kind, detail, level="diff"):
+        out.differences.append(Difference(t, kind, detail, level))
+
+    def skip(aspect, why):
+        out.unread.append((t, aspect, why))
+
+    def there(col):
+        return fold(renamed.get(col, col))
+
+    theirs = {fold(c.name): c for c in b.columns}
+    forward = {there(c.name): fold(c.name) for c in a.columns}
+    for c in a.columns:
+        d = theirs.get(there(c.name))
+        if d is None:
+            add("column", f"{c.name} is on the source and not on the target")
+            continue
+        _column(c, d, same, add, skip, t)
+    for n, d in theirs.items():
+        if n not in forward:
+            add("column", f"{d.name} is on the target and not on the"
+                          " source", "note")
+    if not same:
+        skip("collation", "the two engines name collations differently")
+        skip("checks and triggers", "each is written in its engine's own"
+                                    " language")
+    elif a.others != b.others:
+        for o in sorted(a.others - b.others):
+            add("other", f"{o} is on the source and not on the target")
+        for o in sorted(b.others - a.others):
+            add("other", f"{o} is on the target and not on the source",
+                "note")
+
+    def mapped(cols):
+        return tuple(there(c) for c in cols)
+
+    if mapped(a.key) != tuple(fold(c) for c in b.key):
+        add("key", f"({', '.join(a.key)}) on the source,"
+                   f" ({', '.join(b.key)}) on the target")
+
+    def index(x):
+        cols, unique, definition = x
+        return (mapped(cols), unique, definition if same else "")
+    mine_i = {index(x): x for x in a.indexes}
+    theirs_i = {(tuple(fold(c) for c in x[0]), x[1],
+                 x[2] if same else ""): x for x in b.indexes}
+    for k in sorted(set(mine_i) - set(theirs_i)):
+        add("index", f"{'unique ' if k[1] else ''}index over"
+                     f" ({', '.join(mine_i[k][0])}) is on the source and"
+                     " not on the target")
+    for k in sorted(set(theirs_i) - set(mine_i)):
+        add("index", f"{'unique ' if k[1] else ''}index over"
+                     f" ({', '.join(theirs_i[k][0])}) is on the target and"
+                     " not on the source", "note")
+    mine_f = {(mapped(c), fold(names.get(r, r)), tuple(
+        fold(x) for x in rc)): (c, r) for c, r, rc in a.fks}
+    theirs_f = {(tuple(fold(c) for c in x[0]), fold(x[1]), tuple(
+        fold(c) for c in x[2])): x for x in b.fks}
+    for k in sorted(set(mine_f) - set(theirs_f)):
+        c, r = mine_f[k]
+        add("foreign key", f"({', '.join(c)}) -> {r} is on the source and"
+                           " not on the target")
+    for k in sorted(set(theirs_f) - set(mine_f)):
+        add("foreign key", f"({', '.join(theirs_f[k][0])}) ->"
+                           f" {theirs_f[k][1]} is on the target and not on"
+                           " the source", "note")
+
+
+def _column(c, d, same, add, skip, table):
+    n = c.name
+    if same:
+        if c.declared.strip().lower() != d.declared.strip().lower():
+            add("type", f"{n} is {c.declared} on the source and"
+                        f" {d.declared} on the target")
+    elif c.cls is None or d.cls is None:
+        skip(f"{table}.{n} type", f"{c.declared} -> {d.declared} has no"
+                                  " neutral class on "
+                                  + ("the source" if c.cls is None
+                                     else "the target"))
+    elif c.cls != d.cls:
+        add("type", f"{n} is {c.declared} ({c.cls}) on the source and"
+                    f" {d.declared} ({d.cls}) on the target")
+    elif _narrower(c.capacity, d.capacity):
+        add("capacity", f"{n} is {c.declared} on the source and the"
+                        f" narrower {d.declared} on the target - a value"
+                        " that fits the source is cut or refused there")
+    if c.nullable != d.nullable:
+        add("null", f"{n} is NOT NULL on the source and takes NULL on the"
+                    " target" if not c.nullable else f"{n} takes NULL on"
+                    " the source and not on the target - a NULL the source"
+                    " holds is refused")
+    if same:
+        if (c.default is None) != (d.default is None) or (
+                c.default is not None and str(c.default) != str(d.default)):
+            add("default", f"{n} defaults to {c.default} on the source and"
+                           f" to {d.default} on the target")
+        if (c.collation or None) != (d.collation or None):
+            add("collation", f"{n} is {c.collation} on the source and"
+                             f" {d.collation} on the target")
+        if c.extra != d.extra:
+            add("extra", f"{n} is {c.extra or 'plain'} on the source and"
+                         f" {d.extra or 'plain'} on the target")
+    else:
+        if (c.default is None) != (d.default is None):
+            add("default", f"{n} defaults to {c.default} on the source and"
+                           f" to {d.default} on the target" if c.default
+                is not None else f"{n} has no default on the source and"
+                                 f" {d.default} on the target")
+        if bool(_NUMBERED.search(c.extra)) != bool(_NUMBERED.search(d.extra)):
+            add("extra", f"{n} is numbered by the engine on "
+                         + ("the source and not the target"
+                            if _NUMBERED.search(c.extra) else
+                            "the target and not the source"))
+
+
+def results(got, db, probes_seen=None):
+    """A `Comparison` as `Result`s for `check_schema`: a table that differs
+    is a "diff" of its own; with nothing apart the answer is "ok" - or a
+    "warn" saying what the two could not be held to (`util.Probes`)."""
+    from .engines.base import Result
+    from .util import Probes
+    out = []
+    by = {}
+    for d in got.differences:
+        by.setdefault(d.table, []).append(d)
+    for t, found in sorted(by.items()):
+        hard = [d for d in found if d.level == "diff"]
+        if not hard:
+            continue
+        out.append(Result(
+            "schema", f"{db}.{t}", "diff",
+            "; ".join(d.detail for d in hard[:4])
+            + (f" (and {len(hard) - 4} more)" if len(hard) > 4 else ""), "",
+            "make the target's table match the source's, then run the check"
+            " again"))
+    notes = [d for d in got.differences if d.level == "note"]
+    if out:
+        return out
+    probes = Probes("table aspects")
+    for t in range(got.compared):
+        probes.done(f"table {t}")
+    for t, aspect, why in got.unread:
+        probes.failed(f"{t} {aspect}", why)
+    status, detail = probes.verdict(
+        "ok", f"{got.compared} tables compared"
+        + (f"; also on the target: {'; '.join(d.table + ' ' + d.detail for d in notes[:3])}"
+           if notes else ""))
+    out.append(Result("schema", db, status, detail))
+    return out

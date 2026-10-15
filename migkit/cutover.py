@@ -93,7 +93,7 @@ import subprocess
 import threading
 import time
 
-from . import failpoint
+from . import diagnostics, failpoint
 from .hopkeys import opt
 
 #: in the order they run; each is a failpoint `cutover.<phase>`
@@ -485,7 +485,6 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
     def add(level, what):
         out.append((level, what))
 
-    budget = conf["budget"] if conf else None
     from .hopkeys import topology
     if topology(hop) == "two_way" or (hop.options or {}).get("two_way"):
         add("fail", "the hop streams both ways (two_way), and a"
@@ -511,6 +510,10 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         leg.kind, leg.why + " - drained by a mark on the source, and left"
                             " to whoever runs it"))
     probes = _probes(hop, leg, dbs, conf)
+    window = fresh_window(conf)
+    taken = diagnostics.accumulator(hop)
+    for d in dbs:
+        taken.record("lag", d, probes[d], probes[d][2])
     drain = drain_way(hop, eng, leg, conf, probes)
     marked = drain.rung is not None and drain.rung.name == "mark"
     how = conf["freeze"] if conf else "operator"
@@ -568,23 +571,7 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
                       f" the freeze and found on the target - {probes[d][3]}")
         else:
             out += _position_rows(hop, leg, d, conf, gate, probes[d])
-        for side, name in (("src", "source"), ("dst", "target")):
-            try:
-                left = freeze.open_work(hop, eng, d, side,
-                                        budget if side == "src" else None)
-            except Exception as e:  # noqa: BLE001 - said as the reason
-                left = [f"open transactions could not be read ({e})"]
-            prepared = [x for x in left if x.startswith("prepared")]
-            if prepared:
-                add("fail", f"{d} {name}: " + "; ".join(prepared[:3])
-                    + " - a prepared transaction outlives every session"
-                      " and commits whenever it is told, after any"
-                      " position a drain waits for")
-            long = [x for x in left if not x.startswith("prepared")]
-            if long and side == "src":
-                add(gate, f"{d} source: " + "; ".join(long[:3])
-                    + (f" - open longer than the {budget:g}s budget"
-                       if conf else " - still being written"))
+        out += _open_work_rows(hop, eng, d, conf, gate, window)
         if chosen:
             for line in freeze.cannot(hop, eng, d, chosen):
                 add("fail", f"{d}: {line}")
@@ -607,6 +594,11 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
         out += _slot_rows(hop, eng, d)
         if _reverse(hop):
             out += _reverse_rows(hop, eng, d, gate)
+    out += _verify_rows(hop, conf, gate, window)
+    try:
+        taken.save(hop.report_dir() / diagnostics.PROBES_FILE, window)
+    except OSError:
+        pass
     if conf:
         if conf.get("pooler"):
             why = pooler_ready(conf)
@@ -640,6 +632,106 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
                         " bound - rehearse on a copy first (goal:"
                         " rehearse)")
     return out
+
+
+def fresh_window(conf):
+    """How old a probe the gate may rest on: the write outage the cutover
+    may take. A reading older than that could hide as much outage as the
+    cutover is allowed to use, so it is measured again."""
+    return float((conf or DEFAULTS)["budget"])
+
+
+def _open_work_rows(hop, eng, d, conf, gate, window):
+    """What is still open on each side, read through the run's probe
+    accumulator: a reading that cannot be had, or is older than `window`,
+    is measured again, and one that fails stops the gate - it is not
+    passed as nothing open."""
+    from . import freeze
+    budget = conf["budget"] if conf else None
+    taken = diagnostics.accumulator(hop)
+    out = []
+    for side, name in (("src", "source"), ("dst", "target")):
+        left = taken.read(
+            "open-work", f"{d}:{side}",
+            lambda side=side: freeze.open_work(
+                hop, eng, d, side, budget if side == "src" else None),
+            window)
+        if left is None:
+            out.append((gate, f"{d} {name}: open transactions could not be"
+                              f" read ({taken.get('open-work', f'{d}:{side}').why})"))
+            continue
+        prepared = [x for x in left if x.startswith("prepared")]
+        if prepared:
+            out.append(("fail", f"{d} {name}: " + "; ".join(prepared[:3])
+                        + " - a prepared transaction outlives every session"
+                          " and commits whenever it is told, after any"
+                          " position a drain waits for"))
+        long = [x for x in left if not x.startswith("prepared")]
+        if long and side == "src":
+            out.append((gate, f"{d} source: " + "; ".join(long[:3])
+                        + (f" - open longer than the {budget:g}s budget"
+                           if conf else " - still being written")))
+    return out
+
+
+def _verify_rows(hop, conf, gate, window):
+    """The verify verdict the cutover rests on: the hop's last
+    `verdict.json`, which must say the two are the same and not be marked
+    stale. Read through the accumulator with the file's time as its
+    witness, so a newer verdict is read at once and an unchanged one is
+    not read again."""
+    taken = diagnostics.accumulator(hop)
+    path = hop.report_dir() / "verdict.json"
+    try:
+        witness = path.stat().st_mtime
+    except OSError:
+        witness = None
+
+    def measure():
+        got = json.loads(path.read_text())
+        if not isinstance(got, dict):
+            raise ValueError("it holds no verdict")
+        return {"status": got.get("status"), "why": got.get("why") or "",
+                "stale": bool(got.get("stale"))}
+    got = taken.read("verify", hop.name, measure, window, witness)
+    if got is None:
+        return [(gate, "verify verdict: none could be read ("
+                       + (taken.get("verify", hop.name).why or "not run")
+                       + f") - run `migkit check {hop.name}` first")]
+    if got["status"] != "same":
+        return [(gate, f"verify verdict: {got['status']}"
+                       + (f" - {got['why']}" if got["why"] else ""))]
+    if got["stale"]:
+        return [(gate, "verify verdict: same, but marked stale - what it"
+                       " compared has changed since")]
+    return [("ok", "verify verdict: the two are the same")]
+
+
+def recheck(hop, eng, dbs, leg, conf, marked=False):
+    """The gate again after the approvals, before anything is written:
+    lag, the verify verdict and every probe's freshness. A probe older
+    than `fresh_window` is measured again here; the facts that stop the
+    cutover come back one by one, each named. []: it may start."""
+    window = fresh_window(conf)
+    taken = diagnostics.accumulator(hop)
+    out = []
+    for d in dbs:
+        if not marked:
+            probe = taken.read(
+                "lag", d, lambda d=d: _probes(hop, leg, [d], conf)[d],
+                window)
+            if probe is None:
+                out.append(("fail", f"{d}: the stream's lag could not be"
+                                    " measured ("
+                                    f"{taken.get('lag', d).why})"))
+            else:
+                out += _position_rows(hop, leg, d, conf, "fail", probe)
+        out += _open_work_rows(hop, eng, d, conf, "fail", window)
+    out += _verify_rows(hop, conf, "fail", window)
+    facts = [w for lvl, w in out if lvl == "fail"]
+    facts += [f"probe {w}" for w in taken.refusals(
+        taken.scopes("lag", "open-work", "verify"), window)]
+    return facts
 
 
 def _pooler_sign_in_rows(hop, eng, dbs):
@@ -1163,6 +1255,11 @@ def _run(hop, eng, dbs, go, leg, say, approve):
                                NO_RETURN_STEP)
     if not conf:
         return _manual(hop, eng, dbs, leg, say, approvers, failed, unproven)
+    stopped = recheck(hop, eng, dbs, leg, conf, chose.get("drain") == "mark")
+    if stopped:
+        raise SystemExit(
+            "the cutover did not start, nothing was written: "
+            + "; ".join(stopped[:4]))
     from . import decide
     for got in chose.get("choices") or ():
         # the ways taken, and why, in the run's decision record
@@ -2342,6 +2439,11 @@ def said_by_doctor(hop):
         out.append(f"the point of no return stopped at {_where(rec)}"
                    f": `migkit move {hop.name} --mode cdc --drop --go` goes"
                    " on from there")
+    for r in diagnostics.kept(hop):
+        if not r.get("ok"):
+            out.append(f"the cutover check could not read {r['kind']} of"
+                       f" {r['scope']} ({r.get('why') or 'no reason given'})"
+                       ": the gate does not pass over it")
     if freeze.source_frozen(hop, hop.databases or []):
         out.append("the source is kept frozen by the cutover (the old"
                    f" primary): `migkit rollback {hop.name} --db DB"

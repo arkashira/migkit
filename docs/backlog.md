@@ -3781,6 +3781,22 @@ once (P0, L).** Files: `migkit/engines/base.py`, `migkit/engines/hetero.py`
   from `Endpoint.url` (SEC2, DU8).
 * Running work: the engines (P0-PARITY), repair paths (repair ladder),
   apply paths (two-way conflicts).
+* Done in wave 12 (W12G): `diagnostics.ProbeAccumulator` (kind, scope,
+  value, taken, took, witness, observed pace; `read` measures again what is
+  stale or failed, `refusals` names what a decision cannot rest on; saved as
+  `probes.json`, carried in the diagnostic bundle, cited by `doctor`);
+  `schemaformats.neutral` / `compare` / `results` and `verifiers.compare_schema`
+  (one comparer, same-engine as declared, a pair as converted, what cannot be
+  held is `unread` and turns an ok into a warn); `cutover.recheck` after the
+  approvals: lag, the verify verdict and every probe's freshness
+  (`fresh_window` = the budget), each failing fact named.
+  Not done: the engines still building their own `check_schema` (see
+  `verifiers.engines_with_own_compare()`) have not been moved onto
+  `compare_schema` (their files belong to other tickets); the cutover gate
+  needs a `verdict.json` where earlier it did not, so existing cutover tests
+  that never ran a check need one written; the engines' own readers (grants,
+  versions, settings, sizes) still probe directly and do not yet record into
+  the accumulator.
 
 **AUD-DOC. The manual and the site from the code (P1, M; R24).** Files:
 `tools/gen_docs.py` (new), `README.md`, `docs/index.html`,

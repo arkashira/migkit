@@ -67,7 +67,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/ddl.py` - Statements migkit generates that should not simply be applied.
 - `migkit/decide.py` - One way of deciding for every choice migkit makes (backlog P0, decided 2026-09-27). Classes: Facts, Need, Rung, Choice, Costs, HopCosts.
 - `migkit/described.py` - What a table migkit made on a store that keeps no column types is: its columns' classes and its key, kept beside the store's endpoint on thi
-- `migkit/diagnostics.py` - A bundle to report a problem with, holding nothing to hand over.
+- `migkit/diagnostics.py` - A bundle to report a problem with, holding nothing to hand over. Classes: Reading, ProbeAccumulator.
 - `migkit/digests.py` - Every table's digest as a check took it, kept so anyone can take it again (backlog R23.1).
 - `migkit/drainmark.py` - A drain proved by a mark written on the source, where the stream keeps no position migkit can hold it to.
 - `migkit/drift.py` - Did the source's shape change while it was being moved.
@@ -146,7 +146,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/scanplan.py` - The aggregates checks read of a table, planned as one set of reads (backlog P0-VERIFY-EXECUTION). Classes: Aggregate, Got, Evidence, RowText.
 - `migkit/scenarios.py` - Migration scenarios decided on observed facts (backlog P0-SCENARIOS): a managed service change through the provider's own operations (`cloud Classes: ScenarioDecision, TopologyCheck.
 - `migkit/schedule.py` - A hop that runs on a schedule of its own. Classes: NotDue, Slot.
-- `migkit/schemaformats.py` - Messages framed by a schema registry that carry JSON Schema or Protobuf rather than Avro (backlog R4.formats), read and - for JSON Schema -  Classes: Undecodable, JsonEncoder, ProtoFile.
+- `migkit/schemaformats.py` - Messages framed by a schema registry that carry JSON Schema or Protobuf rather than Avro (backlog R4.formats), read and - for JSON Schema -  Classes: Undecodable, JsonEncoder, ProtoFile, Col, NeutralTable, Difference.
 - `migkit/second_reader.py` - An independent second reading of the data, run out of process. Classes: Narrowing.
 - `migkit/seedtools.py` - What the seed on media (`ship`, `carriers`) asks of each library it wraps, against what each offers (backlog 0f): the compression of a part,
 - `migkit/servicecheck.py` - What another tool's own check said, held table by table against what migkit found (backlog P0-SCOPE.5). Classes: Claims.

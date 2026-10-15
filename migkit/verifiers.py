@@ -840,3 +840,111 @@ def each_database(hop, eng, dbs, fn, workers=None):
         return out
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
+
+
+# --- one schema comparer for every engine (backlog AUD-H, SC1) ----------------
+
+def side_catalog(eng, side, db, acc=None, max_age=0.0):
+    """One side's `catalog.Catalog`, read through its engine's one-pass
+    reader where it has one, else table by table from the neutral readers;
+    kept in the run's probe accumulator, so a second reader of the same
+    side in the run does not ask the server again and a stale one is
+    read afresh. A part the server would not give is left out and said by
+    the reading (`ProbeAccumulator.absorb`)."""
+    from . import diagnostics, drift
+    from .catalog import Catalog, Column, Index
+    from .util import Probes
+    acc = acc or diagnostics.accumulator(eng.hop)
+
+    def measure():
+        reader = drift.side_reader(eng, side)
+        if reader is not None:
+            if hasattr(reader, "shape_catalog"):
+                return reader.shape_catalog(side, db)
+            return drift.catalog_of(reader.column_catalog(side, db))
+        one = getattr(eng, "src_engine" if side == "src" else "dst_engine",
+                      eng)
+        cat, seen = Catalog(), Probes("tables")
+        for t in one.neutral_tables(side, db):
+            name = ".".join(map(str, t)) if isinstance(t, (tuple, list)) \
+                else str(t)
+            with seen.reading(name):
+                cat.tables.append(name)
+                cat.columns[name] = [Column(str(n), str(ty)) for n, ty
+                                     in one.neutral_columns(side, db, t)]
+                cat.keys[name] = tuple(one.neutral_key(side, db, t) or ())
+                cat.indexes[name] = [
+                    Index(str(n), tuple(cols), bool(uniq), "" if plain
+                          else "(not carried)")
+                    for n, uniq, cols, plain
+                    in one.neutral_indexes(side, db, t) or []]
+        acc.absorb("catalog-parts", f"{side}:{db}", seen)
+        return cat
+    return acc.read("catalog", f"{side}:{db}", measure, max_age)
+
+
+def compare_schema(eng, db, max_age=0.0):
+    """`check_schema` for any engine or pair: both sides' catalogues read
+    once into the neutral shape and compared by the one comparer
+    (`schemaformats.compare`), so a difference is worded alike for every
+    pair and a hetero pair is compared as converted. A side that cannot be
+    read is an "error" naming which, never an "ok"."""
+    from . import diagnostics, drift, schemaformats
+    from .engines.base import Result
+    acc = diagnostics.accumulator(eng.hop)
+    cats = {side: side_catalog(eng, side, db, acc, max_age)
+            for side in ("src", "dst")}
+    bad = [s for s, c in cats.items() if c is None]
+    if bad:
+        why = "; ".join(f"{s}: {acc.get('catalog', f'{s}:{db}').why}"
+                        for s in bad)
+        return [Result("schema", db, "error", f"cannot read the tables"
+                       f" ({why})", "", "both sides have to be readable"
+                       " before anything can be compared")]
+    one = lambda side: getattr(  # noqa: E731
+        eng, "src_engine" if side == "src" else "dst_engine", eng)
+    same = getattr(one("src"), "CANON_ENGINE", None) == getattr(
+        one("dst"), "CANON_ENGINE", None)
+    working = {side: drift.transient_among(cats[side].tables)
+               for side in cats}
+    takes = {side: (lambda t, side=side: t not in working[side]
+                    and eng.hop.takes_table(db, t)) for side in cats}
+    src = schemaformats.neutral(getattr(one("src"), "CANON_ENGINE", ""),
+                                cats["src"], takes["src"])
+    dst = schemaformats.neutral(getattr(one("dst"), "CANON_ENGINE", ""),
+                                cats["dst"], takes["dst"])
+    pairs, renamed = None, {}
+    if hasattr(eng, "match_tables") and hasattr(eng, "_renamer"):
+        pairs = eng.match_tables(list(src), list(dst), eng._renamer(db))[0]
+        pairs = [(a, b) for a, b in pairs if a in src and b in dst]
+        for a, b in pairs:
+            try:
+                renamed[a] = {s: t for t, s in
+                              eng._mapped_types(db, a, {
+                                  c.name: None for c in src[a].columns
+                              })[1].items() if s != t}
+            except Exception:  # noqa: BLE001 - names stand as they are
+                renamed[a] = {}
+    return schemaformats.results(
+        schemaformats.compare(src, dst, same, pairs, renamed), db)
+
+
+def engines_with_own_compare():
+    """The engines whose `check_schema` is their own and does not go
+    through `compare_schema` - what is left to move onto the one comparer."""
+    import inspect
+
+    from . import engines
+    from .engines.base import Engine
+    out = []
+    for name in engines.NAMES:
+        try:
+            cls = engines._class_for(name)
+            fn = cls.check_schema
+            if fn is Engine.check_schema:
+                continue
+            if "compare_schema" not in inspect.getsource(fn):
+                out.append(name)
+        except Exception:  # noqa: BLE001 - an engine that cannot load here
+            continue
+    return sorted(out)
