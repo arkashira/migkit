@@ -538,6 +538,7 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
             if hop is not None else "stopped"
     seen, caught_up, failures = 0, time.time(), 0
     wait = idle[0]
+    pace = Pace(*idle)
     ended = "asked"
     running = Running(where, hop) if go else None
     beaten = [0.0]
@@ -627,6 +628,7 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
                             " next run goes on from there")
                         ended = "caught up"
                         break
+                pace.saw(n)
                 if n or not settled:
                     wait = idle[0]
                     continue
@@ -634,7 +636,7 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
                     _nap(where, wait)
                 else:
                     time.sleep(wait)
-                wait = min(wait * 2, idle[1])
+                wait = pace.wait()
         finally:
             if on_end is not None:
                 on_end()
@@ -651,6 +653,60 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
         if term is not None:
             term.__exit__(None, None, None)
     return seen, ended
+
+
+
+class Pace:
+    """How long a tail that read to the end of the source's log waits
+    before it asks again: the time the measured change rate takes to fill
+    the batch it last carried, at least `least`, at most `most` - the
+    caller's longest wait. A rate of changes a second, weighted to the
+    recent rounds; a quiet source drifts to `most`, a busy one is asked
+    again as soon as a batch is likely there. The log is always read from
+    the saved position, so the pace sets latency, never what is read."""
+
+    def __init__(self, least=IDLE_LEAST, most=IDLE_MOST, clock=None):
+        self.least, self.most = float(least), float(max(most, least))
+        self.clock = clock or time.monotonic
+        self.at, self.rate, self.batch = self.clock(), 0.0, 1
+
+    def saw(self, n):
+        now = self.clock()
+        span = max(now - self.at, 1e-6)
+        self.at = now
+        self.rate = 0.7 * self.rate + 0.3 * (int(n) / span)
+        if n:
+            self.batch = int(n)
+
+    def wait(self):
+        if self.rate <= 0:
+            return self.most
+        return min(self.most, max(self.least, self.batch / self.rate))
+
+
+def apply_unit(eng, db, at, changes, apply, log=None):
+    """One tail batch applied as a unit of its own: the target's write
+    run under the fault catalogue's recovery (`faults.retried`), its
+    identity - the database and the position the batch ends at - and its
+    tries kept in the run's ledger, so a restart that finds it begun and
+    never ended reconciles it before it runs again. Every change of it
+    names its row by key, so applying it again converges: what a fault
+    mid-batch left is overwritten, never doubled. A batch with a change
+    that names no row cannot be told landed or not and stops instead."""
+    from . import faults
+    fn = getattr(eng, "attempts", None)
+    ledger = getattr(fn(), "ledger", None) if callable(fn) else None
+    keyed = all(c.get("key") for c in changes)
+    owned = faults.Owned("dst", "tail batch", str(db),
+                         json.dumps(at, sort_keys=True, default=str))
+
+    def check():
+        return (faults.NOTHING, None) if keyed else (None, None)
+    return faults.retried(lambda: apply(changes), side="dst",
+                          operation="tail batch", writes=True, check=check,
+                          log=log, label=f"{db}: a tail batch",
+                          ledger=ledger,
+                          owned=owned if ledger is not None else None)
 
 
 def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):

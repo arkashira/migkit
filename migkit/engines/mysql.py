@@ -1917,6 +1917,17 @@ class MySQLEngine(Engine):
                   "ident": None} if marked else None
         mark_events = register_marks() if two_way else ()
         seen = self.__dict__["_marks_seen"] = []
+        # the binlog dump held open and blocking, a heartbeat from the
+        # server when it has nothing to send, where it was decided
+        # (`decide.change_read`); else the log read to its end each batch
+        from pymysqlreplication.event import HeartbeatLogEvent
+        from .. import decide, tailctl
+        choice = self.__dict__.setdefault("_change_read", decide.change_read(
+            {"stream client": True, "stream granted": True}))
+        streamed = choice.path == "stream"
+        beat = tailctl.IDLE_MOST
+        heartbeat = (HeartbeatLogEvent,) if streamed else ()
+        began_at = time.monotonic()
         if held and (held["token"], held["where"]) == (token, (side, db)):
             stream, events = held["stream"], held["events"]
             boundary, in_txn, skip = held["boundary"], held["in_txn"], 0
@@ -1930,7 +1941,8 @@ class MySQLEngine(Engine):
                                      "user": ep.user,
                                      "passwd": ep.password},
                 server_id=int(self.hop.options.get("server_id", 4379)),
-                blocking=False, resume_stream=True,
+                blocking=streamed, resume_stream=True,
+                **({"slave_heartbeat": beat} if streamed else {}),
                 log_file=token.get("log_file"),
                 log_pos=token.get("log_pos"),
                 only_schemas=[self._d(side, db)],
@@ -1938,7 +1950,7 @@ class MySQLEngine(Engine):
                              PartialUpdateRowsEvent,
                              DeleteRowsEvent, NotImplementedEvent,
                              XidEvent, QueryEvent, GtidEvent, *register(),
-                             *mark_events],
+                             *mark_events, *heartbeat],
                 filter_non_implemented_events=False)
             # each commit's time, as the source wrote it (`canon.ended`)
             when = {}
@@ -1961,6 +1973,13 @@ class MySQLEngine(Engine):
         begun = 0
         try:
             for ev in events:
+                if streamed and isinstance(ev, HeartbeatLogEvent):
+                    # the server had nothing more for `beat` seconds
+                    if not in_txn and stream.log_file and stream.log_pos:
+                        token = {"log_file": stream.log_file,
+                                 "log_pos": stream.log_pos}
+                    keep = True
+                    break
                 if ev is COMMITTED:
                     boundary = {"log_file": stream.log_file,
                                 "log_pos": stream.log_pos}
@@ -1971,7 +1990,9 @@ class MySQLEngine(Engine):
                     begun = len(out)
                     in_txn, skip, marked, gtid = 0, 0, None, None
                     token = dict(boundary)
-                    if len(out) >= limit:
+                    if len(out) >= limit or (
+                            streamed and out
+                            and time.monotonic() - began_at >= beat):
                         keep = True
                         break
                     continue

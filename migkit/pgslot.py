@@ -350,3 +350,107 @@ def change(parsed, keys, txn=None):
     if kept:
         out[canon.UNCHANGED] = kept
     return out
+
+
+def lsn_int(text):
+    """'16/B374D848' as the 64-bit number the replication protocol sends."""
+    hi, _, lo = str(text).partition("/")
+    return (int(hi, 16) << 32) | int(lo or "0", 16)
+
+
+def lsn_text(n):
+    return f"{int(n) >> 32:X}/{int(n) & 0xFFFFFFFF:X}"
+
+
+class Stream:
+    """A logical slot read as the server streams it (START_REPLICATION on
+    a replication connection) instead of peeked again batch by batch: a
+    peek decodes the slot from its confirmed position on every call, so a
+    tail behind by N changes decodes N each batch; the stream decodes each
+    change once and pushes it as it commits. Lines come as the rows a peek
+    gives - (lsn, xid, line) - so the same reader turns them into changes.
+
+    The slot moves only by `confirm`: the standby status sent with the
+    flushed LSN is the position a caller handed back as applied, never
+    what was read. A stream lost and opened again starts from the slot's
+    confirmed position, which re-sends what was not confirmed - the
+    appliers converge on it by key."""
+
+    def __init__(self, connect, slot, start=None, options=None):
+        self.conn = connect()
+        self.cur = self.conn.cursor()
+        self.cur.start_replication(
+            slot_name=slot, decode=True,
+            start_lsn=lsn_int(start) if start else 0,
+            options=dict(options or {}))
+        self.xid, self.end, self.confirmed = None, None, None
+
+    def confirm(self, lsn):
+        if lsn and lsn != self.confirmed:
+            self.cur.send_feedback(flush_lsn=lsn_int(lsn), reply=True)
+            self.confirmed = lsn
+
+    def rows(self, limit, wait, wait_for=None):
+        """Up to `limit` lines, a batch cut only where a transaction ends;
+        waits `wait` seconds for the first and none once one transaction
+        is whole. `end` is the log's end the server's keepalive said."""
+        import select
+        import time
+        out, until = [], time.monotonic() + max(wait, 0.0)
+        wait_for = wait_for or (lambda s: select.select([self.cur], [], [],
+                                                       s))
+        while True:
+            msg = self.cur.read_message()
+            if msg is None:
+                said = getattr(self.cur, "wal_end", 0) or 0
+                if said:
+                    self.end = lsn_text(said)
+                left = until - time.monotonic()
+                if self.xid is None and (out or left <= 0):
+                    return out
+                wait_for(max(left, 0.05))
+                continue
+            line = msg.payload
+            if isinstance(line, bytes):
+                line = line.decode("utf-8")
+            if line.startswith("BEGIN"):
+                self.xid = line.split()[1] if len(line.split()) > 1 \
+                    else self.xid
+            out.append((lsn_text(msg.data_start), self.xid, line))
+            if line.startswith("COMMIT"):
+                self.xid = None
+                if len(out) >= limit:
+                    return out
+
+    def close(self):
+        try:
+            self.conn.close()
+        except Exception:  # noqa: BLE001 - it is being let go
+            pass
+
+
+def columnar(changes, compiled=None):
+    """A batch of `canon.change` records as Arrow record batches, one per
+    (table, op, columns): the key and row values as typed columns, the
+    types taken from the values canon gave them. The compiled builder
+    (Arrow's own, from Python objects in one call) where the library has
+    it and `compiled` is not False; the pure one - column lists built
+    here, each turned into an array - otherwise. The two are equal batch
+    for batch (`test_the_tail_streams_and_decodes_in_batches`)."""
+    import pyarrow as pa
+    groups = {}
+    for c in changes:
+        row = {**{f"key.{k}": v for k, v in (c.get("key") or {}).items()},
+               **{f"row.{k}": v for k, v in (c.get("row") or {}).items()}}
+        groups.setdefault((c["table"], c["op"], tuple(row)), []).append(row)
+    fast = compiled is not False and hasattr(pa.RecordBatch, "from_pylist")
+    out = []
+    for (table, op, names), rows in groups.items():
+        if fast:
+            batch = pa.RecordBatch.from_pylist(rows)
+        else:
+            batch = pa.RecordBatch.from_arrays(
+                [pa.array([r[n] for r in rows]) for n in names],
+                names=list(names))
+        out.append((table, op, batch))
+    return out

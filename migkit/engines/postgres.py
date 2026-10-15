@@ -3340,6 +3340,73 @@ select json_build_object(
     def release_changes(self):
         for conn in self.__dict__.pop("_slot_held", {}).values():
             conn.close()
+        for stream in self.__dict__.pop("_slot_streams", {}).values():
+            stream.close()
+
+    def _change_read(self, side, db):
+        """`decide.change_read` for the slot's database, asked once a run:
+        streamed where the user may open a replication connection
+        (`rolreplication`, or a managed service's replication role), else
+        peeked at the tail's measured pace."""
+        held = self.__dict__.setdefault("_change_reads", {})
+        if (side, db) not in held:
+            from .. import decide
+            try:
+                import psycopg2.extras
+                client = hasattr(psycopg2.extras,
+                                 "LogicalReplicationConnection")
+            except ImportError:
+                client = False
+            got = self._slot_rows(
+                side, db, "select r.rolreplication or exists (select 1"
+                " from pg_roles g where g.rolname = 'rds_replication' and"
+                " pg_has_role(current_user, g.oid, 'member')) from"
+                " pg_roles r where r.rolname = current_user")
+            granted = bool(got and got[0][0])
+            held[(side, db)] = decide.change_read(
+                {"stream client": client, "stream granted": granted,
+                 "stream why": "the source's user has neither REPLICATION"
+                               " nor a replication role, so its log is"
+                               " peeked instead - grant REPLICATION to"
+                               " stream it"})
+        return held[(side, db)]
+
+    def _streamed(self, side, db, slot, token, limit, ask):
+        """`neutral_changes` read off the slot's stream (`pgslot.Stream`):
+        the position handed back confirmed to the server first, then the
+        changes pushed since. A stream that fails is let go, and the next
+        read opens it again from the slot's confirmed position."""
+        import psycopg2.extras
+        from .. import pgslot, tailctl
+        two_way = bool((self.hop.options or {}).get("two_way"))
+        streams = self.__dict__.setdefault("_slot_streams", {})
+        stream = streams.get((side, db))
+        try:
+            if stream is None:
+                _, local = self._log_end(ask, self._d(side, db), two_way)
+                ep = self.hop.source if side == "src" else self.hop.target
+                stream = pgslot.Stream(
+                    lambda: connect(ep, self._d(side, db), session=False,
+                                    connection_factory=psycopg2.extras
+                                    .LogicalReplicationConnection),
+                    slot, token, {"include-timestamp": "true",
+                                  **({"only-local": "true"} if local
+                                     else {})})
+                streams[(side, db)] = stream
+            stream.confirm(token)
+            rows = stream.rows(int(limit), tailctl.IDLE_MOST)
+        except Exception:
+            streams.pop((side, db), None)
+            if stream is not None:
+                stream.close()
+            raise
+        self._marks_seen = []
+        out, last = self._slot_lines(side, db, rows, token, two_way, slot,
+                                     ask)
+        if len(rows) < int(limit) and stream.end and (
+                last is None or self.position_reached(stream.end, last)):
+            last = stream.end
+        return out, last
 
     def _slot_text(self, side, db):
         """`ask(sql)` on the slot's connection: the first column of each row
@@ -3541,6 +3608,8 @@ select json_build_object(
             return self._wal_changes(side, db, token, limit,
                                      self.follow_way(db, side))
         standby = bool((self.hop.options or {}).get("standby"))
+        if not standby and self._change_read(side, db).path == "stream":
+            return self._streamed(side, db, name, token, limit, ask)
         rows_of = self._slot_rows_waited if standby else self._slot_rows
         if token and standby:
             # a machine that took the tail over goes on from the position

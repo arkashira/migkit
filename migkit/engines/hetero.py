@@ -4951,7 +4951,10 @@ class HeteroEngine(Engine):
                 applied_count = 0
                 for mapped, act in plan:
                     if mapped:
-                        applied_count += self.dst_engine.neutral_apply("dst", db, mapped)
+                        applied_count += tailctl.apply_unit(
+                            self.dst_engine, db, token, mapped,
+                            lambda m: self.dst_engine.neutral_apply(
+                                "dst", db, m), log)
                         self._lanes_said(db, log)
                     if act is not None:
                         self._carry_ddl(db, act, s.targets, log)

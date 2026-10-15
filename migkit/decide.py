@@ -3339,6 +3339,7 @@ def worker_budget(facts):
     return max(1, n), choice
 
 
+<<<<<<< HEAD
 # --- a continuous hop into a warehouse (LT.P3, S4) --------------------------
 
 #: the share of a batch's interval its landing may take: the rest is the
@@ -3470,3 +3471,38 @@ def warehouse_feed(facts):
     costs = Costs({n: v for n in ("provider", "own")
                    if (v := lag(n)) is not None})
     return climb("the feed into the warehouse", rungs, f, costs=costs)
+||||||| c95da9db
+=======
+#: how a tail reads its source's log: pushed by the server as it commits,
+#: or asked again at a pace the change rate sets (`tailctl.Pace`)
+CHANGE_READS = (
+    Rung("stream", "the source's log as the server streams it",
+         needs=(Need("a reader that streams",
+                     lambda f: f.get("stream client") is True,
+                     "this machine's database client cannot read a"
+                     " streamed log"),
+                Need("the right to stream the log",
+                     lambda f: f.get("stream granted") is True,
+                     lambda f: str(f.get("stream why")
+                                   or "the source's user may not open a"
+                                      " replication stream")),),
+         holds={"consistent": "as of one moment", "idempotent": "converges",
+                "resumable": "goes on"},
+         because="each change decoded once and pushed as it commits, the"
+                 " position confirmed back only once applied",
+         leaves="nothing"),
+    Rung("poll", "the source's log asked again at a pace the change rate"
+         " sets", holds={"consistent": "as of one moment",
+                         "idempotent": "converges", "resumable": "goes on"},
+         because="every change the log holds is read from the saved"
+                 " position, however it is asked",
+         leaves="nothing"))
+
+
+def change_read(facts, costs=None):
+    """The `Choice` of how a tail reads its source's log (`CHANGE_READS`)
+    from what the grant allows and, where both were measured, the latency
+    each gave a batch (`costs`: {"stream": s, "poll": s})."""
+    return climb("reading the source's log", CHANGE_READS, facts,
+                 costs=costs)
+>>>>>>> w12d
