@@ -259,6 +259,10 @@ def thaw(hop, eng, db, say, side="dst"):
     record = state(hop, db, side)
     if not record:
         return None
+    if record.get("way") == UNNAMED:
+        # nothing was taken: the names stay as the run's evidence
+        _state_path(hop, db, side).unlink(missing_ok=True)
+        return record
     h = hold_for(hop, eng, side)
     h.release(db, record, say)
     _state_path(hop, db, side).unlink(missing_ok=True)
@@ -1230,9 +1234,13 @@ def protect(hop, eng, db, say, ask=None):
             say(f"{db}: {why} - what was kept before stays kept")
             return before
         if from_goal(hop):
-            say(f"{db}: {why} - moved into as before: the hop's goal keeps"
-                " the target where it allows it")
-            return None
+            # nothing keeps it: every write migkit makes is named instead,
+            # and a write the names do not account for is a finding
+            record = _named_by_units(hop, eng, h, db)
+            say(f"{db}: {why} - moved into with every write migkit makes"
+                " named (table, kind, unit); a write not named is a"
+                " finding at the cutover")
+            return record
         raise SystemExit(f"{db}: protect_target is set, and {why} - nothing"
                          " has been copied. Remove the option to move"
                          " without it.")
@@ -1307,6 +1315,10 @@ def kept_rows(hop, eng, d, gate):
     if not record:
         return [("warn", f"{d}: protect_target is set and nothing holds the"
                          " target: the application may have written there")]
+    if record.get("way") == UNNAMED:
+        got = attributed(hop, eng, d)
+        return ([("ok", f"{d}: the target: {got['said']}")]
+                + [(gate, f"{d}: the target: {f}") for f in got["findings"]])
     try:
         got = hold_for(hop, eng, "dst").kept(d, record)
     except Exception as e:  # noqa: BLE001 - said as the reason
@@ -1324,6 +1336,8 @@ def kept_line(hop, d):
     record = state(hop, d, "dst")
     if not record:
         return None
+    if record.get("way") == UNNAMED:
+        return f"{d}: {attributed(hop, None, d)['said']}"
     if record.get("way") in NAMED:
         return (f"{d}: the writes that are not migkit's are named before the"
                 f" cutover, counted since {record.get('since') or '?'}")
@@ -6629,3 +6643,150 @@ KEEPS = {**HOLDS, "dsql": PgWireHold, "db2zos": Db2ZosHold,
          "bigquery": BigQueryHold, "lindorm": LindormHold}
 #: the ways whose server switch is lifted before the databases' records
 _SERVER_FIRST = ("os_cluster",)
+
+
+# Every write migkit makes on a target named (BAR-3)
+#
+# A target is kept from the application by its engine's hold, or, where
+# nothing keeps it, every write migkit makes into it is named: its table,
+# its kind (copy, change, index, check, schema) and the unit that made it.
+# The names are checked against what the target says was written - the
+# writes it can list, each attributed by its mark or its account
+# (`barriers.TargetWriteAttribution`), or else its running count of
+# writes since the record - and a write the names do not account for is a
+# finding at the cutover and in the report, never silence.
+
+#: the way of a target nothing keeps, whose writes migkit names instead
+UNNAMED = "named_by_unit"
+#: where each write migkit made into a database of the target is named,
+#: a line a write
+WRITES_FILE = "target-writes.jsonl"
+
+
+def _total(count):
+    """A server's running count of writes as one number, or None."""
+    if isinstance(count, bool) or count is None:
+        return None
+    if isinstance(count, (int, float)):
+        return int(count)
+    if isinstance(count, dict):
+        got = [_total(v) for v in count.values()]
+        return sum(g for g in got if g is not None) if got else 0
+    return None
+
+
+def _named_by_units(hop, eng, h, db):
+    record = {"db": db, "way": UNNAMED,
+              "since": time.strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        record["writes0"] = _total(h.writes(db))
+    except Exception:  # noqa: BLE001 - not countable: events or names only
+        record["writes0"] = None
+    _save(hop, db, record, "dst")
+    return record
+
+
+def names_writes(hop, db=None):
+    """Whether migkit names the writes it makes into `db` of the target:
+    `protect_target` on, and the target not kept by a hold of its own."""
+    if not (hop.options or {}).get("protect_target"):
+        return False
+    record = state(hop, db, "dst") if db is not None else None
+    return record is None or record.get("way") in NAMED + (UNNAMED,)
+
+
+def name_write(hop, db, table, kind, unit, rows=1):
+    """One write migkit made into `db` of the target named: its table, its
+    kind and the unit that made it, appended - one line, so writers in
+    other processes add theirs beside it. Nothing where the hop does not
+    name its target's writes."""
+    if not names_writes(hop, db):
+        return False
+    path = hop.report_dir(db) / WRITES_FILE
+    with open(path, "a") as f:
+        f.write(json.dumps({"table": str(table or ""), "kind": str(kind),
+                            "unit": str(unit), "rows": max(1, int(rows or 1)),
+                            "at": round(time.time(), 3)}) + "\n")
+    return True
+
+
+def named(hop, db):
+    """[{table, kind, unit, rows, at}] of the writes named into `db`."""
+    try:
+        lines = (hop.report_dir(db) / WRITES_FILE).read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            got = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(got, dict):
+            out.append(got)
+    return out
+
+
+def attributed(hop, eng, db, seen=None):
+    """{kept, named, findings, said} of the target of `db`: kept by a hold,
+    or every write migkit made into it named (by table and kind, the units
+    that made them) and checked against `seen` - the writes the target
+    lists - or else its count of writes since the record. A write migkit's
+    account made that no unit named, or one that is not migkit's, is a
+    finding; a count that cannot be read is said as that."""
+    from .barriers import TargetWriteAttribution
+    record = state(hop, db, "dst") or {}
+    if record and record.get("way") not in NAMED + (UNNAMED,):
+        return {"kept": True, "named": [], "findings": [],
+                "said": f"kept from the application's writes"
+                        f" ({record.get('way')})"}
+    names = named(hop, db)
+    by = {}
+    for n in names:
+        k = (n.get("table", ""), n.get("kind", ""))
+        by.setdefault(k, [0, set()])
+        by[k][0] += int(n.get("rows") or 1)
+        by[k][1].add(n.get("unit", ""))
+    total = sum(v[0] for v in by.values())
+    findings = []
+    kind = target_kind(hop)
+    me = getattr(hop.target, "user", None)
+    if seen is not None:
+        left = {k: v[0] for k, v in by.items()}
+        for w in seen:
+            d = w if isinstance(w, dict) else {}
+            where = d.get("table") or "?"
+            if TargetWriteAttribution.attribute_write(
+                    kind, w, migkit_account=me) != "migkit":
+                findings.append(f"{where}: a {d.get('kind') or 'write'}"
+                                " that is not migkit's")
+                continue
+            k = (d.get("table", ""), d.get("kind", ""))
+            if left.get(k, 0) > 0:
+                left[k] -= 1
+            else:
+                findings.append(f"{where}: a {d.get('kind') or 'write'} by"
+                                " migkit's account that no unit named")
+    elif eng is not None and record.get("writes0") is not None:
+        try:
+            now = _total(hold_for(hop, eng, "dst").writes(db))
+        except Exception as e:  # noqa: BLE001 - said as the finding
+            now = None
+            findings.append("the target's count of writes could not be"
+                            f" read ({str(e).strip()[:120]})")
+        if now is not None and now - record["writes0"] > total:
+            findings.append(f"{now - record['writes0'] - total} writes on the"
+                            f" target since {record.get('since')} that no"
+                            " unit of migkit's named")
+    elif eng is not None:
+        findings.append("the target lists no writes and keeps no count of"
+                        " them, so only migkit's own are named; the final"
+                        " check is what catches a row written there")
+    rows = [{"table": t, "kind": k, "rows": v[0], "units": sorted(v[1])}
+            for (t, k), v in sorted(by.items())]
+    said = (f"{total} writes of migkit's named on {len({t for t, _ in by})}"
+            f" tables by {len({u for v in by.values() for u in v[1]})} units"
+            f" since {record.get('since') or '?'}")
+    if findings:
+        said += f"; {len(findings)} not accounted for"
+    return {"kept": False, "named": rows, "findings": findings, "said": said}

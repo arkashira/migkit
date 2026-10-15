@@ -271,6 +271,29 @@ def _calibration_said(held):
     return f"<p>calibration</p><ul>{''.join(said)}</ul>"
 
 
+def _target_writes_section(hop, dbs):
+    """The target's writes: kept from the application, or each of
+    migkit's named by table, kind and unit (`freeze.attributed`), a write
+    not accounted for an issue, never left out."""
+    from . import freeze
+    if not (getattr(hop, "options", None) or {}).get("protect_target"):
+        return ""
+    rows, issues = [], []
+    for db in dbs:
+        got = freeze.attributed(hop, None, db)
+        rows.append(f"<tr><td>{html.escape(db)}</td><td>"
+                    f"{html.escape(got['said'])}</td></tr>")
+        for n in got["named"]:
+            rows.append(f"<tr><td></td><td>{html.escape(n['table'] or '-')}"
+                        f" {html.escape(n['kind'])}: {n['rows']} by"
+                        f" {html.escape(', '.join(n['units']))}</td></tr>")
+        issues += [f"<li>{html.escape(db)}: {html.escape(f)}</li>"
+                   for f in got["findings"]]
+    return ("<div class=\"card\"><h2>target writes</h2><table><tbody>"
+            + "".join(rows) + "</tbody></table>"
+            + (f"<ul>{''.join(issues)}</ul>" if issues else "") + "</div>")
+
+
 def render(hop, results, generated=None, decided=None, taken=None):
     """The report of a check's answers. It reads them and changes nothing:
     the verdict is `verdict.decide`'s - the one the check's exit code and
@@ -385,6 +408,7 @@ def render(hop, results, generated=None, decided=None, taken=None):
 {"".join(f"<th>{html.escape(CHECK_LABEL.get(c, c).lower())}</th>" for c in ran)}
 </tr></thead><tbody>{"".join(rows)}</tbody></table></div>
 {objects_html}
+{_target_writes_section(hop, dbs)}
 {_time_left_section(hop)}
 <div class="card"><h2>issues</h2>{"".join(cards)}</div>
 </div></body></html>"""
@@ -417,3 +441,119 @@ def from_summary(hop):
     return write_report(hop, results, None, generated,
                         verdict.decide(results, hop, coverage),
                         taken), generated
+
+
+# The organisation's own change sheet (R25.3)
+#
+# The plan's measured phases as steps a team's task sheet maps onto: each
+# step's id a hash of the hop, the phase and its table, so the same step
+# of a later plan keeps its id and a sheet's rows stay mapped; what the
+# run then proves is written back per step - its status, its time and the
+# proof it stands on. It holds nothing beyond what the plan shows.
+
+SHEET_FIELDS = ("id", "hop", "db", "phase", "table", "p50", "p90", "binds",
+                "truth", "status", "seconds", "proof", "at")
+#: what a step's phase writes into the target, as the kind it is named by
+WRITES_KIND = {"copy": "copy", "index": "index", "indexes": "index",
+               "catch-up": "change", "schema": "schema"}
+
+
+def step_id(hop, phase, table=""):
+    """A step's id: stable across plans of the same hop, phase and table."""
+    import hashlib
+    key = "|".join((str(getattr(hop, "name", hop)), phase, table or ""))
+    return "mk-" + hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+def _phase_of(p):
+    name = getattr(p, "name", None) or (p.get("name") if isinstance(p, dict)
+                                        else str(p))
+    table = getattr(p, "table", None) or (p.get("table") if isinstance(
+        p, dict) else None)
+    head, _, rest = str(name).partition(" ")
+    return (head, table or rest.strip()), p
+
+
+def _get(p, k):
+    return p.get(k) if isinstance(p, dict) else getattr(p, k, None)
+
+
+def change_sheet(hop, db, phases):
+    """[step] of the plan's phases (`planner.Phase`, or their dicts) of
+    `db`, in the plan's order; a phase the plan did not estimate keeps
+    its empty times - never a figure made up."""
+    out, seen = [], set()
+    for p in phases:
+        (phase, table), raw = _phase_of(p)
+        sid = step_id(hop, f"{db}/{phase}", table)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append({"id": sid, "hop": str(hop.name), "db": db,
+                    "phase": phase, "table": table,
+                    "p50": _get(raw, "p50"), "p90": _get(raw, "p90"),
+                    "binds": _get(raw, "binds") or "",
+                    "truth": _get(raw, "truth") or "",
+                    "status": "planned", "seconds": None, "proof": "",
+                    "at": ""})
+    return out
+
+
+def _sheet_paths(hop):
+    d = hop.report_dir()
+    return d / "change-sheet.json", d / "change-sheet.csv"
+
+
+def write_change_sheet(hop, steps):
+    """The sheet kept as JSON and CSV beside the hop's reports; a step
+    already there keeps the evidence written back to it."""
+    import csv
+    js, cs = _sheet_paths(hop)
+    before = {s["id"]: s for s in read_change_sheet(hop)}
+    merged = []
+    for s in steps:
+        was = before.pop(s["id"], None)
+        if was and was.get("status") != "planned":
+            s = {**s, **{k: was.get(k) for k in
+                         ("status", "seconds", "proof", "at")}}
+        merged.append(s)
+    merged += list(before.values())
+    js.write_text(json.dumps(merged, indent=1))
+    with open(cs, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=SHEET_FIELDS, extrasaction="ignore")
+        w.writeheader()
+        for s in merged:
+            w.writerow({k: "" if s.get(k) is None else s.get(k)
+                        for k in SHEET_FIELDS})
+    return js, cs
+
+
+def read_change_sheet(hop):
+    try:
+        got = json.loads(_sheet_paths(hop)[0].read_text())
+    except (OSError, ValueError):
+        return []
+    return [s for s in got if isinstance(s, dict) and s.get("id")]
+
+
+def write_back(hop, sid, status, seconds, proof, rows=None, unit=None):
+    """The run's evidence written back to step `sid`: its status (done,
+    failed, ...), the seconds it took and the proof it stands on. A step
+    whose phase wrote into the target names that write (`freeze.name_write`)
+    under the step's id as its unit. Raises where no step has that id - an
+    evidence line that maps onto nothing is a fault, not a row dropped."""
+    from . import freeze
+    steps = read_change_sheet(hop)
+    step = next((s for s in steps if s["id"] == sid), None)
+    if step is None:
+        raise SystemExit(f"{hop.name}: no step {sid} in the change sheet;"
+                         " export it from the plan first")
+    step.update(status=str(status), seconds=None if seconds is None
+                else round(float(seconds), 3), proof=str(proof or ""),
+                at=time.strftime("%Y-%m-%d %H:%M:%S"))
+    kind = WRITES_KIND.get(step["phase"])
+    if kind and status == "done":
+        freeze.name_write(hop, step["db"], step["table"], kind,
+                          unit or sid, rows or 1)
+    write_change_sheet(hop, steps)
+    return step

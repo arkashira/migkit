@@ -215,7 +215,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Backlog (509 items, `docs/backlog-index.md`)
 
-DONE 353 - PARTLY 70 - IN PROGRESS 4 - OPEN 53 - BLOCKED 20 - NOT PURSUED 9
+DONE 353 - PARTLY 73 - IN PROGRESS 4 - OPEN 50 - BLOCKED 20 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
@@ -224,12 +224,12 @@ DONE 353 - PARTLY 70 - IN PROGRESS 4 - OPEN 53 - BLOCKED 20 - NOT PURSUED 9
 | correctness | 3 | 0 | 0 | 0 | 0 | 0 |
 | correctness/operations | 1 | 1 | 0 | 0 | 0 | 0 |
 | correctness/performance | 0 | 1 | 0 | 0 | 0 | 0 |
-| cutover | 18 | 1 | 0 | 1 | 0 | 0 |
-| ease of use | 34 | 6 | 0 | 1 | 1 | 1 |
+| cutover | 18 | 2 | 0 | 0 | 0 | 0 |
+| ease of use | 34 | 7 | 0 | 0 | 1 | 1 |
 | engines | 32 | 10 | 1 | 7 | 6 | 1 |
 | maintainability | 0 | 0 | 0 | 5 | 0 | 0 |
 | move | 31 | 12 | 2 | 7 | 0 | 2 |
-| operations/scale | 42 | 14 | 0 | 12 | 5 | 3 |
+| operations/scale | 42 | 15 | 0 | 11 | 5 | 3 |
 | operations/verify | 0 | 1 | 0 | 0 | 0 | 0 |
 | security | 10 | 5 | 0 | 1 | 2 | 1 |
 | tools used whole | 40 | 4 | 0 | 3 | 0 | 0 |

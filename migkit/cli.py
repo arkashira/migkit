@@ -1095,6 +1095,8 @@ def _doctor_hop(name, hop, raw_hop):
             out.append(f"{_esc(name)}: {_esc(what)}")
         except Exception:  # noqa: BLE001 - a probe never fails doctor
             pass
+    for line in _rungs_said(hop, eng, reached):
+        out.append(f"{_esc(name)}: {_esc(line)}")
     for d in (hop.databases or []):
         line = freeze.kept_line(hop, d)
         if line:
@@ -1102,6 +1104,53 @@ def _doctor_hop(name, hop, raw_hop):
                        " down at cutover, or rollback --apply, gives it"
                        " back")
     return out, failed
+
+
+def _footprint_said(rung):
+    """What a way costs where it runs, from its rung: the resources a
+    byte of it passes (connections, memory, disk spool) and what it
+    leaves on the server."""
+    loads = dict(rung.loads) if rung.loads else {}
+    parts = [f"{k} x{v:g}" if isinstance(v, (int, float)) else str(k)
+             for k, v in loads.items()]
+    return ((("passes " + ", ".join(parts)) if parts else
+             "passes nothing it says") + "; leaves "
+            + (rung.leaves or "what it has not said"))
+
+
+def _rungs_said(hop, eng, reached):
+    """For each side reached: the rung its writes are held on (a source
+    as the cutover freezes it, a target as it is kept from the
+    application), why each higher one was refused, and its footprint -
+    from the decision engine's own climb (`freeze.choose`), read-only."""
+    from . import freeze
+    out = []
+    dbs = list(hop.databases or [])
+    for side in ("src", "dst"):
+        if side not in reached or not dbs:
+            continue
+        if side == "dst" and not (hop.options or {}).get("protect_target"):
+            continue
+        try:
+            got = (freeze.keeping(hop, eng, dbs) if side == "dst"
+                   else freeze.choose(hop, eng, dbs, side="src"))
+        except Exception as e:  # noqa: BLE001 - a probe never fails doctor
+            out.append(f"{side}: the rung its writes are held on could not"
+                       f" be read - {_clean(e, raw=True)[:120]}")
+            continue
+        refused = "; ".join(f"{r.name} refused: {why}" for r, why in
+                            got.passed)
+        if got.rung is None:
+            out.append(f"{side}: no rung holds its writes - {got.reason}"
+                       + (f" ({refused})" if refused else "")
+                       + ("; every write migkit makes is named instead"
+                          if side == "dst" else ""))
+            continue
+        out.append(f"{side}: its writes are held on {got.rung.name} -"
+                   f" {got.reason}" + (f"; above it, {refused}" if refused
+                                       else "")
+                   + f"; {_footprint_said(got.rung)}")
+    return out
 
 
 def _doctor_config():

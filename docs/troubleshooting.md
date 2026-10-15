@@ -571,6 +571,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * no summary at <...>, run migkit check first
 
+* <...>: no step <...> in the change sheet; export it from the plan first
+
 * no second reading is set up for <...> hops
 
 ## Values kept at rest
