@@ -10111,7 +10111,32 @@ Acceptance criteria:
 
 Links: P0-SAFETY-INTEGRITY, P0-DECISION-ALL.reason/.adapt/.priority,
 P0-WORKFLOW-DEPTH.recover and P0-AUTO-RESOURCES. This is a platform-wide hard
-requirement, not a claim of current resilience coverage. Status remains OPEN.
+requirement, not a claim of current resilience coverage.
+
+Status 2026-10-16: PARTLY.
+- Done: `migkit/faults.py` `CATALOGUE` holds 24 classes (the list above plus
+  `unknown`), each with detection by engine code (MySQL number, SQLSTATE) and
+  by effect (`classify`: a transient failure after a write was sent that the
+  server does not roll back whole is an `uncertain_commit` whatever its
+  words), transient/persistent, what must hold before a retry, containment,
+  the actions it admits and its proof. `from_facts`/`assess` detect pressure,
+  disk, lag, stale checkpoint, workload impact and orphaned work from readings.
+  `decide.recovery` is the one chooser (reconcile, proceed, pause, throttle,
+  retry, replan, isolate, probe, stop). `faults.retried` carries it out with
+  bounded tries, a per-side `Breaker` (one probe while open), owned operation
+  identity (`Owned`, kept in `attempts.Ledger.own`, written atomically) so a
+  restart reconciles begun work before repeating it, and a log that fails never
+  changes the outcome. `util.with_retry` and `util.run` - so every engine query,
+  connect and program run - go through it. `failpoint` injects any class
+  (`fault=<class>`, `N+`). Proof: tests/test_a_failure_is_told_by_what_it_did.py.
+- Not done: callers do not yet pass `check` (reconcile) or `owned`/`ledger`, so
+  an uncertain write still stops rather than being reconciled in a real move;
+  `replan`/`isolate` raise to the owner (`decide.attempt`, the move's set-aside)
+  without a workflow test that the next rung or the remaining units carry on;
+  `assess` is not yet called between units; throttle does not yet lower
+  concurrency (W8C tuning owns it); compound sandbox runs against real servers
+  (failover, disk exhaustion, telemetry loss in a running move) are unproved.
+  A torn attempts ledger reads as absent (kind "cache"), losing owned state.
 
 
 ## P0-AUTONOMOUS-MIGRATION: operator intent to verified outcome

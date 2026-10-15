@@ -3145,6 +3145,7 @@ def session_action(facts):
     return climb("a wait the server was asked about", rungs, f)
 
 
+<<<<<<< HEAD
 
 # --- row parity: which read proves a table's rows alike ----------------------
 # Every way below reads every row of both sides - none samples, none can be
@@ -3199,3 +3200,66 @@ def row_parity(work, run, facts=None, need=(), costs=None, log=None,
     need = tuple(dict.fromkeys(ROW_PARITY_NEED + tuple(need or ())))
     return attempt(work, ROW_PARITY, run, facts, need=need, costs=costs,
                    where=where, log=log)
+||||||| 7c40b782
+=======
+def recovery(facts):
+    """The `Choice` after a failure (backlog P0-RESILIENCE-ALL): reconcile
+    an outcome not known, proceed on one that committed, pause on a side
+    whose breaker is open or a credential that renews, throttle, retry,
+    replan, isolate the unit, probe, or stop. `facts` (`faults.retried`):
+    `class` and `admits` (`faults.CATALOGUE`: the actions the class may
+    take), `transient`, `uncertain` (a write whose effect is not known),
+    `can_check` (a way to read it), `reconciled` (what that read said),
+    `renewable`, `breaker` ("open" or "closed"), `tries_left`. An action
+    the class does not admit is never taken, and a write whose effect is
+    not known is never repeated before it is reconciled."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+
+    def admits(action):
+        return Need(f"a fault that admits {action}",
+                    lambda f: action in (f.get("admits") or ()),
+                    lambda f: f"a {f.get('class')} failure is not"
+                              f" recovered by {action}")
+    left = Need("tries left", lambda f: (f.get("tries_left") or 0) > 0,
+                "every try this work may make is spent")
+    known = Need("an effect known", lambda f: not f.get("uncertain")
+                 or f.get("reconciled") == "nothing",
+                 "what the failed write did is not known, so it is not"
+                 " repeated")
+    rungs = (
+        Rung("reconcile", "read whether the work took effect", needs=(
+            Need("an effect not known", lambda f: bool(f.get("uncertain")),
+                 "the failure's effect is known"),
+            Need("not read yet", lambda f: f.get("reconciled") is None,
+                 "it was read already"),
+            Need("a way to read it", lambda f: bool(f.get("can_check")),
+                 "nothing can read whether the write committed, so it"
+                 " stops rather than repeat it"))),
+        Rung("proceed", "go on: the work took effect", needs=(
+            Need("an effect read as committed",
+                 lambda f: f.get("reconciled") == "committed",
+                 "the work is not known to have taken effect"),)),
+        Rung("pause", "wait, then one try", needs=(
+            admits("pause"), left,
+            Need("a side cooling down or a credential that renews",
+                 lambda f: f.get("breaker") == "open" or (
+                     f.get("class") == "expired_credential"
+                     and f.get("renewable")),
+                 "nothing that a wait alone clears"))),
+        Rung("throttle", "back off longer with less work at once", needs=(
+            admits("throttle"), left, known)),
+        Rung("retry", "try again after a backoff", needs=(
+            admits("retry"),
+            Need("a fault that clears", lambda f: bool(f.get("transient")),
+                 "the fault does not clear by itself"),
+            left, known)),
+        Rung("replan", "take another way for the work", needs=(
+            admits("replan"),)),
+        Rung("isolate", "set the unit aside, go on with the rest", needs=(
+            admits("isolate"),)),
+        Rung("probe", "read the evidence again from the servers", needs=(
+            admits("probe"),)),
+        Rung("stop", "stop this work and say why",
+             because="no safe recovery holds"))
+    return climb("a failure", rungs, f)
+>>>>>>> worktree-agent-a162ed900f09ff395

@@ -166,27 +166,20 @@ def _backoff(attempt, base=0.8):
     return base * (2 ** attempt)
 
 
-def with_retry(fn, tries=4, base=0.8, label="", log=None, writes=False):
-    """Run fn(), retrying transient connection failures with exponential
-    backoff. Permanent errors (auth, syntax, constraint) raise at once.
-    `writes`: fn changes something, so only a failure while connecting is
-    tried again (`retryable`). The one retry policy: a program `run`
-    starts is retried by it too."""
-    last = None
-    for i in range(tries):
-        try:
-            return fn()
-        except Exception as e:  # noqa: BLE001 - classify by message
-            last = e
-            if i == tries - 1 or not retryable(e, writes):
-                raise
-            delay = _backoff(i, base)
-            if log:
-                log(f"{label or 'op'}: transient error, retry"
-                    f" {i + 1}/{tries - 1} in {delay:.1f}s"
-                    f" ({str(e).splitlines()[-1][:60]})")
-            time.sleep(delay)
-    raise last
+def with_retry(fn, tries=4, base=0.8, label="", log=None, writes=False,
+               side="", **recover):
+    """Run fn() under the one recovery policy (`faults.retried`): each
+    failure classified by its engine code and effect, and what is done
+    chosen by `decide.recovery` - a transient one retried with exponential
+    backoff, a permanent one (auth, syntax, constraint) raised at once.
+    `writes`: fn changes something, so a failure after it was sent is
+    reconciled (`recover["check"]`) or stopped, never repeated on a guess.
+    `side`: whose breaker the failures count on. The one retry policy: a
+    program `run` starts is retried by it too."""
+    from .faults import retried
+    return retried(fn, tries=tries, side=side, writes=writes, log=log,
+                   label=label, backoff=lambda i: _backoff(i, base),
+                   wait=lambda s: time.sleep(s), **recover)
 
 
 def without_secret(text, secret):
@@ -218,6 +211,15 @@ class CommandFailed(RuntimeError):
         self.returncode, self.stderr, self.argv = returncode, stderr, argv
 
 
+class _Exited(Exception):
+    """A program that exited non-zero, its error output as its words so
+    `faults.classify` reads it; never shown - `run` returns the process."""
+
+    def __init__(self, process):
+        super().__init__(str(process.stderr or ""))
+        self.process = process
+
+
 def run(cmd, env=None, input=None, timeout=None, check=True, retries=3,
         writes=False):
     """Run a command, retrying only transient connection failures with
@@ -240,18 +242,30 @@ def run(cmd, env=None, input=None, timeout=None, check=True, retries=3,
              else ["/bin/sh", "-c"])
     argv = (shell + [cmd] if isinstance(cmd, str)
             else [str(a) for a in cmd])
-    for i in range(retries + 1):
+    from .faults import retried
+
+    def once():
         try:
-            p = runner.run(argv, env, input=input, timeout=timeout,
-                           check=False, check_flags=False)
+            got = runner.run(argv, env, input=input, timeout=timeout,
+                             check=False, check_flags=False)
         except runner.Transient:
-            raise subprocess.TimeoutExpired(cmd, timeout) from None
+            return "timeout", None
         except runner.Blocked as e:
-            raise FileNotFoundError(2, str(e), argv[0]) from None
-        if not p.returncode or i == retries \
-                or not retryable(p.stderr, writes):
-            break
-        time.sleep(_backoff(i))
+            return "blocked", e
+        if got.returncode:
+            raise _Exited(got)
+        return "ran", got
+    try:
+        how, p = retried(once, tries=retries + 1, writes=writes,
+                         side=f"run {os.path.basename(argv[0])}",
+                         label="a program", backoff=_backoff,
+                         wait=lambda s: time.sleep(s))
+    except _Exited as e:
+        how, p = "ran", e.process
+    if how == "timeout":
+        raise subprocess.TimeoutExpired(cmd, timeout) from None
+    if how == "blocked":
+        raise FileNotFoundError(2, str(p), argv[0]) from None
     if p.returncode and check:
         raise CommandFailed(p.returncode, p.stderr, cmd)
     return p
