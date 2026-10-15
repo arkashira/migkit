@@ -46,9 +46,13 @@ Grouped by the kind of breakage they cause.
 | `check_function_bodies` | Function body validation at create time | Restores that pass on one side fail on the other |
 | `default_text_search_config` | Default full-text search config | `to_tsvector()` and FTS queries return different matches |
 
-`wal_level` (replica vs logical) affects whether logical decoding / CDC is
-possible, not the stored data. A managed target often runs `logical` for its own
-replication; that difference is expected.
+`wal_level` (replica vs logical) does not change the stored data - it decides
+whether logical decoding / CDC is possible - but migkit flags it all the same,
+because a source at `replica` cannot carry changes. A managed target often runs
+`logical` for its own replication, so that difference is usually expected rather
+than wrong. `integer_datetimes` is flagged the same way: it is a build setting,
+the same on any pair from one era, and a difference means the two servers were
+built differently.
 
 ## MySQL
 
@@ -104,6 +108,7 @@ less than it does in SQL, as long as the tz database is present on both sides.
 
 `migkit check <hop> --only params` writes the full `params.json` (every setting,
 both sides) and marks a diff only when a behavior-critical setting differs. The
-currently flagged set is the PostgreSQL and MySQL tables above, plus
-`featureCompatibilityVersion` for MongoDB. Everything else is written to disk and
-counted, so the check stays signal rather than noise.
+currently flagged set is the PostgreSQL and MySQL tables above - with `wal_level`
+and `integer_datetimes` for PostgreSQL - plus `featureCompatibilityVersion` for
+MongoDB. Everything else is written to disk and counted, so the check stays
+signal rather than noise.

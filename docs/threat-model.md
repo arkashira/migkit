@@ -67,6 +67,13 @@ stays in the user's state directory and never in a report, so a report
 shared with its salt cannot be tested against guessed values
 (`test_the_drilldown_can_be_masked.py`, `test_a_shown_hash_is_keyed.py`).
 
+Where the hop names recipients for the files holding values, those files
+are sealed before they are written: drilldowns, a repair's undo, a
+two-way tail's conflicts and the evidence export become age files to the
+hop's keys and are read back with the operator's own (`MIGKIT_IDENTITY`)
+(`evidence.HOLDS_VALUES`, `evidence.report_path`; `test_what_holds_values
+_is_kept_encrypted.py`). The report's own summaries are not among them.
+
 ## What leaves the machine
 
 migkit sends four things off the machine of its own accord, and only
@@ -195,6 +202,7 @@ attestation (`.github/workflows/release.yml`).
 
 ## Not covered yet
 
-* The report directory's own files (drilldowns and summaries) are not
-  encrypted at rest. Use the machine's disk encryption for them, and
-  `mask` for the values in them.
+* The report's summaries (`report.html`, `summary.json`, `verdict.json`)
+  are not encrypted at rest. The files that hold values are, where the hop
+  names `at_rest` recipients (see above); for the summaries, use the
+  machine's disk encryption, and `mask` for the values in them.

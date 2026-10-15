@@ -2937,7 +2937,7 @@ prints, and a printed-only plan still shows the placeholder
 
 **Masking of data (2026-09-25).** The hop option `mask` takes `all`, or a
 list of `column` and `table.column` names. Each value a report shows from
-a masked column appears as `masked:` followed by a salted hash. This
+a masked column appears as `masked:` followed by a keyed HMAC. This
 applies to:
 * the keys in the drilldown's findings and in the repair plan
 * the row sample of `check --drill`
@@ -2947,14 +2947,19 @@ applies to:
 Equal values show equal, so the rows still line up and a difference is
 still one. A table with any masked column has its keys masked too. A key
 shown whole could be that very column, so masking the whole key is the
-safe side. A double-encoding example is left out rather than hashed,
+safe side. A double-encoding example is left out rather than masked,
 because the text itself is the finding.
 
-The salt stays in the hop's report directory, readable by its user only,
-so another hop's tokens do not match these. The drilldown's key files are
-migkit's working state for the repair, not a report, and are not masked.
-The repair still acts on the real keys
-(`tests/test_the_drilldown_can_be_masked.py`).
+The key has two parts (`masking.keyed`). The hop's salt stays in the hop's
+report directory, readable by its user only, so another hop's tokens do not
+match these. The rest is a secret kept local to the user, outside every
+report directory (`mask.key` in the state directory, 0600): a report shared
+with its salt still cannot be tested against a list of guessed values,
+which a plain salted hash could. The drilldown's key files are migkit's
+working state for the repair, not a report, and are not masked. The repair
+still acts on the real keys
+(`tests/test_the_drilldown_can_be_masked.py`,
+`tests/test_a_shown_hash_is_keyed.py`).
 
 ---
 

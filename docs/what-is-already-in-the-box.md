@@ -13,22 +13,20 @@ tree, not from memory.
 Re-run it before planning new work. The cheapest capability is the one
 already installed.
 
-## 1. Declared and never imported
+## 1. Declared, and used
 
 | Dependency | State |
 |---|---|
-| `sqlglot` | In `pyproject.toml`. **Zero imports anywhere in `migkit/`.** |
+| `sqlglot` | In `pyproject.toml`, and imported by `rowfilter`, `change_parity` and `storedcode`. |
 
-It used to be load-bearing: `hetero.py` records that DDL conversion "was a
-sqlglot transpile followed by ten regular expressions" before it was
-replaced. The replacement was right; leaving the dependency behind was not.
-
-Two honest options, and they are not the same: drop it, or open it. sqlglot
-parses and transpiles SQL across twenty-odd dialects, which is the same
-shape as three things on the plan - rewriting a query for a renamed table
-(item 17), translating DDL between engines, and the parsing half of stored
-logic conversion (item 20). It is a decision to make deliberately rather
-than a line to leave sitting in the manifest.
+It was once load-bearing and then left behind: `engines/hetero.py` records
+that DDL conversion "was a sqlglot transpile followed by ten regular
+expressions" before it was replaced. It has since been opened deliberately,
+which is what this page asked for. It parses and transpiles SQL across
+twenty-odd dialects, and three things on the plan now lean on it: a hop's
+row filter (`mapping.where`, read once and said in every engine's own
+words), the change-parity reading of a statement log, and the parsing half
+of stored logic conversion (item 20).
 
 ## 2. Wrapped, but only one door is open
 
@@ -359,11 +357,14 @@ regex comes back `The 'table.exclude.list' value is invalid`.
 > oracle, trino, presto, duckdb, vertica and more.
 
 So migkit can already *verify* against Oracle, Snowflake, BigQuery,
-Redshift, ClickHouse, Trino, DuckDB and Vertica today. What is missing is
-not the reach - it is the depth and the ergonomics:
+Redshift, ClickHouse, Trino, DuckDB and Vertica today. What was missing
+was not the reach - it is the depth and the ergonomics:
 
-* `checks = ("counts", "data")` - no schema check, and **no deep battery at
-  all** (`check_deep` returns `skip: no deep checks for this engine yet`).
+* `checks = ("schema", "counts", "data")`, and a deep check of its own: the
+  key check every other verdict on the engine rests on, because a key that
+  is not one row per value makes the comparison and the repair answer about
+  something other than the data. It had neither a schema check nor any deep
+  check when this page was written.
 * The operator must hand-write a connection URL in `options.url` and list
   every table in `options.tables`. Nothing is discovered.
 * No mover: these are verification-only hops.
@@ -374,20 +375,24 @@ already exist on the neutral contract - not a new engine.
 
 ## 4. Deep checks, by engine
 
-Counted from each engine's `check_deep`:
+Counted from each engine's `check_deep`, which names the scopes it can
+report on. Every engine below now returns deep checks of its own:
 
 | engine | deep checks |
 |---|---|
-| postgres | 15 |
-| mysql | 15 |
-| mssql | ~4 (keys, fk, triggers, columns) |
-| mongodb | ~4 (boundary, bson-types, null-missing, collection options) |
-| redis | 2 (ttl, bigkeys) |
-| kafka | 1 |
-| sqlite, generic, hetero | 0 |
+| postgres | the deepest: keys and duplicate keys, foreign keys, columns, collation and collation versions, grants and ownership, indexes, triggers, generated columns, encoding and mojibake, float rendering, NULL against empty, partitions, large objects, RLS and more |
+| mysql | the deepest, beside postgres: the same families, plus charset, table options, errant transactions and statistics |
+| mssql | keys, foreign keys, triggers, columns, charset and collation, RLS, generated columns, ownership and grants, indexes, boundary, NULL against empty, float rendering and more |
+| mongodb | BSON types, capped-collection options, the shard key, indexes, collation, encoding, boundary and narrowing, grants, and more |
+| redis | `ttl`, `bigkeys`, boundary and grants |
+| kafka | the consumer groups' offsets, the ACLs on the topics it takes, the schemas, and boundary |
+| sqlite | its declared types, read against what the database itself already refused to convert |
+| generic | the key check every other verdict on the engine rests on |
+| hetero | the temporal meaning and the zero dates its pairs disagree on, and the values the target would change |
 
-The zeros are honest - the base returns `skip`, not `ok` - but `hetero` is
-the leg the project advertises, and `generic` is every engine in section 3.
+The base's `skip: no deep checks for this engine yet` is still what an
+engine with none returns - the honest answer rather than a false `ok` - and
+none of the engines above is one any more.
 
 ## 5. Order of work this implies
 
@@ -433,5 +438,6 @@ Cheapest first, where "cheap" means no new dependency:
    this and that is why the raw rows are read: `bigint` and `integer` both
    normalise to `Integer`. `test_generic_schema.py`.
 6. atlas `migrate lint` on the DDL migkit already generates.
-7. Decide sqlglot: open it for transformation and DDL translation, or drop
-   it from the manifest.
+7. ~~Decide sqlglot~~ **decided** - it is opened and load-bearing now: a
+   hop's row filter, the change-parity reading of a statement log, and the
+   parsing half of stored logic conversion (section 1).

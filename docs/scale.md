@@ -66,8 +66,8 @@ almost no host CPU at all.
 LOBs cost about half the throughput per byte even on the fast path: 48 MB/s
 for the plain table against 22 MB/s for the LOB table through dump/restore.
 
-**Why migkit was not using it.** `movers.pgcopydb_available()` requires the
-`dimitri/pgcopydb` container image rather than a local binary, because
+**Why migkit held back.** `movers.pgcopydb_available()` once accepted only
+the version-matched container image rather than a local binary, because
 Homebrew's pgcopydb 0.18 is compiled against PostgreSQL 18 and emits `SET
 transaction_timeout = 0`, which PostgreSQL 16 has never heard of. That was
 measured to make a whole-database `clone` move zero rows while reporting
@@ -78,8 +78,10 @@ log shows `ERROR: unrecognized configuration parameter
 "transaction_timeout"` during the pgcopydb run, and all 50,000 and then
 2,000,000 rows arrived anyway. The difference is the subcommand - `copy
 table-data` survives the failed SET where `clone` does not. That is a
-narrower constraint than the current availability check enforces, and
-worth 3-5x.
+narrower constraint than the availability check used to enforce:
+`pgcopydb_runner` now takes the local binary for `copy table-data`, with
+`Engine.moved_nothing` as the guard that refuses a move which reports
+success and leaves the target empty. That is worth 3-5x.
 
 ### What the numbers say
 
