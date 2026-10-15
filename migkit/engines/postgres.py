@@ -10736,6 +10736,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 known[(db, t)] = int((row or {}).get("largest") or 0)
             except Exception:  # noqa: BLE001 - not sized: as asked
                 known[(db, t)] = 0
+        widest = known[(db, t)]
         if not widest:
             return most
         from .. import tuning

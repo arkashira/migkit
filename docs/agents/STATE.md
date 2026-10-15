@@ -16,7 +16,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | cockroachdb | 12/16 | 11/12 | params, bulk-move, users, snapshot, large values |
 | copybook | 16/16 | 12/12 | - |
 | cosmosdb | 14/16 | 12/12 | bulk-move, snapshot |
-| couchbase | 11/16 | 11/12 | params, bulk-move, users, statistics, snapshot, large values |
+| couchbase | 11/16 | 12/12 | params, bulk-move, users, statistics, snapshot |
 | datastore | 16/16 | 11/12 | large values |
 | db2 | 7/16 | 12/12 | params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
 | db2i | 13/16 | 12/12 | params, bulk-move, snapshot |
@@ -58,18 +58,12 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | spanner | 16/16 | 11/12 | large values |
 | sqlite | 16/16 | 12/12 | - |
 | teradata | 16/16 | 12/12 | - |
-| tidb | 13/16 | 11/12 | bulk-move, users, snapshot, large values |
+| tidb | 13/16 | 12/12 | bulk-move, users, snapshot |
 | timestream | 16/16 | 11/12 | large values |
 
 ## Depth by engine
 
-<<<<<<< HEAD
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1315, not yet 1234, stale 218, test owed 778, untested 12, yes 915. A cell below is the ways proved of the items that apply.
-||||||| 7901f35
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1316, not yet 1234, stale 218, test owed 777, untested 13, yes 914. A cell below is the ways proved of the items that apply.
-=======
-87 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1340, not yet 1263, test owed 1005, yes 916. A cell below is the ways proved of the items that apply.
->>>>>>> worktree-agent-a4ca2bacb9aa1b491
+87 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1340, not yet 1261, test owed 1006, yes 917. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -82,14 +76,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | copybook | 0/7 | 0/15 | - | 0/4 | 1/2 | 2/4 | 0/1 | 1/1 | - | 0/1 | 4/35 |
 | cosmosdb | 6/9 | 14/20 | 4/5 | 2/6 | 1/3 | 3/5 | 1/3 | 1/1 | 1/1 | 0/1 | 33/54 |
 | couchbase | 0/9 | 1/22 | 1/5 | 1/7 | 1/4 | 1/6 | 2/6 | 1/1 | 0/1 | 0/1 | 8/62 |
-<<<<<<< HEAD
-| datastore | 0/8 | 0/16 | - | 0/6 | 0/2 | 2/4 | 0/2 | 1/1 | 1/1 | 0/1 | 4/41 |
-||||||| 7901f35
-| couchbase | 0/9 | 1/22 | 1/5 | 1/7 | 1/4 | 1/5 | 2/6 | 1/1 | 0/1 | 0/1 | 8/61 |
-| datastore | 0/8 | 0/16 | - | 0/6 | 0/2 | 2/4 | 0/2 | 1/1 | 1/1 | 0/1 | 4/41 |
-=======
 | datastore | 0/8 | 0/16 | - | 0/6 | 0/2 | 2/5 | 0/2 | 1/1 | 1/1 | 0/1 | 4/42 |
->>>>>>> worktree-agent-a4ca2bacb9aa1b491
 | db2 | 1/10 | 0/36 | 0/6 | 0/7 | 1/6 | 3/7 | 1/7 | 0/1 | 1/1 | 0/1 | 7/82 |
 | db2i | 0/10 | 1/36 | 0/6 | 0/7 | 0/6 | 0/7 | 0/6 | 1/1 | 0/1 | 0/1 | 2/81 |
 | db2zos | 0/9 | 0/33 | - | 1/7 | 0/6 | 0/7 | 0/4 | 0/1 | 0/1 | 0/1 | 1/69 |
@@ -130,16 +117,8 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | spanner | 0/10 | 2/30 | 1/6 | 0/6 | 1/6 | 2/6 | 3/4 | 1/1 | 1/1 | 0/1 | 11/71 |
 | sqlite | 2/9 | 4/27 | - | 2/7 | 2/5 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 17/59 |
 | teradata | 6/8 | 12/29 | - | 2/7 | 3/6 | 2/6 | 3/4 | 1/1 | 1/1 | 0/1 | 30/63 |
-<<<<<<< HEAD
 | tidb | 9/10 | 25/31 | 4/6 | 5/7 | 5/5 | 5/7 | 4/6 | 1/1 | 0/1 | 0/1 | 58/75 |
-| timestream | 0/7 | 0/18 | - | 0/6 | 0/1 | 1/4 | 1/3 | 1/1 | 1/1 | 0/1 | 4/42 |
-||||||| 7901f35
-| tidb | 9/10 | 25/31 | 4/6 | 5/7 | 5/5 | 4/7 | 4/6 | 1/1 | 0/1 | 0/1 | 57/75 |
-| timestream | 0/7 | 0/18 | - | 0/6 | 0/1 | 1/4 | 1/3 | 1/1 | 1/1 | 0/1 | 4/42 |
-=======
-| tidb | 9/10 | 25/31 | 4/6 | 5/7 | 5/5 | 4/7 | 4/6 | 1/1 | 0/1 | 0/1 | 57/75 |
 | timestream | 0/7 | 0/18 | - | 0/6 | 0/1 | 1/5 | 1/3 | 1/1 | 1/1 | 0/1 | 4/43 |
->>>>>>> worktree-agent-a4ca2bacb9aa1b491
 
 Per item: the engines in each state - "test owed" is a way in the code whose test on that engine is not written (`UNPROVED`).
 
@@ -215,26 +194,12 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | schema.routines | mssql mysql oracle postgres | bigquery cockroachdb dcdb geminidb-mongo mongodb oceanbase polardbx | the rest (22) | bigtable copybook datastore delta dynamodb firestore hetero iceberg kafka keyspaces kinesis neptune parquet pubsub saas sapodp sqlite tidb timestream |
 | move.table-copy | the rest (36) | bigquery db2i db2zos dcdb geminidb-cassandra geminidb-mongo lindorm oceanbase-oracle polardbx snowflake timestream | generic | kinesis pubsub saas sapodp |
 | move.bulk | the rest (22) | bigquery geminidb-cassandra geminidb-mongo hetero keyspaces | ase cockroachdb cosmosdb couchbase db2 db2i db2zos dcdb delta generic iceberg oceanbase oceanbase-oracle polardbx redshift snowflake tidb | dsql geminidb-redis kinesis lindorm pubsub saas sapodp teradata |
-<<<<<<< HEAD
-| move.large-values | ase clickhouse db2 delta duckdb hetero iceberg kafka mongodb mssql mysql opensearch oracle parquet postgres redis sqlite tidb | bigquery couchbase db2i db2zos snowflake teradata | - | the rest (23) |
-| move.partitioned | clickhouse kafka mysql postgres tidb | bigquery mssql oracle teradata | - | the rest (36) |
-| move.sized | the rest (18) | cassandra cockroachdb db2i db2zos dcdb gaussdb geminidb-mongo geminidb-redis lindorm oceanbase oceanbase-oracle oracle polardbx redshift snowflake teradata | bigtable copybook couchbase datastore delta firestore generic iceberg neptune parquet saas sapodp spanner timestream | kinesis pubsub |
-| move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse dcdb mongodb mssql oceanbase polardbx teradata | the rest (18) | bigquery bigtable copybook delta dynamodb geminidb-redis iceberg kafka kinesis neptune parquet pubsub redis redshift saas sapodp snowflake timestream |
-| move.create-missing | cosmosdb dsql dynamodb hetero mysql opensearch oracle postgres teradata tidb | bigquery cassandra clickhouse cockroachdb dcdb kafka mssql oceanbase polardbx redshift snowflake | the rest (17) | datastore firestore geminidb-mongo geminidb-redis kinesis mongodb neptune pubsub redis saas sapodp |
-||||||| 7901f35
-| move.large-values | ase clickhouse db2 delta duckdb hetero iceberg kafka mongodb mssql mysql opensearch oracle parquet postgres redis sqlite | bigquery db2i db2zos snowflake teradata | - | the rest (24) |
-| move.partitioned | clickhouse kafka mysql postgres tidb | bigquery mssql oracle teradata | - | the rest (36) |
-| move.sized | the rest (18) | cassandra cockroachdb db2i db2zos dcdb gaussdb geminidb-mongo geminidb-redis lindorm oceanbase oceanbase-oracle oracle polardbx redshift snowflake teradata | bigtable copybook couchbase datastore delta firestore generic iceberg neptune parquet saas sapodp spanner timestream | kinesis pubsub |
-| move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse dcdb mongodb mssql oceanbase polardbx teradata | the rest (18) | bigquery bigtable copybook delta dynamodb geminidb-redis iceberg kafka kinesis neptune parquet pubsub redis redshift saas sapodp snowflake timestream |
-| move.create-missing | cosmosdb dsql dynamodb hetero mysql opensearch oracle postgres teradata tidb | bigquery cassandra clickhouse cockroachdb dcdb kafka mssql oceanbase polardbx redshift snowflake | the rest (17) | datastore firestore geminidb-mongo geminidb-redis kinesis mongodb neptune pubsub redis saas sapodp |
-=======
-| move.large-values | ase clickhouse db2 delta duckdb hetero iceberg kafka mongodb mssql mysql opensearch oracle parquet postgres redis sqlite | bigquery db2i db2zos snowflake teradata | the rest (21) | cassandra copybook cosmosdb dynamodb kinesis pubsub redshift saas sapodp |
+| move.large-values | ase clickhouse db2 delta duckdb hetero iceberg kafka mongodb mssql mysql opensearch oracle parquet postgres redis sqlite tidb | bigquery couchbase db2i db2zos snowflake teradata | the rest (19) | cassandra copybook cosmosdb dynamodb kinesis pubsub redshift saas sapodp |
 | move.partitioned | clickhouse kafka mysql postgres tidb | bigquery db2 db2i db2zos dcdb mssql oceanbase oracle parquet polardbx teradata | ase delta gaussdb generic hetero iceberg lindorm oceanbase-oracle | the rest (28) |
 | move.spread | hetero postgres | cassandra mongodb mysql | - | the rest (47) |
 | move.sized | the rest (18) | cassandra cockroachdb db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm oceanbase oceanbase-oracle oracle polardbx redshift snowflake teradata | bigtable copybook couchbase datastore delta firestore generic iceberg neptune parquet saas sapodp spanner timestream | kinesis pubsub |
 | move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse dcdb geminidb-cassandra geminidb-mongo keyspaces mongodb mssql oceanbase polardbx teradata | the rest (18) | bigquery bigtable copybook delta dynamodb geminidb-redis iceberg kafka kinesis neptune parquet pubsub redis redshift saas sapodp snowflake timestream |
 | move.create-missing | cosmosdb dsql dynamodb hetero mysql opensearch oracle postgres teradata tidb | bigquery cassandra clickhouse cockroachdb dcdb gaussdb geminidb-cassandra kafka keyspaces mssql oceanbase polardbx redshift snowflake | the rest (17) | datastore firestore geminidb-mongo geminidb-redis kinesis mongodb neptune pubsub redis saas sapodp |
->>>>>>> worktree-agent-a4ca2bacb9aa1b491
 | cutover.freeze | cassandra clickhouse cockroachdb kafka mongodb mssql mysql opensearch postgres redis redshift snowflake teradata tidb | ase couchbase db2 dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis hetero oceanbase oceanbase-oracle oracle polardbx | - | the rest (25) |
 | cutover.read-only-target | the rest (22) | db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis hetero oceanbase oceanbase-oracle polardbx | - | bigtable copybook cosmosdb datastore delta duckdb firestore generic iceberg keyspaces kinesis neptune parquet pubsub saas sapodp spanner sqlite timestream |
 | cutover.counters | dcdb duckdb gaussdb hetero mssql mysql oceanbase-oracle oracle polardbx postgres spanner sqlite tidb | cockroachdb db2 db2i db2zos dsql oceanbase | ase generic redshift snowflake | the rest (29) |

@@ -2259,61 +2259,20 @@ WAYS = {
         # measured on a server of the kind, and an inherited adapter is
         # not that measurement
         **{n: (NOT_YET, "P0-PARITY.lv.new") for n in (
-            "tidb", "oceanbase", "oceanbase-oracle", "polardbx", "dcdb",
+            "oceanbase", "oceanbase-oracle", "polardbx", "dcdb",
             "gaussdb", "lindorm", "geminidb-redis", "geminidb-mongo",
             "keyspaces", "geminidb-cassandra", "cockroachdb", "dsql",
-            "couchbase", "spanner", "bigtable", "firestore", "datastore",
+            "spanner", "bigtable", "firestore", "datastore",
             "neptune", "timestream")},
         "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
                                      " under the 1 MB a scan page returns"),
-<<<<<<< HEAD
         "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, less than"
                                      " a piece: read whole in batches cut"
                                      " by bytes and written in"
                                      " transactional batches cut at the"
                                      " 2 MB a request takes"),
         "couchbase": ("yes", "@LARGE_VALUES"),
-        "spanner": (NOT_APPLICABLE, "a row is 4 MB at most; mutations"
-                                    " bounded"),
-        "bigtable": (NOT_APPLICABLE, "a cell is bounded by Bigtable;"
-                                     " row read in chunks"),
-        **{n: (NOT_APPLICABLE, "an entity is 1 MB at most")
-           for n in ("firestore", "datastore")},
-        **{n: (NOT_APPLICABLE, "a row is written as one mutation, at"
-                               " most 16 MB")
-           for n in ("keyspaces", "geminidb-cassandra")},
-        "cockroachdb": (NOT_APPLICABLE, "values past 16 MB are bounded"
-                                        " by range limits"),
-        "dsql": (NOT_APPLICABLE, "Aurora DSQL bounds transactions to"
-                                 " 10 MB"),
-        "neptune": (NOT_APPLICABLE, "graph entities are bounded"),
-        "timestream": (NOT_APPLICABLE, "a record is 2 KB at most"),
-||||||| 7901f35
-        "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, read whole"
-                                     " and handed on in batches cut by"
-                                     " bytes"),
-        "couchbase": (NOT_APPLICABLE, "a document is 20 MB at most; the"
-                                      " range scan reads across them"),
-        "spanner": (NOT_APPLICABLE, "a row is 4 MB at most; mutations"
-                                    " bounded"),
-        "bigtable": (NOT_APPLICABLE, "a cell is bounded by Bigtable;"
-                                     " row read in chunks"),
-        **{n: (NOT_APPLICABLE, "an entity is 1 MB at most")
-           for n in ("firestore", "datastore")},
-        **{n: (NOT_APPLICABLE, "a row is written as one mutation, at"
-                               " most 16 MB")
-           for n in ("keyspaces", "geminidb-cassandra")},
-        "cockroachdb": (NOT_APPLICABLE, "values past 16 MB are bounded"
-                                        " by range limits"),
-        "dsql": (NOT_APPLICABLE, "Aurora DSQL bounds transactions to"
-                                 " 10 MB"),
-        "neptune": (NOT_APPLICABLE, "graph entities are bounded"),
-        "timestream": (NOT_APPLICABLE, "a record is 2 KB at most"),
-=======
-        "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, read whole"
-                                     " and handed on in batches cut by"
-                                     " bytes"),
->>>>>>> worktree-agent-a4ca2bacb9aa1b491
+        "tidb": ("yes", "@LARGE_VALUES"),
         "cassandra": (NOT_APPLICABLE, "a row is written as one mutation, at"
                                       " most half a commit-log segment:"
                                       " 16 MB by default"),
