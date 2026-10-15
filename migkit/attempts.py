@@ -272,11 +272,25 @@ def reconcile_units(eng, kind=None):
     stopped - closed now as cut off (`Ledger.reconcile_open`), before the
     work they were part of is replayed: their names, the ranges the
     restart reads again first. None where `eng` keeps no ledger."""
-    fn = getattr(eng, "attempts", None)
-    ledger = getattr(fn(), "ledger", None) if callable(fn) else None
+    ledger = ledger_of(eng)
     if ledger is None or not hasattr(ledger, "reconcile_open"):
         return None
     return ledger.reconcile_open(kind)
+
+
+def ledger_of(eng):
+    """`eng`'s ledger, or None where it keeps none."""
+    fn = getattr(eng, "attempts", None)
+    return getattr(fn(), "ledger", None) if callable(fn) else None
+
+
+def range_unit(eng, table, after, parts=None):
+    """The unit of one shared range of `table` (the range after `after`),
+    named by `fleet.unit_name` so a mover that takes the hop over reads
+    which ranges the stopped one left open (`fleet.opened`)."""
+    from . import fleet
+    return work_unit(eng, "move", fleet.unit_name(table, after),
+                     level="range", parent=table, parts=parts)
 
 
 def work_unit(eng, kind, name, level="table", parent="", parts=None):
@@ -508,6 +522,18 @@ class Ledger:
             r.update(state="done" if ok else "failed", ended=at,
                      reason="" if ok else (reason or "failed"))
         self.flush()
+
+    def range_units(self, table):
+        """{after: the unit's record} of every shared range of `table` this
+        ledger has a unit for, in any state - the ranges a restart or a
+        takeover owes again are the open and failed ones."""
+        from . import fleet
+        out = {}
+        for name, rec in dict(self.records).items():
+            got = fleet.parse_unit(name)
+            if got and got[0] == table and rec.get("level") == "range":
+                out[got[1]] = dict(rec)
+        return out
 
     def reconcile_open(self, kind=None):
         """Close every unit (of `kind`, or any) an earlier run left open

@@ -5643,6 +5643,15 @@ the gaps nothing above covers yet, now items of their own.
   `claims.copy` do not call `fleet.take_over` yet (the taker still waits
   out a range claim's term), and nothing opens a range unit in the
   ledger under `fleet.unit_name` while it copies.
+  *Closed 2026-10-16 (W12R, tests written, not run):* `ha.Holding.take`
+  calls `fleet.take_hop_over` when the lease was taken over, and the last
+  `unlink` runs `fleet.audit_hop` (findings said, written to the
+  changelog, carried by `claims.evidence` and `claims.health`);
+  `claims.copy` opens each range as a ledger unit named by
+  `fleet.unit_name` (`attempts.range_unit`). *Not done:* a stopped mover's
+  ledger on another machine is not read (only this machine's ledger; the
+  machines' record stays the truth), and `capabilities` text for fleet and
+  topology (W12F's file).
 * **W2. The estate, not the hop.** Discovery of every database on a
   network or account, target sizing from the source's performance
   history (Azure's SKU recommendations, Fleet Advisor), cost of the
@@ -7080,8 +7089,14 @@ researched:
   gives one hop per pair with the origin it applies; `topology_verify`
   proves the union, the partition or the convergence, each source's order
   and that no change came round.
-  Not done: the facts read off a hop's config and the servers, the hops
-  run by the planner, a docker run of each shape.
+  *Read and run 2026-10-16 (W12R, written, not run):* `topology.layout`
+  and `topology.facts_of` read sites, links, hop count and each link's
+  measured rate from the configuration's hops and their kept copies
+  (`planner.link_speed`); `planner.run_topology` runs the decided hops in
+  the order `overlap` gives (the slowest link first) and checks the proof
+  after each hop, the next not begun on a failed one. Not done: the
+  servers' own facts (key spaces, the conflict rule) are still passed in,
+  the facts are not yet a hop key, a docker run of each shape.
 * Tested in docker: pairs of mysql:8.4 and mariadb:11, both directions
   writing, echoes counted (must be 0), both sides hashed equal.
 

@@ -401,7 +401,7 @@ def copy(pair, db, key, src_t, k, ck, lo, hi, edges, log, fn, item,
     `outside()` - the target's rows outside the source's whole range
     removed - is run by that machine alone. Returns True: the table is
     this path's, wherever its ranges were copied."""
-    from . import ha, ranges, sizing
+    from . import attempts, ha, ranges, sizing
     from . import model as resource_model
     hop = pair.hop
     store = shared.store_for(hop, log)
@@ -475,7 +475,8 @@ def copy(pair, db, key, src_t, k, ck, lo, hi, edges, log, fn, item,
                                 lazy=True)
             if not isinstance(proc, ranges._Worker) or not proc.alive():
                 proc = ranges._Worker()
-            got = proc.run(fn, item(a, u, tok.plain()))
+            with attempts.range_unit(src, key, a, units):
+                got = proc.run(fn, item(a, u, tok.plain()))
             # the rows it copied, first where the copier says more
             moved = int((got[0] if isinstance(got, tuple) else got) or 0)
             # the places a shared range keeps what it did, as a range of
@@ -580,6 +581,13 @@ def _records(hop, db, store):
             yield key, rec
 
 
+def audited(rec):
+    """What `fleet.audit` finds in a table's record: a range lost or
+    copied twice, said in the table's words."""
+    from . import fleet
+    return fleet.audit(rec)
+
+
 def health(hop, db, store):
     """What `watch` says of the tables the hop's machines share: ranges
     done, and which machine copies how many now."""
@@ -606,7 +614,9 @@ def health(hop, db, store):
                        + (f"; finished by {rec['finished'].get('host')}"
                           if rec.get("finished") else "")
                        + (f"; {len(rec['lapsed'])} claims lapsed and taken"
-                          " again" if rec.get("lapsed") else ""))
+                          " again" if rec.get("lapsed") else "")
+                       + (f"; AUDIT: {'; '.join(audited(rec))}"
+                          if audited(rec) else ""))
     except Exception as e:  # noqa: BLE001 - said
         out.append(f"shared tables: not read ({type(e).__name__})")
     return out
@@ -631,6 +641,16 @@ def evidence(hop, db, store):
                         "by": f"{st.get('host')} process {st.get('pid')}",
                         "number": st.get("number"), "from": st.get("state"),
                         "to": f"{int(st.get('rows') or 0):,} rows"})
+        for why in audited(rec):
+            out.append({"db": db, "what": f"{key}: audit of the ranges",
+                        "by": "", "number": None, "from": "audit",
+                        "to": why})
+        if not audited(rec):
+            out.append({"db": db, "what": f"{key}: audit of the ranges",
+                        "by": "", "number": None, "from": "audit",
+                        "to": "every range copied once, none lost"
+                        if rec.get("finished") else
+                        "ranges whole so far, the table not finished"})
         for lapse in rec.get("lapsed") or []:
             out.append({"db": db, "what": f"{key}: the range after"
                                           f" {lapse.get('after')}",

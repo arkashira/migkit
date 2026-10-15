@@ -1155,3 +1155,144 @@ def overlap(semantics, copy, build=None, check=None, at_once=1,
     return Overlap(w, said[w], copies, builds, checks, tail, span, serial,
                    tuple((said[k], v) for k, v in sorted(refused.items())
                          if k != w))
+
+
+# ---- topology hops, run in the decided order -----------------------------------
+
+def link_speed(hop):
+    """Rows per second the newest copy kept for this hop reached, over
+    every path it has run on; None where none was kept (`record_rate`)."""
+    import json
+    try:
+        kept = json.loads(_rates_path(hop).read_text())
+    except (OSError, ValueError):
+        return None
+    runs = [r for rs in kept.values() for r in rs if r.get("seconds")]
+    if not runs:
+        return None
+    last = max(runs, key=lambda r: r.get("at") or "")
+    return last["rows"] / last["seconds"]
+
+
+@dataclass
+class TopologyRun:
+    """What `run_topology` did: the decision, the hops in the order they
+    ran (`order`), those finished (`done`), the first hop that stopped the
+    run and why (`stopped`), the proof lines after each hop and the final
+    check."""
+    decision: object
+    order: tuple = ()
+    done: tuple = ()
+    stopped: tuple = ()
+    lines: tuple = ()
+    final: object = None
+
+    @property
+    def ok(self):
+        return not self.stopped and self.final is not None and self.final.ok
+
+
+def _order(specs, hops_by, facts, layout, rows_by_hop, at_once):
+    """The hops' names in the order they run: `overlap` over each hop's
+    seconds (rows over the link's measured rate; the median of the known
+    rates where it has none), so the longest begins first on a free lane
+    - and the plan's order where nothing is known to tell them apart."""
+    rates = sorted(v for v in layout.speeds.values() if v)
+    guess = rates[len(rates) // 2] if rates else None
+    seconds = {}
+    for s in specs:
+        name = hops_by[(s["source"], s["target"])].name
+        rate = layout.speed(s["source"], s["target"]) or guess
+        rows = (rows_by_hop or {}).get(name)
+        seconds[name] = (rows / rate) if rows and rate else 1.0
+    got = overlap({}, seconds, at_once=at_once)
+    names = [n for n, _, _ in got.copies]
+    return names or [hops_by[(s["source"], s["target"])].name
+                     for s in specs]
+
+
+def _partial(facts, rows, done):
+    """The facts and rows narrowed to the hops finished, for the proof
+    after each: sources (many-to-one) or targets (one-to-many) not yet
+    copied are not asked to be in the whole."""
+    from . import decide
+    kind = facts.get("kind")
+    if kind == "many-to-one":
+        s = [x for x in facts["sources"] if any(d["source"] == x for d in done)]
+        narrowed = decide.Facts({**facts, "sources": tuple(s)})
+        return narrowed, {
+            **rows, "sources": {x: rows["sources"][x] for x in s},
+            "applied": [a for a in rows.get("applied", ()) if a[0] in s]}
+    if kind == "one-to-many":
+        from . import scenarios
+        t = [x for x in facts["targets"] if any(d["target"] == x for d in done)]
+        route = scenarios._route(facts)
+        whole = {tb: {k: d for k, d in got.items()
+                      if route.place(tb, k) in t}
+                 for tb, got in rows["source"].items()}
+        return facts, {**rows, "source": whole,
+                       "targets": {x: rows["targets"][x] for x in t}}
+    return facts, rows
+
+
+def _hop_proof(facts, rows, done, last):
+    """The proof after one hop: the whole's own where it is the last; a
+    mesh's nodes converge only once every link is up, so before then only
+    that no change came round is proved; the others narrowed (`_partial`)."""
+    from . import scenarios, topology
+    if facts.get("kind") == "mesh" and not last:
+        came = topology.echoes(rows.get("applied", ()))
+        return scenarios.TopologyCheck(not came, (
+            f"{len(came)} changes came round or were passed on: {came[:3]!r}"
+            if came else "no change came round",))
+    narrowed, rows = _partial(facts, rows, done)
+    return scenarios.topology_verify(narrowed, rows)
+
+
+def run_topology(hops, facts, layout, run_hop, read_rows, rows_by_hop=None,
+                 at_once=1):
+    """The hops of a many-node topology run, in the order the plan and
+    the measured links decide (`_order`), each by `run_hop(hop, spec)`;
+    after every hop `read_rows()` is asked for the rows of the nodes and
+    the proof for the hops finished is checked (`scenarios.topology_verify`
+    over `_partial`), and the next hop does not begin on a proof that
+    failed. The proof of the whole is the last. A topology the case
+    refuses runs nothing."""
+    from . import scenarios, topology
+    decision = scenarios.topology_case(facts)
+    specs = scenarios.topology_hops(facts, decision)
+    if not specs:
+        return TopologyRun(decision, stopped=("", "the case was refused"))
+    hops_by = {}
+    for h in hops:
+        hops_by[(topology.site(h.source), topology.site(h.target))] = h
+    for s in specs:
+        if (s["source"], s["target"]) not in hops_by:
+            return TopologyRun(decision, stopped=(
+                f"{s['source']} to {s['target']}",
+                "the plan needs this hop and the configuration has none"))
+    spec_of = {hops_by[(s["source"], s["target"])].name: s for s in specs}
+    order = _order(specs, hops_by, facts, layout, rows_by_hop, at_once)
+    out = TopologyRun(decision, order=tuple(order))
+    done, lines = [], []
+    for name in order:
+        spec = spec_of[name]
+        hop = next(h for h in hops if h.name == name)
+        try:
+            run_hop(hop, spec)
+        except Exception as e:  # noqa: BLE001 - said; nothing after it runs
+            out.stopped = (name, f"did not finish ({type(e).__name__})")
+            break
+        done.append(spec)
+        check = _hop_proof(facts, read_rows(), done, len(done) == len(specs))
+        lines += [f"{name}: {x}" for x in check.lines]
+        if not check.ok:
+            out.stopped = (name, "its proof failed; the hops after it"
+                                 " were not begun")
+            break
+    out.done = tuple(s["source"] + ">" + s["target"] for s in done)
+    out.lines = tuple(lines)
+    if not out.stopped:
+        out.final = scenarios.topology_verify(facts, read_rows())
+        out.lines += tuple(f"the whole: {x}" for x in out.final.lines)
+    return out

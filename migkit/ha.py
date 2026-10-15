@@ -307,6 +307,10 @@ class Holding:
         self.stamps = {}
         self.epochs = {}
         self.took_over = None
+        #: {(db, key): fleet.Account} of the shared tables taken over
+        self.accounts = {}
+        #: {(db, key): [finding]} of the last audit of the shared tables
+        self.audited = {}
         self.previous = {}
         self._push_lock = threading.Lock()
         self._stop = threading.Event()
@@ -339,6 +343,7 @@ class Holding:
                      f" standby reads it ({_first(e)}); it goes on from"
                      " the one before, which the target's mark completes")
         finally:
+            self._audit()
             fencing.disarm(self.hop, self.token)
             self.lease.release()
             try:
@@ -400,10 +405,53 @@ class Holding:
         self.token = fencing.arm(hop, token)
         for db in self.dbs:
             self.restore(db)
+        self._take_ranges_over(eng)
         for fn in (self._pushing, self._beating):
             t = threading.Thread(target=fn, daemon=True)
             t.start()
             self._threads.append(t)
+
+    def _take_ranges_over(self, eng):
+        """The ranges the stopped holder's movers held put back at once,
+        not after their own term (`fleet.take_hop_over`), read with what
+        its ledger left open where this machine has that ledger."""
+        from . import attempts, claims
+        was = self.lease.took_over
+        if not was or not claims.shared_ranges(self.hop):
+            return
+        try:
+            self.accounts = fleet.take_hop_over(
+                self.hop, was, self.store, self.say,
+                attempts.ledger_of(getattr(eng, "src_engine", None) or eng),
+                self.dbs)
+        except Exception as e:  # noqa: BLE001 - claims lapse by their own term
+            self.say(f"the stopped holder's ranges were not read"
+                     f" ({_first(e)}); each is claimable once its term"
+                     " lapses")
+
+    def _audit(self):
+        """The shared tables' records read for a range copied twice or
+        lost (`fleet.audit_hop`), each finding said and kept in the hop's
+        changelog; `claims.evidence` carries them to the report."""
+        from . import audit, claims
+        if not claims.shared_ranges(self.hop):
+            return
+        try:
+            self.audited = fleet.audit_hop(self.hop, self.store, self.dbs)
+        except Exception as e:  # noqa: BLE001 - said; the report reads it again
+            self.say(f"the ranges of the shared tables were not audited"
+                     f" ({_first(e)})")
+            return
+        lines = fleet.audit_lines(self.audited)
+        for line in lines:
+            self.say(f"audit: {line}")
+        if lines:
+            try:
+                audit.append(self.hop.report_dir() / "changelog.jsonl",
+                             {"op": "range-audit", "findings": lines})
+            except Exception as e:  # noqa: BLE001 - said above; the record is the evidence
+                self.say(f"the audit's findings were not written to the"
+                         f" changelog ({_first(e)})")
 
     def restore(self, db):
         """What the last holder saved of `db`, sealed with this holding's

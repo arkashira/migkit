@@ -50,18 +50,23 @@ def unit_name(table, after):
     return f"{table} r:{int(after)}"
 
 
+def parse_unit(name):
+    """(table, after) of a ledger unit `unit_name` made, else None."""
+    got = re.match(r"(.+) r:(-?\d+)$", str(name))
+    return (got.group(1), int(got.group(2))) if got else None
+
+
 def opened(ledger, table):
     """{after or name: the unit's record} of the ranges of `table` the
     ledger has open - begun and never closed - and the operations it
     keeps uncertain that name the table. Read only."""
-    pattern = re.compile(re.escape(f"{table} r:") + r"(-?\d+)$")
     out = {}
     for name, rec in dict(ledger.records).items():
         if rec.get("level") != "range" or rec.get("parent") != table \
                 or rec.get("state") != "open":
             continue
-        got = pattern.match(name)
-        out[int(got.group(1)) if got else name] = dict(rec)
+        got = parse_unit(name)
+        out[got[1] if got and got[0] == table else name] = dict(rec)
     for key, rec in ledger.uncertain().items():
         if rec.get("table") == table:
             after = rec.get("after")
@@ -207,3 +212,64 @@ def audit(rec):
             out.append(f"the range after {a} is done under number {n},"
                        " above any the table handed out")
     return out
+
+
+def _tables(hop, store, dbs=None):
+    """[(db, key)] of every table whose ranges the hop's machines share."""
+    out = []
+    for db in dbs or hop.databases or [""]:
+        have, _ = store.read_record(hop.report_dir(db) / claims.INDEX)
+        out += [(db, k) for k in (have or {}).get("keys") or []]
+    return out
+
+
+def take_hop_over(hop, took_over, store, say, ledger=None, dbs=None):
+    """Every shared table of `hop` taken over from the mover whose lease
+    record was `took_over` (`take_over`), the account of each said: the
+    one place a standby mover puts the departed mover's ranges back, at
+    the moment it takes the hop. {(db, key): Account}; a table whose
+    record cannot be read is said and left to its claims' own terms."""
+    from . import ha
+    out = {}
+    for db, key in _tables(hop, store, dbs):
+        table = claims.Table(store, claims.path(hop, db, key), ha.mover(),
+                             ha.term())
+        try:
+            got = take_over(table, took_over, ledger, key)
+        except Exception as e:  # noqa: BLE001 - said; the claim's term stands
+            say(f"{key}: the stopped mover's ranges were not put back"
+                f" ({type(e).__name__}); they are claimable once their"
+                " term lapses")
+            continue
+        if got is None:
+            continue
+        out[(db, key)] = got
+        for line in got.lines(key):
+            say(line)
+    return out
+
+
+def audit_hop(hop, store, dbs=None):
+    """{(db, key): [what in the table's record means a range copied twice
+    or lost]} for every shared table of the hop that has a finding; {}
+    where each is whole. A record that cannot be read is a finding."""
+    out = {}
+    for db, key in _tables(hop, store, dbs):
+        try:
+            rec, _ = store.read_record(claims.path(hop, db, key),
+                                       sealed=True)
+        except Exception as e:  # noqa: BLE001 - an unread record proves nothing
+            out[(db, key)] = [f"the record could not be read"
+                              f" ({type(e).__name__}): the table is not"
+                              " proved copied once"]
+            continue
+        found = audit(rec)
+        if found:
+            out[(db, key)] = found
+    return out
+
+
+def audit_lines(found):
+    """The findings of `audit_hop` as report lines, one per finding."""
+    return [f"{key}: {why}" for (_, key), whys in sorted(found.items())
+            for why in whys]

@@ -290,3 +290,88 @@ def echoes(applied):
     never needs). `applied` is [(node, sender, origin, change), ...]."""
     return [(n, o, c) for n, sender, o, c in applied
             if o == n or sender != o]
+
+
+# ---- the facts of a topology, read off the hops --------------------------------
+
+def site(endpoint):
+    """The name of the machine an endpoint of a hop reaches: its host and
+    port, so two hops that name the same server name the same site."""
+    host = getattr(endpoint, "host", "") or ""
+    port = int(getattr(endpoint, "port", 0) or 0)
+    return f"{host}:{port}" if port else host
+
+
+@dataclass(frozen=True)
+class Layout:
+    """The topology the hop configuration draws: its `sites`, the
+    directed `links` between them (each one hop of the configuration,
+    `hops` of them), and the rate each link last measured on its own
+    copies (rows per second, None where it has not been measured)."""
+    sites: tuple
+    links: tuple
+    hops: int
+    kind: str
+    speeds: dict = field(default_factory=dict)
+
+    def speed(self, a, b):
+        return self.speeds.get((a, b))
+
+    def slowest(self):
+        """((a, b), rate) of the slowest measured link, or None."""
+        known = [(k, v) for k, v in sorted(self.speeds.items())
+                 if v is not None]
+        return min(known, key=lambda x: x[1]) if known else None
+
+
+def shape(links):
+    """The kind of many-node topology a set of directed links draws -
+    `many-to-one`, `one-to-many`, `mesh` - or "" where it draws none:
+    sources and targets are told apart by which side of a link a site
+    stands on."""
+    sources = {a for a, _ in links}
+    targets = {b for _, b in links}
+    nodes = sources | targets
+    if len(nodes) >= 3 and sources == targets == nodes:
+        return "mesh"
+    if sources & targets:
+        return ""
+    if len(targets) == 1 and len(sources) >= 2:
+        return "many-to-one"
+    if len(sources) == 1 and len(targets) >= 2:
+        return "one-to-many"
+    return ""
+
+
+def layout(hops, speed=None):
+    """The `Layout` of `hops` (the configuration's `config.Hop`s that
+    belong to one topology): sites and links from their endpoints, the
+    kind from the links, link rates from `speed(hop)` - the planner's
+    measured rate of the hop's last copies where not given."""
+    if speed is None:
+        from .planner import link_speed as speed
+    hops = list(hops)
+    links = tuple(dict.fromkeys((site(h.source), site(h.target))
+                                for h in hops))
+    sites = tuple(sorted({x for pair in links for x in pair}))
+    rates = {}
+    for h in hops:
+        rates[(site(h.source), site(h.target))] = speed(h)
+    return Layout(sites, links, len(hops), shape(links), rates)
+
+
+def facts_of(hops, tables, spaces=None, conflict=None, route=None,
+             marks=None, speed=None):
+    """(the topology's decision facts, its `Layout`) read from the hops:
+    kind, sources, targets and links come from the hops' endpoints; what
+    only the operator knows - the tables' keys, each source's key space,
+    the conflict rule, a fan-out's routing - is passed in."""
+    from . import scenarios
+    lay = layout(hops, speed)
+    sources = sorted({a for a, _ in lay.links})
+    targets = sorted({b for _, b in lay.links})
+    if lay.kind == "mesh":
+        sources = targets = list(lay.sites)
+    return scenarios.topology_facts(
+        lay.kind, sources, targets, tables, spaces, conflict, route, marks,
+        lay.links), lay

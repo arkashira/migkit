@@ -123,7 +123,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text. Classes: Stream.
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Rung, Facts, PgFacts, MyFacts.
 - `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
-- `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap.
+- `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp, Overlap, TopologyRun.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Keyless, Stats.
 - `migkit/ready.py` - Right the first time, not a runbook to recover with (backlog R23, 6). Classes: Item.
 - `migkit/redact.py` - One way of hiding secrets in what migkit writes or says (audit 2026-10-01, SEC12). Classes: Redactor.
@@ -174,7 +174,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/tooluse.py` - What migkit asks of each program and library it wraps, against what the build installed offers (backlog 0f). Classes: Terms, Tool.
 - `migkit/toolversion.py` - Whether the client tools on this machine can talk to that server.
 - `migkit/topicstates.py` - The topics of a running Kafka tail, each in a state of its own (backlog P0-PARITY.tail; the SQL tail's are `tailtables`). Classes: TopicSet.
-- `migkit/topology.py` - The routing and partition math of many-node topologies (backlog R3.topo), decided in `scenarios.topology_case`: whether the key spaces of ma Classes: KeySpace, Route, Proof.
+- `migkit/topology.py` - The routing and partition math of many-node topologies (backlog R3.topo), decided in `scenarios.topology_case`: whether the key spaces of ma Classes: KeySpace, Route, Proof, Layout.
 - `migkit/traces.py` - A run as OpenTelemetry spans, beside the Prometheus metrics (backlog R23.8).
 - `migkit/transforms.py` - A column written other than as it was read, and proved as written (backlog P0-SCOPE.7: column transforms the check understands).
 - `migkit/troubleshooting.py` - The troubleshooting guide, read off the code (backlog 42).
