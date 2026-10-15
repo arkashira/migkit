@@ -58,7 +58,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import fencing, shared
+from . import fencing, fleet, shared
 from . import lease as _lease
 
 #: files of a database's report directory, besides the tail's position
@@ -1049,3 +1049,6 @@ def evidence(hop):
                 pass
         out += claims.evidence(hop, db, store)
     return out
+
+
+take_over = fleet.take_over
