@@ -118,7 +118,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/ownership.py` - Who an object belongs to, and whose privileges it runs with.
 - `migkit/pgslot.py` - Reading what a PostgreSQL logical slot says, when it says it in text.
 - `migkit/physical.py` - Physical where the source allows it, logical everywhere else (backlog R19 lever 1): the target seeded from a copy of the source's pages, the Classes: Unread, Rung, Facts, PgFacts, MyFacts.
-- `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Hashed, hashing, Way, Sql, ReadPlan, DigestPlan.
+- `migkit/pieces.py` - Large values: one way for every engine to size, read, write and hash them (backlog P0-PARITY; R10 and R22 did it for PostgreSQL, MySQL and O Classes: Limit, Sizing, Hashed, hashing, Way, Sql.
 - `migkit/planner.py` - Which way each table goes, decided from facts about it, and why. Classes: Decision, Phase, Ewma, CatchUp.
 - `migkit/ranges.py` - A large table copied as ranges of its key, side by side. Classes: ReadPool, Slots, WorkerGone, Keyless.
 - `migkit/ready.py` - Right the first time, not a runbook to recover with (backlog R23, 6). Classes: Item.

@@ -1879,6 +1879,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...>: <...>:<...> is no instance the provider's API lists for these credentials - name it under the side's managed option (id)
 
+* <...>: <...>; the row is not written cut or in part
+
 * reshard: is a mapping - with, by, key, shared, ranges, values, lookup, default
 
 * reshard: by: <...> - one of <...>

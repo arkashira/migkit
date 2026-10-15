@@ -36,6 +36,7 @@ import struct
 import time
 from decimal import Decimal
 
+from .. import pieces
 from .base import Engine, Result
 from .pgwire import PgWireEngine
 
@@ -55,6 +56,22 @@ EPOCH = datetime.datetime(1970, 1, 1)
 class DsqlEngine(PgWireEngine):
     CANON_ENGINE = "dsql"
     SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "sys")
+    #: PostgreSQL's large-value expressions (no md5 asked: a wide value is hashed as its pieces pass): sized by the server,
+    #: read and written in pieces under the side's limits (`pieces.Sizing`)
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, read and written in pieces",
+        length={"bytea": "octet_length({c})", "text": "octet_length({c})",
+                "character varying": "octet_length({c})"},
+        types=("bytea", "text", "character varying"),
+        piece="substring({c} from {at} for {n})",
+        append="{c} = {c} || {v}",
+        appends=("bytea", "text", "charactervarying"))
+
+    def piece_limits(self, side, db):
+        """DSQL has no limit of its own to read: a write transaction's
+        bytes, its documented quota, bound each piece written."""
+        return [pieces.Limit("a write transaction", 10 * 2 ** 20, "stored",
+                             read=False)]
 
     def _region(self, ep):
         got = ep.options.get("region")
@@ -130,6 +147,7 @@ class DsqlEngine(PgWireEngine):
         self._target_only(side, "write rows")
         if not rows:
             return 0
+        landed = len(rows)
         names = [n for n, _ in columns]
         key = self.neutral_key(side, db, table)
         sets = [n for n in names if n not in key]
@@ -142,6 +160,17 @@ class DsqlEngine(PgWireEngine):
                 + ", ".join(self._q(n) for n in names) + ") values ")
         conn = self._connect(side, db)
         try:
+            # a row past one piece goes first by the same upsert and its
+            # value a piece a transaction (`pieces.written_in_pieces`):
+            # replayed, each lands on itself
+            sz = pieces.sizing(self, side, db)
+            if key and pieces.wider_than(rows, sz.inline, sz.char_bytes):
+                from .dbapi import MARK
+                rows = pieces.written_in_pieces(
+                    self, None, side, db, table, columns, key, list(rows),
+                    insert=head + "(" + ", ".join([MARK] * len(names))
+                    + ")" + tail,
+                    each=lambda work: self._tried(conn, work))
             for part in self._pieces([[canon.write_value(
                     self.CANON_ENGINE, c, v) for (_, c), v in zip(columns, r)]
                     for r in rows]):
@@ -150,7 +179,7 @@ class DsqlEngine(PgWireEngine):
                     [v for r in part for v in r]))
         finally:
             conn.close()
-        return len(rows)
+        return landed
 
     def neutral_apply(self, side, db, changes):
         """A tail's batch in pieces of at most 3,000 changes, each one

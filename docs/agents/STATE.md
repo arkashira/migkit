@@ -63,7 +63,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1315, not yet 1234, stale 218, test owed 778, untested 13, yes 914. A cell below is the ways proved of the items that apply.
+86 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1315, not yet 1234, stale 218, test owed 778, untested 12, yes 915. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -117,7 +117,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | spanner | 0/10 | 2/30 | 1/6 | 0/6 | 1/6 | 2/5 | 3/4 | 1/1 | 1/1 | 0/1 | 11/70 |
 | sqlite | 2/9 | 4/27 | - | 2/7 | 2/5 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 17/59 |
 | teradata | 6/8 | 12/29 | - | 2/7 | 3/6 | 2/6 | 3/4 | 1/1 | 1/1 | 0/1 | 30/63 |
-| tidb | 9/10 | 25/31 | 4/6 | 5/7 | 5/5 | 4/7 | 4/6 | 1/1 | 0/1 | 0/1 | 57/75 |
+| tidb | 9/10 | 25/31 | 4/6 | 5/7 | 5/5 | 5/7 | 4/6 | 1/1 | 0/1 | 0/1 | 58/75 |
 | timestream | 0/7 | 0/18 | - | 0/6 | 0/1 | 1/4 | 1/3 | 1/1 | 1/1 | 0/1 | 4/42 |
 
 Per item: the engines in each state - "test owed" is a way in the code whose test on that engine is not written (`UNPROVED`).
@@ -194,7 +194,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | schema.routines | mssql mysql oracle postgres | bigquery cockroachdb dcdb mongodb oceanbase polardbx | the rest (22) | bigtable copybook datastore delta dynamodb firestore hetero iceberg kafka keyspaces kinesis neptune parquet pubsub saas sapodp sqlite tidb timestream |
 | move.table-copy | the rest (36) | bigquery db2i db2zos dcdb geminidb-cassandra geminidb-mongo lindorm oceanbase-oracle polardbx snowflake timestream | generic | kinesis pubsub saas sapodp |
 | move.bulk | the rest (22) | bigquery geminidb-cassandra geminidb-mongo hetero keyspaces | ase cockroachdb cosmosdb couchbase db2 db2i db2zos dcdb delta generic iceberg oceanbase oceanbase-oracle polardbx redshift snowflake tidb | dsql geminidb-redis kinesis lindorm pubsub saas sapodp teradata |
-| move.large-values | ase clickhouse db2 delta duckdb hetero iceberg kafka mongodb mssql mysql opensearch oracle parquet postgres redis sqlite | bigquery couchbase db2i db2zos snowflake teradata | - | the rest (23) |
+| move.large-values | ase clickhouse db2 delta duckdb hetero iceberg kafka mongodb mssql mysql opensearch oracle parquet postgres redis sqlite tidb | bigquery couchbase db2i db2zos snowflake teradata | - | the rest (23) |
 | move.partitioned | clickhouse kafka mysql postgres tidb | bigquery mssql oracle teradata | - | the rest (36) |
 | move.sized | the rest (18) | cassandra cockroachdb db2i db2zos dcdb gaussdb geminidb-mongo geminidb-redis lindorm oceanbase oceanbase-oracle oracle polardbx redshift snowflake teradata | bigtable copybook couchbase datastore delta firestore generic iceberg neptune parquet saas sapodp spanner timestream | kinesis pubsub |
 | move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse dcdb mongodb mssql oceanbase polardbx teradata | the rest (18) | bigquery bigtable copybook delta dynamodb geminidb-redis iceberg kafka kinesis neptune parquet pubsub redis redshift saas sapodp snowflake timestream |

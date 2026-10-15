@@ -128,6 +128,148 @@ class TiDBEngine(MySQLEngine):
             return None
         return str(got[0][0]) if got else None
 
+    # ---- large values ----------------------------------------------------
+
+    #: `pieces` quotes a name by this: MySQL's `_q` is its query
+    NAME_QUOTE = "_quote_ident"
+
+    def _run(self, cur, sql, args=None):
+        """A statement `pieces` writes, its places `dbapi.MARK`."""
+        from .dbapi import MARK
+        if args:
+            cur.execute(sql.replace("%", "%%").replace(MARK, "%s"),
+                        tuple(args))
+        else:
+            cur.execute(sql)
+
+    def _entry_limit(self, side):
+        """The largest entry - one row - TiDB keeps, in bytes: the session's
+        `tidb_txn_entry_size_limit` where it sets one, else the smallest
+        `performance.txn-entry-size-limit` of the cluster's TiDB servers;
+        None where neither can be read."""
+        from .. import pieces
+        try:
+            got = self._q(side, "select @@tidb_txn_entry_size_limit")
+            n = pieces.setting_bytes(got[0][0]) if got else None
+            if n:
+                return n
+        except Exception:  # noqa: BLE001 - a TiDB without the variable
+            pass
+        try:
+            got = self._q(side, "show config where type = 'tidb' and name ="
+                                " 'performance.txn-entry-size-limit'")
+        except Exception:  # noqa: BLE001 - the account cannot read it
+            return None
+        sizes = [pieces.setting_bytes(r[-1]) for r in got or ()]
+        sizes = [n for n in sizes if n]
+        return min(sizes) if sizes else None
+
+    def piece_limits(self, side, db):
+        """What one statement, one result row and one row kept may hold on
+        this side, read off the server (`pieces.Sizing`):
+        `max_allowed_packet` both ways, and the entry size limit."""
+        from .. import pieces
+        out = []
+        got = self._q(side, "select @@max_allowed_packet")
+        packet = pieces.setting_bytes(got[0][0]) if got else None
+        if packet:
+            out += [pieces.Limit("max_allowed_packet", packet, "sent"),
+                    pieces.Limit("max_allowed_packet", packet, "returned")]
+        entry = self._entry_limit(side)
+        if entry:
+            out.append(pieces.Limit("the entry size limit", entry, "row"))
+        return out
+
+    def _read_plan(self, side, db, table, columns):
+        """MySQL's read expressions, a byte value past what a row carries
+        whole left out and read in pieces by the row's key
+        (`pieces.ReadPlan`)."""
+        from .. import canon, pieces
+        wide = {}
+        for n, c in columns:
+            got = canon.read_expr("mysql", self._quote_ident(n), c)
+            if got != self._quote_ident(n):
+                wide[n] = got
+        return pieces.ReadPlan(self, side, db, table, columns, wide)
+
+    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+                     where=None):
+        """In key order, ending at `limit` rows or at the row that brings
+        the read to `pieces.BATCH_BYTES`, its large values read in pieces
+        (`_read_plan`). A table with no key is read whole."""
+        from .. import pieces
+        plan = self._read_plan(side, db, table, columns)
+        sql, args, key, names = self._read_query(
+            side, db, table, columns, after, limit, where, plan.select)
+        keyed = bool(key) and all(k in names for k in key)
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, args)
+                raw = (pieces.fetch_until(cur, plan.size) if keyed
+                       else cur.fetchall())
+        finally:
+            conn.close()
+        rows = plan.finish(raw)
+        if not rows or not keyed:
+            return (rows, None)
+        return (rows, tuple(rows[-1][names.index(k)] for k in key))
+
+    def neutral_batches(self, side, db, table, columns, size=1000,
+                        where=None):
+        """The whole table in one pass through a cursor the server keeps,
+        in batches of `size` rows or `pieces.BATCH_BYTES`, large values read
+        in pieces (`_read_plan`)."""
+        import pymysql
+
+        from .. import pieces
+        plan = self._read_plan(side, db, table, columns)
+        sql, args, _, _ = self._read_query(side, db, table, columns, None,
+                                           None, where, plan.select)
+        conn = self._conn(side)
+        try:
+            with conn.cursor(pymysql.cursors.SSCursor) as cur:
+                cur.execute(sql, args)
+                for rows in pieces.batches(cur, size, plan.size):
+                    yield plan.finish(rows)
+        finally:
+            conn.close()
+
+    def neutral_write(self, side, db, table, columns, rows):
+        """MySQL's write, a row holding a value past what one statement
+        takes (`pieces.Sizing.inline`) written first: its first piece by
+        the same upsert, the rest added a piece a statement, in one
+        transaction held by the fence (`pieces.written_in_pieces`)."""
+        from .. import fencing, pieces
+        from .dbapi import MARK
+        self._target_only(side, "write rows")
+        sz = pieces.sizing(self, side, db)
+        if not rows or not pieces.wider_than(rows, sz.inline,
+                                             sz.char_bytes):
+            return super().neutral_write(side, db, table, columns, rows)
+        names = [n for n, _ in columns]
+        key = self.neutral_key(side, db, table)
+        sets = ", ".join(f"{self._quote_ident(n)} = values("
+                         f"{self._quote_ident(n)})" for n in names
+                         if n not in key)
+        insert = (f"insert into {self._qualified(side, db, table)} ("
+                  + ", ".join(self._quote_ident(n) for n in names)
+                  + ") values (" + ", ".join([MARK] * len(names)) + ")"
+                  + (f" on duplicate key update {sets}" if sets else ""))
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                rest = pieces.written_in_pieces(self, cur, side, db, table,
+                                                columns, key, list(rows),
+                                                insert=insert)
+                fencing.hold(self, side, db, cur)
+            conn.commit()
+        finally:
+            conn.close()
+        if rest:
+            super().neutral_write(side, db, table, columns, rest)
+        return len(rows)
+
     def server_identity(self, side, db):
         name = self._d(side, db)
         got = self._q(side, "select @@hostname, version(), (select"

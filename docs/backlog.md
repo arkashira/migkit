@@ -3969,6 +3969,7 @@ they are three cross-cutting gaps, not 26 engine problems:
   2 MB a batch); linked piece items change what the application reads
   on the target and need the user's yes. None of the six has a server
   profile in `tests/servers.py`. TiDB's cell is `untested` at 3c33f9a.
+<<<<<<< HEAD
   *Part B (2026-10-16):* Cosmos DB transactional batches are cut by
   count and by the 2 MB of the request body measured as sent
   (`cosmosdb.transactional_batches`), an item past 2 MB named before
@@ -3981,6 +3982,25 @@ they are three cross-cutting gaps, not 26 engine problems:
   from byte 1) - a hook in `pieces`; Couchbase `neutral_rows_by_key`
   still asks 500 documents a request; an item between its UTF-8 and its
   escaped 2 MB goes alone and the service decides.
+||||||| d45f7f2
+=======
+  *Part A built (2026-10-16), on fakes:* `pieces.Sizing` decides the
+  piece and the inline bound per side through `decide.Trials` over
+  `Limit`s the engine reads (`piece_limits`: TiDB packet and entry size,
+  CockroachDB's three settings; DSQL's 10 MiB quota, said as not read);
+  a refused size is given up and the value read again; a row past the
+  side's widest is refused before it is written. TiDB reads through
+  `ReadPlan` (`NAME_QUOTE`, `_run`, `_read_query(select=)`) and writes
+  wide rows by `written_in_pieces`; CockroachDB's `_upsert` and DSQL's
+  `neutral_write` too, statements cut by the cluster's bytes, DSQL a
+  piece a transaction. Proved on fakes in
+  `tests/test_the_piece_is_decided_per_side.py`. Left: the cells for
+  CockroachDB and DSQL in `decide.WAYS["large values"]` still say not
+  applicable (decide.py owned elsewhere; should be `yes @LARGE_VALUES`
+  owed a server proof); a server profile for each; what each server does
+  at its limit; ReadPlan's `_connect(side, db)` reaching MySQL's
+  `_connect(side, retry)`.
+>>>>>>> worktree-agent-a425343029b163d06
 * **Read-only target** (BAR-3) - not yet on 24: the target kept from
   the application while migkit moves into it, or its writes named - the
   same hold-writes primitives the cutover's freezes use on the source

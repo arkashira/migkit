@@ -15,7 +15,9 @@ a column differ between them - the engine's `LARGE_VALUES` (`Way`):
   batch of a one-pass read closes before the row that would take it past
   them - a count of rows read ten thousand of whatever they held;
 * read in pieces where a driver would take a value in one fetch
-  (`Sql.piece`, `ReadPlan`), each piece `PIECE` bytes by the row's key;
+  (`Sql.piece`, `ReadPlan`) by the row's key, each piece the size one
+  decision gives for that side - the sizes its own limits take, read off
+  the server where it says them, then the fastest measured (`Sizing`);
 * written in pieces where a driver would send a value as one statement's
   text (`Sql.append`, `written_in_pieces`): inserted with its first piece,
   then added to a piece a statement, in the batch's own transaction;
@@ -31,7 +33,9 @@ wherever the copier reads them.
 import hashlib
 import threading
 
-#: a value past this many bytes is read and written a piece at a time
+#: a value past this many bytes is read and written a piece at a time, and
+#: the piece, on a side that says no limits of its own; a side that does
+#: has both decided under them (`Sizing`)
 PIECE = 8 * 2 ** 20
 #: what one batch of a copy holds, or one row where one row is more
 BATCH_BYTES = 64 * 2 ** 20
@@ -57,6 +61,168 @@ EXACT_ROWS = 1_000_000
 PAIR_MEMORY = {"own": 64 * 2 ** 20, "per_row": 4.0, "batch": BATCH_BYTES}
 #: rows one read of that copier asks for at most (`HeteroEngine.READ_ROWS`)
 PAIR_ROWS = 50000
+#: what a statement or a result row holds beside its one piece: the SQL
+#: text, the row's key and the protocol's own header
+HEADROOM = 64 * 2 ** 10
+#: bytes one byte of a value takes at most in a statement's text: escaped,
+#: or written in hex
+SENT_FACTOR = 2
+#: bytes one character of text takes at most, as UTF-8
+CHAR_BYTES = 4
+
+
+# --- the piece, decided ----------------------------------------------------
+
+class Limit:
+    """One limit a server holds what crosses to or from it to: `most`
+    bytes of what it `bounds` - "sent", one statement as the client sends
+    it; "returned", one row of a result; "stored", what one write
+    transaction stores; "row", one row as the server keeps it. `read` is
+    True where the number was read off the server, False where it is the
+    service's documented quota because the service says none of its own.
+    A limit of 0 is one the server turned off."""
+
+    BOUNDS = ("sent", "returned", "stored", "row")
+
+    def __init__(self, name, most, bounds, read=True):
+        if bounds not in self.BOUNDS:
+            raise ValueError(f"{name}: bounds {bounds!r}")
+        self.name, self.most = name, int(most)
+        self.bounds, self.read = bounds, read
+
+    def takes(self, piece):
+        """Whether one piece of `piece` bytes, and what goes beside it,
+        stays under this limit (a row limit bounds the row, not a piece)."""
+        if self.bounds == "row" or self.most <= 0:
+            return True
+        need = piece * (SENT_FACTOR if self.bounds == "sent" else 1)
+        return need + HEADROOM <= self.most
+
+    def said(self):
+        how = "read off the server" if self.read else "the service's quota"
+        return f"{self.name} {self.most:,} bytes ({how})"
+
+    def __repr__(self):
+        return f"Limit({self.name!r}, {self.most}, {self.bounds!r})"
+
+
+def setting_bytes(text):
+    """Bytes of a size as a server says it - `67108864`, `64 MiB`,
+    `16MB`, `512 KiB`, `0 B` - or None where it is not one. A unit is a
+    power of 1024 with or without its `i`, as servers write them."""
+    import re
+    got = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:([kmgt])i?)?b?\s*",
+                       str(text if text is not None else ""), re.I)
+    if not got:
+        return None
+    n, unit = got.groups()
+    power = "kmgt".index(unit.lower()) + 1 if unit else 0
+    return int(float(n) * 1024 ** power)
+
+
+def _limits_of(eng, side, db):
+    """The side's limits (`piece_limits` of the engine): none where the
+    engine says none or the reading fails."""
+    read = getattr(eng, "piece_limits", None)
+    if read is None:
+        return ()
+    try:
+        return tuple(read(side, db) or ())
+    except Exception:  # noqa: BLE001 - not readable: no limit known
+        return ()
+
+
+class Sizing:
+    """The piece one side reads and writes its large values by: one
+    decision (`decide.Trials`) over a ladder of doublings around `PIECE`,
+    each size a rung needing the side's limits to take it (`Limit.takes`),
+    the largest up to `PIECE` first, and each value's time a byte measured
+    as its pieces pass (`took`) - so once every size that fits has carried
+    one value, the fastest a byte carries the rest. A size the server
+    refused (`failed`) is not tried again on this side. A side that says
+    no limits has one size, `PIECE`: no limit known, no size past it is
+    safe to try.
+
+    `inline` is the widest value a row carries whole - the largest size
+    that fits, at most `PIECE` - and what a read leaves out of its row and
+    a write sends in pieces past. `row` is the widest row the side keeps
+    (its strictest "row" limit), None where it says none."""
+
+    #: sizes below the widest that fits that are tried: three halvings
+    BELOW = 3
+
+    def __init__(self, eng, side, db, limits=None):
+        from . import decide
+        self.side, self.db = side, db
+        self.limits = tuple(_limits_of(eng, side, db)
+                            if limits is None else limits)
+        top = PIECE << 3 if self.limits else PIECE
+        ladder = [top >> k for k in range(0, 40) if top >> k >= 1]
+        fit = [s for s in ladder if all(x.takes(s) for x in self.limits)]
+        self.inline = max([s for s in fit if s <= PIECE] or [1])
+        rows = [x for x in self.limits if x.bounds == "row" and x.most > 0]
+        self._row = min(rows, key=lambda x: x.most) if rows else None
+        self.row = self._row.most if self._row else None
+        #: a character of text counted as the bytes it may take where the
+        #: side says its limits, as one where it says none
+        self.char_bytes = CHAR_BYTES if self.limits else 1
+        floor = self.inline >> self.BELOW if self.limits else self.inline
+        sizes = sorted((s for s in ladder if s >= floor),
+                       key=lambda s: (s > self.inline, -s if s <= self.inline
+                                      else s))
+        self.rungs = [decide.Rung(
+            name=str(s), said=f"pieces of {s:,} bytes",
+            needs=(decide.Need("the side's limits to take it",
+                               lambda f, s=s: all(x.takes(s)
+                                                  for x in f["limits"]),
+                               lambda f, s=s: self._refused_by(s, f)),),
+            because="the largest piece the side's limits take, up to the"
+                    " size the copier was measured with")
+            for s in sizes]
+        self.trials = decide.Trials(
+            "a large value's pieces", self.rungs,
+            decide.Facts({"limits": self.limits}))
+
+    @staticmethod
+    def _refused_by(size, facts):
+        return (f"a piece of {size:,} bytes is past "
+                + ", ".join(x.said() for x in facts["limits"]
+                            if not x.takes(size)))
+
+    def pick(self):
+        """The bytes of each piece of the next value."""
+        got = self.trials.pick()
+        return int(got.rung.name) if got.rung is not None else self.inline
+
+    def took(self, piece, nbytes, seconds):
+        """A value of `nbytes` carried in pieces of `piece` in `seconds`."""
+        if nbytes:
+            self.trials.took(str(piece), int(nbytes), max(seconds, 1e-9))
+
+    def failed(self, piece, why):
+        self.trials.give_up(str(piece), str(why))
+
+    def too_wide(self, nbytes):
+        """Why a row of `nbytes` cannot be kept by this side, or None."""
+        if self.row and nbytes > self.row:
+            return (f"a row of {nbytes:,} bytes is past the widest row the"
+                    f" {'source' if self.side == 'src' else 'target'}"
+                    f" keeps: {self._row.said()}")
+        return None
+
+
+def sizing(eng, side, db):
+    """The side's `Sizing`, one a run, side and database."""
+    known = eng.__dict__.setdefault("_piece_sizing", {})
+    if (side, db) not in known:
+        known[(side, db)] = Sizing(eng, side, db)
+    return known[(side, db)]
+
+
+def _quote(eng, name):
+    """A name quoted the engine's way: by `_q`, or by the method its
+    `NAME_QUOTE` names where `_q` is not a quote (MySQL's is its query)."""
+    return getattr(eng, getattr(eng, "NAME_QUOTE", "_q"))(name)
 
 
 def row_bytes(row):
@@ -432,7 +598,7 @@ def sql_row_sizes(eng, side, db, tables=None):
                 out[t] = {"largest": most, "p99": most, "mean": float(mean),
                           "rows": rows, "exact": False}
                 continue
-            expr = way.row_expr(eng._q, declared)
+            expr = way.row_expr(lambda n: _quote(eng, n), declared)
             qt = eng._qualified(side, db, t)
             share = ""
             exact = not rows or rows <= EXACT_ROWS or not way.sample
@@ -477,10 +643,11 @@ class ReadPlan:
                  limit=None):
         self.eng, self.side, self.db, self.table = eng, side, db, table
         self.names = [n for n, _ in columns]
-        self.limit = limit = PIECE if limit is None else limit
+        self.sizing = sizing(eng, side, db)
+        self.limit = limit = self.sizing.inline if limit is None else limit
         wide = wide or {}
         way = getattr(eng, "LARGE_VALUES", None)
-        self.exprs = [wide.get(n, eng._q(n)) for n in self.names]
+        self.exprs = [wide.get(n, _quote(eng, n)) for n in self.names]
         self.extra, self.split, self.key = [], [], []
         if isinstance(way, Sql) and way.piece:
             key = eng.neutral_key(side, db, table) if key is None else key
@@ -490,7 +657,7 @@ class ReadPlan:
                     typ = declared.get(n)
                     if cls != "bytes" or n in wide or not way.holds(typ):
                         continue
-                    q = eng._q(n)
+                    q = _quote(eng, n)
                     ln = way.length_of(q, typ)
                     if not ln or not self._takes(i, n, cls, typ):
                         continue
@@ -537,23 +704,49 @@ class ReadPlan:
             self._read_in_pieces(todo)
         return out
 
+    def _pieces(self, fetch, size, undo=None):
+        """One value of `size` bytes read in the pieces the side's sizing
+        gives (`Sizing.pick`), its time a byte measured for the next. A
+        size the server refuses is given up on this side and the value
+        read again by the next size that fits; with none left the refusal
+        stands."""
+        import time
+        tried = set()
+        while True:
+            piece = self.sizing.pick()
+            began = time.monotonic()
+            try:
+                parts = pieces_of(fetch, size, piece)
+                value = (hashed_pieces(parts) if self.hashes
+                         else b"".join(parts))
+            except Exception as e:  # noqa: BLE001 - the size given up
+                tried.add(piece)
+                if undo is not None:
+                    undo()
+                self.sizing.failed(piece, e)
+                if self.sizing.pick() in tried:
+                    raise
+                continue
+            self.sizing.took(piece, size, time.monotonic() - began)
+            return value
+
     def _read_in_pieces(self, todo):
-        """Each value of `todo` ([(row, index, column, size)]) read `PIECE`
-        at a time on one connection. A value whose length is not what it
+        """Each value of `todo` ([(row, index, column, size)]) read in
+        pieces (`_pieces`) on one connection. A value whose length is not what it
         was once read - the source changed under the read - is read again,
         and then once whole: never handed on cut short."""
         from . import canon
         from .engines.dbapi import MARK
         eng, way = self.eng, self.eng.LARGE_VALUES
         qt = eng._qualified(self.side, self.db, self.table)
-        where = " and ".join(f"{eng._q(k)} = {MARK}" for k in self.key)
+        where = " and ".join(f"{_quote(eng, k)} = {MARK}" for k in self.key)
         conn = eng._connect(self.side, self.db)
         try:
             cur = conn.cursor()
             for row, i, name, size in todo:
                 args = [canon.sql_value(row[self.names.index(k)])
                         for k in self.key]
-                q = eng._q(name)
+                q = _quote(eng, name)
                 ln = way.length_of(q, declared_of(
                     eng, self.side, self.db, self.table).get(name))
 
@@ -567,9 +760,7 @@ class ReadPlan:
                     return one(f"select {part} from {qt} where {where}")
                 now = None
                 for _ in range(3):
-                    parts = pieces_of(fetch, size)
-                    value = (hashed_pieces(parts) if self.hashes
-                             else b"".join(parts))
+                    value = self._pieces(fetch, size, conn.rollback)
                     got = (value.length if self.hashes else len(value))
                     now = one(f"select {ln} from {qt} where {where}")
                     if now is None or int(now) == size == got:
@@ -602,7 +793,7 @@ class DigestPlan(ReadPlan):
             self.md5 = [i for i, (n, cls) in enumerate(columns)
                         if cls in way.md5_classes and not (wide or {}).get(n)
                         and way.holds(declared.get(n))
-                        and way.length_of(eng._q(n), declared.get(n))]
+                        and way.length_of(_quote(eng, n), declared.get(n))]
         super().__init__(eng, side, db, table, columns, wide, key,
                          limit=WIDE)
         self.hashed = []
@@ -610,7 +801,7 @@ class DigestPlan(ReadPlan):
             declared = declared_of(eng, side, db, table)
             for i in self.md5:
                 n = self.names[i]
-                q = eng._q(n)
+                q = _quote(eng, n)
                 ln = way.length_of(q, declared.get(n))
                 self.exprs[i] = (f"case when {ln} > {WIDE} then null"
                                  f" else {q} end")
@@ -635,21 +826,37 @@ class DigestPlan(ReadPlan):
         return rows
 
 
-def wider_than(rows, piece=None):
+def wider_than(rows, piece=None, char_bytes=1):
     """Whether a row of `rows` holds a text or byte value past `piece`
-    (`PIECE`)."""
+    bytes (`PIECE`), a character of text counted as `char_bytes`."""
     piece = PIECE if piece is None else piece
-    return any(isinstance(v, (bytes, bytearray, str)) and len(v) > piece
-               for r in rows for v in r)
+    return any(_carried(v, char_bytes) > piece for r in rows for v in r)
 
 
-def written_in_pieces(eng, cur, side, db, table, columns, key, rows):
-    """The rows of `rows` holding a value past `PIECE` in a column the
-    target adds to (`Sql.appendable`), each inserted with the first piece of
-    each such value and filled by the rest, a piece a statement, on the
-    caller's cursor and in its transaction; the other rows handed back for
-    the caller's own insert. A table without a key to find a row by writes
-    every row whole."""
+def _carried(v, char_bytes=1):
+    """Bytes a text or byte value takes at most as sent; 0 for others."""
+    if isinstance(v, (bytes, bytearray)):
+        return len(v)
+    return len(v) * char_bytes if isinstance(v, str) else 0
+
+
+def written_in_pieces(eng, cur, side, db, table, columns, key, rows,
+                      insert=None, each=None):
+    """The rows of `rows` holding a value past what the target takes in
+    one statement (`Sizing.inline`) in a column it adds to
+    (`Sql.appendable`), each written with the first piece of each such
+    value and filled by the rest, a piece a statement, the piece the
+    target's sizing gives (`Sizing.pick`); the other rows handed back for
+    the caller's own write. `insert` is the statement one row is written
+    by, its places `dbapi.MARK` (a plain insert where not given: an
+    upsert where the target writes over a row of the same key); `each`
+    runs one statement's work (`work(cur)`) as the target needs it - on
+    the caller's cursor and in its transaction where not given, its own
+    transaction where the target's transaction is smaller than a value.
+    A row past the widest the target keeps (`Sizing.too_wide`) stops the
+    write before anything of it is sent. A table without a key to find a
+    row by writes every row whole."""
+    import time
     from . import canon
     from .engines.dbapi import MARK
     way = getattr(eng, "LARGE_VALUES", None)
@@ -662,32 +869,46 @@ def written_in_pieces(eng, cur, side, db, table, columns, key, rows):
              if way.appendable(declared.get(n))]
     if not grows:
         return rows
+    sz = sizing(eng, side, db)
+    each = each or (lambda work: work(cur))
     quoted = eng._qualified(side, db, table)
-    insert = (f"insert into {quoted}"
-              f" ({', '.join(eng._q(n) for n in names)}) values"
-              f" ({', '.join([MARK] * len(names))})")
-    where = " and ".join(f"{eng._q(k)} = {MARK}" for k in key)
+    insert = insert or (
+        f"insert into {quoted}"
+        f" ({', '.join(_quote(eng, n) for n in names)}) values"
+        f" ({', '.join([MARK] * len(names))})")
+    where = " and ".join(f"{_quote(eng, k)} = {MARK}" for k in key)
     at = [names.index(k) for k in key]
     small = []
     for r in rows:
         values = [canon.write_value(eng.CANON_ENGINE, c, v)
                   for (_, c), v in zip(columns, r)]
-        big = [i for i in grows if isinstance(values[i], (bytes, bytearray,
-                                                          str))
-               and len(values[i]) > PIECE]
+        wide = sz.too_wide(sum(_carried(v) or 8 for v in values))
+        if wide:
+            raise SystemExit(f"{table}: {wide}; the row is not written cut"
+                             " or in part")
+        big = [i for i in grows if _carried(values[i], sz.char_bytes)
+               > sz.inline]
         if not big:
             small.append(r)
             continue
+        piece = sz.pick()
+        steps = {i: piece if isinstance(values[i], (bytes, bytearray))
+                 else max(1, piece // sz.char_bytes) for i in big}
+        began = time.monotonic()
         first = list(values)
         for i in big:
-            first[i] = values[i][:PIECE]
-        eng._run(cur, insert, first)
+            first[i] = values[i][:steps[i]]
+        each(lambda c, first=first: eng._run(c, insert, first))
         keyed = [values[j] for j in at]
         for i in big:
-            add = way.append.format(c=eng._q(names[i]), v=MARK)
-            for start in range(PIECE, len(values[i]), PIECE):
-                eng._run(cur, f"update {quoted} set {add} where {where}",
-                         [values[i][start:start + PIECE]] + keyed)
+            add = way.append.format(c=_quote(eng, names[i]), v=MARK)
+            step = steps[i]
+            for start in range(step, len(values[i]), step):
+                each(lambda c, part=values[i][start:start + step]: eng._run(
+                    c, f"update {quoted} set {add} where {where}",
+                    [part] + keyed))
+        sz.took(piece, sum(_carried(values[i]) for i in big),
+                time.monotonic() - began)
     return small
 
 

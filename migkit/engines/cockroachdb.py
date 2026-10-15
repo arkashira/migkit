@@ -27,6 +27,7 @@ import json
 import re
 import time
 
+from .. import pieces
 from .base import Result
 from .dbapi import MARK
 from .pgwire import PgWireEngine
@@ -165,6 +166,38 @@ class CockroachEngine(PgWireEngine):
     #: feed is let go and opened again, from where the tail stands
     #: (`hetero.tail_apply`) - copied and then never followed before
     FOLLOWS_LISTED_TABLES = True
+    #: PostgreSQL's large-value expressions: sized by the server,
+    #: read and written in pieces under the side's limits (`pieces.Sizing`)
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, read and written in pieces, wide values hashed where they lie",
+        length={"bytea": "octet_length({c})", "text": "octet_length({c})",
+                "character varying": "octet_length({c})"},
+        types=("bytea", "text", "character varying"),
+        piece="substring({c} from {at} for {n})",
+        append="{c} = {c} || {v}",
+        appends=("bytea", "text", "charactervarying"),
+        md5="md5({c})", md5_classes=("bytes", "text"))
+
+    #: the cluster settings that bound a statement, a write and a row
+    LIMIT_SETTINGS = (
+        ("sql.conn.max_read_buffer_message_size", "sent"),
+        ("kv.raft.command.max_size", "stored"),
+        ("kv.raft.command.max_size", "row"),
+        ("sql.guardrails.max_row_size_err", "row"))
+
+    def piece_limits(self, side, db):
+        """Each of `LIMIT_SETTINGS` read off the cluster (`SHOW CLUSTER
+        SETTING`); one the account cannot read is left out."""
+        out = []
+        for name, bounds in self.LIMIT_SETTINGS:
+            try:
+                got = self._rows(side, db, f"show cluster setting {name}")
+            except Exception:  # noqa: BLE001 - not readable by this account
+                continue
+            n = pieces.setting_bytes(got[0][0]) if got else None
+            if n:
+                out.append(pieces.Limit(name, n, bounds))
+        return out
 
     def _visible(self):
         return " and is_hidden = 'NO'"
@@ -188,8 +221,20 @@ class CockroachEngine(PgWireEngine):
         head = (f"upsert into {self._qualified(side, db, table)} ("
                 + ", ".join(self._q(n) for n in names) + ") values ")
         one = "(" + ", ".join(["%s"] * len(names)) + ")"
-        for i in range(0, len(rows), UPSERT_ROWS):
-            part = rows[i:i + UPSERT_ROWS]
+        # a row past what one statement takes goes first by the same
+        # upsert and its value a piece a statement; the rest in statements
+        # cut by rows and by what the cluster takes in one
+        sz = pieces.sizing(self, side, db)
+        if pieces.wider_than(rows, sz.inline, sz.char_bytes):
+            rows = pieces.written_in_pieces(
+                self, cur, side, db, table, list(zip(names, classes)),
+                self.neutral_key(side, db, table), rows,
+                insert=head + "(" + ", ".join([MARK] * len(names)) + ")")
+        most = min([(x.most - pieces.HEADROOM) // (
+            pieces.SENT_FACTOR if x.bounds == "sent" else 1)
+            for x in sz.limits if x.bounds in ("sent", "stored")
+            and x.most > pieces.HEADROOM] or [pieces.BATCH_BYTES])
+        for part in pieces.by_bytes(rows, most, UPSERT_ROWS):
             cur.execute(head + ", ".join([one] * len(part)),
                         [canon.write_value(self.CANON_ENGINE, c, v)
                          for r in part for c, v in zip(classes, r)])

@@ -667,13 +667,15 @@ class MySQLEngine(Engine):
                           " = %s and table_name = %s",
                     (self._d(side, db), table))}
 
-    def _read_query(self, side, db, table, columns, after, limit, where):
+    def _read_query(self, side, db, table, columns, after, limit, where,
+                    select=None):
         """(sql, args, key, names) for `neutral_read` and
-        `neutral_batches`: one statement shape for both."""
+        `neutral_batches`: one statement shape for both. `select` is the
+        select list where a read plan gives its own (`pieces.ReadPlan`)."""
         from .. import canon
         names = [n for n, _ in columns]
-        cols = ", ".join(canon.read_expr("mysql", f"`{n}`", c)
-                         for n, c in columns)
+        cols = select or ", ".join(canon.read_expr("mysql", f"`{n}`", c)
+                                   for n, c in columns)
         key = self.neutral_key(side, db, table)
         resume, args = "", []
         if key and after is not None:
