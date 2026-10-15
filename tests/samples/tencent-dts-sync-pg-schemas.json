@@ -1,0 +1,77 @@
+{
+ "Response": {
+  "TotalCount": 1,
+  "JobList": [
+   {
+    "JobId": "sync-example2",
+    "JobName": "pg-schemas",
+    "Status": "Running",
+    "SrcRegion": "ap-example-1",
+    "DstRegion": "ap-example-1",
+    "SrcDatabaseType": "postgresql",
+    "DstDatabaseType": "postgresql",
+    "SrcAccessType": "vpncloud",
+    "DstAccessType": "cdb",
+    "SrcInfo": {
+     "Region": "ap-example-1",
+     "Ip": "10.0.0.51",
+     "Port": 5432,
+     "User": "rep",
+     "Password": ""
+    },
+    "DstInfo": {
+     "Region": "ap-example-1",
+     "InstanceId": "postgres-example",
+     "User": "app",
+     "Password": ""
+    },
+    "Objects": {
+     "Mode": "Partial",
+     "Databases": [
+      {
+       "DbName": "appdb",
+       "NewDbName": "appdb_new",
+       "DbMode": "Partial",
+       "SchemaName": "sales",
+       "TableMode": "All"
+      },
+      {
+       "DbName": "appdb",
+       "NewDbName": "appdb_new",
+       "DbMode": "Partial",
+       "SchemaName": "ops",
+       "TableMode": "Partial",
+       "Tables": [
+        {
+         "TableName": "jobs",
+         "NewTableName": "job_runs"
+        },
+        {
+         "TableName": "tickets",
+         "FilterCondition": "id > 100"
+        }
+       ]
+      }
+     ]
+    },
+    "Options": {
+     "InitType": "Full",
+     "DealOfExistSameTable": "ExecuteAfterIgnore",
+     "ConflictHandleType": "ReportError",
+     "OpTypes": ["Insert", "Update", "Delete", "PartialDDL"],
+     "DdlOptions": [
+      {
+       "DdlObject": "Table",
+       "DdlValue": ["Create", "Alter", "Drop"]
+      },
+      {
+       "DdlObject": "Database",
+       "DdlValue": ["Create"]
+      }
+     ]
+    }
+   }
+  ],
+  "RequestId": "00000000-0000-0000-0000-000000000000"
+ }
+}

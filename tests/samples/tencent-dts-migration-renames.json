@@ -1,0 +1,94 @@
+{
+ "Response": {
+  "JobId": "dts-example2",
+  "JobName": "shop-renamed",
+  "Status": "created",
+  "RunMode": "timed",
+  "ExpectRunTime": "2026-01-01 02:00:00",
+  "CompareTask": {
+   "CompareTaskId": "dts-example2-cmp-example",
+   "Status": "success"
+  },
+  "SrcInfo": {
+   "Region": "ap-example-1",
+   "DatabaseType": "mysql",
+   "AccessType": "extranet",
+   "Info": [
+    {
+     "Host": "mysql-src.example.com",
+     "Port": 3306,
+     "User": "dts_reader",
+     "Password": "",
+     "EncryptConn": "Encrypted"
+    }
+   ]
+  },
+  "DstInfo": {
+   "Region": "ap-example-1",
+   "DatabaseType": "mysql",
+   "AccessType": "cdb",
+   "Info": [
+    {
+     "InstanceId": "cdb-example2",
+     "User": "app",
+     "Password": ""
+    }
+   ]
+  },
+  "MigrateOption": {
+   "MigrateType": "fullAndIncrement",
+   "IsMigrateAccount": true,
+   "IsDstReadOnly": true,
+   "DatabaseTable": {
+    "ObjectMode": "partial",
+    "AdvancedObjects": ["function", "procedure", "trigger", "event"],
+    "Databases": [
+     {
+      "DbName": "shop",
+      "NewDbName": "shop_v2",
+      "DBMode": "partial",
+      "TableMode": "partial",
+      "Tables": [
+       {
+        "TableName": "orders"
+       },
+       {
+        "TableName": "order_item",
+        "NewTableName": "order_line",
+        "TableEditMode": "rename"
+       },
+       {
+        "TableName": "payments",
+        "FilterCondition": "created_at >= '2025-01-01'"
+       }
+      ],
+      "ViewMode": "partial",
+      "Views": [
+       {
+        "ViewName": "v_sales"
+       }
+      ]
+     },
+     {
+      "DbName": "crm",
+      "DBMode": "all",
+      "TableMode": "partial",
+      "Tables": [
+       {
+        "TableName": "ignored_when_whole"
+       }
+      ]
+     }
+    ]
+   },
+   "Consistency": {
+    "Mode": "full",
+    "ObjectMode": "all",
+    "Options": {
+     "Method": "dataCheck"
+    }
+   }
+  },
+  "RequestId": "00000000-0000-0000-0000-000000000000"
+ }
+}

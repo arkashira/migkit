@@ -604,6 +604,8 @@ READERS = {"tencent": imports.from_tencent_dts,
            "connector": imports.from_connector}
 #: the JSON samples and the reader that is each one's own
 OWN = {"tencent-dts-migration.json": "tencent",
+       "tencent-dts-migration-renames.json": "tencent",
+       "tencent-dts-sync-pg-schemas.json": "tencent",
        "alibaba-dts-job.json": "alibaba",
        "dms-task.json": "dms",
        "connector-postgres.json": "connector",

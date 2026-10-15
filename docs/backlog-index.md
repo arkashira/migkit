@@ -489,7 +489,7 @@ in these historical totals.
 | 397 | R21.4 | Nothing to tune: knobs only ceilings, the starter config shows none, doctor flags keys that do nothing | DONE f5285cb (grep: the starter config shows no knob; `hopkeys.said_by_doctor`) | S | ease of use | L7463-7467 |
 | 398 | R21.5 | `goal:` sets the defaults | DONE f5285cb | S | ease of use | L7468-7472 |
 | 399 | R21.6 | Config checked like code (did you mean, types, contradictions, plaintext secrets) | DONE f5285cb | S | ease of use | L7473-7475 |
-| 400 | R21.7 | Import an AWS DMS task, a DTS job, a Debezium config or a pgloader file | PARTLY f5285cb (done: an AWS DMS task, a Debezium config, a pgloader file; missing: a DTS job) | M | ease of use | L7476-7478 |
+| 400 | R21.7 | Import an AWS DMS task, a DTS job, a Debezium config or a pgloader file | DONE in text (f5285cb: an AWS DMS task, a Debezium config, a pgloader file; a Tencent/Alibaba DTS job since P0-SCOPE.2/.5, deepened 2026-10-16: start time, region, DbMode, sequences/accounts, the job's own report as compare_with; left: a whole schema renamed) | M | ease of use | L8253-8268 |
 | 401 | R21.8 | A setup page in the view | OPEN (grep: the web view has the operator's account setup and a hop's validation, no form doing what `init` does) | M | ease of use | L7479-7481 |
 | 402 | R21.9 | Every message says what to do next | OPEN | M | ease of use | L7482-7483 |
 | 403 | R21.M | Ease measured: time to a verified move scripted per pair, config lines, questions asked | OPEN | S | ease of use | L7485-7489 |

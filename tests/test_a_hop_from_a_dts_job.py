@@ -317,3 +317,109 @@ def test_the_objects_a_job_names_one_by_one_and_what_it_does_not_carry():
     assert not hop.takes_object("views", "a", "v2")
     assert hop.takes_object("procedures", "a", "p1")
     assert hop.takes_object("triggers", "a", "t1")
+
+
+def test_a_mysql_migration_job_with_renames_reads_as_this_hop():
+    got = imports.read(SAMPLES / "tencent-dts-migration-renames.json")
+    assert got.name == "shop-renamed"
+    assert got.raw == {
+        "goal": "verify",
+        "source": ("mysql://dts_reader@mysql-src.example.com/shop,crm"
+                   "?ssl-mode=REQUIRED"),
+        "db_map": {"shop": "shop_v2"},
+        # crm is DBMode all: its table list does not narrow it
+        "include": ["shop.orders", "shop.order_item", "shop.payments",
+                    "crm.*"],
+        "objects": {"views": ["shop.v_sales", "crm.*"]},
+        "mapping": {"tables": {"shop.order_item": "order_line"},
+                    "where": {"shop.payments":
+                              "created_at >= '2025-01-01'"}}}
+    said = " | ".join(got.notes)
+    for words in ("timed to start at 2026-01-01 02:00:00 (Status created)",
+                  "cdb-example2 in ap-example-1",
+                  "DescribeCompareReport --JobId dts-example2"
+                  " --CompareTaskId dts-example2-cmp-example"
+                  " > dts-example2-cmp-example.json"):
+        assert words in said, (words, said)
+    # a MySQL job's changes carry AUTO_INCREMENT with the rows, and a
+    # migration job that moves accounts is not told to make them
+    assert "sequence" not in said and "migkit users" not in said
+    hop = _hop(got, "mysql://app@10.0.0.22")
+    assert hop.target_db("shop") == "shop_v2"
+    assert not hop.excluded("crm", "ignored_when_whole")
+    assert not hop.excluded("crm", "anything")
+    assert hop.excluded("shop", "audit_log")
+    assert hop.target_table_in("shop", "order_item") == "order_line"
+    assert hop.row_filter("shop", "payments") == \
+        "created_at >= '2025-01-01'"
+    assert hop.takes_object("views", "shop", "v_sales")
+    assert not hop.takes_object("views", "shop", "v_other")
+
+
+def test_a_postgres_sync_job_of_schemas_and_its_ddl_reads_as_this_hop():
+    got = imports.read(SAMPLES / "tencent-dts-sync-pg-schemas.json")
+    assert got.name == "pg-schemas"
+    assert got.raw == {
+        "goal": "verify",
+        "source": "postgres://rep@10.0.0.51/appdb",
+        "db_map": {"appdb": "appdb_new"},
+        # a schema taken whole is `db.schema.*`, as every hop says it
+        "include": ["appdb.sales.*", "appdb.ops.jobs", "appdb.ops.tickets"],
+        "mapping": {"tables": {"appdb.ops.jobs": "ops.job_runs"},
+                    "where": {"appdb.ops.tickets": "id > 100"}},
+        # PartialDDL with Create, Alter, Drop on tables: truncate is left
+        # out, rename cannot be and is said
+        "options": {"ddl": {"default": "apply", "skip": ["truncate"]}}}
+    said = " | ".join(got.notes)
+    for words in ("postgres-example in ap-example-1", "ExecuteAfterIgnore",
+                  "does not carry a table's rename",
+                  "`migkit sync pg-schemas --kind sequences`",
+                  "`migkit users pg-schemas create`"):
+        assert words in said, (words, said)
+    hop = _hop(got, "postgres://app@10.0.0.52")
+    assert hop.target_db("appdb") == "appdb_new"
+    assert not hop.excluded("appdb", "sales", "anything")
+    assert not hop.excluded("appdb", "ops", "tickets")
+    assert hop.excluded("appdb", "ops", "scratch")
+    assert hop.excluded("appdb", "public", "orders")
+    assert hop.target_table_in("appdb", "ops", "jobs") == "ops.job_runs"
+    assert hop.row_filter("appdb", "ops", "tickets") == "id > 100"
+
+
+def test_the_jobs_own_check_report_beside_it_becomes_compare_with(
+        tmp_path):
+    from migkit import servicecheck
+    job = tmp_path / "shop.json"
+    job.write_text((SAMPLES / "tencent-dts-migration-renames.json")
+                   .read_text())
+    report = tmp_path / "dts-example2-cmp-example.json"
+    report.write_text(json.dumps({"Response": {
+        "Abstract": {"Conclusion": "same",
+                     "Options": {"Method": "dataCheck"},
+                     "TotalTables": 3, "CheckedTables": 3},
+        "Detail": {"Difference": {"TotalCount": 0, "Items": []}}}}))
+    got = imports.read(job)
+    assert got.raw["options"] == {"compare_with": str(report.resolve())}
+    assert "is the hop's compare_with" in " | ".join(got.notes)
+    hop = _hop(got, "mysql://app@10.0.0.22")
+    assert servicecheck.path_of(hop) == str(report.resolve())
+    assert servicecheck.read(servicecheck.path_of(hop)).service == \
+        "Tencent Cloud DTS"
+    # a file of that name that is not the service's report is not taken
+    report.write_text(json.dumps({"something": "else"}))
+    got = imports.read(job)
+    assert "options" not in got.raw
+    assert "is not the report of its data check" in " | ".join(got.notes)
+
+
+def test_an_unknown_database_type_is_refused_with_the_next_step():
+    data = json.loads((SAMPLES / "tencent-dts-sync-pg-schemas.json")
+                      .read_text())
+    data["Response"]["JobList"][0]["DstDatabaseType"] = "cosmos-of-mars"
+    with pytest.raises(SystemExit) as e:
+        imports.from_tencent_dts(data)
+    said = str(e.value)
+    assert said.startswith("the job's target is a cosmos-of-mars one,"
+                           " which migkit has no engine for")
+    assert "mysql" in said and "postgres" in said
+    assert "write the hop with `migkit init`" in said

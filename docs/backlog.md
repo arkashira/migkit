@@ -8274,6 +8274,19 @@ across the code; `init` writes a static template and asks nothing. So:
 7. **Coming from another tool:** read an AWS DMS task, a Tencent/Alibaba
    DTS job, a Debezium connector config or a pgloader load file and
    write the hop that does the same - switching costs nothing.
+   Tencent DTS (2026-10-16, `imports.from_tencent_dts`): a timed or
+   unstarted job (RunMode, ExpectRunTime, Status) is said, a side's
+   Region beside its instance, DbMode all takes a database whole, InitType
+   Data said; what the job does not do is said with the command that does
+   it (a PostgreSQL source's sequences under changes, a sync job's
+   accounts); the job's CompareTask report saved beside the file as
+   `<CompareTaskId>.json` becomes `compare_with`, else the command that
+   saves it is said; an unknown DatabaseType is refused with the next
+   step. Not done: a whole schema renamed (NewSchemaName with TableMode
+   all) is still said, not carried - the hop renames tables only; what a
+   PostgreSQL migration job carries of DDL while it follows changes is
+   not said (the service's limit there is not measured); the tests were
+   written, not run (one run at the end).
 8. **The view helps too:** the dashboard gets a setup page doing what
    `init` does, for operators who prefer a form (behind the same
    roles and host checks).

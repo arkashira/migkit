@@ -119,11 +119,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the file holds <...> jobs (<...>); give it one (a hop is one job)
 
-* the job's <...> is a <...> one, which migkit has no engine for
+* the job's <...> is a <...> one, which migkit has no engine for - it reads a job between <...>; where the <...> speaks one of them under a name of the service's own, write the hop with `migkit init` and give that engine's address
 
 * the job sends database <...> to both <...> and <...>
 
 * the file holds <...> DTS jobs (<...>); give it one (a hop is one job)
+
+* the job's <...> is a <...> one, which migkit has no engine for
 
 * the file holds <...> DRS jobs (<...>); give it one (a hop is one job)
 

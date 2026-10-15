@@ -76,7 +76,7 @@ def read(path):
     if head.startswith("{") or head.startswith("["):
         data = json.loads(text)
         if _is_tencent_dts(data):
-            return from_tencent_dts(data, stem)
+            return from_tencent_dts(data, stem, p.parent)
         if _is_alibaba_dts(data):
             return from_alibaba_dts(data, stem)
         if _is_huawei_drs(data):
@@ -480,7 +480,7 @@ def _is_tencent_dts(data):
     return _tdts_kind(d) is not None
 
 
-def from_tencent_dts(data, stem="hop"):
+def from_tencent_dts(data, stem="hop", where=None):
     """A hop that checks what a Tencent Cloud DTS job takes, read from what
     the service says of it - whichever of its things the file holds: a
     migration job's detail (DescribeMigrationDetail, or the 2018 API's
@@ -497,7 +497,10 @@ def from_tencent_dts(data, stem="hop"):
     is neither moved by migkit nor called missing. Every setting of the
     job that makes a correct move look different (deletes it does not
     carry, conflicts it ignores, a target left writable) is said beside
-    it."""
+    it, and so is what migkit does that the job does not (a sequence's
+    next value, accounts). The job's own data check's report, saved in
+    `where` (the job file's folder) under its CompareTaskId, becomes the
+    hop's `compare_with`."""
     d = _unwrap(data)
     many = _tdts_listed(d)
     if many is not None:
@@ -521,6 +524,7 @@ def from_tencent_dts(data, stem="hop"):
     notes.append("the job moves the data and this hop checks what it took"
                  " (goal: verify) - make the goal copy or cutover to have"
                  " migkit move it instead")
+    _tdts_start_notes(d, notes)
     src = _tdts_end(d, "Src", notes)
     dst = _tdts_end(d, "Dst", notes) if kind != "subscription" else None
     ops, ddl = {}, None
@@ -588,7 +592,93 @@ def from_tencent_dts(data, stem="hop"):
     if ddl is not None:
         # what a tail does with each DDL, as the job carries them
         out.raw.setdefault("options", {})["ddl"] = ddl
+    _tdts_beyond(d, kind, src_e, out.name, notes)
+    report = _tdts_report(d, where, notes)
+    if report:
+        out.raw.setdefault("options", {})["compare_with"] = report
     return out
+
+
+#: a job's Status before it has moved anything
+_TDTS_UNSTARTED = ("created", "checking", "checkPass", "checkNotPass",
+                   "readyRun", "notStarted")
+
+
+def _tdts_start_notes(d, notes):
+    """A job that has not moved anything yet - timed to start later
+    (RunMode timed, ExpectRunTime) or not started - is said: a check now
+    finds the target without what the job takes."""
+    status = str(d.get("Status") or "")
+    timed = str(d.get("RunMode") or "").lower() == "timed"
+    if not (timed or status in _TDTS_UNSTARTED):
+        return
+    when = ""
+    if timed:
+        when = (f" timed to start at {d['ExpectRunTime']}"
+                if d.get("ExpectRunTime") else " timed to start later")
+    state = f" (Status {status})" if status in _TDTS_UNSTARTED else ""
+    notes.append(f"the job is{when or ' not started'}{state}: a check"
+                 " before it has moved the data finds every table it takes"
+                 " missing on the target - run the check after it has")
+
+
+def _tdts_beyond(d, kind, src_e, name, notes):
+    """What migkit does that the job does not, said with the command that
+    does it: a PostgreSQL source's sequences where the job carries
+    changes (the changes hold no sequence's next value), and the accounts
+    of a sync job (it moves none)."""
+    opt = d.get("MigrateOption") or {}
+    changes = kind == "sync" or (kind == "migration" and str(
+        opt.get("MigrateType") or "") == "fullAndIncrement")
+    if src_e == "postgres" and changes:
+        notes.append("the changes the job carries hold no sequence's next"
+                     " value: on the target each one reads as behind the"
+                     " source's - the check compares every sequence the hop"
+                     f" takes, and `migkit sync {name} --kind sequences`"
+                     " sets them before the cutover")
+    if kind == "sync":
+        notes.append("the job moves no accounts: the check shows the"
+                     " target's users and grants as they are, missing ones"
+                     f" among them - `migkit users {name} create` makes"
+                     " them with their grants")
+
+
+def _tdts_report(d, where, notes):
+    """The path of the job's own data check's report where it is saved
+    beside the job's file as `<CompareTaskId>.json` and reads as the
+    service's report (`servicecheck.read`), else '' with how to save it
+    said."""
+    task = d.get("CompareTask") if isinstance(d.get("CompareTask"),
+                                              dict) else d
+    cid = task.get("CompareTaskId")
+    job = d.get("JobId") or task.get("JobId")
+    if not cid or not job:
+        return ""
+    path = Path(str(where)) / f"{cid}.json" if where else None
+    if path is not None and path.is_file():
+        from . import servicecheck
+        try:
+            said = servicecheck.read(path)
+        except (ValueError, OSError) as e:
+            said = None
+            why = f" ({e})"
+        if said is not None and said.service == "Tencent Cloud DTS":
+            notes.append(f"the job's own data check's report ({path.name})"
+                         " is the hop's compare_with: each table's answer is"
+                         " held against migkit's")
+            return str(path.resolve())
+        notes.append(f"{path.name} beside the job is not the report of its"
+                     f" data check{why if said is None else ''} - not"
+                     " carried")
+        return ""
+    status = task.get("Status")
+    notes.append(f"the job has its own data check ({cid}"
+                 + (f", {status}" if status else "") + "): save its report"
+                 " beside this file - tccli dts DescribeCompareReport"
+                 f" --JobId {job} --CompareTaskId {cid} > {cid}.json - and"
+                 " import again, to have each table's answer held against"
+                 " migkit's (the hop's compare_with)")
+    return ""
 
 
 def _tdts_2018_items(info):
@@ -669,9 +759,7 @@ def _tdts_check_notes(d, notes):
                      f" {rate if rate is not None else 'a sample'}"
                      f"{'%' if rate is not None else ''} of the rows")
     if d.get("Conclusion"):
-        notes.append(f"the service's own check concluded {d['Conclusion']}"
-                     " - give its report as the hop's compare_with to have"
-                     " each table's answer held against migkit's")
+        notes.append(f"the service's own check concluded {d['Conclusion']}")
 
 
 #: DTS's words for the changes a job carries
@@ -811,8 +899,12 @@ def _tdts_end(d, side, notes):
         return None
     engine = TDTS_ENGINES.get(str(kind or "").lower())
     if engine is None:
+        known = ", ".join(sorted(set(TDTS_ENGINES.values())))
         raise SystemExit(f"the job's {word} is a {kind} one, which migkit"
-                         " has no engine for")
+                         " has no engine for - it reads a job between "
+                         f"{known}; where the {word} speaks one of them under"
+                         " a name of the service's own, write the hop with"
+                         " `migkit init` and give that engine's address")
     node = nodes[0] if nodes else {}
     if len(nodes) > 1:
         notes.append(f"the {word} is {len(nodes)} nodes; the address is the"
@@ -835,8 +927,11 @@ def _tdts_end(d, side, notes):
                      " connection (EncryptConn UnEncrypted)")
     if not host:
         what = node.get("InstanceId") or node.get("CvmInstanceId") or ""
-        notes.append(f"the {word} is {what or 'an instance'}, which the job"
-                     " reaches through the cloud's own network"
+        region = node.get("Region") or (info.get("Region") if isinstance(
+            info, dict) else None) or d.get(f"{side}Region")
+        place = f" in {region}" if region else ""
+        notes.append(f"the {word} is {what or 'an instance'}{place}, which"
+                     " the job reaches through the cloud's own network"
                      f" ({access or 'not said'}) - the guide asks for an"
                      " address migkit can reach")
     return {"engine": engine, "long": long}
@@ -868,7 +963,10 @@ def _tdts_selection(mode, items, notes):
             got["db_map"][db] = new
         sch, new_sch = it.get("SchemaName") or "", it.get("NewSchemaName")
         tables = it.get("Tables") or []
-        tmode = str(it.get("TableMode") or (
+        # DbMode all takes the database whole, whatever else it lists
+        whole_db = str(it.get("DbMode") or it.get("DBMode") or "").lower() \
+            == "all" and not sch
+        tmode = "all" if whole_db else str(it.get("TableMode") or (
             "partial" if tables else "all")).lower()
         base = f"{db}.{sch}" if sch else db
         if new_sch and new_sch != sch and tmode != "partial":
@@ -881,7 +979,7 @@ def _tdts_selection(mode, items, notes):
             whole = False
             for t in tables:
                 _tdts_table(got, base, sch, new_sch, t, notes)
-        _tdts_objects(got, base, it)
+        _tdts_objects(got, base, it, whole_db)
     if whole:
         # whole databases: the databases say it
         got["include"] = []
@@ -903,7 +1001,7 @@ _TDTS_OBJECTS = (("ViewMode", "Views", "ViewName", "views"),
                  ("RoleMode", "Roles", "RoleName", "roles"))
 
 
-def _tdts_objects(got, base, item):
+def _tdts_objects(got, base, item, whole_db=False):
     """The objects beside its tables a database of the job names one by
     one - views, functions and procedures, triggers, events, roles - as
     the hop's `objects` names them. Only a choice the job made by name is
@@ -913,7 +1011,8 @@ def _tdts_objects(got, base, item):
     objects = got.setdefault("objects", {})
     for mode_key, list_key, name_key, kind in _TDTS_OBJECTS:
         # a database that says nothing of a kind takes all of it
-        mode = str(item.get(mode_key) or "all").lower()
+        mode = "all" if whole_db else str(item.get(mode_key)
+                                          or "all").lower()
         mine = objects.setdefault(kind, [])
         if mode == "partial":
             for o in item.get(list_key) or []:
@@ -1008,6 +1107,10 @@ def _tdts_sync_notes(options, objects, notes):
     elif init == "Structure":
         notes.append("the job made the structure and carries changes only:"
                      " the rows from before it began read as missing")
+    elif init == "Data":
+        notes.append("the job moves rows into tables made before it"
+                     " (InitType Data): the structure is the target's own,"
+                     " and where it is not the source's the check says so")
     conflict = options.get("ConflictHandleType")
     if conflict == "Ignore":
         notes.append("the job keeps a row the target already had under the"
