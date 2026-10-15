@@ -448,53 +448,6 @@ def test_byte_order_difference_is_said_and_pages_refused():
     assert "byte_order: 'little' to 'big'" in got.words()
 
 
-<<<<<<< HEAD
-class _Unread(BaseEngine):
-    CANON_ENGINE = "redis"
-
-
-def test_an_engine_without_semantic_readers_is_not_yet_never_an_error():
-    eng = _Unread.__new__(_Unread)
-    facts = scenarios.architecture_facts(eng, "db", lambda side: hosts()[side])
-    got = scenarios.architecture_case(facts)
-    assert got.choice.path is None
-    assert "not yet" in got.choice.reason
-    assert "P0-SCENARIOS.arch" in got.choice.reason
-
-
-def test_an_engine_without_a_storage_reader_is_not_yet_never_an_error():
-    eng = _Unread.__new__(_Unread)
-    got = tableengine.observed(eng, "db")
-    assert got["src"] is None and got["dst"] is None
-    assert "P0-SCENARIOS.engine" in got["not_read"]
-
-
-@pytest.mark.parametrize("family", ["redis", "nosuchengine"])
-def test_a_storage_change_on_an_unread_engine_is_not_yet(family):
-    got = storage_case("items", "a", "b", family=family, supported=("b",),
-                       accepted=True, orphan_rows=0)
-    assert got.choice.path is None
-    assert "not yet" in got.choice.reason
-    assert "P0-SCENARIOS.engine" in got.choice.reason
-
-
-def test_the_storage_needs_read_the_facts_not_the_arguments():
-    change = tableengine.Change("items", "myisam", "innodb", "", there="")
-    rungs = decide.fenced(tableengine.ways(), *tableengine.storage_needs())
-    facts = decide.Facts({
-        "there": False, "source": "myisam", "target": "innodb",
-        "source_traits": tableengine.TRAITS["myisam"],
-        "target_traits": tableengine.TRAITS["innodb"],
-        "supported": ("innodb",), "accepted": True, "orphan_rows": 0,
-        "used_features": (), "alter_access_method": False})
-    assert decide.climb("t", rungs, facts, need=("engine changed",)).path \
-        == "definition"
-    facts["orphan_rows"] = 3
-    assert decide.climb("t", rungs, facts, need=("engine changed",)).path \
-        is None
-    assert change.table == "items"
-||||||| 580cd213
-=======
 def test_the_server_says_its_build_and_the_byte_order_follows():
     class My:
         CANON_ENGINE = "mysql"
@@ -570,4 +523,3 @@ def test_the_plan_carries_the_architecture_case_and_records_it(monkeypatch):
     monkeypatch.setattr(scenarios, "architecture_facts",
                         lambda eng, db, reader: decide.Facts(same))
     assert scenarios.plan_lines(object(), eng, "db") == []
->>>>>>> worktree-agent-a5f0e055450860533

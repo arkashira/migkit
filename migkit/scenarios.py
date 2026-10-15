@@ -328,71 +328,6 @@ def architecture_facts(eng, db, platform_reader):
     return decide.Facts(out)
 
 
-<<<<<<< HEAD
-ARCH_FIELDS = ("architecture", "os", "byte_order", "collation",
-               "case_sensitivity", "float_rendering")
-#: what moves a value's meaning, carried only by the schema step
-SEMANTIC = ("collation", "case_sensitivity", "float_rendering",
-            "float_setting")
-
-
-def _unread(value):
-    return value is None or value == "" or (
-        isinstance(value, tuple) and (not value or _unread(value[0])))
-
-
-def _sides(f):
-    return f.get("src") or {}, f.get("dst") or {}
-
-
-def _arch_unread(f):
-    a, b = _sides(f)
-    return [k for k in ARCH_FIELDS if _unread(a.get(k)) or _unread(b.get(k))]
-
-
-def _arch_read_why(f):
-    said = sorted({side.get("not_read") for side in _sides(f)
-                   if side.get("not_read")})
-    return "; ".join(said) or "unread server facts: " + ", ".join(
-        _arch_unread(f))
-
-
-def _arch_differs(f):
-    a, b = _sides(f)
-    return [k for k in ARCH_FIELDS + ("float_setting",)
-            if a.get(k) != b.get(k)]
-
-
-def _arch_unhandled(f):
-    carried = f.get("schema_carries") or ()
-    return [k for k in _arch_differs(f) if k in SEMANTIC
-            and k not in carried]
-
-
-def _architecture_rungs():
-    shared = (
-        decide.Need("facts read from both servers",
-                    lambda f: not _arch_unread(f), _arch_read_why),
-||||||| 580cd213
-def architecture_case(facts, schema_carries=()):
-    """Refuse unhandled semantic differences, route byte changes logically."""
-    a, b = facts.get("src", {}), facts.get("dst", {})
-    fields = ("architecture", "os", "byte_order", "collation",
-              "case_sensitivity", "float_rendering")
-    def unread(value):
-        return value is None or value == "" or (
-            isinstance(value, tuple) and (not value or unread(value[0])))
-    missing = [k for k in fields if unread(a.get(k)) or unread(b.get(k))]
-    differences = [k for k in fields if a.get(k) != b.get(k)]
-    unhandled = [k for k in differences if k in (
-        "collation", "case_sensitivity", "float_rendering", "float_setting")
-        and k not in schema_carries]
-    if a.get("float_setting") != b.get("float_setting") and "float_setting" not in schema_carries:
-        unhandled.append("float_setting")
-    needs = (
-        decide.Need("facts read from both servers", lambda f: not missing,
-                    "unread server facts: " + ", ".join(missing)),
-=======
 #: the engines whose settings and build `architecture_facts` reads
 ARCH_ENGINES = ("mysql", "postgres", "mssql")
 _HOST = ("architecture", "os", "byte_order")
@@ -506,59 +441,7 @@ def architecture_case(facts, schema_carries=()):
         decide.Need("facts read from both servers",
                     lambda f: not _unread(f),
                     lambda f: "unread server facts: " + ", ".join(_unread(f))),
->>>>>>> worktree-agent-a5f0e055450860533
         decide.Need("semantic differences carried by the schema step",
-<<<<<<< HEAD
-                    lambda f: not _arch_unhandled(f),
-                    lambda f: "the schema step does not carry: "
-                              + ", ".join(_arch_unhandled(f))))
-    return decide.fenced((
-        decide.Rung("architecture-pages", "a copy of the server's pages",
-                    frozenset({"architecture change"}),
-                    needs=(decide.Need(
-                        "the same architecture, OS and byte order",
-                        lambda f: not any(k in _arch_differs(f) for k in
-                                          ("architecture", "os",
-                                           "byte_order"))),)),
-        decide.Rung("architecture-logical",
-                    "a logical move across hardware or OS",
-                    frozenset({"architecture change"}),
-                    because="values are decoded and encoded for the"
-                            " target")), *shared)
-
-
-ARCHITECTURE = _architecture_rungs()
-
-
-def architecture_case(facts, schema_carries=()):
-    """Refuse unhandled semantic differences, route byte changes logically:
-    the ladder (`ARCHITECTURE`) climbed on the facts read
-    (`architecture_facts`) and what the schema step carries."""
-    f = decide.Facts(dict(facts, schema_carries=tuple(schema_carries)))
-    choice = decide.climb("hardware / OS / architecture", ARCHITECTURE, f,
-                          need=("architecture change",))
-    a, b = _sides(f)
-    details = tuple(f"{k}: {a.get(k)!r} to {b.get(k)!r}"
-                    for k in ARCH_FIELDS)
-    return ScenarioDecision("hardware / OS / architecture change", choice,
-                            details)
-||||||| 580cd213
-                    lambda f: not unhandled,
-                    "the schema step does not carry: " + ", ".join(unhandled)))
-    logical = decide.Rung("architecture-logical", "a logical move across hardware or OS",
-                          frozenset({"architecture change"}), needs=needs,
-                          because="values are decoded and encoded for the target")
-    physical = decide.Rung(
-        "architecture-pages", "a copy of the server's pages",
-        frozenset({"architecture change"}),
-        needs=needs + (decide.Need("the same architecture, OS and byte order",
-                                 lambda f: not any(k in differences for k in
-                                                   ("architecture", "os", "byte_order"))),))
-    choice = decide.climb("hardware / OS / architecture", (physical, logical), facts,
-                          need=("architecture change",))
-    details = tuple(f"{k}: {a.get(k)!r} to {b.get(k)!r}" for k in fields)
-    return ScenarioDecision("hardware / OS / architecture change", choice, details)
-=======
                     lambda f: not unhandled(f),
                     lambda f: "the schema step does not carry: "
                               + ", ".join(unhandled(f))),
@@ -631,7 +514,6 @@ def architecture_lines(hop, eng, db, instances=None, offers=(), size=None):
     got = architecture_case(facts)
     decide.record(hop, got.choice)
     return [f"  {got.words()}"]
->>>>>>> worktree-agent-a5f0e055450860533
 
 
 def run_managed_case(facts, verify, hop=None):
