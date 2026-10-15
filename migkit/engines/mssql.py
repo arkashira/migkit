@@ -3110,6 +3110,12 @@ class MSSQLEngine(DbapiRows, Engine):
                       " order by ic.key_ordinal",
             (self._qualified(side, db, table),))]
 
+    def server_platform(self, side, db):
+        """`@@version`: the build's machine, and after " on " the OS it
+        runs on (`Engine.server_platform`)."""
+        text = str(self._cmd(side, db, "select @@version")[0][0])
+        return {"architecture": text, "os": text.split(" on ", 1)[-1]}
+
     def server_semantics(self, side, db):
         """The database's collation, whether it compares case, and how it
         renders a float (`Engine.server_semantics`)."""

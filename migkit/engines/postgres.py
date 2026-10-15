@@ -1109,6 +1109,13 @@ class PostgresEngine(Engine):
                 "float_setting": settings.get("extra_float_digits"),
                 "float_rendering": row[0]}
 
+    def server_platform(self, side, db):
+        """`version()`, which names the build's machine and OS
+        (`Engine.server_platform`)."""
+        from .. import upgrade
+        text = upgrade._pg(self, side, db, "select version()")[0][0]
+        return {"architecture": text, "os": text}
+
     def table_storage(self, side, db):
         """Each table's access method (`Engine.table_storage`)."""
         from .. import upgrade

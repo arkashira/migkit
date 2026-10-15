@@ -1759,6 +1759,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: point-in-time recovery is off on <...> - a table without it has no time to be restored to; turn it on (ALTER TABLE ... WITH custom_properties = {'point_in_time_recovery': {'status': 'enabled'}})
 
+* a restore onto a new instance class needs the target's class (spec) named
+
+* the restored instance <...> runs on <...>, not <...>
+
 * <...> has no parameter <...> in its parameter groups
 
 * <...> cannot be changed on <...>

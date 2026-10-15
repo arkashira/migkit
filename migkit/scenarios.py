@@ -245,6 +245,7 @@ def provider_offers(hop, source_adapter, target_adapter=None):
         out.append({"name": op.name, "said": op.said, "checks": op.checks,
                     "execute": source_adapter.runner(op),
                     "why_not": op.why_not, "startup_seconds": op.startup,
+                    "new_instance": op.new_instance,
                     "startup_source": op.startup_source, "runs": runs,
                     "duration_source": whose, "truth": truth})
     return tuple(out)
@@ -321,15 +322,14 @@ def architecture_facts(eng, db, platform_reader):
         facts = dict(platform_reader(side))
         read = eng.server_semantics(side, db)
         if isinstance(read, str):
-            facts["not_read"] = read
+            facts["not_read"] = "; ".join(
+                w for w in (facts.get("not_read"), read) if w)
         else:
             facts.update(read)
         out[side] = facts
     return decide.Facts(out)
 
 
-#: the engines whose settings and build `architecture_facts` reads
-ARCH_ENGINES = ("mysql", "postgres", "mssql")
 _HOST = ("architecture", "os", "byte_order")
 _FIELDS = _HOST + ("collation", "case_sensitivity", "float_rendering")
 _SEMANTIC = ("collation", "case_sensitivity", "float_rendering",
@@ -367,29 +367,36 @@ def _class_architecture(inst):
 
 def server_platform(eng, db, side, instance=None):
     """The architecture, OS and byte order the server on `side` was built
-    for, read off the server itself; the provider's instance class
+    for, in the words its engine reads off the server
+    (`Engine.server_platform`); the provider's instance class
     (`cloudapi.Instance`) where the server does not say. What neither
-    says stays None."""
-    from . import upgrade
-    engine = getattr(eng, "CANON_ENGINE", None)
+    says stays None, with why it was not read under "not_read"."""
     arch = os_ = None
+    why = ""
     try:
-        if engine == "mysql":
-            row = eng._q(side, "select @@version_compile_machine,"
-                               " @@version_compile_os")[0]
-            arch, os_ = _word(row[0], _ARCH), _word(row[1], _OS)
-        elif engine == "postgres":
-            text = upgrade._pg(eng, side, db, "select version()")[0][0]
-            arch, os_ = _word(text, _ARCH), _word(text, _OS)
-        elif engine == "mssql":
-            text = eng._cmd(side, db, "select @@version")[0][0]
-            arch = _word(text, _ARCH)
-            os_ = _word(str(text).lower().split(" on ", 1)[-1], _OS)
-    except (Exception, SystemExit):  # noqa: BLE001 - unread, said as such
-        pass
+        read = eng.server_platform(side, db)
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - said as not read
+        read = ("the build was not read: "
+                + ((str(e).strip().splitlines() or [type(e).__name__])[-1]
+                   [:160]))
+    if isinstance(read, dict):
+        arch = _word(read.get("architecture"), _ARCH)
+        os_ = _word(read.get("os"), _OS)
+    else:
+        why = read
     arch = arch or _class_architecture(instance)
-    return {"architecture": arch, "os": os_,
-            "byte_order": BYTE_ORDER.get(arch)}
+    out = {"architecture": arch, "os": os_,
+           "byte_order": BYTE_ORDER.get(arch)}
+    return dict(out, not_read=why) if why else out
+
+
+def reads_servers(eng):
+    """Whether `eng` reads its servers' build or semantics at all
+    (`Engine.server_platform`, `Engine.server_semantics`): an engine
+    that reads neither has no architecture case to plan."""
+    from .engines.base import Engine
+    return any(getattr(type(eng), m, None) not in (None, getattr(Engine, m))
+               for m in ("server_platform", "server_semantics"))
 
 
 def _unread_value(value):
@@ -440,7 +447,11 @@ def architecture_case(facts, schema_carries=()):
     shared = (
         decide.Need("facts read from both servers",
                     lambda f: not _unread(f),
-                    lambda f: "unread server facts: " + ", ".join(_unread(f))),
+                    lambda f: "unread server facts: " + ", ".join(_unread(f))
+                    + "".join(f" ({side}: {s['not_read']})"
+                              for side, s in zip(("source", "target"),
+                                                 _sides(f))
+                              if s.get("not_read"))),
         decide.Need("semantic differences carried by the schema step",
                     lambda f: not unhandled(f),
                     lambda f: "the schema step does not carry: "
@@ -455,6 +466,8 @@ def architecture_case(facts, schema_carries=()):
         needs=(decide.Need(
             "an operation that places the data on another instance",
             lambda f, o=o: o.get("new_instance") is True,
+            f"{o['said']} changes the instance in place: its hardware"
+            " stays" if o.get("new_instance") is False else
             f"{NOT_YET}: whether {o['said']} places the data on an"
             " instance of another class is not read from the provider's"
             " operations"),) + provider_needs(o),
@@ -488,7 +501,7 @@ def architecture_lines(hop, eng, db, instances=None, offers=(), size=None):
     instances' topology as their provider states it, the decision kept in
     the run's record. Nothing where the two servers are alike in every
     fact and both were read."""
-    if getattr(eng, "CANON_ENGINE", None) not in ARCH_ENGINES:
+    if not reads_servers(eng):
         return []
     instances = instances or {}
     try:
@@ -587,11 +600,14 @@ def plan_lines(hop, eng, db, offers=None):
             adapters[which] = managed.adapter(hop, eng, which)
         return adapters[which]
 
+    offers_error = ""
     if offers is None:
         try:
             offers = provider_offers(hop, adapter("src"))
-        except (Exception, SystemExit):  # noqa: BLE001 - said by the read
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - said below
             offers = ()
+            offers_error = ((str(e).strip().splitlines()
+                             or [type(e).__name__])[-1][:160])
 
     read = {}
 
@@ -603,6 +619,9 @@ def plan_lines(hop, eng, db, offers=None):
     def api(which):
         return SimpleNamespace(instance=lambda: instance(which))
     facts = managed_facts(hop, eng, api("src"), api("dst"), offers, size)
-    return managed_lines(facts) + architecture_lines(
+    said = ([f"  the provider's operations were not read: {offers_error} -"
+             " check the API's access for the source's product, then plan"
+             " again"] if offers_error else [])
+    return managed_lines(facts) + said + architecture_lines(
         hop, eng, db, {"src": facts.get("source"), "dst": facts.get("target")},
         offers, size)

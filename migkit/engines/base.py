@@ -2361,6 +2361,16 @@ class Engine:
                 f" not read on {self.CANON_ENGINE} (backlog"
                 " P0-SCENARIOS.arch)")
 
+    def server_platform(self, side, db):
+        """The text `side`'s server writes of the machine it was built for
+        - {"architecture": text, "os": text} - read for a hardware, OS or
+        architecture change (`scenarios.server_platform` reads the words
+        out of it). A string where this engine does not read it: the
+        reason, as a decision cell says it."""
+        from ..capabilities import NOT_YET
+        return (f"{NOT_YET}: the build's architecture and OS are not read"
+                f" on {self.CANON_ENGINE} (backlog P0-SCENARIOS.arch)")
+
     def table_storage(self, side, db):
         """{table: its storage engine or access method, lowercase} of
         `side`'s base tables, for a storage engine change

@@ -348,6 +348,10 @@ class Operation:
     #: the adapter's method running it; "" with `why_not` where none does
     runs: str = ""
     why_not: str = ""
+    #: whether it places the data on a new instance - one whose class,
+    #: hardware or OS may differ - as the provider documents the
+    #: operation: True, False (in place), None (not documented)
+    new_instance: object = None
 
 
 def _major(version):
@@ -409,6 +413,10 @@ def _primary(s, d):
 AURORA = {"mysql": "aurora-mysql", "postgres": "aurora-postgresql"}
 
 
+def _class_named(s, d):
+    return True if d.klass else None
+
+
 def _into_aurora(s, d):
     return (AURORA.get(s.engine) == d.engine
             if _known(s.engine, d.engine) else None)
@@ -441,7 +449,8 @@ OPERATIONS = {
             startup=300, startup_source="the switchover's documented"
                                         " default timeout",
             why_not=NOT_RUN.format(who="AWS",
-                                   what="a blue/green deployment")),
+                                   what="a blue/green deployment"),
+            new_instance=True),
         Operation(
             "aws-major-upgrade", "AWS's in-place major version upgrade",
             "aws", ("rds",),
@@ -454,7 +463,8 @@ OPERATIONS = {
               "the provider lists the target's version as no upgrade of"
               " the source's")),
             why_not=NOT_RUN.format(who="AWS",
-                                   what="an in-place major upgrade")),
+                                   what="an in-place major upgrade"),
+            new_instance=False),
         Operation(
             "aws-aurora-replica", "AWS's Aurora read replica of an RDS"
                                   " instance, promoted", "aws", ("rds",),
@@ -466,7 +476,8 @@ OPERATIONS = {
              ("a source that follows no other instance", _primary,
               "the source is a read replica")),
             why_not=NOT_RUN.format(who="AWS",
-                                   what="an Aurora read replica")),
+                                   what="an Aurora read replica"),
+            new_instance=True),
         Operation(
             "aws-aurora-snapshot", "AWS's RDS snapshot restored into"
                                    " Aurora", "aws", ("rds",),
@@ -475,7 +486,20 @@ OPERATIONS = {
               "the target is not the source engine's Aurora"),
              NOT_DOWN),
             why_not=NOT_RUN.format(who="AWS",
-                                   what="a snapshot restore into Aurora")),
+                                   what="a snapshot restore into Aurora"),
+            new_instance=True),
+        Operation(
+            "aws-class-restore", "AWS's restore of an RDS instance to its"
+                                 " latest time on a new instance class",
+            "aws", ("rds",),
+            (SAME_PROVIDER,
+             ("the same engine on both", _same_engine,
+              "a restore keeps the engine"),
+             ("the same major version on both", _same_major,
+              "a restore keeps the source's major version"),
+             ("an instance class named for the target", _class_named,
+              "the target's instance class is not known")),
+            runs="run_class_restore", new_instance=True),
     ),
     "azure": (
         Operation(
@@ -488,7 +512,8 @@ OPERATIONS = {
              ("a Flexible Server target", lambda s, d: d.product.startswith(
                  "flexible-"), "the target is no Flexible Server")),
             why_not="migkit's Azure adapter reads no Single Server, so the"
-                    " migration's source cannot be verified"),
+                    " migration's source cannot be verified",
+            new_instance=True),
     ),
     "gcp": (
         Operation(
@@ -503,7 +528,8 @@ OPERATIONS = {
               "the provider lists the target's version as no upgrade of"
               " the source's")),
             why_not=NOT_RUN.format(who="Google Cloud",
-                                   what="an in-place major upgrade")),
+                                   what="an in-place major upgrade"),
+            new_instance=False),
     ),
 }
 
@@ -1310,6 +1336,26 @@ class Aws(Adapter):
                          "DBClusterIdentifier", name, f"the copy {name}", log)
         return {"host": got.get("Endpoint", ""), "port": got.get("Port"),
                 "id": name, "kind": "cluster"}
+
+    def run_class_restore(self, log=print):
+        """The provider's restore of this instance to its latest time on a
+        new instance of the class `spec` names (`clone`), the new instance
+        then read back through the API: its class and engine as the
+        provider states them. A restore that came back on another class
+        is refused, never taken as the change asked for."""
+        spec = str(self.conf.get("spec") or "")
+        if not spec:
+            raise SystemExit("a restore onto a new instance class needs the"
+                             " target's class (spec) named")
+        name = str(self.conf.get("into") or self.id + "-"
+                   + spec.removeprefix("db.").replace(".", "-"))
+        made = self.clone(name, None, log)
+        got = type(self)(dict(self.conf, id=made["id"])).instance()
+        if got.klass != spec:
+            raise SystemExit(f"the restored instance {made['id']} runs on"
+                             f" {got.klass or 'a class not said'}, not {spec}")
+        return dict(made, klass=got.klass, engine=got.engine,
+                    version=got.version)
 
     # parameters -------------------------------------------------------------
 

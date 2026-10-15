@@ -475,6 +475,27 @@ class GenericEngine(Engine):
                 "is NOT NULL on the source and takes NULL on the target"))
         return out
 
+    def moved_nothing(self, db):
+        """The tables the source has rows in and the target has none of,
+        counted through the driver - a row limit has no one spelling
+        across dialects, a count has. None where a side cannot be read."""
+        empty = []
+        try:
+            for t in self._tables():
+                counts = []
+                for side in ("src", "dst"):
+                    conn = self._connect(side)
+                    counts.append(int(conn.query(
+                        f"SELECT COUNT(*) FROM {self._from(conn, t)}", int)
+                        or 0))
+                if counts[0] and not counts[1]:
+                    empty.append(t)
+        except (Exception, SystemExit):  # noqa: BLE001 - cannot answer
+            return None
+        finally:
+            self._close()
+        return empty
+
     def check_counts(self, db):
         bad = []
         blind = []

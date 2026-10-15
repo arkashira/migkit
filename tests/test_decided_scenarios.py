@@ -449,32 +449,35 @@ def test_byte_order_difference_is_said_and_pages_refused():
 
 
 def test_the_server_says_its_build_and_the_byte_order_follows():
-    class My:
-        CANON_ENGINE = "mysql"
+    class My(MySQLEngine):
         def _q(self, side, sql):
             return [("aarch64" if side == "dst" else "x86_64", "Linux")]
-    assert scenarios.server_platform(My(), "db", "dst") == {
+    assert scenarios.server_platform(My.__new__(My), "db", "dst") == {
         "architecture": "aarch64", "os": "linux", "byte_order": "little"}
 
-    class Ms:
-        CANON_ENGINE = "mssql"
+    class Ms(MSSQLEngine):
         def _cmd(self, side, db, sql):
             return [("Microsoft SQL Server 2022 (RTM) (X64) ... on Windows"
                      " Server 2022 Datacenter",)]
-    assert scenarios.server_platform(Ms(), "db", "src") == {
+    assert scenarios.server_platform(Ms.__new__(Ms), "db", "src") == {
         "architecture": "x86_64", "os": "windows", "byte_order": "little"}
 
 
 def test_an_unread_build_falls_to_the_instance_class_or_stays_unknown():
-    class Mute:
-        CANON_ENGINE = "mysql"
+    class Mute(MySQLEngine):
         def _q(self, side, sql):
             raise RuntimeError("denied")
     arm = Instance("aws", "rds", "db-1", klass="db.r7g.large")
-    assert scenarios.server_platform(Mute(), "db", "src", arm)[
+    mute = Mute.__new__(Mute)
+    assert scenarios.server_platform(mute, "db", "src", arm)[
         "architecture"] == "aarch64"
-    assert scenarios.server_platform(Mute(), "db", "src") == {
-        "architecture": None, "os": None, "byte_order": None}
+    unread = scenarios.server_platform(mute, "db", "src")
+    assert unread["architecture"] is None and unread["os"] is None
+    assert unread["not_read"] == "the build was not read: denied"
+    facts = hosts()
+    facts["src"].update(unread)
+    assert "the build was not read: denied" in \
+        scenarios.architecture_case(facts).choice.reason
 
 
 def test_a_target_that_follows_another_server_is_refused():
@@ -512,7 +515,7 @@ def test_the_plan_carries_the_architecture_case_and_records_it(monkeypatch):
                         lambda hop, what, *a, **k: recorded.append(what))
     monkeypatch.setattr(scenarios, "architecture_facts",
                         lambda eng, db, reader: decide.Facts(hosts()))
-    eng = SimpleNamespace(CANON_ENGINE="mysql")
+    eng = MySQLEngine.__new__(MySQLEngine)
     lines = scenarios.plan_lines(object(), eng, "db")
     assert len(lines) == 1
     assert "hardware / OS / architecture change" in lines[0]
@@ -523,3 +526,109 @@ def test_the_plan_carries_the_architecture_case_and_records_it(monkeypatch):
     monkeypatch.setattr(scenarios, "architecture_facts",
                         lambda eng, db, reader: decide.Facts(same))
     assert scenarios.plan_lines(object(), eng, "db") == []
+
+
+def test_the_platform_is_the_engines_fact_and_an_engine_that_reads_none_says_why():
+    from migkit import upgrade
+
+    class Pg(PostgresEngine):
+        pass
+    pg = Pg.__new__(Pg)
+    orig = upgrade._pg
+    try:
+        upgrade._pg = lambda e, side, db, sql: [(
+            "PostgreSQL 16.2 on aarch64-unknown-linux-gnu, compiled by gcc",)]
+        assert scenarios.server_platform(pg, "db", "src") == {
+            "architecture": "aarch64", "os": "linux", "byte_order": "little"}
+    finally:
+        upgrade._pg = orig
+
+    class Other(BaseEngine):
+        CANON_ENGINE = "other"
+    other = Other.__new__(Other)
+    said = other.server_platform("src", "db")
+    assert isinstance(said, str) and "P0-SCENARIOS.arch" in said
+    got = scenarios.server_platform(other, "db", "src")
+    assert got["architecture"] is None and "P0-SCENARIOS.arch" in \
+        got["not_read"]
+    assert not scenarios.reads_servers(other)
+    assert scenarios.reads_servers(pg)
+    assert scenarios.architecture_lines(object(), other, "db") == []
+
+
+def test_no_engine_is_named_in_the_scenarios():
+    import inspect
+    assert "engine ==" not in inspect.getsource(scenarios)
+
+
+def test_the_catalogue_says_which_operations_place_the_data_on_a_new_instance():
+    ops = {o.name: o for ops in cloudapi.OPERATIONS.values() for o in ops}
+    assert all(o.new_instance in (True, False) for o in ops.values())
+    assert ops["aws-major-upgrade"].new_instance is False
+    assert ops["gcp-major-upgrade"].new_instance is False
+    assert ops["aws-class-restore"].new_instance is True
+    assert ops["aws-class-restore"].runs == "run_class_restore"
+    facts = hosts()
+    facts["offers"] = ({"name": "op", "said": "the in-place upgrade",
+                        "checks": (), "new_instance": False},)
+    got = scenarios.architecture_case(facts)
+    assert got.choice.path == "architecture-logical"
+    assert "the in-place upgrade changes the instance in place" \
+        in got.choice.reason
+
+
+def _restoring(monkeypatch, comes_back_as):
+    made = []
+
+    def clone(self, name, point, log):
+        made.append((self.id, name, point, self.conf.get("spec")))
+        return {"host": f"{name}.example.com", "port": 5432, "id": name,
+                "kind": "instance"}
+
+    def instance(self, names=()):
+        klass = "db.r6i.large" if self.id == "source" else comes_back_as
+        return Instance("aws", "rds", self.id, engine="postgres",
+                        version="16.2", klass=klass, status="available",
+                        storage_gb=100, maintenance="sun:03:00-sun:04:00")
+    monkeypatch.setattr(cloudapi.Aws, "_clone", clone)
+    monkeypatch.setattr(cloudapi.Aws, "instance", instance)
+    adapter = cloudapi.Aws({"product": "rds", "id": "source",
+                            "spec": "db.r7g.large"})
+    src = adapter.instance()
+    dst = replace(src, id="target", klass="db.r7g.large")
+    offers = tuple(dict(o, runs=[{"bytes": 1000, "seconds": 70}])
+                   for o in scenarios.provider_offers(object(), adapter)
+                   if o["name"] == "aws-class-restore")
+    return made, decide.Facts({"source": src, "target": dst,
+                               "api_reachable": True, "offers": offers,
+                               "size_bytes": 1000})
+
+
+def test_a_class_restore_runs_through_the_adapter_then_migkit_verifies(
+        monkeypatch):
+    made, facts = _restoring(monkeypatch, "db.r7g.large")
+    assert facts["offers"][0]["new_instance"] is True
+    verified = []
+    result, proved = scenarios.run_managed_case(
+        facts, lambda: verified.append("full") or True)
+    assert made == [("source", "source-r7g-large", None, "db.r7g.large")]
+    assert result["klass"] == "db.r7g.large"
+    assert result["id"] == "source-r7g-large"
+    assert verified == ["full"]
+    assert proved.choice.path == "aws-class-restore"
+
+    arch = hosts()
+    arch["dst"]["architecture"] = "aarch64"
+    arch.update(source=facts["source"], target=facts["target"],
+                api_reachable=True, offers=facts["offers"], size_bytes=1000)
+    assert scenarios.architecture_case(arch).choice.path == \
+        "aws-class-restore"
+
+
+def test_a_failed_verify_or_a_wrong_class_back_is_no_success(monkeypatch):
+    _, facts = _restoring(monkeypatch, "db.r7g.large")
+    with pytest.raises(ValueError, match="full verify did not pass"):
+        scenarios.run_managed_case(facts, lambda: False)
+    _, facts = _restoring(monkeypatch, "db.r6i.large")
+    with pytest.raises(SystemExit, match="not db.r7g.large"):
+        scenarios.run_managed_case(facts, lambda: True)

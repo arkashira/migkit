@@ -84,6 +84,9 @@ _READ_FOLLOW = ("{} is followed as a pair's source, its changes carried"
                 " into another engine (engine: hetero, source_engine: {});"
                 " two of them are compared, never one written")
 
+_DRIVER = ("the generic engine reaches a server only through a standard"
+           " driver, which has no statement for {}; a server whose one"
+           " migkit reads is a hop of its own engine")
 _GIVEN_KEYS = ("a {} is kept by the key the application gives it, not one"
                " a sequence hands out: there is no sequence to carry")
 _IAM = ("who may read {} is the cloud's access policies', outside the"
@@ -471,19 +474,30 @@ GAPS = {
     # every capability of a pair is read off the code: its accounts too,
     # carried across engines in the one shape (`users.across`)
     "hetero": {},
+    # the generic engine reaches a server only through a standard driver:
+    # what has no standard statement is a named engine's, not this one's;
+    # the guard is read off the code (`GenericEngine.moved_nothing`)
     "generic": {
-        "confirm": (NOT_YET, "33"),
-        "sequences": (NOT_YET, "0e"),
-        "params": (NOT_YET, "0e"),
-        "bulk-move": (NOT_YET, "33"),
-        "table-copy": (NOT_YET, "33"),
-        "stream": (NOT_YET, "33"),
-        "fence": (NOT_YET, "33"),
-        "delta": (NOT_YET, "33"),
-        "users": (NOT_YET, "0e"),
-        "guard": (NOT_YET, "0e"),
-        "statistics": (NOT_YET, "0e"),
-        "snapshot": (NOT_YET, "0e"),
+        "sequences": (NOT_APPLICABLE, _DRIVER.format(
+            "a sequence or auto-increment counter")),
+        "params": (NOT_APPLICABLE, _DRIVER.format("a server setting")),
+        "users": (NOT_APPLICABLE, _DRIVER.format("an account or its grants")),
+        "statistics": (NOT_APPLICABLE, _DRIVER.format(
+            "a refresh of the optimiser's statistics")),
+        "snapshot": (NOT_APPLICABLE, _DRIVER.format(
+            "a snapshot of the server")),
+        "bulk-move": (NOT_APPLICABLE, "a whole database moved in bulk is"
+                      " the server's own dump and load, which a standard"
+                      " driver does not reach; table by table is"
+                      " table-copy"),
+        # real ways any driver has, not built yet: rows copied by key
+        # range, a column of the time a row changed followed, the target
+        # fenced on that column, and only rows past it verified
+        "table-copy": (NOT_YET, "R13-GENERIC"),
+        "stream": (NOT_YET, "R13-GENERIC"),
+        "fence": (NOT_YET, "R13-GENERIC"),
+        "confirm": (NOT_YET, "R13-GENERIC"),
+        "delta": (NOT_YET, "R13-GENERIC"),
     },
 }
 

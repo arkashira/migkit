@@ -469,6 +469,13 @@ class MySQLEngine(Engine):
                                      row[1]),
                 "float_rendering": row[0]}
 
+    def server_platform(self, side, db):
+        """The machine and OS the server was compiled for
+        (`Engine.server_platform`)."""
+        row = self._q(side, "select @@version_compile_machine,"
+                            " @@version_compile_os")[0]
+        return {"architecture": row[0], "os": row[1]}
+
     def table_storage(self, side, db):
         """Each base table's engine (`Engine.table_storage`)."""
         from .. import tableengine
