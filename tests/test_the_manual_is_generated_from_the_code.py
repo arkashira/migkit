@@ -35,6 +35,11 @@ def _named(text):
     list and the programs the movers start."""
     from migkit.movers import DRIVEN
     low = text.lower()
+    # a managed service the catalogue lists ("MongoDB Atlas") is a
+    # product's own name on the engines page, not a program named
+    for provider, label, _kind in gen_docs.managed_services():
+        for name in (label, provider):
+            low = low.replace(name.lower(), " ")
     return sorted({n for n in {t.lower() for t in TOOLS}
                    | {d.lower() for d in DRIVEN} if n in low})
 
