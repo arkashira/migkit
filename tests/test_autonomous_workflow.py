@@ -383,7 +383,7 @@ def test_a_fault_in_a_step_is_held_never_passed_as_success():
             raise KeyError("columns")
     got, _ = _run("copy", Broken(dbs=("a",)))
     u = got.workflow.by_key()["verify:a"]
-    assert u.state == "failed" and "stopped unexpectedly" in u.why
+    assert u.state == "failed" and "stopped" in u.why and "never on a guess" in u.why
     assert not got.complete
 
 
