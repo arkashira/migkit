@@ -49,18 +49,33 @@ def postgres(wal_level, replica_identity, has_key):
     return "D3", "alter table ... replica identity full"
 
 
-def mongodb(replica_set, pre_images):
+_PRE_IMAGES = ("db.runCommand({collMod: ..., changeStreamPreAndPostImages:"
+               " {enabled: true}})")
+
+
+def mongodb(replica_set, pre_images, way=None, why=""):
     """The same for one MongoDB collection: `replica_set` whether the
     server keeps an oplog (a replica set, or a sharded cluster's router),
     `pre_images` whether the collection keeps its documents' images
-    before a change. A standalone keeps no log, and its collections are
-    followed by comparing them again and again (D1)."""
+    before a change, `way` how its changes are followed
+    (`MongoEngine.FOLLOW_WAYS`, the change stream where not said) and
+    `why` the way above it was passed over. A change stream gives every
+    change with its images where they are kept (D4), else its key and
+    fields (D3); the oplog an entry's key and the fields it set and
+    unset, never the image before (D3); a sweep, comparing the
+    collections again and again, which of them changed (D1)."""
     if not replica_set:
         return "D1", "convert to a single-node replica set"
+    if way == "bucket sweep":
+        return "D1", "let the source's oplog be read" + (
+            f" ({why})" if why else "")
+    if way == "oplog":
+        return "D3", "let the source open a change stream" + (
+            f" ({why})" if why else "") + (
+            "" if pre_images else f", then {_PRE_IMAGES}")
     if pre_images:
         return "D4", ""
-    return "D3", ("db.runCommand({collMod: ..., changeStreamPreAndPostImages:"
-                  " {enabled: true}})")
+    return "D3", _PRE_IMAGES
 
 
 def lines(table_depths, shown=5):

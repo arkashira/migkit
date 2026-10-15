@@ -875,6 +875,12 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * this server is a standalone, and a change stream needs a replica set - the oplog a stream reads does not exist otherwise. A single node is enough: mongod --replSet rs0 mongosh --eval 'rs.initiate()'
 
+* <...>: the saved position is no point in the source's oplog. Nothing was applied. Move again with --mode full+cdc
+
+* <...>: <...>. Nothing past it was applied. Move again with --mode full+cdc
+
+* <...>: the source no longer says up to where a majority of its members hold its writes
+
 * <...>: no way to follow the source - <...>
 
 * <...>: the target's TTL indexes could not be saved before holding them for the load, so nothing was loaded

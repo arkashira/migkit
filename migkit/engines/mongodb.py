@@ -167,6 +167,164 @@ def bucket_writes(src, dst, carried=("insert", "update", "delete")):
     return writes, deletes
 
 
+# --- the oplog ---------------------------------------------------------------
+
+def oplog_token(ts):
+    """The position an oplog follow saves: the time of the last entry it
+    applied, as JSON keeps it."""
+    return {"ts": [int(ts.time), int(ts.inc)]}
+
+
+def oplog_ts(token):
+    """The `Timestamp` a saved position stands at - an oplog follow's, or
+    a change stream's resume token read for its cluster time - or None
+    (a sweep's, or none)."""
+    from bson.timestamp import Timestamp
+    if isinstance(token, Timestamp):
+        return token
+    if isinstance(token, dict) and isinstance(token.get("ts"), (list, tuple)):
+        t, i = token["ts"]
+        return Timestamp(int(t), int(i))
+    data = token.get("_data") if isinstance(token, dict) else token
+    return MongoEngine._token_time(data) if isinstance(data, str) else None
+
+
+def _diff_mods(diff, path, out):
+    """`diff`, an update's `$v: 2` difference at `path`, added to `out` as
+    the `$set` and `$unset` that make it; False where it resizes an array,
+    which neither can say."""
+    def at(name):
+        return f"{path}.{name}" if path else str(name)
+    if diff.get("a") is True:
+        for key, val in diff.items():
+            if key == "a":
+                continue
+            if key[:1] == "u" and key[1:].isdigit():
+                out.setdefault("$set", {})[at(key[1:])] = val
+            elif key[:1] == "s" and key[1:].isdigit() \
+                    and isinstance(val, dict):
+                if not _diff_mods(val, at(key[1:]), out):
+                    return False
+            else:
+                return False
+        return True
+    for key, val in diff.items():
+        if key in ("u", "i") and isinstance(val, dict):
+            for name, v in val.items():
+                out.setdefault("$set", {})[at(name)] = v
+        elif key == "d" and isinstance(val, dict):
+            for name in val:
+                out.setdefault("$unset", {})[at(name)] = ""
+        elif key[:1] == "s" and len(key) > 1 and isinstance(val, dict):
+            if not _diff_mods(val, at(key[1:]), out):
+                return False
+        else:
+            return False
+    return True
+
+
+def oplog_update(o):
+    """(kind, what) of an update entry's `o`: ("replace", the document
+    whole), ("modify", the `$set` and `$unset` that make it - `$v: 1`
+    operators as written, a `$v: 2` difference translated), or ("lookup",
+    None) where it cannot be said so and the document is read again by
+    key."""
+    if not any(str(k).startswith("$") for k in o):
+        return "replace", o
+    if o.get("$v") == 2 or "diff" in o:
+        out = {}
+        if isinstance(o.get("diff"), dict) and _diff_mods(o["diff"], "", out):
+            return "modify", out
+        return "lookup", None
+    mods = {k: v for k, v in o.items() if k != "$v"}
+    if set(mods) <= {"$set", "$unset"}:
+        return "modify", mods
+    return "lookup", None
+
+
+#: the commands an oplog holds that a change stream reports, by the event
+#: it reports them as - each stops a follow (`MongoEngine._not_a_row_change`)
+OPLOG_STOPS = {"drop": "drop", "renameCollection": "rename",
+               "dropDatabase": "dropDatabase", "emptycapped": "truncate"}
+
+
+def _txn_key(entry):
+    lsid = entry.get("lsid") or {}
+    return (repr(lsid.get("id")), entry.get("txnNumber"))
+
+
+def _oplog_command(entry, db, txns):
+    o = entry.get("o") or {}
+    if "applyOps" in o:
+        inner = list(o.get("applyOps") or [])
+        if "txnNumber" not in entry:
+            return [e for sub in inner for e in oplog_events(sub, db, txns)]
+        key = _txn_key(entry)
+        txns.setdefault(key, []).extend(inner)
+        if o.get("partialTxn") or o.get("prepare"):
+            return []
+        return [e for sub in txns.pop(key)
+                for e in oplog_events(sub, db, txns)]
+    if "commitTransaction" in o:
+        return [e for sub in txns.pop(_txn_key(entry), [])
+                for e in oplog_events(sub, db, txns)]
+    if "abortTransaction" in o:
+        txns.pop(_txn_key(entry), None)
+        return []
+    on = str(entry.get("ns") or "").partition(".")[0]
+    for cmd, kind in OPLOG_STOPS.items():
+        if cmd not in o:
+            continue
+        if cmd == "renameCollection":
+            ends = [str(o.get(k) or "") for k in ("renameCollection", "to")]
+            hit = [n.partition(".")[2] for n in ends
+                   if n.partition(".")[0] == db]
+            return [{"operationType": kind,
+                     "ns": {"db": db, "coll": hit[0]}}] if hit else []
+        if on != db:
+            return []
+        coll = o.get(cmd)
+        return [{"operationType": kind,
+                 "ns": {"db": db, **({"coll": coll} if isinstance(coll, str)
+                                     else {})}}]
+    return []
+
+
+def oplog_events(entry, db, txns):
+    """The changes one oplog entry holds for `db`, in the change stream's
+    own shape (`MongoEngine._tail_event`): an insert, a delete, a replace,
+    an update said as its `modifiers` or to be read again (`lookup`), and
+    a command the stream reports - a collection dropped or renamed - as
+    the event that stops a follow. A transaction's entries are held in
+    `txns` ({transaction: [operations]}) until it commits and given then,
+    in the order written; one aborted is let go."""
+    op, o = entry.get("op"), entry.get("o") or {}
+    if op == "c":
+        return _oplog_command(entry, db, txns)
+    name, _, coll = str(entry.get("ns") or "").partition(".")
+    if op not in ("i", "u", "d") or name != db or not coll \
+            or coll.startswith("system."):
+        return []
+    where = {"db": db, "coll": coll}
+    if op == "i":
+        return [{"operationType": "insert", "ns": where,
+                 "documentKey": {"_id": o.get("_id")}, "fullDocument": o}]
+    if op == "d":
+        return [{"operationType": "delete", "ns": where,
+                 "documentKey": {"_id": o.get("_id")}}]
+    kind, what = oplog_update(o)
+    ev = {"operationType": "replace" if kind == "replace" else "update",
+          "ns": where, "documentKey": {"_id": (entry.get("o2") or {})
+                                       .get("_id")}}
+    if kind == "replace":
+        ev["fullDocument"] = what
+    elif kind == "modify":
+        ev["modifiers"] = what
+    else:
+        ev["lookup"] = True
+    return [ev]
+
+
 class MongoEngine(Engine):
     checks = ("schema", "counts", "data")
     counts_from_data = True
@@ -204,8 +362,41 @@ class MongoEngine(Engine):
         if self.hop.databases:
             return list(self.hop.databases)
         c = self._client("src")
-        return sorted(d for d in c.list_database_names()
+        from pymongo.errors import PyMongoError
+        try:
+            names = c.list_database_names()
+        except PyMongoError as e:
+            self._refused("listDatabases", e)
+            raise
+        return sorted(d for d in names
                       if d not in SKIP_DBS and not self.hop.excluded(d))
+
+    #: what reading the oplog needs, which no listed action names
+    OPLOG_GRANT = ("the find action on local.oplog.rs (the read role on the"
+                   " local database)")
+
+    def _refused(self, action, e, grant=None):
+        """Stop on `e` where the server refused `action` for want of a
+        grant, as the grant (`enterprise_connectors.missing_grant`) - never
+        an empty answer in its place. Returns where `e` is anything else,
+        for the caller to raise as it is."""
+        from . import enterprise_connectors as ec
+        if not ec.is_grant_error("mongodb", e):
+            return
+        if grant:
+            raise ec.MissingGrant("mongodb", action, grant, e)
+        ec.missing_grant("mongodb", action, e)
+
+    def _hello(self, side):
+        """The server's `hello`, or `isMaster` from one older than it."""
+        admin = self._client(side).admin
+        from pymongo.errors import OperationFailure
+        try:
+            return admin.command("hello")
+        except OperationFailure as e:
+            if getattr(e, "code", None) != 59:
+                raise
+            return admin.command("isMaster")
 
     CANON_ENGINE = "mongodb"
     ENGINE_FAMILY = "mongodb"
@@ -851,7 +1042,8 @@ class MongoEngine(Engine):
         for name in self.neutral_tables(side, db):
             try:
                 st = dbh.command("collStats", name)
-            except Exception:  # noqa: BLE001 - a view, or not allowed
+            except Exception as e:  # noqa: BLE001 - a view has none
+                self._refused("collStats", e)
                 continue
             out[name] = {"rows": int(st.get("count") or 0), "key": True,
                          "bytes": int(st.get("size") or 0),
@@ -1204,15 +1396,12 @@ class MongoEngine(Engine):
         Asked before the stream opens: a stream opened on a lost point is
         refused only by some servers, and not by all versions."""
         from pymongo.errors import PyMongoError
-        data = token.get("_data") if isinstance(token, dict) else token
-        at = self._token_time(data) if data else None
+        at = oplog_ts(token)
         if at is None:
             return None
-        client = self._client(side)
         try:
-            oldest = next(iter(client.local["oplog.rs"].find({}, {"ts": 1})
-                               .sort("$natural", 1).limit(1)), None)
-            now = client.admin.command("hello").get("operationTime")
+            oldest = next(iter(self._oplog(side, {}, limit=1)), None)
+            now = self._hello(side).get("operationTime")
         except PyMongoError:
             return None
         if oldest and at.time < oldest["ts"].time:
@@ -1258,7 +1447,11 @@ class MongoEngine(Engine):
         except Exception as e:
             if "only supported on replica sets" in str(e):
                 return self._sweep_point(side)
-            raise
+            # a member whose stream is refused is followed by its oplog
+            # (`FOLLOW_WAYS`), from the point a majority holds
+            if self._oplog_reads(side) is not True:
+                raise
+            return oplog_token(self._majority_ts(side))
         try:
             token = (stream.resume_token or {}).get("_data")
         finally:
@@ -1970,7 +2163,7 @@ class MongoEngine(Engine):
             if not isinstance(want, dict) or not have.get("at"):
                 return None
             return str(have["at"]) >= str(want.get("at") or "")
-        at = cls._token_time(have)
+        at = oplog_ts(have)
         if at is None or want is None:
             return None
         return at >= want
@@ -1996,9 +2189,7 @@ class MongoEngine(Engine):
             token = tailctl.saved(tailctl.token_path(self.hop, db))
         except SystemExit:
             return None
-        if isinstance(token, dict):
-            token = token.get("_data")
-        return self._token_time(token) if isinstance(token, str) else None
+        return oplog_ts(token)
 
     def fence_wait(self, db, at, timeout=300):
         """Wait until migkit's tail has applied the source up to `at`.
@@ -3237,17 +3428,24 @@ class MongoEngine(Engine):
     def _keeps_a_log(self, side):
         """Whether the server keeps an oplog a change stream reads: a
         replica set's member, or a sharded cluster's router."""
-        hello = self._client(side).admin.command("hello")
+        hello = self._hello(side)
         return bool(hello.get("setName")) or hello.get("msg") == "isdbgrid"
 
     def change_depths(self):
         """{database.collection: (depth, the statement that raises it)}
-        (`changedepth.mongodb`): from whether the source keeps an oplog
-        and whether each collection keeps its pre-images. Read-only."""
+        (`changedepth.mongodb`): from whether the source keeps an oplog,
+        the way its changes are followed (`follow_way`) and why the ways
+        above it were passed over, and whether each collection keeps its
+        pre-images. Read-only."""
         from .. import changedepth
         logged = self._keeps_a_log("src")
         out = {}
         for db in self.databases():
+            way = self.follow_way(db) if logged else None
+            path = way.path if way is not None and way.rung else None
+            above = {"oplog": "change stream", "bucket sweep": "oplog"}
+            why = next((w for r, w in (way.passed if way else ())
+                        if r.name == above.get(path)), "")
             for info in self._client("src")[db].list_collections():
                 name = info.get("name", "")
                 if name.startswith("system.") or info.get("type") == "view" \
@@ -3255,16 +3453,20 @@ class MongoEngine(Engine):
                     continue
                 pre = bool(((info.get("options") or {}).get(
                     "changeStreamPreAndPostImages") or {}).get("enabled"))
-                out[f"{db}.{name}"] = changedepth.mongodb(logged, pre)
+                out[f"{db}.{name}"] = changedepth.mongodb(logged, pre, path,
+                                                          why)
         return out
 
     #: how a source's changes are followed: its change stream where the
-    #: server keeps an oplog, else by comparing it again and again - each
-    #: collection's server hash first, the cheap proof nothing changed,
-    #: then the documents' stored bytes in buckets, and only the changed
-    #: buckets' documents read again and written (`_sweep_round`). A sweep
-    #: reads each bucket as of its own moment, so where a stream holds it
-    #: is passed over: guarantees are never traded for speed
+    #: server keeps an oplog and opens one; else, on a replica set's
+    #: member, its oplog read entry by entry (`_oplog_follow`); else by
+    #: comparing it again and again - each collection's server hash
+    #: first, the cheap proof nothing changed, then the documents' stored
+    #: bytes in buckets, and only the changed buckets' documents read
+    #: again and written (`_sweep_round`). The oplog and the sweep each
+    #: write a document as of its own moment, so where a stream holds both
+    #: are passed over - guarantees are never traded for speed - and
+    #: between the two the cost each was measured at here decides
     FOLLOW_WAYS = (
         Rung("change stream", "the source's change stream",
              needs=(Need("an oplog", lambda f: f["replica set"],
@@ -3277,6 +3479,23 @@ class MongoEngine(Engine):
              holds={"consistent": "as of one moment",
                     "idempotent": "converges", "resumable": "goes on"},
              because="every change read from the oplog, in order",
+             leaves="a position file and a process on this machine"),
+        Rung("oplog", "the source's oplog, read entry by entry",
+             needs=(Need("an oplog", lambda f: f["replica set"],
+                         "the source is a standalone server and keeps no"
+                         " oplog, which {rung} reads"),
+                    Need("the oplog read",
+                         lambda f: f.get("oplog reads") is True,
+                         lambda f: str(f.get("oplog reads")
+                                       or "the source's oplog was not"
+                                          " looked at"))),
+             holds={"consistent": "per range", "idempotent": "converges",
+                    "resumable": "goes on"},
+             because="every entry up to the point a majority of the"
+                     " members hold, in order, a transaction once it"
+                     " commits; an update its entry cannot say as fields"
+                     " set and unset is read again by key, so a document"
+                     " may stand as of a later moment than its entry",
              leaves="a position file and a process on this machine"),
         Rung("bucket sweep", "the collections compared again and again,"
                              " their changed documents written",
@@ -3294,7 +3513,8 @@ class MongoEngine(Engine):
     @classmethod
     def follow_choice(cls, facts, costs=None):
         """The `decide.Choice` of the way this source's changes are
-        followed, from `facts` ("replica set", "stream opens") and what
+        followed, from `facts` ("replica set", "stream opens", "oplog
+        reads") and what
         each way cost here (`_follow_costs`)."""
         from ..decide import climb
         return climb("following the source's changes", cls.FOLLOW_WAYS,
@@ -3310,11 +3530,15 @@ class MongoEngine(Engine):
             return (str(e).splitlines() or ["refused"])[0][:120] or "refused"
 
     def _follow_costs(self, db):
-        """Seconds a round of each way takes here: a sweep's from the
-        source's size and collections at the rates its rounds were
-        measured to read at (`_sweep_round`), the stream's from what it
-        was timed at; nothing where a way was never timed on this hop."""
+        """Seconds each way takes here to follow `SWEEP_EVERY` seconds of
+        the source: a sweep's round from the source's size and
+        collections at the rates its rounds were measured to read at
+        (`_sweep_round`); the oplog's and the stream's from the entries
+        the source wrote of this database lately (`_oplog_rate`) at the
+        rate each was measured to carry them at. Nothing where a way was
+        never timed on this hop, or the source's oplog is not to be read."""
         from ..decide import Costs, HopCosts
+        from . import enterprise_connectors as ec
         kept = HopCosts(self.hop, "follow/")
         out = Costs()
         per_byte = kept.get("bucket sweep bytes")
@@ -3324,17 +3548,201 @@ class MongoEngine(Engine):
             out["bucket sweep"] = (float(st.get("dataSize") or 0) * per_byte
                                    + int(st.get("collections") or 0)
                                    * (per_coll or 0.0))
-        got = kept.get("change stream")
-        if got is not None:
-            out["change stream"] = got
+        timed = {n: kept.get(f"{n} entries") for n in ("oplog",
+                                                       "change stream")}
+        if any(v is not None for v in timed.values()):
+            try:
+                rate = self._oplog_rate(db)
+            except ec.MissingGrant:
+                rate = None
+            for name, per in timed.items():
+                if per is not None and rate is not None:
+                    out[name] = rate * self.SWEEP_EVERY * per
         return out
 
     def follow_way(self, db):
         """`follow_choice` for this hop's source, its facts read once."""
         from ..decide import Facts
         facts = Facts(**{"replica set": lambda: self._keeps_a_log("src"),
-                         "stream opens": lambda: self._stream_opens(db)})
+                         "stream opens": lambda: self._stream_opens(db),
+                         "oplog reads": lambda: self._oplog_reads("src")})
         return self.follow_choice(facts, self._follow_costs(db))
+
+    def _majority_ts(self, side, hello=None):
+        """The time of the last write a majority of the replica set's
+        members hold (`hello`'s last write), or None where the server does
+        not say: an entry past it can still be undone by a failover."""
+        hello = hello if hello is not None else self._hello(side)
+        return (((hello.get("lastWrite") or {}).get("majorityOpTime") or {})
+                .get("ts"))
+
+    def _oplog(self, side, flt, limit=0, sort=1, projection=None):
+        """The entries of the server's oplog matching `flt`, oldest first
+        (newest with `sort` -1). A refusal stops as the grant it lacks -
+        never an oplog with nothing in it."""
+        from pymongo.errors import PyMongoError
+        kw = {}
+        if sort == 1 and "ts" in flt and self._ranges_need_replay(side):
+            kw["oplog_replay"] = True
+        try:
+            return list(self._client(side).local["oplog.rs"].find(
+                flt, projection, sort=[("$natural", sort)], limit=limit,
+                **kw))
+        except PyMongoError as e:
+            self._refused("reading the oplog", e, self.OPLOG_GRANT)
+            raise
+
+    def _ranges_need_replay(self, side):
+        """Whether the server predates 4.4, which reads an oplog from a
+        time on only when told the query is one (`oplog_replay`)."""
+        key = f"_replay_{side}"
+        if key not in self.__dict__:
+            try:
+                got = self._client(side).admin.command("buildInfo")
+                ver = tuple(int(x) for x in (got.get("versionArray")
+                                             or [])[:2])
+            except Exception:  # noqa: BLE001 - asked again on the read
+                ver = ()
+            self.__dict__[key] = bool(ver) and ver < (4, 4)
+        return self.__dict__[key]
+
+    def _oplog_reads(self, side):
+        """True, or why the server's oplog cannot be followed: a replica
+        set's member keeps one (a sharded cluster's router does not - each
+        shard keeps its own); it must say up to where a majority holds its
+        writes, the point an entry read past could be undone by a
+        failover; and the reading refused is the grant it lacks."""
+        from . import enterprise_connectors as ec
+        hello = self._hello(side)
+        if hello.get("msg") == "isdbgrid":
+            return ("the source is a sharded cluster's router, and each of"
+                    " its shards keeps an oplog of its own")
+        if not hello.get("setName"):
+            return "the source is a standalone server and keeps no oplog"
+        if self._majority_ts(side, hello) is None:
+            return ("the source does not say up to where a majority of its"
+                    " members hold its writes, and an entry read past that"
+                    " can be undone by a failover")
+        try:
+            self._oplog(side, {}, limit=1, sort=-1, projection={"ts": 1})
+        except ec.MissingGrant as e:
+            return str(e)
+        return True
+
+    @staticmethod
+    def _oplog_filter(db, at, upto, inclusive=False):
+        """The entries after `at` (at it too, where `inclusive`), up to
+        `upto`, that can hold a change of `db`: its own namespaces, and
+        the admin commands a transaction or a rename is written as."""
+        return {"ts": {"$gte" if inclusive else "$gt": at, "$lte": upto},
+                "$or": [{"ns": {"$regex": "^" + re.escape(db) + r"\."}},
+                        {"ns": "admin.$cmd"}]}
+
+    #: seconds of the oplog read back for how fast a database is written
+    OPLOG_WINDOW = 60
+
+    def _oplog_rate(self, db):
+        """Entries a second the source wrote that can hold a change of
+        `db`, over the last `OPLOG_WINDOW` seconds of its oplog, or None
+        where it keeps none; at most `TAIL_BATCH` times ten are read."""
+        from bson.timestamp import Timestamp
+        newest = self._oplog("src", {}, limit=1, sort=-1,
+                             projection={"ts": 1})
+        if not newest:
+            return None
+        end = newest[0]["ts"]
+        start = Timestamp(max(end.time - self.OPLOG_WINDOW, 0), 0)
+        got = self._oplog("src", self._oplog_filter(db, start, end, True),
+                          limit=self.TAIL_BATCH * 10, projection={"ts": 1})
+        return len(got) / float(self.OPLOG_WINDOW)
+
+    def _oplog_follow(self, db, go, token_path, log):
+        """Follow a replica set member whose change stream is refused by
+        its oplog (`FOLLOW_WAYS`): up to `TAIL_BATCH` entries after the
+        saved position and no later than the point a majority holds, each
+        given as the stream's own event (`oplog_events`) and applied by
+        key (`_tail_event`); an update its entry cannot say as fields set
+        and unset is read again by key. A transaction is held until it
+        commits, and the position saved stays before its first entry until
+        then, so a stop reads it again whole. The position is the time of
+        the last entry applied - a stream's token resumed from is read for
+        its time, and its entry read again - and the rate entries were
+        carried at is kept for what following costs (`_follow_costs`)."""
+        from ..decide import HopCosts
+        from .. import tailctl
+        if go and tailctl.position(token_path) is None:
+            tailctl.begin(self, db, token_path,
+                          oplog_token(self._majority_ts("src")))
+        src = self._client("src")[db]
+        dst = self._client("dst")[self._d("dst", db)]
+        kept = HopCosts(self.hop, "follow/")
+        s = {"txns": {}, "read": None, "gave": None}
+
+        def where(token):
+            at = oplog_ts(token)
+            if at is None:
+                raise SystemExit(
+                    f"{db}: the saved position is no point in the source's"
+                    " oplog. Nothing was applied. Move again with --mode"
+                    " full+cdc")
+            lost = self.position_lost("src", db, token)
+            if lost:
+                raise SystemExit(f"{db}: {lost}. Nothing past it was"
+                                 " applied. Move again with --mode full+cdc")
+            return at
+
+        def look(token):
+            at = where(token)
+            if s["gave"] is None or at != s["gave"]:
+                # read from the saved position: what was held is read again
+                s["txns"].clear()
+                s["read"] = (at, not (isinstance(token, dict)
+                                      and "ts" in token))
+            upto = self._majority_ts("src")
+            if upto is None:
+                raise SystemExit(
+                    f"{db}: the source no longer says up to where a"
+                    " majority of its members hold its writes")
+            began = time.monotonic()
+            s["gave"] = None
+            entries = self._oplog("src", self._oplog_filter(
+                db, s["read"][0], upto, s["read"][1]), limit=self.TAIL_BATCH)
+            went, safe = 0, at
+            for entry in entries:
+                for ev in oplog_events(entry, db, s["txns"]):
+                    coll = ev["ns"].get("coll")
+                    if coll and not self.in_scope(db, coll):
+                        continue
+                    op = ev["operationType"]
+                    if op not in self.STREAM_OPS:
+                        raise self._not_a_row_change(op, ev)
+                    if ev.pop("lookup", False):
+                        ev["fullDocument"] = src[coll].find_one(
+                            ev["documentKey"])
+                    went += self._tail_event(db, dst, ev, True)
+                if not s["txns"]:
+                    safe = entry["ts"]
+            if entries:
+                s["read"] = (entries[-1]["ts"], False)
+                kept.saw("oplog entries", len(entries),
+                         time.monotonic() - began)
+            settled = len(entries) < self.TAIL_BATCH
+            if settled and not s["txns"]:
+                safe = max(safe, upto)
+            s["gave"] = safe
+            return oplog_token(safe), went, settled
+
+        def behind(token):
+            at = where(token)
+            upto = self._majority_ts("src") or at
+            got = self._oplog("src", self._oplog_filter(db, at, upto),
+                              limit=self.TAIL_BATCH * 10,
+                              projection={"ts": 1})
+            more = "at least " if len(got) >= self.TAIL_BATCH * 10 else ""
+            return (f"{more}{len(got):,} oplog entries of this database"
+                    " past the saved position")
+        tailctl.follow(self, db, go, token_path, log, "changes", look,
+                       behind, self.SWEEP_EVERY / 5)
 
     def _sweep_point(self, side):
         """Now, as a sweep holds it: the server's own clock."""
@@ -3847,6 +4255,13 @@ class MongoEngine(Engine):
                  "replace": {"update", "insert"}}[op]
         if not kinds & carried:
             return 0
+        mods = ev.get("modifiers")
+        if mods is not None:
+            # an oplog's update, as the fields it set and unset: applied
+            # to the document the target holds, as a member applies it
+            if go and mods:
+                into.update_one(key, mods)
+            return 1
         if go and doc is not None:
             into.replace_one(key, doc, upsert="insert" in carried)
         return 1
@@ -3878,6 +4293,11 @@ class MongoEngine(Engine):
         if way.path == "bucket sweep":
             log(f"following by {way.said}: {way.reason}")
             return self._sweep_follow(db, go, token_path, log)
+        if way.path == "oplog":
+            log(f"following by {way.said}: {way.reason}")
+            return self._oplog_follow(db, go, token_path, log)
+        from ..decide import HopCosts
+        kept = HopCosts(self.hop, "follow/")
         src = self._client("src")[db]
         dst = self._client("dst")[self._d("dst", db)]
         env = tailctl.position(token_path)
@@ -3906,12 +4326,17 @@ class MongoEngine(Engine):
         def look(at):
             if s.stream is None:
                 kwargs = {"full_document": "updateLookup"}
-                if at:
+                if isinstance(at, dict) and "ts" in at:
+                    # an oplog follow's position: opened at its entry,
+                    # which carried again converges
+                    kwargs["start_at_operation_time"] = oplog_ts(at)
+                elif at:
                     kwargs["resume_after"] = at
                 # the server leaves out what the hop does not take
                 # (`stream_match`); each event is still asked below
                 s.stream = src.watch(self.stream_match(db), **kwargs)
             read, n, after, settled = 0, 0, at, False
+            began = time.monotonic()
             while read < self.TAIL_BATCH:
                 ev = s.stream.try_next()
                 if ev is None:
@@ -3936,6 +4361,11 @@ class MongoEngine(Engine):
             if n:
                 s.n += n
                 log(f"{s.n} events, token saved")
+            # timed only where a whole batch was read: the stream's wait
+            # for an event that has not come is no cost of carrying one
+            if read and go and not settled:
+                kept.saw("change stream entries", read,
+                         time.monotonic() - began)
             return after, n, settled
 
         def save(after):

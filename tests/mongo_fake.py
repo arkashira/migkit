@@ -339,6 +339,30 @@ class FakeCollection:
         if upsert:
             self.docs.append(copy.deepcopy(doc))
 
+    def update_one(self, flt, update, upsert=False):
+        """`$set` and `$unset` of dotted paths, an array's element by its
+        index - what an oplog's update is said as."""
+        self._touch()
+        doc = next((d for d in self.docs if matches(flt, d)), None)
+        if doc is None:
+            return
+        for op, fields in update.items():
+            for path, value in fields.items():
+                *up, last = path.split(".")
+                node = doc
+                for part in up:
+                    node = node[int(part)] if isinstance(node, list) \
+                        else node.setdefault(part, {})
+                if isinstance(node, list):
+                    if op == "$set":
+                        node[int(last)] = copy.deepcopy(value)
+                    else:
+                        node[int(last)] = None
+                elif op == "$set":
+                    node[last] = copy.deepcopy(value)
+                else:
+                    node.pop(last, None)
+
     def bulk_write(self, ops, ordered=True):
         for op in ops:
             doc = getattr(op, "_doc", None)
