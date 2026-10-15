@@ -1,4 +1,5 @@
 import contextlib
+import contextvars
 import json
 import re
 import socket
@@ -2751,9 +2752,12 @@ def _orchestrate(hop_name, db, mode, go, serve, interval, on_conflict=None):
 @click.option("--hop", "hop_name", default="",
               help="a hop already set up, instead of two addresses")
 @click.option("--go", is_flag=True, help="write; default shows the plan")
+@click.option("--switch", "switch", is_flag=True,
+              help="a cutover proved ready switches the applications;"
+              " without it the switch is asked")
 @click.option("--why", is_flag=True,
               help="the decisions and evidence of the last run")
-def migrate(source, target, goal, hop_name, go, why):
+def migrate(source, target, goal, hop_name, go, switch, why):
     """Two addresses and a goal in; the whole migration run to a verified
     outcome: the assessment, the copy, the catch-up, the proof and the
     cutover's readiness, every way chosen by migkit, a database that
@@ -2807,18 +2811,18 @@ def migrate(source, target, goal, hop_name, go, why):
         console.print(f"nothing written; migkit migrate --hop"
                       f" {_esc(hop_name)} --go runs it")
         return
-    # a --go given up front is the yes to the switch a cutover proposes
+    # --go is the consent to write; the switch has its own (--switch)
     got = autonomous.run(goal, _Steps(hop_name, goal),
                          lambda m: console.print(_esc(m)), path,
-                         answer=answer if tty else None, go=go)
+                         answer=answer if tty else None, go=switch)
     console.print("\n[bold]outcome[/bold]")
     for d, (state, words) in got.databases.items():
         color = "green" if state == "done" else "yellow"
         console.print(f"  [{color}]{_esc(d)}[/{color}]: {_esc(words)}")
     if got.switch == "asked":
         console.print(f"the switch waits for your yes: migkit migrate --hop"
-                      f" {_esc(hop_name)} --go proves readiness again and"
-                      " switches")
+                      f" {_esc(hop_name)} --go --switch proves readiness"
+                      " again and switches")
     console.print(f"evidence: migkit migrate --hop {_esc(hop_name)} --why")
     if got.exit:
         raise SystemExit(got.exit)
@@ -2837,9 +2841,59 @@ class _Steps:
         return list(self.eng.databases())
 
     def facts(self, db):
-        return {"chunk": 500000, "resumes": True,
-                "pieces": not capabilities.unavailable(self.hop.engine,
-                                                       "resume")}
+        """What a unit of `db` runs at, with the move's measured budget
+        (`model.Model.budget`, `sizing.estimate`) the flow shares out -
+        measured once a run (`model.for_move` keeps it); none where the
+        servers could not be measured, and the copy measures itself."""
+        from . import model as resource_model, sizing
+        out = {"chunk": 500000, "resumes": True,
+               "pieces": not capabilities.unavailable(self.hop.engine,
+                                                      "resume")}
+        try:
+            m = resource_model.for_move(self.hop, self.eng, db)
+            p = sizing.estimate(self.hop, self.eng, db, model=m)
+            out.update(m.budget(p.most), start=p.start)
+        except Exception:  # noqa: BLE001 - unmeasured: the copy sizes itself
+            pass
+        return out
+
+    def uncertain(self, step, db):
+        """The ledger's operations of `db` a run before left begun and never
+        ended, or with their effect not known (`attempts.Ledger.uncertain`)."""
+        from . import attempts
+        led = attempts.Ledger(attempts.ledger_path(self.eng))
+        return {k: v for k, v in led.uncertain().items()
+                if not db or db in (v.get("unit") or "").split(".")
+                or v.get("unit") == db}
+
+    def settle(self, step, db, key, rec):
+        """What the operation `key` actually left on the target: its kept
+        position against the target's own (`Engine.log_position`,
+        `position_reached`) through `faults.landed` - reached is
+        committed, short of it nothing; None where nothing reads it."""
+        from . import faults
+        want = rec.get("position")
+        side = rec.get("side") or "dst"
+        read = getattr(self.eng, "log_position", None)
+        reached = getattr(self.eng, "position_reached", None)
+        if not want or read is None or reached is None:
+            return None
+        have = read(side, db)
+        if have is None:
+            return None
+        state, _ = faults.landed(
+            lambda: True, lambda: bool(reached(have, want)), before=False)()
+        return state
+
+    def move(self, db, chunk, workers=None):
+        from . import autonomous
+        token = _FLOW_WORKERS.set(workers)
+        try:
+            return _move_run(self.name, db, "",
+                             autonomous.MOVE_MODE[self.goal], chunk, False,
+                             True)
+        finally:
+            _FLOW_WORKERS.reset(token)
 
     def _fails(self, dbs=None, quick=False, assessed=None, when=None):
         from . import ready
@@ -2860,10 +2914,6 @@ class _Steps:
         return [(d, w) for d in self.dbs()
                 for w in self._fails([d], quick=True)]
 
-    def move(self, db, chunk):
-        from . import autonomous
-        return _move_run(self.name, db, "", autonomous.MOVE_MODE[self.goal],
-                         chunk, False, True)
 
     def follow(self, db):
         if capabilities.unavailable(self.hop.engine, "fence") or \
@@ -2892,6 +2942,26 @@ class _Steps:
 
     def progress(self, db):
         return _move_said(self.hop, db)
+
+
+#: the workers `migrate`'s flow handed the copy it runs (`_flow_sized`)
+_FLOW_WORKERS = contextvars.ContextVar("flow_workers", default=None)
+
+
+def _flow_sized(hop, plan, m):
+    """The copy's workers from the one sizing rung
+    (`decide.worker_budget`): the flow's share where `migrate` handed one
+    down - the one owner of concurrency, the copy's pace never past it -
+    else what this move measured of itself."""
+    from . import decide
+    flow = _FLOW_WORKERS.get()
+    n, _ = decide.worker_budget({**m.budget(plan.most), "start": plan.start,
+                                 "budget": flow})
+    plan.start = min(n, plan.most) if plan.most else n
+    if flow:
+        plan.most = plan.start
+    hop.workers, hop.workers_most = plan.start, plan.most
+    return plan
 
 
 def _table_plan(hop, eng, d, via, go=False):
@@ -3311,8 +3381,9 @@ def _copy_tables(hop, eng, d, tables, chunk, ck, followed=False):
     short = m.too_wide(sizing._memory())
     if short:
         raise SystemExit(f"{d}: not started - {short}")
-    plan = sizing.fit(hop, eng, d, log, units=_units(eng, d, tables),
-                      model=m)
+    plan = _flow_sized(hop, sizing.fit(hop, eng, d, log,
+                                       units=_units(eng, d, tables),
+                                       model=m), m)
     if not m.planned:
         try:
             _planned(hop, m, eng.table_facts("src", d), names, plan.start,

@@ -27,6 +27,11 @@ class Fake:
         self.errors = {k: list(v) for k, v in (errors or {}).items()}
         self.etas = dict(etas or {})
         self.calls = []
+        #: (step, db) -> {key: record} a run before left open
+        self.owned = {}
+        #: key -> what the target says it holds of it
+        self.landed = {}
+        self.workers = []
 
     def dbs(self):
         return self._dbs
@@ -48,8 +53,16 @@ class Fake:
             self.fail[(step, db)] -= 1
             raise ConnectionError(f"{step} of {db}: connection reset")
 
-    def move(self, db, chunk):
+    def move(self, db, chunk, workers=None):
+        self.workers.append((db, workers))
         self._hit("move", db, chunk)
+
+    def uncertain(self, step, db):
+        return dict(self.owned.get((step, db)) or {})
+
+    def settle(self, step, db, key, rec):
+        self.calls.append(("settle", db, key))
+        return self.landed.get(key)
 
     def follow(self, db):
         self._hit("follow", db)
@@ -231,7 +244,7 @@ def test_a_fault_that_does_not_clear_is_bounded_and_held_apart(tmp_path):
     assert not got.complete and got.exit == 1
     keys = got.workflow.by_key()
     assert keys["move:a"].state == "failed"
-    assert f"every try spent ({autonomous.TRIES})" in keys["move:a"].why
+    assert f"every try spent ({autonomous.unmeasured_tries()})" in keys["move:a"].why
     # its later steps wait; the other database went on to the end
     assert keys["follow:a"].state == "held"
     assert keys["verify:a"].state == "held"
@@ -242,7 +255,7 @@ def test_a_fault_that_does_not_clear_is_bounded_and_held_apart(tmp_path):
     assert any("the rest goes on without it" in s for s in said)
     # bounded: never more runs than the tries, never a storm
     assert len([c for c in ops.calls if c[:2] == ("move", "a")]) \
-        == autonomous.TRIES
+        == autonomous.unmeasured_tries()
     held = [r["held"] for r in _recovered(tmp_path)]
     assert held and not any(held)
 
@@ -406,3 +419,159 @@ def test_a_class_failing_again_cools_the_side_before_one_more_try():
     assert decide.recovery(first).path == "retry"
     assert decide.recovery(again).path == "pause"
     assert decide.recovery({**again, "tries_left": 0}).path == "stop"
+
+
+class Measured(Fake):
+    def __init__(self, *a, budget=None, **kw):
+        super().__init__(*a, **kw)
+        self.budget = dict(budget or {})
+
+    def facts(self, db):
+        return {**super().facts(db), **self.budget}
+
+
+class NoLedger(Fake):
+    uncertain = None
+
+
+def test_the_flow_hands_each_copy_its_share_of_the_measured_budget(
+        tmp_path):
+    ops = Measured(dbs=("a", "b"), budget={"start": 8, "most": 6},
+                   errors={("verify", "a"): [faults.Injected("quota")]})
+    got, _ = _run("copy", ops, tmp_path, [])
+    assert got.complete
+    # the measured start, never past the most both servers take
+    assert ops.workers[0] == ("a", 6)
+    # the throttle on a cut the budget too: b runs at half
+    assert ops.workers[1] == ("b", 3)
+
+
+def test_unmeasured_the_flow_hands_no_budget_down_and_the_copy_sizes_itself():
+    ops = Fake(dbs=("a",))
+    got, _ = _run("copy", ops)
+    assert got.complete and ops.workers == [("a", None)]
+
+
+def test_a_plain_move_asks_the_same_sizing_rung():
+    n, c = decide.worker_budget({"start": 6, "most": 4})
+    assert (n, c.path) == (4, "the measured start")
+    n, c = decide.worker_budget({"budget": 3, "start": 6, "scale": 0.5})
+    assert (n, c.path) == (3, "the flow's budget")
+    n, c = decide.worker_budget({"little": 5, "scale": 0.5})
+    assert (n, c.path) == (2, "the measured carry")
+    n, c = decide.worker_budget({})
+    assert (n, c.path) == (1, "one at a time")
+    n, _ = decide.worker_budget({"start": 1, "scale": 0.1})
+    assert n == 1
+
+
+def test_model_budget_says_what_the_rung_reads():
+    from migkit import model
+    class Carried(model.Model):
+        little = 3
+    m = Carried.__new__(Carried)
+    m.observed = {"workers": 4, "rows_a_second": 900.0}
+    b = m.budget(most=7)
+    assert b == {"little": 3, "observed": 4, "observed_rate": 900.0,
+                 "most": 7}
+
+
+def test_a_step_reconciles_what_a_run_before_left_open_before_it_runs(
+        tmp_path):
+    ops = Fake(dbs=("a",))
+    ops.owned[("move", "a")] = {"op:1": {"state": "began", "position": "9"}}
+    ops.landed["op:1"] = "committed"
+    got, said = _run("copy", ops, tmp_path, [])
+    assert got.complete
+    calls = [c[0] for c in ops.calls]
+    assert calls.index("settle") < calls.index("move")
+    rec = [d for d in autonomous.evidence(tmp_path / "workflow.json", 500)
+           if d["what"] == "reconcile"]
+    assert rec and rec[0]["held"] is True
+    assert rec[0]["states"] == {"op:1": "committed"}
+    assert any("read on the target before it runs again" in s for s in said)
+
+
+def test_an_operation_that_cannot_be_read_blocks_with_the_next_step(
+        tmp_path):
+    ops = Fake(dbs=("a", "b"))
+    ops.owned[("move", "a")] = {"op:1": {"state": "unknown"},
+                                "op:2": {"state": "began"}}
+    ops.landed["op:1"] = "nothing"
+    got, _ = _run("copy", ops, tmp_path, [])
+    u = got.workflow.by_key()["move:a"]
+    assert u.state == "failed"
+    assert "1 operations a run before began cannot be read" in u.why
+    assert "check the target for them, then run again" in u.why
+    # never replayed blind; the other database goes on
+    assert ("move", "a", 1000) not in ops.calls
+    assert got.databases["b"][0] == "done"
+
+
+def test_an_operation_still_running_waits_for_it_rather_than_repeat_it(
+        tmp_path):
+    ops = Fake(dbs=("a",))
+    ops.owned[("verify", "a")] = {"op:3": {"state": "running"}}
+    ops.landed["op:3"] = "running"
+    got, _ = _run("copy", ops, tmp_path, [])
+    u = got.workflow.by_key()["verify:a"]
+    assert u.state == "failed" and "wait for them to end" in u.why
+    assert ("verify", "a") not in ops.calls
+
+
+def test_a_kept_position_alone_is_not_proof_nothing_landed(tmp_path):
+    ops = NoLedger(dbs=("a",), fail={("move", "a"): 1})
+    got, _ = _run("copy", ops, tmp_path, [])
+    u = got.workflow.by_key()["move:a"]
+    assert u.state == "failed"
+    assert len([c for c in ops.calls if c[:2] == ("move", "a")]) == 1
+
+
+def test_the_tries_are_what_the_forecast_pays_for():
+    ops = Fake(dbs=("a",), etas={"a": 50.0})
+    u = autonomous.Unit("move", "a")
+    assert autonomous.tries_for(ops, u, {"attempt_seconds": 10.0}) == 6
+    assert autonomous.tries_for(ops, u, {}) == autonomous.unmeasured_tries()
+    assert autonomous.tries_for(Fake(dbs=("a",)), u,
+                                {"attempt_seconds": 10.0}) \
+        == autonomous.unmeasured_tries()
+    import inspect
+    assert autonomous.unmeasured_tries() == inspect.signature(
+        faults.retried).parameters["tries"].default
+
+
+def test_the_scale_floor_is_one_worker_of_the_budget():
+    assert autonomous.scale_floor({"most": 4, "chunk": 1000}) == 0.25
+    assert autonomous.scale_floor({"chunk": 1000}) == 0.001
+    assert autonomous.scale_floor({}) == 0.0
+
+
+def test_the_write_consent_is_not_the_switch_s():
+    from migkit import cli
+    names = {p.name for p in cli.migrate.params}
+    assert {"go", "switch"} <= names
+    ops = Switching(dbs=("a",))
+    got, said = _run("cutover", ops)
+    assert got.switch == "asked" and ops.switched == []
+
+
+def test_the_comparison_is_filled_only_from_runs():
+    import json
+    table = ("| Scenario | Engine | Inputs | Interventions | Completed |"
+             " Recovered | Retry waste | Seconds | Managed service |\n"
+             "| healthy | MySQL | 6 | to be measured | to be measured |"
+             " to be measured | to be measured | to be measured |"
+             " to be measured |\n"
+             "| healthy | PostgreSQL | 6 | to be measured | to be measured |"
+             " to be measured | to be measured | to be measured |"
+             " to be measured |\n")
+    lines = [json.dumps({"scenario": "healthy", "engine": "mysql",
+                         "inputs": 6, "interventions": 0, "completed": True,
+                         "recovered": None, "retry_waste": 0,
+                         "seconds": 12.5})]
+    got = autonomous.comparison(lines, table).splitlines()
+    assert got[1] == ("| healthy | MySQL | 6 | 0 | yes | none needed | 0 |"
+                      " 12.5 | to be measured |")
+    # a row no run measured keeps its cells
+    assert got[2] == table.splitlines()[2]
+

@@ -337,6 +337,15 @@ class Model:
             memory=self.worker_memory * workers
             if self.worker_memory and workers else None)
 
+    def budget(self, most=None):
+        """The facts the one sizing rung (`decide.worker_budget`) reads of
+        this move: as many as carry the binding stage (`little`), what the
+        last move of it ran at and reached (`observe`), and the most both
+        servers take (`most`, where sized)."""
+        seen = self.observed or {}
+        return {"little": self.little, "observed": seen.get("workers"),
+                "observed_rate": seen.get("rows_a_second"), "most": most}
+
     def too_wide(self, free):
         """Why not even one worker fits in `free` bytes of this machine's
         memory with the widest rows of the move, in words - or None. Said

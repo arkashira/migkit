@@ -3287,3 +3287,53 @@ def admit(schedule, semantics, said="the schedule as planned", facts=None):
     kept, out = prune((Rung("as scheduled", said,
                             needs=(KEEPS_SEMANTICS,)),), f)
     return (True, "") if kept else (False, out[0][1])
+
+
+# --- how many workers one copy runs (W10D): one owner for concurrency -------
+
+def _count(v):
+    try:
+        n = int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def worker_budget(facts):
+    """(workers, the `Choice`) one copy runs, the one sizing rung every
+    copy asks - handed down by `migrate`'s flow, asked by a plain `move`
+    itself: the flow's share of the measured budget where it handed one
+    down (`budget`), else the start the move's own sizing measured
+    (`start`, `sizing.estimate`), else as many as carry the binding stage
+    (`little`, Little's law), else one at a time until a measure says
+    more. Never more than the most both servers take (`most`) where that
+    was measured, cut by what the throttles left (`scale`), never below
+    one."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+
+    def has(key, said, why):
+        return Need(said, lambda f: _count(f.get(key)) > 0, why)
+    rungs = (
+        Rung("the flow's budget", "the share of the measured budget the"
+             " flow handed down", needs=(has("budget", "a budget from the"
+                                              " flow", "no flow handed a"
+                                              " budget down"),)),
+        Rung("the measured start", "the start the move's sizing measured",
+             needs=(has("start", "a start measured", "nothing sized the"
+                        " start"),)),
+        Rung("the measured carry", "as many as carry the binding stage",
+             needs=(has("little", "the stages measured", "the stages were"
+                        " not measured"),)),
+        Rung("one at a time", "one worker until a measure says more",
+             because="nothing measured says more"))
+    choice = climb("the copy's workers", rungs, f)
+    key = {"the flow's budget": "budget", "the measured start": "start",
+           "the measured carry": "little"}.get(choice.path)
+    n = _count(f.get(key)) if key else 1
+    most = _count(f.get("most"))
+    if most:
+        n = min(n, most)
+    scale = f.get("scale")
+    if key != "budget" and scale:
+        n = int(n * float(scale))
+    return max(1, n), choice

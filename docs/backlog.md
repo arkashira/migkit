@@ -10324,6 +10324,22 @@ P0-AUTONOMOUS-MIGRATION:
   truthful partial results. Measure automatic recovery success, user actions,
   total completion time, retry waste and external workload impact.
 
+W10D, 2026-10-16: the flow owns the copy's workers - one share of the
+measured budget a database (`model.Model.budget`, `sizing.estimate`), cut
+by a throttle, handed down to the copy; a plain `move` asks the same rung
+(`decide.worker_budget`). Every step keeps a reconcile contract before it
+runs again (`autonomous.settle`: the ledger's uncertain operations read on
+the target through `faults.landed`; one not readable is a blocker with the
+next step). A unit runs under the one ladder (`faults.retried`, sizing
+causes in `tuning.sized`); its tries are what the forecast pays for
+(`autonomous.tries_for`), the throttle floor one worker of the budget
+(`autonomous.scale_floor`). `--go` writes; only `--switch` is the switch's
+yes. Not done: `tools/final_suite.py` does not yet call
+`autonomous.comparison` to fill the table from `MIGKIT_MEASURE_OUT`; the
+target reading of an owned operation is its kept position against the
+target's (`Engine.log_position`) - a copy range's row count is not read,
+so such an operation stops as a blocker; nothing run on the sandbox yet.
+
 The target is smooth autonomous completion without sacrificing any required
 guarantee. It does not authorize source changes, destructive repair or weakened
 verification merely to keep moving. These implementation criteria remain OPEN.

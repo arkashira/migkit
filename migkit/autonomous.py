@@ -11,8 +11,14 @@ recovered as the one decision engine chooses from the fault catalogue
 (`decide.recovery`): reconcile an effect not known, proceed, pause,
 throttle, retry from the last durable position after a backoff the
 failed attempt's own time measures, replan, probe, isolate or stop -
-bounded, each choice and whether its postcondition held kept in
-`workflow.json`. migkit's own stop is a blocker said in its words, never
+under the one recovery ladder (`faults.retried`), its tries the ones the
+unit's forecast pays for (`tries_for`), each choice and whether its
+postcondition held kept in `workflow.json`. Before any step runs again,
+what a run before it left begun is reconciled on the target (`settle`,
+`attempts.Ledger.uncertain`, `faults.landed`); one that cannot be read
+is a blocker with its next step, never replayed blind. The flow owns the
+copy's workers: one share of the measured budget a database, cut by a
+throttle (`Plan.workers`, `decide.worker_budget`). migkit's own stop is a blocker said in its words, never
 retried; a fault is held, never passed as success. A unit that cannot
 complete is isolated: its database's later steps are held, every other
 database goes on, and after an isolate or a throttle the units left are
@@ -227,11 +233,37 @@ class Workflow:
 
 #: the bounds of the wait before a unit is tried again from its position
 BACKOFF_MIN, BACKOFF_MAX = 1.0, 300.0
-#: the runs of a step one unit may make, every recovery counted: no
-#: failure makes more than this of anything
-TRIES = 4
-#: the least of the planned sizes throttles may leave a unit
-MIN_SCALE = 1 / 16
+def unmeasured_tries():
+    """The runs a unit may make where nothing measures what a try costs:
+    the recovery ladder's own bound (`faults.retried`), kept there once."""
+    import inspect
+    from . import faults
+    return inspect.signature(faults.retried).parameters["tries"].default
+
+
+def tries_for(ops, u, facts):
+    """The runs of a step one unit may make, every recovery counted: as
+    many attempts as the unit's forecast work pays for, each costed at
+    what one attempt of it was measured to take (`attempt_seconds`, else
+    its kept run) - recovery never spends more time than the work is
+    worth; the work itself and one recovery of it always fit. Where
+    neither is measured, `unmeasured_tries`."""
+    import math
+    eta = _seconds(ops, u.step, u.db)
+    took = facts.get("attempt_seconds") or u.took or None
+    if not eta or not took:
+        return unmeasured_tries()
+    return max(2, 1 + math.ceil(float(eta) / max(float(took), BACKOFF_MIN)))
+
+
+def scale_floor(facts):
+    """The least share of the plan throttles may leave a unit: one worker
+    of the measured budget and one row of the planned piece - below that
+    a cut changes nothing but the time."""
+    most = facts.get("most") or facts.get("start") or facts.get("little")
+    chunk = facts.get("chunk")
+    return max(1 / int(most) if most else 0.0,
+               1 / int(chunk) if chunk else 0.0)
 
 
 def backoff(took, tries):
@@ -250,9 +282,24 @@ class Plan:
     why the plan last changed (cleared once the units left are re-planned)."""
     scale: float = 1.0
     changed: str = ""
+    #: the least `scale` the measured budget leaves (`scale_floor`)
+    floor: float = 0.0
+    #: one cooling-down record of the sides this flow's units fail on
+    breaker: object = None
 
     def chunk(self, facts):
         return max(1, int(int(facts.get("chunk") or 500000) * self.scale))
+
+    def workers(self, facts):
+        """(workers, `decide.Choice`) the copy of one database runs: its
+        share of the measured budget (`model.Model.budget`), cut by what
+        the throttles left; (None, choice) where nothing was measured, so
+        the copy asks the same rung with what it measures itself."""
+        n, choice = decide.worker_budget({**facts, "scale": self.scale})
+        return (n if choice.path != "one at a time" else None), choice
+
+    def cut(self):
+        self.scale = max(self.floor, self.scale / 2)
 
 
 def recovery_facts(told, repeats, reconciled, can_check, tries_left):
@@ -269,24 +316,92 @@ def recovery_facts(told, repeats, reconciled, can_check, tries_left):
             "phase": told.phase}
 
 
+STATES = ("committed", "running", "nothing")
+
+
+def settle(u, ops):
+    """{operation: state} of what a run before left begun under the step,
+    reconciled on the target before anything repeats it: the ledger's
+    uncertain operations (`ops.uncertain(step, db)`,
+    `attempts.Ledger.uncertain`), each read for its actual effect
+    (`ops.settle(step, db, key, record)`: a count, a position or a marker
+    through `faults.landed`) - "committed", "running", "nothing", or None,
+    not known. {} where the ops keep no ledger; a ledger that cannot be
+    read is itself not known."""
+    read = getattr(ops, "uncertain", None)
+    if read is None:
+        return {}
+    try:
+        left = dict(read(u.step, u.db) or {})
+    except Exception:  # noqa: BLE001 - an unread ledger is not known
+        return {"the ledger": None}
+    check = getattr(ops, "settle", None)
+    out = {}
+    for key, rec in left.items():
+        try:
+            got = check(u.step, u.db, key, rec) if check else None
+        except Exception:  # noqa: BLE001 - an unanswered read is not known
+            got = None
+        out[key] = got if got in STATES else None
+    return out
+
+
 def reconcile(u, ops, facts):
     """Whether a unit whose failed write has an unknown effect took
-    effect: the step's own reading (`ops.reconcile(db)`: "committed",
-    "running" or "nothing") where it has one; else, for a copy that keeps
-    its position on disk, "nothing" past that position - the copy goes on
-    from it and counts nothing after it as done; else None, not known."""
+    effect: the step's own reading (`ops.reconcile(db)`) where it has
+    one; else the ledger's operations read on the target (`settle`):
+    "running" while one still runs, "nothing" once every one is read -
+    what landed is kept and the step goes on past it; None, not known,
+    where one cannot be read or nothing reads them. A kept position alone
+    is never taken as proof that nothing landed after it."""
     read = getattr(ops, "reconcile", None)
     if read is not None:
         try:
             got = read(u.db)
         except Exception:  # noqa: BLE001 - an unanswered read is not known
             return None
-        return got if got in ("committed", "running", "nothing") else None
-    return "nothing" if facts.get("resumes") else None
+        return got if got in STATES else None
+    if getattr(ops, "uncertain", None) is None:
+        return None
+    states = settle(u, ops)
+    if any(v is None for v in states.values()):
+        return None
+    return "running" if "running" in states.values() else "nothing"
 
 
 def can_reconcile(ops, facts):
-    return hasattr(ops, "reconcile") or bool(facts.get("resumes"))
+    return (getattr(ops, "reconcile", None) is not None
+            or getattr(ops, "uncertain", None) is not None)
+
+
+def _settled(u, wf, ops, say, work):
+    """The reconcile contract every step keeps before it runs: what a run
+    before it left begun is read on the target (`settle`); "" where every
+    one was read, else the blocker - the stop `decide.recovery` chooses
+    for an effect nothing can read - and the operator's next step."""
+    states = settle(u, ops)
+    if not states:
+        return ""
+    bad = sorted(k for k, v in states.items() if v is None)
+    busy = sorted(k for k, v in states.items() if v == "running")
+    rec = wf.decided(u, "reconcile", f"{len(states)} operations a run"
+                     " before left open, read on the target", "reconcile",
+                     states=states)
+    rec["held"] = not bad and not busy
+    if rec["held"]:
+        say(f"{work}: {len(states)} operations a run before left open were"
+            " read on the target before it runs again")
+        return ""
+    choice = decide.recovery({
+        "class": "unknown_outcome", "admits": (), "transient": False,
+        "uncertain": True, "can_check": False, "renewable": False,
+        "reconciled": None, "tries_left": 0, "breaker": "closed"})
+    if bad:
+        return (f"{len(bad)} operations a run before began cannot be read"
+                f" on the target, so they are not run again; {choice.said}:"
+                " check the target for them, then run again")
+    return (f"{len(busy)} operations a run before began still run on the"
+            f" target; {choice.said}: wait for them to end, then run again")
 
 
 @dataclass
@@ -327,7 +442,9 @@ def run(goal, ops, say, path=None, wait=time.sleep, now=time.time,
     owed = wf.again()
     keys = wf.by_key()
     total = len(wf.units)
-    apart, seen, plan = {}, set(), Plan()
+    from . import faults
+    apart, seen = {}, set()
+    plan = Plan(breaker=faults.Breaker())
     while True:
         u = next((x for x in wf.units
                   if x.key in owed and x.key not in seen), None)
@@ -428,141 +545,173 @@ def replan(wf, ops, plan, say):
 
 
 def _unit(u, wf, ops, say, wait, now, plan):
-    """One unit run to done, asked or failed. A failure is told by its
-    class (`faults.classify`); a cause a size answers retunes the copy
-    (`tuning.Retune`), never the same work again; every other failure is
-    recovered as `decide.recovery` chooses from the catalogue: reconcile
-    an effect not known, proceed on one that committed, pause, throttle,
-    retry, replan, probe, isolate or stop - each choice and whether its
-    postcondition then held kept in the decisions."""
+    """One unit run to done, asked or failed. Before it runs, what a run
+    before it left begun is reconciled (`_settled`). The step then runs
+    under the one recovery ladder (`faults.retried`: `decide.recovery`
+    choosing from the catalogue, `reconcile` its check), a cause a size
+    answers retuned inside it (`tuning.sized`), never the same work
+    again. Only the workflow's own paths are taken here, from the choice
+    the ladder made: a throttle cuts what the units left run at
+    (`Plan.cut`) and re-plans them, a replan or a probe reads the facts
+    again once each, an isolate sets the unit apart. Each choice and
+    whether its postcondition held kept in the decisions."""
     from . import faults, tuning
     began = now()
     facts = dict(ops.facts(u.db)) if u.db else {}
-    chunk = plan.chunk(facts)
-    retune = (tuning.Retune(f"the copy of {u.db}", rows=chunk)
-              if u.step == "move" and facts.get("pieces") else None)
     work = STEP_SAID[u.step] + (f" of {u.db}" if u.db else "")
-    tries, reconciled, last, repeats, got = 0, None, None, {}, None
-    way, spent = "as-planned", set()
-    while True:
+    run = {"chunk": plan.chunk(facts), "way": "as-planned", "last": None,
+           "err": None, "took": 0.0, "reconciled": None, "workers": None,
+           "runs": 0}
+    got = None
+    blocked = _settled(u, wf, ops, say, work)
+    if blocked:
+        u.state, u.why = "failed", blocked
+        return _ended(u, wf, say, plan, began, now, run, got)
+    plan.floor = max(plan.floor, scale_floor(facts))
+    tries = tries_for(ops, u, facts)
+
+    def sized():
+        if u.step == "move":
+            run["workers"], _ = plan.workers(facts)
+    sized()
+    retune = (tuning.Retune(f"the copy of {u.db}", rows=run["chunk"])
+              if u.step == "move" and facts.get("pieces") else None)
+
+    def taken():
+        # the ladder's choice for the failure before this try, as the
+        # workflow's own path
+        e, run["err"] = run["err"], None
+        if e is None:
+            return
+        _held(run["last"], False)
+        path = getattr(e, "recovery", "") or ""
+        f = faults.CATALOGUE.get(getattr(e, "fault", ""))
+        said = f.said if f else _words(e)
+        if path == "throttle":
+            plan.cut()
+            run["chunk"] = max(1, run["chunk"] // 2)
+            sized()
+            plan.changed = f"{work} was throttled"
+        run["way"] = "resume" if path in ("retry", "reconcile") else path
+        run["last"] = wf.decided(
+            u, "recover", f"{said}: {path}", path,
+            fault=getattr(e, "fault", ""), post=f.retry_after if f else "",
+            reconciled=run["reconciled"])
+        say(f"{work}: {said}; {path}, again from its last position")
+
+    def apply(settings):
+        rows = max(1, int(settings.get("rows") or run["chunk"]))
+        if run["err"] is not None and rows != run["chunk"]:
+            # a size answered the failure: retuned, not recovered
+            e, run["err"] = run["err"], None
+            _held(run["last"], False)
+            run["way"] = "retuned"
+            run["last"] = wf.decided(
+                u, "recover", f"{_words(e)}: {rows} rows a piece", "retune",
+                post="the unit completes at the new size")
+            say(f"{work}: {rows} rows a piece after {_words(e)}")
+        run["chunk"] = rows
+
+    def once():
+        taken()
+        run["runs"] += 1
         t0 = now()
         try:
-            got = _step(u, ops, chunk)
+            return _step(u, ops, run["chunk"], run["workers"])
         except decide.Verdict as e:
-            u.state, u.why = "failed", str(e)
-        except Asked as e:
-            u.state, u.why = "asked", str(e)
+            raise _Final(e) from None
+        except Exception as e:
+            run["took"], run["err"] = now() - t0, e
+            q = question_for(e)
+            if q is not None:
+                raise _Final(Asked(q, _words(e))) from None
+            raise
+
+    def check():
+        run["reconciled"] = reconcile(u, ops, facts)
+        return run["reconciled"]
+
+    def step():
+        if retune is None:
+            return once()
+        return tuning.sized(retune, u.key, once, apply)
+
+    spent = set()
+    while True:
+        try:
+            got = faults.retried(
+                step, tries=tries - run["runs"], side=u.db or "hop",
+                label=work,
+                writes=u.step == "move",
+                check=check if can_reconcile(ops, facts) else None,
+                log=say, wait=wait, breaker=plan.breaker,
+                backoff=lambda i: backoff(run["took"], i + 1))
+        except _Final as e:
+            err = e.error
+            if isinstance(err, Asked):
+                u.state, u.why = "asked", str(err)
+            else:
+                u.state, u.why = "failed", _words(err)
         except SystemExit as e:
             # migkit's own stop: said, never retried here
             q = question_for(e)
             u.state = "asked" if q else "failed"
             u.why = str(Asked(q, _words(e))) if q else _words(e)
         except Exception as e:  # noqa: BLE001 - classified, never success
-            took = now() - t0
-            tries += 1
-            _held(last, False)
-            q = question_for(e)
-            if q is not None:
-                u.state, u.why = "asked", str(Asked(q, _words(e)))
-                break
-            told = faults.classify(e, writes=u.step == "move")
-            name = told.fault.name
-            repeats[name] = repeats.get(name, 0) + 1
-            if retune is not None and tries < TRIES:
-                try:
-                    adj = retune.failed(u.key, e, rows=chunk)
-                except decide.Blocked as b:
-                    u.state, u.why = "failed", _words(b)
-                    break
-                if adj is not None:
-                    chunk = max(1, int(retune.settings()["rows"]))
-                    way = "retuned"
-                    last = wf.decided(u, "recover", f"{told.fault.said}:"
-                                      f" {adj.said}", "retune", fault=name,
-                                      post="the unit completes at the new"
-                                      " size", tries=tries)
-                    say(f"{work}: {told.fault.said}; {adj.said}")
-                    continue
-            choice = decide.recovery(recovery_facts(
-                told, repeats[name], reconciled,
-                can_reconcile(ops, facts), TRIES - tries))
-            act = choice.path
-            last = wf.decided(u, "recover", f"{told.fault.said}:"
-                              f" {choice.said}", act, fault=name,
-                              post=told.fault.retry_after, tries=tries,
-                              because=choice.reason)
-            if act == "reconcile":
-                reconciled = reconcile(u, ops, facts)
-                last["reconciled"] = reconciled
-                say(f"{work}: {told.fault.said}; read whether it took"
-                    f" effect: {reconciled or 'not known'}")
-                if reconciled == "committed":
-                    way = "reconciled"
-                    got = None
-                    _held(last, True)
-                    u.state, u.why = "done", ""
-                    break
-                if reconciled in ("nothing", "running") and tries >= TRIES:
-                    u.state = "failed"
-                    u.why = f"{told.fault.said}; every try spent ({tries})"
-                    break
-                if reconciled in ("nothing", "running"):
-                    secs = backoff(now() - t0, tries)
-                    say(f"{work}: again from its last position in"
-                        f" {secs:.0f}s")
-                    wait(secs)
-                    way, reconciled = "resume", None
-                    continue
-                u.state = "failed"
-                u.why = (f"{told.fault.said}; what it did cannot be read,"
-                         " so it is not run again: check the target for"
-                         " it, then run again")
-                break
-            if act == "proceed":
-                way = "reconciled"
-                _held(last, True)
-                u.state, u.why = "done", ""
-                break
-            if act in ("retry", "pause", "throttle") and tries < TRIES:
-                secs = backoff(took, tries)
-                if act != "retry":
-                    secs = min(BACKOFF_MAX, secs * 2)
-                if act == "throttle":
-                    plan.scale = max(MIN_SCALE, plan.scale / 2)
-                    chunk = max(1, chunk // 2)
-                    plan.changed = f"{work} was throttled"
-                say(f"{work}: {told.fault.said}; {choice.said}, again"
-                    f" from its last position in {secs:.0f}s")
-                wait(secs)
-                way = "resume" if act == "retry" else act
+            path = getattr(e, "recovery", "") or "stop"
+            f = faults.CATALOGUE.get(getattr(e, "fault", ""))
+            said = f.said if f else _words(e)
+            run["err"] = None
+            _held(run["last"], False)
+            run["last"] = wf.decided(
+                u, "recover", f"{said}: {path}", path,
+                fault=getattr(e, "fault", ""),
+                post=f.retry_after if f else "",
+                reconciled=run["reconciled"])
+            if run["reconciled"] in STATES[1:] and run["runs"] < tries:
+                # read as nothing landed (or still running): a new attempt
+                # from its position, its runs counted against the same tries
+                run["reconciled"], run["way"] = None, "resume"
                 continue
-            if act in ("probe", "replan") and act not in spent \
-                    and tries < TRIES:
+            if path in ("probe", "replan") and path not in spent:
                 # read again what the step reads; one try of each
-                spent.add(act)
+                spent.add(path)
                 facts = dict(ops.facts(u.db)) if u.db else {}
-                if act == "replan":
-                    chunk = plan.chunk(facts)
-                say(f"{work}: {told.fault.said}; {choice.said}")
-                way = act
+                run["chunk"] = plan.chunk(facts)
+                sized()
+                run["way"] = path
+                say(f"{work}: {said}; {path}")
                 continue
             u.state = "failed"
-            u.why = (f"{told.fault.said}; "
-                     + ("set apart, the rest goes on" if act == "isolate"
-                        else f"every try spent ({tries})" if
-                        act in ("retry", "pause", "throttle", "probe",
-                                "replan")
-                        else "stopped: " + told.fault.retry_after))
-            if act == "isolate":
+            if path == "reconcile" and run["reconciled"] not in STATES[1:]:
+                u.why = (f"{said}; what it did cannot be read, so it is not"
+                         " run again: check the target for it, then run"
+                         " again")
+            elif path in ("retry", "pause", "throttle", "reconcile",
+                          "probe", "replan") \
+                    or run["reconciled"] in STATES[1:]:
+                u.why = f"{said}; every try spent ({tries})"
+            elif path == "isolate":
+                u.why = f"{said}; set apart, the rest goes on"
                 plan.changed = f"{work} was set apart"
+            else:
+                u.why = f"{said}; stopped: " + (f.retry_after if f
+                                                 else "not recoverable")
         else:
             u.state, u.why = "done", ""
-            _held(last, True)
+            if run["reconciled"] == "committed":
+                run["way"] = "reconciled"
+            _held(run["last"], True)
         break
+    return _ended(u, wf, say, plan, began, now, run, got)
+
+
+def _ended(u, wf, say, plan, began, now, run, got):
+    work = STEP_SAID[u.step] + (f" of {u.db}" if u.db else "")
     if u.state == "done":
-        u.way = way
+        u.way = run["way"]
     else:
-        _held(last, False)
+        _held(run["last"], False)
     u.took, u.at = now() - began, now()
     wf.decided(u, u.state, u.why, u.way)
     if u.state != "done":
@@ -586,7 +735,16 @@ def _words(e):
     return without_programs(text.splitlines()[-1][:300], DRIVEN)
 
 
-def _step(u, ops, chunk):
+class _Final(BaseException):
+    """A step's answer no recovery may retry - a verdict, a question -
+    carried through the ladder unchanged."""
+
+    def __init__(self, error):
+        super().__init__(str(error))
+        self.error = error
+
+
+def _step(u, ops, chunk, workers=None):
     if u.step == "assess":
         bad = list(ops.assess())
         hop_wide = [why for d, why in bad if not d]
@@ -594,7 +752,7 @@ def _step(u, ops, chunk):
             raise SystemExit("; ".join(hop_wide))
         return bad
     if u.step == "move":
-        return ops.move(u.db, chunk)
+        return ops.move(u.db, chunk, workers)
     if u.step == "follow":
         if ops.follow(u.db) is False:
             raise TimeoutError(f"the stream of {u.db} has not caught up")
@@ -624,8 +782,9 @@ def evidence_of(wf, db):
 def propose_switch(wf, ops, dbs, say, answer, go):
     """The cutover's switch, proposed only when every database of the hop
     is proved ready in this run (the applications move as one), with the
-    evidence; performed only on the operator's yes - `go` given up front
-    is that yes - and kept in the decisions, never done on migkit's own."""
+    evidence; performed only on the operator's yes - `go` is that yes,
+    given up front by the switch's own consent (`migrate --switch`), never
+    by the consent to write - and kept in the decisions, never done on migkit's own."""
     if wf.goal != "cutover":
         return ""
     if wf.switched():
@@ -643,7 +802,7 @@ def propose_switch(wf, ops, dbs, say, answer, go):
     say(f"ready for the switch - {proof}")
     q = BY_KEY["switch"]
     if go:
-        yes, how = True, "the go given up front"
+        yes, how = True, "the switch's yes given up front"
     elif answer is None:
         wf.decisions.append({"unit": "switch", "what": "asked", "why":
                              f"{q.asked} ({q.kind}: {q.reason})",
@@ -710,3 +869,55 @@ def evidence(path, last=50):
     """The decisions of the last runs, for `migrate --why`."""
     kept = durable.read_state(path, "state") if Path(path).exists() else None
     return list((kept or {}).get("decisions") or [])[-last:]
+
+
+#: the scenario harness's names -> the comparison's rows
+#: (docs/research/autonomous-comparison.md, tests/test_autonomous_scenarios.py)
+SCENARIOS = {"healthy": "healthy",
+             "recoverable in the run": "fault mid-copy, recovered in the run",
+             "recoverable by a run again": "crash mid-copy, run again",
+             "unrecoverable": "refused target (unrecoverable)"}
+ENGINES = {"mysql": "MySQL", "postgres": "PostgreSQL"}
+#: the measured columns, in the table's order after scenario and engine
+MEASURED = ("inputs", "interventions", "completed", "recovered",
+            "retry_waste", "seconds")
+
+
+def _cell(key, v):
+    if v is None:
+        return "none needed" if key == "recovered" else "not measured"
+    if key == "completed":
+        return "yes" if v else "no"
+    if key == "recovered":
+        return f"{float(v):.0%}"
+    return f"{v:g}" if isinstance(v, float) else str(v)
+
+
+def comparison(lines, table):
+    """`table` (the comparison's markdown) with each scenario row's
+    measured cells filled from the harness's JSON lines (one a run,
+    `MIGKIT_MEASURE_OUT`): the last run of a scenario on an engine counts;
+    a row no run measured, and the managed-service column, are left as
+    they were - a number is never written that no run produced."""
+    import json
+    got = {}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        m = json.loads(line)
+        row = (SCENARIOS.get(m.get("scenario")), ENGINES.get(m.get("engine")))
+        if all(row):
+            got[row] = m
+    out = []
+    for line in table.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        m = got.get(tuple(cells[:2])) if line.startswith("| ") else None
+        if m is None or len(cells) < 2 + len(MEASURED):
+            out.append(line)
+            continue
+        for i, key in enumerate(MEASURED):
+            if key in m:
+                cells[2 + i] = _cell(key, m[key])
+        out.append("| " + " | ".join(cells) + " |")
+    return "\n".join(out) + ("\n" if table.endswith("\n") else "")
