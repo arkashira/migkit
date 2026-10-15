@@ -3145,7 +3145,6 @@ def session_action(facts):
     return climb("a wait the server was asked about", rungs, f)
 
 
-<<<<<<< HEAD
 
 # --- row parity: which read proves a table's rows alike ----------------------
 # Every way below reads every row of both sides - none samples, none can be
@@ -3200,8 +3199,6 @@ def row_parity(work, run, facts=None, need=(), costs=None, log=None,
     need = tuple(dict.fromkeys(ROW_PARITY_NEED + tuple(need or ())))
     return attempt(work, ROW_PARITY, run, facts, need=need, costs=costs,
                    where=where, log=log)
-||||||| 7c40b782
-=======
 def recovery(facts):
     """The `Choice` after a failure (backlog P0-RESILIENCE-ALL): reconcile
     an outcome not known, proceed on one that committed, pause on a side
@@ -3262,4 +3259,3 @@ def recovery(facts):
         Rung("stop", "stop this work and say why",
              because="no safe recovery holds"))
     return climb("a failure", rungs, f)
->>>>>>> worktree-agent-a162ed900f09ff395

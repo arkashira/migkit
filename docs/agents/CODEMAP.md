@@ -19,13 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-<<<<<<< HEAD
-## `migkit/` (171 modules)
-||||||| 7c40b782
-## `migkit/` (169 modules)
-=======
-## `migkit/` (170 modules)
->>>>>>> worktree-agent-a162ed900f09ff395
+## `migkit/` (172 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
