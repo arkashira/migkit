@@ -981,6 +981,14 @@ class MySQLEngine(Engine):
                   " = %s and referenced_table_name is not null",
             (self._d(side, db),))]
 
+    def _load_skips_keys(self, db):
+        """The target's writers skip foreign key checks where `_keys_off`
+        says so (`_open_writer`); not readable, the keys hold."""
+        try:
+            return bool(self._keys_off("dst", db))
+        except Exception:  # noqa: BLE001 - not known: the keys hold
+            return False
+
     def _keys_off(self, side, db):
         """Whether the applier writes without checking foreign keys: where
         every parent a table in scope points at is in scope too, what a row

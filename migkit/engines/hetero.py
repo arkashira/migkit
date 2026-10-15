@@ -4908,6 +4908,7 @@ class HeteroEngine(Engine):
                 for mapped, act in plan:
                     if mapped:
                         applied_count += self.dst_engine.neutral_apply("dst", db, mapped)
+                        self._lanes_said(db, log)
                     if act is not None:
                         self._carry_ddl(db, act, s.targets, log)
                         unkept.add(act[1])
@@ -5095,6 +5096,25 @@ class HeteroEngine(Engine):
                                  mapped)
             plan.append((mapped, acts[i] if i < len(acts) else None))
         return plan, before, work, released
+
+    def _lanes_said(self, db, log):
+        """Why the target applied a batch as one rather than in lanes side
+        by side, where the decision engine refused the lanes
+        (`Engine._lanes_admitted`): said and recorded once per reason, as
+        the tail goes on applying in the source's order."""
+        why = self.dst_engine.__dict__.pop("lanes_refused", None)
+        if not why:
+            return
+        said = self.__dict__.setdefault("_lanes_refused_said", set())
+        if why in said:
+            return
+        said.add(why)
+        from .. import decide
+        log(f"tail: {db}: a batch applied as one, in the source's order -"
+            f" {why}")
+        decide.record(self.hop, {"work": f"the tail of {db}",
+                                 "lanes_refused": why}, log,
+                      way="one batch in the source's order", reason=why)
 
     def _one_transaction(self, changes):
         """Whether the target applies `changes` in one transaction: not in

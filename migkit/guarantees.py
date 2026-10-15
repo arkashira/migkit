@@ -534,7 +534,7 @@ def breaks(schedule, semantics):
                        " loads them - take the keys off for the load")
         out += _out_of_order(schedule, semantics, cycles)
     if schedule.snapshot in ("per table", "per range") and linked \
-            and not schedule.caught_up:
+            and not schedule.caught_up and not shared_read(semantics):
         out.append(f"{', '.join(sorted(linked))} are tied by foreign keys"
                    " and read each as of its own moment: a child read"
                    " later than its parent points at rows the parent's"
@@ -618,6 +618,14 @@ def lanes_schedule(lanes, semantics, name=None):
                 spread = True
     return Schedule(at_once=len(lanes or ()) or 1, checkpoint="after durable",
                     apply="by key" if spread else "by transaction")
+
+
+def shared_read(semantics):
+    """How the source reads the tables of `semantics` at one moment where
+    it said it shares one snapshot between its readers
+    (`Engine.shared_snapshot`, kept on what `jointplan.semantics_of`
+    read), else "": the tables are then read each as of its own moment."""
+    return getattr(semantics, "snapshot", "") or ""
 
 
 def copy_schedule(at_once, shared, followed, mark):

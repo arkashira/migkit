@@ -97,7 +97,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/interlock.py` - The interlock on the target (backlog R23, 3): before a step writes to a target - a copy, a stream, a repair, a cutover, users, a converted s
 - `migkit/intervals.py` - An interval as the three parts every engine that has one keeps apart: months, days, and a time of nanoseconds. Classes: Interval.
 - `migkit/jobs.py` - Scheduled jobs inside the databases, on exactly one side at a time.
-- `migkit/jointplan.py` - One plan for a move's tables, made jointly (backlog P0-SMART, item 4). Classes: Way, Job, Limits, Placed, Plan.
+- `migkit/jointplan.py` - One plan for a move's tables, made jointly (backlog P0-SMART, item 4). Classes: Way, Job, Limits, Placed, Plan, Tied.
 - `migkit/kafkaclient.py` - The stream client a Kafka target is written through, and the codec its messages go in (backlog R18.7). Classes: StreamError, Refused, Sent, NativeProducer, Handle, Stepping.
 - `migkit/kept.py` - The proof kept up as the data moves (backlog R20.8; incremental multiset hashing, docs/research/diff-algorithms-2026-09-28.md section 8). Classes: Store, Table, Keeper.
 - `migkit/lacks.py` - What the source uses that the target does not have, asked of both servers (backlog P0-SCENARIOS: a version down, a fork, an edition). Classes: Side, Feature.

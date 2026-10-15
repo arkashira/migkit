@@ -688,3 +688,125 @@ def test_a_shape_changed_between_ranges_stops_the_move(pg_pair, tmp_path):
                  ).stdout.strip()
     assert extra == "80000:80000", extra
     _same_and_whole(pg_pair)
+
+
+def _pg_target(monkeypatch, quiet):
+    """A PostgreSQL target whose user may do what `quiet` says
+    (`movers._pg_quiet_triggers`): "session" or "flag" loads as a replica,
+    "none" as the tables are, a SystemExit is a refusal."""
+    from migkit import movers
+    from migkit.engines.postgres import PostgresEngine
+
+    def said(hop, db, tables):
+        if isinstance(quiet, BaseException):
+            raise quiet
+        return quiet
+    monkeypatch.setattr(movers, "_pg_quiet_triggers", said)
+    eng = _Engine(hop=None, WRITE_WAYS=PostgresEngine.WRITE_WAYS,
+                  _d=lambda side, db: db)
+    eng._write_way = lambda db, tables=None: PostgresEngine._write_way(
+        eng, db, tables)
+    eng._load_skips_keys = lambda db: PostgresEngine._load_skips_keys(eng, db)
+    return eng
+
+
+_CYCLE = {"a": guarantees.Semantics("a", parents=("b",)),
+          "b": guarantees.Semantics("b", parents=("a",))}
+
+
+def test_a_postgres_cycle_loaded_as_a_replica_is_admitted(monkeypatch):
+    from migkit.engines.base import Engine
+    for quiet in ("session", "flag"):
+        dst = _pg_target(monkeypatch, quiet)
+        fks = Engine.foreign_keys_in_load(_Engine(dst_engine=dst, hop=None),
+                                          "db")
+        assert fks == "after", quiet
+        jp = jointplan.admitted(
+            jointplan.Plan(placed={}, makespan=1.0, order=("a", "b")),
+            dict(_CYCLE), fks)
+        assert jp.admitted and not jp.refused, quiet
+    # a load already inside its replica window says so without asking
+    dst = _pg_target(monkeypatch, SystemExit("never asked"))
+    dst._as_replica = {"db"}
+    assert Engine.foreign_keys_in_load(_Engine(dst_engine=dst, hop=None),
+                                       "db") == "after"
+
+
+def test_a_postgres_cycle_without_the_replica_rung_stops(monkeypatch):
+    from migkit.engines.base import Engine
+    for quiet in ("none", SystemExit("may not write as a replica")):
+        dst = _pg_target(monkeypatch, quiet)
+        fks = Engine.foreign_keys_in_load(_Engine(dst_engine=dst, hop=None),
+                                          "db")
+        assert fks == "during", quiet
+        jp = jointplan.admitted(
+            jointplan.Plan(placed={}, makespan=1.0, order=("a", "b")),
+            dict(_CYCLE), fks)
+        assert not jp.admitted
+        assert "point at each other" in jp.refused
+    # the target not readable: the keys are taken to hold
+    dst = _pg_target(monkeypatch, RuntimeError("no route"))
+    assert Engine.foreign_keys_in_load(_Engine(dst_engine=dst, hop=None),
+                                       "db") == "during"
+
+
+def test_mysql_says_its_keys_are_skipped_only_where_its_writers_skip_them():
+    from migkit.engines.mysql import MySQLEngine
+
+    def answer(v):
+        def keys_off(side, db):
+            assert side == "dst"
+            if isinstance(v, BaseException):
+                raise v
+            return v
+        return _Engine(_keys_off=keys_off)
+    assert MySQLEngine._load_skips_keys(answer(True), "db") is True
+    assert MySQLEngine._load_skips_keys(answer(False), "db") is False
+    assert MySQLEngine._load_skips_keys(answer(OSError("gone")), "db") \
+        is False
+
+
+def test_tied_tables_copied_side_by_side_only_under_a_shared_snapshot():
+    from migkit.engines.base import Engine
+    tied = {"orders": guarantees.Semantics("orders"),
+            "lines": guarantees.Semantics("lines", parents=("orders",))}
+    sched = guarantees.copy_schedule(4, False, False, "after durable")
+    ok, why = decide.admit(sched, jointplan.Tied(tied), "copy")
+    assert not ok and "read each as of its own moment" in why
+    ok, why = decide.admit(sched, jointplan.Tied(tied, snapshot=""), "copy")
+    assert not ok
+    shared = jointplan.Tied(tied, snapshot="one exported snapshot")
+    ok, why = decide.admit(sched, shared, "copy")
+    assert ok, why
+    assert guarantees.shared_read(shared) == "one exported snapshot"
+    assert guarantees.shared_read(dict(tied)) == ""
+    jp = jointplan.admitted(
+        jointplan.Plan(placed={}, makespan=1.0, order=("orders", "lines")),
+        shared, "after")
+    assert jp.as_evidence()["snapshot"] == "one exported snapshot"
+    jp = jointplan.admitted(
+        jointplan.Plan(placed={}, makespan=1.0, order=("orders", "lines")),
+        jointplan.Tied(tied), "after")
+    assert jp.as_evidence()["snapshot"] == "each range as of its own mark"
+    assert Engine.shared_snapshot(_Engine(), "db") == ""
+    assert Engine.shared_snapshot(_Engine(SHARED_SNAPSHOT=True), "db")
+
+
+def test_the_cross_engine_tail_says_why_its_lanes_were_refused():
+    from migkit.engines.hetero import HeteroEngine
+    dst = _Engine()
+    tail = _Engine(dst_engine=dst, hop=None)
+    said = []
+    dst.lanes_refused = "lines, orders are tied"
+    HeteroEngine._lanes_said(tail, "db", said.append)
+    assert len(said) == 1 and "lines, orders are tied" in said[0]
+    assert "applied as one" in said[0]
+    assert "lanes_refused" not in dst.__dict__
+    # the same reason again is not said twice; none is not said at all
+    dst.lanes_refused = "lines, orders are tied"
+    HeteroEngine._lanes_said(tail, "db", said.append)
+    HeteroEngine._lanes_said(tail, "db", said.append)
+    assert len(said) == 1
+    dst.lanes_refused = "codes spread over lanes"
+    HeteroEngine._lanes_said(tail, "db", said.append)
+    assert len(said) == 2 and "codes" in said[1]

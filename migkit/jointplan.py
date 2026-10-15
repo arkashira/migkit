@@ -204,6 +204,12 @@ class Plan:
     #: {table: guarantees.Semantics} it was admitted against
     semantics: dict = None
 
+    def snapshot(self):
+        """How the tables it was admitted against are read: at one moment
+        and how, or each as of its own mark."""
+        from .guarantees import shared_read
+        return shared_read(self.semantics) or "each range as of its own mark"
+
     def ways(self):
         """{table: way name}."""
         return {n: p.way for n, p in self.placed.items()}
@@ -220,6 +226,7 @@ class Plan:
                 "truth": self.truth, "tables_at_once": self.tables,
                 "admitted": self.admitted, "refused": self.refused,
                 "foreign_keys": self.fks,
+                "snapshot": self.snapshot(),
                 "tables": {n: {"way": p.way, "start": p.start,
                                "copied": p.copied, "indexed": p.indexed,
                                "checked": p.checked,
@@ -1221,10 +1228,28 @@ def semantics_of(eng, db, tables=None, tail=False):
     if not got:
         return None
     cat = drift.catalog_of(got)
-    return guarantees.read_hop(
-        cat, getattr(eng, "src_engine", None) or eng,
-        getattr(eng, "dst_engine", None) or eng, _target_catalog(eng, db),
+    src = getattr(eng, "src_engine", None) or eng
+    sem = guarantees.read_hop(
+        cat, src, getattr(eng, "dst_engine", None) or eng,
+        _target_catalog(eng, db),
         tables=set(tables) if tables is not None else None, tail=tail)
+    if sem is None:
+        return None
+    try:
+        how = src.shared_snapshot(db)
+    except Exception:  # noqa: BLE001 - not known: read as of each mark
+        how = ""
+    return Tied(sem, snapshot=how)
+
+
+class Tied(dict):
+    """{table: guarantees.Semantics} with how the source reads them at one
+    moment (`Engine.shared_snapshot`), "" where it does not: what the
+    copy's readers are admitted against (`guarantees.shared_read`)."""
+
+    def __init__(self, semantics=(), snapshot=""):
+        super().__init__(semantics)
+        self.snapshot = snapshot or ""
 
 
 def _target_catalog(eng, db):

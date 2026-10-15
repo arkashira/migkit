@@ -7181,18 +7181,35 @@ class Engine:
     #: between its connections, rather than each range as of its own mark
     SHARED_SNAPSHOT = False
 
+    def shared_snapshot(self, db):
+        """How the copy's readers of `db` read at one moment - one snapshot
+        the source shares between its connections - or "" where each range
+        is read as of its own mark. Said by the source, which is the side
+        that knows whether its readers adopt one (`SHARED_SNAPSHOT`)."""
+        if getattr(self, "SHARED_SNAPSHOT", False):
+            return "one snapshot the source shares between its connections"
+        return ""
+
     #: the target loads rows with its foreign keys not checked (a session
     #: that skips them), so no order between tables is owed for the load
     LOAD_SKIPS_KEYS = False
 
+    def _load_skips_keys(self, db):
+        """Whether this target's load of `db` writes without checking its
+        foreign keys - `LOAD_SKIPS_KEYS` here; an engine whose answer
+        depends on the way it loads and what its user may do reads them."""
+        return bool(getattr(self, "LOAD_SKIPS_KEYS", False))
+
     def foreign_keys_in_load(self, db):
         """Whether the target's foreign keys hold while the move loads
         `db`: "after" where a load's window took them off and keeps them
-        off (`indexes.ForeignKeyWindow`, its record) or the target loads
-        without checking them (`LOAD_SKIPS_KEYS`), else "during" - read
-        from the mover, never assumed by the planner."""
+        off (`indexes.ForeignKeyWindow`, its record) or the target's load
+        writes without checking them (`_load_skips_keys`), else "during" -
+        read from the mover, never assumed by the planner."""
         dst = getattr(self, "dst_engine", None) or self
-        if getattr(dst, "LOAD_SKIPS_KEYS", False):
+        skips = getattr(dst, "_load_skips_keys", None)
+        if (skips(db) if callable(skips)
+                else getattr(dst, "LOAD_SKIPS_KEYS", False)):
             return "after"
         hop = getattr(self, "hop", None)
         if hop is not None:

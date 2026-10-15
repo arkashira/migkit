@@ -10122,6 +10122,32 @@ copying tied tables one at a time narrows the window, it does not read them
 as of one moment; the tests are written and not yet run; no measured
 comparison at high concurrency.
 
+Status 2026-10-16 (W10B): keys and snapshots said truthfully.
+- PostgreSQL says whether its load checks foreign keys from the write way
+  its target user reaches (`PostgresEngine._write_way`, shared with
+  `load_window`): the replica rung (superuser, or allowed
+  `session_replication_role`) or a load already writing as a replica is
+  "after", so a key cycle is admitted; "as they are" or a refusal is
+  "during", and only then a cycle stops the move. MySQL says "after" where
+  its writers skip the checks (`_keys_off`). SQL Server's load keeps its
+  keys checked (only triggers go off), so "during" stays true there.
+- `Engine.shared_snapshot(db)` says how the source's readers read at one
+  moment; `jointplan.semantics_of` keeps it on what it read (`Tied`),
+  `guarantees.shared_read` admits tied tables copied side by side under it,
+  and the plan's evidence says which held (`snapshot`).
+- The cross-engine tail says and records why its lanes were refused
+  (`HeteroEngine._lanes_said`), once per reason.
+- Tests in tests/test_a_move_keeps_what_it_must.py (written, not run).
+
+Not done (W10B): no engine claims a shared snapshot yet - the builtin
+copy's range readers (owned by the copy methods) do not adopt the
+PostgreSQL exported snapshot (`_export_snapshot`, `_snapshot_preamble`
+exist and the consistent verify pass uses them); MySQL needs a fenced
+consistent snapshot per reader at one binlog position; SQL Server's
+snapshot isolation starts each reader's snapshot at its own first read, so
+it does not share a moment. The verify read of tied tables at one moment
+(`scanplan`) is not wired to `shared_snapshot`.
+
 
 ## P0-RESILIENCE-ALL: prevent, contain and recover from migration failures
 

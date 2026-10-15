@@ -1745,6 +1745,37 @@ select json_build_object(
                          lambda f: f["write refused"] or "the tables have"
                          " triggers or foreign keys"),)))
 
+    def _write_way(self, db, tables=None):
+        """The way rows are written into the target (`WRITE_WAYS`) climbed
+        from what its user may do, and why the target refused where none
+        is reached."""
+        from .. import decide, movers
+
+        def quiet():
+            try:
+                return movers._pg_quiet_triggers(self.hop, db, tables)
+            except SystemExit as e:
+                facts["write refused"] = str(e)
+                return "refused"
+        facts = decide.Facts({"write refused": ""}, quiet=quiet)
+        way = decide.climb(f"{db}: rows written into the target",
+                           self.WRITE_WAYS, facts)
+        return way, facts["write refused"]
+
+    def _load_skips_keys(self, db):
+        """Whether the load of `db` writes with the target's foreign keys
+        not checked: a load already writing as a replica, or the write way
+        its user reaches being the replica's - the keys' triggers do not
+        fire for a replica, so no order between tables is owed. Not
+        reached, or not readable, the keys hold during the load."""
+        if self._d("dst", db) in self.__dict__.get("_as_replica", ()):
+            return True
+        try:
+            way, _ = self._write_way(db)
+        except Exception:  # noqa: BLE001 - not known: the keys hold
+            return False
+        return way.path == "as a replica"
+
     def load_window(self, db, log=None, tables=None):
         """The target's connections as a replica while rows are written
         into it, which a trigger does not fire for - the way the bulk paths
@@ -1758,24 +1789,13 @@ select json_build_object(
         repair and a rollback's rows put back alike.
         """
         import contextlib
-
-        from .. import decide, movers
         on = self.__dict__.setdefault("_as_replica", set())
         name = self._d("dst", db)
         if name in on:
             return contextlib.nullcontext()
-
-        def quiet():
-            try:
-                return movers._pg_quiet_triggers(self.hop, db, tables)
-            except SystemExit as e:
-                facts["write refused"] = str(e)
-                return "refused"
-        facts = decide.Facts({"write refused": ""}, quiet=quiet)
-        way = decide.climb(f"{db}: rows written into the target",
-                           self.WRITE_WAYS, facts)
+        way, refused = self._write_way(db, tables)
         if way.rung is None:
-            raise SystemExit(facts["write refused"] or way.reason)
+            raise SystemExit(refused or way.reason)
         if way.path == "as they are":
             return contextlib.nullcontext()
 
