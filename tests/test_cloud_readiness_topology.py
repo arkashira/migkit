@@ -1,11 +1,5 @@
-import json
 import pytest
 
-from migkit.change_sheet import (
-    ChangeSheet,
-    ChangeTask,
-    create_from_plan,
-)
 from migkit.upgrade import (
     _mongo,
     _mssql,
@@ -13,51 +7,6 @@ from migkit.upgrade import (
     upgrade_goal_runner,
 )
 from migkit.engines.mysql import managed_retention
-
-
-# --- Item 433 (R25.2): Cloud Readiness Auditor ---
-
-def test_change_sheet_creation_and_cutover_gating():
-    sheet = create_from_plan("orders-hop", ticket_prefix="TICK")
-    assert sheet.service == "orders-hop"
-    assert len(sheet.tasks) > 0
-    assert sheet.tasks[0].ticket_id == "TICK-01"
-
-    # Initially not ready for cutover because tasks are pending
-    ready, reasons = sheet.is_ready_for_cutover()
-    assert not ready
-    assert any("expected completed" in r for r in reasons)
-
-    # Mark pre-cutover tasks completed but without evidence
-    sheet.update_progress("TICK-01", "completed")
-    ready, reasons = sheet.is_ready_for_cutover()
-    assert not ready
-    assert any("lacks evidence ID" in r for r in reasons)
-
-    # Complete all pre-cutover tasks with evidence IDs
-    for t in sheet.tasks:
-        if t.phase in ("assess", "plan", "copy", "verify"):
-            sheet.update_progress(t.ticket_id, "completed", evidence_id=f"EV-{t.ticket_id}-RUN01",
-                                  summary="passed 100% verification")
-
-    ready, reasons = sheet.is_ready_for_cutover()
-    assert ready
-    assert len(reasons) == 0
-
-    # Exports
-    md = sheet.export_markdown()
-    assert "# Enterprise Change Implementation Sheet" in md
-    assert "| **TICK-01** |" in md
-    assert "`EV-TICK-01-RUN01`" in md
-
-    json_text = sheet.export_json()
-    parsed = json.loads(json_text)
-    assert parsed["service"] == "orders-hop"
-    assert len(parsed["tasks"]) == len(sheet.tasks)
-
-    csv_text = sheet.export_csv()
-    assert "change_id,ticket_id,step_id" in csv_text
-    assert "TICK-01" in csv_text
 
 
 # --- Item 317 (R3.topo): Multi-Node Topologies ---

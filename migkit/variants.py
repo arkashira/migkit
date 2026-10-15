@@ -130,7 +130,7 @@ SIGNATURES = {
         # the distribution's. Its coordinator's statistics describe shell
         # tables whose rows live on the workers, so it is a brand of its
         # own and not the software whose change marker is trusted
-        # (`unchanged.TRUSTED_BRANDS`)
+        # (`unchanged.usable_brand`)
         ("citus", [("citus", "")], "citus"),
         ("postgres", [("version", "postgresql")], "server_version"),
     ],

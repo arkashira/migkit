@@ -1293,10 +1293,10 @@ class MySQLEngine(Engine):
 
     #: binlog events that carry rows (or a statement) the reader cannot
     #: open, and the setting that writes them. MySQL's compressed
-    #: transaction and MariaDB's compressed statement and version-1 rows
-    #: are read (`binlog_payload`); they are listed for the reader that
-    #: cannot, should one be given no way to, and for the one that finds
-    #: them unreadable. MariaDB's version-2 rows (169-171) are only listed.
+    #: transaction and MariaDB's compressed statement, version-1 and
+    #: version-2 rows are read (`binlog_payload`); they are listed for the
+    #: reader that cannot, should one be given no way to, and for the one
+    #: that finds them unreadable.
     COMPRESSED_ROWS = {0x28: "binlog_transaction_compression",
                        **{t: "log_bin_compress" for t in range(165, 172)}}
 

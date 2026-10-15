@@ -1,4 +1,4 @@
-"""Unit tests for scenarios and versions (Items 161, 162, 163, 65, and 445)."""
+"""Unit tests for scenarios (Items 161, 162, 163 and 65)."""
 import time
 import pytest
 
@@ -7,11 +7,6 @@ from migkit.scenarios import (
     StorageEngineTransformationHelper,
     ConsolidationCoordinator,
     SplittingCoordinator,
-)
-from migkit.migration_versions import (
-    ApplicationMigrationTool,
-    SchemaVersionDiscovery,
-    discover_and_compare,
 )
 
 
@@ -243,107 +238,3 @@ def test_schema_splitting_coordinator():
     assert len(plan.cross_references) == 1
     assert plan.cross_references[0]["fk_name"] == "fk_invoice_user"
     assert plan.cross_references[0]["action"] == "sever_physical_fk_and_decouple"
-
-
-def test_schema_version_discovery_all_tools():
-    tables = [
-        "users",
-        "flyway_schema_history",
-        "databasechangelog",
-        "alembic_version",
-        "django_migrations",
-        "schema_migrations",
-        "__efmigrationshistory",
-        "schemachange_history",
-        "_migkit_metadata",
-    ]
-    tools = SchemaVersionDiscovery.discover_tools(tables)
-    assert ApplicationMigrationTool.FLYWAY in tools
-    assert ApplicationMigrationTool.LIQUIBASE in tools
-    assert ApplicationMigrationTool.ALEMBIC in tools
-    assert ApplicationMigrationTool.DJANGO in tools
-    assert ApplicationMigrationTool.RAILS in tools
-    assert ApplicationMigrationTool.ENTITY_FRAMEWORK in tools
-    assert ApplicationMigrationTool.SCHEMACHANGE in tools
-
-
-def test_flyway_version_extraction_and_comparison():
-    flyway_rows_src = [
-        {"installed_rank": 1, "version": "1.0", "description": "init", "installed_on": "2026-01-01", "checksum": "abc1", "success": 1},
-        {"installed_rank": 2, "version": "1.1", "description": "add_orders", "installed_on": "2026-01-02", "checksum": "abc2", "success": 1},
-    ]
-    flyway_rows_dst = [
-        {"installed_rank": 1, "version": "1.0", "description": "init", "installed_on": "2026-01-01", "checksum": "abc1", "success": 1},
-        {"installed_rank": 2, "version": "1.1", "description": "add_orders", "installed_on": "2026-01-02", "checksum": "abc2", "success": 1},
-    ]
-
-    recs_src = SchemaVersionDiscovery.extract_records(ApplicationMigrationTool.FLYWAY, flyway_rows_src)
-    recs_dst = SchemaVersionDiscovery.extract_records(ApplicationMigrationTool.FLYWAY, flyway_rows_dst)
-    assert SchemaVersionDiscovery.get_head_version(recs_src) == "1.1"
-
-    cmp_res = SchemaVersionDiscovery.compare_tool_versions(ApplicationMigrationTool.FLYWAY, recs_src, recs_dst)
-    assert cmp_res.status == "ok"
-    assert cmp_res.source_count == 2
-    assert cmp_res.target_count == 2
-
-    # Target lacking 1.1
-    cmp_diff = SchemaVersionDiscovery.compare_tool_versions(ApplicationMigrationTool.FLYWAY, recs_src, recs_dst[:1])
-    assert cmp_diff.status == "diff"
-    assert len(cmp_diff.source_only) == 1
-    assert cmp_diff.source_only[0].version == "1.1"
-
-    # Checksum mismatch
-    dst_mismatched = [
-        flyway_rows_dst[0],
-        {"installed_rank": 2, "version": "1.1", "description": "add_orders", "installed_on": "2026-01-02", "checksum": "DIFF_CHECKSUM", "success": 1},
-    ]
-    recs_mismatched = SchemaVersionDiscovery.extract_records(ApplicationMigrationTool.FLYWAY, dst_mismatched)
-    cmp_chk = SchemaVersionDiscovery.compare_tool_versions(ApplicationMigrationTool.FLYWAY, recs_src, recs_mismatched)
-    assert cmp_chk.status == "diff"
-    assert len(cmp_chk.checksum_mismatches) == 1
-    assert cmp_chk.checksum_mismatches[0][0] == "1.1"
-
-
-def test_cutover_gate_verification():
-    src_records = {
-        ApplicationMigrationTool.ALEMBIC: SchemaVersionDiscovery.extract_records(
-            ApplicationMigrationTool.ALEMBIC, [{"version_num": "rev_002"}]
-        )
-    }
-    dst_synced = {
-        ApplicationMigrationTool.ALEMBIC: SchemaVersionDiscovery.extract_records(
-            ApplicationMigrationTool.ALEMBIC, [{"version_num": "rev_002"}]
-        )
-    }
-    ready, reasons = SchemaVersionDiscovery.verify_cutover_gate(src_records, dst_synced)
-    assert ready is True
-    assert len(reasons) == 0
-
-    dst_behind = {
-        ApplicationMigrationTool.ALEMBIC: SchemaVersionDiscovery.extract_records(
-            ApplicationMigrationTool.ALEMBIC, [{"version_num": "rev_001"}]
-        )
-    }
-    ready, reasons = SchemaVersionDiscovery.verify_cutover_gate(src_records, dst_behind)
-    assert ready is False
-    assert any("target lacks 1 migration" in r for r in reasons)
-
-
-def test_discover_and_compare_and_internal_objects():
-    src_tables = ["flyway_schema_history", "users", "_migkit_staging_tbl"]
-    dst_tables = ["flyway_schema_history", "users"]
-
-    def fetch_src(tbl):
-        return [{"installed_rank": 1, "version": "1.0", "description": "init", "success": True}]
-
-    def fetch_dst(tbl):
-        return [{"installed_rank": 1, "version": "1.0", "description": "init", "success": True}]
-
-    results = discover_and_compare(src_tables, dst_tables, fetch_src, fetch_dst)
-    assert len(results) == 1
-    assert results[0].tool == ApplicationMigrationTool.FLYWAY
-    assert results[0].status == "ok"
-
-    internals = SchemaVersionDiscovery.identify_migkit_internal_objects(src_tables, ["flyway_schema_history"])
-    assert len(internals) == 1
-    assert internals[0]["table"] == "_migkit_staging_tbl"

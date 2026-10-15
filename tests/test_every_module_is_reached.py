@@ -12,18 +12,16 @@ ENTRY = {
     "migkit.integrations",
     # started as a process of its own on the reading machine
     "migkit.runners", "migkit.runners.second_reader",
+    # run as a program by `cloudapi.Huawei` in the SDK's own environment
+    "migkit.huawei_sdk",
+    # read by `tools/gen_docs.py` into the manual, and run with -m
+    "migkit.troubleshooting",
 }
 
 #: unreached today, each owned by a ticket that wires or deletes it
 TODO = {
-    # TODO lead: wire `migkit plan` to the change sheet, or fold it away
-    "migkit.change_sheet",
-    # TODO T7: fold the parser into appversions (CRIT0 keep list)
-    "migkit.migration_versions",
     # TODO SCEN: the decided cases are wired into plan by that ticket
     "migkit.scenarios",
-    # TODO lead: found unreached by this lint, no ticket owns them yet
-    "migkit.huawei_sdk", "migkit.troubleshooting",
 }
 
 
