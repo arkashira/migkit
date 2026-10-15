@@ -17,8 +17,10 @@ transaction is the same object as one read from an uncompressed one.
 
 MariaDB's compressed events (`log_bin_compress`) are another format, read
 by `MariadbCompressedEvent` below: each is one event whose rows (or whose
-statement text) are compressed with zlib behind a one-byte header. The part
-in front of them is written as in the plain event, so it is read as there,
+statement text) are compressed with zlib behind a one-byte header. Rows
+come in two versions: the second's post-header goes on, after the flags,
+with the length of its extra data and the extra data. The part in front of
+the compressed part is written as in the plain event, so it is read as there,
 the compressed part is opened, and the plain event rebuilt from the two is
 handed to the reader's own parser. What is not known about the format is
 said where it is used; where what arrives is not what is expected, the
@@ -128,16 +130,18 @@ class TransactionPayloadEvent(BinLogEvent):
 
 
 #: MariaDB's compressed events, by type (log_event.h; the reader's own
-#: constants stop at 164): the statement, and the rows of version 1, each
-#: with the plain event it is written as
+#: constants stop at 164): the statement, and the rows of version 1 and 2,
+#: each with the plain event it is written as
 QUERY_COMPRESSED = 165
 ROWS_COMPRESSED = {166: 23, 167: 24, 168: 25}   # write, update, delete
-#: the version-2 rows (169-171) are not read: nothing has shown a MariaDB
-#: that writes them, and their post-header is not known to be MySQL's
-ROWS_COMPRESSED_V2 = (169, 170, 171)
-UPDATE_ROWS = 24
-#: bytes in front of a rows event's column count: table id and flags
+#: what MariaDB is remembered to write is version 1; version 2 is read so a
+#: log that holds it is not stopped on, and is not proved against a server
+ROWS_COMPRESSED_V2 = {169: 30, 170: 31, 171: 32}
+UPDATE_ROWS = (24, 31)
+#: bytes of a rows event's post-header: table id and flags, and in version
+#: 2 the length of the extra data that follows it
 ROWS_POST_HEADER = 8
+ROWS_POST_HEADER_V2 = 10
 #: bytes in front of a statement's status variables
 QUERY_POST_HEADER = 13
 
@@ -188,6 +192,32 @@ def unpack(block, limit=None):
     return out
 
 
+def _extra_end(plain, body):
+    """Where a version-2 rows event's extra data ends. Its length is the
+    two bytes after the flags, those included. The reader's parser reads
+    one piece of it - a tag, then for tag 0 a length that counts itself and
+    a format byte, for tag 1 one partition id (two for an update), for any
+    other the rest - and then the column count; extra data it would read
+    to another end is refused, as the rows would be read from the wrong
+    place."""
+    (size,) = struct.unpack("<H", body[8:10])
+    end = 8 + size
+    if size < 2 or end > len(body):
+        raise Unreadable(f"its extra data is said to be {size} bytes, which"
+                         " is not two or more and within the event")
+    extra = body[ROWS_POST_HEADER_V2:end]
+    if not extra or extra[0] > 1:
+        return end
+    if extra[0] == 0:
+        read = 1 + extra[1] if len(extra) > 1 and extra[1] >= 2 else None
+    else:
+        read = 5 if plain in UPDATE_ROWS else 3
+    if read != len(extra):
+        raise Unreadable(f"its extra data of {len(extra)} bytes is not one"
+                         f" piece of tag {extra[0]} as the parser reads it")
+    return end
+
+
 def opened(event_type, body, declared=None):
     """(the plain event's type, the plain event's body) of a MariaDB
     compressed event's body. `declared`: the post-header lengths the log
@@ -196,6 +226,8 @@ def opened(event_type, body, declared=None):
         plain, known = 2, QUERY_POST_HEADER
     elif event_type in ROWS_COMPRESSED:
         plain, known = ROWS_COMPRESSED[event_type], ROWS_POST_HEADER
+    elif event_type in ROWS_COMPRESSED_V2:
+        plain, known = ROWS_COMPRESSED_V2[event_type], ROWS_POST_HEADER_V2
     else:
         raise Unreadable(f"event type {event_type} is not a compressed"
                          " event of a layout known here")
@@ -211,8 +243,12 @@ def opened(event_type, body, declared=None):
             _, _, dblen, _, status = struct.unpack("<IIBHH", body[:13])
             at = known + status + dblen + 1
         else:
-            width, at = _packed(body, known)
-            at += (width + 7) // 8 * (2 if plain == UPDATE_ROWS else 1)
+            at = known if known == ROWS_POST_HEADER else \
+                _extra_end(plain, body)
+            width, at = _packed(body, at)
+            at += (width + 7) // 8 * (2 if plain in UPDATE_ROWS else 1)
+    except Unreadable:
+        raise
     except (struct.error, ValueError, IndexError) as e:
         raise Unreadable(f"the part in front of the compressed data cannot"
                          f" be read ({e})") from None
@@ -256,6 +292,6 @@ def register():
     from pymysqlreplication.packet import BinLogPacketWrapper
     table = BinLogPacketWrapper._BinLogPacketWrapper__event_map
     table[TRANSACTION_PAYLOAD] = TransactionPayloadEvent
-    for kind in (QUERY_COMPRESSED, *ROWS_COMPRESSED):
+    for kind in (QUERY_COMPRESSED, *ROWS_COMPRESSED, *ROWS_COMPRESSED_V2):
         table[kind] = MariadbCompressedEvent
     return TransactionPayloadEvent, MariadbCompressedEvent

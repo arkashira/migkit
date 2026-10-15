@@ -6,8 +6,9 @@ plain events a server writes (a table map, a write, an update and a
 delete, a statement), and the compressed ones are made from the plain ones
 with `zlib`: the header byte, the length, the stream, in the layout
 `binlog_payload` documents. What this proves is what migkit does with
-bytes laid out that way: a compressed event decodes to the rows the plain
-one does, through the replication library's own parser; one that is not
+bytes laid out that way: a compressed event, of rows version 1 or 2,
+decodes to the rows the plain one does, through the replication library's
+own parser; one that is not
 what a compressed event should be (corrupt stream, a different algorithm,
 a wrong length, bytes after the stream) is refused, and the tail stops on
 it with the position it was asked to read from.
@@ -16,7 +17,10 @@ What it does NOT prove: that a real MariaDB writes exactly this layout.
 Which part of an event is compressed (the rows after the column bitmaps,
 the statement after the database name), the byte order of the length and
 that MariaDB writes version-1 rows only are from the server's code as
-remembered, never read from a server in this work. The test that would
+remembered, never read from a server in this work. Version-2 rows
+(169-171), with the length of their extra data and the extra data after
+the flags, are built here by `_v2` and read; no server is known to write
+them. The test that would
 settle it, against a MariaDB with `log_bin_compress = ON`, is
 `test_a_compressed_binlog_is_read_or_stops_the_tail.py`
 (`test_mariadb_compressed_rows_are_read_by_the_tail`), and has not been
@@ -42,6 +46,8 @@ from migkit.engines.mysql import MySQLEngine  # noqa: E402
 
 PLAIN = {"query": 2, "write": 23, "update": 24, "delete": 25}
 PACKED = {"query": 165, "write": 166, "update": 167, "delete": 168}
+PLAIN_V2 = {"write": 30, "update": 31, "delete": 32}
+PACKED_V2 = {"write": 169, "update": 170, "delete": 171}
 LONG, VARCHAR = 3, 15
 
 
@@ -104,6 +110,19 @@ def _split(kind, body):
 def _compressed(kind, body, **how):
     keep, rest = _split(kind, body)
     return keep + _pack(rest, **how)
+
+
+def _v2(body, extra=b"", said=None):
+    """A version-1 rows body as version 2: after the table id and flags,
+    the length of the extra data (its two bytes counted) and the extra
+    data. `said`: a length other than the true one."""
+    size = 2 + len(extra) if said is None else said
+    return body[:8] + struct.pack("<H", size) + extra + body[8:]
+
+
+def _compressed_v2(kind, body, extra=b"", **how):
+    keep, rest = _split(kind, body)
+    return _v2(keep, extra) + _pack(rest, **how)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -244,10 +263,98 @@ def test_a_declared_post_header_that_differs_is_refused():
         bp.opened(166, b"\0" * 20, declared)
 
 
-def test_the_version_two_rows_are_not_read():
+def test_an_event_type_past_the_compressed_ones_is_not_read():
     with pytest.raises(bp.Unreadable, match="not a compressed event"):
-        bp.opened(169, b"\0" * 20)
-    assert 169 in MySQLEngine.COMPRESSED_ROWS
+        bp.opened(172, b"\0" * 20)
+    assert all(t in MySQLEngine.COMPRESSED_ROWS for t in range(165, 172))
+
+
+@pytest.mark.parametrize("kind", ["write", "update", "delete"])
+@pytest.mark.parametrize("checksum", [False, True])
+def test_a_version_two_compressed_rows_event_decodes_to_the_plain_one(
+        kind, checksum):
+    body = _plain_bodies()[kind]
+    v1 = _wrap(_frame(PLAIN[kind], body, checksum=checksum), _mapped(),
+               checksum)
+    plain = _wrap(_frame(PLAIN_V2[kind], _v2(body), checksum=checksum),
+                  _mapped(), checksum)
+    packed = _wrap(_frame(PACKED_V2[kind], _compressed_v2(kind, body),
+                          checksum=checksum), _mapped(), checksum)
+    assert isinstance(packed, bp.MariadbCompressedEvent)
+    assert packed.error is None, packed.error
+    [got] = packed.events
+    assert type(got) is type(plain) is type(v1)
+    assert got.event_type == PLAIN_V2[kind]
+    assert _rows(got) == _rows(plain) == _rows(v1) != []
+    assert (got.schema, got.table) == ("appdb", "t")
+
+
+@pytest.mark.parametrize("extra", [
+    b"\x00\x05\x00abc",          # tag 0: its length, format, three bytes
+    b"\x00\x02\x07",              # tag 0, nothing after the format byte
+    b"\x09" + b"z" * 12,           # a tag the parser reads to the end
+])
+def test_version_two_rows_with_extra_data_are_read(extra):
+    body = _plain_bodies()["update"]
+    plain = _wrap(_frame(31, _v2(body, extra)), _mapped())
+    packed = _wrap(_frame(170, _compressed_v2("update", body, extra)),
+                   _mapped())
+    assert packed.error is None, packed.error
+    [got] = packed.events
+    assert _rows(got) == _rows(plain) != []
+    [row] = _rows(got)
+    assert "alpha moved" in str(row["after_values"].values())
+    assert got.extra_data_length == 2 + len(extra)
+
+
+@pytest.mark.parametrize("make,why", [
+    (lambda keep, rest: _v2(keep, said=1) + _pack(rest), "said to be 1"),
+    (lambda keep, rest: _v2(keep, said=4000) + _pack(rest),
+     "said to be 4000"),
+    # two pieces: the parser reads the first, and would take the second
+    # for the column count
+    (lambda keep, rest: _v2(keep, b"\x00\x03\x00a\x00\x02\x00")
+     + _pack(rest), "not one piece of tag 0"),
+    (lambda keep, rest: _v2(keep, b"\x00\x01\x00") + _pack(rest),
+     "not one piece of tag 0"),
+    (lambda keep, rest: _v2(keep, b"\x01\x00") + _pack(rest),
+     "not one piece of tag 1"),
+    (lambda keep, rest: _v2(keep) + bytes([0x82])
+     + (len(rest) + 5).to_bytes(2, "big") + zlib.compress(rest),
+     "header says"),
+    (lambda keep, rest: _v2(keep) + _pack(rest, algorithm=2),
+     "algorithm 2"),
+    (lambda keep, rest: _v2(keep) + bytes([0x82])
+     + len(rest).to_bytes(2, "big") + b"\x78\x9c" + b"\xff" * 20,
+     "corrupt"),
+    (lambda keep, rest: _v2(keep) + _pack(rest) + b"tail", "follow"),
+])
+def test_a_version_two_event_that_is_not_one_is_refused_with_a_reason(
+        make, why):
+    body = _plain_bodies()["write"]
+    keep, rest = _split("write", body)
+    ev = _wrap(_frame(169, make(keep, rest)), _mapped())
+    assert isinstance(ev, bp.MariadbCompressedEvent)
+    assert ev.events == []
+    assert ev.error and why in ev.error, ev.error
+
+
+def test_a_version_one_body_under_a_version_two_type_is_refused():
+    """No extra-data length where version 2 has one: what is read as it is
+    the column count and a bitmap, and the rest does not open."""
+    body = _plain_bodies()["write"]
+    ev = _wrap(_frame(169, _compressed("write", body)), _mapped())
+    assert ev.events == [] and ev.error, ev.error
+
+
+def test_the_version_two_post_header_is_checked_against_the_log():
+    declared = [0] * 171
+    declared[168] = 8
+    body = _compressed_v2("write", _plain_bodies()["write"])
+    with pytest.raises(bp.Unreadable, match="declares a post-header of 8"):
+        bp.opened(169, body, declared)
+    declared[168] = 10
+    assert bp.opened(169, body, declared)[0] == 30
 
 
 def test_a_bomb_is_not_opened_beyond_what_the_block_says():
@@ -305,6 +412,39 @@ def test_a_compressed_statement_reaches_the_tail_as_a_statement():
     assert "add column w int" in got[0].query
 
 
+def test_the_tail_reads_version_two_compressed_rows_in_order():
+    b = _plain_bodies()
+    raws = [_frame(19, b["map"]),
+            _frame(169, _compressed_v2("write", b["write"], b"\x00\x02\x00")),
+            _frame(170, _compressed_v2("update", b["update"])),
+            _frame(168, _compressed("delete", b["delete"])),
+            _frame(171, _compressed_v2("delete", b["delete"])),
+            _frame(16, struct.pack("<Q", 6))]
+    from migkit.engines.mysql import COMMITTED
+    got = list(MySQLEngine._row_events(_stream(*raws)))
+    assert [type(e).__name__ for e in got] == [
+        "TableMapEvent", "WriteRowsEvent", "UpdateRowsEvent",
+        "DeleteRowsEvent", "DeleteRowsEvent", type(COMMITTED).__name__]
+    assert got[-1] is COMMITTED
+    assert _rows(got[3]) == _rows(got[4]) != []
+
+
+def test_the_tail_stops_on_a_version_two_one_it_cannot_open():
+    b = _plain_bodies()
+    keep, rest = _split("write", b["write"])
+    stream = _stream(_frame(19, b["map"]),
+                     _frame(169, _v2(keep) + _pack(rest, algorithm=3)))
+    [_, bad] = list(MySQLEngine._row_events(stream))
+    assert isinstance(bad, bp.MariadbCompressedEvent) and bad.error
+    with pytest.raises(SystemExit) as e:
+        MySQLEngine._compressed_stop(
+            {"log_file": "bin.000009", "log_pos": 777}, bad.event_type,
+            bad.error)
+    said = str(e.value)
+    assert "algorithm 3" in said and "bin.000009" in said, said
+    assert "777" in said and "log_bin_compress" in said, said
+
+
 def test_the_tail_stops_on_one_it_cannot_open_and_says_why():
     b = _plain_bodies()
     keep, rest = _split("write", b["write"])
@@ -337,7 +477,7 @@ def test_the_old_message_stays_for_a_reader_without_the_events():
 def test_the_events_are_registered_for_the_reader_by_type():
     table = BinLogPacketWrapper._BinLogPacketWrapper__event_map
     assert all(table[t] is bp.MariadbCompressedEvent
-               for t in (165, 166, 167, 168))
-    assert not any(t in table for t in (169, 170, 171))
+               for t in range(165, 172))
+    assert 172 not in table
     assert set(bp.register()) == {bp.TransactionPayloadEvent,
                                   bp.MariadbCompressedEvent}

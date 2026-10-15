@@ -1519,8 +1519,22 @@ different points.**
     NOT proved: that MariaDB writes this layout (which part is compressed,
     the length's byte order, version-1 rows only) - it is from the
     server's code as remembered; the test against MariaDB 11 is written
-    and not run. The version-2 rows (169-171) are not read and still stop
-    the tail. Row 6.mariadb.
+    and not run. Row 6.mariadb.
+  * *MariaDB version-2 rows (2026-10-16):* the compressed rows 169-171 are
+    opened as version 1 is: after the table id and flags, the length of
+    the extra data (its two bytes counted) and the extra data, then the
+    column count and bitmaps, then the compressed block. The plain
+    version-2 event (30-32) goes to the reader's parser. Extra data the
+    parser would read to another end than the length says (two pieces, a
+    tag-0 length under 2, a short partition id) is refused, as are a
+    length under 2 or past the event, and the stream checks of version 1
+    (`tests/test_mariadb_compressed_events_are_read_or_stop_the_tail.py`).
+    *Not done:* no server is known to write 169-171 (MariaDB writes
+    version 1 as remembered), so version 2 is proved with synthetic events
+    only. The server test (`test_mariadb_compressed_rows_are_read_by_the_tail`)
+    now also checks the server's declared post-headers for 165-171 (13, 8,
+    10) and that every compressed event in the log opens; it is written
+    and not run, and neither are the synthetic tests yet (batch rule).
 * **The largest row against the target's `max_allowed_packet` (MySQL):**
   measured on 8.4. An 8 MiB value loaded into a target with a 4 MiB packet
   stopped the copy with `Lost connection` and nothing else. An 8 MiB value

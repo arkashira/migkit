@@ -11,7 +11,8 @@ MySQL's compressed transaction is now opened by migkit itself
 (`binlog_payload`): its events are decompressed and parsed as if they had
 arrived on their own, and the tail and the delta read them like any other.
 MariaDB's compressed statements and rows are another format, read by
-`binlog_payload.MariadbCompressedEvent` (zlib behind a one-byte header).
+`binlog_payload.MariadbCompressedEvent` (zlib behind a one-byte header),
+rows of version 1 (166-168) and version 2 (169-171).
 The synthetic proof of that, with no server, is in
 `test_mariadb_compressed_events_are_read_or_stop_the_tail.py`. The test
 below against a real MariaDB is written but NOT YET RUN: it is what settles
@@ -170,7 +171,14 @@ def test_assess_passes_the_setting_on_mysql(mysql):
 def test_mariadb_compressed_rows_are_read_by_the_tail(mariadb):
     """Not yet run against a server. A rows event of more than the
     configured minimum length is written compressed (`log_bin_compress`),
-    and the tail reads the insert and the delete from it."""
+    and the tail reads the insert, the update and the delete from it.
+    The server's own format description settles the post-header of every
+    compressed type, version 2 (169-171) with it; each compressed event
+    the log holds, of either version, opens without an error."""
+    from pymysqlreplication import BinLogStreamReader
+    from pymysqlreplication.event import FormatDescriptionEvent
+
+    from migkit import binlog_payload as bp
     eng = _eng(MARIA_PORT)
     token = eng.change_point("src", "appdb")
     _sql(MARIA, "mariadb", "insert into appdb.t values"
@@ -182,6 +190,25 @@ def test_mariadb_compressed_rows_are_read_by_the_tail(mariadb):
     assert [(c["op"], c["key"]["id"]) for c in got] == [
         ("insert", 1), ("update", 1), ("delete", 1)], got
     assert got[1]["values"]["v"] == "b" * 200, got[1]
+    stream = BinLogStreamReader(
+        connection_settings={"host": "127.0.0.1", "port": MARIA_PORT,
+                             "user": "root", "passwd": "test"},
+        server_id=4381, blocking=False, resume_stream=True,
+        log_file=token["log_file"], log_pos=token["log_pos"],
+        only_events=[FormatDescriptionEvent, *bp.register()])
+    try:
+        events = list(stream)
+    finally:
+        stream.close()
+    fde = next(e for e in events
+               if isinstance(e, FormatDescriptionEvent))
+    assert tuple(fde.post_header_len[164:171]) == (
+        bp.QUERY_POST_HEADER, *[bp.ROWS_POST_HEADER] * 3,
+        *[bp.ROWS_POST_HEADER_V2] * 3), fde.post_header_len[164:171]
+    packed = [e for e in events if isinstance(e, bp.MariadbCompressedEvent)]
+    kinds = {e.event_type for e in packed}
+    assert kinds & {*bp.ROWS_COMPRESSED, *bp.ROWS_COMPRESSED_V2}, kinds
+    assert [e.error for e in packed] == [None] * len(packed), packed
 
 
 def test_assess_passes_the_setting_on_mariadb(mariadb):
