@@ -1,0 +1,179 @@
+{
+  "note": "Internal. What each wrapped tool can do, taken from its pinned release's documentation, set against the tool-use registry (migkit/tooluse.py). A capability names the registry options it covers as 'command option' (command empty for a program without subcommands); its state is computed, never written. 'candidate' marks a capability that would deepen the rung named in 'rung' and is worth a backlog row while it is unused.",
+  "import_aliases": {
+    "boto3": "aws-sdk", "botocore": "aws-sdk", "azure": "azure-sdk",
+    "google": "google-api-client", "googleapiclient": "google-api-client",
+    "data_validation": "dvt", "gremlin_python": "gremlinpython",
+    "Tea": "alibabacloud-sdk", "alibabacloud_credentials": "alibabacloud-sdk",
+    "alibabacloud_tea_openapi": "alibabacloud-sdk",
+    "snowflake": "snowflake-connector-python", "sqeleton": "reladiff",
+    "mapepire_python": "mapepire", "ibm_cloud_sdk_core": "ibm-cloud-sdk-core",
+    "argon2": "argon2-cffi", "tencentcloud": "tencentcloud-sdk"
+  },
+  "program_aliases": {"data-validation": "dvt"},
+  "system_programs": {
+    "/bin/sh": "operating system shell", "bash": "operating system shell",
+    "/usr/libexec/java_home": "locates the Java runtime other tools run on",
+    "java": "runtime other tools run on",
+    "apt-get": "operating system package manager",
+    "dnf": "operating system package manager",
+    "brew": "operating system package manager",
+    "uv": "Python environment manager that installs other tools",
+    "uvx": "Python environment manager that installs other tools",
+    "docker": "container runtime the sandbox and images run on",
+    "ssh-keygen": "operating system key tool",
+    "netstat": "operating system socket listing"
+  },
+  "tools": {
+    "dvt": {
+      "release": "data-validation 8.9.3",
+      "capabilities": [
+        {"id": "row-hash", "what": "row validation by hash of the comparison fields", "covers": ["--hash", "--comparison-fields"], "candidate": false},
+        {"id": "grouped", "what": "aggregates per group, to find where a sum differs", "covers": ["--grouped-columns"], "candidate": false},
+        {"id": "sample", "what": "random-row sampling as a quick first look", "covers": ["--use-random-row"], "candidate": false},
+        {"id": "partitions", "what": "table partitions generated as batch files so a big table is compared range by range in parallel", "covers": ["generate-table-partitions", "--partition-num", "--parts-per-file"], "candidate": true, "rung": "R8 narrowing a differing table to a key range (verify ladder)"},
+        {"id": "custom-query", "what": "row validation of a query on each side, for a view or a keyless source", "covers": ["validate custom-query row"], "candidate": true, "rung": "verify of views and keyless sources (verify ladder)"},
+        {"id": "schema", "what": "schema validation of columns and types", "covers": ["validate schema"], "candidate": false},
+        {"id": "tolerance", "what": "a tolerance for aggregates that drift", "covers": ["--threshold"], "candidate": false}
+      ]
+    },
+    "reladiff": {
+      "release": "reladiff 0.6",
+      "capabilities": [
+        {"id": "bisect", "what": "bisection factor and threshold for the checksum tree", "covers": ["--bisection-factor", "--bisection-threshold"], "candidate": false},
+        {"id": "threads", "what": "parallel readers", "covers": ["--threads"], "candidate": false},
+        {"id": "empty", "what": "tolerating an empty table on one side", "covers": ["--allow-empty-tables"], "candidate": true, "rung": "verify of tables the generic engine reads (verify ladder)"},
+        {"id": "sort", "what": "skipping the sort of the result", "covers": ["--skip-sort-results"], "candidate": true, "rung": "row-compare cost on wide differences (verify ladder)"},
+        {"id": "age-window", "what": "comparing only rows updated within a window", "covers": ["--update-column", "--min-age", "--max-age"], "candidate": false}
+      ]
+    },
+    "pgcopydb": {
+      "release": "pgcopydb 0.17",
+      "capabilities": [
+        {"id": "binary-copy", "what": "binary COPY between servers of one major version, skipping text conversion", "covers": ["clone --use-copy-binary"], "candidate": true, "rung": "same-engine bulk copy (bulk ladder)"},
+        {"id": "split", "what": "tables split by ctid across parallel jobs", "covers": ["clone --split-tables-larger-than", "clone --split-max-parts", "clone --table-jobs", "clone --skip-split-by-ctid"], "candidate": false},
+        {"id": "follow-resume", "what": "resuming a change-stream leg from its saved position", "covers": ["follow --resume"], "candidate": true, "rung": "P0-RESUME-ALL resume of a stream leg (stream ladder)"},
+        {"id": "compare-json", "what": "the second reading in a structured form", "covers": ["compare data --json"], "candidate": true, "rung": "second-reading verdict detail (verify ladder)"},
+        {"id": "index-jobs", "what": "parallel index builds", "covers": ["clone --index-jobs"], "candidate": false},
+        {"id": "blobs", "what": "large object copy", "covers": ["copy blobs --source", "clone --large-objects-jobs"], "candidate": false}
+      ]
+    },
+    "mydumper": {
+      "release": "mydumper 0.16",
+      "capabilities": [
+        {"id": "stream", "what": "streaming the dump straight into the load, with no dump directory", "covers": ["--stream"], "candidate": true, "rung": "disk-pressured MySQL bulk copy (bulk ladder)"},
+        {"id": "partitions", "what": "a partitioned table dumped per partition", "covers": ["--split-partitions"], "candidate": true, "rung": "chunking of partitioned MySQL tables (bulk ladder)"},
+        {"id": "checksums", "what": "a checksum per table at dump time", "covers": ["--checksum-all"], "candidate": false},
+        {"id": "progress", "what": "machine-readable progress", "covers": ["--machine-log-json"], "candidate": false}
+      ]
+    },
+    "myloader": {
+      "release": "mydumper 0.16",
+      "capabilities": [
+        {"id": "optimize-keys", "what": "secondary keys built after the rows are in", "covers": ["--optimize-keys"], "candidate": true, "rung": "MySQL bulk load index handling (bulk ladder)"},
+        {"id": "resume", "what": "resuming a stopped load", "covers": ["--resume"], "candidate": true, "rung": "P0-RESUME-ALL resume of a bulk load"},
+        {"id": "checksum", "what": "checksum compared after the load", "covers": ["--checksum", "--checksum-all"], "candidate": false}
+      ]
+    },
+    "mysqlsh": {
+      "release": "MySQL Shell 8.4",
+      "capabilities": [
+        {"id": "defer-indexes", "what": "indexes built after the load", "covers": ["deferTableIndexes"], "candidate": true, "rung": "MySQL bulk load index handling (bulk ladder)"},
+        {"id": "max-rate", "what": "a ceiling on the load's throughput", "covers": ["maxRate"], "candidate": true, "rung": "throttle of the shell's own copy (throttle rung)"},
+        {"id": "overlap", "what": "loading while the dump is still being written", "covers": ["waitDumpTimeout"], "candidate": true, "rung": "phases overlapped by measured time (bulk ladder)"},
+        {"id": "upgrade-check", "what": "upgrade compatibility checks", "covers": ["util.checkForServerUpgrade"], "candidate": false},
+        {"id": "dump-load", "what": "parallel schema dump and load", "covers": ["util.dump_schemas + util.load_dump"], "candidate": false}
+      ]
+    },
+    "pt-table-checksum": {
+      "release": "Percona Toolkit 3.6",
+      "capabilities": [
+        {"id": "chunk-sizing", "what": "its own adaptive chunk time and size", "covers": ["--chunk-time", "--chunk-size", "--chunk-size-limit"], "candidate": true, "rung": "replica checksum chunk size from measured lag (replica-proof rung)"},
+        {"id": "resume", "what": "resuming a checksum run", "covers": ["--resume"], "candidate": true, "rung": "P0-RESUME-ALL resume of a replica proof"},
+        {"id": "lag", "what": "pausing on replica lag and server load", "covers": ["--max-lag", "--max-load"], "candidate": false}
+      ]
+    },
+    "redis-shake": {
+      "release": "RedisShake 4",
+      "capabilities": [
+        {"id": "managed-psync", "what": "replica protocol behind a managed service's own command", "covers": ["advanced aws_psync"], "candidate": true, "rung": "managed Redis snapshot ladder (snapshot ladder)"},
+        {"id": "sentinel-target", "what": "a target reached through its sentinel", "covers": ["redis_writer sentinel", "redis_writer master"], "candidate": true, "rung": "highly available Redis target (target-write rung)"},
+        {"id": "key-filter", "what": "allow and block lists of keys and commands", "covers": ["filter allow_key_prefix", "filter block_key_prefix", "filter allow_command"], "candidate": false},
+        {"id": "empty-first", "what": "emptying the target before the sync", "covers": ["advanced empty_db_before_sync"], "candidate": false}
+      ]
+    },
+    "dsbulk": {
+      "release": "DSBulk 1.11",
+      "capabilities": [
+        {"id": "compression", "what": "compressed JSON files between read-out and load", "covers": ["unload --connector.json.compression", "load --connector.json.compression"], "candidate": true, "rung": "disk-pressured Cassandra copy (bulk ladder)"},
+        {"id": "paging", "what": "continuous paging on sources that support it", "covers": ["unload --executor.continuousPaging.enabled"], "candidate": true, "rung": "Cassandra-compatible read-out speed (bulk ladder)"},
+        {"id": "rate", "what": "a fixed rate ceiling", "covers": ["load --executor.maxPerSecond", "unload --executor.maxPerSecond"], "candidate": false},
+        {"id": "timestamps", "what": "write timestamps and TTL kept", "covers": ["count --schema.preserveTimestamp", "count --schema.preserveTtl"], "candidate": false}
+      ]
+    },
+    "connect-mirror-maker.sh": {
+      "release": "Kafka 3.9",
+      "capabilities": [
+        {"id": "compression", "what": "producer batch compression", "covers": ["worker producer.compression.type"], "candidate": true, "rung": "compression probed per leg (stream ladder)"},
+        {"id": "client-cert", "what": "a client certificate for a secured cluster", "covers": ["worker ssl.keystore.location"], "candidate": true, "rung": "secured Kafka source and target (stream ladder)"},
+        {"id": "refresh", "what": "refreshing topics and groups while the mirror runs", "covers": ["flow refresh.topics.interval.seconds", "flow sync.group.offsets.interval.seconds"], "candidate": true, "rung": "long-running Kafka follow (stream ladder)"},
+        {"id": "acls", "what": "topic access rules carried", "covers": ["flow sync.topic.acls.enabled"], "candidate": false},
+        {"id": "exactly-once", "what": "exactly-once source support", "covers": ["worker exactly.once.source.support"], "candidate": false}
+      ]
+    },
+    "debezium": {
+      "release": "Debezium 3.0",
+      "capabilities": [
+        {"id": "snapshot-threads", "what": "parallel first-read threads and fetch size", "covers": ["mysql snapshot.max.threads", "postgres snapshot.max.threads", "mysql snapshot.fetch.size", "postgres snapshot.fetch.size"], "candidate": true, "rung": "first read of a change-capture pipeline sized from measurements (stream ladder)"},
+        {"id": "incremental-snapshot", "what": "chunked re-read beside the live stream", "covers": ["mysql incremental.snapshot.chunk.size", "postgres incremental.snapshot.chunk.size"], "candidate": true, "rung": "repair re-read without a stop (repair rung)"},
+        {"id": "reduction-buffer", "what": "several changes to one key in a batch reduced to the last", "covers": ["jdbc-sink use.reduction.buffer"], "candidate": true, "rung": "change apply throughput on hot keys (apply ladder)"},
+        {"id": "tls-stores", "what": "trust and key stores for a secured source", "covers": ["mysql database.ssl.truststore", "mysql database.ssl.keystore"], "candidate": true, "rung": "secured MySQL change capture (stream ladder)"},
+        {"id": "keep-alive", "what": "connection keep-alive on a long idle stream", "covers": ["mysql connect.keep.alive", "postgres database.tcpKeepAlive"], "candidate": true, "rung": "idle-stream survival behind proxies (stream ladder)"},
+        {"id": "masking", "what": "column masking and hashing in flight", "covers": ["mysql column.mask.hash.", "postgres column.mask.hash."], "candidate": false},
+        {"id": "signals", "what": "ad-hoc signals to the running connector", "covers": ["signals log", "signals stop-snapshot"], "candidate": false}
+      ]
+    },
+    "OpenLogReplicator": {
+      "release": "OpenLogReplicator 1.8",
+      "capabilities": [
+        {"id": "protobuf", "what": "a binary change format", "covers": ["config source.format.type protobuf"], "candidate": true, "rung": "Oracle redo reader throughput (change-capture rung)"},
+        {"id": "flags", "what": "checkpoint records on request", "covers": ["config source.flags"], "candidate": false}
+      ]
+    },
+    "pg_upgrade": {
+      "release": "PostgreSQL 18",
+      "capabilities": [
+        {"id": "swap", "what": "swapping directories instead of copying files", "covers": ["--swap"], "candidate": true, "rung": "in-place upgrade file carrying (upgrade ladder)"},
+        {"id": "copy-file-range", "what": "server-side file copy", "covers": ["--copy-file-range"], "candidate": true, "rung": "in-place upgrade file carrying (upgrade ladder)"}
+      ]
+    },
+    "hypopg": {
+      "release": "hypopg 1.4",
+      "capabilities": [
+        {"id": "hide-index", "what": "hiding an existing index to price its removal", "covers": ["hypopg_hide_index", "hypopg_unhide_index"], "candidate": true, "rung": "index advice on unused target indexes (advice rung)"}
+      ]
+    },
+    "datacompy": {
+      "release": "datacompy 0.16",
+      "capabilities": [
+        {"id": "polars", "what": "a compare on columnar frames", "covers": ["PolarsCompare"], "candidate": true, "rung": "row explanation memory and speed (verify ladder)"},
+        {"id": "mismatch", "what": "every differing value and per-column statistics", "covers": ["all_mismatch", "column_stats"], "candidate": false}
+      ]
+    },
+    "reindex-from-snapshot": {
+      "release": "Reindex-from-Snapshot 2.x",
+      "capabilities": [
+        {"id": "signed-target", "what": "a target signed by the cloud's own credentials", "covers": ["--target-aws-region", "--target-aws-service-signing-name"], "candidate": true, "rung": "managed search targets (target-write rung)"},
+        {"id": "ca", "what": "a target checked against a given authority", "covers": ["--target-cacert"], "candidate": true, "rung": "secured search targets (target-write rung)"},
+        {"id": "bulk-size", "what": "documents per bulk request", "covers": ["--documents-per-bulk-request", "--documents-size-per-bulk-request"], "candidate": true, "rung": "bulk sizing from the target's measured refusals (apply ladder)"}
+      ]
+    },
+    "dynamodb-s3": {
+      "release": "DynamoDB API 2012-08-10",
+      "capabilities": [
+        {"id": "incremental-export", "what": "an incremental export between two times", "covers": ["ExportTableToPointInTime IncrementalExportSpecification"], "candidate": true, "rung": "DynamoDB catch-up after the copy (stream ladder)"},
+        {"id": "bucket-owner", "what": "a bucket of another account", "covers": ["ExportTableToPointInTime S3BucketOwner"], "candidate": true, "rung": "cross-account DynamoDB export (snapshot ladder)"}
+      ]
+    }
+  }
+}

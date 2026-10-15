@@ -501,6 +501,53 @@ each offers:
   `capabilities.matrix`, and a feature not used has a reason written
   (measured slower, unsafe, or not yet).
 
+<!-- whole-use:begin (written by tools/whole_use.py) -->
+
+*0f whole-use audit (2026-10-16, written by `tools/whole_use.py`; the full table is `docs/research/whole-use-2026-10-16.md`).*
+
+* `0f.dvt.partitions` (unused): table partitions generated as batch files so a big table is compared range by range in parallel would strengthen R8 narrowing a differing table to a key range (verify ladder).
+* `0f.dvt.custom-query` (unused): row validation of a query on each side, for a view or a keyless source would strengthen verify of views and keyless sources (verify ladder).
+* `0f.reladiff.empty` (unused): tolerating an empty table on one side would strengthen verify of tables the generic engine reads (verify ladder).
+* `0f.reladiff.sort` (unused): skipping the sort of the result would strengthen row-compare cost on wide differences (verify ladder).
+* `0f.pgcopydb.binary-copy` (unused): binary COPY between servers of one major version, skipping text conversion would strengthen same-engine bulk copy (bulk ladder).
+* `0f.pgcopydb.follow-resume` (unused): resuming a change-stream leg from its saved position would strengthen P0-RESUME-ALL resume of a stream leg (stream ladder).
+* `0f.pgcopydb.compare-json` (unused): the second reading in a structured form would strengthen second-reading verdict detail (verify ladder).
+* `0f.mydumper.stream` (unused): streaming the dump straight into the load, with no dump directory would strengthen disk-pressured MySQL bulk copy (bulk ladder).
+* `0f.mydumper.partitions` (unused): a partitioned table dumped per partition would strengthen chunking of partitioned MySQL tables (bulk ladder).
+* `0f.myloader.optimize-keys` (unused): secondary keys built after the rows are in would strengthen MySQL bulk load index handling (bulk ladder).
+* `0f.myloader.resume` (unused): resuming a stopped load would strengthen P0-RESUME-ALL resume of a bulk load.
+* `0f.mysqlsh.defer-indexes` (unused): indexes built after the load would strengthen MySQL bulk load index handling (bulk ladder).
+* `0f.mysqlsh.max-rate` (unused): a ceiling on the load's throughput would strengthen throttle of the shell's own copy (throttle rung).
+* `0f.mysqlsh.overlap` (unused): loading while the dump is still being written would strengthen phases overlapped by measured time (bulk ladder).
+* `0f.pt-table-checksum.chunk-sizing` (unused): its own adaptive chunk time and size would strengthen replica checksum chunk size from measured lag (replica-proof rung).
+* `0f.pt-table-checksum.resume` (unused): resuming a checksum run would strengthen P0-RESUME-ALL resume of a replica proof.
+* `0f.redis-shake.managed-psync` (unused): replica protocol behind a managed service's own command would strengthen managed Redis snapshot ladder (snapshot ladder).
+* `0f.redis-shake.sentinel-target` (unused): a target reached through its sentinel would strengthen highly available Redis target (target-write rung).
+* `0f.dsbulk.compression` (unused): compressed JSON files between read-out and load would strengthen disk-pressured Cassandra copy (bulk ladder).
+* `0f.dsbulk.paging` (unused): continuous paging on sources that support it would strengthen Cassandra-compatible read-out speed (bulk ladder).
+* `0f.connect-mirror-maker.sh.compression` (unused): producer batch compression would strengthen compression probed per leg (stream ladder).
+* `0f.connect-mirror-maker.sh.client-cert` (unused): a client certificate for a secured cluster would strengthen secured Kafka source and target (stream ladder).
+* `0f.connect-mirror-maker.sh.refresh` (unused): refreshing topics and groups while the mirror runs would strengthen long-running Kafka follow (stream ladder).
+* `0f.debezium.snapshot-threads` (unused): parallel first-read threads and fetch size would strengthen first read of a change-capture pipeline sized from measurements (stream ladder).
+* `0f.debezium.incremental-snapshot` (unused): chunked re-read beside the live stream would strengthen repair re-read without a stop (repair rung).
+* `0f.debezium.reduction-buffer` (unused): several changes to one key in a batch reduced to the last would strengthen change apply throughput on hot keys (apply ladder).
+* `0f.debezium.tls-stores` (unused): trust and key stores for a secured source would strengthen secured MySQL change capture (stream ladder).
+* `0f.debezium.keep-alive` (unused): connection keep-alive on a long idle stream would strengthen idle-stream survival behind proxies (stream ladder).
+* `0f.OpenLogReplicator.protobuf` (unused): a binary change format would strengthen Oracle redo reader throughput (change-capture rung).
+* `0f.pg_upgrade.swap` (unused): swapping directories instead of copying files would strengthen in-place upgrade file carrying (upgrade ladder).
+* `0f.pg_upgrade.copy-file-range` (unused): server-side file copy would strengthen in-place upgrade file carrying (upgrade ladder).
+* `0f.hypopg.hide-index` (unused): hiding an existing index to price its removal would strengthen index advice on unused target indexes (advice rung).
+* `0f.datacompy.polars` (unused): a compare on columnar frames would strengthen row explanation memory and speed (verify ladder).
+* `0f.reindex-from-snapshot.signed-target` (unused): a target signed by the cloud's own credentials would strengthen managed search targets (target-write rung).
+* `0f.reindex-from-snapshot.ca` (unused): a target checked against a given authority would strengthen secured search targets (target-write rung).
+* `0f.reindex-from-snapshot.bulk-size` (unused): documents per bulk request would strengthen bulk sizing from the target's measured refusals (apply ladder).
+* `0f.dynamodb-s3.incremental-export` (unused): an incremental export between two times would strengthen DynamoDB catch-up after the copy (stream ladder).
+* `0f.dynamodb-s3.bucket-owner` (unused): a bucket of another account would strengthen cross-account DynamoDB export (snapshot ladder).
+* `0f.account.library`: 44 libraries are called with no tool-use account (each written option by option, as the others are): `airflow`, `bson`, `certifi`, `click`, `clickhouse_connect`, `confluent_kafka`, `croniter`, `cryptography`, `dagster`, `duckdb`, `ebcdic`, `fastavro`, `google_crc32c`, `grpc`, `hypothesis`, `ibm_db`, `ibm_db_dbi`, `kafka`, `keyring`, `lxml`, `lz4`, `mssql_py_core`, `mssql_python`, `numpy`, `opensearchpy`, `oracledb`, `packaging`, `pandas`, `pglast`, `psutil`, `psycopg`, `psycopg2`, `pyarrow`, `pymongo`, `pymssql`, `pymysql`, `pymysqlreplication`, `pyodbc`, `requests`, `results`, `rich`, `sqlglot`, `yaml`, `z3`.
+* `0f.account.program`: 7 programs are called with no tool-use account (each written option by option, as the others are): `atlas`, `liquibase`, `mysql`, `mysqldump`, `pt-table-sync`, `vacuumdb`, `vault`.
+
+<!-- whole-use:end -->
+
 **0. Choose per table, from measured facts, and combine.**
 
 *Started (2026-09-24):* `migkit/planner.py` makes one decision per table,

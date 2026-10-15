@@ -18,6 +18,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/imports.py` - another tool's task read as a hop (DMS, DTS, DRS, Google, Azure, connectors, LOAD files)
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
+- `tools/whole_use.py` - every wrapped program and library used, unused or topped up, written from the tool-use registry
 
 ## `migkit/` (174 modules)
 
