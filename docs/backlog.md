@@ -3909,6 +3909,25 @@ they are three cross-cutting gaps, not 26 engine problems:
   documentation, from memory or from a sample (a sampled maximum cannot
   certify an exact bound), so the cell stays not yet until they are
   measured (P0-PARITY.lv.new).
+  *Not done (2026-10-16), read for the next pass:* `pieces.PIECE` is a
+  constant every engine reads, and `ReadPlan` uses it as both the
+  threshold and the piece, so a piece decided per engine needs one
+  sizing in `decide` (limits read off the server where it says them:
+  TiDB `@@max_allowed_packet` and the entry size limit, CockroachDB
+  `kv.raft.command.max_size`, `sql.conn.max_read_buffer_message_size`
+  and `sql.guardrails.max_row_size_err`; DSQL, Cosmos DB and Couchbase
+  have only documented limits) and the rate measured per piece. TiDB
+  reads through MySQL's `_read_query`, not `DbapiRows`, and MySQL's `_q`
+  is a query, not a quote, so `ReadPlan` cannot run on it without a view
+  of the engine. CockroachDB and DSQL write by their own `neutral_write`
+  (UPSERT, ON CONFLICT), which skips `written_in_pieces`. Teradata needs
+  a first-piece expression in place of the CASE `ReadPlan` uses.
+  Couchbase's subdocument API has no substring and no string append,
+  so a value past one operation can only go field by field. Cosmos DB
+  writes transactional batches cut by count only (the service takes
+  2 MB a batch); linked piece items change what the application reads
+  on the target and need the user's yes. None of the six has a server
+  profile in `tests/servers.py`. TiDB's cell is `untested` at 3c33f9a.
 * **Read-only target** (BAR-3) - not yet on 24: the target kept from
   the application while migkit moves into it, or its writes named - the
   same hold-writes primitives the cutover's freezes use on the source
