@@ -1052,6 +1052,7 @@ def _classify_finding(r):
         "defect_class": "replication_artifact" if is_artifact else "application_defect",
         "is_replication_artifact": is_artifact,
         **({"artifact_origin": origin} if origin else {}),
+        **({"window": r["window"]} if r.get("window") else {}),
         "detail": r.get("detail", ""),
         "report": r.get("report", ""),
         "fix_hint": r.get("fix_hint", ""),
@@ -1172,3 +1173,12 @@ def unchanged_since(hop, records):
     if hasattr(hop, "scope_changed") and hop.scope_changed(prev):
         return False
     return prev.get("fingerprint") == fingerprint(records, _narrowing(hop))
+
+
+def interval_status(source, target, closed):
+    """A half-open change window is equal only after both sides passed its end."""
+    if target is None:
+        return "warn"
+    if source != target:
+        return "diff"
+    return "ok" if closed else "warn"

@@ -196,7 +196,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/variants.py` - Which brand is actually answering, and what that brand cannot do. Classes: Brand.
 - `migkit/vectors.py` - A vector - an embedding - as the numbers it holds, each exactly.
 - `migkit/verdict.py` - The one result shape, whatever engine produced it. Classes: Verdict, Refused, Usage, Decision, Held.
-- `migkit/verifiers.py` - What migkit asks of each verifier it wraps, read off the code, with every feature it does not use given its reason (backlog 0f).
+- `migkit/verifiers.py` - What migkit asks of each verifier it wraps, read off the code, with every feature it does not use given its reason (backlog 0f). Classes: ChangeIntervals.
 - `migkit/waysaid.py` - What `doctor` says of the ways a hop stands on: the way the whole database moves, the way its changes are followed, and how deeply each tabl
 - `migkit/wording.py` - What the operator reads while migkit works, in migkit's own words. Classes: Tally, DebugLog, Step.
 - `migkit/workflow.py` - Deep and adaptive workflow contracts across migration phases (backlog P0-WORKFLOW-DEPTH). Classes: PhaseContract, WorkflowState, Hypothesis, SemanticsModel.

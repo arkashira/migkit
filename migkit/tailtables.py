@@ -1131,6 +1131,10 @@ class TableSet:
                 s.put("accounts", t, row)
             if gen is not None:
                 s.put("meta", "pending", pending)
+                if pending and pending.get("intervals") is not None:
+                    from .verifiers import INTERVALS
+                    s.put("meta", f"{INTERVALS}:{gen}", pending["intervals"])
+                    s.put("meta", INTERVALS + "-clock", pending["interval_clock"])
             if scope is not None:
                 s.put("meta", "scope", json.loads(scope))
         if scope is not None:

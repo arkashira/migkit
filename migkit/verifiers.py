@@ -577,3 +577,222 @@ def replan_validation(table, run_check, facts=None, need=(), costs=None, where=N
     f = facts if isinstance(facts, Facts) else Facts(facts or {})
     ladder = validation_ladder(f.get("hop"), table)
     return attempt(table, ladder, run_check, facts=f, need=need, costs=costs, where=where, log=log)
+
+
+INTERVALS = "change-intervals"
+
+
+class ChangeIntervals:
+    """A batch's source-time signatures and independently read target effects."""
+
+    def __init__(self, target, db, store, changes, seconds):
+        import copy
+        from . import decide
+        self.target, self.db = target, db
+        self.changes = copy.deepcopy(changes)
+        self.clock = dict(store.get(INTERVALS + "-clock") or {})
+        self.receipt = {"windows": [], "unknown": [], "through": None}
+        times = [c["txn_ts"] for c in changes if c.get("txn_ts") is not None]
+        span = max(times) - min(times) if times else 0
+        width = decide.change_window(len(changes), span or seconds)
+        self.columns, self.events = {}, []
+        by = {}
+        for c in self.changes:
+            table = c["table"]
+            ts = c.get("txn_ts")
+            if ts is None or not math.isfinite(ts) or width is None:
+                self.receipt["unknown"].append(table)
+                continue
+            if table not in self.columns:
+                try:
+                    self.columns[table] = target.neutral_columns("dst", db, table)
+                except Exception:
+                    self.receipt["unknown"].append(table)
+                    continue
+            width = max(width, math.ulp(ts))
+            if not self.clock:
+                self.clock = {"start": ts, "end": ts + width}
+            if ts >= self.clock["end"]:
+                start = self.clock["end"]
+                steps = int((ts - start) / width)
+                self.clock = {"start": start + steps * width,
+                              "end": start + (steps + 1) * width}
+            if ts < self.clock["start"]:
+                self.receipt["unknown"].append(table)
+                continue
+            key = (self.clock["start"], self.clock["end"], table)
+            w = by.setdefault(key, {"start": key[0], "end": key[1],
+                                    "table": table, "source": [0, 0],
+                                    "target": None, "status": "pending"})
+            w["source"][0] += 1
+            w["source"][1] += self.signature(c, self.columns[table])
+            self.events.append((key, c))
+        self.receipt["windows"] = list(by.values())
+        self.receipt["unknown"] = sorted(set(self.receipt["unknown"]))
+        self.receipt["through"] = max(times) if times else None
+
+    @staticmethod
+    def signature(change, columns):
+        from . import canon, rowtext
+        classes = dict(columns)
+        parts = [change["op"]]
+        for part in ("key", "values"):
+            parts.append(part)
+            for n, v in sorted(change.get(part, {}).items()):
+                parts.extend((n, canon.digest_value(classes[n], v)))
+        return canon.digest_step(0, rowtext.encode(parts))
+
+    def observed(self, applied):
+        """Read back the final effects; an apply acknowledgement alone is no proof."""
+        from . import canon
+        from .engines.base import Engine
+        bad, observed = set(), {}
+        unknown = set(self.receipt["unknown"])
+        grouped = {}
+        for table, (op, key, values) in Engine._collapsed(self.changes):
+            grouped.setdefault((table, tuple(sorted(key))), []).append((op, key, values))
+        try:
+            for (table, names), rows in grouped.items():
+                cols = self.columns.get(table)
+                if not cols:
+                    unknown.add(table)
+                    continue
+                found = self.target.neutral_rows_by_key(
+                    "dst", self.db, table, cols, list(names),
+                    [tuple(key[n] for n in names) for _, key, _ in rows])
+                for op, key, values in rows:
+                    ident = tuple(canon.render_value(dict(cols)[n], key[n])
+                                  for n in names)
+                    row = found.get(ident)
+                    observed[table, ident] = (dict(zip([n for n, _ in cols], row))
+                                               if row is not None else None)
+                    if op == "delete":
+                        if row is not None:
+                            bad.add(table)
+                    elif row is None:
+                        bad.add(table)
+                    else:
+                        selected = [(n, c) for n, c in cols
+                                    if n in values or n in key]
+                        expected = {**key, **values}
+                        mine = canon.fold_rows(
+                            [c for _, c in selected],
+                            [[expected[n] for n, _ in selected]])
+                        actual = dict(zip([n for n, _ in cols], row))
+                        theirs = canon.fold_rows(
+                            [c for _, c in selected],
+                            [[actual[n] for n, _ in selected]])
+                        if mine != theirs:
+                            bad.add(table)
+        except Exception:
+            unknown.update(c["table"] for c in self.changes)
+        from collections import Counter
+        def identity(c):
+            classes = dict(self.columns[c["table"]])
+            return (c["table"], tuple(canon.render_value(classes[n], v)
+                                     for n, v in sorted(c["key"].items())))
+        counts = Counter(identity(c) for _, c in self.events)
+        actual = {}
+        for window, c in self.events:
+            table = c["table"]
+            ident = identity(c)
+            total = actual.setdefault(window, [0, 0])
+            moved = any(n in c["values"] and c["values"][n] != v
+                        for n, v in c["key"].items())
+            if counts[ident] > 1 or moved:
+                unknown.add(table)
+                continue
+            row = observed.get(ident)
+            if c["op"] == "delete":
+                if row is not None:
+                    continue
+                read = c
+            elif row is None:
+                continue
+            else:
+                read = {**c, "values": {n: row[n] for n in c["values"]}}
+            total[0] += 1
+            total[1] += self.signature(read, self.columns[table])
+        for w in self.receipt["windows"]:
+            key = (w["start"], w["end"], w["table"])
+            w["target"] = actual.get(key, [0, 0])
+            if w["table"] in bad:
+                w["status"] = "diff"
+            elif applied != len(self.changes):
+                w.update(status="diff", target=None)
+            elif w["table"] in unknown:
+                w.update(status="pending", target=None)
+            else:
+                from .verdict import interval_status
+                w["status"] = interval_status(w["source"], w["target"], True)
+        self.receipt["unknown"] = sorted(unknown)
+        return self.receipt
+
+
+def change_intervals(hop, db):
+    """Read only committed receipts, holding the SQLite generation to its position."""
+    import json
+    from pathlib import Path
+    from . import tailctl, tailtables
+    where = hop.report_dir(db)
+    path = where / tailtables.STORE
+    if not path.exists():
+        return []
+    import sqlite3
+    from contextlib import closing
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as conn:
+        conn.execute("begin")
+        meta = {k: json.loads(v) for k, v in conn.execute(
+            "select k, v from meta where k = 'gen' or k like ?",
+            (INTERVALS + "%",))}
+        env = tailctl.position(where / tailctl.TOKEN) or {}
+    if int(meta.get("gen") or 0) != int(env.get("gen") or 0):
+        return [{"check": "data", "category": "data.intervals", "scope": db,
+                 "status": "warn", "detail": "change windows await the tail's checkpoint"}]
+    receipts = [v for k, v in meta.items() if k.startswith(INTERVALS + ":")]
+    through = max((r["through"] for r in receipts
+                   if r.get("through") is not None), default=None)
+    windows, unknown = {}, set()
+    for r in receipts:
+        if r.get("scope") and r["scope"] != hop.scope_fingerprint():
+            unknown.update(w["table"] for w in r["windows"])
+            continue
+        unknown.update(r.get("unknown") or [])
+        for w in r["windows"]:
+            key = (w["start"], w["end"], w["table"])
+            got = windows.setdefault(key, {**w, "source": [0, 0],
+                                           "target": [0, 0], "status": "ok"})
+            for side in ("source", "target"):
+                value = w.get(side)
+                if value is None or value[1] is None:
+                    if got["status"] != "diff":
+                        got["status"] = "warn"
+                else:
+                    for i in (0, 1):
+                        got[side][i] += value[i]
+            if w["status"] == "diff":
+                got["status"] = "diff"
+            elif w["status"] != "ok" and got["status"] != "diff":
+                got["status"] = "warn"
+    out = []
+    from . import verdict
+    from datetime import datetime, timezone
+    for (start, end, table), w in sorted(windows.items()):
+        status = w["status"]
+        if status == "ok":
+            status = verdict.interval_status(w["source"], w["target"],
+                                             through is not None and through >= end)
+        period = ", ".join(datetime.fromtimestamp(t, timezone.utc).isoformat()
+                           for t in (start, end))
+        out.append({"check": "data", "category": "data.intervals",
+                    "scope": f"{db}.{table} [{period})",
+                    "table": table, "status": status,
+                    "detail": f"source changes {w['source']}; target receipts {w['target']}",
+                    "window": {"start": start, "end": end, "table": table,
+                               "source": w["source"], "target": w["target"]}})
+    if unknown:
+        out.append({"check": "data", "category": "data.intervals", "scope": db,
+                    "status": "warn", "detail": "change windows unproved for: "
+                    + ", ".join(sorted(unknown))})
+    return out

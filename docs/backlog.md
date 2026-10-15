@@ -2703,6 +2703,40 @@ documentation, and says what migkit took from each:
 * Striim's interval validation, and Bytebase's schema snapshot at each
   change, are ideas to take next
 
+**26.striim - interval validation (2026-10-16).** Research:
+`docs/research-other-tools.md` describes timestamp-filtered comparisons;
+`docs/research/mechanisms-goldengate-qlik-hvr-ibm-shareplex-2026-09-28.md`
+sections 6-7 distinguish committed checkpoints from streaming analytics.
+The vendor's [current description](https://www.striim.com/blog/validata-in-action/)
+requires timestamp columns on both sides. This ticket instead uses the source
+log's commit time (`canon.ended`) and the tail's durable change accounts.
+Reuse `canon.digest_step`/`fold_rows` and the applier's `_collapsed` final-state
+semantics; count/sum signatures alone must never certify a successful write.
+Read back touched target keys after each apply, including deletes, before saving
+the position. Keep interval receipts in the same generation/undo contract as
+the tail's accounts. A pending or untimed receipt is unproved, never equal.
+Window duration is derived by `decide` from measured change rate and batch size;
+check/watch report closed half-open windows, table names and the first mismatch.
+This proves the carried stream and its observable batch effects, not intermediate
+row versions collapsed within an atomic apply or unrelated target writes.
+Implementation: `verifiers.ChangeIntervals` freezes mapped source events before
+apply, sums operation/key/value signatures with the shared digest fold, and credits
+target receipts only after its acknowledgement and a key read-back of the batch's
+final effects agree. Target value signatures are computed from the rows read back,
+independently of the source signatures; repeated keys and moved keys whose event
+images cannot be reconstructed are explicitly unproved. `tailtables.Store` keeps pending/final receipts under the
+checkpoint generation; undo removes an uncommitted receipt and restart retains a
+committed one once. `cli.run_checks` includes these findings in check/watch;
+`verdict.interval_status` keeps an open window unproved. Timestamp regressions,
+missing times, unreadable effects and DDL batches are unproved rather than equal.
+Synthetic tests: `tests/test_change_windows_name_when_a_tail_diverges.py` covers
+boundaries, corruption, missing rows, deletes, key moves, undo/reopen and pending
+receipts. Its PostgreSQL test uses the shared `pg` server profile and injects a
+wrong target value after the real tail applies a batch.
+Not done: PostgreSQL execution (Colima was stopped; no server started), independent
+observation of intermediate versions collapsed within a batch, and unrelated
+pre-existing depth-matrix inconsistencies (reproduced on the unchanged HEAD).
+
 HVR, Qlik, Striim and Bytebase are learned from and not wrapped. They
 are commercial or bring a platform of their own. Trino is a candidate
 second reader, to measure first. *Read (2026-10-04):* sqlpipe (CSV

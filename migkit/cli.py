@@ -1833,6 +1833,9 @@ def run_checks(hop, eng, dbs, checks, table="", consistent=False,
                         pf.write(json.dumps(r, default=str) + "\n")
             except Exception:
                 pass
+        if "data" in local_map[d]:
+            from . import verifiers
+            out.extend(verifiers.change_intervals(hop, d))
         if before is not None:
             after = drift.shape(watch, "src", d)
             moved = drift.changed_tables(before, after)

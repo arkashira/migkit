@@ -2787,3 +2787,12 @@ def task_gaps():
                         and mod != "verdict":
                     out.append((task, f"{mod} does not use the engine"))
     return out
+
+
+def change_window(changes, seconds):
+    """Seconds for a window holding the square root of a measured batch."""
+    import math
+    if changes <= 0 or seconds <= 0 or not math.isfinite(seconds):
+        return None
+    rate = changes / seconds
+    return math.sqrt(changes) / rate

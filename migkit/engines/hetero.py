@@ -4661,6 +4661,7 @@ class HeteroEngine(Engine):
             return False if got is None and s.got else got
 
         def look(saved_token):
+            read_started = _time.monotonic()
             if s.unresolved:
                 resolve()
                 saved_token = s.saved
@@ -4778,21 +4779,44 @@ class HeteroEngine(Engine):
                 # the batch's part of the tail's own state, set down before
                 # the target commits it
                 s.pending_rows = accounts.kept_rows() if moves else {}
+                from ..verifiers import ChangeIntervals, INTERVALS
+                interval = ChangeIntervals(
+                    self.dst_engine, db, accounts.store, applied,
+                    _time.monotonic() - read_started) if moves else None
+                interval_gen = int((s.env or {}).get("gen") or 0) + 1
+                if interval is not None:
+                    interval.receipt["scope"] = self.hop.scope_fingerprint()
+                    timestamps = [c["txn_ts"] for c in changes
+                                  if c.get("txn_ts") is not None]
+                    if timestamps:
+                        interval.receipt["through"] = max(timestamps)
                 if tables is not None:
                     tables.prepare(
                         work, int((s.env or {}).get("gen") or 0) + 1
                         if moves else None, s.pending_rows,
-                        {"batch": next_batch, "token": token}
+                        {"batch": next_batch, "token": token,
+                         "intervals": interval.receipt,
+                         "interval_clock": interval.clock}
                         if moves else None)
                     s.prepared = moves
                     if moves:
                         failpoint.hit("tail.set_down")
+                applied_count = 0
                 for mapped, act in plan:
                     if mapped:
-                        self.dst_engine.neutral_apply("dst", db, mapped)
+                        applied_count += self.dst_engine.neutral_apply("dst", db, mapped)
                     if act is not None:
                         self._carry_ddl(db, act, s.targets, log)
                         unkept.add(act[1])
+                if interval is not None:
+                    receipt = interval.observed(applied_count)
+                    ddl_tables = {c["table"] for c in changes if canon.is_ddl(c)}
+                    if ddl_tables:
+                        receipt["unknown"] = sorted(set(receipt["unknown"]) | ddl_tables)
+                        for w in receipt["windows"]:
+                            w["status"], w["target"] = "pending", None
+                    with accounts.store.batch() as st:
+                        st.put("meta", f"{INTERVALS}:{interval_gen}", receipt)
                 if applied or plan[-1][1] is not None or before:
                     failpoint.hit("tail.applied")
             s.seen += len(applied)
@@ -5283,7 +5307,7 @@ class _CopiedRanges:
 
         def bare(c):
             return ({k: v for k, v in c.items()
-                     if k not in canon.FROM_THE_LOG}
+                     if k not in canon.FROM_THE_LOG or k == "txn_ts"}
                     if any(k in c for k in canon.FROM_THE_LOG) else c)
         if self.off or not changes:
             return [bare(c) for c in changes], Counter()

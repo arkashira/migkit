@@ -2362,7 +2362,8 @@ def ended(out, begun, at=None, ts=None):
         if at is not None:
             out[-1]["txn_at"] = at
         if ts is not None:
-            out[-1]["txn_ts"] = float(ts)
+            for c in out[begun:]:
+                c["txn_ts"] = float(ts)
 
 
 def ddl(table, kind, sql=None, to=None, txn=None):
