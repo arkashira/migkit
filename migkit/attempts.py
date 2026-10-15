@@ -215,15 +215,36 @@ class Ledger:
         self.run = os.urandom(6).hex()
         #: operations by identity (`faults.Owned.key`): state, tries, fault
         self.operations = {}
+        #: where the ledger was read from: the file, its last good
+        #: snapshot beside it (`.bak`) where the file was torn, or nothing
+        self.read_from = None
         if path:
-            from .durable import read_state
-            got = read_state(path, "cache")
+            got = self._read(path)
             if isinstance(got, dict):
                 self.attempts = dict(got.get("attempts") or {})
                 self.durations = {k: list(v) for k, v in
                                   (got.get("durations") or {}).items()}
                 self.records = dict(got.get("units") or {})
                 self.operations = dict(got.get("operations") or {})
+
+    def _read(self, path):
+        """The ledger kept at `path`. A file cut mid-write (a full disk, a
+        killed process) is not read as empty - the operations it owned
+        would be forgotten and their writes run again blind: the snapshot
+        every flush leaves beside it is read instead, and where both are
+        torn the run stops naming them."""
+        from .durable import Torn, read_state
+        try:
+            got = read_state(path, "state")
+            self.read_from = path if got is not None else None
+            return got
+        except Torn:
+            bak = f"{path}.bak"
+            got = read_state(bak, "state")
+            if got is None:
+                raise
+            self.read_from = bak
+            return got
 
     def owned(self, key):
         """What is kept of the operation `key`: {} where it never began."""
@@ -437,6 +458,8 @@ class Ledger:
                                "units": self.records,
                                "operations": self.operations},
                               sort_keys=True, default=str)
+        # the snapshot first: whichever write is cut, one of the two is whole
+        write_atomic(f"{self.path}.bak", text)
         write_atomic(self.path, text)
 
 

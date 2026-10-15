@@ -1607,6 +1607,7 @@ class GenericEngine(Engine):
             self._close()
 
     def _copy_rows(self, table, chunk, st, ck, log):
+        from .. import faults
         columns = self._copy_columns(table)
         choice = self.copy_way(table, columns)
         if choice.rung is None:
@@ -1681,7 +1682,21 @@ class GenericEngine(Engine):
                     finally:
                         cur.close()
                     c.commit()
-                dst_call(write)
+
+                def held():
+                    return int(dst_call(lambda c: self._run(
+                        c, f"SELECT COUNT(*) FROM {dst_t}", fetch=True))[0][0])
+                was = int(st.get("moved") or 0)
+                # a batch whose commit was lost on the way is counted on
+                # the target before it is sent again: there whole, it is
+                # not written twice; not there, it goes again
+                faults.retried(
+                    lambda: dst_call(write), side="dst",
+                    operation="copy batch", writes=True, log=log,
+                    label=table, check=faults.landed(
+                        lambda: was + len(batch), held, before=was),
+                    ledger=self.attempts().ledger,
+                    owned=faults.Owned("dst", "copy batch", table, str(was)))
                 st["moved"] = int(st.get("moved") or 0) + len(rows)
                 if at:
                     st["after"] = [self._carried(rows[-1][i]) for i in at]

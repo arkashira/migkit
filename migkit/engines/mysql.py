@@ -9227,7 +9227,7 @@ class MySQLEngine(Engine):
         differs too; a range that still differs stops the copy, named."""
         import pymysql
 
-        from .. import decide
+        from .. import decide, faults, tuning
         from ..tally import Tally
         self._stall_bound(sconn, dconn)
         # a batch's load switched to inserts is said once a table in the
@@ -9298,27 +9298,65 @@ class MySQLEngine(Engine):
             dconn.commit()
             return sent
 
+        def source():
+            got = Tally()
+            with sconn.cursor(pymysql.cursors.SSCursor) as cur:
+                cur.execute(f"select {collist} from `{db}`.`{t}`" + where,
+                            args or None)
+                while True:
+                    rows = cur.fetchmany(5000)
+                    if not rows:
+                        break
+                    for r in rows:
+                        got.row(r)
+            return got
+
+        def tried():
+            try:
+                dconn.ping(reconnect=True)
+                return once()
+            except _LoadRefused:
+                raise
+            except Exception:
+                try:
+                    dconn.rollback()
+                except Exception:  # noqa: BLE001 - the link may be gone
+                    pass
+                raise
+
+        retune = tuning.Retune(f"{ddb}.{t}", rows=self.COPY_BATCH,
+                               nbytes=self.COPY_BYTES, log=log,
+                               hop=self.hop, engine="mysql")
+
+        def sizes(s):
+            self.COPY_BATCH, self.COPY_BYTES = s["rows"], s["bytes"]
+
         def copy(ways):
             def run(choice):
                 loads[0] = choice.path == "load"
-                # a deadlock or a lock wait the server gave up on rolls the
-                # range back whole; it is copied again from the start
-                for tries in range(6):
-                    try:
-                        return once()
-                    except _LoadRefused as e:
-                        # rolled back whole, the range is switched to
-                        # inserts, which stop on the row the load had let
-                        # through with a warning
-                        dconn.rollback()
-                        raise decide.Blocked(
-                            f"the bulk load was not taken as it was ({e})"
-                            f" in {what}") from e
-                    except pymysql.err.OperationalError as e:
-                        if e.args[0] not in (1205, 1213) or tries == 5:
-                            raise
-                        dconn.rollback()
-                        time.sleep(0.2 * (tries + 1))
+                # the range is one transaction that replaces its span: a
+                # deadlock rolls it back whole and it runs again; a write
+                # whose link was lost is read back first (`faults.landed`)
+                # and never run on a guess; a size the server refused is
+                # retuned, never sent again as it was
+                try:
+                    return tuning.sized(retune, what, lambda: faults.retried(
+                        tried, tries=6, side="dst", operation="copy range",
+                        writes=True, atomic=True, log=log, label=what,
+                        backoff=lambda i: 0.2 * (i + 1),
+                        check=faults.landed(source, there,
+                                            idempotent=True),
+                        ledger=self.attempts().ledger,
+                        owned=faults.Owned("dst", "copy range", f"{ddb}.{t}",
+                                           f"{args}")), sizes)
+                except _LoadRefused as e:
+                    # rolled back whole, the range is switched to inserts,
+                    # which stop on the row the load had let through with a
+                    # warning
+                    dconn.rollback()
+                    raise decide.Blocked(
+                        f"the bulk load was not taken as it was ({e})"
+                        f" in {what}") from e
             # the table's work, not the range's: a table of a hundred
             # thousand ranges keeps one decision, and a range that switched
             # is named in its reason

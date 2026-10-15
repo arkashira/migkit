@@ -80,7 +80,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an
 - `migkit/factbook.py` - Every fact a choice may read, in one place (backlog P0-SMART, the owner's note B of 2026-09-30: "every factor"). Classes: Fact.
 - `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
-- `migkit/faults.py` - What can go wrong in a migration, how each is told by its effect, and what is done about it (backlog P0-RESILIENCE-ALL). Classes: Fault, Told, Breaker, Owned, Injected.
+- `migkit/faults.py` - What can go wrong in a migration, how each is told by its effect, and what is done about it (backlog P0-RESILIENCE-ALL). Classes: Fault, Told, Breaker, Owned, Throttle, Injected.
 - `migkit/fencing.py` - A mover's token, carried into every transaction it writes, so that a mover which lost its hold is refused by the target itself (backlog W1). Classes: Fenced, Token.
 - `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, GroupHold, PostgresHold, MySQLHold, TiDBHold, MongoHold.
 - `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog

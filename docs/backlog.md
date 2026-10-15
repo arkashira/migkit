@@ -10293,6 +10293,8 @@ not on master), concurrency rebalancing and replanning inside this ladder,
 the switch itself, comparative measurements against managed services.
 
 
+Not done (W9A, 2026-10-16): the MySQL range copier and the generic copier pass `check=` (`faults.landed`) and `owned=` to `faults.retried`; the PostgreSQL, SQL Server and cross-engine copiers and the tail loop do not yet. `faults.Throttle` runs between ranges in `ranges.ReadPool` only, not in the tail loop.
+
 ## P0-AUTOTUNE-ALL: diagnose and tune the complete migration workflow
 
 Owner clarification, 2026-10-06. Status: PARTLY (2026-10-16). Retry/restart alone is not
@@ -10381,6 +10383,8 @@ retry-only baselines, is owed (`tuning.SANDBOX_OWED`); concurrency, flow
 control, transport, conversion/validation and the consistency boundary have
 no tuning scenario yet (`tuning.UNPROVED`).
 
+
+Not done (W9A, 2026-10-16): `tuning.sized` retunes the MySQL range copier on a sizing fault; `tuning.payload_way` is not yet called before a large-value table, and the PostgreSQL, SQL Server and cross-engine copiers are not wired. A bare "timed out" now reads as a connection fault, not a statement timeout.
 
 ## P0-PRODUCT-TELEMETRY: complete usage evidence without customer data
 

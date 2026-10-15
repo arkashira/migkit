@@ -112,7 +112,8 @@ CATALOGUE = {f.name: f for f in (
     _f("memory_pressure", "a process ran out of memory", True,
        "smaller units and less work at once", "the unit",
        ("throttle", "stop"), codes=(1037, 1038, 1041, "53200"),
-       words=("out of memory", "memoryerror", "cannot allocate memory"),
+       words=("out of memory", "memoryerror", "cannot allocate memory",
+              "invalid memory alloc request size", "resource exhausted"),
        proof=_T + "test_pressure_read_as_a_fact_throttles"),
     _f("disk_pressure", "a disk is full", False,
        "space freed on the full disk", "the side", ("pause", "stop"),
@@ -123,9 +124,26 @@ CATALOGUE = {f.name: f for f in (
     _f("lock", "a lock wait timed out or a deadlock was broken", True,
        "the server rolled the statement back", "the attempt",
        ("retry", "pause", "stop"), codes=(1205, 1213, "40P01", "55P03"),
-       words=("deadlock", "lock wait timeout", "could not obtain lock"),
+       words=("deadlock", "lock wait timeout", "could not obtain lock",
+              "lock request time out"),
        rolled_back=True,
        proof=_T + "test_a_deadlock_victim_is_rerun_only_where_it_was_whole"),
+    _f("packet", "a statement was larger than the server takes in one",
+       False, "never the same size: a smaller batch, pieces or a stream",
+       "the unit", ("replan", "stop"), codes=(1153, 1301),
+       words=("max_allowed_packet", "packet too large",
+              "packet bigger than", "total message length",
+              "request entity too large", "exceeds the maximum allowed size",
+              "exceeds the maximum size", "exceeds the maximum length"),
+       proof="tests/test_a_copier_reconciles_and_retunes.py::"
+             "test_a_packet_too_large_is_retuned_once_and_completes"),
+    _f("statement_timeout", "a statement ran past the server's time limit",
+       False, "never the same size: a shorter unit", "the unit",
+       ("replan", "stop"), codes=(3024, "57014"),
+       words=("statement timeout", "max_execution_time",
+              "query execution was interrupted"),
+       proof="tests/test_a_copier_reconciles_and_retunes.py::"
+             "test_a_statement_timeout_is_a_sizing_cause"),
     _f("orphaned", "work migkit owns is still running after its attempt",
        False, "the owned work ended or cancelled", "the unit",
        ("reconcile", "isolate", "stop"), facts=("owned_running",),
@@ -596,6 +614,78 @@ def _reconcile_restart(check, ledger, owned, log, name):
         f"{name}: work begun before a restart has an outcome that cannot"
         " be read, so it is not run again; check the target for this unit,"
         " then run again")
+
+
+def landed(want, held, before=None, idempotent=False, value=None):
+    """A reconcile `check` for `retried` from two readings of one unit:
+    what the target was to hold (`want()`) and what it holds (`held()`) -
+    a row count, a position or a marker. Equal: the write landed
+    (`COMMITTED`, with `value(want)` or the reading). Where the write
+    replaces its span whole in one transaction (`idempotent`), or the
+    target holds what it held before it (`before`), nothing of it is
+    there and it may run again (`NOTHING`); anything else is not known,
+    and the write stops rather than doubling what it may have left."""
+    def check():
+        w, h = want(), held()
+        if w == h:
+            return COMMITTED, (value(w) if value else w)
+        if idempotent or (before is not None and h == before):
+            return NOTHING, None
+        return None, None
+    return check
+
+
+class Throttle:
+    """The width of a pool (`sizing.Pace`: `limit` of `most`) moved by
+    what `assess` reads between units. A throttle choice halves it at
+    once; it grows back one step only after `STEADY` clear readings in a
+    row, and each throttle that follows a growth doubles that wait - so a
+    server near its limit does not flip the width every unit."""
+
+    STEADY = 3
+
+    def __init__(self, pace, read, log=None):
+        self.pace, self.read, self.log = pace, read, log
+        self.clear, self.steady, self.grew = 0, self.STEADY, False
+        self.lowered_from = None
+
+    def between(self):
+        """Read the facts and move the width; the choices `assess` made."""
+        try:
+            facts = self.read() or {}
+        except Exception:  # noqa: BLE001 - a probe never stops a move
+            facts = {}
+        got = assess(facts)
+        pressed = [f for f, c in got if c.path in ("throttle", "pause")]
+        was = int(self.pace.limit)
+        if pressed:
+            self.clear = 0
+            if self.grew:
+                self.steady *= 2
+            self.grew = False
+            now = max(1, was // 2)
+            if now < was:
+                self.lowered_from = max(self.lowered_from or 0, was)
+                self._set(now, pressed[0].said)
+        elif self.lowered_from and was < self.lowered_from:
+            self.clear += 1
+            if self.clear >= self.steady:
+                self.clear, self.grew = 0, True
+                self._set(min(self.lowered_from, was + max(1, was // 2)),
+                          "the pressure eased")
+        return got
+
+    def _set(self, n, why):
+        lock = getattr(self.pace, "_lock", None)
+        if lock is not None:
+            with lock:
+                self.pace.limit = n
+        else:
+            self.pace.limit = n
+        hist = getattr(self.pace, "history", None)
+        if isinstance(hist, list):
+            hist.append((n, None, why))
+        _say(self.log, f"{n} at once: {why}")
 
 
 class Injected(Exception):

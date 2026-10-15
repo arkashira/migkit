@@ -611,24 +611,11 @@ PACKET, TIMEOUT, MEMORY, LOCK, CONNECTION, UNKNOWN = (
     "packet", "timeout", "memory", "lock", "connection", "unknown")
 #: causes a size answers: the same work again would fail the same way
 SIZING = (PACKET, TIMEOUT, MEMORY, LOCK)
-#: (cause, what the server says), first that matches: lock before timeout,
-#: since a lock wait ends in a timeout. A local reading of the servers'
-#: words until the fault catalogue (P0-RESILIENCE-ALL) owns one
-SIGNATURES = (
-    (PACKET, r"max_allowed_packet|packet (?:too large|bigger than)|"
-             r"\b(?:1153|1301)\b|total message length|"
-             r"request entity too large|exceeds the maximum (?:allowed )?"
-             r"(?:size|length)"),
-    (LOCK, r"lock wait timeout|deadlock|\b(?:1205|1213|40P01|55P03)\b|"
-           r"could not obtain lock|lock request time out"),
-    (MEMORY, r"out of memory|invalid memory alloc request size|"
-             r"cannot allocate|MemoryError|\b53200\b|resource exhausted"),
-    (TIMEOUT, r"statement timeout|\b57014\b|max_execution_time|\b3024\b|"
-              r"timed? ?out|query execution was interrupted"),
-    (CONNECTION, r"lost connection|gone away|\b(?:2006|2013)\b|"
-                 r"connection (?:reset|refused|closed)|"
-                 r"server closed the connection"),
-)
+#: the failure catalogue's classes (`faults.CATALOGUE`) a size answers,
+#: and the connection's, which a known limit may explain
+BY_CLASS = {"packet": PACKET, "statement_timeout": TIMEOUT,
+            "memory_pressure": MEMORY, "lock": LOCK,
+            "connectivity": CONNECTION, "interruption": CONNECTION}
 
 
 @dataclass(frozen=True)
@@ -646,13 +633,12 @@ def cause_of(error, sent=None, limits=()):
     connection lost while sending more than a known limit takes is that
     limit: measured on MySQL 8.4, a row past `max_allowed_packet` ended
     in a lost connection that said nothing of the packet."""
-    import re
+    from . import faults
     text = f"{type(error).__name__}: {error}" if isinstance(
         error, BaseException) else str(error or "")
-    kind = next((k for k, rx in SIGNATURES
-                 if re.search(rx, text, re.I)), UNKNOWN)
-    if isinstance(error, MemoryError):
-        kind = MEMORY
+    told = faults.classify(error if isinstance(error, BaseException)
+                           else RuntimeError(text))
+    kind = BY_CLASS.get(told.fault.name, UNKNOWN)
     over = [x for x in limits or () if sent and x.bounds == "sent"
             and 0 < x.most < sent]
     if kind in (CONNECTION, UNKNOWN) and over:
@@ -979,6 +965,31 @@ class Retune:
         (`util.Unit`s): a retuned unit counted with its attempts."""
         from .util import forecast
         return forecast(list(self.units.values()) + list(pending), **kw)
+
+
+def sized(retune, unit, fn, apply, reconcile=None, sent=None, rows=None,
+          most_rounds=8):
+    """fn() run at `retune`'s sizes (`apply(settings)` before each try). A
+    failure a size answers is retuned (`Retune.failed`) and the work goes
+    again at the new size - never at the one that failed; any other
+    failure is raised to the caller's resilience. `sent()`/`rows()` say
+    what the failed try carried, where known."""
+    from . import decide
+    for rounds in range(most_rounds + 1):
+        apply(retune.settings())
+        try:
+            return fn()
+        except decide.Blocked:
+            raise
+        except Exception as e:  # noqa: BLE001 - its cause decides
+            if rounds == most_rounds:
+                raise
+            adj = retune.failed(unit, e, sent=sent() if sent else None,
+                                rows=rows() if rows else None,
+                                reconcile=reconcile)
+            if adj is None:
+                raise
+    raise decide.Blocked(f"{retune.work}: {unit} did not settle")
 
 
 def run(retune, units, write, reconcile, count, size=None, most_rounds=64):
