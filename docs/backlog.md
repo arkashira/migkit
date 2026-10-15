@@ -7841,6 +7841,22 @@ To build, in the order they pay:
    natively (PostgreSQL through ADBC, SQL Server, Oracle, ClickHouse),
    with per-column guards for the known losses.
 7. **confluent-kafka** in place of kafka-python, lz4 or zstd on produce.
+   PARTLY (2026-10-16, `migkit/kafkaclient.py`): the producer is chosen
+   by `decide` (compiled client, else the pure one, the hop's measured
+   rate kept per client), the codec too (zstd where the target's
+   Produce version or broker version takes it and the first messages
+   compress, else lz4, else none; in the decision record),
+   idempotent and transactional producers carried
+   (`test_the_stream_client_and_codec_are_chosen_by_facts.py`, doubles).
+   Not done: the consumer and the topic admin still on the pure client
+   (poll/seek/watermark semantics and isolation level to be matched and
+   proved on a server); a codec the brokers refuse at send stops the
+   copy rather than stepping down to lz4; the server tests not run on the
+   compiled client. Users' client quotas stay on the pure client: they
+   are DescribeClientQuotas/AlterClientQuotas, which the compiled admin
+   has no call for (not a config resource). Noticed: `apply` calls
+   `delete_consumer_groups`, which the 3.x pure admin names
+   `delete_groups`.
 
 ### R19. Faster than the fastest, without giving up a row (added
 2026-09-28, the owner: "can we beat them with logic, technique or

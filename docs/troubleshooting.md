@@ -1857,6 +1857,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> holds its number on the target through another store (<...>; this machine's is <...>) - every machine of a hop must name the same one. Nothing was written
 
+* no stream client can write the target here (<...>): migkit doctor --install puts it in place
+
 * <...> is not a managed service migkit knows; it knows <...> and more (`migkit/data/managed.yaml`)
 
 * the <...> is named <...> (<...>), and it runs <...> - name the service it is (managed: {service: ...})

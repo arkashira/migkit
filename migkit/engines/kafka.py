@@ -92,13 +92,65 @@ class KafkaEngine(Engine):
         finally:
             log.removeHandler(handler)
 
+    def _client_way(self):
+        """The stream client the target is written through
+        (`kafkaclient.client_way`), chosen once for the engine's life and
+        kept in the run's decision record."""
+        got = self.__dict__.get("_client_choice")
+        if got is None:
+            from .. import decide, kafkaclient
+            iam = str((self.hop.target.options or {}).get("sasl_mechanism") or ""
+                      ).upper() == "AWS_MSK_IAM"
+            got = self.__dict__["_client_choice"] = kafkaclient.client_way(
+                iam, costs=decide.HopCosts(self.hop, "kafka.client."))
+            decide.record(self.hop, got)
+        return got.path
+
+    def _zstd_target(self):
+        """Whether the target's brokers take zstd: the Produce request's
+        version they answer with, else the version they run, else None."""
+        from .. import kafkaclient
+        produce = None
+        try:
+            admin = self._admin("dst")
+            try:
+                for key, v in (admin.api_versions() or {}).items():
+                    if int(getattr(key, "value", key)) == 0:
+                        produce = v[1] if isinstance(v, (tuple, list)) \
+                            else getattr(v, "max_version", None)
+            finally:
+                admin.close()
+        except Exception:  # noqa: BLE001 - read from the version below
+            produce = None
+        return kafkaclient.target_takes_zstd(
+            produce, self._numbers(self._versions()["dst"][0]))
+
+    def _codec(self, way):
+        """The codec a producer sends in (`kafkaclient.codec`), from the
+        first messages of what is to be sent (`_sample`) and the target's
+        brokers; kept in the run's decision record."""
+        from .. import decide, kafkaclient
+        has_zstd, has_lz4 = kafkaclient.codecs_of(way)
+        got = kafkaclient.codec(
+            self.__dict__.get("_sample") or [], self._zstd_target(),
+            has_zstd, has_lz4,
+            costs=decide.HopCosts(self.hop, "kafka.codec."))
+        decide.record(self.hop, got)
+        return None if got.path == "none" else got.path
+
     def _producer(self, **extra):
+        from .. import kafkaclient
+        way = self._client_way()
+        kw = {"acks": "all", "request_timeout_ms": 15000,
+              "max_request_size": 16 * 2 ** 20, **extra}
+        kw.setdefault("compression_type", self._codec(way))
+        if way == "native":
+            return kafkaclient.NativeProducer(self._connection("dst"),
+                                              **kw)
         try:
             from kafka import KafkaProducer
         except ImportError:
             raise SystemExit("pip install 'migkit[kafka]' for kafka support")
-        kw = {"acks": "all", "request_timeout_ms": 15000,
-              "max_request_size": 16 * 2 ** 20, **extra}
         return self._signed_in("dst", lambda: KafkaProducer(
             **self._connection("dst"), **kw))
 
@@ -222,6 +274,8 @@ class KafkaEngine(Engine):
             return self._apply_registered(db, changes)
         sent, skipped = streamout.encoded(self.hop, db, changes,
                                           int(time.time() * 1000))
+        sent = list(sent)
+        self.__dict__["_sample"] = [v for _, _, v in sent[:200]]
         producer = self._producer()
         try:
             for topic, key, value in sent:
@@ -629,6 +683,10 @@ class KafkaEngine(Engine):
                                  timeout_ms=5000,
                                  max_records=max(1, min(int(chunk), 5000))
                              ).values() for m in msgs if m.offset < end]
+                    if batch:
+                        # what the producers' codec is measured on
+                        self.__dict__.setdefault(
+                            "_sample", [m.value for m in batch[:200]])
                     if not batch:
                         # past what a reader of committed messages is given
                         # - a transaction's marker, an aborted write - the
@@ -1953,15 +2011,14 @@ class KafkaEngine(Engine):
                              f" {', '.join(self.OFFSET_WAYS)}")
         return way
 
-    @staticmethod
-    def _can_transact():
+    def _can_transact(self):
         """Whether the client can run a producer transaction: a client
         that cannot is not asked to, and a map is not claimed."""
+        from .. import kafkaclient
         try:
-            from kafka import KafkaProducer
-        except ImportError:
+            return kafkaclient.can_transact(self._client_way())
+        except SystemExit:
             return False
-        return callable(getattr(KafkaProducer, "init_transactions", None))
 
     def _gap_free(self, src, tp, beg, end):
         """(True, "") where every offset from `beg` up to `end` holds one

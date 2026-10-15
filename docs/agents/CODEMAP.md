@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (180 modules)
+## `migkit/` (181 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -101,6 +101,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/jobs.py` - Scheduled jobs inside the databases, on exactly one side at a time.
 - `migkit/jointplan.py` - One plan for a move's tables, made jointly (backlog P0-SMART, item 4). Classes: Way, Job, Limits, Placed, Plan.
 - `migkit/kafka_fabric.py` - Kafka fabric integrations: offset alignment, transactional outbox offset map, schema registry wire validation, quota enforcement & config re Classes: OffsetAlignmentError, PaddingRecord, AlignmentPlan, PartitionOffsetAligner, OutboxOffsetRecord, TransactionalOutbox.
+- `migkit/kafkaclient.py` - The stream client a Kafka target is written through, and the codec its messages go in (backlog R18.7). Classes: StreamError, Refused, Sent, NativeProducer.
 - `migkit/kept.py` - The proof kept up as the data moves (backlog R20.8; incremental multiset hashing, docs/research/diff-algorithms-2026-09-28.md section 8). Classes: Store, Table, Keeper.
 - `migkit/lacks.py` - What the source uses that the target does not have, asked of both servers (backlog P0-SCENARIOS: a version down, a fork, an edition). Classes: Side, Feature.
 - `migkit/lease.py` - A write operation's hold on a hop, as a lease with a heartbeat (backlog 30). Classes: Held, Lost, Lease.

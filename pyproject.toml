@@ -64,6 +64,9 @@ dependencies = [
     "pymongo>=4.6",
     "redis>=5.0",
     "kafka-python>=2.2.15",
+    # the compiled stream client the target is written through, zstd and
+    # lz4 on produce; the pure one above stays the way where it is not
+    "confluent-kafka>=2.5",
     # Avro bodies for the change stream and schema-registry-aware copies
     "fastavro>=1.9",
     # comparison and schema libraries driven by check/schema
