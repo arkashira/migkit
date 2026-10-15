@@ -3057,9 +3057,99 @@ def change_window(changes, seconds, costs=None):
     None) where the batch has no rate to cut by."""
     import math
     if changes <= 0 or seconds <= 0 or not math.isfinite(seconds):
+<<<<<<< HEAD
         return None, None
     widths, rungs = window_rungs(changes, seconds)
     got = climb("change windows", rungs,
                 Facts({"rate": changes / seconds, "span": seconds}),
                 costs=costs)
     return widths[got.path or rungs[0].name], got
+||||||| 580cd213
+        return None
+    rate = changes / seconds
+    return math.sqrt(changes) / rate
+=======
+        return None
+    rate = changes / seconds
+    return math.sqrt(changes) / rate
+
+
+def session_patience(durations, predicted=None, deadline=None):
+    """(seconds, `Choice`): how long an attempt waits on its server before
+    the server's own view of its session is read (backlog
+    P0-CONNECTION-PROGRESS). No number is written here: the longest wait
+    this operation measured here and its spread above the middle; where
+    fewer than two were measured, the cost model's p90 for the unit; where
+    none, the read deadline read back from the connection - before which
+    nothing is closed, as the transport ends the wait there anyway. None
+    where not even that was read: the wait is left to the driver."""
+    d = sorted(float(x) for x in durations or () if x is not None and x >= 0)
+
+    def spread():
+        longest, middle = d[-1], d[len(d) // 2]
+        return longest + (longest - middle)
+    rungs = (
+        Rung("measured", "the waits this operation measured here",
+             needs=(Need("two measured waits", lambda f: len(d) >= 2,
+                         "fewer than two waits of this operation were"
+                         " measured here"),),
+             because="the longest wait measured here and its spread"),
+        Rung("predicted", "the predicted wait of the unit",
+             needs=(Need("a prediction", lambda f: bool(predicted)
+                         and predicted > 0,
+                         "no wait was predicted for the unit"),)),
+        Rung("deadline", "the read deadline the connection holds",
+             needs=(Need("the read deadline", lambda f: bool(deadline)
+                         and deadline > 0,
+                         "the connection's read deadline was not read"),)))
+    got = climb("a wait on the server", rungs, Facts())
+    seconds = {"measured": spread() if len(d) >= 2 else None,
+               "predicted": predicted, "deadline": deadline}.get(got.path)
+    return (float(seconds) if seconds else None), got
+
+
+def session_action(facts):
+    """The `Choice` for a wait the server's view of its session was read
+    for (backlog P0-CONNECTION-PROGRESS): close that session only, end
+    migkit's own end of a connection the server no longer has, or say what
+    it is and leave the wait to the read deadline. `facts`: `kind`
+    (`attempts.IDLE`, ...), `idle_seconds` the server counts, `patience`
+    (`session_patience`), `idle_reads` in a row, `reads` (the attempt only
+    reads: nothing it wrote is left uncertain), `owned` (the session is
+    the hop's account's and this attempt's), `unprogressed` (closes of
+    this unit not followed by progress) and `can_abandon`."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    once = Need("no earlier close of this unit without progress since",
+                lambda f: not f["unprogressed"],
+                "this unit's session was closed once already and the"
+                " retry made no progress, so it is not closed again")
+    rungs = (
+        Rung("close", "close that session only", footprint=1, needs=(
+            Need("an idle session", lambda f: f["kind"] == "idle",
+                 "the server is not idle on it"),
+            Need("idle longer than the wait measured",
+                 lambda f: f["idle_seconds"] >= f["patience"],
+                 lambda f: f"the server was idle {f['idle_seconds']:.0f}s,"
+                           f" within the {f['patience']:.0f}s measured"),
+            Need("idle on two reads", lambda f: f["idle_reads"] >= 2,
+                 "idle on one read only"),
+            Need("a read", lambda f: f["reads"],
+                 "the attempt writes, and a write closed under it is left"
+                 " uncertain"),
+            Need("the session owned", lambda f: f["owned"],
+                 "the session is not exactly this attempt's"),
+            once)),
+        Rung("abandon", "end migkit's own end of the connection",
+             footprint=1, needs=(
+                 Need("a session the server no longer has",
+                      lambda f: f["kind"] == "gone",
+                      "the server still has the session"),
+                 Need("a read", lambda f: f["reads"],
+                      "the attempt writes, and its outcome is uncertain"),
+                 Need("a way to end it", lambda f: f["can_abandon"],
+                      "the connection gives no way to end it"),
+                 once)),
+        Rung("report", "say it and leave the wait to the read deadline",
+             because="nothing safe to close"))
+    return climb("a wait the server was asked about", rungs, f)
+>>>>>>> worktree-agent-a71d4f5ba40a440ef

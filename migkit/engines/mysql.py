@@ -257,6 +257,15 @@ def managed_retention(ask, hinted=False):
     return out
 
 
+def _shut(conn):
+    """End migkit's own end of `conn`: a read blocked on it returns, and
+    the driver says the connection was lost - the retry's cue."""
+    import socket
+    sock = getattr(conn, "_sock", None)
+    if sock is not None:
+        sock.shutdown(socket.SHUT_RDWR)
+
+
 class MySQLEngine(Engine):
     ENGINE_FAMILY = "mysql"
     checks = ("schema", "counts", "autoinc", "data")
@@ -315,7 +324,9 @@ class MySQLEngine(Engine):
                            f"set session time_zone = '+00:00', sql_mode = '{self.WRITE_SQL_MODE}'"
                            if side == "dst" else "set session time_zone = '+00:00'"))
             c._read_timeout = rt
-            _keepalive(getattr(c, "_sock", None))
+            from ..attempts import transport
+            sock = getattr(c, "_sock", None)
+            c._migkit_transport = transport(sock, rt, _keepalive(sock))
             return c
         # a probe that only decides an option asks once: retrying a server
         # that is not there only delays saying "no"
@@ -2578,20 +2589,8 @@ class MySQLEngine(Engine):
                     return
 
                 if cmd.lower() == "sleep":
-                    try:
-                        cur.execute(f"KILL CONNECTION {int(thread_id)}")
-                    except Exception as err:
-                        if not err.args or err.args[0] != 1094:
-                            raise
-                    deadline = time.monotonic() + 15
-                    while True:
-                        cur.execute("select ID from information_schema.PROCESSLIST"
-                                    " where ID=%s", (thread_id,))
-                        if not cur.fetchone():
-                            return
-                        if time.monotonic() >= deadline:
-                            raise RuntimeError("server connection termination unconfirmed")
-                        time.sleep(0.1)
+                    self._kill_connection(cur, thread_id)
+                    return
 
                 if info != statement:
                     return
@@ -2626,10 +2625,92 @@ class MySQLEngine(Engine):
         finally:
             control.close()
 
+    @staticmethod
+    def _kill_connection(cur, thread_id):
+        """KILL CONNECTION `thread_id`, confirmed gone from the process
+        list; True once it is."""
+        try:
+            cur.execute(f"KILL CONNECTION {int(thread_id)}")
+        except Exception as err:
+            if not err.args or err.args[0] != 1094:
+                raise
+        deadline = time.monotonic() + 15
+        while True:
+            cur.execute("select ID from information_schema.PROCESSLIST"
+                        " where ID=%s", (thread_id,))
+            if not cur.fetchone():
+                return True
+            if time.monotonic() >= deadline:
+                raise RuntimeError("server connection termination unconfirmed")
+            time.sleep(0.1)
+
+    SESSION_VIEW = "the process list"
+
+    def session_of(self, conn):
+        tid = getattr(conn, "thread_id", None)
+        return tid() if callable(tid) else None
+
+    def session_view(self, side, session):
+        """The process list's row of `session`: its account, command, time
+        and state - never its statement's text."""
+        from ..attempts import View
+        control = self._conn(side, retry=False)
+        try:
+            control._read_timeout = min(control._read_timeout or 15, 15)
+            with control.cursor() as cur:
+                cur.execute("select USER, COMMAND, TIME, STATE from"
+                            " information_schema.PROCESSLIST where ID=%s",
+                            (session,))
+                row = cur.fetchone()
+        finally:
+            control.close()
+        if not row:
+            return View(session, present=False)
+        user, cmd, secs, state = row
+        cmd, state = (cmd or "").lower(), (state or "").lower()
+        kind = ("idle" if cmd == "sleep" else "locked" if "lock" in state
+                else "sending" if state in ("sending to client",
+                                            "writing to net")
+                else "running")
+        return View(session, user or "", kind, float(secs or 0))
+
+    def close_session(self, side, session, view):
+        """KILL CONNECTION `session` once it is read again still idle since
+        `view` saw it, under the hop's account; True once it is gone."""
+        again = self.session_view(side, session)
+        if not (again.present and not again.error and again.state == "idle"
+                and again.seconds >= view.seconds
+                and self.owns_session(side, again)):
+            return False
+        control = self._conn(side, retry=False)
+        try:
+            with control.cursor() as cur:
+                return self._kill_connection(cur, session)
+        finally:
+            control.close()
+
+    @staticmethod
+    def _reads(sql):
+        """Whether a statement only reads: a session closed under it leaves
+        nothing uncertain."""
+        text = " ".join(str(sql).lower().split())
+        return (text.split(" ", 1)[0] in ("select", "show", "explain",
+                                          "describe", "desc", "checksum")
+                and " into " not in text and " for update" not in text
+                and " for share" not in text)
+
     def _q(self, side, sql, args=None, fresh=False):
         # retry the connect+query as a unit so a TLS/socket blip clears
         def once():
             conn = self._conn(side)
+            mon = self.attempts()
+            op, unit, position = self.unit_now() or ("a query", "", "")
+            a = mon.begin(side, op, unit, position,
+                          session=self.session_of(conn),
+                          reads=self._reads(sql),
+                          transport=self.transport_of(conn),
+                          abandon=lambda: _shut(conn))
+            ok, why = False, ""
             try:
                 with conn.cursor() as cur:
                     if fresh:
@@ -2641,8 +2722,16 @@ class MySQLEngine(Engine):
                     statement = cur.mogrify(sql, args)
                     try:
                         cur.execute(sql, args)
-                        return cur.fetchall()
+                        mon.answered(a)
+                        rows = cur.fetchall()
+                        ok = True
+                        return rows
                     except Exception as err:
+                        # the error's class and number: never its text,
+                        # which may quote the statement
+                        code = err.args[0] if err.args else None
+                        why = type(err).__name__ + (
+                            f" {code}" if isinstance(code, int) else "")
                         if retryable(err):
                             try:
                                 self._cancel_query(side, conn.thread_id(), statement)
@@ -2652,6 +2741,7 @@ class MySQLEngine(Engine):
                                     " automatic replay refused") from None
                         raise
             finally:
+                mon.done(a, ok, why)
                 conn.close()
         return with_retry(once, label=f"mysql query {side}")
 
@@ -3562,7 +3652,11 @@ class MySQLEngine(Engine):
             cols.append(self._summed(key_expr, salt))
         q = (f"select {', '.join(cols)}"
              f" from {self._scope(side, db, t)} {where}")
-        got = tuple(self._q(side, q)[0])
+        import hashlib
+        # the range kept by its digest: no key value in the ledger
+        position = hashlib.sha256(str(where).encode()).hexdigest()[:16]
+        with self.attempt_unit("a verify read", f"{db}.{t}", position):
+            got = tuple(self._q(side, q)[0])
         from .. import digests
         digests.record(self.hop, db, t, side, got[0], got[1],
                        method=digests.OWN,

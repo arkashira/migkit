@@ -10440,7 +10440,7 @@ their own units and health; only the check progress line does.
 
 ## P0-CONNECTION-PROGRESS: detect and reconcile client/server progress mismatch
 
-Owner request, 2026-10-14. Status: OPEN. Priority: first incident-recovery work
+Owner request, 2026-10-14. Status: PARTLY (2026-10-16). Priority: first incident-recovery work
 alongside P0-VALIDATE.mysql-query-lifecycle, before feature expansion. Applies
 to every engine, adapter and external worker where observations are available.
 
@@ -10480,6 +10480,35 @@ Required before DONE:
 
 Dependencies: P0-RESUME-ALL, P0-DECISION-ALL,
 P0-VALIDATE.mysql-query-lifecycle and P0-ETA-ALL.
+
+Done 2026-10-16: `attempts.py` keeps every attempt in a ledger beside the
+hop's reports (`attempts.json`: start, the exact server session, operation,
+unit and position digest, query sent/answer read, last progress, retry
+reason, transport facts; no statement text or credentials) and runs one
+watcher per engine. Past the patience `decide.session_patience` chooses
+(rungs on the waits measured per operation, then the unit's prediction,
+then the read deadline read back off the connection; no fixed number), the
+server's view of the session is read through the Engine contract
+(`session_view`, `owns_session`, `close_session`, `transport_of`;
+`SESSION_VIEW` NOT_YET on every engine but MySQL - the process list - and
+PostgreSQL - `pg_stat_activity`) and the wait is named: computing,
+transfer, client stall, between reads, idle, locked, gone, unavailable.
+`decide.session_action` closes only a session idle on two reads, longer
+than the measured wait, of the hop's account, under a read; ends migkit's
+own socket where the server dropped the session; else says the fact, the
+consequence and the next action. A unit closed once is not closed again
+until it progresses. MySQL `_q` and the range checksum (`attempt_unit`)
+and PostgreSQL `_psql` record attempts; `util.keepalive` now returns its
+failure instead of swallowing it. Proved on fakes:
+tests/test_a_lost_answer_closes_only_its_session.py (written, not run).
+
+Not done: no sandbox fault injection yet (server-idle/client-wait through a
+proxy, stalled transfer, disconnect, stale session ids, missing
+privileges on real servers); PostgreSQL's chunked verify ranges are not yet
+wrapped in `attempt_unit` (its attempts are kept per operation, not per
+range); tunnel-side evidence is not captured; the other engines declare no
+session view (NOT_YET); lock waits are named but not acted on; the
+ETA (P0-ETA-ALL) does not yet read the attempt ledger.
 
 
 ## P0-VERIFY-EXECUTION: default adaptive verification plans, not fixed nested loops

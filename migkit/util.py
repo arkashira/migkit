@@ -143,9 +143,11 @@ def keepalive(sock, idle=60, interval=10, count=5):
     If the far end or the tunnel goes away in the meantime nothing is ever
     sent, so the OS never notices and the process waits for good. Probing
     while idle turns that into a normal connection error the retry can handle.
+    Returns {"error": why} where a setting could not be made - said by the
+    socket's facts (`attempts.transport`), never swallowed - else {}.
     """
     if sock is None:
-        return
+        return {"error": "no socket to set"}
     import socket as _s
     try:
         sock.setsockopt(_s.SOL_SOCKET, _s.SO_KEEPALIVE, 1)
@@ -154,8 +156,9 @@ def keepalive(sock, idle=60, interval=10, count=5):
             opt = getattr(_s, name, None)
             if opt is not None:
                 sock.setsockopt(_s.IPPROTO_TCP, opt, val)
-    except OSError:
-        pass
+    except OSError as e:
+        return {"error": f"keepalive not set: {e.strerror or e}"}
+    return {}
 
 
 def _backoff(attempt, base=0.8):

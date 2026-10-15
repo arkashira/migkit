@@ -316,6 +316,25 @@ SESSION = ("-c statement_timeout=0 -c extra_float_digits=3"
 CONNECT_SECONDS, PROBE_SECONDS = 15, 5
 
 
+def _pg_socket(conn, shut=False):
+    """A socket on `conn`'s descriptor (a duplicate: the caller closes
+    it), or None; `shut` ends migkit's end of the connection, so a read
+    blocked on it returns and the driver says it was lost."""
+    import socket
+    try:
+        fd = conn.pgconn.socket
+        sock = socket.socket(fileno=os.dup(fd))
+    except Exception:  # noqa: BLE001 - no socket to read
+        return None
+    if shut:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        finally:
+            sock.close()
+        return None
+    return sock
+
+
 def keepalives():
     """libpq's keepalive settings. Left out, the idle time is the
     operating system's (two hours on macOS): a long query over a
@@ -713,9 +732,23 @@ class PostgresEngine(Engine):
                 # caller that reads an unreachable side as a RuntimeError
                 from ..wording import pooler_refused
                 raise SqlFailed(pooler_refused(str(e)) or e) from e
+            mon = self.attempts()
+            op, unit, position = self.unit_now() or ("a query", "", "")
+            a = mon.begin(side, op, unit, position,
+                          session=self.session_of(conn),
+                          reads=_plain_read(sql),
+                          transport=self.transport_of(conn),
+                          abandon=lambda: _pg_socket(conn, shut=True))
+            ok, why = False, ""
             try:
                 got = self._answer(conn, sql, statement_timeout)
+                ok = True
             except psycopg.Error as e:
+                # its class and state: never its text, which may quote
+                # the statement
+                why = " ".join(x for x in (type(e).__name__,
+                                           getattr(e, "sqlstate", "") or "")
+                               if x)
                 if not (conn.closed or conn.broken) or again or not kept \
                         or not _plain_read(sql):
                     if conn.closed or conn.broken:
@@ -723,6 +756,8 @@ class PostgresEngine(Engine):
                     raise SqlFailed(e) from e
                 self._drop_kept(self._kept_key(side, name))
                 continue
+            finally:
+                mon.done(a, ok, why)
             held = self.__dict__.get("_kept", {}).get(
                 self._kept_key(side, name))
             if held is not None:
@@ -730,6 +765,61 @@ class PostgresEngine(Engine):
             if _changes_shape(sql):
                 self._forget_catalog(side, db)
             return got
+
+    SESSION_VIEW = "pg_stat_activity"
+
+    def session_of(self, conn):
+        info = getattr(conn, "info", None)
+        return getattr(info, "backend_pid", None)
+
+    def transport_of(self, conn):
+        from ..attempts import transport
+        sock = _pg_socket(conn)
+        try:
+            return transport(sock)
+        finally:
+            if sock is not None:
+                sock.close()
+
+    def session_view(self, side, session):
+        """`pg_stat_activity`'s row of `session`: its account, state, what
+        it waits on and since when - never its statement's text."""
+        from ..attempts import View
+        got = self._psql(side, "postgres",
+                         "select usename||'|'||coalesce(state, '')||'|'||"
+                         "coalesce(wait_event_type, '')||'|'||"
+                         "coalesce(wait_event, '')||'|'||"
+                         "coalesce(extract(epoch from now() - state_change),"
+                         " 0) from pg_stat_activity"
+                         f" where pid = {int(session)}").strip()
+        if not got:
+            return View(session, present=False)
+        user, state, wtype, wevent, secs = (got.split("|") + [""] * 5)[:5]
+        if not state:
+            return View(session, user, error="the account cannot read the"
+                        " session's state (pg_read_all_stats)")
+        kind = ("idle" if state.startswith("idle") else "locked"
+                if wtype == "Lock" else "sending" if wevent == "ClientWrite"
+                else "running")
+        return View(session, user, kind, float(secs or 0))
+
+    def close_session(self, side, session, view):
+        """`pg_terminate_backend` of `session` once it is read again still
+        idle since `view` saw it, under the hop's account; True once the
+        server no longer lists it."""
+        again = self.session_view(side, session)
+        if not (again.present and not again.error and again.state == "idle"
+                and again.seconds >= view.seconds
+                and self.owns_session(side, again)):
+            return False
+        self._psql(side, "postgres",
+                   f"select pg_terminate_backend({int(session)})")
+        deadline = time.monotonic() + CONNECT_SECONDS
+        while self.session_view(side, session).present:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("server session termination unconfirmed")
+            time.sleep(0.1)
+        return True
 
     def _kept_key(self, side, name):
         import threading

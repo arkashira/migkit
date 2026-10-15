@@ -1,3 +1,4 @@
+import contextlib
 import re
 import threading
 import time
@@ -5251,6 +5252,71 @@ class Engine:
         parent = current_pool() or getattr(self, "_active_read_pool", None) or getattr(self.hop, "_read_pool", None)
         coordinator = current_coordinator() or getattr(self, "_slot_coordinator", None) or getattr(self.hop, "_slot_coordinator", None)
         return ReadPool(self.hop, self, db, workers, parent=parent, coordinator=coordinator)
+
+    # --- one attempt's server session (`attempts`, P0-CONNECTION-PROGRESS)
+
+    #: how the server lists one session (`attempts.View`): the engine's
+    #: own view, or NOT_YET where migkit reads none of its server - a wait
+    #: there is ended by its read deadline only
+    SESSION_VIEW = "not yet"
+
+    def attempts(self):
+        """The attempts in flight on this engine and their ledger, beside
+        the hop's reports (`attempts.Monitor`)."""
+        got = self.__dict__.get("_attempts")
+        if got is None:
+            from .. import attempts
+            try:
+                path = str(self.hop.report_dir("") / "attempts.json")
+            except Exception:  # noqa: BLE001 - kept in memory then
+                path = None
+            got = self.__dict__.setdefault(
+                "_attempts", attempts.Monitor(self, attempts.Ledger(path)))
+        return got
+
+    def session_of(self, conn):
+        """The server's id of the session `conn` holds, or None."""
+        return None
+
+    def session_view(self, side, session):
+        """`attempts.View` of one session as the server lists it."""
+        from .. import attempts
+        return attempts.View(session, error=f"{self.SESSION_VIEW}: migkit"
+                             " reads no session view of this server")
+
+    def owns_session(self, side, view):
+        """Whether the session is the hop's account's on that side."""
+        ep = self.hop.source if side == "src" else self.hop.target
+        user = getattr(ep, "user", None)
+        return bool(user) and view.owner == user
+
+    def close_session(self, side, session, view):
+        """Close exactly `session`, still as `view` saw it: True once the
+        server no longer has it. False where it cannot be closed here."""
+        return False
+
+    def transport_of(self, conn):
+        """The keepalive and read deadline `conn`'s socket holds, read back
+        (`attempts.transport`), or {}."""
+        return dict(getattr(conn, "_migkit_transport", None) or {})
+
+    @contextlib.contextmanager
+    def attempt_unit(self, operation, unit="", position=""):
+        """The unit of work the queries this thread sends inside belong
+        to: what their attempts are kept under in the ledger, so a retry
+        is counted against the unit and resumes it at `position`."""
+        local = self.__dict__.setdefault("_unit_local", threading.local())
+        before = getattr(local, "now", None)
+        local.now = (operation, unit, str(position))
+        try:
+            yield
+        finally:
+            local.now = before
+
+    def unit_now(self):
+        """(operation, unit, position) this thread is inside, or None."""
+        local = self.__dict__.get("_unit_local")
+        return getattr(local, "now", None) if local else None
 
     def capacity(self, side, db):
         """What this side's server can give a move, for `sizing`: any of
