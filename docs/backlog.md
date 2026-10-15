@@ -10291,3 +10291,9 @@ long-running verifier still holds its earlier sequential implementation.
 
 Dependencies: P0-DECISION-ALL, P0-AUTO-RESOURCES.adapt, P0-RESUME-ALL,
 P0-VALIDATE.mysql-query-lifecycle, P0-CONNECTION-PROGRESS and P0-ETA-ALL.
+
+### LT.R10 MongoDB standalone followed by buckets
+
+Done: a standalone source is followed by a bucket sweep (`MongoEngine.FOLLOW_WAYS`, `_sweep_round`): dbHash per collection as the unchanged proof, then raw-BSON bucket digests keyed by the canonical `_id` hash (`leaves.bytes_hash`, `id_bucket`), only changed buckets re-read and written; depth D1 with "convert to a single-node replica set" (`changedepth.mongodb`, `MongoEngine.change_depths`).
+
+Not done: an oplog rung (reading `local.oplog.rs` where a change stream is refused) is not built; the standalone server test is written, not run; `change_parity.MongoStandaloneVerifier` is an older flat duplicate of this item, to be retired.

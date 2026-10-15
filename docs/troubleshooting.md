@@ -873,9 +873,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the server opened a change stream without saying where it stands, so there is no position to start the tail from before the copy
 
-* this server is a standalone, and a change stream needs a replica set - the oplog a stream reads does not exist otherwise
-
 * this server is a standalone, and a change stream needs a replica set - the oplog a stream reads does not exist otherwise. A single node is enough: mongod --replSet rs0 mongosh --eval 'rs.initiate()'
+
+* <...>: no way to follow the source - <...>
 
 * <...>: the target's TTL indexes could not be saved before holding them for the load, so nothing was loaded
 

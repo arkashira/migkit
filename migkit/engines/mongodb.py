@@ -2,7 +2,7 @@ import re
 import time
 
 from .. import pieces
-from ..decide import Rung
+from ..decide import Need, Rung
 from .base import Engine, RepairAction, Result, clauses, rows_counted
 from ..verdict import difference_kind_from_counts
 
@@ -67,6 +67,104 @@ def chunk_of(text, ranges):
         if above and below:
             return part
     return None
+
+
+#: a BSON value's length after its type byte and name, where it is fixed
+_FIXED = {0x01: 8, 0x06: 0, 0x07: 12, 0x08: 1, 0x09: 8, 0x0A: 0, 0x10: 4,
+          0x11: 8, 0x12: 8, 0x13: 16, 0x7F: 0, 0xFF: 0}
+
+
+def _value_len(raw, ty, at):
+    """Bytes of the value of type `ty` starting at `at` in `raw`."""
+    if ty in _FIXED:
+        return _FIXED[ty]
+    n = int.from_bytes(raw[at:at + 4], "little", signed=True)
+    if ty in (0x02, 0x0D, 0x0E):
+        return 4 + n
+    if ty in (0x03, 0x04, 0x0F):
+        return n
+    if ty == 0x05:
+        return 5 + n
+    if ty == 0x0C:
+        return 4 + n + 12
+    if ty == 0x0B:
+        first = raw.index(b"\x00", at) + 1
+        return raw.index(b"\x00", first) + 1 - at
+    raise ValueError(f"a BSON element of type {ty:#x} is not one migkit"
+                     " reads")
+
+
+def id_element(raw):
+    """The `_id` element of a document's stored BSON - its type byte, its
+    name and its value, as the server keeps them - found without decoding
+    the document; None where it has none."""
+    raw = bytes(raw)
+    i, end = 4, len(raw) - 1
+    while i < end:
+        start, ty = i, raw[i]
+        j = raw.index(b"\x00", i + 1)
+        k = j + 1 + _value_len(raw, ty, j + 1)
+        if raw[i + 1:j] == b"_id":
+            return raw[start:k]
+        i = k
+    return None
+
+
+def id_of(element):
+    """The `_id` value an element (`id_element`) holds, to ask a server
+    for the document by."""
+    import bson
+    body = element + b"\x00"
+    return bson.decode((len(body) + 4).to_bytes(4, "little") + body)["_id"]
+
+
+def id_bucket(spec, element):
+    """The leaf of `spec` (`leaves.Spec`, kind "hash") an `_id` falls in:
+    the top bits of the canonical hash over the element's bytes, so one
+    `_id` falls in one bucket on both sides whatever its type."""
+    from .. import leaves
+    return spec.bucket(leaves.text_hash(spec.salt, element.hex()))
+
+
+def bucket_digests(raws, spec):
+    """({bucket: [documents, sum of their hashes]}, bytes read) of stored
+    BSON documents: each document's bytes hashed as the server sent them,
+    never decoded and encoded again, and summed into the bucket of its
+    `_id` - a sum, so the order a walk reads them in does not matter and
+    a document held twice counts twice."""
+    from .. import leaves
+    out, size = {}, 0
+    for doc in raws:
+        raw = doc.raw if hasattr(doc, "raw") else bytes(doc)
+        size += len(raw)
+        cell = out.setdefault(id_bucket(spec, id_element(raw)), [0, 0])
+        cell[0] += 1
+        cell[1] += leaves.bytes_hash(spec.salt, raw)
+    return out, size
+
+
+def changed_buckets(a, b):
+    """The buckets whose digests differ between two sides."""
+    return {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
+
+
+def bucket_writes(src, dst, carried=("insert", "update", "delete")):
+    """(documents to write, `_id` elements to delete) that make the target's
+    documents of the changed buckets the source's: `src` and `dst` are
+    {`_id` element: stored bytes}. A document the target lacks is written
+    where inserts are carried, one whose bytes differ where updates are,
+    and one the source no longer holds deleted where deletes are
+    (`Hop.carries`)."""
+    writes, deletes = [], []
+    for k, raw in src.items():
+        have = dst.get(k)
+        if have is None and "insert" in carried:
+            writes.append((k, raw))
+        elif have is not None and have != raw and "update" in carried:
+            writes.append((k, raw))
+    if "delete" in carried:
+        deletes = [k for k in dst if k not in src]
+    return writes, deletes
 
 
 class MongoEngine(Engine):
@@ -1159,10 +1257,7 @@ class MongoEngine(Engine):
             stream = self._client(side)[self._d(side, db)].watch([])
         except Exception as e:
             if "only supported on replica sets" in str(e):
-                raise SystemExit(
-                    "this server is a standalone, and a change stream needs"
-                    " a replica set - the oplog a stream reads does not"
-                    " exist otherwise")
+                return self._sweep_point(side)
             raise
         try:
             token = (stream.resume_token or {}).get("_data")
@@ -1870,6 +1965,11 @@ class MongoEngine(Engine):
 
     @classmethod
     def position_reached(cls, have, want):
+        if isinstance(have, dict) and "at" in have:
+            # a sweep's: the time of its last round that found nothing
+            if not isinstance(want, dict) or not have.get("at"):
+                return None
+            return str(have["at"]) >= str(want.get("at") or "")
         at = cls._token_time(have)
         if at is None or want is None:
             return None
@@ -3134,6 +3234,227 @@ class MongoEngine(Engine):
                 "".join(k + "\n" for k in kept))
         return [by[k] for k in overwrite]
 
+    def _keeps_a_log(self, side):
+        """Whether the server keeps an oplog a change stream reads: a
+        replica set's member, or a sharded cluster's router."""
+        hello = self._client(side).admin.command("hello")
+        return bool(hello.get("setName")) or hello.get("msg") == "isdbgrid"
+
+    def change_depths(self):
+        """{database.collection: (depth, the statement that raises it)}
+        (`changedepth.mongodb`): from whether the source keeps an oplog
+        and whether each collection keeps its pre-images. Read-only."""
+        from .. import changedepth
+        logged = self._keeps_a_log("src")
+        out = {}
+        for db in self.databases():
+            for info in self._client("src")[db].list_collections():
+                name = info.get("name", "")
+                if name.startswith("system.") or info.get("type") == "view" \
+                        or not self.in_scope(db, name):
+                    continue
+                pre = bool(((info.get("options") or {}).get(
+                    "changeStreamPreAndPostImages") or {}).get("enabled"))
+                out[f"{db}.{name}"] = changedepth.mongodb(logged, pre)
+        return out
+
+    #: how a source's changes are followed: its change stream where the
+    #: server keeps an oplog, else by comparing it again and again - each
+    #: collection's server hash first, the cheap proof nothing changed,
+    #: then the documents' stored bytes in buckets, and only the changed
+    #: buckets' documents read again and written (`_sweep_round`). A sweep
+    #: reads each bucket as of its own moment, so where a stream holds it
+    #: is passed over: guarantees are never traded for speed
+    FOLLOW_WAYS = (
+        Rung("change stream", "the source's change stream",
+             needs=(Need("an oplog", lambda f: f["replica set"],
+                         "the source is a standalone server and keeps no"
+                         " oplog, which {rung} reads"),
+                    Need("the stream opened",
+                         lambda f: f["stream opens"] is True,
+                         lambda f: "the source refused to open a change"
+                                   f" stream: {f['stream opens']}")),
+             holds={"consistent": "as of one moment",
+                    "idempotent": "converges", "resumable": "goes on"},
+             because="every change read from the oplog, in order",
+             leaves="a position file and a process on this machine"),
+        Rung("bucket sweep", "the collections compared again and again,"
+                             " their changed documents written",
+             holds={"consistent": "per range", "idempotent": "converges",
+                    "resumable": "goes on"},
+             because="the source keeps no log of its changes: each round"
+                     " holds every collection's server hash to the"
+                     " target's, and walks only those that differ",
+             leaves="a position file and a process on this machine"),
+    )
+
+    #: seconds between rounds of a sweep at most, when nothing changed
+    SWEEP_EVERY = 5.0
+
+    @classmethod
+    def follow_choice(cls, facts, costs=None):
+        """The `decide.Choice` of the way this source's changes are
+        followed, from `facts` ("replica set", "stream opens") and what
+        each way cost here (`_follow_costs`)."""
+        from ..decide import climb
+        return climb("following the source's changes", cls.FOLLOW_WAYS,
+                     facts, costs=costs)
+
+    def _stream_opens(self, db):
+        """True, or the server's refusal, of a change stream opened and
+        closed again without reading an event."""
+        try:
+            self._client("src")[db].watch([]).close()
+            return True
+        except Exception as e:  # noqa: BLE001 - the refusal is the fact
+            return (str(e).splitlines() or ["refused"])[0][:120] or "refused"
+
+    def _follow_costs(self, db):
+        """Seconds a round of each way takes here: a sweep's from the
+        source's size and collections at the rates its rounds were
+        measured to read at (`_sweep_round`), the stream's from what it
+        was timed at; nothing where a way was never timed on this hop."""
+        from ..decide import Costs, HopCosts
+        kept = HopCosts(self.hop, "follow/")
+        out = Costs()
+        per_byte = kept.get("bucket sweep bytes")
+        per_coll = kept.get("bucket sweep collections")
+        if per_byte is not None:
+            st = self._client("src")[db].command("dbStats")
+            out["bucket sweep"] = (float(st.get("dataSize") or 0) * per_byte
+                                   + int(st.get("collections") or 0)
+                                   * (per_coll or 0.0))
+        got = kept.get("change stream")
+        if got is not None:
+            out["change stream"] = got
+        return out
+
+    def follow_way(self, db):
+        """`follow_choice` for this hop's source, its facts read once."""
+        from ..decide import Facts
+        facts = Facts(**{"replica set": lambda: self._keeps_a_log("src"),
+                         "stream opens": lambda: self._stream_opens(db)})
+        return self.follow_choice(facts, self._follow_costs(db))
+
+    def _sweep_point(self, side):
+        """Now, as a sweep holds it: the server's own clock."""
+        got = self._client(side).admin.command("hello")
+        at = got.get("localTime")
+        return {"at": at.isoformat() if at is not None
+                else time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+    def _sweep_collection(self, db, name, apply):
+        """(documents written or deleted, bytes read) of one collection
+        whose server hashes differ: the source walked by `_id` ranges and
+        the target whole, every document's stored bytes summed into the
+        bucket of its `_id` (`bucket_digests`); then only the changed
+        buckets' documents read again, by key, on both sides, and the
+        source's written over the target's (`bucket_writes`)."""
+        from bson.raw_bson import RawBSONDocument
+        from pymongo import DeleteOne, ReplaceOne
+
+        from .. import leaves
+        rows = self._rows_of(db, name)
+        sc = self._client("src")[db][name]
+        tc = self._client("dst")[self._d("dst", db)][self._there(db, name)]
+        docs = sc.count_documents(rows or {})
+        spec = leaves.plan(max(docs, tc.estimated_document_count()), "hash",
+                           salt=self.digest_salt())
+        plan = self._id_plan(sc, docs)
+        if not self._coverage_ok(sc, plan, docs, rows):
+            plan = [(None, None, None)]
+        a, size = {}, 0
+        for ty, lo, hi in plan:
+            got, n = bucket_digests(self._raw(sc).find(
+                self._within(self._range_filter(ty, lo, hi), rows),
+                sort=[("_id", 1)]), spec)
+            size += n
+            for k, (c, h) in got.items():
+                cell = a.setdefault(k, [0, 0])
+                cell[0] += c
+                cell[1] += h
+        b, n = bucket_digests(self._raw(tc).find(rows or {}), spec)
+        size += n
+        changed = changed_buckets(a, b)
+        if not changed:
+            return 0, size
+
+        def read(coll):
+            keys = [id_element(d.raw) for d in self._raw(coll).find(
+                rows or {}, {"_id": 1})]
+            keys = [k for k in keys if id_bucket(spec, k) in changed]
+            out = {}
+            for i in range(0, len(keys), leaves.IN_LIST):
+                for d in self._raw(coll).find(
+                        {"_id": {"$in": [id_of(k) for k in
+                                         keys[i:i + leaves.IN_LIST]]}}):
+                    out[id_element(d.raw)] = d.raw
+            return out
+        writes, deletes = bucket_writes(read(sc), read(tc),
+                                        self.hop.carries(db, name))
+        if apply and (writes or deletes):
+            ops = ([ReplaceOne({"_id": id_of(k)}, RawBSONDocument(raw),
+                               upsert=True) for k, raw in writes]
+                   + [DeleteOne({"_id": id_of(k)}) for k in deletes])
+            for i in range(0, len(ops), leaves.IN_LIST):
+                tc.bulk_write(ops[i:i + leaves.IN_LIST], ordered=True)
+        return len(writes) + len(deletes), size
+
+    def _sweep_round(self, db, apply, log):
+        """(documents carried, whether the round found nothing to carry)
+        of one look at a source with no log: every collection the hop
+        takes held by its server hash (`dbHash`) to the target's - equal,
+        it is level and nothing is read - and each that differs, or that
+        has no hash to go by, walked (`_sweep_collection`). The rates the
+        walks read at are kept, for what a round is predicted to cost."""
+        from ..decide import HopCosts
+        mine, _ = self._taken(db)
+        names = [a for a, _ in mine if not a.startswith("system.")]
+        on_src = set(self._client("src")[db].list_collection_names())
+        ha, hb = self._db_hashes(db, [n for n in names if n in on_src])
+        went, size, walked, began = 0, 0, 0, time.monotonic()
+        for name in names:
+            if name not in on_src:
+                log(f"{name} is no longer on the source; its documents on"
+                    " the target are left as they are")
+                continue
+            a = self._server_hash(ha, name)
+            if a and a == self._server_hash(hb, self._there(db, name)) \
+                    and not self._rows_of(db, name):
+                continue
+            n, read = self._sweep_collection(db, name, apply)
+            went, size, walked = went + n, size + read, walked + 1
+            if n:
+                log(f"{name}: {n:,} documents "
+                    + ("written" if apply else "differ"))
+        if apply and size:
+            kept = HopCosts(self.hop, "follow/")
+            took = time.monotonic() - began
+            kept.saw("bucket sweep bytes", size, took)
+            kept.saw("bucket sweep collections", walked, took)
+        return went, not went
+
+    def _sweep_follow(self, db, go, token_path, log):
+        """Follow a source that keeps no log (`FOLLOW_WAYS`): round after
+        round (`_sweep_round`), the position the time of the last round
+        that found nothing to carry, so a fence waits until the target is
+        level with no write between."""
+        from .. import tailctl
+        if go and tailctl.position(token_path) is None:
+            tailctl.begin(self, db, token_path, self._sweep_point("src"))
+
+        def look(token):
+            point = self._sweep_point("src")
+            went, settled = self._sweep_round(db, True, log)
+            return ({"at": point["at"] if settled
+                     else (token or {}).get("at")}, went, settled)
+
+        def behind(token):
+            went, _ = self._sweep_round(db, False, lambda m: None)
+            return f"{went:,} documents differ between the source and target"
+        tailctl.follow(self, db, go, token_path, log, "documents", look,
+                       behind, self.SWEEP_EVERY)
+
     def _assess_extra(self):
         """What a document store has to say beside what every engine's
         assessment does (`Engine.assess`: the brands, the two servers'
@@ -3167,11 +3488,12 @@ class MongoEngine(Engine):
         if not on and not sharded:
             return Result(
                 "schema", scope, "warn",
-                "the source is a standalone server and keeps no oplog, so"
-                " its changes cannot be followed after the copy; only a"
-                " full copy is possible",
-                fix_hint="run the source as a replica set (a single member"
-                         " is enough) to follow it online")
+                "the source is a standalone server and keeps no oplog: its"
+                " changes are followed by comparing its collections again"
+                " and again (depth D1), and a fence holds only once a"
+                " round finds nothing to carry",
+                fix_hint="convert to a single-node replica set to follow"
+                         " every change in order")
         if sharded:
             return Result("schema", scope, "ok",
                           "a sharded cluster: its changes are read through"
@@ -3489,7 +3811,8 @@ class MongoEngine(Engine):
     def tail_seed(self, db, token_path, point):
         """Start the tail from `point`, a resume token taken earlier."""
         from .. import tailctl
-        tailctl.begin(self, db, token_path, {"_data": point})
+        tailctl.begin(self, db, token_path, point if isinstance(point, dict)
+                      else {"_data": point})
 
     #: events a look at the change stream carries at most before its
     #: position is saved (`tail_apply`)
@@ -3548,6 +3871,13 @@ class MongoEngine(Engine):
         from bson.json_util import dumps, loads
 
         from .. import tailctl
+        way = self.follow_way(db)
+        if way.rung is None:
+            raise SystemExit(f"{db}: no way to follow the source -"
+                             f" {way.reason}")
+        if way.path == "bucket sweep":
+            log(f"following by {way.said}: {way.reason}")
+            return self._sweep_follow(db, go, token_path, log)
         src = self._client("src")[db]
         dst = self._client("dst")[self._d("dst", db)]
         env = tailctl.position(token_path)

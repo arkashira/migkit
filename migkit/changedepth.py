@@ -49,6 +49,20 @@ def postgres(wal_level, replica_identity, has_key):
     return "D3", "alter table ... replica identity full"
 
 
+def mongodb(replica_set, pre_images):
+    """The same for one MongoDB collection: `replica_set` whether the
+    server keeps an oplog (a replica set, or a sharded cluster's router),
+    `pre_images` whether the collection keeps its documents' images
+    before a change. A standalone keeps no log, and its collections are
+    followed by comparing them again and again (D1)."""
+    if not replica_set:
+        return "D1", "convert to a single-node replica set"
+    if pre_images:
+        return "D4", ""
+    return "D3", ("db.runCommand({collMod: ..., changeStreamPreAndPostImages:"
+                  " {enabled: true}})")
+
+
 def lines(table_depths, shown=5):
     """Assess rows, one per depth reached, from {table: (depth, raise)}:
     (level, item, detail) - the tables named up to `shown`, and the one

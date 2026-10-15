@@ -120,6 +120,13 @@ SLOW_RTT_MS = 20.0
 SKETCH_MOST = 5000
 
 
+def bytes_hash(salt, data):
+    """`text_hash` of bytes held as they are - a document's stored BSON -
+    hashed without being turned into text first."""
+    return int(hashlib.md5(salt.encode() + bytes(data),
+                           usedforsecurity=False).hexdigest()[:HEX], 16)
+
+
 def text_hash(salt, text):
     """A row's (or key's) hash: the first 60 bits of md5(salt || text),
     the canonical digest's width (`canon.DIGEST_BITS`) behind this run's
