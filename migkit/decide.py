@@ -2740,7 +2740,7 @@ def rank_priority(items, goal="copy", max_cost=None):
 
 TASKS = {
     # task: (family, ("routed", modules...) | ("gap", why) | ("no choice", why))
-    "init": ("configuration", ("routed", "guide")),
+    "init": ("configuration", ("routed", "guide", "engineat")),
     "doctor": ("discovery", ("routed", "cli")),
     "advise": ("assessment", ("routed", "advisors")),
     "assess": ("assessment", ("routed", "ready")),

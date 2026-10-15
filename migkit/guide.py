@@ -25,6 +25,12 @@ the configuration, or kept in the keychain with
 the hop's name where migkit's own choice is not wanted. Without either,
 it writes the template, as it always has.
 
+An address may leave the engine out (`app@db1:5432/shop`, or a host
+alone): the server's own first words say it (`migkit.engineat`), and a
+server that does not is the one question asked, its port's engine
+proposed. What is missing of a user is said with the statements that
+grant it.
+
 Measured, a PostgreSQL to MySQL hop from nothing in a terminal
 (`tests/test_init_is_the_guide.py`): 5 questions (two addresses, two
 passwords, where to keep them) and a hop of 4 lines (its name, the goal,
@@ -105,7 +111,7 @@ def run(ask, say, path, force=False, env=None):
     """The guide. `ask(question, secret=False, default="")` returns the
     answer, or is None where nothing may be asked; `say(text)` prints.
     Returns the path written."""
-    from . import addresses, hopkeys, imports
+    from . import addresses, engineat, hopkeys, imports
     from .config import build_hop, keychain_name, keychain_write
     env = dict(os.environ if env is None else env)
     asked = []
@@ -121,6 +127,9 @@ def run(ask, say, path, force=False, env=None):
         if not src and ask is not None:
             src = question(ASK_SOURCE).strip()
         try:
+            if src and "://" not in src and \
+                    not imports.looks_like_a_file(src):
+                src = engineat.address(src, question if ask else None, say)
             if imports.looks_like_a_file(src):
                 imported = imports.read(src)
                 break
@@ -246,6 +255,9 @@ def _address(question, say, given, text, side):
                              f"{side.upper()} or run `migkit init` in a"
                              " terminal")
         try:
+            if "://" not in got:
+                from . import engineat
+                got = engineat.address(got, question, say)
             addresses.parse(got, side)
             return got
         except SystemExit as e:
@@ -557,6 +569,10 @@ def propose(found):
     return choice.path
 
 
+#: how many of a need's statements the plan says before the script
+SAID_STATEMENTS = 6
+
+
 def plan(hop, found, goal, say):
     """Says the plan; writes the DBA's scripts; returns {side: path}."""
     from . import dba, hopkeys
@@ -614,6 +630,12 @@ def plan(hop, found, goal, say):
         say(f"  before it can: {len(lack)} thing(s) the DBA must do -")
         for n in lack:
             say(f"    {n.side}: {n.what} ({n.now})")
+            # the exact statements, said here as well as in the script
+            for line in n.fix[:SAID_STATEMENTS]:
+                say(f"      {line}")
+            if len(n.fix) > SAID_STATEMENTS:
+                say(f"      ... {len(n.fix) - SAID_STATEMENTS} more in the"
+                    " script")
         for side, p in written.items():
             say(f"  the {side}'s script, for the DBA: {p}")
     for n in unknown:

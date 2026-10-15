@@ -19,7 +19,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 
-## `migkit/` (182 modules)
+## `migkit/` (183 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -77,6 +77,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/durable.py` - State that survives a crash and a power loss, written one way. Classes: Torn.
 - `migkit/editions.py` - An edition change: the same engine, sold or built as another edition (backlog P0-SCENARIOS - "SQL Server Web edition to Datacenter (Enterpri Classes: Edition, Feature, Use.
 - `migkit/egress.py` - What leaves the machine, and the one gate it goes through (audit 2026-10-01, SEC12, SEC20, W8).
+- `migkit/engineat.py` - Which engine answers at an address that names none (backlog P0-MINIMAL-INPUT). Classes: Knock.
 - `migkit/envkeys.py` - Every environment variable migkit reads, in one place, and one way of reading each kind (audit 2026-10-01, K13). Classes: Var, Bad.
 - `migkit/evidence.py` - The files migkit writes that hold the application's values, kept encrypted where the hop asks (backlog R17b): Classes: EvidencePath.
 - `migkit/export.py` - The evidence of a migration, exported: what migkit did on a hop and what it measured, in the forms audit and change processes take - HTML an

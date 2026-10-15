@@ -1845,6 +1845,14 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> is not something migkit sends; one of <...>, or none
 
+* <...> names no server
+
+* nothing answers at <...> on any engine's own port: write the port, host:port
+
+* <...> is no engine migkit knows
+
+* <...>. Write it as the address's scheme: <...>://<...><...>:<...><...>
+
 * the tail keeps <...>, which the machines' store cannot hold; keep the hop's run state in a bucket or a directory every machine sees
 
 * the machines' store kept changing under migkit while it wrote <...>; too many machines write one record at once

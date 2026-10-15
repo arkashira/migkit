@@ -3021,7 +3021,10 @@ def smallest(name, raw):
                            ("target", dst_e, target_dbs)):
         got = raw.get(side)
         if addresses.is_address(got):
-            got = addresses.parse(got, side)[1]
+            _, got, said = addresses.parse(got, side)
+            # the databases the address names: rendered back, never
+            # dropped (a hop of `/shop` written as every database)
+            names = names or said
         if not isinstance(got, dict):
             rendered[side] = None
             continue
