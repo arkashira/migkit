@@ -718,6 +718,12 @@ def _took(secs):
 
 # ---- the file ------------------------------------------------------------
 
+#: the top-level keys a hops file holds beside `hops` (`hopkeys.check`):
+#: who sees and does what in the web view. The guide adds a hop under
+#: `hops` and leaves them as they are
+BESIDE_HOPS = ("access",)
+
+
 def _existing(path, force):
     """{name: the hop as written} of the file now, where the new one is
     added to it."""
@@ -730,9 +736,13 @@ def _existing(path, force):
     except yaml.YAMLError:
         raise SystemExit(f"{p} is not YAML migkit can read; use --force to"
                          " write a new one")
-    if set(data) - {"hops"}:
-        raise SystemExit(f"{p} holds more than hops; add the hop by hand,"
-                         " or use --force to write a new file")
+    odd = sorted(set(map(str, data)) - {"hops", *BESIDE_HOPS})
+    if odd:
+        raise SystemExit(
+            f"{p} holds {', '.join(odd)}, which migkit reads nothing from"
+            f" beside `hops` and {', '.join(f'`{k}`' for k in BESIDE_HOPS)}"
+            " - add the hop by hand, or use --force to write a new file"
+            " (which leaves nothing of the old one)")
     return {str(k): v for k, v in (data.get("hops") or {}).items()}
 
 
@@ -815,6 +825,30 @@ def _replaced(text, name, body):
     return None
 
 
+def _added(text, body):
+    """`text` with `body` at the end of the `hops:` block, before whatever
+    key follows it (`access:`): appended to the file's end it would sit
+    under that key, and the file would read as a hop of its own."""
+    import re
+    lines = text.splitlines(keepends=True)
+    head = next((i for i, line in enumerate(lines)
+                 if re.match(r"^hops\s*:\s*(#.*)?$", line.rstrip("\n"))),
+                None)
+    if head is None:
+        return text + "hops:\n" + body
+    end = len(lines)
+    for j in range(head + 1, len(lines)):
+        if lines[j].strip() and not lines[j][0].isspace() \
+                and not lines[j].lstrip().startswith("#"):
+            end = j
+            break
+    # comments just before the next key belong to it
+    while end - 1 > head and lines[end - 1].lstrip().startswith("#") \
+            and not lines[end - 1][0].isspace() and end < len(lines):
+        end -= 1
+    return "".join(lines[:end]) + body + "".join(lines[end:])
+
+
 def _write(path, name, small, force, replace=False):
     """The hop written: added to the file, or - `replace` - put in the
     place of the hop of that name, every other line of the file as it
@@ -828,9 +862,7 @@ def _write(path, name, small, force, replace=False):
             text += "\n"
         new = _replaced(text, name, body) if replace else None
         if new is None:
-            if "hops:" not in text:
-                text += "hops:\n"
-            new = text + body
+            new = _added(text, body)
     else:
         new = HEADER + "hops:\n" + body
     # a name of its own: two guides writing beside one file each check

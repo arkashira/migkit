@@ -14,6 +14,12 @@ against the hop's list of who may approve.
         signers: /etc/migkit/allowed_signers   # ssh-keygen's format
         expires: 3600                # seconds a request stands (1 hour)
 
+The cutover is asked of approvers only when it can go ahead
+(`readiness`): while a tail runs, it is no further behind than the bound
+(the cutover's `start_below`, or `approvals.lag_below`) and the last
+verify ended `same`; otherwise the step stops naming what blocks it and
+what to do, and no approver is bothered.
+
 No new command: the request is a file in the run's reports, and an
 approver signs it with the machine's own `ssh-keygen`, as migkit prints -
 or approves it in the web view, signed in as themselves, where the hop's
@@ -226,6 +232,70 @@ def needed(hop, step):
     return step in check_steps(rules(hop))
 
 
+def readiness(hop, db):
+    """Whether a cutover approval is worth asking for now, from what is
+    measured: {"ready", "blocks": [what stands in the way], "next": what
+    to do, "lag": seconds or None, "bound": seconds, "verdict": status or
+    None}. Two things must hold while a change tail runs for `db`: it is
+    no further behind than the bound (the cutover's `start_below`, or the
+    hop's `approvals.lag_below`), and the hop's last verify ended `same` -
+    not different, not incomplete, not never. Where no tail runs there is
+    no lag to measure and the cutover's own drain proves it; nothing
+    blocks then."""
+    from . import cutover, tailctl
+    rule = rules(hop)
+    conf = cutover.settings(hop)
+    bound = float(rule.get("lag_below")
+                  or (conf or cutover.DEFAULTS)["start_below"])
+    where = hop.report_dir(db)
+    tail = tailctl.state(where)
+    out = {"ready": True, "blocks": [], "next": "", "lag": None,
+           "bound": bound, "verdict": None}
+    if not tail or not tail.get("running"):
+        return out
+    nxt = []
+    known = [v for v in (tail.get("lag"), tail.get("behind"))
+             if v is not None]
+    if not known:
+        why = tail.get("lag_unknown") or "the tail has not reported yet"
+        out["blocks"].append(f"the lag is unknown ({why})")
+        nxt.append("wait for the tail's next report, or fix what hides the"
+                   " lag")
+    else:
+        out["lag"] = max(known)
+        if tail.get("paused"):
+            out["blocks"].append("the tail is held, and the source goes on")
+            nxt.append("let the tail go on (resume it)")
+        elif out["lag"] > bound:
+            out["blocks"].append(f"the tail is {out['lag']:.1f}s behind the"
+                                 f" source, more than the {bound:g}s bound")
+            nxt.append("wait for it to catch up")
+    status = _last_verdict(hop, db)
+    out["verdict"] = status
+    if status != "same":
+        out["blocks"].append("the last verify " + (
+            "was never run" if status is None
+            else f"ended {status}, not same"))
+        nxt.append(f"run `migkit check {hop.name}` and settle its"
+                   " differences")
+    out["ready"] = not out["blocks"]
+    out["next"] = "; then ".join(nxt)
+    return out
+
+
+def _last_verdict(hop, db):
+    """The status the hop's last verify ended as, None where it never
+    did."""
+    for where in (hop.report_dir(db), hop.report_dir()):
+        try:
+            got = json.loads((where / "verdict.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(got, dict) and got.get("status"):
+            return str(got["status"])
+    return None
+
+
 def require(hop, step, db, log=None, detail=None):
     """Returns the approvers where the step may go ahead; raises SystemExit
     saying what to do where the hop asks for approval and it is not all
@@ -234,6 +304,13 @@ def require(hop, step, db, log=None, detail=None):
     rule = rules(hop)
     if step not in check_steps(rule):
         return []
+    if step == "cutover":
+        ready = readiness(hop, db)
+        if not ready["ready"]:
+            raise SystemExit(
+                f"{step} is not offered for approval yet: "
+                + "; ".join(ready["blocks"]) + ". Nothing was asked of the"
+                f" approvers. Then: {ready['next']}.")
     from .web import approve as view
     if _signers(rule) is None and not view.accepts(hop):
         raise SystemExit(f"{step} needs approval, and the hop's"

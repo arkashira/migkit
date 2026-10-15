@@ -520,3 +520,47 @@ def leave_out(hop, d, kept):
     if kept:
         hop.exclude = list(hop.exclude or []) + [
             _named((d, *t)) for t in sorted(kept)]
+
+
+#: the actions that cannot be taken back, and what each does - every one
+#: of them goes through `before_one_way`, not through a guard of its own
+ONE_WAY = {
+    "drop": "takes an object away from the target",
+    "switch": "moves the application to the target",
+    "drain": "stops the apply at a position the source has gone past",
+}
+
+
+def before_one_way(hop, eng, db, action, go, log):
+    """The guard of every one-way action (`ONE_WAY`): the write guard
+    (`before_write` - the target is not the source, not production unless
+    the hop names it, and the one the plan showed) and one thing more -
+    the action itself must have been shown in a plan against this same
+    target before it is taken with `go`. A drop, a switch or a drain that
+    was never planned is refused, naming the plan to run; one planned
+    against another target is too. Without `go` the plan is kept and said.
+    Returns the target's identity and its fingerprint."""
+    if action not in ONE_WAY:
+        raise ValueError(f"{action!r} is not a one-way action migkit holds"
+                         f" ({', '.join(ONE_WAY)})")
+    dst, fp = before_write(hop, eng, db, go, log)
+    rec, path = _load(hop, db)
+    shown = rec.setdefault("one_way", {})
+    seen = shown.get(action) or {}
+    where = db or hop.name
+    if go:
+        if seen.get("fingerprint") != fp:
+            raise SystemExit(
+                f"{where}: {action} was not done - it {ONE_WAY[action]}"
+                " and cannot be taken back, and "
+                + ("no plan showed it" if not seen else
+                   "the plan that showed it was for another target")
+                + f". Show the plan first (the same command without --go),"
+                  " then run it with --go against the target it names.")
+        return dst, fp
+    shown[action] = {"fingerprint": fp,
+                     "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    _save(hop, rec, path)
+    log(f"{action} {ONE_WAY[action]} and cannot be taken back: the plan is"
+        " kept, and --go does it against this target only")
+    return dst, fp

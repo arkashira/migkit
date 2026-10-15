@@ -83,7 +83,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * no <...> address: set MIGKIT_<...> or run `migkit init` in a terminal
 
-* <...> holds more than hops; add the hop by hand, or use --force to write a new file
+* <...> holds <...>, which migkit reads nothing from beside `hops` and <...> - add the hop by hand, or use --force to write a new file (which leaves nothing of the old one)
 
 * <...> is not YAML migkit can read; use --force to write a new one
 
@@ -479,6 +479,18 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> changes are held and the feed has not said for <...> minutes that anything older is past (nothing from <...>) | <...>: without its marks a change cannot be put in commit order. <...>
 
+* <...>: drain to what? Name a position, or write `<...>` for where the source stands this moment
+
+* <...> is not a WAL location - write it as 0/16B3748 (the form pg_current_wal_lsn shows)
+
+* <...> is not a set of transaction ids - write it as uuid:1-500 (several, comma-separated)
+
+* <...>: the source gives no position this stream can be held to, so there is nothing to stop at. A cutover of this hop proves its drain by a mark instead
+
+* <...>: no change tail runs for this database, so nothing applies the changes up to a position. Start it (`migkit move <...> --mode cdc --go`) and drain again
+
+* <...>: the tail did not reach <...> within <...>s - no stream of this hop's reads the source | (<...>s waited)<...>. Nothing was stopped; the tail goes on. Give it longer (a larger wait), or name an earlier position
+
 * two_way: this tail numbers its batches on the target by <...>, and the target no longer allows it: <...>. Which batch it last committed is kept there, so put that right and start the tail again
 
 * two_way: no way of marking migkit's own writes proved itself on the target, so what it applies would come back to where it began. <...> | None of them is allowed there.
@@ -597,6 +609,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> needs approval, and the hop's `approvals.signers` - the list of who may approve - is not there, and no one approves it in the web view either (the hop's `access` names no approver)
 
+* <...> is not offered for approval yet: <...>. Nothing was asked of the approvers. Then: <...>.
+
 * cutover: is `true` or the path's settings (<...>), not <...>
 
 * cutover: <...> - not a setting of the cutover; it has <...>
@@ -654,6 +668,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * target_rows: <...> - <...>
 
 * <...>: <...>. Nothing was written. Use target_rows: replace, or empty them
+
+* <...>: <...> was not done - it <...> and cannot be taken back, and no plan showed it | the plan that showed it was for another target. Show the plan first (the same command without --go), then run it with --go against the target it names.
 
 * MIGKIT_LEASE_SECONDS is not a number of seconds
 

@@ -31,7 +31,15 @@ is written again (the point of no return, or going back).
 
 It is migkit's own table (`config.MIGKIT_OWN`), so no check compares it
 and no copy carries it as the application's.
+
+The other drain is the operator's: `to_position` waits for a running tail
+to apply a named position (or `now`), holds it there, and reports the seam
+- where the tail really stopped, whether it went past, and whether the
+target checks the same there. It is one-way and goes through the
+interlock's guard (`interlock.before_one_way`).
 """
+import json
+import re
 import time
 
 from .freeze import side_engine
@@ -179,3 +187,132 @@ def _missing(e):
     said = str(e).lower()
     return ("does not exist" in said or "doesn't exist" in said
             or "1146" in said or "42p01" in said)
+
+
+# --- a drain the operator stops at a position ---------------------------------
+
+#: what the operator writes to drain to where the source stands this moment
+NOW = "now"
+_LSN = re.compile(r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$")
+_GTID = re.compile(r"^[0-9A-Fa-f-]{36}:\d+(-\d+)?(:\d+(-\d+)?)*"
+                   r"(,\s*[0-9A-Fa-f-]{36}:\d+(-\d+)?(:\d+(-\d+)?)*)*$")
+
+
+def named(hop, fence, db, text):
+    """The position the operator asked the drain to stop at: `now` is
+    where the source stands at this moment (as the stream's own fence
+    reads it); anything else is a position written the way the engine
+    writes it - a WAL location, a set of transaction ids, an offset the
+    engine names. Raises SystemExit saying what is wrong with it and what
+    to write; None never comes back."""
+    text = str(text or "").strip()
+    if not text:
+        raise SystemExit(f"{db}: drain to what? Name a position, or write"
+                         f" `{NOW}` for where the source stands this moment")
+    kind = side_engine(hop, fence, "src")[0]
+    if text.lower() == NOW:
+        at = fence.src_lsn(db)
+        if at is None:
+            raise SystemExit(
+                f"{db}: the source gives no position this stream can be"
+                " held to, so there is nothing to stop at. A cutover of"
+                " this hop proves its drain by a mark instead")
+        return at
+    own = getattr(fence, "parse_position", None)
+    if own is not None:
+        return own(db, text)
+    if kind == "postgres" and not _LSN.match(text):
+        raise SystemExit(f"{text!r} is not a WAL location - write it as"
+                         " 0/16B3748 (the form pg_current_wal_lsn shows)")
+    if kind == "mysql" and not _GTID.match(text):
+        raise SystemExit(f"{text!r} is not a set of transaction ids - write"
+                         " it as uuid:1-500 (several, comma-separated)")
+    return text
+
+
+def order(kind, a, b):
+    """-1, 0 or 1 as position `a` is before, at or after `b`, where the
+    engine's positions have one total order migkit can read (a PostgreSQL
+    WAL location); None where they have not - a set of transaction ids
+    is partial, an offset is the engine's own."""
+    if kind != "postgres" or not (_LSN.match(str(a)) and _LSN.match(str(b))):
+        return None
+
+    def n(x):
+        hi, lo = str(x).split("/")
+        return (int(hi, 16) << 32) + int(lo, 16)
+    return (n(a) > n(b)) - (n(a) < n(b))
+
+
+def to_position(hop, eng, db, where, at, timeout, go, log, fence=None,
+                verify=None):
+    """Drain the change tail of `db` to the position `at` and hold it
+    there: the apply is waited for until the target has the position,
+    paused, and the seam read back from what the tail saved.
+
+    One-way, so it is planned first and taken with `go`
+    (`interlock.before_one_way`); without `go` the position and the
+    tail's state are said and nothing is touched. `verify(db)` returns
+    (True or False, what it saw) - the check of the target at the seam -
+    and a drain whose check does not pass says so and is not called done.
+    Returns {"position", "reached", "held", "applied", "past", "verified",
+    "said"}; raises SystemExit where the drain cannot be taken at all."""
+    from . import interlock, tailctl
+    fence = fence or eng
+    pos = named(hop, fence, db, at)
+    kind = side_engine(hop, fence, "src")[0]
+    if not tailctl.alive(where):
+        raise SystemExit(f"{db}: no change tail runs for this database, so"
+                         " nothing applies the changes up to a position."
+                         f" Start it (`migkit move {hop.name} --mode cdc"
+                         " --go`) and drain again")
+    interlock.before_one_way(hop, eng, db, "drain", go, log)
+    if not go:
+        log(f"{db}: would drain the tail to {pos} and hold it there")
+        return {"position": pos, "reached": None, "held": None,
+                "applied": None, "past": None, "verified": None,
+                "said": "planned"}
+    began = time.monotonic()
+    got = fence.fence_wait(db, pos, timeout=timeout)
+    took = time.monotonic() - began
+    if not got:
+        left = ""
+        report = getattr(fence, "drain_report", None)
+        if report is not None:
+            try:
+                left = f". Left: {report(db, pos)}"
+            except Exception:  # noqa: BLE001 - the stop is said without it
+                left = ""
+        raise SystemExit(
+            f"{db}: the tail did not reach {pos} within {timeout:g}s"
+            + (" - no stream of this hop's reads the source" if got is None
+               else f" ({took:.1f}s waited)") + left
+            + ". Nothing was stopped; the tail goes on. Give it longer"
+              " (a larger wait), or name an earlier position")
+    held = tailctl.pause(where, max(5.0, timeout))
+    saved = tailctl.saved(tailctl.token_path(hop, db))
+    applied = None if saved is None else (
+        saved if isinstance(saved, str) else json.dumps(saved, default=str,
+                                                        sort_keys=True))
+    past = order(kind, applied, pos) if isinstance(applied, str) else None
+    verified = None
+    seen = ""
+    if verify is not None:
+        verified, seen = verify(db)
+    said = (f"{db}: drained to {pos} in {took:.1f}s; "
+            + ("the tail is held" if held else "the tail did not hold")
+            + (f" at {applied}" if applied else "")
+            + (" (the batch in flight went past the position)"
+               if past and past > 0 else "")
+            + ("" if verified is None else
+               "; the target checked at the seam: "
+               + ("same" if verified else f"NOT the same - {seen}")))
+    log(said)
+    from . import audit
+    audit.append(hop.report_dir() / "changelog.jsonl",
+                 {"op": "drained", "db": db, "position": pos,
+                  "applied": applied, "held": bool(held),
+                  "verified": verified})
+    return {"position": pos, "reached": True, "held": bool(held),
+            "applied": applied, "past": past, "verified": verified,
+            "said": said}
