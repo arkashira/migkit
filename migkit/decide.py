@@ -3339,6 +3339,7 @@ def worker_budget(facts):
     return max(1, n), choice
 
 
+<<<<<<< HEAD
 # --- a continuous hop into a warehouse (LT.P3, S4) --------------------------
 
 #: the share of a batch's interval its landing may take: the rest is the
@@ -3542,3 +3543,92 @@ def chunk_edges(work, facts):
     key taken now, else the key read in order - never the key's minimum
     and maximum divided alone."""
     return climb(work, CHUNK_EDGES, facts, need=("edges",))
+||||||| c95da9db
+=======
+# --- a Redis tail's live way and two sites both written (LT.C6, LT.C4) ------
+
+def _at_least(have, need):
+    return have is not None and need is not None and have >= need
+
+
+def redis_live(facts):
+    """The `Choice` of how a Redis tail follows its source past the copy.
+
+    The replica stream first: migkit is a replica of the source, every
+    write comes in the source's order with its offset, a stop resumes from
+    the byte it reached and the source's answer to that offset proves no
+    write was passed over. It needs an account the source lets replicate,
+    one server (a cluster's shards each keep a stream of their own), and
+    room on the source for the replica's buffer while the copy runs: the
+    headroom measured (`headroom`) at least what the stream needs
+    (`stream needs`: the backlog and the replica's buffer limit). Else the
+    idle-time sweep: every key the source touched since the last round's
+    start read again, and every key the target holds that the source no
+    longer has removed - lossless for writes where the source keeps idle
+    times (no frequency-based eviction), ordered only by rounds. Else
+    nothing: the reason says which fact to change."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+
+    def room(f):
+        if f.get("stream needs") is None:
+            return ("the replica stream needs the source's replica buffer"
+                    " bounded or its last snapshot timed, and neither was"
+                    " measured")
+        return (f"the replica stream needs {f.get('stream needs'):,} bytes free on the"
+                f" source, and {f.get('headroom') or 0:,} are")
+    stream = Rung(
+        "replica stream", "followed as a replica of the source, offset by"
+        " offset", needs=(
+            Need("an account that may replicate",
+                 lambda f: f.get("replica grant") is True,
+                 "{rung} needs an account the source lets replicate (psync,"
+                 " replconf and ping granted)"),
+            Need("one server", lambda f: not f.get("cluster"),
+                 "{rung} follows one server, and the source is a cluster"),
+            Need("room for the replica's buffer",
+                 lambda f: _at_least(f.get("headroom"),
+                                     f.get("stream needs")), room)),
+        prove=lambda f: None if f.get("continued", True) else (
+            "the source could not continue from the offset saved, so a"
+            " write may have been passed over"),
+        because="every write arrives in the source's order and a stop"
+                " resumes from the byte it reached")
+    sweep = Rung(
+        "idle-time sweep", "every key touched since the last round read"
+        " again, every key the source no longer has removed", needs=(
+            Need("idle times kept", lambda f: f.get("idletime") is True,
+                 "{rung} needs the source to keep idle times, and it evicts"
+                 " by how often keys are read"),),
+        footprint=1)
+    return climb("the Redis tail's live way", (stream, sweep), f)
+
+
+def two_site_rule(facts):
+    """The `Choice` of how two Redis sites that both took writes are made
+    alike, from the write overlap measured over the window: `overlap` keys
+    written on both, `unmergeable` of them neither counters nor sets, and
+    `skew_ms` the two clocks' measured skew with the reading lag (None
+    where not measured). No key written on both: each site's writes go
+    across. Every overlapping key a counter or a set: merged. Else the
+    later write by offset time, where the two are further apart than the
+    skew; else held and logged. A key whose two writes no rule settles is
+    always logged and left as each site has it, never settled silently."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("the two sites' rule", (
+        Rung("apart", "each site's writes carried to the other", needs=(
+            Need("no key written on both", lambda f: not f.get("overlap"),
+                 lambda f: f"{f.get('overlap'):,} keys were written on both"
+                 " sites"),)),
+        Rung("merged", "counters summed and sets merged member by member",
+             needs=(Need("every key written on both mergeable",
+                         lambda f: not f.get("unmergeable"),
+                         lambda f: f"{f.get('unmergeable'):,} keys written"
+                         " on both are neither counters nor sets"),)),
+        Rung("merged, else newest", "counters and sets merged, any other"
+             " key to the later write where the clocks tell them apart",
+             needs=(Need("the clocks' skew measured",
+                         lambda f: f.get("skew_ms") is not None,
+                         "{rung} needs the two clocks' skew measured"),)),
+        Rung("merged, else held", "counters and sets merged, any other key"
+             " both wrote held and logged", footprint=1)), f)
+>>>>>>> w12c

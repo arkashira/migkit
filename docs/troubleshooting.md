@@ -961,6 +961,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...> refused <...>: <...><...>. What ran before it stays as it is.
 
+* db<...>: no live way holds - <...>
+
+* db<...>: the stream fails again at offset <...> - <...>; the tail stops there, its offset saved
+
 ## Kafka
 
 * security_protocol: <...> is not one of <...>

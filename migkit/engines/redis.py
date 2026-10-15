@@ -2179,3 +2179,670 @@ class RedisEngine(Engine):
     def _write_pk_files(self, db, table, missing, extra, changed):
         self._write_drill(db, table, missing=missing, extra=extra,
                           changed=changed)
+
+    # --- the tail by key space, lossless (P0-PARITY.tail, LT.C6) ----------
+
+    def _config_one(self, client, name):
+        try:
+            got = client.config_get(name)
+        except Exception:  # noqa: BLE001 - a managed server hides CONFIG
+            return None
+        return got.get(name) if isinstance(got, dict) else None
+
+    def _replica_grant(self, client):
+        """Whether the account the hop signs in with may replicate: asked
+        of the server's own access check where it has one, read off the
+        account where it has accounts but no check, and yes where it keeps
+        no accounts at all. A managed server that renames or removes the
+        command answers no."""
+        import redis
+        user = getattr(self.hop.source, "user", None) or "default"
+        try:
+            return client.execute_command("ACL", "DRYRUN", user, "PSYNC",
+                                          "?", "-1") in ("OK", b"OK")
+        except redis.ResponseError as e:
+            text = str(e).lower()
+            if "unknown command" in text:
+                return True
+            if "unknown subcommand" not in text:
+                return False
+        try:
+            rules = client.execute_command("ACL", "GETUSER", user)
+        except redis.ResponseError:
+            return False
+        rules = dict(zip(rules[::2], rules[1::2])) if isinstance(
+            rules, list) else rules or {}
+        said = str(rules.get("commands") or rules.get(b"commands") or "")
+        return "-psync" not in said and any(
+            w in said for w in ("+@all", "+psync", "+@admin"))
+
+    def live_facts(self):
+        """What choosing the live way reads off the source (`decide.
+        redis_live`): the replica grant, whether it is a cluster, whether
+        it keeps idle times, and the memory the replica's buffer may take
+        against what is free. The buffer is bounded by its hard limit
+        where one is set (the source drops a replica at it, which the
+        stream sees); with none, by the write rate measured over the
+        source's last timed snapshot."""
+        src = self._client("src")
+        mem = src.info("memory")
+        policy = str(mem.get("maxmemory_policy")
+                     or self._config_one(src, "maxmemory-policy") or "")
+        most = int(mem.get("maxmemory") or 0) or int(
+            mem.get("total_system_memory") or 0)
+        used = int(mem.get("used_memory") or 0)
+        backlog = int(self._config_one(src, "repl-backlog-size") or 0)
+        need = None
+        limits = str(self._config_one(src, "client-output-buffer-limit")
+                     or "").split()
+        for i, word in enumerate(limits[:-1]):
+            if word in ("replica", "slave") and limits[i + 1].isdigit() \
+                    and int(limits[i + 1]):
+                need = backlog + int(limits[i + 1])
+        if need is None:
+            took = int(src.info("persistence").get("rdb_last_bgsave_time_sec")
+                       or -1)
+            if took >= 0:
+                a = int(src.info("replication").get("master_repl_offset")
+                        or 0)
+                t0 = time.monotonic()
+                time.sleep(1)
+                b = int(src.info("replication").get("master_repl_offset")
+                        or 0)
+                need = backlog + int((b - a) / (time.monotonic() - t0)
+                                     * max(took, 1))
+        return {"replica grant": self._replica_grant(src),
+                "cluster": self._cluster("src"),
+                "idletime": "lfu" not in policy,
+                "headroom": max(0, most - used) if most else None,
+                "stream needs": need}
+
+    def live_way(self, facts=None):
+        """The `Choice` of the live way, from `live_facts` and anything
+        measured since (`facts`)."""
+        from .. import decide
+        got = self.live_facts()
+        got.update(facts or {})
+        return decide.redis_live(got)
+
+    def _key_spec(self, client):
+        """`spec(argv) -> [keys]` from the source's own command table, each
+        command asked once; a command whose keys move with its arguments is
+        asked with them (`COMMAND GETKEYS`)."""
+        seen = {}
+
+        def spec(argv):
+            name = argv[0].lower()
+            if name not in seen:
+                info = client.execute_command("COMMAND", "INFO", name)
+                row = (next(iter(info.values()), None) if isinstance(
+                    info, dict) else info[0] if info else None)
+                if isinstance(row, dict):
+                    row = [name, row.get("arity"), row.get("flags") or (),
+                           row.get("first_key_pos"), row.get("last_key_pos"),
+                           row.get("step_count")]
+                if not row:
+                    # a write the source cannot place: its keys unknown
+                    seen[name] = None
+                else:
+                    flags = {(f.decode() if isinstance(f, bytes) else str(f))
+                             .lower() for f in (row[2] or ())}
+                    seen[name] = (int(row[3] or 0), int(row[4] or 0),
+                                  int(row[5] or 0), "movablekeys" in flags)
+            if seen[name] is None:
+                return None
+            first, last, step, movable = seen[name]
+            if movable:
+                return list(client.execute_command("COMMAND", "GETKEYS",
+                                                   *argv))
+            if not first or not step:
+                return []
+            end = len(argv) + last if last < 0 else last
+            return list(argv[first:end + 1:step])
+        return spec
+
+    def _refresh_keys(self, db, ops):
+        """`ops` {key: what the stream did to it}: each key read again from
+        the source and written on the target as it is now, or removed there
+        where the source has it no longer - the same whether done once or
+        again after a stop, so a replayed round changes nothing. What
+        happened is counted against the target as it was."""
+        tally = dict.fromkeys(KEY_EVENTS, 0)
+        ops = {k.encode("latin-1") if isinstance(k, str) else k: v
+               for k, v in ops.items()}
+        keys = self._raw_kept(db, list(ops))
+        if not keys:
+            return tally
+        src = self._client("src", db, decode=False)
+        dst = self._client("dst", db, decode=False)
+
+        def types(client):
+            p = client.pipeline(transaction=False)
+            for k in keys:
+                p.type(k)
+            return [t.decode() if isinstance(t, bytes) else t
+                    for t in p.execute()]
+        now, before = types(src), types(dst)
+        gone = [k for k, t in zip(keys, now) if t == "none"]
+        if gone:
+            dst.delete(*gone)
+        here = [k for k, t in zip(keys, now) if t != "none"]
+        if here:
+            self._carry(src, dst, here, self._carry_plan(db))
+        for k, a, b in zip(keys, before, now):
+            tally[key_event(ops[k], a, b)] += 1
+        return tally
+
+    def follow_live(self, db, state, save, log, stop=lambda: False,
+                    rounds=None):
+        """Follow the source past the copy by the way `live_way` chose,
+        re-chosen where a fact it rested on proves wrong as it runs (the
+        source refuses the stream, or cannot continue from the offset
+        saved). `state` is the tail's saved state, `save()` writes it; the
+        offset or the round's start moves only after the keys it covers
+        landed on the target."""
+        measured, failed_at = {}, None
+        while not stop():
+            choice = self.live_way(measured)
+            if choice.rung is None:
+                raise SystemExit(f"db{db}: no live way holds - "
+                                 f"{choice.reason}")
+            log(f"db{db}: {choice.rung.said}")
+            if choice.rung.name == "idle-time sweep":
+                return self._sweep_rounds(db, state, save, log, stop, rounds)
+            try:
+                return self._stream_rounds(db, state, save, log, stop,
+                                           rounds)
+            except LiveRefused as e:
+                at = (state.get("keyspaces") or {}).get("offset")
+                if e.facts.get("continued", True) is not False \
+                        and failed_at is not None and at == failed_at:
+                    raise SystemExit(f"db{db}: the stream fails again at"
+                                     f" offset {at} - {e}; the tail stops"
+                                     " there, its offset saved") from e
+                failed_at = at
+                log(f"db{db}: {e}; choosing again")
+                measured.update(e.facts)
+
+    def _copy_again(self, d, log):
+        self.move_table(d, "", f"db{d}", None, _NoCheckpoint(), log)
+
+    def _stream_socket(self):
+        import socket
+        ep = self.hop.source
+        sock = socket.create_connection((ep.host, ep.port), timeout=30)
+        if getattr(ep, "tls", None):
+            import ssl
+            sock = ssl.create_default_context().wrap_socket(
+                sock, server_hostname=ep.host)
+        return sock
+
+    def _stream_rounds(self, db, state, save, log, stop, rounds=None):
+        ep = self.hop.source
+        spaces = KeyspaceStates(state.setdefault("keyspaces", {}), log)
+        stream = ReplicaStream(self._stream_socket(),
+                               user=getattr(ep, "user", None),
+                               password=ep.password or None)
+        got = stream.begin(spaces.replid, spaces.offset)
+        reseed = spaces.started(got)
+        listing = {d: self._dbsize("src", d)
+                   for d in sorted(self._keyspace("src"), key=int)
+                   if str(d) == str(db) or db is None}
+        copied_at = state.get("copied_at")
+        for d in spaces.boundary(listing, got["offset"]) + reseed:
+            if d not in reseed and copied_at and got["kind"] == "full" \
+                    and self.live_facts()["idletime"]:
+                # the move copied it already: only the keys written since
+                # its start, before this offset, are read again
+                spaces.copied(d, self._sweep_once(d, int(copied_at), log))
+            else:
+                self._copy_again(d, log)
+                spaces.copied(d, self._refresh_keys(d, spaces.joined(d)))
+        for d, ops in spaces.take().items():
+            spaces.landed(d, self._refresh_keys(d, ops))
+        save()
+        spec = self._key_spec(self._client("src", decode=False))
+        done = 0
+        for _ in stream.commands():
+            spaces.route(stream.offset, stream.argv, spec)
+            if stream.buffered() or not spaces.ready():
+                continue
+            for d, ops in spaces.take().items():
+                spaces.landed(d, self._refresh_keys(d, ops))
+            for d in spaces.rejoin(stream.offset):
+                self._copy_again(d, log)
+                spaces.copied(d, {})
+            spaces.reached(stream.offset)
+            save()
+            stream.ack(stream.offset)
+            done += 1
+            if stop() or (rounds is not None and done >= rounds):
+                break
+        stream.close()
+        log(spaces.said())
+        return spaces
+
+    def _sweep_rounds(self, db, state, save, log, stop, rounds=None):
+        """Rounds of the idle-time sweep: each takes the source's clock,
+        reads again every key whose idle time is no older than the last
+        round's start (a second more, the clock's grain), and removes on
+        the target every key the source no longer has. The round's start
+        is saved only after both landed. A key restored with an older idle
+        time is not seen by it; the deep check that ends the tail is."""
+        st = state.setdefault("sweep", {})
+        done = 0
+        while not stop() and (rounds is None or done < rounds):
+            started = int(self._client("src", db).time()[0])
+            tally = self._sweep_once(db, int(st.get(str(db), 0)) or None,
+                                     log)
+            st[str(db)] = started
+            save()
+            done += 1
+        return st
+
+    def _sweep_once(self, db, since, log):
+        """Every key of `db` the source touched at or after its clock read
+        `since` read again (all where None), every key the target holds
+        that the source has no longer removed; the tally of what changed.
+        The batches are cut by bytes (`pieces.by_bytes`) as the copy's
+        are."""
+        src = self._client("src", db, decode=False)
+        window = int(src.time()[0]) - since + 1 if since else None
+        keys = self._raw_kept(db, self._keys("src", db, decode=False))
+        touched = []
+        for batch in pieces.by_bytes(keys, size=lambda k: len(k) + 16):
+            p = src.pipeline(transaction=False)
+            for k in batch:
+                p.object("idletime", k)
+            idle = p.execute(raise_on_error=False)
+            touched += [k for k, i in zip(batch, idle)
+                        if window is None or not isinstance(i, int)
+                        or i <= window]
+        held = set(self._raw_kept(db, self._keys("dst", db, decode=False)))
+        ops = {k: "write" for k in touched}
+        ops.update({k: "write" for k in held - set(keys)})
+        tally = self._refresh_keys(db, ops)
+        log(f"db{db}: swept {len(keys):,} keys, {len(ops):,} read again"
+            f" ({tally['added']:,} added, {tally['removed']:,} removed)")
+        return tally
+
+
+#: what the tail counts a key's change as (`key_event`)
+KEY_EVENTS = ("added", "removed", "renamed", "ttl", "retyped", "written")
+
+#: the commands that change only a key's expiry
+_TTL_COMMANDS = frozenset((b"expire", b"pexpire", b"expireat", b"pexpireat",
+                           b"persist"))
+_RENAMES = frozenset((b"rename", b"renamenx"))
+
+
+def key_event(op, before, now):
+    """What one change was, from the stream's word for it (`op`) and the
+    key's type on the target before and on the source after."""
+    if before == "none" and now == "none":
+        return "written"
+    if before == "none":
+        return "added"
+    if now == "none":
+        return "removed"
+    if before != now:
+        return "retyped"
+    return {"rename": "renamed", "ttl": "ttl"}.get(op, "written")
+
+
+class LiveRefused(Exception):
+    """The source would not give the stream as decided; `facts` is what it
+    showed, for the decision taken again."""
+
+    def __init__(self, why, **facts):
+        super().__init__(why)
+        self.facts = facts
+
+
+class _NoCheckpoint(dict):
+    """A key space's copy inside the tail: its seam is the tail's offset,
+    so a stop copies it again rather than resuming a cursor."""
+
+    def save(self):
+        return None
+
+
+class ReplicaStream:
+    """migkit as a replica of a Redis source, over one connection: the
+    handshake a replica makes, the snapshot the source sends where it
+    cannot continue, then every write command with the offset it ends at.
+    `offset` is the source's offset of the last byte read; the source's
+    answer to a saved offset (+CONTINUE) is the proof nothing between was
+    lost."""
+
+    def __init__(self, sock, user=None, password=None):
+        self.sock, self.user, self.password = sock, user, password
+        self.buf = bytearray()
+        self.offset = 0
+        self.read = 0
+        self.argv = []
+
+    def _fill(self):
+        try:
+            chunk = self.sock.recv(1 << 16)
+        except OSError as e:
+            raise LiveRefused(f"the stream broke: {e}", continued=True) \
+                from e
+        if not chunk:
+            raise LiveRefused("the source closed the stream", continued=True)
+        self.buf += chunk
+
+    def _line(self):
+        while True:
+            i = self.buf.find(b"\r\n")
+            if i >= 0:
+                out = bytes(self.buf[:i])
+                del self.buf[:i + 2]
+                self.read += i + 2
+                return out
+            self._fill()
+
+    def _exact(self, n):
+        while len(self.buf) < n:
+            self._fill()
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        self.read += n
+        return out
+
+    def _send(self, *argv):
+        parts = [b"*%d\r\n" % len(argv)]
+        for a in argv:
+            a = a if isinstance(a, bytes) else str(a).encode()
+            parts.append(b"$%d\r\n%s\r\n" % (len(a), a))
+        self.sock.sendall(b"".join(parts))
+
+    def _ask(self, *argv):
+        self._send(*argv)
+        got = self._line().lstrip(b"\n")
+        if got.startswith(b"-"):
+            text = got[1:].decode("latin-1")
+            raise LiveRefused(f"the source refused {argv[0]}: {text}",
+                              **{"replica grant": False})
+        return got
+
+    def begin(self, replid=None, offset=None, sink=None):
+        """The handshake, and {"kind": "continue"|"full", "replid",
+        "offset"}: continued from the byte after `offset` of `replid`, or
+        a full snapshot (its bytes to `sink`) as of the offset it names."""
+        if self.password:
+            self._ask(*(("AUTH", self.user, self.password) if self.user
+                        else ("AUTH", self.password)))
+        self._ask("REPLCONF", "listening-port",
+                  self.sock.getsockname()[1])
+        self._ask("REPLCONF", "capa", "eof", "capa", "psync2")
+        want = (replid, offset + 1) if replid and offset is not None \
+            else ("?", -1)
+        got = self._ask("PSYNC", *want).decode()
+        if got.startswith("+CONTINUE"):
+            rest = got.split()
+            self.offset = int(offset)
+            return {"kind": "continue",
+                    "replid": rest[1] if len(rest) > 1 else replid,
+                    "offset": self.offset}
+        if not got.startswith("+FULLRESYNC"):
+            raise LiveRefused(f"the source answered the stream with {got}",
+                              **{"replica grant": False})
+        _, rid, at = got.split()
+        self.offset = int(at)
+        self._snapshot(sink or (lambda chunk: None))
+        return {"kind": "full", "replid": rid, "offset": self.offset}
+
+    def _snapshot(self, sink):
+        head = b""
+        while not head:
+            head = self._line().strip(b"\n")
+        if head.startswith(b"$EOF:"):
+            mark = head[5:]
+            while True:
+                i = self.buf.find(mark)
+                if i >= 0:
+                    sink(bytes(self.buf[:i]))
+                    del self.buf[:i + len(mark)]
+                    return
+                keep = max(0, len(self.buf) - len(mark))
+                sink(bytes(self.buf[:keep]))
+                del self.buf[:keep]
+                self._fill()
+        left = int(head[1:])
+        while left:
+            if not self.buf:
+                self._fill()
+            take = min(left, len(self.buf))
+            sink(bytes(self.buf[:take]))
+            del self.buf[:take]
+            left -= take
+
+    def commands(self):
+        """Each write command as `argv`, `offset` moved past its bytes; the
+        source's request for an acknowledgement answered with the offset
+        last saved."""
+        while True:
+            start = self.read
+            head = self._line()
+            if not head.startswith(b"*"):
+                raise LiveRefused(f"the stream carried {head[:20]!r} where"
+                                  " a command was due", continued=False)
+            argv = []
+            for _ in range(int(head[1:])):
+                size = self._line()
+                argv.append(self._exact(int(size[1:]) + 2)[:-2])
+            self.offset += self.read - start
+            self.argv = argv
+            if argv[:2] and argv[0].lower() == b"replconf" \
+                    and argv[1].lower() == b"getack":
+                continue
+            yield argv
+
+    def buffered(self):
+        return bool(self.buf)
+
+    def ack(self, offset):
+        self._send("REPLCONF", "ACK", offset)
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class KeyspaceStates:
+    """A Redis tail's key spaces (its databases), each in a state of its
+    own, the way the SQL tail keeps its tables (`tailtables`) and Kafka's
+    its topics (`topicstates`):
+
+        joining   added to the running tail: copied, every key the stream
+                  changed after its seam (the offset it joined at) read
+                  again once the copy is done, live from there
+        live      each change read again from the source as it arrives
+        left      out of the scope: the keys changed since kept by name, so
+                  that its return reads only those again
+        parked    flushed or swapped on the source, or the stream could not
+                  continue: copied again from the next offset
+
+    `state` is the saved dict; nothing in it moves before the keys it
+    covers landed. Each space counts the keys added, removed, renamed,
+    retyped and given another expiry while followed."""
+
+    def __init__(self, state, log):
+        self.state = state
+        self.log = log
+        self.spaces = state.setdefault("spaces", {})
+        self.db = "0"
+        self.pending = {}
+        self.multi = False
+        self.held = state.setdefault("held", {})
+
+    @property
+    def replid(self):
+        return self.state.get("replid")
+
+    @property
+    def offset(self):
+        return self.state.get("offset")
+
+    def started(self, got):
+        """The stream's answer at its start: a continue keeps every space;
+        a full snapshot on a saved offset means a write may be lost, so
+        every space followed is parked and copied again from the new
+        offset. Returns the spaces to copy again."""
+        lost = got["kind"] == "full" and self.offset is not None
+        self.state.update(replid=got["replid"], offset=got["offset"])
+        again = []
+        for d, st in sorted(self.spaces.items()):
+            if lost and st["state"] in ("live", "joining", "parked"):
+                self._enter(d, "joining", got["offset"], "the source could"
+                            " not continue from the offset saved")
+                again.append(d)
+            elif lost and st["state"] == "left":
+                st["reseed"] = True
+        return again
+
+    def _enter(self, d, state, at, why):
+        st = self.spaces.setdefault(d, {"counts": dict.fromkeys(KEY_EVENTS,
+                                                                0)})
+        st.update(state=state, seam=at, why=why)
+        st["touched"] = {} if state in ("joining", "left") else None
+        self.log(f"db{d}: {state} at offset {at:,} - {why}")
+        return st
+
+    def boundary(self, listing, at):
+        """The scope's spaces now (`listing`, {db: keys it holds}) against
+        those followed: a new one joins at `at`, one gone from the scope
+        leaves, one back with fewer keys changed than it holds reads only
+        those again. Returns the spaces to copy."""
+        copy = []
+        here = {str(d): n for d, n in listing.items()}
+        for d, n in sorted(here.items()):
+            st = self.spaces.get(d)
+            if st is None or st["state"] == "parked":
+                self._enter(d, "joining", at, "added to the tail")
+                copy.append(d)
+            elif st["state"] == "left":
+                touched = st.get("touched") or {}
+                if st.pop("reseed", False) or len(touched) > n:
+                    self._enter(d, "joining", at, "back in the scope; its"
+                                " changes since outnumber its keys")
+                    copy.append(d)
+                else:
+                    self.pending.setdefault(d, {}).update(touched)
+                    self._enter(d, "live", at, f"back in the scope; the"
+                                f" {len(touched):,} keys changed since read"
+                                " again")
+        for d, st in sorted(self.spaces.items()):
+            if d not in here and st["state"] != "left":
+                self.pending.pop(d, None)
+                self._enter(d, "left", at, "out of the scope")["keys"] = \
+                    self.held.get(d, 0)
+            if d in here:
+                self.held[d] = here[d]
+        return copy
+
+    def rejoin(self, at):
+        """The parked spaces, joining again at `at`: to be copied."""
+        out = self.parked()
+        for d in out:
+            self._enter(d, "joining", at, "copied again after what parked"
+                        " it")
+        return out
+
+    def joined(self, d):
+        """The keys a joining space's stream changed while it was copied."""
+        return dict(self.spaces[d].get("touched") or {})
+
+    def copied(self, d, tally):
+        st = self.spaces[d]
+        self._count(st, tally)
+        self._enter(d, "live", st["seam"], "copied, its changes since read"
+                    " again")
+
+    def _count(self, st, tally):
+        for k, n in tally.items():
+            st["counts"][k] = st["counts"].get(k, 0) + n
+
+    def _touch(self, d, key, op):
+        st = self.spaces.get(d)
+        if st is None or st["state"] == "parked":
+            return
+        if st["state"] == "live":
+            self.pending.setdefault(d, {})[key] = op
+        elif st.get("reseed"):
+            return
+        else:
+            st["touched"][key.decode("latin-1") if isinstance(
+                key, bytes) else key] = op
+            if st["state"] == "left" and len(st["touched"]) > st.get(
+                    "keys", 0):
+                # more changed than it held: its return copies it whole
+                st["touched"], st["reseed"] = {}, True
+
+    def route(self, at, argv, spec):
+        """One write command of the stream, ending at offset `at`."""
+        name = argv[0].lower()
+        if name == b"select":
+            self.db = argv[1].decode()
+        elif name == b"multi":
+            self.multi = True
+        elif name == b"exec":
+            self.multi = False
+        elif name in (b"flushdb", b"flushall", b"swapdb"):
+            hit = ([self.db] if name == b"flushdb" else
+                   [a.decode() for a in argv[1:3]] if name == b"swapdb"
+                   else list(self.spaces))
+            for d in hit:
+                if d in self.spaces and self.spaces[d]["state"] != "left":
+                    self.pending.pop(d, None)
+                    self._enter(d, "parked", at, f"{name.decode().upper()}"
+                                " on the source")
+                elif d in self.spaces:
+                    self.spaces[d]["reseed"] = True
+        elif name in (b"move", b"copy"):
+            keys = spec(argv)
+            to = self.db
+            for i, a in enumerate(argv):
+                if (name == b"move" and i == 2) or (
+                        i and argv[i - 1].lower() == b"db"):
+                    to = a.decode()
+            for k in keys:
+                self._touch(self.db, k, "write")
+                self._touch(to, k, "write")
+        elif name not in (b"ping", b"replconf"):
+            op = ("rename" if name in _RENAMES else
+                  "ttl" if name in _TTL_COMMANDS else "write")
+            keys = spec(argv)
+            if keys is None:
+                self._enter(self.db, "parked", at, f"{name.decode().upper()}"
+                            " changes keys the source does not name")
+                self.pending.pop(self.db, None)
+            for k in keys or ():
+                self._touch(self.db, k, op)
+
+    def ready(self):
+        """Not inside a transaction: its writes land together."""
+        return not self.multi
+
+    def take(self):
+        out, self.pending = self.pending, {}
+        return out
+
+    def landed(self, d, tally):
+        self._count(self.spaces[d], tally)
+
+    def reached(self, at):
+        self.state["offset"] = at
+
+    def parked(self):
+        return sorted(d for d, st in self.spaces.items()
+                      if st["state"] == "parked")
+
+    def said(self):
+        return "; ".join(
+            f"db{d} {st['state']} from offset {st['seam']:,}: "
+            + ", ".join(f"{n:,} {k}" for k, n in sorted(st["counts"].items())
+                        if n) for d, st in sorted(self.spaces.items()))

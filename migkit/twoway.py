@@ -1585,3 +1585,127 @@ def apart(one, other):
                    " higher, so a tie goes to each hop's own source - rank"
                    " the same side higher on both")
     return out
+
+
+# --- two Redis sites both taking writes (LT.C4) ----------------------------
+
+def _redis_folded(changes):
+    """One site's changes over the window, folded per (db, key) in offset
+    order: a counter's deltas summed, a set's members added and removed
+    netted, any other write the last one."""
+    out = {}
+    for c in sorted(changes, key=lambda c: c.get("offset", 0)):
+        k = (str(c.get("db", "0")), c["key"])
+        f = out.setdefault(k, {"kind": c["kind"], "delta": 0, "added": set(),
+                               "gone": set(), "time": c.get("time", 0),
+                               "offset": c.get("offset", 0)})
+        if f["kind"] != c["kind"]:
+            f["kind"] = "value"
+        if c["kind"] == "counter":
+            f["delta"] += int(c.get("delta") or 0)
+        elif c["kind"] == "set":
+            for m in c.get("added") or ():
+                f["added"].add(m)
+                f["gone"].discard(m)
+            for m in c.get("gone") or ():
+                f["gone"].add(m)
+                f["added"].discard(m)
+        f["value"] = c.get("value")
+        f["removed"] = c["kind"] == "removed"
+        f["time"], f["offset"] = c.get("time", 0), c.get("offset", 0)
+    return out
+
+
+def redis_overlap(a, b):
+    """The write overlap of two sites' windows, as `decide.two_site_rule`
+    reads it: keys written on both, and how many of those neither both
+    counters nor both sets."""
+    fa, fb = _redis_folded(a), _redis_folded(b)
+    both = set(fa) & set(fb)
+    return {"overlap": len(both),
+            "unmergeable": sum(1 for k in both
+                               if fa[k]["kind"] != fb[k]["kind"]
+                               or fa[k]["kind"] not in ("counter", "set"))}
+
+
+def _redis_carry(f):
+    if f["kind"] == "counter":
+        return ("incrby", f["delta"])
+    if f["kind"] == "set":
+        return ("set", sorted(f["added"]), sorted(f["gone"]))
+    return ("del",) if f["removed"] else ("put", f["value"])
+
+
+def redis_two_site(a, b, skew_ms=None, log=print):
+    """Two Redis sites made alike from the changes each took over one
+    window (`a`, `b`: [{db, key, kind: counter|set|value|removed, offset,
+    time (the site's clock at the offset, ms), delta | added, gone |
+    value}]). The rule is chosen from the measured overlap (`redis_overlap`
+    and `skew_ms`, `decide.two_site_rule`); per key:
+
+      written on one site      its change carried to the other
+      counter on both          each site given the other's delta: the sum
+      set on both              each given the other's members; a member
+                               one added while the other removed it stays
+                               (the remove did not see the add)
+      a list or a stream       a conflict: its order on each site is kept
+      anything else on both    the later write by offset time, where the
+                               two are further apart than the skew and the
+                               rule allows it; else a conflict
+
+    A conflict is logged per key with both sides' offsets and times and
+    left as each site has it - never settled silently. Returns {"to_a",
+    "to_b": [(db, key, write)], "merged", "newest", "conflicts",
+    "choice"}."""
+    from . import decide
+    fa, fb = _redis_folded(a), _redis_folded(b)
+    choice = decide.two_site_rule(dict(redis_overlap(a, b), skew_ms=skew_ms))
+    newest = choice.rung is not None and choice.rung.name in (
+        "merged, else newest",)
+    out = {"to_a": [], "to_b": [], "merged": [], "newest": [],
+           "conflicts": [], "choice": choice}
+    for k in sorted(set(fa) | set(fb), key=str):
+        x, y = fa.get(k), fb.get(k)
+        if y is None:
+            out["to_b"].append(k + (_redis_carry(x),))
+            continue
+        if x is None:
+            out["to_a"].append(k + (_redis_carry(y),))
+            continue
+        if x["kind"] == y["kind"] == "counter":
+            out["to_a"].append(k + (("incrby", y["delta"]),))
+            out["to_b"].append(k + (("incrby", x["delta"]),))
+            out["merged"].append(k)
+            continue
+        if x["kind"] == y["kind"] == "set":
+            out["to_a"].append(k + (("set", sorted(y["added"]),
+                                     sorted(y["gone"] - x["added"])),))
+            out["to_b"].append(k + (("set", sorted(x["added"]),
+                                     sorted(x["gone"] - y["added"])),))
+            out["merged"].append(k)
+            continue
+        gap = abs(x["time"] - y["time"])
+        ordered = {x["kind"], y["kind"]} & {"list", "stream"}
+        if newest and gap > skew_ms and not ordered:
+            win, lose = ("a", "to_b") if x["time"] > y["time"] else (
+                "b", "to_a")
+            out[lose].append(k + (_redis_carry(x if win == "a" else y),))
+            out["newest"].append(k)
+            log(f"db{k[0]} {k[1]}: written on both sites {gap:,} ms apart"
+                f" (the clocks' skew {skew_ms:,} ms); site {win}'s later"
+                " write kept on both")
+            continue
+        why = ("a list or a stream keeps each site's order, which neither"
+               " write may overrule" if ordered else
+               f"{gap:,} ms apart, within the clocks' skew of {skew_ms:,} ms"
+               if newest else f"the rule is {choice.path or 'none'}")
+        out["conflicts"].append({"db": k[0], "key": k[1],
+                                 "a": {"kind": x["kind"],
+                                       "offset": x["offset"],
+                                       "time": x["time"]},
+                                 "b": {"kind": y["kind"],
+                                       "offset": y["offset"],
+                                       "time": y["time"]}, "why": why})
+        log(f"db{k[0]} {k[1]}: a conflict - written on both sites ({why});"
+            " left as each site has it for the operator")
+    return out
