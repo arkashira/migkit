@@ -1501,6 +1501,46 @@ class MSSQLEngine(DbapiRows, Engine):
                        " c.table_name and t.table_type = 'BASE TABLE')"
                        " order by 1, 2"))
 
+    def scan_cuts(self, db, table, most):
+        """The predicates a deep check's plan reads `table` in, at most
+        `most` of them (`scanplan.for_engine`), cut from the source's own
+        statistics: its rows from `sys.dm_db_partition_stats`, and ranges
+        of its primary key's leading integer column at the steps of that
+        index's histogram (`sys.dm_db_stats_histogram`), so each range
+        holds about as many rows. [""], the table read whole, where the
+        rows are not known, the key is not an integer or the server keeps
+        no histogram to read. Open at both ends, the ranges cover each
+        side whatever it holds."""
+        from .. import scanplan
+        name = self._qualified("src", db, table).replace("'", "''")
+        got = self._cmd("src", db,
+                        "select sum(row_count) from sys.dm_db_partition_stats"
+                        f" where object_id = object_id(N'{name}')"
+                        " and index_id in (0, 1)")
+        n = scanplan.cuts(got[0][0] if got and got[0] else None, most)
+        if n < 2:
+            return [""]
+        steps = self._cmd("src", db,
+                          "select c.name, cast(h.range_high_key as bigint)"
+                          " from sys.indexes i join sys.index_columns ic on"
+                          " ic.object_id = i.object_id and ic.index_id ="
+                          " i.index_id and ic.key_ordinal = 1 join"
+                          " sys.columns c on c.object_id = i.object_id and"
+                          " c.column_id = ic.column_id cross apply"
+                          " sys.dm_db_stats_histogram(i.object_id,"
+                          " i.index_id) h where i.object_id ="
+                          f" object_id(N'{name}') and i.is_primary_key = 1"
+                          " and type_name(c.system_type_id) in ('tinyint',"
+                          " 'smallint', 'int', 'bigint') and"
+                          " h.range_high_key is not null"
+                          " order by h.step_number")
+        points = [int(r[1]) for r in steps if len(r) > 1 and str(r[1]).strip()]
+        if not points:
+            return [""]
+        return scanplan.bounded(self._quote_ident(steps[0][0]),
+                                [str(p) for p in scanplan.spread(points, n)],
+                                nullable=False)
+
     def _value_scan(self, db, aggregates):
         """`scanplan.Got` of `aggregates` over both sides of `db`: every
         aggregate of a table in one read a side, the rows counted as

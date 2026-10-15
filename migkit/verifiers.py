@@ -809,3 +809,28 @@ def change_intervals(hop, db):
                     "status": "warn", "detail": "change windows unproved for: "
                     + ", ".join(sorted(unknown))})
     return out
+
+
+def each_database(hop, eng, dbs, fn, workers=None):
+    """[(db, fn(db))] in the order of `dbs`, the databases read side by
+    side under one read pool of the run (`ranges.ReadPool`), sized as
+    `check` sizes its own: whatever a database's verify opens below it
+    borrows from that budget rather than multiplying it. A database whose
+    `fn` raises gives (db, the exception), and the others still answer."""
+    from .ranges import ReadPool
+    dbs = list(dbs)
+    if not dbs:
+        return []
+    pool = ReadPool(hop, eng, dbs[0], max(1, int(
+        workers or getattr(hop, "workers", None) or 1)))
+    try:
+        futs = [pool.submit(fn, d) for d in dbs]
+        out = []
+        for d, f in zip(dbs, futs):
+            try:
+                out.append((d, f.result()))
+            except Exception as e:  # noqa: BLE001 - said by the caller
+                out.append((d, e))
+        return out
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)

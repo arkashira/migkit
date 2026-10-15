@@ -1619,11 +1619,12 @@ def sides(pair, db, src_t, dst_t, sc, dc, scope):
 
 
 def both(fn, a, b, *args):
-    """fn on the two sides at once, each on its own connection."""
-    import concurrent.futures as cf
-    with cf.ThreadPoolExecutor(2) as pool:
-        fa, fb = pool.submit(fn, a, *args), pool.submit(fn, b, *args)
-        return fa.result(), fb.result()
+    """fn on the two sides at once, each on its own connection, as two
+    reads of the run's own slots (`scanplan.together`): borrowed from the
+    check's pool where one runs, never a pool of their own."""
+    from . import scanplan
+    ga, gb = scanplan.together((a, b), lambda s: fn(s, *args), 2)
+    return ga, gb
 
 
 # --- the fastest hash the pair allows -----------------------------------------
@@ -1906,10 +1907,10 @@ def gather(s, spec, workers=1, lohi=None):
     """`scan` of a whole side with its range leaves read by `workers`
     statements at once over the key's index, each a run of adjacent
     leaves, and one more for keys outside the planned range (written
-    since): where the side's server computes them. A hash leaf is found
-    only by reading every row, so those are one pass, as is a side folded
-    here."""
-    import concurrent.futures as cf
+    since): where the side's server computes them, as reads of the run's
+    own slots (`scanplan.together`). A hash leaf is found only by reading
+    every row, so those are one pass, as is a side folded here."""
+    from . import scanplan
     if (workers <= 1 or spec.kind != "range" or not s.sql
             or lohi is None):
         return scan(s, spec)
@@ -1924,11 +1925,10 @@ def gather(s, spec, workers=1, lohi=None):
     preds.append(f"{k} < {spec.bounds(0)[0]} or"
                  f" {k} >= {spec.bounds(last)[1]}")
     tree = Tree()
-    with cf.ThreadPoolExecutor(min(int(workers), len(preds))) as pool:
-        for rows in pool.map(lambda w: s.eng.run_rule(
-                s.side, s.db, _scan_sql(s, spec, extra=w)), preds):
-            for b, n, r, kk in rows:
-                tree.add(int(b), int(n), int(r), int(kk))
+    for rows in scanplan.together(preds, lambda w: s.eng.run_rule(
+            s.side, s.db, _scan_sql(s, spec, extra=w)), workers):
+        for b, n, r, kk in rows:
+            tree.add(int(b), int(n), int(r), int(kk))
     return tree
 
 

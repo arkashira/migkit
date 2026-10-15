@@ -5700,8 +5700,9 @@ select json_build_object(
         "   and a.atttypid in ('int2'::regtype,'int4'::regtype,'int8'::regtype)"
         "   and n.nspname not in ('pg_catalog','information_schema')")
 
-    def _chunkable(self, db):
-        """table -> (estimated rows, single integer primary-key column).
+    def _chunkable(self, db, least=None):
+        """table -> (estimated rows, single integer primary-key column), of
+        the tables of at least `least` rows (`CHUNK_MIN_ROWS` where None).
 
         Restricted to one-column integer keys on purpose: range predicates on
         those are index-only and cheap to reason about. A composite or text key
@@ -5722,7 +5723,8 @@ select json_build_object(
                 if not name:
                     continue
                 est = rows.get(name)
-                if est is None or est >= self.CHUNK_MIN_ROWS:
+                if est is None or est >= (self.CHUNK_MIN_ROWS
+                                          if least is None else least):
                     out[name] = (est, col)
         except Exception:
             pass    # no key facts = no chunking, never a failure
@@ -5882,8 +5884,13 @@ select json_build_object(
         from .. import checkpoint as _cp
         gate = Throttle(self.hop.workers,
                         probe=lambda: self._health("src", db))
-        big = self._chunkable(db)
+        keyed = self._chunkable(db, least=0)
         cp = _cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
+        from .. import config as _config
+        from .. import decide
+        parity_costs = decide.Layered(decide.Costs(), decide.HopCosts(
+            self.hop, "row parity/")) if isinstance(self.hop, _config.Hop) \
+            else decide.Costs()
         # What was proved equal last time, and the marker it carried then.
         # `--consistent` never reaches this function; a plain check whose
         # proof goes into a cutover does, and reads every table
@@ -5944,10 +5951,10 @@ select json_build_object(
             independent queries is right regardless; if anyone measures it on
             separate hosts, put the figure in this docstring.
             """
-            with ThreadPoolExecutor(max_workers=2) as two:
-                fa = two.submit(fn, "src", *args)
-                fb = two.submit(fn, "dst", *args)
-                return fa.result(), fb.result()
+            from .. import scanplan
+            ga, gb = scanplan.together(("src", "dst"),
+                                       lambda side: fn(side, *args), 2)
+            return ga, gb
 
         def one_chunked(t, col):
             """Same answer as one pass, but restartable.
@@ -6048,6 +6055,46 @@ select json_build_object(
             name = f"{sch}.{tbl}"
             return marked[0].get(name), marked[1].get(name)
 
+        def proved(t):
+            """The table's OK/DIFF/ERROR line, by the way of proving its
+            rows alike that its own measured reads rank cheapest
+            (`decide.row_parity`): a whole-table digest a side, or the
+            same digest a key range at a time - that one where an earlier
+            run left ranges proved, or the rows are not known and a stop
+            must not lose the reading."""
+            import re
+            est, col = keyed.get(t, (None, None))
+            facts = decide.Facts({"server digest": True, "key": col,
+                                  "rows read here": False})
+            need = (("resume by chunk",) if col and (
+                cp.resumed(t) or est is None) else ())
+
+            def run(choice):
+                began = time.monotonic()
+                if choice.rung.name == "key-range digest":
+                    line = one_chunked(t, col)
+                    if ": ERROR " in line:
+                        raise RuntimeError(line.split(": ERROR ", 1)[1])
+                else:
+                    with gate.unit():
+                        a, b = both(csum, t)
+                    line = (f"{t}: OK rows={a.split('|')[0]}"
+                            f" checksum={a.split('|')[1]}" if a == b else
+                            f"{t}: DIFF src={a} dst={b}{_kind(a, b)}")
+                rows = re.search(r": OK rows=(\d+)", line)
+                if rows:
+                    # a DIFF stops a range read early: only a whole
+                    # reading says what a row costs
+                    parity_costs.saw(choice.rung.name, int(rows.group(1)),
+                                     time.monotonic() - began)
+                return line
+            try:
+                return decide.row_parity(f"{db}.{t}: its rows alike", run,
+                                         facts, need=need,
+                                         costs=parity_costs)[1]
+            except decide.Exhausted as e:
+                return f"{t}: ERROR {(str(e).splitlines() or [''])[-1][:80]}"
+
         def one(t):
             src_m, dst_m = markers(t)
             judged = (self._skip_judged(proof.get(t), src_m, dst_m, held)
@@ -6061,19 +6108,7 @@ select json_build_object(
                 # when the evidence was taken
                 return (f"{t}: UNCHANGED since it was last proved equal"
                         f" (no rows read this run)")
-            if t in big:
-                line = one_chunked(t, big[t][1])
-            else:
-                with gate.unit():
-                    try:
-                        a, b = both(csum, t)
-                    except RuntimeError as e:
-                        return f"{t}: ERROR {str(e).splitlines()[-1][:80]}"
-                if a == b:
-                    line = (f"{t}: OK rows={a.split('|')[0]}"
-                            f" checksum={a.split('|')[1]}")
-                else:
-                    line = f"{t}: DIFF src={a} dst={b}{_kind(a, b)}"
+            line = proved(t)
             if ": OK" in line:
                 # the markers are the ones read *before* the scan, so they
                 # can never be newer than the evidence they stand for
@@ -7048,6 +7083,57 @@ select json_build_object(
         f" and c.table_name not in {OWN_SQL}"
         " and c.data_type in ('text','character varying','character')"
         " order by 1")
+
+    #: the server version a block range of a table is read by itself on,
+    #: not by a scan of the whole table filtered
+    TID_RANGES = 140000
+
+    def scan_cuts(self, db, table, most):
+        """The predicates a deep check's plan reads `table` in, at most
+        `most` of them (`scanplan.for_engine`), cut from the source's own
+        statistics so each range holds about as many rows: ranges of its
+        pages where both servers read a block range by itself
+        (`TID_RANGES`), else ranges of its key's leading integer column at
+        the bounds of that column's histogram. [""], the table read whole,
+        where the statistics do not say how many rows it holds or nothing
+        cuts it. Open at both ends, the ranges cover each side whatever
+        it holds, so the values they fold add up to the table's."""
+        from .. import scanplan
+        sch, tbl = self._split(table)
+        rel = _literal(f"{_ident(sch)}.{_ident(tbl)}")
+        got = self._psql("src", db,
+                         "select relpages||'|'||greatest(reltuples, 0)"
+                         f"::bigint from pg_class where oid = {rel}::regclass"
+                         ).strip()
+        if "|" not in got:
+            return [""]
+        pages, rows = (int(x) for x in got.split("|"))
+        n = scanplan.cuts(rows, most)
+        if n < 2:
+            return [""]
+        if pages >= n and all((self._server_version(s, db) or 0)
+                              >= self.TID_RANGES for s in ("src", "dst")):
+            return scanplan.bounded(
+                "ctid", [f"'({pages * i // n},0)'::tid" for i in range(1, n)],
+                nullable=False)
+        got = self._psql("src", db,
+                         "select a.attname||'|'||coalesce(array_to_string("
+                         "s.histogram_bounds::text::bigint[], ','), '')"
+                         " from pg_index i join pg_attribute a on"
+                         " a.attrelid = i.indrelid and a.attnum = i.indkey[0]"
+                         " left join pg_stats s on s.schemaname ="
+                         f" {_literal(sch)} and s.tablename = {_literal(tbl)}"
+                         " and s.attname = a.attname"
+                         f" where i.indrelid = {rel}::regclass and"
+                         " i.indisprimary and a.atttypid in ('int2'::regtype,"
+                         " 'int4'::regtype, 'int8'::regtype)").strip()
+        col, _, bounds = got.partition("|")
+        points = [int(x) for x in bounds.split(",") if x.strip()]
+        if not col or not points:
+            return [""]
+        return scanplan.bounded(_ident(col),
+                                [str(p) for p in scanplan.spread(points, n)],
+                                nullable=False)
 
     def _deep_scans(self, db, columns_sql):
         """(`scanplan.Got`, {}) of the NULL/empty and replacement-character

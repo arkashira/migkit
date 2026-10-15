@@ -3143,3 +3143,59 @@ def session_action(facts):
         Rung("report", "say it and leave the wait to the read deadline",
              because="nothing safe to close"))
     return climb("a wait the server was asked about", rungs, f)
+
+
+
+# --- row parity: which read proves a table's rows alike ----------------------
+# Every way below reads every row of both sides - none samples, none can be
+# picked silently for less - and folds them into the same proof; what differs
+# is what each costs on these servers, measured end to end (seconds a row)
+# and kept with the hop, so a table goes the way its own reads were cheapest
+# (`Trials` explores a way never timed). Resuming a table from ranges an
+# earlier run proved is the one need that is not cost: those ranges are kept.
+
+#: what any way of proving a table's rows alike must give
+ROW_PARITY_NEED = ("every row",)
+
+_FOLDS = Need("both servers fold the row digest",
+              lambda f: bool(f.get("server digest")),
+              "a side's server cannot fold the row digest, so {rung} has"
+              " nothing to compare")
+
+ROW_PARITY = (
+    Rung("server digest", "each server folding every row into one digest",
+         gives=frozenset({"every row"}), needs=(_FOLDS,),
+         because="one statement a side, and two numbers back",
+         loads={"source": 1, "target": 1}),
+    Rung("key-range digest", "the same digest a range of the key at a time,"
+                             " each range kept as it is proved",
+         gives=frozenset({"every row", "resume by chunk"}),
+         needs=(_FOLDS, Need("one integer key",
+                             lambda f: bool(f.get("key")),
+                             "the table has no single integer key, so its"
+                             " ranges are not the same rows on both sides")),
+         because="a run stopped midway goes on from the last range proved",
+         loads={"source": 1, "target": 1}),
+    Rung("row text", "every row brought here as canonical text and hashed",
+         gives=frozenset({"every row"}),
+         needs=(Need("rows read here",
+                     lambda f: bool(f.get("rows read here")),
+                     "no reader brings this table's rows here as canonical"
+                     " text"),),
+         because="a value hashes alike whatever each server renders",
+         loads={"source": 1, "target": 1, "link:src": 1, "link:dst": 1,
+                "cpu": 1}),
+)
+
+
+def row_parity(work, run, facts=None, need=(), costs=None, log=None,
+               where=None):
+    """(the `Choice`, what `run` returned) of proving one table's rows
+    alike (`ROW_PARITY`, climbed by `attempt`): every row the need, the
+    caller's `need` on top ("resume by chunk" where ranges an earlier run
+    proved are kept), ranked by `costs` - which `run` tells what each way
+    took (`saw(name, rows, seconds)`). A way failing to run switches to
+    the next; none left raises `Exhausted` with every way's reason."""
+    need = tuple(dict.fromkeys(ROW_PARITY_NEED + tuple(need or ())))
+    return attempt(work, ROW_PARITY, run, facts, need=need, costs=costs,
+                   where=where, log=log)

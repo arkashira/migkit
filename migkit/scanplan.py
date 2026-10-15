@@ -212,14 +212,115 @@ def _slots(eng, db, hop, units):
         memory=sizing.Memory(sizing.WORKER_MEMORY)))
 
 
+def together(items, fn, most):
+    """[fn(item) for item in items], in that order, as many at once as
+    `most` and the run's own slots allow: a child of the slots the caller
+    runs under where there are some (`ranges.current_coordinator`),
+    borrowed rather than multiplied; else slots of `most` of their own,
+    which reads nested in these do not count against: with no run's
+    budget to share, a side's reads are not held to the two sides'.
+    The first failure is raised once those in flight have finished."""
+    from . import ranges
+    items = list(items)
+    got = [None] * len(items)
+    parent = ranges.current_coordinator()
+    slots = ranges.Slots(max(1, min(int(most or 1), len(items) or 1)),
+                         parent=parent)
+
+    def one(i):
+        if parent is not None:
+            got[i] = fn(items[i])
+            return
+        token = ranges._current_coordinator_var.set(None)
+        try:
+            got[i] = fn(items[i])
+        finally:
+            ranges._current_coordinator_var.reset(token)
+    slots.each(range(len(items)), one)
+    return got
+
+
+def cuts(rows, most):
+    """How many key ranges a table of `rows` rows is read in: no more than
+    the plan reads at once (`most`), and none holding fewer than a range
+    of a copy does (`ranges.LEAST`); one where its rows are not known."""
+    from . import ranges
+    try:
+        rows = int(rows)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(int(most or 1), rows // ranges.LEAST))
+
+
+def spread(points, n):
+    """`n - 1` of the ascending `points` evenly apart, each once: the
+    bounds that cut what the points sample into `n` ranges of near equal
+    rows."""
+    points = list(points)
+    if n < 2 or not points:
+        return []
+    picked = [points[min(len(points) - 1, len(points) * i // n)]
+              for i in range(1, n)]
+    return list(dict.fromkeys(picked))
+
+
+def bounded(column, bounds, nullable=True):
+    """The predicates of the ranges of `column` cut at the ascending
+    `bounds` (SQL literals), open at both ends and each starting where the
+    one before ended (`covering`): every row in exactly one of them on
+    either side, whatever each side holds. The first also takes a key
+    that is NULL where `nullable`, which no range of values holds. [""],
+    the whole table, where there is nothing to cut at."""
+    from . import checkpoint
+    bounds = list(dict.fromkeys(bounds))
+    if not bounds:
+        return [""]
+    edges = [None] + bounds + [None]
+    preds = [checkpoint.where(column, lo, hi)
+             for lo, hi in covering(list(zip(edges, edges[1:])))]
+    if nullable and preds[0]:
+        preds[0] = f"({preds[0]} or {column} is null)"
+    return preds
+
+
+def plan_most(eng, db):
+    """How many reads the run's plan holds at once for `db`
+    (`sizing.estimate`): the most key ranges a table is cut into."""
+    from . import sizing
+    try:
+        return max(1, int(sizing.estimate(eng.hop, eng, db).most))
+    except Exception:  # noqa: BLE001 - no plan reads the table whole
+        return 1
+
+
 def for_engine(eng, db, aggregates, *, source, query, parts=None,
                progress="deep-scan-progress.json", count="count(*)"):
     """`run` as an engine's deep checks call it: the engine's change
     markers (`_change_marker`) and cutover hold, the hop's scope and its
     kept costs, the progress and the evidence under the database's report
-    directory."""
+    directory. Where the caller cuts no ranges and the engine says how its
+    tables are cut (`scan_cuts(db, table, most)`, from its own statistics),
+    each table is cut into at most as many ranges as the plan reads at
+    once (`plan_most`); a table the engine cannot cut is read whole."""
     from . import config
     hop = eng.hop
+    cutter = getattr(eng, "scan_cuts", None)
+    if parts is None and callable(cutter):
+        most, cut, guard = plan_most(eng, db), {}, threading.Lock()
+
+        def parts(table):
+            with guard:
+                if table in cut:
+                    return cut[table]
+            try:
+                got = list(cutter(db, table, most) or [""])
+            except Exception:  # noqa: BLE001 - uncut is read whole
+                got = [""]
+            with guard:
+                # more ranges than the plan holds is a cut it did not ask
+                # for, and fewer of them would not cover the table
+                return cut.setdefault(table, got if len(got) <= most
+                                      else [""])
     marker = getattr(eng, "_change_marker", None)
     scope = getattr(hop, "scope_fingerprint", None)
     real = isinstance(hop, config.Hop)

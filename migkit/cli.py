@@ -5579,17 +5579,23 @@ def _delta_loop(hop_name, db, interval, cycles, teardown):
                 secrets = (hop.source.password, hop.target.password)
         stamp = time.strftime("%H:%M:%S")
         all_results = []
-        for d in dbs:
+        # the position held to the scope it was taken under
+        verify = getattr(eng, "delta_in_scope", None) or eng.delta_verify
+
+        def one_db(d, verify=verify, eng=eng):
             position = _position(eng, d)
-            # the position held to the scope it was taken under
-            verify = getattr(eng, "delta_in_scope", None) or eng.delta_verify
-            try:
-                rs = [r.__dict__ for r in verify(
-                    d, log=lambda m, d=d: chat(
-                        f"  {_esc('[' + str(d) + ']')} {_esc(m)}"))]
-            except Exception as e:
+            return position, [r.__dict__ for r in verify(
+                d, log=lambda m: chat(
+                    f"  {_esc('[' + str(d) + ']')} {_esc(m)}"))]
+        from .verifiers import each_database
+        for d, done in each_database(hop, eng, dbs, one_db):
+            if isinstance(done, Exception):
+                # no position read with it: nothing held still is claimed
+                position = None
                 rs = [{"check": "delta", "scope": d, "status": "error",
-                       "detail": _clean(e, secrets, raw=True)}]
+                       "detail": _clean(done, secrets, raw=True)}]
+            else:
+                position, rs = done
             if not rs:
                 rs = [{"check": "delta", "scope": d, "status": "error",
                        "detail": "the verify gave no answer"}]
