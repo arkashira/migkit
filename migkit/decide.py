@@ -1257,7 +1257,9 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
     `explore` False commits: a rung only predicted ranks above one
     measured only where it is faster even at its p90. `trial` (name,
     seconds) is a program never measured here on its one bounded trial
-    (`Trials`): ranked first where it holds, its run boxed in `seconds`.
+    (`Trials`): ranked first where it holds, its run boxed in `seconds`;
+    (names, seconds) the programs owed one, the first of them that holds
+    taking it.
 
     The reason is why the ways the list prefers were passed over, or the
     chosen rung's own `because` where none was: a way the list puts below
@@ -1270,7 +1272,9 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
     kept, short = _strongest(kept)
     out = sorted(out + short, key=lambda x: at[id(x[0])])
     priced = _priced(kept, costs, unit)
-    on_trial = (trial[0],) if trial else ()
+    # several names: the programs owed a trial, the first that holds goes
+    on_trial = (() if not trial else tuple(trial[0])
+                if isinstance(trial[0], (tuple, list)) else (trial[0],))
     ranked = _ranked(kept, priced, explore, costs, on_trial)
     order, passed = list(ranked), []
     if keep:

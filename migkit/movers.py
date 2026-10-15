@@ -192,7 +192,59 @@ def choice(engine, table="", hop=None, go=False):
         # to it (`sourcechange`): offered, never assumed
         sourcechange.put_answers(hop, facts, ladder)
     return climb(table or engine, ladder, facts,
-                 ("resume by chunk",) if table else (), costs=costs)
+                 ("resume by chunk",) if table else (), costs=costs,
+                 trial=_owed_trial(ladder, costs, hop))
+
+
+#: the bulk ways that failed their one trial on a hop, each with why
+TRIALS_FILE = "mover-trials.json"
+
+
+def _owed_trial(ladder, costs, hop):
+    """(names, seconds) of the programs never timed on this hop and owed
+    their one trial (`decide.untried`) - all but those that failed it here
+    (`trial_failed`) - for the climb to give the first that holds; None
+    where none is. Without it a program never timed is held below the
+    copier for good, and a whole database is never moved by it to be
+    timed: the table ladder's trials (`decide.Trials`) see only tables."""
+    from .decide import TRIAL_SECONDS, untried
+    failed = trials_failed(hop)
+    owed = tuple(r.name for r in untried(ladder, costs)
+                 if r.name not in failed)
+    return (owed, TRIAL_SECONDS) if owed else None
+
+
+def trials_failed(hop):
+    """{way: why} of the bulk ways that failed their one trial on `hop`."""
+    if hop is None:
+        return {}
+    got = _read_json(hop.report_dir() / TRIALS_FILE)
+    return got if isinstance(got, dict) else {}
+
+
+def trial_failed(hop, via, why):
+    """`via`, on its one trial, failed on `hop`: kept, so the ranking holds
+    it below the copier from now on and it is not tried again."""
+    got = trials_failed(hop)
+    got.setdefault(via, str(why)[:200])
+    path = hop.report_dir() / TRIALS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(path, got)
+
+
+def on_trial(hop, via):
+    """Whether a move of `hop` by `via` is the program's one trial: a
+    program never timed on the hop, owed it."""
+    from .decide import HopCosts, untried
+    if via in trials_failed(hop):
+        return False
+    try:
+        rates = untried(_ladder(), HopCosts(hop))
+    except (OSError, ValueError):
+        # the hop's rates unreadable: no way is known timed, and the
+        # move is not held as anyone's trial on a guess
+        return False
+    return via in {r.name for r in rates}
 
 
 def chosen(engine, table="", hop=None, go=False):
@@ -2060,6 +2112,28 @@ def _pg_references_into(hop, db, routed=()):
             continue
         out.append(f"{ref} <- {by}")
     return sorted(set(out))
+
+
+def _fks_off(hop, db):
+    """Whether foreign keys a load of `db` took off are still off - a
+    record kept for the load that goes on (`indexes.ForeignKeyWindow`):
+    the target's catalogue no longer names them, so only the record can
+    say they are owed back."""
+    from .indexes import FKS_SET_ASIDE, ForeignKeyWindow
+    from .setaside import SetAside
+    record = SetAside(hop, db, FKS_SET_ASIDE)
+    return any(p.parent == record.dir for p in ForeignKeyWindow._held) \
+        or any(not alive for _, alive, _ in record.records())
+
+
+def _fk_window(hop, db, log=None):
+    """The window a copy of `db` loads inside: the target's foreign keys on
+    and into the tables it fills (`_pg_carried`) off before the first row,
+    back and validated after the last, held off for the copy that goes on
+    where this one dies."""
+    from .indexes import ForeignKeyWindow
+    return ForeignKeyWindow(hop, db, log, tables=list(_pg_carried(hop, db)),
+                            hold=True)
 
 
 #: The target's triggers of every kind - the foreign keys' own included -
@@ -5823,22 +5897,21 @@ def pgcopydb_move(hop, db, workers, go, log):
     # the plan says what happens; the command stays on the step and goes
     # only to the run's debug log
     from .wording import Step, phase
+    copy = Step(phase("stream-copy", workers=workers,
+                      split=len(split.tables)), stream.argv(args))
+    steps = [_truncate_step(hop)]
     if blocked:
         # measured: the streaming copy empties each table it loads on its
         # own, one at a time, and the target refuses to empty a table
         # another one references - `cannot truncate a table referenced in
-        # a foreign key constraint` - so on such a target it can only fail.
-        # The dump and load that carry it instead are recorded as
-        # themselves (`Ran`), never as this way's time
-        if log:
-            log(f"the target's foreign keys ({', '.join(blocked[:3])}"
-                + (" ..." if len(blocked) > 3 else "") + ") keep the"
-                " streaming copy from emptying the tables it loads, so this"
-                " goes through a local copy instead")
-        return Ran(pgdump_move(hop, db, workers, go, log), "pgdump")
-    copy = Step(phase("stream-copy", workers=workers,
-                      split=len(split.tables)), stream.argv(args))
-    steps = [_truncate_step(hop)]
+        # a foreign key constraint`. Those keys come off for the copy
+        # (`_fk_window`); where they cannot, the dump and load carry it,
+        # recorded as themselves (`Ran`), never as this way's time
+        steps.insert(0, f"# the target's foreign keys into the tables it"
+                        f" fills ({', '.join(blocked[:3])}"
+                        + (" ..." if len(blocked) > 3 else "") + ") come"
+                        " off before the first row and go back, validated,"
+                        " before the copy is done")
     if note:
         steps.insert(0, note)
     if filters_note:
@@ -5879,44 +5952,63 @@ def pgcopydb_move(hop, db, workers, go, log):
 
     took = None
     _pg_create_missing(hop, db, log)
-    if resume:
-        # what the stopped copy put in is what it goes on from
-        if log:
-            log("an earlier streaming copy of this database stopped part"
-                " way; going on from the tables it finished")
-    else:
-        if stopped_split and log:
-            log("an earlier streaming copy of this database stopped part"
-                " way through a table it was copying in parts, and a"
-                " copy cut that way cannot be gone on from without"
-                " losing rows; it starts over")
-        elif other_scope and log:
-            log("an earlier streaming copy of this database stopped part"
-                " way under another scope than the hop's now, and what it"
-                " finished was taken under that one; it starts over")
-        _pg_truncate_target(hop, db, log)
-        if how == "local":
-            import shutil
-            from .decide import remember
-            shutil.rmtree(work, ignore_errors=True)
-            work.mkdir(parents=True)
-            begun.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
-            split.keep(begun)
-            # the scope it begins under, beside the record that it began
-            remember(begun, "scope", hop.scope_fingerprint())
-    with _IndexWindow(hop, db, workers, log):
-        if log:
-            log(copy)
-            log(split.why)
-        began = time.monotonic()
-        try:
-            with _CopyProgress(work if how == "local" else None, log):
-                stream.run(args, what="the streaming copy")
-        except RuntimeError as e:
-            if "message queue" in str(e):
-                raise runner.Failed(QUEUES_GONE) from None
-            raise
-        took = time.monotonic() - began
+    from contextlib import ExitStack
+
+    from . import decide
+    with ExitStack() as keys:
+        if blocked or _fks_off(hop, db):
+            # the keys come off before the first row is emptied or written
+            # and go back, validated, before the copy is done; a copy that
+            # dies in between leaves them off and recorded for the one
+            # that goes on (`indexes.ForeignKeyWindow`)
+            try:
+                keys.enter_context(_fk_window(hop, db, log))
+            except decide.Blocked as e:
+                if log:
+                    log(f"the target's foreign keys ({', '.join(blocked[:3])}"
+                        + (" ..." if len(blocked) > 3 else "") + ") keep the"
+                        " streaming copy from emptying the tables it loads,"
+                        f" and they could not be taken off ({e}); this goes"
+                        " through a local copy instead")
+                return Ran(pgdump_move(hop, db, workers, go, log), "pgdump")
+        if resume:
+            # what the stopped copy put in is what it goes on from
+            if log:
+                log("an earlier streaming copy of this database stopped part"
+                    " way; going on from the tables it finished")
+        else:
+            if stopped_split and log:
+                log("an earlier streaming copy of this database stopped part"
+                    " way through a table it was copying in parts, and a"
+                    " copy cut that way cannot be gone on from without"
+                    " losing rows; it starts over")
+            elif other_scope and log:
+                log("an earlier streaming copy of this database stopped part"
+                    " way under another scope than the hop's now, and what"
+                    " it finished was taken under that one; it starts over")
+            _pg_truncate_target(hop, db, log)
+            if how == "local":
+                import shutil
+                from .decide import remember
+                shutil.rmtree(work, ignore_errors=True)
+                work.mkdir(parents=True)
+                begun.write_text(time.strftime("%Y-%m-%dT%H:%M:%S"))
+                split.keep(begun)
+                # the scope it begins under, beside the record that it began
+                remember(begun, "scope", hop.scope_fingerprint())
+        with _IndexWindow(hop, db, workers, log):
+            if log:
+                log(copy)
+                log(split.why)
+            began = time.monotonic()
+            try:
+                with _CopyProgress(work if how == "local" else None, log):
+                    stream.run(args, what="the streaming copy")
+            except RuntimeError as e:
+                if "message queue" in str(e):
+                    raise runner.Failed(QUEUES_GONE) from None
+                raise
+            took = time.monotonic() - began
     if how == "local":
         # a resumed copy's time is not the whole copy's, so only a copy
         # from the start is a rate
@@ -8710,6 +8802,11 @@ def run_via(via, hop, db, workers, go, log):
 
     from .wording import DebugLog
     _SIZES = _source_sizes(hop, db) if go else None
+    trial = go and on_trial(hop, via)
+    if trial and log:
+        log(f"{db}: this machine never timed this bulk way on the hop;"
+            " this move is its one trial - a failure holds it below"
+            " migkit's own copier from now on, a finish keeps its rate")
     try:
         with ExitStack() as stack:
             stack.enter_context(runner.recording(
@@ -8721,6 +8818,12 @@ def run_via(via, hop, db, workers, go, log):
                 # so the programs this run started are stopped with it
                 stack.enter_context(runner.stopping())
             got = fns[via](hop, db, workers, go, log)
+    except Exception as e:
+        from .decide import operational
+        if trial and operational(e):
+            lines = [x for x in str(e).splitlines() if x.strip()]
+            trial_failed(hop, via, lines[-1] if lines else type(e).__name__)
+        raise
     finally:
         _SIZES = None
     return got if isinstance(got, Ran) else Ran(got, via)

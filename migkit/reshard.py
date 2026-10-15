@@ -596,8 +596,9 @@ def table_ways():
                          "the group writes more than one target"),
                     Need("a target that spreads the table",
                          lambda f: f["distributed"],
-                         "the target does not spread the table across"
-                         " nodes of its own")),
+                         lambda f: f["spread_unknown"] or (
+                             "the target does not spread the table across"
+                             " nodes of its own"))),
              because="the target spreads the table across its nodes, and"
                      " each row goes where the target itself would put it"),
         Rung("range", "the hop's ranges of the shard key",
@@ -650,17 +651,17 @@ def _target_table(pair, db, table):
 
 def _spread(g, table):
     """What the one target says of how it spreads `table` (`Spread`), or
-    None - asked of its own engine (`Engine.distribution`); a target that
-    cannot say spreads nothing migkit knows of."""
+    None where it spreads it over no nodes of its own - asked of its own
+    engine (`Engine.distribution`). A target that cannot be asked raises:
+    not knowing how a cluster spreads a table is not knowing it spreads
+    nothing, and the cluster's own way taken on that would place rows on
+    nodes the cluster never gave them."""
     if len(g.targets) != 1:
         return None
     pair = g.pair(0, 0)
     db = g.sources[0].db
-    try:
-        return pair.dst_engine.distribution("dst", db,
-                                            _target_table(pair, db, table))
-    except Exception:  # noqa: BLE001 - not known: spread by no one
-        return None
+    return pair.dst_engine.distribution("dst", db,
+                                        _target_table(pair, db, table))
 
 
 def _shared(g, table):
@@ -683,8 +684,16 @@ def function(g, table, home=0, record=False):
 
     def spread_of():
         if "got" not in spread:
-            spread["got"] = (_spread(g, table) if g.kind == GOAL
-                             else None)
+            spread["got"] = None
+            try:
+                spread["got"] = (_spread(g, table) if g.kind == GOAL
+                                 else None)
+            except Exception as e:  # noqa: BLE001 - the rung refuses with it
+                lines = [x for x in str(e).splitlines() if x.strip()]
+                spread["unknown"] = (
+                    "the target could not say how it spreads the table: "
+                    + (lines[-1].strip()[:160] if lines
+                       else type(e).__name__))
         return spread["got"]
     facts = decide.Facts(
         {"group": g.kind,
@@ -697,7 +706,9 @@ def function(g, table, home=0, record=False):
         distributed=lambda: bool(spread_of() is not None
                                  and not spread_of().reference),
         reference=lambda: bool(spread_of() is not None
-                               and spread_of().reference))
+                               and spread_of().reference),
+        spread_unknown=lambda: (spread_of() is None
+                                and spread.get("unknown")) or "")
     choice = decide.climb(f"{db}.{table}: where its rows go", table_ways(),
                           facts, ("placed",))
     if record and choice.rung is not None:

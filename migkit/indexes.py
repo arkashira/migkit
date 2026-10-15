@@ -128,7 +128,9 @@ FKS_SET_ASIDE = "dropped-fks"
 #: The target's foreign keys outside the catalogues, one record per key
 #: (`chr(30)` between records, `chr(31)` between fields, so a name holding
 #: a newline stays one name): schema, table, name, validated, definition,
-#: referenced schema, referenced table.
+#: referenced schema, referenced table. A key a partition inherits from
+#: its table (`coninhcount`) is not one: the server refuses to drop it, and
+#: it goes and comes back with its table's.
 PG_FK_SQL = """
 select string_agg(concat_ws(chr(31), cn.nspname, c.relname, k.conname,
                             k.convalidated, pg_get_constraintdef(k.oid),
@@ -139,7 +141,7 @@ select string_agg(concat_ws(chr(31), cn.nspname, c.relname, k.conname,
   join pg_namespace cn on cn.oid = c.relnamespace
   join pg_class r on r.oid = k.confrelid
   join pg_namespace rn on rn.oid = r.relnamespace
- where k.contype = 'f'
+ where k.contype = 'f' and k.coninhcount = 0
    and cn.nspname not in ('pg_catalog', 'information_schema')"""
 
 
@@ -230,16 +232,31 @@ class ForeignKeyWindow:
     keys a load that died left off with them; one that does not is the
     move's end (`NotPutBack`), never a line in the log.
 
+    `hold`: a load that dies inside the window leaves its keys off and its
+    record in place for the load that goes on from it - put back over
+    half a copy, a key is refused on rows the rest of the copy would
+    have matched, and that refusal took the place of the copy's own
+    error. The record stops the cutover until the keys are back
+    (`cutover`), and the next window - in this process or a later one -
+    takes them over and puts them back at its end.
+
+    `tables`: names, or (schema, table) pairs as the target has them.
     `run(sql)` sends one statement to the target and returns what it
     printed; by default the target's own client (`movers._pg_psql`).
     """
 
-    def __init__(self, hop, db, log=None, tables=None, run=None):
+    #: the records a window held for the load that goes on, this process's
+    #: own: alive while it runs, so no record of a dead load
+    _held = set()
+
+    def __init__(self, hop, db, log=None, tables=None, run=None,
+                 hold=False):
         from .setaside import SetAside
         from .util import split_table
-        self.hop, self.db, self.log = hop, db, log
+        self.hop, self.db, self.log, self.hold = hop, db, log, hold
         self.tables = (None if tables is None else
-                       {split_table("postgres", str(t), "public")
+                       {tuple(t) if isinstance(t, tuple) else
+                        split_table("postgres", str(t), "public")
                         for t in tables})
         if run is None:
             from .movers import _pg_psql
@@ -261,6 +278,12 @@ class ForeignKeyWindow:
         plan = fk_plan(rows, self.tables)
         present = {fk_key(s, t, n): v for s, t, n, v, *_ in rows}
         left, stale = self.record.left_behind()
+        # what a load of this process that died in its window held off
+        for path in sorted(p for p in ForeignKeyWindow._held
+                           if p.parent == self.record.dir):
+            ForeignKeyWindow._held.discard(path)
+            left = {**restore_from(path), **left}
+            stale.append(path)
         left = {k: fk for k, fk in left.items()
                 if isinstance(fk, dict) and fk_put_back(k, fk, present)}
         if not plan and not left:
@@ -292,7 +315,16 @@ class ForeignKeyWindow:
                      f" definitions saved to {self.record.path}")
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, kind, *exc):
+        if self.hold and kind is not None and self.dropped:
+            ForeignKeyWindow._held.add(self.record.path)
+            if self.log:
+                self.log(f"{len(self.dropped)} foreign keys stay off the"
+                         " target for the load that goes on from this one;"
+                         f" their definitions are kept in"
+                         f" {self.record.path}, and the cutover waits for"
+                         " them")
+            return False
         self._put_back()
         return False            # never swallow the load's own exception
 

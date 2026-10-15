@@ -230,6 +230,18 @@ def test_a_streaming_copy_that_hands_its_work_on_says_the_way_that_ran(
                         lambda h, db: ([], False))
     monkeypatch.setattr(movers, "pgdump_move",
                         lambda *a: ["# the dump and load"])
+    monkeypatch.setattr(movers._Streaming, "run", lambda self, *a, **k: None)
+    monkeypatch.setattr(movers, "_pg_create_missing", lambda *a, **k: None)
+    from migkit import decide
+
+    class Refused:
+        def __enter__(self):
+            raise decide.Blocked("the keys could not be read")
+
+        def __exit__(self, *exc):
+            return False
+    # the target's keys could not come off: the dump and load carry it
+    monkeypatch.setattr(movers, "_fk_window", lambda *a, **k: Refused())
     got = movers.pgcopydb_move(hop, "appdb", 2, True, None)
     assert isinstance(got, movers.Ran) and got.via == "pgdump", got
     assert list(got) == ["# the dump and load"]
