@@ -598,7 +598,7 @@ def preflight(hop, eng, dbs, leg, conf, chose=None):
                             f" not be read ({e})")
         out += _shape_rows(hop, eng, d, gate)
         out += _version_rows(eng, d, gate)
-        out += _set_aside_rows(hop, d, gate)
+        out += _set_aside_rows(hop, eng, d, gate)
         # the target's hold read back, or the writes that are not migkit's
         # named - drift, at the gate's level
         out += freeze.kept_rows(hop, eng, d, gate)
@@ -809,7 +809,7 @@ def _version_rows(eng, d, gate):
                                                       quote)]
 
 
-def _set_aside_rows(hop, d, gate):
+def _set_aside_rows(hop, eng, d, gate):
     from .setaside import SetAside
     out = []
     for kind, what in (("dropped-triggers", "triggers"),
@@ -821,7 +821,41 @@ def _set_aside_rows(hop, d, gate):
                               f" not back ({', '.join(names[:4])}) - one"
                               " left off after the flip changes nothing and"
                               " says nothing"))
+    off = _keys_off(hop, eng, d)
+    if off:
+        out.append(("fail", f"{d}: {off}"))
     return out
+
+
+def _keys_off(hop, eng, d):
+    """Why the cutover may not go on while the target's foreign keys a
+    load took off (`indexes.ForeignKeyWindow`) are not all back, or '':
+    after the flip the target takes rows its own keys would refuse, and
+    no later check is asked first. The target engine that takes keys off
+    reads which are back (`foreign_keys_off`). A record or a target that
+    cannot be read is not known to be back, and stops it too."""
+    target = getattr(eng, "dst_engine", None) or eng
+    read = getattr(target, "foreign_keys_off", None)
+    if read is None:
+        return ""
+    try:
+        off, unread = read(d)
+        keys = [k for k, _, _ in off]
+    except Exception as e:  # noqa: BLE001 - not known back is not back
+        return ("whether the foreign keys a load took off the target are"
+                f" back could not be read ({str(e).strip()[:160]})")
+    said = []
+    if keys:
+        said.append(f"{len(keys)} foreign keys a load took off the target"
+                    f" are not back ({', '.join(sorted(set(keys))[:4])})")
+    if unread:
+        said.append("a record of foreign keys taken off cannot be read"
+                    f" ({', '.join(unread[:2])})")
+    if not said:
+        return ""
+    return ("; ".join(said) + " - the target would take rows its own keys"
+            " refuse after the flip; put them back first (`migkit check`"
+            " says where their definitions are)")
 
 
 def _job_rows(hop, eng, d, conf):
@@ -1874,6 +1908,10 @@ def _final_check(hop, eng, d, before, left, say):
 
     def work():
         try:
+            # the proof that goes into the flip passes no table over, on
+            # an engine that would otherwise (`cutover_proof`)
+            if hasattr(eng, "cutover_proof"):
+                eng.cutover_proof = True
             if _has_delta(hop, eng, d):
                 got = eng.delta_verify(d)
                 result["how"] = ("the rows changed since the last verified"
@@ -1894,6 +1932,9 @@ def _final_check(hop, eng, d, before, left, say):
             result["skipped"] = [r.scope for r in got if r.status == "skip"]
         except Exception as e:  # noqa: BLE001 - a check that fails is a stop
             result["error"] = str(e).strip()[:300]
+        finally:
+            if hasattr(eng, "cutover_proof"):
+                eng.cutover_proof = False
     t = threading.Thread(target=work, daemon=True)
     t.start()
     t.join(max(0.1, left()))
@@ -1906,6 +1947,10 @@ def _final_check(hop, eng, d, before, left, say):
     if decision.status != "same":
         raise _Undo(f"{d}: the final check did not find the two the same"
                     f" ({decision.word}) - {decision.why}")
+    # read again here: a load may have taken keys off since the preflight
+    off = _keys_off(hop, eng, d)
+    if off:
+        raise _Undo(f"{d}: {off}")
     watch = drift.reader(eng)
     if watch is not None and before is not None:
         moved = drift.changes(before, drift.shape(watch, "src", d))

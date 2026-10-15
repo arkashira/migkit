@@ -498,6 +498,9 @@ class PostgresEngine(Engine):
     SETTINGS_PER_DATABASE = True
     #: a subscription with copy_data=true copies the tables, then follows
     REPLICA_COPIES = True
+    #: set by the cutover's last check while it reads: its proof never
+    #: passes a table over (`_held_for_cutover`)
+    cutover_proof = False
 
     #: every table that holds rows, by the one rule (`user_tables_where`)
     USER_TABLES = ("select n.nspname||'.'||c.relname from pg_class c"
@@ -5199,11 +5202,13 @@ select json_build_object(
         big = self._chunkable(db)
         cp = _cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
         # What was proved equal last time, and the marker it carried then.
-        # `--consistent` never reaches this function, so the final proof
-        # cannot skip anything by construction rather than by a flag.
+        # `--consistent` never reaches this function; a plain check whose
+        # proof goes into a cutover does, and reads every table
+        # (`_held_for_cutover`).
         from .. import unchanged as _un
         proof = _un.Proof(self.hop.report_dir(db) / "proof.json")
-        skipped = []
+        skipped, again = [], {}
+        held = self._held_for_cutover(db) if may_skip else ""
         # Read once: a source in recovery produces the target-ahead shapes all
         # by itself, and the verdict has to say so. See `migkit.standby`.
         from .. import standby as _sb
@@ -5362,7 +5367,11 @@ select json_build_object(
 
         def one(t):
             src_m, dst_m = markers(t)
-            if may_skip and _un.skippable(proof.get(t), src_m, dst_m):
+            judged = (self._skip_judged(proof.get(t), src_m, dst_m, held)
+                      if may_skip else None)
+            if judged is not None and not judged and proof.get(t):
+                again[t] = judged.why
+            if judged:
                 skipped.append(t)
                 # deliberately not "OK": nothing was read this run, and a
                 # line that looks like a fresh verdict would be a lie about
@@ -5413,6 +5422,11 @@ select json_build_object(
             lines.append(f"# source read while {src_note}; a source behind"
                          f" its writer shows fewer rows than the target and"
                          f" reads as rows-extra")
+        if held:
+            lines.append(f"# every table read: {held}")
+        else:
+            lines += [f"# {t} read again: {again[t]}"
+                      for t in tables if t in again]
         if skipped:
             lines.append(f"# {len(skipped)} of {len(tables)} tables unchanged"
                          f" since their last proof and not read this run;"
@@ -8581,7 +8595,78 @@ select json_build_object(
         else:
             res.append(Result("deep", f"{db} boundary", "ok",
                               "no single-int-pk tables to boundary-check"))
+        res += [r for r in (self.set_aside(db),) if r]
         return res
+
+    def foreign_keys_off(self, db):
+        """([(key, record file, its load still running)] of the target's
+        foreign keys a load took off (`indexes.ForeignKeyWindow`) that are
+        not back - missing, or not validated where the source held them
+        valid (`indexes.fk_put_back`) - and [the records that cannot be
+        read]. A key a running load holds is off on purpose, and still off.
+        The target's keys are read only where a record names one; a target
+        that cannot be read raises, since nothing then says they are
+        back."""
+        from .. import indexes
+        from ..setaside import SetAside
+        off, unread, present = [], [], None
+        for path, alive, defs in SetAside(self.hop, db,
+                                          indexes.FKS_SET_ASIDE).records():
+            if not isinstance(defs, dict):
+                unread.append(str(path))
+                continue
+            for key, fk in sorted(defs.items()):
+                if present is None:
+                    present = {
+                        indexes.fk_key(s_, t_, n_): v for s_, t_, n_, v, *_
+                        in indexes.fk_rows(self._psql(
+                            "dst", db, indexes.PG_FK_SQL))}
+                try:
+                    back = not indexes.fk_put_back(key, fk, present)
+                except (KeyError, TypeError, AttributeError):
+                    unread.append(str(path))
+                    break
+                if not back:
+                    off.append((key, str(path), alive))
+        return off, unread
+
+    def set_aside(self, db):
+        """The target's foreign keys a load took off and has not put back
+        (`foreign_keys_off`), as a check result; None where no record
+        names one. With a key off, the target takes rows its own keys
+        would refuse, and nothing else in the check says so."""
+        scope = f"{db} foreign keys set aside"
+        try:
+            off, unread = self.foreign_keys_off(db)
+        except Exception as e:  # noqa: BLE001 - said, as not known back
+            return Result("deep", scope, "error",
+                          "the target's foreign keys could not be read to"
+                          " see whether the keys a load took off are back:"
+                          f" {str(e).strip()[:160]}", "")
+        if not off and not unread:
+            return None
+        said = []
+        held = [k for k, _, alive in off if alive]
+        lost = [(k, p) for k, p, alive in off if not alive]
+        if held:
+            said.append(f"{len(held)} foreign keys are off for a load still"
+                        " running, and go back when it ends: "
+                        + ", ".join(held[:5]))
+        if not lost and not unread:
+            return Result("deep", scope, "ok", "; ".join(said), "")
+        if lost:
+            said.append(f"{len(lost)} foreign keys a load took off the target"
+                        " and never put back: "
+                        + ", ".join(k for k, _ in lost[:5])
+                        + " - definitions in "
+                        + ", ".join(sorted({p for _, p in lost})))
+        if unread:
+            said.append("a record of foreign keys taken off cannot be read: "
+                        + ", ".join(unread))
+        return Result("deep", scope, "diff", "; ".join(said), "",
+                      "add them back from the definitions in that file; the"
+                      " next load that takes the target's keys off puts"
+                      " them back first")
 
     #: each relation under the kind the hop's `objects` reads it by - a
     #: view, a materialized view and a sequence by their own kinds
@@ -8659,13 +8744,19 @@ select json_build_object(
         # Measured on CockroachDB: empty pg_stat_all_tables, relfilenode 0
         # everywhere, and a reported server_version of 13.0.0 - so the marker
         # would be constant and the only thing refusing it is that number.
-        if not _u.usable_brand(self._brands()[0 if side == "src" else 1]):
+        # The registry says which kinds' counters are read
+        # (`unchanged.COUNTERS`); a marker built anyway and dead is refused
+        # by `unchanged.judge`.
+        brand = self._brands()[0 if side == "src" else 1]
+        entry = _u.COUNTERS.get(getattr(brand, "name", None))
+        if (entry is None or entry.owed
+                or entry.family != getattr(brand, "family", None)):
             return {}
         texts = self.__dict__.setdefault("_version_texts", {})
         try:
             if side not in texts:
                 texts[side] = self._psql(side, db, "show server_version")
-            if not _u.usable_postgres(texts[side]):
+            if entry.refusal({"server_version": texts[side]}, side):
                 return {}
             got = self._psql(side, db, """
                 select n.nspname||'.'||c.relname||chr(31)
@@ -8694,6 +8785,35 @@ select json_build_object(
             if name:
                 out[name] = _u.marker(rest.split("\x1f"))
         return out
+
+    def _skip_judged(self, stored, src_m, dst_m, held=""):
+        """Whether a table is passed over this run, and why
+        (`unchanged.judge`, for the kind of server the source is): never
+        where `held` says the proof goes into a cutover."""
+        from .. import unchanged as _u
+        if held:
+            return _u.Judgement(False, held)
+        return _u.judge(getattr(self._brands()[0], "name", None), stored,
+                        src_m, dst_m)
+
+    def _held_for_cutover(self, db):
+        """Why this check reads every table of `db`, or '': its proof goes
+        into a cutover - the cutover's own last check
+        (`cutover._final_check` sets `cutover_proof`), or a check run while
+        a source freeze is recorded (`freeze.source_frozen`). A freeze
+        record that cannot be read is a doubt, and a doubt reads."""
+        if self.cutover_proof:
+            return "the proof goes into a cutover, which reads every table"
+        from .. import freeze
+        try:
+            frozen = freeze.source_frozen(self.hop, [db])
+        except Exception as e:  # noqa: BLE001 - a doubt reads every table
+            return ("whether the source is held for a cutover could not be"
+                    f" read ({str(e).strip()[:120]})")
+        if frozen:
+            return ("the source is held for a cutover, and the proof that"
+                    " goes into it reads every table")
+        return ""
 
     def _change_marker(self, side, db, table):
         """One table's marker (`_change_markers`), or None."""
@@ -11874,37 +11994,61 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         read. It is copied again as text, where `_piped` reads it back and
         stops the copy on it if it still differs, and the pass-through is
         not tried again on the table. A snapshot that ended before a read
-        could import it is let go, and the range read under a new one."""
+        could import it is let go, and the range read under a new one.
+
+        The pass-through and the text copy are one climb (`decide.attempt`):
+        a pass that fails as a way fails - a server that refused the binary
+        encoding of a type whose form differs between the two, one that is
+        gone, which the text copy then finds too and raises - is given up
+        on for the table and the switch said with its reason; a refusal in
+        the database's words (`movers.refusal`) stops the range, which the
+        text copy would meet too; a fault of migkit's own is raised."""
         import time
 
+        from .. import decide, movers
         from . import pg_pass
-        ctx = way.ctx
-        try:
-            rows, lsn = ctx.copy(
-                way.export, where, pre_sql, what,
-                freeze=pre_sql.lower().startswith("truncate"),
-                unawaited=way.name == "pass-through unawaited")
-        except pg_pass.SnapshotLost:
-            ctx.snapshot.lost(way.export)
-            ctx.snapshot.release(way.export)
+        ctx, ways = way.ctx, way.ways
+        rungs = (way.choice.rung,) + tuple(
+            r for r in ways.trials.rungs
+            if r.name not in ways.passing and r.name != way.name)
+
+        def run(choice):
+            if choice.path != way.name:
+                return None
+            try:
+                return ctx.copy(
+                    way.export, where, pre_sql, what,
+                    freeze=pre_sql.lower().startswith("truncate"),
+                    unawaited=way.name == "pass-through unawaited")
+            except pg_pass.SnapshotLost:
+                ctx.snapshot.lost(way.export)
+                ctx.snapshot.release(way.export)
+                return pg_pass.SnapshotLost
+            except Exception as e:
+                ctx.snapshot.release(way.export)
+                stop = movers.refusal(e)
+                if stop is not None:
+                    raise stop from e
+                raise
+            except BaseException:
+                ctx.snapshot.release(way.export)
+                raise
+
+        def undo(rung, error):
+            ways.give_up_passing("a range could not pass server to server:"
+                                 f" {decide._first(error)}")
+        _, got = decide.attempt(
+            what, rungs, run, ways.trials.facts, keep=way.name, undo=undo,
+            log=log, prove=False, record=False, switch=movers.switchable,
+            otherwise="copying it as text")
+        if got is None or got is pg_pass.SnapshotLost:
+            # given up on for the table, or a snapshot that ended before
+            # the range could import it: the range again, as the table's
+            # ways now pick it
             return self._copy_checked(db, qt, cols, where, pre_sql, what,
-                                      log, way=way.ways.pick(way.begin),
+                                      log, way=ways.pick(way.begin),
                                       proved=proved)
-        except Exception as e:  # noqa: BLE001 - said, and the pipe goes
-            # a server that refused the binary encoding (a type whose
-            # form differs between the two), or one that is gone - which
-            # the pipe then finds too, and raises
-            ctx.snapshot.release(way.export)
-            why = str(e).strip().splitlines()[-1][:200] if str(e) else e
-            log(f"{what}: could not pass server to server ({why}) -"
-                " copying it as text")
-            return self._copy_checked(
-                db, qt, cols, where, pre_sql, what, log,
-                way=way.instead(f"a range could not pass server to server:"
-                                f" {why}"), proved=proved)
-        except BaseException:
-            ctx.snapshot.release(way.export)
-            raise
+        rows, lsn = got
         checked = (self.hop.options or {}).get("verify_batches", True)
 
         def check():
