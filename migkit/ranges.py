@@ -431,6 +431,8 @@ def plan(st, lo, hi, edges_fn, save, table=None):
         st["ranges_done"] = [a for a, u in st["ranges"]
                              if "last" in st and u <= st["last"]]
         save()
+    if refine(st):
+        save()
     rs = st["ranges"]
     if rs and hi > rs[-1][1]:
         rs.append([rs[-1][1], hi])
@@ -494,7 +496,7 @@ def _reach(st, after):
     return rs[i - 1][1] if i else None
 
 
-def finished(st, after, save):
+def finished(st, after, save, rows=None):
     """A range copied: marked, and `last` moved to how far every range
     from the start is done - under the checkpoint's lock, where ranges of
     one table finish side by side, and saved by one save for every range
@@ -504,6 +506,8 @@ def finished(st, after, save):
     owner = _owner(save)
     with owner._lock if owner is not None else _NOLOCK:
         st["ranges_done"].append(after)
+        if rows is not None:
+            measured(st, after, rows)
         reach = _reach(st, after)
         if reach is not None:
             st["last"] = reach
@@ -937,7 +941,7 @@ def bounds_sql(quote, table, key, every, where=None):
     """The statement answering the key at every `every`-th row in key
     order, in SQL both PostgreSQL and MySQL take: the upper edge of each
     range but the last."""
-    k = quote(key)
+    k = _quoted(quote, key)
     return (f"select {k} from (select {k}, row_number() over (order by {k})"
             f" as migkit_rn from {table}"
             + (f" where ({where})" if where else "")
@@ -972,6 +976,396 @@ def split(lo, hi, edges):
         last = e
     out.append((last, hi))
     return out
+
+
+# --- chunk edges from the statistics (backlog F7.edges) ----------------------
+
+#: sample points an edge stands on per range: a range of N rows has its
+#: edge off by about N / sqrt(points), refined as the ranges are copied
+#: (`refine`)
+SAMPLE_PER_RANGE = 16
+
+
+def _keys(key):
+    return [key] if isinstance(key, str) else list(key)
+
+
+def _quoted(quote, key):
+    return ", ".join(quote(k) for k in _keys(key))
+
+
+def kind_of(engine):
+    """The statistics dialect of a source engine, from the class it is or
+    derives from; None where migkit has no statement for its statistics."""
+    for cls in type(engine).__mro__:
+        name = cls.__name__.lower()
+        for word, kind in (("postgres", "postgresql"), ("mysql", "mysql"),
+                           ("mssql", "mssql"), ("sqlserver", "mssql"),
+                           ("oracle", "oracle")):
+            if word in name:
+                return kind
+    return None
+
+
+def _ordered(values):
+    """Integers in numeric order; any other key in the order the server
+    gave it, which is the key's collation, not Python's."""
+    out, seen = [], set()
+    for v in values:
+        t = tuple(v) if isinstance(v, (list, tuple)) else v
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in out):
+        return sorted(out)
+    return out
+
+
+def quantile_edges(values, need):
+    """The `need - 1` edges that cut `values` - keys in key order, a
+    sample's or a statistics' bounds - into `need` ranges of about equal
+    rows; None where there are fewer values than ranges."""
+    got = list(values)
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in got):
+        got.sort()
+    if need < 2 or len(got) < need:
+        return None
+    cut = _ordered(got[i * len(got) // need] for i in range(1, need))
+    return cut or None
+
+
+def cumulative_edges(points, need):
+    """Edges from a histogram's (key, share of the rows at or below it):
+    the first key reaching each i / need of the rows. Equal-depth bounds
+    and a histogram with a heavy value come out alike. None where the
+    histogram is coarser than the ranges."""
+    pts = [(v, float(c)) for v, c in points if c is not None]
+    if need < 2 or len(pts) < need:
+        return None
+    top = pts[-1][1] or 1.0
+    out = []
+    for i in range(1, need):
+        goal = top * i / need
+        for v, c in pts:
+            if c >= goal:
+                out.append(v)
+                break
+    out = _ordered(out)
+    return out if len(out) + 1 >= max(need // 2, 2) else None
+
+
+@dataclass
+class Stats:
+    """What a table's statistics say of a key: `points` [(key, share of
+    rows at or below)], `modified` the rows written since they were taken
+    (None where the engine does not say), `touched` whether the table was
+    written since at all (None where not known)."""
+    points: list
+    modified: int = None
+    touched: bool = None
+
+
+def _lit(value):
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    text = str(value)
+    if "\\" in text or "\x00" in text:
+        raise ValueError("a key value with a backslash or a NUL is not"
+                         " written into a statement here")
+    return "'" + text.replace("'", "''") + "'"
+
+
+def statistics_sql(kind, table, key, names=None):
+    """The statements that read a key's histogram and what changed since,
+    for a dialect, as (histogram, drift) - None where it has none."""
+    col = _keys(key)[0]
+    schema, name = names if names else (None, None)
+    if kind == "postgresql":
+        return ("select u.v, u.ord, (select n_mod_since_analyze from"
+                " pg_stat_all_tables where relid = c.oid),"
+                " format_type(a.atttypid, a.atttypmod) from pg_stats s"
+                " join pg_class c on c.relname = s.tablename join"
+                " pg_namespace n on n.oid = c.relnamespace and n.nspname ="
+                " s.schemaname join pg_attribute a on a.attrelid = c.oid and"
+                " a.attname = s.attname cross join lateral"
+                " unnest(s.histogram_bounds::text::text[]) with ordinality"
+                f" as u(v, ord) where c.oid = {_lit(table)}::regclass and"
+                f" s.attname = {_lit(col)} order by u.ord", None)
+    if kind == "mysql" and schema:
+        where = (f"where SCHEMA_NAME = {_lit(schema)} and TABLE_NAME ="
+                 f" {_lit(name)} and COLUMN_NAME = {_lit(col)}")
+        return (f"select cast(HISTOGRAM as char) from"
+                f" information_schema.COLUMN_STATISTICS {where}",
+                f"select (t.UPDATE_TIME > c.HISTOGRAM->>'$.\"last-updated\"')"
+                f" from information_schema.TABLES t join"
+                f" information_schema.COLUMN_STATISTICS c on"
+                f" c.SCHEMA_NAME = t.TABLE_SCHEMA and c.TABLE_NAME ="
+                f" t.TABLE_NAME where t.TABLE_SCHEMA = {_lit(schema)} and"
+                f" t.TABLE_NAME = {_lit(name)} and c.COLUMN_NAME ="
+                f" {_lit(col)}")
+    if kind == "mssql":
+        obj = str(table).replace("'", "''")
+        return ("select s.stats_id, h.range_high_key, h.range_rows +"
+                " h.equal_rows, p.modification_counter from sys.stats s"
+                " join sys.stats_columns sc on sc.object_id = s.object_id"
+                " and sc.stats_id = s.stats_id and sc.stats_column_id = 1"
+                " join sys.columns c on c.object_id = sc.object_id and"
+                " c.column_id = sc.column_id cross apply"
+                " sys.dm_db_stats_histogram(s.object_id, s.stats_id) h"
+                " cross apply sys.dm_db_stats_properties(s.object_id,"
+                " s.stats_id) p where s.object_id = object_id(N'" + obj
+                + f"') and c.name = {_lit(col)} order by s.stats_id,"
+                " h.step_number", None)
+    if kind == "oracle" and schema:
+        return ("select h.endpoint_value, h.endpoint_number, (select"
+                " m.inserts + m.updates + m.deletes from"
+                " all_tab_modifications m where m.table_owner = h.owner and"
+                " m.table_name = h.table_name and m.partition_name is null)"
+                " from all_tab_histograms h where h.owner ="
+                f" {_lit(schema)} and h.table_name = {_lit(name)} and"
+                f" h.column_name = {_lit(col)} order by h.endpoint_number",
+                None)
+    return None
+
+
+def read_statistics(kind, ask, table, key, names=None):
+    """The `Stats` of a table's key as its engine holds them, or None where
+    there are none or the engine gives no way to read them. Reading them
+    never fails a copy."""
+    import json
+    import re
+    sqls = statistics_sql(kind, table, key, names)
+    if not sqls or len(_keys(key)) != 1:
+        return None
+    try:
+        rows = ask(sqls[0]) or []
+        if not rows:
+            return None
+        if kind == "postgresql":
+            whole = re.fullmatch(r"(small|big)?int(eger)?\d*", rows[0][3])
+            last = max(int(r[1]) for r in rows) - 1
+            points = [(int(r[0]) if whole else r[0],
+                       (int(r[1]) - 1) / last if last else 1.0)
+                      for r in rows]
+            return Stats(points, modified=None if rows[0][2] is None
+                         else int(rows[0][2]))
+        if kind == "mysql":
+            hist = json.loads(rows[0][0])
+            points = []
+            for b in hist.get("buckets") or ():
+                points.append((b[1], b[2]) if len(b) > 2 else (b[0], b[1]))
+            touched = None
+            if sqls[1]:
+                got = ask(sqls[1])
+                if got and got[0][0] is not None:
+                    touched = bool(int(got[0][0]))
+            return Stats(points, touched=touched)
+        if kind == "mssql":
+            first = rows[0][0]
+            rows = [r for r in rows if r[0] == first]
+            running, points = 0, []
+            for r in rows:
+                running += int(r[2])
+                points.append((r[1], running))
+            return Stats(points, modified=int(rows[0][3]))
+        points = [(r[0], r[1]) for r in rows]
+        return Stats(points, modified=None if rows[0][2] is None
+                     else int(rows[0][2]))
+    except Exception:  # noqa: BLE001 - no statistics is not a failure
+        return None
+
+
+def sample_sql(kind, quote, table, key, rows, want, where=None):
+    """The statement taking about `want` of a table's `rows` keys, in key
+    order, from the live rows; None where the dialect has none or the
+    sample would be the whole table."""
+    if kind is None or rows <= want:
+        return None
+    k = _quoted(quote, key)
+    share = want / max(rows, 1)
+    cond = f" where ({where})" if where else ""
+    more = f" and ({where})" if where else ""
+    if kind == "postgresql":
+        return (f"select {k} from {table} tablesample bernoulli"
+                f" ({share * 100:.8f}){cond} order by {k}")
+    if kind == "mysql":
+        return (f"select {k} from {table} where rand() < {share:.10f}"
+                f"{more} order by {k}")
+    if kind == "mssql":
+        return (f"select {k} from {table} where abs(checksum(newid())) %"
+                f" {max(round(1 / share), 1)} = 0{more} order by {k}")
+    if kind == "oracle":
+        return (f"select {k} from {table} sample ({share * 100:.8f}){cond}"
+                f" order by {k}")
+    return None
+
+
+def cut(ask, kind, quote, table, key, rows, every, where=None, names=None,
+        stats=None, into=None, log=None, label=None):
+    """The range edges of a table - keys in key order - cut the way
+    `decide.CHUNK_EDGES` picks on what is known of it: the engine's
+    statistics (`stats` an engine's own reader returning a `Stats`, else
+    `read_statistics`) while the table has moved less than half a range
+    since they were taken and no row filter narrows the rows; else a
+    sample of the live key; else the key read in order. A way that cannot
+    run hands on to the next. The edges are never the key's minimum and
+    maximum divided. `into` is the table's checkpoint entry, which keeps
+    the rows a range holds and the way the edges came from for `refine`."""
+    from . import decide
+    every = max(int(every), 1)
+    need = -(-int(rows) // every)
+    say = log or (lambda m: None)
+    label = label or str(table)
+    got = None if where else (stats() if stats else
+                              read_statistics(kind, ask, table, key, names))
+    facts = {}
+    cand = None
+    if got is not None and got.points:
+        cand = cumulative_edges(got.points, need)
+    if cand:
+        facts["statistics"] = True
+        half = every // 2
+        if got.touched is False or (got.modified is not None
+                                    and got.modified <= half):
+            facts["statistics fresh"] = True
+        elif got.modified is not None:
+            facts["statistics stale"] = (
+                f"the table moved {got.modified:,} rows since its"
+                f" statistics, more than half a range ({half:,})")
+        elif got.touched:
+            facts["statistics stale"] = ("the table was written since its"
+                                         " statistics were taken")
+    sample = sample_sql(kind, quote, table, key, int(rows),
+                        need * SAMPLE_PER_RANGE, where)
+    facts["sample"] = bool(sample)
+
+    def run(choice):
+        if choice.path == "statistics":
+            return cand
+        if choice.path == "sample":
+            keys = [_pick(r, key) for r in ask(sample)]
+            edges = quantile_edges(keys, need)
+            if edges is None:
+                raise decide.Blocked(f"the sample held {len(keys):,} keys,"
+                                     f" fewer than the {need:,} ranges")
+            return edges
+        return [_pick(r, key) for r in ask(bounds_sql(
+            quote, table, key, every, where))]
+    choice, edges = decide.attempt(
+        f"the range edges of {label}", decide.CHUNK_EDGES, run, facts,
+        need=("edges",), log=say, record=False)
+    say(f"{label}: range edges from {choice.said}"
+        + (f" ({facts['statistics stale']}, so they are not trusted)"
+           if choice.path != "statistics" and "statistics stale" in facts
+           else ""))
+    if into is not None:
+        into["every"] = every
+        into["edges_from"] = choice.path
+    return _ordered(edges)
+
+
+def _pick(row, key):
+    """A key from a row: the value, or the tuple of a composite key's."""
+    if len(_keys(key)) > 1:
+        return tuple(row[:len(_keys(key))])
+    return row[0]
+
+
+def range_where(quote, key, after, upto, lit=_lit):
+    """The condition for the keys after `after` up to and including `upto`
+    in key order (None for an open end), written as the plain comparisons
+    every engine takes - a composite key as its lexicographic expansion,
+    which holds for strings and uuids as for integers."""
+    cols = [quote(k) for k in _keys(key)]
+
+    def beyond(point):
+        vals = point if isinstance(point, (list, tuple)) else (point,)
+        terms = []
+        for i, v in enumerate(vals):
+            eq = [f"{cols[j]} = {lit(vals[j])}" for j in range(i)]
+            terms.append("(" + " and ".join(eq + [f"{cols[i]} > {lit(v)}"])
+                         + ")")
+        return "(" + " or ".join(terms) + ")"
+    parts = []
+    if after is not None:
+        parts.append(beyond(after))
+    if upto is not None:
+        parts.append("not " + beyond(upto))
+    return " and ".join(parts) or "1 = 1"
+
+
+def split_keyed(edges):
+    """[(after, upto)] over the edges of any key type, in the order given:
+    None is an open end - the first range has no lower bound and the last
+    no upper - so a key that is not a number needs no minimum or maximum
+    to be read first."""
+    out, last = [], None
+    for e in edges:
+        out.append((last, e))
+        last = e
+    out.append((last, None))
+    return out
+
+
+def measured(st, after, rows):
+    """The rows a range held, kept beside the plan for `refine`; nothing
+    kept where the copier did not count them."""
+    try:
+        n = int(rows)
+    except (TypeError, ValueError):
+        return
+    st.setdefault("ranges_rows", {})[str(after)] = n
+
+
+def refine(st):
+    """The ranges not yet begun cut again from what the finished ones held:
+    a pending range the finished ranges' density says holds more than two
+    shares is split into shares, and neighbours whose rows add to no more
+    than one share are merged. Only integer ranges, and only ones neither
+    done nor begun, so no row is read twice or left out - an edge is where
+    one range ends and the next begins. True where the plan changed."""
+    rs, every = st.get("ranges"), int(st.get("every") or 0)
+    held = st.get("ranges_rows") or {}
+    if not rs or every < 1 or not held:
+        return False
+    if not all(isinstance(x, int) for r in rs for x in r):
+        return False
+    spans = {str(r[0]): r[1] - r[0] for r in rs}
+    rows = sum(v for k, v in held.items() if k in spans)
+    width = sum(spans[k] for k in held if k in spans)
+    if rows < 1 or width < 1:
+        return False
+    density = rows / width
+    done = set(st.get("ranges_done") or ())
+    begun = set((st.get("ranges_seen") or {}).keys())
+
+    def pending(r):
+        return r[0] not in done and str(r[0]) not in begun
+
+    out = []
+    for r in rs:
+        guess = (r[1] - r[0]) * density
+        if pending(r) and guess > 2 * every:
+            shares = min(-(-int(guess) // every), r[1] - r[0])
+            edges = [r[0] + (r[1] - r[0]) * i // shares
+                     for i in range(1, shares)]
+            last = r[0]
+            for e in edges + [r[1]]:
+                if e > last:
+                    out.append([last, e])
+                    last = e
+        elif (out and pending(r) and pending(out[-1])
+              and (r[1] - out[-1][0]) * density <= every):
+            out[-1] = [out[-1][0], r[1]]
+        else:
+            out.append(list(r))
+    if out == [list(r) for r in rs]:
+        return False
+    st["ranges"] = out
+    _DONE.pop(id(st), None)
+    return True
 
 
 if __name__ == "__main__":

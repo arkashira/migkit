@@ -3339,6 +3339,7 @@ def worker_budget(facts):
     return max(1, n), choice
 
 
+<<<<<<< HEAD
 # --- a continuous hop into a warehouse (LT.P3, S4) --------------------------
 
 #: the share of a batch's interval its landing may take: the rest is the
@@ -3502,3 +3503,46 @@ def change_read(facts, costs=None):
     each gave a batch (`costs`: {"stream": s, "poll": s})."""
     return climb("reading the source's log", CHANGE_READS, facts,
                  costs=costs)
+||||||| c95da9db
+=======
+def _edge_fact(name):
+    return lambda f: bool(f.get(name))
+
+
+CHUNK_EDGES = (
+    Rung("statistics", "the table's statistics",
+         gives=frozenset({"edges"}),
+         needs=(Need("statistics fine enough for the ranges",
+                     _edge_fact("statistics"),
+                     "the table has no statistics fine enough for its"
+                     " ranges"),
+                Need("statistics that still hold",
+                     _edge_fact("statistics fresh"),
+                     lambda f: f.get("statistics stale")
+                     or "how far the table moved since its statistics is"
+                     " not known")),
+         because="the server already counted the rows, so no key is read"),
+    Rung("sample", "a sample of the key taken now",
+         gives=frozenset({"edges"}),
+         needs=(Need("a sample the server can take",
+                     _edge_fact("sample"),
+                     "this engine has no statement for a sample of a"
+                     " table's key"),),
+         because="a sample of the live rows stands where the statistics"
+                 " are stale, coarse or not about the rows asked for",
+         loads={"source": 1}, trips=2.0),
+    Rung("key order", "the key read in order",
+         gives=frozenset({"edges"}),
+         because="every row counted, so the ranges hold equal rows",
+         loads={"source": 1, "cpu": 1}, trips=2.0),
+)
+
+
+def chunk_edges(work, facts):
+    """The `Choice` of how a table's range edges are cut (backlog
+    F7.edges): the table's statistics where they are fine enough and the
+    table has moved less than half a range since, else a sample of the
+    key taken now, else the key read in order - never the key's minimum
+    and maximum divided alone."""
+    return climb(work, CHUNK_EDGES, facts, need=("edges",))
+>>>>>>> w12j

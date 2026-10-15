@@ -2405,8 +2405,11 @@ class HeteroEngine(Engine):
             # machine's: the machines that join later take theirs from the
             # same plan, which is made once
             every = ranges.step(rows, rows, workers * (4 if shared else 1))
-            return [r[0] for r in src.run_rule("src", db, ranges.bounds_sql(
-                src._quote_ident, table, k, every, src_where))]
+            return ranges.cut(
+                lambda sql: src.run_rule("src", db, sql),
+                ranges.kind_of(src), src._quote_ident, table, k, rows,
+                every, where=src_where, names=(db, src_t), log=log,
+                label=key)
 
         def outside():
             # a target row outside the source's whole range was in none of
@@ -2440,7 +2443,7 @@ class HeteroEngine(Engine):
         def finished(item, got):
             rng, asked = item[4:6], item[6]
             moved, used, fell = got
-            ranges.finished(st, rng[0], ck.save)
+            ranges.finished(st, rng[0], ck.save, rows=moved)
             if fell:
                 way.fell(used, fell)
             else:

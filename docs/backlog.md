@@ -5010,6 +5010,20 @@ the schema as of their position (dts-tidb-vitess); warehouse loads with
 the Storage Write API and Snowpipe channels as exact paths
 (aws-azure-google-snowflake); the 16 security fixes (security scorecard).
 Correction carried: AWS ended DMS Fleet Advisor on 2026-05-20.
+W12J note, 2026-10-16 (F7.edges): `ranges.cut` cuts a table's range edges by
+`decide.CHUNK_EDGES` - the engine's statistics (PostgreSQL, MySQL, SQL
+Server, Oracle statements in `ranges.statistics_sql`) while the table moved
+under half a range since, else a sample of the live key, else the key read in
+order; the way and why are said in the plan. `ranges.refine` splits fat and
+merges thin pending ranges from the rows finished ranges held (`finished(...,
+rows=)`). Proved by `test_chunk_edges_come_from_statistics.py` (fake server;
+written, not run on a database). Not done: MongoDB and `claims.py` still cut
+their own edges; keys that are not integers get edges, `split_keyed` and
+`range_where`, but no copier reads ranges of them yet; PostgreSQL's
+modification counter lags a second after ANALYZE, so
+`test_range_edges_come_from_the_tables_statistics` (another ticket's file)
+may now see a sample where it expects statistics; R20.11's MySQL and
+CockroachDB counters (unchanged.py) are not touched here.
 **Built 2026-09-30, the tail's (tests written, the full run to come):**
 a batch ends at the last source commit it holds where a read can stop
 inside a transaction (MySQL, MongoDB): the commit's position saved

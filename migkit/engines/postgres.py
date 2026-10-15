@@ -13903,16 +13903,13 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             every = ranges.step(rows, chunk, slots.workers)
             if rows <= every:
                 return []
-            # the statistics' bucket bounds where there are enough of them,
-            # not a pass over the whole key in order; the rows a row filter
-            # leaves are not what the histogram counted
-            got = None if rf else ranges.thin(
-                self._histogram(db, qt, pk), rows, every)
-            if got:
-                log(f"{key}: range edges from the table's statistics")
-                return got
-            return [r[0] for r in self.run_rule("src", db, ranges.bounds_sql(
-                self._quote_ident, qt, pk, every, rf))]
+            # the statistics where they hold, else a sample, else the key
+            # in order (`ranges.cut`); the rows a row filter leaves are not
+            # what the histogram counted
+            return ranges.cut(
+                lambda sql: self.run_rule("src", db, sql), "postgresql",
+                self._quote_ident, qt, pk, rows, every, where=rf, into=st,
+                log=log, label=key)
         todo = (ranges.plan(st, lo, hi, edges, ck.save, table=key)
                 if has == "1" else [])
         ways = self._copy_ways(db, key, qt, cols, log) if todo else None

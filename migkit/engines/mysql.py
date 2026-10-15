@@ -8637,10 +8637,10 @@ class MySQLEngine(Engine):
                 every = ranges.step(rows, chunk, slots.workers)
                 if rows <= every:
                     return []
-                return [r[0] for r in self.run_rule(
-                    "src", db, ranges.bounds_sql(
-                        self._quote_ident, f"`{db}`.`{t}`", intpk, every,
-                        rf))]
+                return ranges.cut(
+                    lambda sql: self.run_rule("src", db, sql), "mysql",
+                    self._quote_ident, f"`{db}`.`{t}`", intpk, rows, every,
+                    where=rf, names=(db, t), into=st, log=log, label=key)
             todo = (ranges.plan(st, lo, hi, edges, ck.save, table=t)
                     if has else [])
             # a connection each: a range copied beside another holds its
@@ -8688,7 +8688,7 @@ class MySQLEngine(Engine):
                         f"{key} {intpk} {after + 1:,} to {upto:,}", whole,
                         log)
                     if n is not None:
-                        ranges.finished(st, after, ck.save)
+                        ranges.finished(st, after, ck.save, rows=n)
                         log(f"{key}: {intpk} {after + 1:,} to {upto:,}"
                             f" copied ({len(st['ranges_done'])} of"
                             f" {len(st['ranges'])} ranges)")
