@@ -2436,25 +2436,74 @@ class MySQLEngine(Engine):
     #: of the table's own (`computed`: a masked column as its transform)
     DIGESTS_COMPUTED = True
 
+    def json_version(self, side):
+        """The side's `version()`, read once: whether its SQL writes canon's
+        JSON text is a fact of it (`canon.JSON_MYSQL`)."""
+        got = self.__dict__.setdefault("_json_versions", {})
+        if side not in got:
+            try:
+                got[side] = str(self._q(side, "select version()")[0][0])
+            except Exception:  # noqa: BLE001 - unread: folded here
+                got[side] = ""
+        return got[side]
+
+    def _json_in_sql(self, side, db, table, columns):
+        """The JSON columns of `columns` the server renders as canon's text
+        itself (`canon.json_on_server`: their declared types and the
+        server's version), or None where it cannot render them all."""
+        from .. import canon
+        wanted = [n for n, c in columns if canon.folded_here(c)]
+        if not wanted:
+            return []
+        if any(c != "json" for _, c in columns if canon.folded_here(c)):
+            return None
+        declared = dict(self.neutral_columns(side, db, table))
+        ok, _ = canon.json_on_server(
+            "mysql", [str(declared.get(n, "")) for n in wanted],
+            version=self.json_version(side))
+        return wanted if ok else None
+
     def neutral_digest(self, side, db, table, columns, where=None,
-                       computed=None):
+                       computed=None, way="md5"):
         """(rows, digest) of a table as canon renders its rows, summed by the
         server; `computed` is {column: SQL} read in place of a column - a
-        masked one as its transform makes it (`transforms.sql`)."""
+        masked one as its transform makes it (`transforms.sql`). A JSON
+        column is written as canon's text in the server's SQL where its
+        version does (`canon.json_sql`); a table it cannot, or holding a
+        number it writes otherwise than canon (`canon.json_guard`), or one
+        its regular expressions refuse, is folded here: the same digest
+        either way. `way` is the row hash both sides of the comparison take
+        (`leaves.fastest_hash`)."""
+        import pymysql
         from .. import canon
-        if any(canon.folded_here(c) for _, c in columns):
+
+        def folded():
             return canon.fold_batches(columns, self.neutral_batches(
-                side, db, table, columns, 5000, where=where))
+                side, db, table, columns, 5000, where=where), way)
+        jsons = self._json_in_sql(side, db, table, columns)
+        if jsons is None:
+            return folded()
         row = canon.row_expr("mysql", columns)
         source = f"`{self._d(side, db)}`.`{table}`" + self._where(where)
+        q = self._quote_ident
         if computed:
-            q = self._quote_ident
             inner = ", ".join(f"{computed[n]} as {q(n)}" if n in computed
                               else q(n) for n, _ in columns)
             source = f"(select {inner} from {source}) s"
-        r = self._q(side, f"select count(*),"
-                          f" {canon.digest_expr('mysql', row)}"
-                          f" from {source}")
+        # the server's own text: the replaces only drop digits from it
+        guard = " or ".join(canon.json_guard("mysql", f"cast({q(n)} as char)")
+                            for n in jsons) or "false"
+        try:
+            r = self._q(side, f"select count(*),"
+                              f" {canon.digest_expr('mysql', row, way)},"
+                              f" coalesce(max({guard}), 0) from {source}")
+        except pymysql.err.MySQLError:
+            if not jsons:
+                raise
+            # a document past `regexp_time_limit` or its stack
+            return folded()
+        if jsons and int(r[0][2] or 0):
+            return folded()
         return (int(r[0][0]), str(r[0][1]))
 
     def purge_backlog(self, side):

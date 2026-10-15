@@ -1025,6 +1025,9 @@ def _mysql(col, cls):
         # small letters where it is written the one way a UUID is
         return (f"case when {c} regexp '{UUID_FORM}' then lower({c})"
                 f" else cast({c} as char) end")
+    if cls == "json":
+        # canon's own text (`json_sql`), where the server writes it
+        return json_sql("mysql", c)
     return f"cast({c} as char)"
 
 
@@ -1372,13 +1375,13 @@ def folded_here(cls):
     return cls in FOLDED_HERE or str(cls).startswith(bsontype_prefixes())
 
 
-def fold_batches(columns, batches):
+def fold_batches(columns, batches, way="md5"):
     """(rows, digest) over batches of rows - `fold_rows` across them, as a
-    digest `neutral_digest` gives."""
+    digest `neutral_digest` gives, each row hashed by `way`."""
     classes = [c for _, c in columns]
     total, n = 0, 0
     for batch in batches:
-        k, total = fold_rows(classes, batch, total)
+        k, total = fold_rows(classes, batch, total, way)
         n += k
     return n, str(total)
 
@@ -2188,10 +2191,13 @@ JSON_DIGITS = FOLD_DIGITS + 1
 #: why a JSON column is folded in this process, by the engine its server
 #: has not been proved to write canon's JSON text on
 JSON_UNPROVED = {
-    "mysql": "MySQL writes `1.10` back as `1.1` and `100000000000000000000`"
-             " as `1e20`, and a rendering of its JSON in SQL is not yet held"
-             " to canon's text on a server",
+    "mysql": "MySQL before 8.0.4 has no regular-expression replace to write"
+             " a number of its JSON as its value in SQL, and MariaDB keeps a"
+             " document's text as it was given",
 }
+#: the first MySQL whose SQL writes canon's JSON text (`json_sql`): its
+#: `regexp_replace` came in 8.0.4
+JSON_MYSQL = (8, 0, 4)
 
 
 #: each engine's defaults, from its documentation: InnoDB's DYNAMIC rows
@@ -2205,7 +2211,8 @@ LIMITS = {
                        json_encodings=frozenset({"UTF8", "UTF-8"}),
                        json_digits=JSON_DIGITS),
     "mysql": Limits(identifier=64, key_bytes=3072, char_bytes=4,
-                    binary_collation="utf8mb4_0900_bin"),
+                    binary_collation="utf8mb4_0900_bin",
+                    json_digits=JSON_DIGITS),
     "mssql": Limits(identifier=128, key_bytes=900, char_bytes=2),
     "oracle": Limits(identifier=128, max_string=4000),
     "db2": Limits(identifier=128),
@@ -2216,14 +2223,39 @@ LIMITS = {
 def limits(engine, version=None, **asked):
     """`engine`'s `Limits`: its defaults (`LIMITS`), what the server's
     version says of them - MariaDB and MySQL before 8.0 have no
-    `utf8mb4_0900_bin`, only `utf8mb4_bin` - and whatever an engine read
-    off the server itself (`asked`, by field) over both."""
+    `utf8mb4_0900_bin`, only `utf8mb4_bin`; MySQL from 8.0.4 writes its
+    `json` columns as canon's text in SQL (`JSON_MYSQL`) - and whatever an
+    engine read off the server itself (`asked`, by field) over all."""
     got = LIMITS.get(dialect(engine), Limits())
     text = str(version or "").lower()
     if dialect(engine) == "mysql" and text and (
             "mariadb" in text or _re.match(r"\s*[1-7]\.", text)):
         got = got._replace(binary_collation="utf8mb4_bin")
+    if dialect(engine) == "mysql" and _mysql_writes_json(text):
+        got = got._replace(json_types=frozenset({"json"}))
     return got._replace(**{k: v for k, v in asked.items() if v is not None})
+
+
+def _mysql_writes_json(text):
+    """Whether a MySQL server's `version()` is MySQL's own (not MariaDB's
+    or a server only speaking its protocol) at `JSON_MYSQL` or later."""
+    got = _re.match(r"\s*(\d+)\.(\d+)\.(\d+)", text)
+    if not got or any(w in text for w in ("mariadb", "tidb", "vitess")):
+        return False
+    return tuple(int(x) for x in got.groups()) >= JSON_MYSQL
+
+
+def _my_literal(text):
+    """A MySQL string constant under its default sql_mode, where a backslash
+    is an escape (`MysqlEngine._quote_literal`)."""
+    return "'" + text.replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+#: what `json_guard` finds in a document's text, by engine: a run of digits
+#: the fold here rounds, and on MySQL a number its server writes with an
+#: exponent (`1e20`, a double's), which canon writes as its digits
+_JSON_FOLDS = {"postgres": "[0-9.]{%d,}",
+               "mysql": "[0-9.]{%d,}|[0-9][eE]"}
 
 
 def _pg_literal(text):
@@ -2243,29 +2275,41 @@ def json_sql(engine, c):
     the zeros ending its fraction dropped and a point with nothing after
     it too (`1.10` -> `1.1`, `2.0` -> `2`); `jsonb` never writes an
     exponent. A string is matched whole first, so a number inside one is
-    never touched, and `"5"` stays a string beside the number 5."""
-    if dialect(engine) != "postgres":
-        return None
+    never touched, and `"5"` stays a string beside the number 5.
+    MySQL (`JSON_MYSQL`): a `json` column's own text, its keys ordered and
+    written alike, with the same two replaces; a double it writes with an
+    exponent is found by `json_guard` and folded here."""
+    name = dialect(engine)
     string = r'("(?:[^"\\]|\\.)*")'
-    both = _pg_literal(r"\1\2")
-    t = f"to_jsonb({c})::text"
-    t = (f"regexp_replace({t}, "
-         f"{_pg_literal(string + r'|([0-9]\.[0-9]*[1-9])0+(?![0-9])')},"
-         f" {both}, 'g')")
-    return (f"regexp_replace({t}, "
-            f"{_pg_literal(string + r'|([0-9])\.0+(?![0-9])')},"
-            f" {both}, 'g')")
+    zeros = r'|([0-9]\.[0-9]*[1-9])0+(?![0-9])'
+    point = r'|([0-9])\.0+(?![0-9])'
+    if name == "postgres":
+        lit, both = _pg_literal, _pg_literal(r"\1\2")
+        t = f"to_jsonb({c})::text"
+        return (f"regexp_replace(regexp_replace({t}, {lit(string + zeros)},"
+                f" {both}, 'g'), {lit(string + point)}, {both}, 'g')")
+    if name == "mysql":
+        lit, both = _my_literal, "'$1$2'"
+        t = f"cast({c} as char)"
+        return (f"regexp_replace(regexp_replace({t}, {lit(string + zeros)},"
+                f" {both}), {lit(string + point)}, {both})")
+    return None
 
 
 def json_guard(engine, text_expr):
     """SQL true where a document's text (`json_sql`'s) holds a run of
     `Limits.json_digits` digits - a number the fold here would round
-    (`FOLD_DIGITS`), so that side is folded here; None where the engine
+    (`FOLD_DIGITS`) - or a number the server writes otherwise than canon
+    (`_JSON_FOLDS`), so that side is folded here; None where the engine
     writes no JSON in SQL."""
-    got = limits(engine)
-    if not got.json_digits or json_sql(engine, "x") is None:
+    name = dialect(engine)
+    got = limits(name)
+    if not got.json_digits or json_sql(name, "x") is None:
         return None
-    return f"({text_expr} ~ '[0-9.]{{{int(got.json_digits)},}}')"
+    find = _JSON_FOLDS[name] % int(got.json_digits)
+    if name == "mysql":
+        return f"({text_expr} regexp {_my_literal(find)})"
+    return f"({text_expr} ~ {_pg_literal(find)})"
 
 
 _LONG_NUMBER = _re.compile(r"[0-9.]{%d,}" % JSON_DIGITS)
@@ -2283,16 +2327,17 @@ def json_rounds(text):
 
 #: what is said of a side folded here because a document `json_rounds`
 JSON_ROUNDED = (f"a document holds a number of {JSON_DIGITS} or more digits,"
-                f" which this process keeps to {FOLD_DIGITS}: the side is"
-                " folded here so both sides round it alike")
+                f" which this process keeps to {FOLD_DIGITS}, or one its"
+                " server writes with an exponent: the side is folded here"
+                " so both sides write it alike")
 
 
-def json_on_server(engine, declared, encoding=None):
-    """(True, None) where the engine's server writes canon's JSON text for
-    columns of these declared types in a database of this encoding, else
-    (False, why)."""
+def json_on_server(engine, declared, encoding=None, version=None):
+    """(True, None) where the engine's server, of this `version()`, writes
+    canon's JSON text for columns of these declared types in a database of
+    this encoding, else (False, why)."""
     name = dialect(engine)
-    got = limits(name)
+    got = limits(name, version)
     if not got.json_types or json_sql(name, "x") is None:
         return False, JSON_UNPROVED.get(name, f"{name} is not proved to"
                                               " write JSON as canon does")
@@ -2889,32 +2934,35 @@ def _bytea_escaped(raw):
     return bytes(out)
 
 
-def fold_rows(classes, rows, total=0):
+def fold_rows(classes, rows, total=0, way="md5"):
     """(rows folded, running digest) over rows of values, rendered by
     their classes and folded one row at a time as `digest_step` folds -
     the one fold every engine that digests in this process uses, and the
     number the SQL engines' own digests are held to. Each column's
     rendering is chosen once (`render.digest_renderer`): a wide value as
-    its length and md5, as every server writes it (`WIDE`)."""
+    its length and md5, as every server writes it (`WIDE`). `way` is the
+    row hash, as `digest_expr` takes it."""
     from . import render, rowtext
     fns = [render.digest_renderer(c) for c in classes]
     n = 0
     for row in rows:
         total = digest_step(total, rowtext.encode(
-            [f(v) for f, v in zip(fns, row)]))
+            [f(v) for f, v in zip(fns, row)]), way)
         n += 1
     return n, total
 
 
-def digest_step(total, text):
-    """Fold one row's text into a running digest, the same way the SQL does.
+def digest_step(total, text, way="md5"):
+    """Fold one row's text into a running digest, the same way the SQL does,
+    hashed by `way` (`DIGEST_HASHES`).
 
     Separate from the aggregate that calls it so the arithmetic can be tested
     without a database, and so an engine that has to accumulate in Python
     cannot drift from the one that accumulates in SQL.
     """
-    got = _hashlib.md5(("" if text is None else str(text)).encode(),
-                       usedforsecurity=False).digest()
+    got = (_hashlib.md5 if way == "md5" else getattr(_hashlib, way))(
+        ("" if text is None else str(text)).encode(),
+        usedforsecurity=False).digest()
     # the first DIGEST_HEX hex digits, read off the bytes: the same number
     # as `int(hexdigest()[:DIGEST_HEX], 16)`, without writing the hex out
     # (0.385 -> 0.36 us a row, measured 2026-10-01)

@@ -265,10 +265,11 @@ class Side:
         """Whether the server writes every column of this side that is
         rendered in this process elsewhere as canon's JSON text, and so
         hashes the rows itself: each such column JSON
-        (`canon.json_on_server` on its declared type and the database's
-        encoding) and no document holding a number the fold here rounds
-        (`canon.json_guard`, asked once). Decided once a side and said,
-        with the reason, where not."""
+        (`canon.json_on_server` on its server's version, as the engine
+        reads it - `json_version` - and the declared type and the
+        database's encoding) and no document holding a number the fold
+        here rounds (`canon.json_guard`, asked once). Decided once a side
+        and said, with the reason, where not."""
         if "_json" in self.__dict__:
             return self.__dict__["_json"]
         why = None
@@ -282,7 +283,10 @@ class Side:
               or getattr(self.eng, "CANON_ENGINE", None) not in SQL_ENGINES):
             why = "its server is not one whose JSON canon is held to"
         else:
-            ok, why = canon.json_on_server(self.eng.CANON_ENGINE, ())
+            version = getattr(self.eng, "json_version", None)
+            ok, why = canon.json_on_server(
+                self.eng.CANON_ENGINE, (),
+                version=version(self.side) if version else None)
             if ok and (reader is None or reader(
                     self.side, self.db, self.table, self.cols) is None):
                 ok, why = False, ("a JSON column's declared type or the"
@@ -318,10 +322,10 @@ class Side:
         side is folded here and its engine reads so: a document the
         driver hands over parsed lost what canon's text keeps - a JSON
         `null` came as SQL's NULL, and a string `"5"` as the text the
-        fold then read as the number 5. Not a key's, which is read back
-        by its value."""
-        return tuple(n for n, c in self.cols
-                     if c == "json" and n not in self.key)
+        fold then read as the number 5. A key's too: a side read as text
+        is read through one cursor (`_text_read`), never resumed after a
+        key's value, and its key hashed as the server's text of it."""
+        return tuple(n for n, c in self.cols if c == "json")
 
 
 SQL_ENGINES = ("postgres", "mysql")

@@ -3900,6 +3900,17 @@ fallback and the source-change offer. Flat, to be made smart:
    read canon's; `neutral_digest` callers passing the chosen hash to
    `canon.digest_expr(way=)`; a JSON key column is still read parsed; the
    server tests are written, not run.
+   W5B (2026-10-16): PostgreSQL reads `canon.json_sql`/`json_on_server`/
+   `json_guard` (its own copies gone); MySQL 8.0.4+ (`canon.JSON_MYSQL`,
+   from `version()`) writes its JSON in SQL, a double with an exponent or
+   29 digits folded here; `neutral_digest(way=)` and `canon.fold_batches(
+   way=)` take the chosen hash on both engines; a JSON key is read as the
+   server's text. Not done: `hetero._digests`, ship, tailtables and the
+   other table-digest callers still pass md5 (their files are other
+   tickets'; the probe runs after the table digest there); the MySQL
+   server tests (`test_mysql_digests_json_on_the_server.py`) are written,
+   not run; MySQL's escape of a control character is assumed lower-case
+   hex like `jsonb`'s until that test runs.
 8. **Quieting the target's triggers during a load is not carried into
    range worker processes** - a table copied by ranges in parallel fires
    its triggers; one rule for triggers and keys during any write into the

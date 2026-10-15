@@ -1948,8 +1948,11 @@ select json_build_object(
             args = [canon.sql_value(v) for v in after]
         # the driver formats every statement it is given parameters for
         where = self._where(where, resume, True, percent=True)
-        order = (" order by " + ", ".join(_ident(k) for k in key)) if key \
-            else ""
+        # by the table's own column: a key read as its text (`as_text`)
+        # is named alike in the list, and would order by that text
+        own = f"{_ident(sch)}.{_ident(tbl)}"
+        order = (" order by " + ", ".join(f"{own}.{_ident(k)}" for k in key)
+                 ) if key else ""
         cap = f" limit {int(limit)}" if key and limit else ""
         return (f"select {cols} from {_ident(sch)}.{_ident(tbl)}{where}"
                 f"{order}{cap}", args, key, names)
@@ -3768,39 +3771,12 @@ select json_build_object(
         except (TypeError, ValueError):
             return None
 
-    #: the declared types a JSON column's values are rendered as canon's
-    #: JSON text by the server itself (`_json_text_sql`)
-    JSON_IN_SQL = ("json", "jsonb", "hstore")
-    #: a number of this many digits or more in a document may be one the
-    #: fold in this process rounds (`canon.render_value` normalises a
-    #: decimal in a context of 28 digits): a document holding one is
-    #: folded here, so the digest stays the fold's
-    JSON_DIGITS = 29
-
-    @staticmethod
-    def _json_text_sql(c):
-        """SQL for canon's JSON text of column `c` (`canon.json_text`):
-        `jsonb`'s own text - an object's keys by their length and then
-        their bytes, the last of a key given twice, `", "` and `": "`
-        between, a string escaped as JSON escapes it - with each number
-        outside a string written as its value, the zeros ending its
-        fraction dropped and a point with nothing after it too (`1.10` ->
-        `1.1`, `2.0` -> `2`); `jsonb` never writes an exponent. A string is
-        matched whole first, so a number inside one is never touched."""
-        string = r'("(?:[^"\\]|\\.)*")'
-        both = _literal(r"\1\2")
-        t = f"to_jsonb({c})::text"
-        t = (f"regexp_replace({t}, "
-             f"{_literal(string + r'|([0-9]\.[0-9]*[1-9])0+(?![0-9])')},"
-             f" {both}, 'g')")
-        return (f"regexp_replace({t}, "
-                f"{_literal(string + r'|([0-9])\.0+(?![0-9])')},"
-                f" {both}, 'g')")
-
     def _json_in_sql(self, side, db, table, columns):
         """The JSON columns of `columns` the server can render as canon's
-        text itself, or None where it cannot render them all: a database
-        not in UTF-8 orders an object's keys by other bytes than canon's."""
+        text itself (`canon.json_on_server`: their declared types and the
+        database's encoding - one not in UTF-8 orders an object's keys by
+        other bytes than canon's), or None where it cannot render them
+        all."""
         from .. import canon
         wanted = [n for n, c in columns if canon.folded_here(c)]
         if not wanted:
@@ -3808,66 +3784,65 @@ select json_build_object(
         if any(c != "json" for _, c in columns if canon.folded_here(c)):
             return None
         declared = dict(self.neutral_columns(side, db, table))
-        if any(str(declared.get(n, "")).lower() not in self.JSON_IN_SQL
-               for n in wanted):
-            return None
         codes = self.__dict__.setdefault("_encodings", {})
         at = (side, self._d(side, db))
         if at not in codes:
             codes[at] = self._psql(side, db, "show server_encoding").strip()
-        return wanted if codes[at].upper() in ("UTF8", "UTF-8") else None
+        ok, _ = canon.json_on_server(
+            "postgres", [declared.get(n, "") for n in wanted], codes[at])
+        return wanted if ok else None
 
     #: `neutral_digest` takes columns computed in the server's SQL in place
     #: of the table's own (`computed`: a masked column as its transform)
     DIGESTS_COMPUTED = True
 
     def neutral_digest(self, side, db, table, columns, where=None,
-                       computed=None):
+                       computed=None, way="md5"):
         """(rows, digest) of a table as canon renders its rows, summed by the
         server. A JSON column is rendered as canon's text by the server too
-        (`_json_text_sql`) - a document was folded in this process on every
+        (`canon.json_sql`) - a document was folded in this process on every
         cross-engine proof, the proof taking three times the copy's time at
         a million rows (backlog P0-DEPTH 7) - and a table the server cannot
         render whole, or holding a number the fold here rounds
-        (`JSON_DIGITS`), is folded here: the same digest either way.
+        (`canon.json_guard`), is folded here: the same digest either way.
         `computed` is {column: SQL} read in place of a column - a masked
-        one as its transform makes it (`transforms.sql`)."""
+        one as its transform makes it (`transforms.sql`). `way` is the row
+        hash both sides of the comparison take (`leaves.fastest_hash`)."""
         from .. import canon, rowtext
         jsons = self._json_in_sql(side, db, table, columns)
         if jsons is None:
-            return self._folded_digest(side, db, table, columns, where)
+            return self._folded_digest(side, db, table, columns, where, way)
         computed = computed or {}
         sch, tbl = self._split(table)
         source = f"{_ident(sch)}.{_ident(tbl)}" + self._where(where)
         if jsons or computed:
             inner = ", ".join(
                 f"{computed[n]} as {_ident(n)}" if n in computed else
-                f"{self._json_text_sql(_ident(n))} as {_ident(n)}"
+                f"{canon.json_sql('postgres', _ident(n))} as {_ident(n)}"
                 if n in jsons else _ident(n) for n, _ in columns)
             source = f"(select {inner} from {source}) s"
         row = rowtext.postgres_row_from(
             [_ident(n) if n in jsons else canon.expr("postgres", n, c)
              for n, c in columns])
-        many = _literal("[0-9.]{%d,}" % self.JSON_DIGITS)
-        guard = " or ".join(f"{_ident(n)} ~ {many}" for n in jsons) \
-            or "false"
+        guard = " or ".join(canon.json_guard("postgres", _ident(n))
+                            for n in jsons) or "false"
         try:
             got = self._psql(side, db,
                              "select count(*)::text||chr(31)||"
-                             f"{canon.digest_expr('postgres', row)}::text"
+                             f"{canon.digest_expr('postgres', row, way)}::text"
                              f"||chr(31)||coalesce(bool_or({guard}), false)"
                              f"::text from {source}").strip()
         except SqlFailed:
             if not jsons:
                 raise
             # a `json` value `jsonb` cannot hold (`\u0000`)
-            return self._folded_digest(side, db, table, columns, where)
+            return self._folded_digest(side, db, table, columns, where, way)
         n, d, rounded = (got.split("\x1f") + ["", ""])[:3]
         if rounded == "true":
-            return self._folded_digest(side, db, table, columns, where)
+            return self._folded_digest(side, db, table, columns, where, way)
         return (int(n), d)
 
-    def _folded_digest(self, side, db, table, columns, where):
+    def _folded_digest(self, side, db, table, columns, where, way="md5"):
         """`neutral_digest` folded in this process: a JSON document read as
         its text, which canon parses as JSON - the driver hands a document
         over parsed, where a JSON `null` came as SQL's and a string holding
@@ -3877,7 +3852,7 @@ select json_build_object(
         text = [n for n, c in columns if c == "json"
                 and str(declared.get(n, "")).lower() in ("json", "jsonb")]
         return canon.fold_batches(columns, self.neutral_batches(
-            side, db, table, columns, 5000, where=where, as_text=text))
+            side, db, table, columns, 5000, where=where, as_text=text), way)
 
     @staticmethod
     def _quote_ident(name):

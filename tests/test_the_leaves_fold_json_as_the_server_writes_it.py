@@ -8,7 +8,7 @@ document as the driver parsed it: a JSON string `"5"` came as the text
 `5`, which the fold then read as the number 5, and a JSON `null` as SQL's
 NULL - two different documents one digest. A document holding a number
 of 29 or more digits is folded here on every side, since this process
-keeps 28 of them; MySQL's JSON in SQL is not yet held to canon's text.
+keeps 28 of them; MySQL's JSON is written in SQL from 8.0.4.
 """
 from decimal import Decimal
 
@@ -76,9 +76,9 @@ def test_the_json_text_in_sql_is_written_in_one_place():
     from migkit.engines.postgres import PostgresEngine
     sql = canon.json_sql("postgres", '"j"')
     assert sql == canon.expr("postgres", "j", "json")
-    assert sql == PostgresEngine._json_text_sql('"j"')
+    assert not hasattr(PostgresEngine, "_json_text_sql")
     assert sql.startswith("regexp_replace(regexp_replace(to_jsonb(")
-    assert canon.json_sql("mysql", "`j`") is None
+    assert canon.json_sql("mysql", "`j`").startswith("regexp_replace(")
     # one engine's own JSON keeps its own text
     assert canon.expr("postgres", "j", canon.JSON_ONE) == \
         'to_jsonb("j")::text'
@@ -207,8 +207,8 @@ def test_canon_says_where_a_server_writes_json():
     assert canon.json_on_server("mysql", ["json"]) == \
         (False, canon.JSON_UNPROVED["mysql"])
     assert canon.limits("postgres").json_digits == canon.JSON_DIGITS == 29
-    assert canon.limits("mysql").json_types is None
-    assert canon.json_guard("mysql", "j") is None
+    assert canon.limits("mysql", "8.4.3").json_types == {"json"}
+    assert canon.json_guard("mysql", "j").startswith("(j regexp ")
 
 
 @pytest.mark.parametrize("engine,way,want", [
@@ -279,7 +279,7 @@ def test_a_string_five_and_the_number_five_differ_across_the_pair(
         servers, tmp_path, said):
     target = [(i, '{"v": 5}' if i == 2 else d) for i, d in PAIR_DOCS]
     a, b = _pair(tmp_path, target)
-    assert not a.sql and a.folded == canon.JSON_UNPROVED["mysql"]
+    assert a.sql and a.folded is None
     assert b.sql and b.folded is None
     spec = leaves.Spec("hash", bits=3, salt="c0ffee")
     ta, tb = leaves.scan(a, spec), leaves.scan(b, spec)

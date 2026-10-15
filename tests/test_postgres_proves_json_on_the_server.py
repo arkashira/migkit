@@ -74,7 +74,7 @@ COLUMNS = [("id", "integer"), ("j", "json"), ("b", "json"), ("h", "json")]
 
 def test_the_servers_json_is_canons_text(eng, run):
     from migkit import canon
-    rows = run("select b::text, " + eng._json_text_sql('"b"')
+    rows = run("select b::text, " + canon.json_sql("postgres", '"b"')
                + " from public.docs order by id")
     for raw, served in rows:
         assert served == canon.json_text(raw), (raw, served)
