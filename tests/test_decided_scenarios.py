@@ -241,7 +241,7 @@ def test_postgres_columnar_is_not_assumed_to_have_heap_semantics():
     got = storage_case("public.items", "heap", "columnar", family="postgres",
                                  supported=("heap", "columnar"), accepted=True)
     assert got.choice.path is None
-    assert "known storage semantics" in got.words()
+    assert "what heap and columnar promises is not known" in got.words()
     traits = tableengine.Traits("heap", True, True, "row", "postgres")
     got = storage_case("public.items", "heap", "columnar", family="postgres",
                                  supported=("columnar",), accepted=True, orphan_rows=0,
@@ -368,8 +368,10 @@ def test_the_plan_says_the_case_from_what_the_providers_state(monkeypatch):
     facts = managed()
     monkeypatch.setattr(clouds, "of", lambda eng, side, ep: clouds.Where("aws", "rds"))
     monkeypatch.setattr(catalogue, "api_conf", lambda hop, eng, which: ("aws", {}))
-    adapter = SimpleNamespace(instance=lambda: facts["source"])
-    monkeypatch.setattr(catalogue, "adapter", lambda hop, eng, which: adapter)
+    sides = {"src": facts["source"], "dst": facts["target"]}
+    monkeypatch.setattr(
+        catalogue, "adapter",
+        lambda hop, eng, which: SimpleNamespace(instance=lambda: sides[which]))
     eng = SimpleNamespace(table_sizes=lambda db, quick=False: {
         "a": {"bytes": 600}, "b": {"bytes": 400}})
     hop = SimpleNamespace(source=object(), target=object())

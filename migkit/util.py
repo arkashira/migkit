@@ -671,7 +671,10 @@ def _estimate_rungs():
              because="the units this run finished last measure the servers"
                      " and the link as they are now"),
         Rung("eta.kept", "the rate an earlier run of this hop kept",
-             needs=(Need("an earlier run's rate",
+             needs=(Need("fewer finished units here than the warm-up",
+                         lambda f: f["measured"] < f["warmup"],
+                         why="this run has measured enough of its own"),
+                    Need("an earlier run's rate",
                          lambda f: f["kept_rate"] is not None,
                          why="no earlier run of this hop kept a rate"),),
              because="an earlier run on the same servers, until this one"

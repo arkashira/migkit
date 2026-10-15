@@ -150,10 +150,11 @@ class Server:
         self.blocks = blocks          # {block: [row]}
         self.filenodes = filenodes if filenodes is not None else {
             16385: ("public.items", "r")}
+        self.flush = "0/90"
 
     def __call__(self, side, db, sql, args=None):
         if "pg_current_wal_flush_lsn" in sql:
-            return [("0/90",)]
+            return [(self.flush,)]
         if "pg_filenode_relation" in sql:
             got = self.filenodes.get(args[1])
             return [got] if got else []
@@ -187,13 +188,15 @@ def test_changed_blocks_are_read_again_and_told_apart_by_key(monkeypatch):
     assert follow(e, [], monkeypatch, token=None) == ([], "0/90")
     # 2 is deleted from block 0, 1 updated, 3 inserted into block 0
     server.blocks = {0: [{"id": 1, "v": "a2"}, {"id": 3, "v": "c"}]}
-    recs = [wal_record("0/20", 7, "Heap", "DELETE", "off: 2",
+    # the records come after 0/90, where the follow began holding its keys
+    server.flush = "0/e0"
+    recs = [wal_record("0/a0", 7, "Heap", "DELETE", "off: 2",
                        "blkref #0: rel 1663/5/16385 blk 0"),
-            wal_record("0/30", 7, "Heap", "INSERT", "off: 3",
+            wal_record("0/b0", 7, "Heap", "INSERT", "off: 3",
                        "blkref #0: rel 1663/5/16385 blk 0"),
-            wal_record("0/40", 7, "Transaction", "COMMIT", "", "")]
-    out, upto = follow(e, recs, monkeypatch)
-    assert upto == "0/90"
+            wal_record("0/c0", 7, "Transaction", "COMMIT", "", "")]
+    out, upto = follow(e, recs, monkeypatch, token="0/90")
+    assert upto == "0/e0"
     got = {(c["op"], c["key"]["id"]) for c in out}
     assert got == {("update", 1), ("insert", 3), ("delete", 2)}
     assert next(c for c in out if c["key"]["id"] == 1)["values"]["v"] == "a2"

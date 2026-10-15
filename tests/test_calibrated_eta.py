@@ -155,8 +155,8 @@ def test_eta_structured_tuple():
     for i in range(1, 6):
         timer.update(i, timestamp=float(i))
     eta = timer.eta_detailed(5, 10)
-    # Unpackable as namedtuple
-    sec, lb, ub, conf, fmt = eta
+    # Unpackable as namedtuple: the first five fields keep their order
+    sec, lb, ub, conf, fmt = eta[:5]
     assert sec == eta.seconds
     assert lb == eta.lower_bound
     assert ub == eta.upper_bound
