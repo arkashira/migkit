@@ -11128,9 +11128,55 @@ Not done: a same-engine pair's inner engines must say their side (`pair_side`), 
 ### W12L (2026-10-16) change-sheet command, doctor numbers
 Done: `migkit change-sheet` (export, `--back`); `doctor` says connections per side, memory and disk spool of this machine, and objects created on the servers per leg (`report.footprint_lines`).
 Not done: the run does not call `write_back` by itself as each step ends; server objects are read from each way's `leaves` words (no structured per-side counts on `decide.Rung`); the disk spool is the bytes carried, before compression.
+<<<<<<< HEAD
 * **P0-SCENARIOS.consolidate / .engine, W12H - not done.** A per-source
   slice verify at a follow position; `keys: prefix` is accepted by
   `consolidate.settings` but the hop-key check (`hopkeys`) is not touched;
   `scenarios.storage_copy_case` is not yet read by the move's copy-way
   choice; no capabilities cell names the ClickHouse storage reads.
 W12D (R19.9/R20.3/W10A tail) not done: the Arrow batches (`pgslot.columnar`) are built and proved equal on both paths but the appliers still take change records - handing them the batches is each target engine's `neutral_apply`; the MySQL stream's heartbeat period is the tail's longest idle wait, not yet measured per source; the stream-vs-poll latency is not measured into `decide.change_read`'s costs yet; MSSQL keeps polling, paced by `tailctl.Pace` like every polled tail. Sandbox proof against live PostgreSQL/MySQL streams is owed.
+||||||| ba8d5c61
+=======
+
+## Left after waves 10 and 11 (2026-10-16)
+
+What waves 10 (W10A-E) and 11 (W11A-F), and the wave 9 review (CRIT4), left open. Checked on master `c95da9db` by `rg` and `sed` on 2026-10-16, not from the tickets' own notes. Owner = the W12 ticket that owns the file (`/private/tmp/migkit-briefs/W12-OWNERS.md`); UNOWNED = no W12 ticket owns the file, so it needs a wave 13 ticket. A row leaves this list only when its `docs/backlog-index.md` row is DONE.
+
+| Wave (commit) | Leftover | Built | Missing | Owner |
+|---|---|---|---|---|
+| W10A (cd443007) | `payload_way` before large-value tables | `tuning.payload_way` (tuning.py:516) | no caller but tuning.py:604; the engine copies do not call it | W12E (tuning.py), W12D (postgres.py, mssql.py) |
+| W10A (cd443007) | `tuning.sized` on PostgreSQL and SQL Server copies | `tuning.sized` on the MySQL range copier (mysql.py:9422) and `autonomous._unit` (autonomous.py:637) | the PostgreSQL and SQL Server copiers do not call it | W12E (tuning.py), W12D (postgres.py, mssql.py) |
+| W10A (cd443007) | tail/follow apply under retried and reconcile | copiers run under `faults.retried` | the tail apply loop is not wired | W12D (tailctl.py, postgres.py) |
+| W10A (cd443007), CRIT4 4 | MySQL range sizes kept per range, not on the engine | `Retune` per copy (mysql.py:9406) | `COPY_BATCH` and `COPY_BYTES` are still engine attributes (mysql.py:9120, 9319, 9406), so one range's retune reaches the others | W12D (mysql.py) |
+| W10B (b3adbb81) | shared snapshot claimed by an engine | the hook: `base.py` SHARED_SNAPSHOT, `guarantees.py`, `jointplan.py`, `cli.py` | no engine claims it (PostgreSQL exports per reader, MySQL reads per reader at one binlog position) | W12E (base.py hook), W12D (postgres.py, mysql.py) |
+| W10B (b3adbb81) | verify read on the snapshot | scan plan in `scanplan.py` | the verify read does not use the snapshot | UNOWNED (scanplan.py); verifiers.py W12G |
+| W10C (e0b58e8b) | inner engines say their side | `attempts.pair_side` reads `eng.__dict__["pair_side"]` (attempts.py:208) | nothing sets it (grep) | W12E (base.py), W12R (attempts.py) |
+| W10C (e0b58e8b) | range-level units in the engine copiers | `fleet.unit_name` (fleet.py:47), the attempt ledger | the PostgreSQL, MySQL and SQL Server range copiers do not open units | W12D (copiers), W12R (attempts.py) |
+| W10C (e0b58e8b) | a multi-range keyed table falls to row text | the row text rung (`scanplan.row_text`) | a keyed table cut into ranges never reaches row text (needs resume) | UNOWNED (scanplan.py); verifiers.py W12G |
+| W10D (adb35512) | `final_suite` calls the comparison | `tools/final_suite.py` | does not call `autonomous.comparison` | W12K (tools/*) |
+| W10D (adb35512) | settle reads positions only | `autonomous.py` settle step | not checked against the ledger's open operations | UNOWNED (autonomous.py) |
+| W10E (0e410eec) | per-unit guarantees | telemetry per unit (telemetry.py) | empty until a check records its guarantees (`guarantees.py`) | UNOWNED (telemetry.py, guarantees.py) |
+| W10E (0e410eec) | ETA for assess | ETA for the forecast phases | `assess` has no forecast | UNOWNED (the assess code is not in the W12 map) |
+| W10E (0e410eec) | row 227 (CV.P4) | - | the row's status was not checked against code | W12O (next wave, `docs/backlog-index.md`) |
+| W11A (3f0f7e3e, 3e72c462) | `fleet.take_over` never called | closed by 3e72c462: `ha.py` binds `take_over = fleet.take_over` (ha.py:1054) | - | closed |
+| W11A (3f0f7e3e) | ledger range units through `unit_name` | `fleet.unit_name` (fleet.py:47) | `attempts`, `ranges` and `claims` do not call it | W12R (attempts.py, fleet.py, claims.py) |
+| W11A (3f0f7e3e) | capabilities text | the standby takeover cell | the text in `capabilities` is not updated | W12F (capabilities.py) |
+| W11B (61022c65) | overlap, compression and move_file in the engine copies | `planner.overlap` (planner.py:1079), `movers.choose_compression` (movers.py:9030), `carriers.move_file` (carriers.py:1137) | no caller on master for any of the three; relay and ship do not use them | W12R (planner.py), W12D and W12E (engine copies), UNOWNED (movers.py, carriers.py) |
+| W11B (61022c65) | Azure and Google stores move in one stream | parallel ranged parts for one object store | the cloud store API still moves one stream | W12B (cloudapi.py, clouds.py); carriers.py UNOWNED |
+| W11B (61022c65) | checksum while streaming, in the store | checksums while streaming (carriers.py) | in-store checksum not done | UNOWNED (carriers.py) |
+| W11C (0c955f02) | engine apply paths name their writes | `freeze.name_write` (freeze.py:6698), called from `report.write_back` (report.py:556) | no engine apply path calls it | W12E (freeze.py hook); engines by ticket: W12A, W12B, W12C, W12D, W12F, W12H |
+| W11C (0c955f02) | doctor numbers | doctor says each side's rung and the refused rungs | connections, memory and spool as numbers | W12L (cli.py) |
+| W11C (0c955f02) | change-sheet command | `report.change_sheet` and `write_change_sheet` | no `migkit` command exports or writes back from a run | W12L (cli.py, report.py) |
+| W11D (e8a5de46) | topology facts from the hop and servers | `scenarios.topology_case`, `topology.py` math and proofs | facts are not read from the hop's config and servers | W12R (topology.py), W12H (scenarios.py) |
+| W11D (e8a5de46) | topology hops run by the planner | `topology_hops` plan | the planner does not run them | W12R (planner.py) |
+| W11D (e8a5de46) | docker run of each topology | fake-catalogue tests (tests/test_many_node_topologies_are_decided.py, not run) | no docker run | W12P (tests), needs a container run |
+| W11E (5a7c0020) | Qdrant and Neo4j depth | registered engines, copy, checks, change capture | recall at k, HNSW and quantization, Qdrant snapshot, Neo4j dump and load, users, fence, compose | UNOWNED (engines/qdrant.py, engines/neo4j.py) |
+| W11F (c95da9db) | MongoDB oplog rung decodes | oplog rung follows a replica set (3fcbed7) | decode of raw and expanded oplog events | UNOWNED (engines/mongodb.py; W12F owns only its missing-grant cell) |
+| W11F (c95da9db) | reshard expanded events | per-collection generations | the reshard's expanded events | UNOWNED (engines/mongodb.py) |
+| W11F (c95da9db) | reseed drop | reseed rung per generation | the drop step on reseed | UNOWNED (engines/mongodb.py) |
+| W11F (c95da9db) | MongoDB capabilities cell | the cell for change follow | the cell's status | W12F (capabilities.py) |
+
+CRIT4 (wave 9 review) items, checked on `c95da9db`: 1 (one consent for the switch) is closed: `--switch` is its own flag (cli.py:2804). 2 (PostgreSQL key cycle as a hard stop) is closed by b3adbb81 (subject only, not re-run). 3 (second throttle on `Pace`) is closed: `faults.Throttle` is gone (rg: no match). 5 (two recovery ladders) is closed: `autonomous._unit` no longer carries `TRIES` or `MIN_SCALE` (rg: no match). 6 (fixed retry count) is closed by the same removal. 7 (telemetry pace keyed by phase only) is closed: `_pace_key(phase, where)` (telemetry.py:886). 8 (whole-table count per failed batch) is closed: the count is span-scoped (generic.py:1700-1712). 4 is open, listed above.
+
+Not done: the rows above are not run on a server. Everything that W10-W11 wrote is proved on fakes, and the tests are written but not run until the wave 12 gate.
+>>>>>>> w12o
