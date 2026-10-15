@@ -188,6 +188,9 @@ class Need:
     what: str
     holds: object
     why: object = None
+    #: the programs on this machine it needs installed: a rung needing one
+    #: runs a program migkit drives, not its own code (`_is_external_program`)
+    programs: tuple = ()
 
     def missing(self, rung, facts):
         """The reason, or None where the need holds."""
@@ -234,7 +237,11 @@ class Rung:
     #: slot, a process, a file - and "nothing" where it leaves nothing:
     #: the words `footprint` stands for, said by `doctor` (`waysaid`)
     leaves: str = ""
+    #: it runs a program migkit drives, not migkit's own code: it earns a
+    #: rank above the copier only by a run measured here, and is given one
+    #: bounded trial where it never ran (`Trials`)
     external: bool = False
+    #: migkit's own copier: the way an untimed program is held below
     native_copier: bool = False
 
     def __post_init__(self):
@@ -274,6 +281,9 @@ class Choice:
     guarantees: tuple = ()
     #: the facts the climb read, in the order it read them
     asked: tuple = ()
+    #: seconds the unit's run is boxed in where the rung is on its one
+    #: trial (`Trials`), 0 where it is not
+    trial: float = 0.0
 
     @property
     def path(self):
@@ -416,6 +426,11 @@ EXPLORE_BUDGET = 0.05
 #: a unit is small enough to explore on where it holds no more rows than
 #: this many times the median unit so far
 EXPLORE_SIZE = 1.0
+#: a program's one trial on a work is boxed in this many times the best
+#: measured way's time for the unit, or in `TRIAL_SECONDS` where no way is
+#: measured on it yet
+TRIAL_TIMES = 4.0
+TRIAL_SECONDS = 60.0
 
 
 class _InFlightModel:
@@ -465,7 +480,16 @@ class Trials:
     resource's limit was cut (`limits`, the pace's `sizing.Limit`s: a way
     that loads a resource cut to half its workers is costed at twice its
     time). Nothing here is a second controller: the pace moves the
-    workers, the trials move the way."""
+    workers, the trials move the way.
+
+    A program the ranking holds below migkit's own copier because it never
+    ran here (`untried`) is owed one trial on this work all the same, so a
+    way is never left unmeasured for want of being run: on a unit exploring
+    may take (`_may_explore`), boxed in `TRIAL_TIMES` the best measured
+    way's time for that unit (`TRIAL_SECONDS` where nothing is), said in a
+    line through `log`. A trial past its box, or failed, is given up on
+    for the rest of the work and said; one in time ranks by what it was
+    measured at."""
 
     def __init__(self, work, rungs, facts=None, need=(), costs=None,
                  model=None, unit=None, log=None, critical=False,
@@ -488,6 +512,9 @@ class Trials:
         self.limits = limits or {}
         self._sizes, self._spent, self._extra = [], 0.0, 0.0
         self._on, self._why = None, ""
+        #: {name: seconds}: the programs on their one trial, and its box;
+        #: `_trialled` every program that had it
+        self._boxes, self._trialled = {}, set()
         #: the rows of every unit the work has, where known ahead (the
         #: ranges of a table): what a small unit is measured against
         self._median = None
@@ -503,18 +530,22 @@ class Trials:
         """The `Choice` for the next unit (`unit`: its rows and bytes,
         where the caller knows them)."""
         with self._lock:
+            u = unit if unit is not None else self.unit
+            may = self._may_explore(u)
+            trial = self._owed(u) if may else None
             if self.model is None:
                 got = climb(self.work, self.rungs, self.facts, self.need,
-                            _InFlight(self.costs, self._timing))
+                            _InFlight(self.costs, self._timing), trial=trial)
                 if got.rung is not None and \
                         self.costs.get(got.rung.name) is None:
                     self._timing.add(got.rung.name)
-                return got
-            u = unit if unit is not None else self.unit
+                return self._on_trial(got)
             costs = _InFlightModel(self.model, self._timing, self._pressure)
             got = climb(self.work, self.rungs, self.facts, self.need, costs,
-                        unit=u, explore=AGAIN if self._may_explore(u)
-                        else False)
+                        unit=u, explore=AGAIN if may else False, trial=trial)
+            if got.trial:
+                self._timing.add(got.rung.name)
+                return self._on_trial(got)
             if got.rung is not None and not self._measured_best(got, u):
                 if not self.model.measured(got.rung.name):
                     self._timing.add(got.rung.name)
@@ -522,6 +553,43 @@ class Trials:
                 got = self._said(got, u)
                 self._settle(got, u)
             return got
+
+    def _owed(self, unit):
+        """(name, seconds) of the first program never measured on this
+        work and owed its one trial, with the box its run is held to, or
+        None."""
+        costs = self.costs if self.model is None else self.model
+        for r in untried(self.rungs, costs, unit):
+            if r.name not in self._trialled and r.name not in \
+                    self.given_up and r.name not in self._timing:
+                return r.name, self._box(unit)
+        return None
+
+    def _box(self, unit):
+        """The seconds a trial on `unit` is held to: `TRIAL_TIMES` the
+        best measured way's time for it, `TRIAL_SECONDS` where none is."""
+        best = []
+        for r in self.rungs:
+            if self.model is not None:
+                if self.model.measured(r.name):
+                    e = self.model.estimate(r.name, unit)
+                    if e is not None and e.mean:
+                        best.append(e.mean)
+                continue
+            got = self.costs.get(r.name)
+            rows = int((unit or {}).get("rows") or 0)
+            if isinstance(got, (int, float)) and 0 < got < _TIMING and rows:
+                best.append(got * rows)
+        return TRIAL_TIMES * min(best) if best else TRIAL_SECONDS
+
+    def _on_trial(self, got):
+        """`got`, kept and said where it is a program's one trial."""
+        if got.trial and got.rung is not None:
+            self._boxes[got.rung.name] = got.trial
+            self._trialled.add(got.rung.name)
+            if self.log is not None:
+                self.log(str(got))
+        return got
 
     def _measurements(self, chosen, unit):
         """The ways measured on this work, the chosen first, each with
@@ -605,6 +673,9 @@ class Trials:
         with self._lock:
             self.costs.saw(name, units, seconds)
             self._timing.discard(name)
+            box = self._boxes.pop(name, None)
+            if box is not None and float(seconds or 0) > box:
+                self._past_box(name, seconds, box)
             if self.model is None:
                 return
             before = self.model.estimate(name, unit)
@@ -624,11 +695,28 @@ class Trials:
                              f" {seconds:,.1f}s where"
                              f" {before.said()} was predicted")
 
+    def _past_box(self, name, seconds, box):
+        """A trial that ran past its box: timed, and given up on for the
+        rest of the work, said."""
+        rung = next((r for r in self.rungs if r.name == name), None)
+        why = (f"its one trial took {float(seconds):,.1f}s, past the"
+               f" {box:,.1f}s it was boxed in")
+        self.given_up.setdefault(name, why)
+        if self.log is not None:
+            self.log(f"{self.work}: {rung.said if rung else name} - {why};"
+                     " not tried again on this work")
+
     def give_up(self, name, why):
         """`name` failed here and is not tried again on this work."""
         with self._lock:
             self.given_up.setdefault(name, why)
             self._timing.discard(name)
+            if self._boxes.pop(name, None) is not None and \
+                    self.log is not None:
+                rung = next((r for r in self.rungs if r.name == name), None)
+                self.log(f"{self.work}: {rung.said if rung else name} failed"
+                         f" its one trial: {why}; not tried again on this"
+                         " work")
             if self.model is not None:
                 self.model.outcome(name, False, why)
 
@@ -709,25 +797,17 @@ def _priced(rungs, costs, unit=None):
 
 
 def _is_external_program(rung):
-    if getattr(rung, "external", False):
-        return True
-    from . import tools
-    if rung.name in getattr(tools, "PROGRAM", ()):
-        return True
-    return rung.name in {
-        "pgloader", "mydumper", "myloader", "mysqlsh", "pgdump",
-        "pgcopydb", "mongosync", "mongodump", "dsbulk",
-        "dump-load", "stream-copy", "one-pass", "external",
-    }
+    """Whether `rung` runs a program migkit drives: it says so itself
+    (`Rung.external`), or one of its needs is a program installed here
+    (`Need.programs`) - never by its name or its words."""
+    return bool(getattr(rung, "external", False)) or any(
+        getattr(n, "programs", ()) for n in getattr(rung, "needs", ()))
 
 
 def _is_native_copier(rung):
-    if getattr(rung, "native_copier", False):
-        return True
-    if rung.name in {"builtin", "copier", "rows", "pass-through"}:
-        return True
-    said = (getattr(rung, "said", "") or "").lower()
-    return "table copier" in said or "migkit's own" in said
+    """Whether `rung` is migkit's own copier, as it declares
+    (`Rung.native_copier`) - never by its name or its words."""
+    return bool(getattr(rung, "native_copier", False))
 
 
 def _has_measured_run(rung, priced, costs=None):
@@ -746,7 +826,14 @@ def _has_measured_run(rung, priced, costs=None):
     return False
 
 
-def _enforce_copier_rank(ordered, priced, costs=None):
+def _enforce_copier_rank(ordered, priced, costs=None, trial=()):
+    """`ordered` with a program never measured here held below migkit's
+    own copier - except a rung named in `trial`, on its one bounded trial
+    (`Trials`), which goes first."""
+    if trial:
+        first = [r for r in ordered if r.name in trial]
+        return first + _enforce_copier_rank(
+            [r for r in ordered if r.name not in trial], priced, costs)
     copier_idx = None
     for idx, r in enumerate(ordered):
         if _is_native_copier(r):
@@ -769,14 +856,26 @@ def _enforce_copier_rank(ordered, priced, costs=None):
     return earned + [ordered[copier_idx]] + unearned + ordered[copier_idx + 1:]
 
 
-def _ranked(rungs, priced, explore=True, costs=None):
+def _ranked(rungs, priced, explore=True, costs=None, trial=()):
     entries = [(priced.get(r.name), r.footprint, i, r)
                for i, r in enumerate(rungs)]
     if any(hasattr(e[0], "mean") for e in entries):
         ordered = _order_estimates(entries, explore)
     else:
         ordered = _order(entries)
-    return _enforce_copier_rank(ordered, priced, costs)
+    return _enforce_copier_rank(ordered, priced, costs, trial)
+
+
+def untried(rungs, costs=None, unit=None):
+    """The programs of `rungs` never measured here: each held below the
+    copier by the ranking, so each is owed one bounded trial before that
+    holds it there for good (`Trials`)."""
+    rungs = list(rungs)
+    priced = _priced(rungs, costs, unit)
+    if not any(_is_native_copier(r) for r in rungs):
+        return []
+    return [r for r in rungs if _is_external_program(r)
+            and not _has_measured_run(r, priced, costs)]
 
 
 def _measured(cost):
@@ -1144,7 +1243,7 @@ def _told(fn):
 
 @_told
 def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
-          prove=True, unit=None, explore=True):
+          prove=True, unit=None, explore=True, trial=None):
     """The `Choice` for one unit of work from its `rungs`.
 
     `need` is what the work must have (capabilities); `facts` what the
@@ -1156,7 +1255,9 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
     still holds and proves. Where the rungs say their guarantees, only
     those reaching the strongest any of them does are ranked (`_strongest`).
     `explore` False commits: a rung only predicted ranks above one
-    measured only where it is faster even at its p90.
+    measured only where it is faster even at its p90. `trial` (name,
+    seconds) is a program never measured here on its one bounded trial
+    (`Trials`): ranked first where it holds, its run boxed in `seconds`.
 
     The reason is why the ways the list prefers were passed over, or the
     chosen rung's own `because` where none was: a way the list puts below
@@ -1169,7 +1270,8 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
     kept, short = _strongest(kept)
     out = sorted(out + short, key=lambda x: at[id(x[0])])
     priced = _priced(kept, costs, unit)
-    ranked = _ranked(kept, priced, explore, costs)
+    on_trial = (trial[0],) if trial else ()
+    ranked = _ranked(kept, priced, explore, costs, on_trial)
     order, passed = list(ranked), []
     if keep:
         held = [r for r in ranked if r.name == keep]
@@ -1189,6 +1291,10 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
         if r.name == keep:
             reason = ("the way the last run took, kept so a restart goes"
                       " on the way it began")
+        elif r.name in on_trial:
+            reason = (f"{r.said} never ran here: its one trial, on a small"
+                      f" unit and boxed in {trial[1]:,.0f}s, before the"
+                      " ranking holds it below the copier")
         elif above:
             reason = _joined(above)
         else:
@@ -1204,7 +1310,8 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
         return Choice(work, r, reason, tuple(out + passed), tuple(ranked),
                       costs_of, runner,
                       _why_not(r, runner, priced) if runner else "",
-                      tuple(g.named(g.of([r])).items()), asked)
+                      tuple(g.named(g.of([r])).items()), asked,
+                      float(trial[1]) if r.name in on_trial else 0.0)
     return Choice(work, None,
                   _joined(w for _, w in out + passed) or "no way was given",
                   tuple(out + passed), tuple(ranked), costs_of, asked=asked)

@@ -8557,6 +8557,7 @@ class MySQLEngine(Engine):
                         "{rung} started for one table applies neither its"
                         " row filter nor its masking")),
             footprint=1, batch=True, run="_dump_table", start="dump-load",
+            external=True,
             startup=0.15, rates={PLAIN: 18.9e6, BINARY: 60.8e6,
                                  "read": 280e6}),
         Way("stream-copy", "copied straight from source to target in"
@@ -8575,6 +8576,7 @@ class MySQLEngine(Engine):
                         "whether the target takes local loads could not be"
                         " asked yet")),
             footprint=1, batch=True, start="stream-copy", startup=1.22,
+            external=True,
             rates={PLAIN: 23.2e6, BINARY: 64.9e6, PLAIN + DIRECT: 25.4e6,
                    BINARY + DIRECT: 26.9e6, "read": 280e6}),
         Way("pass-through",
@@ -8599,7 +8601,7 @@ class MySQLEngine(Engine):
                         lambda f: not f["unfit"], lambda f: f["unfit"])),
             because="no row passes through migkit, and a range is proved"
                     " by two numbers each server computes",
-            run="_copy_ranges", start="copier",
+            run="_copy_ranges", start="copier", native_copier=True,
             startup=PASS_BENCH["startup"],
             rates={PLAIN: PASS_BENCH[PLAIN], BINARY: PASS_BENCH[BINARY]}),
         # a masked table the copier takes is carried by the pair, which
@@ -8612,7 +8614,7 @@ class MySQLEngine(Engine):
                         lambda f: not f["straight_only"],
                         "the move is asked to copy straight across"),),
             run="_copy_ranges", start="copier", through=True,
-            startup=0.45, rates={PLAIN: 10.8e6, BINARY: 36.8e6}),
+            native_copier=True, startup=0.45, rates={PLAIN: 10.8e6, BINARY: 36.8e6}),
     )
 
     def way_name(self, table):

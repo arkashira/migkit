@@ -255,13 +255,12 @@ RUNGS = (
                 " proved without being stopped",
         footprint=1, external=True,
         leaves="a checksum table on the source, replicated to the target"),
-    # said without "migkit's own": `decide` ranks a rung so worded as a
-    # native copier, and an untimed external way below it would never run
+    # a proof, not a copier: an untimed program is not held below it
     decide.Rung(
-        "own digest", "the digest migkit takes of every table on both"
-                      " servers",
+        "own digest", "migkit's own digest of every table on both servers",
         gives=frozenset({"checksum", "byte exact"}),
-        because="migkit's own digest, the proof everywhere else"),
+        because="migkit's own digest, the proof everywhere else",
+        native_copier=False),
 )
 
 

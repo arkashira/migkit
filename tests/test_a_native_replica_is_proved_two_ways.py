@@ -157,6 +157,7 @@ def test_the_checksum_table_is_a_change_the_operator_allows():
 def test_an_untimed_replica_checksum_is_tried_before_the_digest():
     # the digest is no native copier: a way never timed is not held below
     # it for ever
+    assert rs.RUNGS[1].native_copier is False
     assert not decide._is_native_copier(rs.RUNGS[1])
     assert decide.rank(rs.RUNGS)[0].name == "replica checksum"
     timed_digest = decide.Costs({"own digest": 1e-6})

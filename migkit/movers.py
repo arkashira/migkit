@@ -48,7 +48,8 @@ def _moves(via):
 def _installed(*programs):
     from .decide import Need
     return Need("its programs installed",
-                lambda f: all(which(p) for p in programs))
+                lambda f: all(which(p) for p in programs),
+                programs=programs)
 
 
 def _ladder():
@@ -67,7 +68,8 @@ def _ladder():
         Rung("pgcopydb", "the streaming copy",
              needs=(_moves("pgcopydb"),
                     Need("its version-matched build",
-                         lambda f: pgcopydb_available())),
+                         lambda f: pgcopydb_available(),
+                         programs=("pgcopydb",))),
              because="copy, index and constraint work overlap, and indexes"
                      " are built after the rows land",
              leaves="files in a work directory on this machine, and a"
@@ -126,7 +128,8 @@ def _ladder():
         Rung("mirror", "the cluster mirror",
              needs=(_moves("mirror"),
                     Need("its runner here", lambda f: bool(_mirror_runner()),
-                         "the cluster mirror is not installed here")),
+                         "the cluster mirror is not installed here",
+                         programs=("connect-mirror-maker.sh",))),
              because="Kafka's own Java clients, many partitions at once",
              leaves="a process on this machine while it runs; what it keeps"
                     " on the clusters migkit has not measured"),
@@ -135,7 +138,7 @@ def _ladder():
                     " not by migkit"),
         # a single table goes by the table copier: resuming by chunk
         # matters more than raw speed there
-        Rung("builtin", "the table copier",
+        Rung("builtin", "the table copier", native_copier=True,
              gives=frozenset({"resume by chunk", "row filter",
                               "column mapping"}),
              leaves="a checkpoint of the ranges done, in files on this"
