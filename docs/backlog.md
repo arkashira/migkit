@@ -10055,7 +10055,47 @@ Acceptance criteria:
 Links: P0-MINIMAL-INPUT.correctness/.idempotency,
 P0-DECISION-ALL.reason/.priority, P0-WORKFLOW-DEPTH.recover and
 P0-AUTO-RESOURCES.proof. This is a hard implementation and review requirement;
-current behavior is not certified by recording it. Status remains OPEN.
+current behavior is not certified by recording it.
+
+Status 2026-10-16: PARTLY. Built:
+
+- `guarantees.Semantics` / `read` / `read_hop`: per table, read from the
+  catalogue and the engines' facts - exact columns, value classes, text
+  columns where an empty text and NULL differ (`EMPTY_IS_NULL`, set on
+  Oracle), a field not there apart from NULL (`EXPRESSES_ABSENT`),
+  collations, key and duplicates (no key and no unique index), foreign-key
+  parents, cascading parents (atomicity), change order needed ("per key",
+  "as logged" for keyless), deletes, the shape's fingerprint. A target that
+  cannot keep one is a `Gap` (scope, values, null and empty, absent,
+  encoding, duplicates, dependencies) with what to do next.
+  `guarantees.barriers` gives dependency waves and cycles;
+  `changed_since` names tables whose shape moved since the read.
+- Admission: `guarantees.Schedule` + `guarantees.breaks`, asked through one
+  `decide.KEEPS_SEMANTICS` need (`decide.admit`): gaps not answered,
+  children before parents while the target's keys hold, a key cycle under
+  held keys, tied tables read each as of its own moment without a catch-up
+  position, a position moved before the durable effect, tied or keyless
+  changes applied by key or unordered, deletes dropped, shape changes
+  ignored.
+- The joint plan of a move's tables is routed through it: copies wait on
+  their parents' copies (`jointplan.barriered`), the plan is admitted
+  (`jointplan.admitted`, kept in the plan's evidence), the move reads the
+  source's semantics (`jointplan.semantics_of`) and says a refusal.
+- Fault catalogue `guarantees.FAULTS` with `SAFETY_PROVED` /
+  `SAFETY_UNPROVED`; tests in tests/test_a_move_keeps_what_it_must.py
+  (pure admission tests, and sandbox failpoint runs of a PostgreSQL move
+  with foreign keys stopped at every mark and with deletes between stop and
+  re-run).
+
+Not done: a refused joint plan is said and recorded but does not stop the
+move (whether the target's keys hold during the load is not yet a fact the
+mover reports, so the planner assumes they hold); the tail's parallel lanes
+(`LANES_FROM`), the copy's per-range snapshots and the checkpoint writers
+do not yet build a `Schedule` and ask `decide.admit`; the target's
+catalogue is not read into `read_hop` by the move; duplicate delivery inside
+one batch, DDL between a copy's ranges and a crash before the tail's
+position with foreign keys are UNPROVED; the tests are written and not yet
+run; no measured comparison at high concurrency.
 
 
 ## P0-RESILIENCE-ALL: prevent, contain and recover from migration failures

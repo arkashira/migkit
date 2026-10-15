@@ -432,6 +432,8 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
     #: row of, and text stored twice as UTF-8 on the source
     PREFLIGHT = ("_deep_keys", "_mojibake")
     CHARSETS = True
+    #: an empty text is stored as NULL (`guarantees.read`)
+    EMPTY_IS_NULL = True
     SQL_DIALECT = "oracle"
     FOLDED_BECAUSE = ("holds a column this table has that Oracle's SQL"
                       " cannot render exactly, or a row too wide to hash"

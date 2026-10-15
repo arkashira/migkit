@@ -85,7 +85,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, GroupHold, PostgresHold, MySQLHold, TiDBHold, MongoHold.
 - `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog
 - `migkit/geo.py` - A shape - a geometry or a geography - as its SRID and its well-known binary, with x the longitude and y the latitude. Classes: Shape.
-- `migkit/guarantees.py` - What a way guarantees, and what a whole strategy of ways does (backlog P0-SMART, the owner's note C of 2026-09-30: "guarantees never traded" Classes: Lift.
+- `migkit/guarantees.py` - What a way guarantees, and what a whole strategy of ways does (backlog P0-SMART, the owner's note C of 2026-09-30: "guarantees never traded" Classes: Lift, Gap, Semantics, Schedule.
 - `migkit/guide.py` - `migkit init` as the guide (backlog R21): two addresses and the passwords, and migkit does the rest.
 - `migkit/ha.py` - The mover highly available: a standby that takes a hop's move over from the last position committed, and the proof that one machine wrote at Classes: Holding.
 - `migkit/handwork.py` - What the migration will not do for you, counted and named. Classes: Inventory.

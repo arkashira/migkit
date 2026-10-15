@@ -134,6 +134,9 @@ class Job:
     ways: tuple = ()
     #: the way its check reads it, or None where it is not checked here
     check: object = None
+    #: the tables whose copy must end before this one's starts: those its
+    #: rows point at where the target's keys hold during the load
+    after: tuple = ()
 
 
 @dataclass
@@ -191,6 +194,10 @@ class Plan:
     #: "measured" where every way it chose was, "partly predicted" where
     #: one was only predicted
     truth: str = ""
+    #: whether it keeps what the move must keep (`decide.admit`), and
+    #: why not
+    admitted: bool = True
+    refused: str = ""
 
     def ways(self):
         """{table: way name}."""
@@ -206,6 +213,7 @@ class Plan:
                 "meets_limits": self.meets, "why": self.why,
                 "order": list(self.order),
                 "truth": self.truth, "tables_at_once": self.tables,
+                "admitted": self.admitted, "refused": self.refused,
                 "tables": {n: {"way": p.way, "start": p.start,
                                "copied": p.copied, "indexed": p.indexed,
                                "checked": p.checked,
@@ -267,12 +275,14 @@ def _tasks(jobs, choice, limits, slow, check_after_all):
     """The steps of every table: its copy, its index builds, its check."""
     out = []
     index_rate = limits.index_rate
+    copies = {}
     for j in jobs:
         w = choice[j.name]
         k = w.most or j.ranges
         rate1 = w.per_stream / (1.0 + slow * w.spread)
         copy = _Task(j, "copy", w.expected(j.bytes), w.startup, rate1,
                      w.uses, min(k, j.ranges), True, 0)
+        copies[j.name] = copy
         out.append(copy)
         last = copy
         if j.index_bytes and index_rate:
@@ -286,6 +296,11 @@ def _tasks(jobs, choice, limits, slow, check_after_all):
                              c.per_stream / (1.0 + slow * c.spread),
                              c.uses, min(c.most or j.ranges, j.ranges), True,
                              0, after="all" if check_after_all else last))
+    for j in jobs:
+        ups = tuple(copies[p] for p in j.after or () if p in copies
+                    and p != j.name)
+        if ups:
+            copies[j.name].after = ups
     return out
 
 
@@ -331,6 +346,9 @@ def simulate(jobs, choice, limits, order=None, workers=None, slow=0.0,
         for t in pending:
             if t.after == "all":
                 if done_copies < n_copies:
+                    continue
+            elif isinstance(t.after, tuple):
+                if any(a not in finished for a in t.after):
                     continue
             elif t.after is not None and t.after not in finished:
                 continue
@@ -941,20 +959,61 @@ def outage_line(hop, phases):
             " check narrowed to what changed, would shorten it")
 
 
-def plan_move(model, facts, limits, ways=None, check=None):
+def barriered(jobs, semantics, fks="during"):
+    """`jobs` with each one's copy after the tables its rows point at
+    (`guarantees.barriers`) where the target's keys hold during the load;
+    tables pointing at each other round a cycle wait on none of each
+    other - no order loads them, and the admission says so."""
+    if not semantics or fks != "during":
+        return jobs
+    from . import guarantees
+    _, cycles = guarantees.barriers(semantics)
+    ring = {t: set(c) for c in cycles for t in c}
+    for j in jobs:
+        s = semantics.get(j.name)
+        if s is not None:
+            j.after = tuple(p for p in s.parents
+                            if p not in ring.get(j.name, ()))
+    return jobs
+
+
+def admitted(plan, semantics, fks="during"):
+    """`plan` asked of the decision engine as a schedule (`decide.admit`):
+    its order, each table's start and end, the tables at once and whether
+    the target's keys hold during the load - marked refused, with why and
+    what to do, where it does not keep what the move must keep."""
+    if plan is None or semantics is None:
+        return plan
+    from . import decide, guarantees
+    sched = guarantees.Schedule(
+        order=tuple(plan.order), at_once=plan.tables or 1, fks=fks,
+        times=tuple((n, p.start, p.copied)
+                    for n, p in sorted(plan.placed.items())))
+    ok, why = decide.admit(sched, semantics, "the tables planned as one")
+    plan.admitted, plan.refused = ok, why
+    if not ok:
+        plan.meets = False
+        plan.why = "; ".join(x for x in (plan.why, why) if x)
+    return plan
+
+
+def plan_move(model, facts, limits, ways=None, check=None, semantics=None,
+              fks="during"):
     """The joint plan of one database's move from its resource model and
-    catalogue, or None where the model measured no rate to plan from."""
+    catalogue, or None where the model measured no rate to plan from.
+    `semantics` ({table: guarantees.Semantics}) holds each table's copy
+    after the tables it points at and admits the plan through them."""
     if model is None or not getattr(model, "measured", False):
         return None
     w = ways or (way_of(model),)
     if not callable(w) and not any(x.per_stream for x in w):
         return None
-    jobs = jobs_of(facts, w, check=check)
+    jobs = barriered(jobs_of(facts, w, check=check), semantics, fks)
     if not jobs:
         return None
     if not limits.caps:
         limits.caps = caps_of(model)
-    return joint(jobs, limits)
+    return admitted(joint(jobs, limits), semantics, fks)
 
 
 def _per_stream(model, names):
@@ -1015,7 +1074,8 @@ def check_of(model):
 PLAN_FILE = "plan.json"
 
 
-def for_move(hop, model, facts, tables=None, workers=None, db=None):
+def for_move(hop, model, facts, tables=None, workers=None, db=None,
+             semantics=None, fks="during"):
     """The joint plan of one database's move, kept beside its reports
     (`PLAN_FILE`), or None where the model measured nothing to plan from.
     `tables` limits it to the tables the move carries."""
@@ -1024,7 +1084,8 @@ def for_move(hop, model, facts, tables=None, workers=None, db=None):
     got = {t: f for t, f in (facts or {}).items()
            if tables is None or t in tables}
     lim = limits_of(hop, model, workers)
-    plan = plan_move(model, got, lim, ways_of(model), check_of(model))
+    plan = plan_move(model, got, lim, ways_of(model), check_of(model),
+                     semantics, fks)
     if plan is not None and db is not None:
         try:
             import os
@@ -1140,3 +1201,20 @@ MEASURED = {
     "cpsat/joint (40 moves, 5 s each)": {"mean": 1.023, "median": 1.004,
                                          "best": 0.968, "seconds": 5.04},
 }
+
+
+def semantics_of(eng, db, tables=None, tail=False):
+    """{table: guarantees.Semantics} of the source's tables `tables` takes,
+    read from its catalogue in one pass (`drift.shape`), or None where the
+    catalogue cannot be read so: the plan then holds no barrier it did
+    not read."""
+    from . import drift, guarantees
+    r = drift.side_reader(eng, "src")
+    got = drift.shape(r, "src", db) if r is not None else None
+    if not got:
+        return None
+    cat = drift.catalog_of(got)
+    return guarantees.read_hop(
+        cat, getattr(eng, "src_engine", None) or eng,
+        getattr(eng, "dst_engine", None) or eng,
+        tables=set(tables) if tables is not None else None, tail=tail)

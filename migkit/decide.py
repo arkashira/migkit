@@ -3145,6 +3145,7 @@ def session_action(facts):
     return climb("a wait the server was asked about", rungs, f)
 
 
+<<<<<<< HEAD
 
 # --- row parity: which read proves a table's rows alike ----------------------
 # Every way below reads every row of both sides - none samples, none can be
@@ -3259,3 +3260,34 @@ def recovery(facts):
         Rung("stop", "stop this work and say why",
              because="no safe recovery holds"))
     return climb("a failure", rungs, f)
+||||||| 8b14e90b
+=======
+# --- a schedule admitted only where it keeps what the move must keep -------
+# (P0-SAFETY-INTEGRITY): one need every schedule that runs work side by
+# side is asked through, read from `guarantees.breaks`
+
+#: the fact the need reads: [why] the schedule breaks what the move keeps
+SCHEDULE_BREAKS = "schedule breaks"
+
+KEEPS_SEMANTICS = Need(
+    "a schedule that keeps what the move must keep",
+    lambda f: not f[SCHEDULE_BREAKS],
+    lambda f: "; ".join(f[SCHEDULE_BREAKS]))
+
+
+def schedule_facts(schedule, semantics, known=None):
+    """`Facts` a schedule is admitted from: what it breaks, read once."""
+    from . import guarantees
+    return Facts(known, **{SCHEDULE_BREAKS: lambda: guarantees.breaks(
+        schedule, semantics)})
+
+
+def admit(schedule, semantics, said="the schedule as planned", facts=None):
+    """(True, "") where `schedule` keeps every table's `semantics` ({table:
+    guarantees.Semantics}), else (False, why with what to do next). An
+    empty `semantics` admits only what keeps nothing it could break."""
+    f = facts if facts is not None else schedule_facts(schedule, semantics)
+    kept, out = prune((Rung("as scheduled", said,
+                            needs=(KEEPS_SEMANTICS,)),), f)
+    return (True, "") if kept else (False, out[0][1])
+>>>>>>> worktree-agent-a1f3165d519308d89

@@ -3189,7 +3189,8 @@ def _joint_for_move(hop, eng, m, d, names, most, log):
         return None
     try:
         facts = eng.table_facts("src", d)
-        jp = jointplan.for_move(hop, m, facts, set(names), most, d)
+        sem = jointplan.semantics_of(eng, d, names)
+        jp = jointplan.for_move(hop, m, facts, set(names), most, d, sem)
     except SystemExit:
         raise
     except Exception:  # noqa: BLE001 - the move goes on as sized
@@ -3198,6 +3199,8 @@ def _joint_for_move(hop, eng, m, d, names, most, log):
         return None
     for line in jointplan.lines(jp):
         log(f"plan: {line}")
+    if not jp.admitted:
+        log(f"plan: not admitted as it stands - {jp.refused}")
     decide.record(hop, {
         "work": f"the move of {d}", "plan": jp.as_evidence(),
         "facts": jointplan.account(hop, m, facts, jp)}, log,
