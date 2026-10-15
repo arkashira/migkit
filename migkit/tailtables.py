@@ -1405,21 +1405,27 @@ class TableSet:
                                          False)),
             same_shape=lambda: self._same_shape(prev, name),
             lost=lambda: self._lost(prev.get("at")))
-        got = decide.climb(f"{self.db}.{leaf}", _add_ways(), facts)
-        way, reason = got.path, got.reason
         st = {"state": "copying", "name": name, "since": token,
               "why": why, "start": True}
-        if way == "from-removal":
-            try:
-                upto = self.src.log_position("src", self.db)
-            except Exception:  # noqa: BLE001 - copied instead
-                upto = None
+
+        def run(choice):
+            # the changes since it left are read up to where the log is
+            # now; a source that cannot say leaves the copy, said
+            if choice.path != "from-removal":
+                return None
+            upto = self.src.log_position("src", self.db)
             if upto is None:
-                way, reason = "copy", ("the source could not say where its"
-                                       " log is now")
-            else:
-                st.update(at=prev["at"], digest=prev["digest"],
-                          columns=prev.get("columns"), upto=upto)
+                raise decide.Blocked("the source could not say where its"
+                                     " log is now")
+            return upto
+        from . import movers
+        got, upto = decide.attempt(f"{self.db}.{leaf}", _add_ways(), run,
+                                   facts, log=self.log, record=False,
+                                   switch=movers.switchable)
+        way, reason = got.path, got.reason
+        if upto is not None:
+            st.update(at=prev["at"], digest=prev["digest"],
+                      columns=prev.get("columns"), upto=upto)
         st["way"] = way
         states[leaf] = st
         said = dict((r.name, r.said) for r in _add_ways())[way]

@@ -44,8 +44,11 @@ DIGEST_OPTIONS = "-c lc_monetary=C"
 
 #: a loading or snapshot-holding session is never ended by a server's
 #: default timeout while it works or waits for the next range (the
-#: statement's own is off in every session, `postgres.SESSION`)
-LOAD_OPTIONS = "-c idle_in_transaction_session_timeout=0 -c session_replication_role=replica"
+#: statement's own is off in every session, `postgres.SESSION`). It holds
+#: nothing only a superuser may set: the source's export runs under it
+#: too, and a load's triggers are quieted by the target's own options
+#: (`PostgresEngine._load_options`, `load_window`), asked of its role
+LOAD_OPTIONS = "-c idle_in_transaction_session_timeout=0"
 
 #: what a source's refusal of a snapshot a read asked for reads like
 _SNAPSHOT_GONE = ("invalid snapshot identifier", "could not import the"
@@ -422,7 +425,13 @@ class Way:
 
     def instead(self, why):
         """The pass-through gone wrong on this unit: given up on for the
-        rest of the table, and the way to copy the unit again."""
+        rest of the table, and the way to copy the unit again - unless
+        what went wrong is a refusal, which the text copy would meet too
+        and which stops the table in the database's words."""
+        from .. import movers
+        stop = movers.refusal(why)
+        if stop is not None:
+            raise stop
         self.ways.give_up_passing(why)
         return self.ways.pick(self.begin)
 
@@ -443,25 +452,46 @@ class Ways:
         self._lock = threading.Lock()
 
     def pick(self, begin):
-        """The `Way` for the next unit, its mark given to `begin`."""
-        while True:
-            got = self.trials.pick()
-            if got.rung is None:
-                raise RuntimeError(f"{self.table}: no way to copy it here:"
-                                   f" {got.reason}")
-            self._say(got)
-            if got.path not in self.passing:
-                begin(self.eng.snapshot_mark("src", self.db))
-                return Way(self, got, begin)
+        """The `Way` for the next unit, its mark given to `begin`. A
+        passing way stands on the snapshot its ranges share: where the
+        source will not export one, the pass-through is given up on for
+        the table and the unit goes as text, the switch said with its
+        reason (`decide.attempt`); a refusal stops the table."""
+        from .. import decide, movers
+        got = self.trials.pick()
+        if got.rung is None:
+            raise RuntimeError(f"{self.table}: no way to copy it here:"
+                               f" {got.reason}")
+        self._say(got)
+        rungs = (got.rung,) + tuple(
+            r for r in self.trials.rungs
+            if r.name not in self.passing and r.name != got.path)
+
+        def run(choice):
+            if choice.path not in self.passing:
+                return None
             try:
-                export = self.ctx.snapshot.lease()
-            except Exception as e:  # noqa: BLE001 - said, and a rung down
-                self.give_up_passing(
+                return self.ctx.snapshot.lease()
+            except Exception as e:
+                stop = movers.refusal(e)
+                if stop is not None:
+                    raise stop from e
+                raise decide.Blocked(
                     "the source would not export a snapshot for the ranges"
-                    f" to share: {str(e).strip().splitlines()[-1][:120]}")
-                continue
-            begin(export.mark)
-            return Way(self, got, begin, export)
+                    f" to share: {str(e).strip().splitlines()[-1][:120]}"
+                    if str(e).strip() else type(e).__name__) from e
+
+        def undo(rung, error):
+            self.give_up_passing(decide._first(error))
+        choice, export = decide.attempt(
+            f"{self.table}: a range", rungs, run, self.trials.facts,
+            undo=undo, log=self.log, prove=False, record=False,
+            switch=movers.switchable)
+        if export is None:
+            begin(self.eng.snapshot_mark("src", self.db))
+            return Way(self, choice, begin)
+        begin(export.mark)
+        return Way(self, choice, begin, export)
 
     def _say(self, got):
         """The first way a table takes, with why; and once every way that

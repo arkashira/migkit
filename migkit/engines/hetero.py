@@ -229,6 +229,28 @@ def masking(engine, hop):
     return engine
 
 
+def _ddl_ways():
+    from ..decide import Need
+    return (
+        Rung("statement", "the target's own schema change",
+             needs=(Need("a schema change of the target engine's own",
+                         lambda f: f["own_ddl"],
+                         "{rung} is not one the target's engine runs"),),
+             because="the statement runs as the target's engine changes"
+                     " a schema, which forgets what it read of the shape"),
+        Rung("create", "the statement run as a converted create",
+             needs=(Need("converted creates on the target",
+                         lambda f: f["own_create"],
+                         "the target's engine runs no converted create"),),
+             because="the statement as the target runs a converted object"),
+    )
+
+
+#: how one statement that changes the target's schema is run
+#: (`HeteroEngine._run_ddl`)
+DDL_WAYS = _ddl_ways()
+
+
 class HeteroEngine(Engine):
     """A hop whose two sides are different database engines.
 
@@ -4365,11 +4387,26 @@ class HeteroEngine(Engine):
 
     def _run_ddl(self, db, sql):
         """One statement on the target that changes its schema, and what
-        the engines keep of the shape it changed forgotten."""
-        try:
-            self.dst_engine.execute_ddl("dst", db, sql)
-        except NotImplementedError:
-            self.dst_engine.neutral_create_code("dst", db, sql)
+        the engines keep of the shape it changed forgotten. Run as the
+        target's own schema change where its engine has one, else as a
+        converted create (`DDL_WAYS`); a way the engine turns out not to
+        have for the statement is switched from, said, and a refusal - or
+        the statement failing - stops it."""
+        from .. import decide
+        dst = self.dst_engine
+        facts = decide.Facts(
+            own_ddl=lambda: type(dst).execute_ddl is not Engine.execute_ddl,
+            own_create=lambda: (type(dst).neutral_create_code
+                                is not Engine.neutral_create_code))
+
+        def run(choice):
+            if choice.path == "statement":
+                return dst.execute_ddl("dst", db, sql)
+            return dst.neutral_create_code("dst", db, sql)
+        self._attempt(f"{db}: a schema change on the target", DDL_WAYS, run,
+                      facts, prove=False,
+                      switch=lambda e: isinstance(
+                          e, (NotImplementedError, decide.Blocked)))
         self.dst_engine.forget_shapes()
         self.__dict__.pop("_typed_of", None)
 

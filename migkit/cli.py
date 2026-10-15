@@ -4784,7 +4784,7 @@ def _stream_climb(hop, eng, db, do_drop, engine=None):
     server gives are asked only if a rung still in the running needs
     them, read-only. `where` is the stream's position file, `work` its
     name in the decision record."""
-    from . import decide
+    from . import decide, movers
     from .engines import ALIASES
     engine = engine or ALIASES.get(hop.engine, hop.engine)
     has_repl = hasattr(eng, "replicate_sql")
@@ -4813,8 +4813,10 @@ def _stream_climb(hop, eng, db, do_drop, engine=None):
             return False
         pair = _tail_pair(eng)
         return pair is not None and _tail_ready(pair)
-    facts, rungs = _stream_facts(hop, eng, engine, has_repl, has_tail,
-                                  do_drop, risk, refused, by_pair)
+    facts = movers.stream_facts(hop, engine, has_repl, has_tail,
+                                has_tail and _tail_ready(eng), do_drop, risk,
+                                refused, by_pair)
+    rungs = movers.stream_ways()
     where = hop.report_dir(db) / "stream.json"
     work = f"following {hop.name}'s source"
     # a way refused as it starts - a target that cannot dial the source -
@@ -4880,35 +4882,6 @@ def _cdc(hop, eng, db, do_drop, go, engine):
                          " on this machine" + (f" - {held[0]}" if held else
                                                "; migkit doctor says what"
                                                " is missing"))
-
-
-def _stream_facts(hop, eng, engine, has_repl, has_tail, drop=False,
-                  risk=None, refused=None, by_pair=None):
-    """(facts, rungs) of the ways this hop's changes may follow its source
-    (`movers.stream_ways`, read as `movers.stream_way` reads them), the leg
-    run from here held also where the servers' own replication could not
-    start here: what a target that cannot dial the source falls to.
-    `risk()` says why the servers' own replication would lose a table's
-    changes (`PostgresEngine.publication_add_risk`), `refused()` why it
-    would carry the hop's tables wrongly (`_own_refused`), and `by_pair()`
-    whether migkit's own tail of the engine as a pair then follows it."""
-    import dataclasses
-
-    from . import decide, movers
-    facts = movers.stream_facts(hop, engine, has_repl, has_tail,
-                                has_tail and _tail_ready(eng), drop, risk,
-                                refused, by_pair)
-    rungs = []
-    for r in movers.stream_ways():
-        if r.name == "follow":
-            r = dataclasses.replace(r, needs=(r.needs[0], decide.Need(
-                "the target unable to dial the source",
-                lambda f: movers.follow_selected() == "follow"
-                or bool(f.get("own replication failed")),
-                "the target can dial the source, so its own replication"
-                " carries the changes")) + tuple(r.needs[2:]))
-        rungs.append(r)
-    return facts, rungs
 
 
 def _follow_group(hop, eng, db, mode, table, chunk, go):

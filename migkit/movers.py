@@ -6368,6 +6368,10 @@ def stream_ways():
     target from dialling the source (`MIGKIT_CDC=follow`) and the leg run
     from here connects out to both instead; another engine its change
     tail, then its servers' replication, then the streaming pipeline.
+    The leg run from here is held also where the servers' own replication
+    could not start on this hop (`own replication failed`, kept beside the
+    hop's stream by `cli._stream_climb`): what a target that cannot dial
+    the source falls to, read once here for the climb, the move and doctor.
 
     A way's measured cost (seconds a change took to reach the target,
     kept with the hop's rates under `cdc/`) ranks it among the ways that
@@ -6399,7 +6403,8 @@ def stream_ways():
     return (
         Rung("follow", "the change leg run from here",
              needs=(pg, Need("the target unable to dial the source",
-                             lambda f: follow_selected() == "follow",
+                             lambda f: follow_selected() == "follow"
+                             or bool(f.get("own replication failed")),
                              "the target can dial the source, so its own"
                              " replication carries the changes"),
                     as_they_are),
@@ -6476,6 +6481,26 @@ def stream_ways():
 
 #: the pipeline rung in an operator's words
 PIPELINE_SAID = "migkit's streaming pipeline"
+
+
+def refusal(e):
+    """`e` as the `runner.Refused` it is in the database's words - the
+    sign-in, a privilege, a read-only target, a full disk - or None: what
+    no other way gets past (`runner.classify`)."""
+    from . import runner
+    if isinstance(e, runner.Refused):
+        return e
+    got = runner.classify(1, str(e))
+    return got if isinstance(got, runner.Refused) else None
+
+
+def switchable(e):
+    """`decide.attempt`'s `switch` for a way that may be left for the next
+    one: a failure that is the way's own, never a refusal, which stops the
+    work in its own words rather than fall through to a way that would
+    meet it too."""
+    from . import decide
+    return decide.operational(e) and refusal(e) is None
 
 
 def stream_way(hop, engine, repl, tail, ready, drop=False, risk=None,
