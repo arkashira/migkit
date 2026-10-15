@@ -57,6 +57,9 @@ class Fault:
     words: tuple = ()
     #: the facts (engine readings) that detect it without any error
     facts: tuple = ()
+    #: words that say this class whatever other class's words they hold,
+    #: read before any `words`
+    phrases: tuple = ()
     #: the server rolled back what failed, so a write may be run again
     rolled_back: bool = False
     #: the test proving it, or "UNPROVED: why"
@@ -79,7 +82,8 @@ CATALOGUE = {f.name: f for f in (
               "server closed the connection", "broken pipe", "gone away",
               "eof occurred", "timeout expired", "connection timed out",
               "temporary failure", "no route to host", "connection aborted",
-              "reset by peer", "timed out", "operationalerror"),
+              "reset by peer", "timed out", "operationalerror",
+              "dbprocess is dead", "not connected"),
        proof=_T + "test_a_dropped_connection_is_retried_and_then_proceeds"),
     _f("auth", "the server refused the account", False,
        "never: the credentials must be corrected", "the side",
@@ -142,6 +146,11 @@ CATALOGUE = {f.name: f for f in (
        ("replan", "stop"), codes=(3024, "57014"),
        words=("statement timeout", "max_execution_time",
               "query execution was interrupted"),
+       # read before the connection's words, which a statement's own
+       # time limit shares ("timeout expired")
+       phrases=("canceling statement due to statement timeout",
+                "execution timeout expired", "query timeout expired",
+                "query timed out", "statement timed out"),
        proof="tests/test_a_copier_reconciles_and_retunes.py::"
              "test_a_statement_timeout_is_a_sizing_cause"),
     _f("orphaned", "work migkit owns is still running after its attempt",
@@ -280,8 +289,33 @@ def _code_class(code):
     return None
 
 
+#: a timeout said with nothing else: the server's time limit on a
+#: statement while one runs (`statement_timeout`, a size answers it), the
+#: connection's while one is opened (`connectivity`) - told apart only by
+#: the phase it was met in (`classify(during=)`)
+BARE_TIMEOUT = ("timed out", "timeout")
+
+
+def _bare_timeout(text):
+    """Whether `text` says a timeout and nothing else of the connection:
+    no word of a link lost, refused or being opened."""
+    from .util import CONNECTING
+    if not any(w in text for w in BARE_TIMEOUT):
+        return False
+    rest = text
+    for w in sorted(BARE_TIMEOUT, key=len, reverse=True):
+        rest = rest.replace(w, " ")
+    link = [w for w in CATALOGUE["connectivity"].words
+            if w not in BARE_TIMEOUT and w != "operationalerror"]
+    return not any(w in rest for w in link) and not any(
+        p in text for p in CONNECTING)
+
+
 def _words_class(err):
     e = str(err).lower()
+    for f in CATALOGUE.values():
+        if any(w in e for w in f.phrases):
+            return f
     for f in CATALOGUE.values():
         if any(w in e for w in f.words):
             return f
@@ -300,12 +334,14 @@ class Told:
     by: str = "words"
 
 
-def classify(err, writes=False, atomic=False):
+def classify(err, writes=False, atomic=False, during=None):
     """`Told` for `err`. By the engine's code first, then by what it did:
     a failure after a write was sent, of a kind the server does not roll
     back whole (or of a write that is not one transaction, `atomic`),
     leaves its outcome unknown - an `uncertain_commit` whatever the
-    words; a lost connection while connecting sent nothing."""
+    words; a lost connection while connecting sent nothing. A bare
+    timeout (`BARE_TIMEOUT`) is the phase's: met `during` a "statement"
+    it is the statement's time limit, during a "connect" the link's."""
     from .util import CONNECTING
     code = code_of(err)
     fault, by = _code_class(code), "code"
@@ -317,8 +353,14 @@ def classify(err, writes=False, atomic=False):
         fault, by = CATALOGUE["memory_pressure"], "effect"
     fault = fault or CATALOGUE["unknown"]
     text = str(err).lower()
-    connecting = code in CONNECTING_CODES or any(p in text
-                                                 for p in CONNECTING)
+    bare = by == "words" and fault.name in ("connectivity", "unknown") \
+        and _bare_timeout(text)
+    if bare and during == "statement":
+        fault, by = CATALOGUE["statement_timeout"], "phase"
+    elif bare and during == "connect":
+        fault, by = CATALOGUE["connectivity"], "phase"
+    connecting = code in CONNECTING_CODES or any(
+        p in text for p in CONNECTING) or (bare and during == "connect")
     phase = "connecting" if connecting else "sent"
     uncertain = False
     if writes and phase == "sent" and fault.transient:
@@ -633,59 +675,6 @@ def landed(want, held, before=None, idempotent=False, value=None):
             return NOTHING, None
         return None, None
     return check
-
-
-class Throttle:
-    """The width of a pool (`sizing.Pace`: `limit` of `most`) moved by
-    what `assess` reads between units. A throttle choice halves it at
-    once; it grows back one step only after `STEADY` clear readings in a
-    row, and each throttle that follows a growth doubles that wait - so a
-    server near its limit does not flip the width every unit."""
-
-    STEADY = 3
-
-    def __init__(self, pace, read, log=None):
-        self.pace, self.read, self.log = pace, read, log
-        self.clear, self.steady, self.grew = 0, self.STEADY, False
-        self.lowered_from = None
-
-    def between(self):
-        """Read the facts and move the width; the choices `assess` made."""
-        try:
-            facts = self.read() or {}
-        except Exception:  # noqa: BLE001 - a probe never stops a move
-            facts = {}
-        got = assess(facts)
-        pressed = [f for f, c in got if c.path in ("throttle", "pause")]
-        was = int(self.pace.limit)
-        if pressed:
-            self.clear = 0
-            if self.grew:
-                self.steady *= 2
-            self.grew = False
-            now = max(1, was // 2)
-            if now < was:
-                self.lowered_from = max(self.lowered_from or 0, was)
-                self._set(now, pressed[0].said)
-        elif self.lowered_from and was < self.lowered_from:
-            self.clear += 1
-            if self.clear >= self.steady:
-                self.clear, self.grew = 0, True
-                self._set(min(self.lowered_from, was + max(1, was // 2)),
-                          "the pressure eased")
-        return got
-
-    def _set(self, n, why):
-        lock = getattr(self.pace, "_lock", None)
-        if lock is not None:
-            with lock:
-                self.pace.limit = n
-        else:
-            self.pace.limit = n
-        hist = getattr(self.pace, "history", None)
-        if isinstance(hist, list):
-            hist.append((n, None, why))
-        _say(self.log, f"{n} at once: {why}")
 
 
 class Injected(Exception):

@@ -1699,10 +1699,22 @@ class GenericEngine(Engine):
                         cur.close()
                     c.commit()
 
-                def held():
-                    return int(dst_call(lambda c: self._run(
-                        c, f"SELECT COUNT(*) FROM {dst_t}", fetch=True))[0][0])
                 was = int(st.get("moved") or 0)
+                prev = st.get("after") if at else None
+                # in key order the batch is the rows past the last key
+                # copied, which nothing of this copy wrote yet: counted
+                # there, never over the whole target per failed batch
+                span, span_args, base = "", (), was
+                if prev is not None:
+                    span, span_args = self._keyed_where(
+                        "dst", dst_style, key,
+                        [self._uncarried(v) for v in prev], op=">")
+                    span, base = f" WHERE {span}", 0
+
+                def held(span=span, span_args=span_args):
+                    return int(dst_call(lambda c: self._run(
+                        c, f"SELECT COUNT(*) FROM {dst_t}{span}",
+                        span_args, fetch=True))[0][0])
                 # a batch whose commit was lost on the way is counted on
                 # the target before it is sent again: there whole, it is
                 # not written twice; not there, it goes again
@@ -1710,7 +1722,8 @@ class GenericEngine(Engine):
                     lambda: dst_call(write), side="dst",
                     operation="copy batch", writes=True, log=log,
                     label=table, check=faults.landed(
-                        lambda: was + len(batch), held, before=was),
+                        lambda base=base, n=len(batch): base + n, held,
+                        before=base),
                     ledger=self.attempts().ledger,
                     owned=faults.Owned("dst", "copy batch", table, str(was)))
                 st["moved"] = int(st.get("moved") or 0) + len(rows)

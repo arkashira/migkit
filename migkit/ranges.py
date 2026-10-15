@@ -80,6 +80,12 @@ class ReadPool:
                 resources = sizing.resources(engine, db, hop)
             except Exception:
                 resources = {}
+        if engine is not None and db is not None:
+            # what the failure catalogue reads of each side, one signal of
+            # the pace's own (`sizing.catalogue`): the pace alone moves
+            # the width, read once a window, not once a unit
+            resources.setdefault(sizing.CATALOGUE,
+                                 sizing.catalogue(engine, db))
         self.pace = sizing.Pace(min(plan_start, most), most,
                                resources=resources,
                                memory=sizing.Memory(sizing.WORKER_MEMORY))
@@ -87,15 +93,6 @@ class ReadPool:
         parent_slots = coordinator or (parent.slots if parent is not None else None)
         self.slots = Slots(most, pace=self.pace, parent=parent_slots)
         self.pool = cf.ThreadPoolExecutor(max_workers=most)
-        # between units the failure catalogue reads each side's strain
-        # (`faults.assess`); a throttle lowers the width, held until it
-        # stays clear (`faults.Throttle`)
-        self.throttle = None
-        if engine is not None and db is not None:
-            from . import faults
-            self.throttle = faults.Throttle(self.pace, lambda: {
-                "source_cpu_busy": sizing.side_strain(engine, "src", db),
-                "target_cpu_busy": sizing.side_strain(engine, "dst", db)})
 
     def submit(self, fn, *args, **kwargs):
         import time
@@ -103,8 +100,6 @@ class ReadPool:
         ctx = contextvars.copy_context()
 
         def read():
-            if self.throttle is not None:
-                self.throttle.between()
             lease = self.slots._take()
             token = _active_lease_var.set(lease)
             pool_token = _current_pool_var.set(self)

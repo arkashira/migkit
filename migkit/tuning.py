@@ -628,8 +628,10 @@ class Cause:
         return self.kind in SIZING
 
 
-def cause_of(error, sent=None, limits=()):
-    """The `Cause` of a unit's failure from what the server said. A
+def cause_of(error, sent=None, limits=(), during=None):
+    """The `Cause` of a unit's failure from what the server said, in the
+    phase it was met (`during`: "statement" or "connect", for a bare
+    timeout - `faults.BARE_TIMEOUT`). A
     connection lost while sending more than a known limit takes is that
     limit: measured on MySQL 8.4, a row past `max_allowed_packet` ended
     in a lost connection that said nothing of the packet."""
@@ -637,7 +639,7 @@ def cause_of(error, sent=None, limits=()):
     text = f"{type(error).__name__}: {error}" if isinstance(
         error, BaseException) else str(error or "")
     told = faults.classify(error if isinstance(error, BaseException)
-                           else RuntimeError(text))
+                           else RuntimeError(text), during=during)
     kind = BY_CLASS.get(told.fault.name, UNKNOWN)
     over = [x for x in limits or () if sent and x.bounds == "sent"
             and 0 < x.most < sent]
@@ -732,7 +734,7 @@ class Retune:
     # --- a failure ------------------------------------------------------------
 
     def failed(self, unit, error, sent=None, rows=None, widest=None,
-               reconcile=None):
+               reconcile=None, during=None):
         """The `Adjustment` for `unit` that failed with `error` on a batch
         of `sent` bytes in `rows` rows (`widest` its widest row), or
         None where the cause is not one a size answers (the caller's
@@ -741,7 +743,7 @@ class Retune:
         import math
         from . import decide, pieces
         cause = cause_of(error, int(sent) * pieces.SENT_FACTOR
-                         if sent else None, self.limits)
+                         if sent else None, self.limits, during=during)
         self._unit(unit, state="failed")
         if not cause.sizing:
             return None
@@ -968,7 +970,7 @@ class Retune:
 
 
 def sized(retune, unit, fn, apply, reconcile=None, sent=None, rows=None,
-          most_rounds=8):
+          most_rounds=8, during="statement"):
     """fn() run at `retune`'s sizes (`apply(settings)` before each try). A
     failure a size answers is retuned (`Retune.failed`) and the work goes
     again at the new size - never at the one that failed; any other
@@ -986,7 +988,7 @@ def sized(retune, unit, fn, apply, reconcile=None, sent=None, rows=None,
                 raise
             adj = retune.failed(unit, e, sent=sent() if sent else None,
                                 rows=rows() if rows else None,
-                                reconcile=reconcile)
+                                reconcile=reconcile, during=during)
             if adj is None:
                 raise
     raise decide.Blocked(f"{retune.work}: {unit} did not settle")

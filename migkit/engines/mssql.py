@@ -130,26 +130,35 @@ class MSSQLEngine(DbapiRows, Engine):
 
     def _kept_rows(self, side, db, sql, args=None):
         """The rows of `sql` as the driver gives them, `args` bound at its
-        MARKs, on the side's kept connection; one that dropped is opened
-        again once."""
+        MARKs, on the side's kept connection, under the failure catalogue
+        (`faults.retried`): a read whose link dropped is read again on a
+        new one; a statement that writes, lost after it was sent, has an
+        outcome no count here can read, so it stops rather than run
+        twice."""
+        from .. import faults
         where = "source" if side == "src" else "target"
-        for attempt in (0, 1):
+        writes = not re.match(r"\s*(select|with|set\s+nocount)\b", sql,
+                              re.I)
+
+        def once():
             conn = self._kept(side, db)
             try:
                 cur = conn.cursor()
                 self._run(cur, sql, args)
                 return [list(r) for r in cur.fetchall()] \
                     if cur.description else []
-            except Exception as e:  # noqa: BLE001 - said, with the side
-                said = " ".join(str(e).split())
-                lost = any(w in said.lower() for w in (
-                    "connection", "closed", "dbprocess is dead",
-                    "not connected"))
+            except Exception:
                 self._forget(side, db)
-                if attempt == 0 and lost:
-                    continue
-                raise RuntimeError(f"the {where} refused a statement:"
-                                   f" {said[-300:]}") from None
+                raise
+        try:
+            return faults.retried(once, tries=2, side=side,
+                                  operation="statement", writes=writes,
+                                  label=f"the {where}",
+                                  backoff=lambda i: 0.2 * (i + 1))
+        except Exception as e:  # noqa: BLE001 - said, with the side
+            said = " ".join(str(e).split())
+            raise RuntimeError(f"the {where} refused a statement:"
+                               f" {said[-300:]}") from None
 
     def databases(self):
         if self.hop.databases:

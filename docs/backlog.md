@@ -10355,6 +10355,8 @@ steps do not yet); comparative measurements against managed services.
 
 Not done (W9A, 2026-10-16): the MySQL range copier and the generic copier pass `check=` (`faults.landed`) and `owned=` to `faults.retried`; the PostgreSQL, SQL Server and cross-engine copiers and the tail loop do not yet. `faults.Throttle` runs between ranges in `ranges.ReadPool` only, not in the tail loop.
 
+Not done (W10A, 2026-10-16): `faults.Throttle` is gone; the catalogue's reading is one more `sizing.Pace` signal (`sizing.catalogue`, the pace's own hold and one-back-a-window), and a server's answers about itself are held `sizing.FRESH` seconds. The PostgreSQL range pipe (`_pipe_retried`) and SQL Server's kept statements run under `faults.retried` with `check`/`owned`; MySQL ranges keep their own sizes. A bare timeout is told by its phase (`faults.classify(during=)`, `tuning.sized` says "statement"). Left: `tuning.sized` on the PostgreSQL pipe and the SQL Server bulk write (a pipe range has no batch size of its own to retune; the range split would be it), the tail/follow apply under `faults.retried` with owned reconcile, and `tuning.payload_way` asked before large-value tables and recorded in the plan and ledger. `generic.dst_call` does not retry on its own, so the generic batch is retried once over.
+
 ## P0-AUTOTUNE-ALL: diagnose and tune the complete migration workflow
 
 Owner clarification, 2026-10-06. Status: PARTLY (2026-10-16). Retry/restart alone is not

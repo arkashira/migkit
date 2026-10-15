@@ -12755,7 +12755,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             # a fresh start: what the target holds of the table is not this
             # copy's (by count, `spans_to_copy` empties it the same way)
             restart()
-        for attempt in (1, 2):
+        for round_ in (1, 2):
             if way.by_bucket:
                 todo = ranges.buckets_to_copy(st, way.spans, clear, log, key)
             else:
@@ -12766,9 +12766,9 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             for start, where, _ in todo:
                 if way.by_bucket:
                     ranges.bucket_begun(st, start, ck.save)
-                sent = self._copy_pipe(db, self._copy_select(qt, cols,
-                                                             scoped(where)),
-                                       qt, "", columns=cols)
+                sent = self._pipe_retried(
+                    db, self._copy_select(qt, cols, scoped(where)), qt, "",
+                    cols, scoped(where), key, log)
                 ranges.span_copied(st, start, sent.n, sent.total, ck.save)
                 log(f"{key}: {len(st['spans_done'])} of {len(st['spans'])}"
                     " parts copied (no key: "
@@ -12783,7 +12783,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 or self._range_same(db, key, rf)
             if held:
                 break
-            if not way.by_bucket or attempt == 2:
+            if not way.by_bucket or round_ == 2:
                 raise SystemExit(
                     f"{key}: the target holds {back.n:,} rows where"
                     f" {whole[0] if whole else '?'} were copied, or the same"
@@ -12956,6 +12956,35 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         ctx.check(check)
         return rows
 
+    def _pipe_retried(self, db, select, qt, pre_sql, cols, where, what, log):
+        """One range through the pipe (`_copy_pipe`) under the failure
+        catalogue (`faults.retried`), its identity and tries kept in the
+        ledger. The target loads it in one transaction, behind `pre_sql`
+        where that clears its span: a write whose link was lost is read
+        back first (`faults.landed`, by count) and never run on a guess -
+        there whole, it is read back as it landed and not written again;
+        with nothing of it there it goes again; part of it there, with no
+        clear of its span, it stops."""
+        from .. import faults
+        scoped = f" where {where}" if where else ""
+
+        def count(side):
+            return int(self._psql(side, db, f"select count(*) from {qt}"
+                                  + scoped).strip() or 0)
+        clears = pre_sql.lstrip().lower().startswith(("delete", "truncate"))
+        before = None if clears else count("dst")
+        return faults.retried(
+            lambda: self._copy_pipe(db, select, qt, pre_sql, columns=cols),
+            tries=4, side="dst", operation="copy range", writes=True,
+            atomic=True, log=log, label=what,
+            backoff=lambda i: 0.2 * (i + 1),
+            check=faults.landed(
+                lambda: count("src"), lambda: count("dst"), before=before,
+                idempotent=clears,
+                value=lambda n: self._copy_out_tally("dst", db, select)),
+            ledger=self.attempts().ledger,
+            owned=faults.Owned("dst", "copy range", qt, where or ""))
+
     def _piped(self, db, qt, cols, where, pre_sql, what, log):
         """One range copied through the pipe, then read back from the
         target and held to what passed: a copy that says it moved a range
@@ -12967,12 +12996,13 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         is copied is not a difference: what passed is the reference, not
         what the source holds by the time the target is read."""
         select = self._copy_select(qt, cols, where)
-        sent = self._copy_pipe(db, select, qt, pre_sql, columns=cols)
+        sent = self._pipe_retried(db, select, qt, pre_sql, cols, where, what,
+                                  log)
         if not (self.hop.options or {}).get("verify_batches", True):
             return sent
         import time
         table = qt.replace('"', '')
-        for attempt in (1, 2):
+        for round_ in (1, 2):
             # a range is proved either way: both servers digest it and two
             # numbers cross the link, or it is read back and held to what
             # was sent. Which is cheaper is the link's and the servers', not
@@ -12997,11 +13027,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 return sent
             if way == "read back" and self._range_same(db, table, where):
                 return sent
-            if attempt == 2:
+            if round_ == 2:
                 break
             log(f"{what}: read back from the target different from what"
                 " was copied; copying it again")
-            sent = self._copy_pipe(db, select, qt, pre_sql, columns=cols)
+            sent = self._pipe_retried(db, select, qt, pre_sql, cols, where,
+                                      what, log)
         raise SystemExit(
             f"{what}: copied twice, and the target reads back {there.n:,}"
             f" rows where {sent.n:,} were copied, or the same number"

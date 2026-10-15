@@ -122,49 +122,165 @@ def test_a_statement_timeout_is_a_sizing_cause():
     assert not hasattr(tuning, "SIGNATURES")
 
 
-class Pace:
-    def __init__(self, limit, most):
-        self.limit, self.most = limit, most
-        self._lock = threading.Lock()
-        self.history = []
+class Strained:
+    """A server that says how many sessions run on its CPUs, counted."""
+
+    def __init__(self, running):
+        self.running, self.asked = running, 0
+
+    def capacity(self, side, db):
+        self.asked += 1
+        return {"cpus": 2, "running": self.running}
+
+    def io_wait(self, side, db):
+        return {}
 
 
-def test_a_throttle_lowers_and_restores_the_width_without_flip_flop():
-    pressed = {"on": True}
-    pace = Pace(8, 8)
-    t = faults.Throttle(pace, lambda: {"target_cpu_busy":
-                                       "busy" if pressed["on"] else ""})
-    t.between()
-    assert pace.limit == 4
-    pressed["on"] = False
-    widths = []
-    for _ in range(faults.Throttle.STEADY - 1):
-        t.between()
-        widths.append(pace.limit)
-    assert widths == [4] * (faults.Throttle.STEADY - 1)
-    t.between()
-    assert pace.limit == 6
-    # pressure right after a growth: lowered again, and the wait doubles
-    pressed["on"] = True
-    t.between()
-    assert pace.limit == 3
-    pressed["on"] = False
-    for _ in range(faults.Throttle.STEADY * 2 - 1):
-        t.between()
-    assert pace.limit == 3
-    t.between()
-    assert pace.limit > 3
-    for _ in range(40):
-        t.between()
-    assert pace.limit == 8
+def test_one_controller_moves_the_width_through_the_catalogue():
+    from migkit import sizing
+    sizing._ASKED.clear()
+    eng = Strained(running=64)
+    now = [0.0]
+    pace = sizing.Pace(8, 8, clock=lambda: now[0], resources={
+        sizing.CATALOGUE: sizing.catalogue(eng, "db")})
+
+    def window():
+        for _ in range(4):
+            now[0] += 1.0
+            pace.done(1)
+        return pace.limit
+    cut = window()
+    assert cut < 8
+    assert any(faults.CATALOGUE["cpu_pressure"].said in (why or "")
+               for _, _, why in pace.history)
+    eng.running = 0
+    sizing._ASKED.clear()
+    widths = [window() for _ in range(14)]
+    # held while the cut holds, then one back a window, never a leap
+    assert widths[:pace.HOLD] == [cut] * pace.HOLD
+    back = widths[:widths.index(8) + 1]
+    steps = [b - a for a, b in zip([cut] + back, back)]
+    assert all(0 <= s <= 1 for s in steps)
 
 
-def test_a_clear_reading_never_widens_past_where_it_was():
-    pace = Pace(2, 8)
-    t = faults.Throttle(pace, lambda: {})
-    for _ in range(10):
-        t.between()
-    assert pace.limit == 2
+def test_a_server_is_asked_about_itself_once_a_window():
+    from migkit import sizing
+    sizing._ASKED.clear()
+    eng = Strained(running=0)
+    for _ in range(5):
+        sizing.side_strain(eng, "dst", "db")
+    assert eng.asked == 1
+    sizing._ASKED.clear()
+    sizing.capacity(eng, "dst", "db")
+    assert eng.asked == 2
+
+
+def test_a_bare_timeout_is_told_by_the_phase_it_was_met_in():
+    import socket
+    late = socket.timeout("timed out")
+    assert tuning.cause_of(late, during="statement").kind == tuning.TIMEOUT
+    assert tuning.cause_of(late, during="statement").sizing
+    assert tuning.cause_of(late, during="connect").kind == tuning.CONNECTION
+    assert faults.classify(late, during="connect").phase == "connecting"
+    # a link's own words win over the phase
+    assert tuning.cause_of(Exception("connection timed out"),
+                           during="statement").kind == tuning.CONNECTION
+    # a statement's own time limit, whose words hold the connection's
+    assert faults.classify(Exception(
+        "Execution Timeout Expired. The timeout period elapsed")).fault \
+        .name == "statement_timeout"
+    assert faults.classify(Exception("timeout expired")).fault.name \
+        == "connectivity"
+
+
+class Cursor:
+    def __init__(self, rows):
+        self.rows, self.description = rows, [("a",)]
+
+    def fetchall(self):
+        return self.rows
+
+
+def _mssql(fail_first):
+    from migkit.engines.mssql import MSSQLEngine
+    eng = MSSQLEngine.__new__(MSSQLEngine)
+    ran, forgot = [], []
+
+    class Conn:
+        def cursor(self):
+            return Cursor([(1,), (2,)])
+
+    def run(cur, sql, args):
+        ran.append(sql)
+        if fail_first and len(ran) == 1:
+            raise Exception("DBPROCESS is dead or not enabled")
+    eng._kept = lambda side, db: Conn()
+    eng._forget = lambda side, db: forgot.append(side)
+    eng._run = run
+    return eng, ran, forgot
+
+
+def test_a_server_read_whose_link_dropped_is_read_again():
+    eng, ran, forgot = _mssql(fail_first=True)
+    assert eng._kept_rows("src", "db", "select a from t") == [[1], [2]]
+    assert len(ran) == 2 and forgot == ["src"]
+
+
+def test_a_server_write_lost_after_it_was_sent_is_never_run_twice():
+    eng, ran, _ = _mssql(fail_first=True)
+    with pytest.raises(RuntimeError, match="target refused"):
+        eng._kept_rows("dst", "db", "insert into t values (1)")
+    assert len(ran) == 1
+
+
+def _pg(tmp_path, landed, pre_sql_clears):
+    from types import SimpleNamespace
+
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine.__new__(PostgresEngine)
+    src, dst, copies = list(range(5)), [], []
+
+    def pipe(db, select, qt, pre_sql, columns=None):
+        copies.append(select)
+        if pre_sql_clears:
+            dst.clear()
+        dst.extend(src[:landed] if len(copies) == 1 else src)
+        if len(copies) == 1:
+            raise Exception("server closed the connection unexpectedly")
+        return "sent"
+    eng._copy_pipe = pipe
+    eng._psql = lambda side, db, sql: str(len(src if side == "src"
+                                              else dst))
+    eng._copy_out_tally = lambda side, db, select: "read back"
+    ledger = attempts.Ledger(str(tmp_path / "attempts.json"))
+    eng.attempts = lambda: SimpleNamespace(ledger=ledger)
+    return eng, dst, copies, ledger
+
+
+def test_a_range_whose_load_landed_whole_is_read_back_not_copied_again(
+        tmp_path):
+    eng, dst, copies, ledger = _pg(tmp_path, landed=5, pre_sql_clears=True)
+    got = eng._pipe_retried("db", "select * from t where id < 5", "t",
+                            "delete from t where id < 5", ["id"], "id < 5",
+                            "t range 1", None)
+    assert got == "read back" and len(copies) == 1 and len(dst) == 5
+    key = faults.Owned("dst", "copy range", "t", "id < 5").key
+    assert ledger.owned(key)["state"] == faults.COMMITTED
+
+
+def test_a_range_part_landed_with_no_clear_of_its_span_stops(tmp_path):
+    eng, dst, copies, _ = _pg(tmp_path, landed=2, pre_sql_clears=False)
+    with pytest.raises(Exception, match="server closed"):
+        eng._pipe_retried("db", "select * from t", "t", "", ["id"], "",
+                          "t range 1", None)
+    assert len(copies) == 1 and len(dst) == 2
+
+
+def test_a_range_that_left_nothing_goes_again_once(tmp_path):
+    eng, dst, copies, _ = _pg(tmp_path, landed=0, pre_sql_clears=True)
+    got = eng._pipe_retried("db", "select * from t", "t", "truncate t",
+                            ["id"], "", "t range 1", None)
+    assert got == "sent" and len(copies) == 2 and len(dst) == 5
 
 
 def test_a_torn_ledger_is_read_from_its_snapshot(tmp_path):

@@ -183,16 +183,47 @@ class Plan:
                 + unmeasured)
 
 
+#: seconds a server's answer about itself is held before it is asked
+#: again: the pace reads its signals once a window (`Pace.WINDOW`), and
+#: units that start inside one ask nothing more of a strained server
+FRESH = 3.0
+_ASKED, _ASKED_LOCK = {}, threading.Lock()
+
+
+def _asked(eng, what, side, db, ask, clock=time.monotonic):
+    """`ask()`'s answer for (`eng`, `what`, `side`, `db`), held `FRESH`
+    seconds; {} where the question fails."""
+    key = (id(eng), what, side, db)
+    now = clock()
+    with _ASKED_LOCK:
+        got = _ASKED.get(key)
+        if got is not None and now - got[0] < FRESH:
+            return got[1]
+    try:
+        out = ask() or {}
+    except Exception:  # noqa: BLE001 - a question never stops a move
+        out = {}
+    with _ASKED_LOCK:
+        _ASKED[key] = (now, out)
+    return out
+
+
 def capacity(eng, side, db):
     """What a server says about itself (`Engine.capacity`), {} where it
     says nothing or the question fails."""
     fn = getattr(eng, "capacity", None)
     if fn is None:
         return {}
-    try:
-        return fn(side, db) or {}
-    except Exception:  # noqa: BLE001 - a question never stops a move
+    return _asked(eng, "capacity", side, db, lambda: fn(side, db))
+
+
+def io_wait(eng, side, db):
+    """How many of a server's sessions wait on storage
+    (`Engine.io_wait`), {} where it says nothing."""
+    fn = getattr(eng, "io_wait", None)
+    if fn is None:
         return {}
+    return _asked(eng, "io_wait", side, db, lambda: fn(side, db))
 
 
 def estimate(hop, eng, db, units=None, here=None, sides=None, model=None):
@@ -333,10 +364,7 @@ def side_strain(eng, side, db, health=None):
     if why:
         return why
     cpus = c.get("cpus")
-    try:
-        io = eng.io_wait(side, db) or {}
-    except Exception:  # noqa: BLE001
-        io = {}
+    io = io_wait(eng, side, db)
     waiting, active = io.get("io_wait"), io.get("active")
     if waiting and active and waiting >= 2 \
             and waiting >= IO_WAITING * active:
@@ -518,6 +546,26 @@ def held(hop, eng, db, model=None, health=None):
     return out
 
 
+#: the name of the failure catalogue's signal among a pace's resources
+CATALOGUE = "what the failure catalogue reads"
+
+
+def catalogue(eng, db, health=None):
+    """A `Pace` signal of what the failure catalogue says of both sides'
+    readings with no error raised (`faults.assess`): the classes whose
+    first choice is to throttle or pause, named. Its hysteresis is the
+    pace's own - a cut held `Pace.HOLD` windows, one given back a window
+    it is clear - so one controller moves the width."""
+    def signal():
+        from . import faults
+        got = faults.assess({
+            "source_cpu_busy": side_strain(eng, "src", db, health),
+            "target_cpu_busy": side_strain(eng, "dst", db, health)})
+        return "; ".join(dict.fromkeys(
+            f.said for f, c in got if c.path in ("throttle", "pause")))
+    return signal
+
+
 def resources(eng, db, hop=None, health=None, model=None):
     """{name: signal} for `Pace`: the source's reads, the target's writes
     and each link, one signal each - so a source that lags cuts the
@@ -528,7 +576,8 @@ def resources(eng, db, hop=None, health=None, model=None):
     out = {"the source's reads":
            lambda: side_strain(eng, "src", db, health),
            "the target's writes":
-           lambda: side_strain(eng, "dst", db, health)}
+           lambda: side_strain(eng, "dst", db, health),
+           CATALOGUE: catalogue(eng, db, health)}
     if hop is not None:
         seen = set()
         known = getattr(model, "sides", None)
@@ -543,7 +592,7 @@ def resources(eng, db, hop=None, health=None, model=None):
                 continue
             seen.add(at)
             out[f"the link to the {side}"] = RoundTrip(*at)
-        if len(out) > 2:
+        if len(out) > 3:
             out["this machine's connections"] = Loss()
         # the hop's limits as targets held, beside the strains backed off
         # from

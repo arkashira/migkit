@@ -9314,6 +9314,9 @@ class MySQLEngine(Engine):
         names = [n.replace("``", "`")
                  for n in re.findall(r"`((?:[^`]|``)*)`", collist)]
         loads = [True]
+        # this range's own sizes: ranges run side by side, and one's retune
+        # set on the engine reset another's to the size that failed it
+        size_ = {"rows": self.COPY_BATCH, "bytes": self.COPY_BYTES}
 
         def once():
             sent = Tally()
@@ -9334,8 +9337,8 @@ class MySQLEngine(Engine):
                         for r in rows:
                             sent.row(r)
                         batches.put(rows)
-                        size = _batch_for(rows, self.COPY_BATCH,
-                                          self.COPY_BYTES)
+                        size = _batch_for(rows, size_["rows"],
+                                          size_["bytes"])
                     batches.put(None)
                 except BaseException as e:  # noqa: BLE001 - raised below
                     batches.put(e)
@@ -9405,7 +9408,7 @@ class MySQLEngine(Engine):
                                hop=self.hop, engine="mysql")
 
         def sizes(s):
-            self.COPY_BATCH, self.COPY_BYTES = s["rows"], s["bytes"]
+            size_.update(rows=s["rows"], bytes=s["bytes"])
 
         def copy(ways):
             def run(choice):
