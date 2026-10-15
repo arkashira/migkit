@@ -212,9 +212,32 @@ def _slots(eng, db, hop, units):
         memory=sizing.Memory(sizing.WORKER_MEMORY)))
 
 
+def for_engine(eng, db, aggregates, *, source, query, parts=None,
+               progress="deep-scan-progress.json", count="count(*)"):
+    """`run` as an engine's deep checks call it: the engine's change
+    markers (`_change_marker`) and cutover hold, the hop's scope and its
+    kept costs, the progress and the evidence under the database's report
+    directory."""
+    from . import config
+    hop = eng.hop
+    marker = getattr(eng, "_change_marker", None)
+    scope = getattr(hop, "scope_fingerprint", None)
+    real = isinstance(hop, config.Hop)
+    return run(
+        eng, db, aggregates, source=source, query=query, parts=parts,
+        markers=(lambda side, t: marker(side, db, t)) if marker else None,
+        held=eng._held_for_cutover(db) if marker else "",
+        scope=scope() if callable(scope) else None,
+        costs=decide.Layered(decide.Costs(), decide.HopCosts(
+            hop, "scan/")) if real else None,
+        progress=hop.report_dir(db) / progress,
+        evidence=Evidence(hop.report_dir(db) / "scan-evidence.json")
+        if marker else None, count=count)
+
+
 def run(eng, db, aggregates, *, source, query, parts=None, markers=None,
         held="", scope=None, costs=None, progress=None, evidence=None,
-        log=None, sides=("src", "dst")):
+        log=None, sides=("src", "dst"), count="count(*)"):
     """`Got` for `aggregates` over `sides` of `db`.
 
     `source(side, table)` is what a read selects from; `query(side, sql)`
@@ -224,7 +247,8 @@ def run(eng, db, aggregates, *, source, query, parts=None, markers=None,
     none; `held` why nothing kept is reused (a cutover's proof); `scope`
     what the values are read under; `costs` where each way's measured
     seconds a row are kept (`decide.Costs`, `HopCosts`); `progress` the
-    file that says how far it is; `evidence` an `Evidence`."""
+    file that says how far it is; `evidence` an `Evidence`; `count` how
+    the side counts its rows (`count_big(*)` where `count(*)` overflows)."""
     hop = getattr(eng, "hop", None)
     got = Got(aggregates)
     tables = {}
@@ -287,7 +311,7 @@ def run(eng, db, aggregates, *, source, query, parts=None, markers=None,
                 side, chunk, pred = u
                 with lock:
                     state["table"], state["side"] = table, side
-                sql = (f"select count(*), {', '.join(chunk)} from"
+                sql = (f"select {count}, {', '.join(chunk)} from"
                        f" {source(side, table)}"
                        + (f" where {pred}" if pred else ""))
                 try:

@@ -6887,6 +6887,39 @@ select json_build_object(
         " and c.data_type in ('text','character varying','character')"
         " order by 1")
 
+    def _deep_scans(self, db, columns_sql):
+        """(`scanplan.Got`, {}) of the NULL/empty and replacement-character
+        aggregates of every text column `columns_sql` lists (`table|column`
+        a line), or (None, {what: why}) where the plan could not be made -
+        unknown, never clean."""
+        from .. import scanplan
+        from ..scanplan import Aggregate
+        try:
+            cols = [tc.split("|", 1) for tc in
+                    self._scoped(db, self._psql("src", db, columns_sql))]
+        except Exception as e:  # noqa: BLE001 - said as what it is
+            return None, {"the text columns": str(e).splitlines()[-1][:90]}
+        aggs = []
+        for tbl, col in cols:
+            c = _ident(col)
+            aggs.append(Aggregate("nullempty", tbl, col, (
+                f"count(*) filter (where {c} is null)",
+                f"count(*) filter (where {c} = '')")))
+            aggs.append(Aggregate("charset", tbl, col, (
+                f"coalesce(sum(char_length({c}) - char_length("
+                f"replace({c}, U&'\\FFFD', ''))),0)",)))
+        try:
+            return scanplan.for_engine(
+                self, db, aggs,
+                source=lambda side, t: ".".join(
+                    _ident(x) for x in self._split(t)),
+                query=lambda side, sql: [
+                    ln.split("|") for ln in
+                    self._psql(side, db, sql).splitlines() if ln.strip()]), {}
+        except Exception as e:  # noqa: BLE001 - said as what it is
+            return None, {"the text columns":
+                          (str(e).splitlines() or [""])[-1][:90]}
+
     def _text_columns(self, side, db):
         """{schema.table: [text column]} on a side, of the tables the hop
         takes (`TEXT_COLUMNS`, `_scoped`): what the mojibake check samples
@@ -8612,19 +8645,31 @@ select json_build_object(
                 " and n.nspname not like 'pg\\_%'"
                 " and n.nspname not like '\\_\\_%'"
                 f" and c.relname not in {OWN_SQL} order by 1")
-        neq = []
-        for tc in self._scoped(db, self._psql("src", db, txtq))[:30]:
-            tbl, col = tc.split("|", 1)
-            sch2, t2 = self._split(tbl)
-            q = (f'select count(*) filter (where {_ident(col)} is null)||\'|\'||'
-                 f'count(*) filter (where {_ident(col)} = \'\') from {_ident(sch2)}.{_ident(t2)}')
-            try:
-                sv, dv = self._psql("src", db, q), self._psql("dst", db, q)
-            except RuntimeError:
+        # one plan reads what the NULL/empty and replacement-character
+        # checks ask of each table: a read a table a side, not a column
+        scans, unread = self._deep_scans(db, txtq)
+        neq, nfail = [], dict(unread)
+        for agg in (scans.of("nullempty") if scans else ()):
+            sv, dv = scans.value("src", agg), scans.value("dst", agg)
+            if sv is None or dv is None:
+                err = scans.failure(agg)
+                nfail[f"{agg.table}.{agg.name}"] = (
+                    str(err).splitlines()[-1][:90] if err else "not read")
                 continue
-            if sv != dv and "|" in sv and "|" in dv:
-                neq.append(f"{tbl}.{col}: src null/empty={sv} dst={dv}")
-        if neq:
+            s_, d_ = (int(sv[0]), int(sv[1])), (int(dv[0]), int(dv[1]))
+            if s_ != d_:
+                neq.append(f"{agg.table}.{agg.name}: src null/empty="
+                           f"{s_[0]}|{s_[1]} dst={d_[0]}|{d_[1]}")
+        if nfail:
+            res.append(Result("deep", f"{db} nullempty", "error",
+                              f"{len(nfail)} text columns not read - unknown,"
+                              " not clean: " + "; ".join(
+                                  f"{k} ({v})" for k, v in
+                                  list(nfail.items())[:5])
+                              + (f"; and {len(neq)} differ: "
+                                 + "; ".join(neq[:3]) if neq else ""),
+                              category="value.null-empty"))
+        elif neq:
             res.append(Result("deep", f"{db} nullempty", "diff",
                               f"{len(neq)} text columns differ in NULL vs"
                               " empty-string split (semantic flip): "
@@ -8649,22 +8694,24 @@ select json_build_object(
                        f" validation); source is {se}")
         elif se != de:
             enc.append(f"server_encoding differs: src={se} dst={de}")
-        for tc in self._scoped(db, self._psql("src", db, txtq))[:30]:
-            tbl, col = tc.split("|", 1)
-            sch2, t2 = self._split(tbl)
-            c = _ident(col)
-            q = (f"select coalesce(sum(char_length({c}) - char_length("
-                 f"replace({c}, U&'\\FFFD', ''))),0) from"
-                 f" {_ident(sch2)}.{_ident(t2)}")
-            try:
-                sv = int(self._psql("src", db, q) or 0)
-                dv = int(self._psql("dst", db, q) or 0)
-            except (RuntimeError, ValueError):
-                continue
-            if dv > sv:
-                enc.append(f"{tbl}.{col}: {dv - sv} extra U+FFFD replacement"
-                           " chars on target")
-        if enc:
+        cfail = dict(unread)
+        for agg in (scans.of("charset") if scans else ()):
+            sv, dv = scans.value("src", agg), scans.value("dst", agg)
+            if sv is None or dv is None:
+                err = scans.failure(agg)
+                cfail[f"{agg.table}.{agg.name}"] = (
+                    str(err).splitlines()[-1][:90] if err else "not read")
+            elif int(dv[0]) > int(sv[0]):
+                enc.append(f"{agg.table}.{agg.name}: {int(dv[0]) - int(sv[0])}"
+                           " extra U+FFFD replacement chars on target")
+        if cfail:
+            res.append(Result("deep", f"{db} encoding", "error",
+                              "replacement-character scan incomplete, unknown"
+                              " not clean: could not read " + "; ".join(
+                                  f"{k} ({v})" for k, v in
+                                  list(cfail.items())[:5])
+                              + ("; " + "; ".join(enc[:3]) if enc else "")))
+        elif enc:
             res.append(Result("deep", f"{db} encoding", "diff",
                               "; ".join(enc[:6]), "",
                               "re-load affected rows with a non-lossy client"

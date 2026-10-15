@@ -10580,6 +10580,8 @@ loop's sequential databases, `leaves`' private pools, row parity costed end
 to end with an engine-native digest rung, unit resume without markers (MySQL
 has none), sandbox/end-to-end benchmarks.
 
+W6C2 note, 2026-10-16: PostgreSQL (NULL/empty, replacement characters) and SQL Server (NULL/empty, float, replacement characters) deep value checks read through `scanplan.for_engine`, one read a table a side, no column limit, a failed read said as unknown (tests/test_postgres_and_sql_server_deep_checks_share_one_plan.py, written, not run); depth item `verify.value.one-plan` declares every other engine NOT_YET here. Not done: Oracle, ClickHouse, Teradata, BigQuery, pgwire value checks still a read a column; no key-range cut on PostgreSQL/SQL Server plans; `leaves`' private pools; the delta loop's databases one at a time; row parity as a ladder in `decide` costed end to end with a server digest rung and full coverage as a Need.
+
 ### LT.R10 MongoDB standalone followed by buckets
 
 Done: a standalone source is followed by a bucket sweep (`MongoEngine.FOLLOW_WAYS`, `_sweep_round`): dbHash per collection as the unchanged proof, then raw-BSON bucket digests keyed by the canonical `_id` hash (`leaves.bytes_hash`, `id_bucket`), only changed buckets re-read and written; depth D1 with "convert to a single-node replica set" (`changedepth.mongodb`, `MongoEngine.change_depths`).

@@ -3207,7 +3207,7 @@ class MySQLEngine(Engine):
         table's aggregates fused into one read a key range, the ranges and
         both sides read side by side under the check's own slots."""
         import copy
-        from .. import checkpoint, config, decide, scanplan
+        from .. import checkpoint, scanplan
         reader = copy.copy(self)
         reader.hop = copy.copy(self.hop)
         reader.hop.slice = min(max(1, self.hop.slice), 10000)
@@ -3223,22 +3223,11 @@ class MySQLEngine(Engine):
                               (scanplan.covering(got) if k
                                else [(None, None)])]
             return cut[table]
-        marker = getattr(self, "_change_marker", None)
-        scope = getattr(self.hop, "scope_fingerprint", None)
-        real = isinstance(self.hop, config.Hop)
-        return scanplan.run(
+        return scanplan.for_engine(
             self, db, aggregates,
             source=lambda side, t: self._scope(side, db, t),
             query=lambda side, sql: self._q(side, sql), parts=parts,
-            markers=(lambda side, t: marker(side, db, t)) if marker else None,
-            held=self._held_for_cutover(db) if marker else "",
-            scope=scope() if callable(scope) else None,
-            costs=decide.Layered(decide.Costs(), decide.HopCosts(
-                self.hop, "scan/")) if real else None,
-            progress=self.hop.report_dir(db) / progress,
-            evidence=scanplan.Evidence(self.hop.report_dir(db)
-                                       / "scan-evidence.json")
-            if marker else None)
+            progress=progress)
 
     def _value_aggregates(self, db, which):
         """The aggregates of the deep value checks `which` asks

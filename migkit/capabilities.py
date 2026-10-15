@@ -1236,6 +1236,9 @@ def _items():
             _every(("check_counts", "check_data", "check_schema"), _SCOPE)),
         "scope.deep": ("its deep checks read only the tables the hop takes",
                        _every(("check_deep",), _SCOPE)),
+        "verify.value.one-plan": (
+            "its deep value checks read a table once a side, every column"
+            " and check in one shared plan", own("_deep_scans")),
         "scope.copy": ("the tables its copy lists are the hop's",
                        _every(("list_move_tables",), _SCOPE)),
         "scope.repair": ("its repairs act only on tables the hop takes",
@@ -2738,6 +2741,28 @@ UNPROVED = {
     "verify.identity.sequence-parity": "snowflake",
     "verify.tables": "redshift snowflake",
 }
+
+# --- the deep value checks' one shared plan (P0-VERIFY-EXECUTION) -----------
+#
+# Where an engine has no NULL/empty check the plan has nothing to carry, and
+# that cell's reason stands for this one; an engine whose value checks still
+# read a column at a time waits on the plan's own row.
+DEPTH_GAPS["verify.value.one-plan"] = {
+    **_each(NOT_YET, "P0-VERIFY-EXECUTION",
+            "clickhouse oracle teradata bigquery cockroachdb dsql gaussdb"
+            " oceanbase-oracle mongodb dynamodb cassandra opensearch"
+            " cosmosdb spanner bigtable firestore datastore keyspaces"
+            " lindorm geminidb-cassandra geminidb-mongo geminidb-redis"
+            " couchbase snowflake redshift db2 db2i db2zos ase sqlite duckdb"
+            " parquet copybook iceberg delta neptune timestream sapodp saas"
+            " hetero generic kafka kinesis pubsub"),
+    **{n: v for n, v in DEPTH_GAPS["verify.value.null-empty"].items()
+       if v[0] == NOT_APPLICABLE},
+}
+# MySQL's plan (`MySQLEngine._deep_scans`) is proved through `scanplan`'s
+# own tests only; no test drives the engine's methods on fakes yet
+UNPROVED["verify.value.one-plan"] = "mysql tidb oceanbase polardbx dcdb"
+
 
 # --- CockroachDB and Aurora DSQL, on PostgreSQL's wire (P0-PARITY) ----------
 #

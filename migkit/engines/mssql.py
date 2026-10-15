@@ -50,6 +50,19 @@ def _without_parameters(text):
     return text
 
 
+
+def _unread(err):
+    """Why a column's aggregate was not read, in one line."""
+    return (str(err).strip().splitlines() or ["not read"])[-1][:90] \
+        if err is not None else "not read"
+
+
+def _listed(unread, bad):
+    """The columns not read, and what the ones read found."""
+    return ("; ".join(f"{k} ({v})" for k, v in list(unread.items())[:5])
+            + (f"; and {len(bad)} differ: " + "; ".join(bad[:3])
+               if bad else ""))
+
 class MSSQLEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
     CHARSETS = True
@@ -1213,14 +1226,18 @@ class MSSQLEngine(DbapiRows, Engine):
         """The value, structure and access checks beyond the ones above,
         each read on both sides."""
         res = []
+        # one plan reads what the NULL/empty and float checks ask of each
+        # table: a read a table a side, not a read a column a check
+        scans = self._deep_scans(db)
         for word, check in (
                 ("narrowing", self._deep_narrowing),
                 ("timeshift", self._deep_timeshift),
                 ("charset", self._deep_charset),
                 ("collation", self._deep_collation),
                 ("generated", self._deep_generated),
-                ("nullempty", self._deep_nullempty),
-                ("float", self._deep_float),
+                ("nullempty",
+                 lambda d: self._deep_nullempty(d, scans)),
+                ("float", lambda d: self._deep_float(d, scans)),
                 ("render", self._deep_render),
                 ("checks", self._deep_unenforced_checks),
                 ("partitions", self._deep_partitions),
@@ -1341,22 +1358,29 @@ class MSSQLEngine(DbapiRows, Engine):
                 note += " (DOWNGRADE, what the target cannot hold arrives" \
                         " as ?)"
             bad.append(note)
-        for (t, col), (kind, _) in sorted(read["src"].items())[:30]:
-            if kind in ("text", "ntext") or (t, col) not in read["dst"]:
-                continue
-            mark = "nchar(65533)" if kind in self.UNICODE else "'?'"
-            count = ("select count_big(*) from "
-                     f"{self._qualified('src', db, t)} where charindex("
-                     f"{mark}, {self._q(col)}) > 0")
-            try:
-                src = int(self._cmd("src", db, count)[0][0] or 0)
-                dst = int(self._cmd("dst", db, count)[0][0] or 0)
-            except (RuntimeError, IndexError, ValueError):
-                continue
-            if dst > src:
-                bad.append(f"{t}.{col}: {dst - src} more rows hold "
-                           + ("U+FFFD" if kind in self.UNICODE else "a ?")
-                           + " on the target")
+        from ..scanplan import Aggregate
+        kinds = {(t, col): kind for (t, col), (kind, _) in read["src"].items()
+                 if kind not in ("text", "ntext") and (t, col) in read["dst"]}
+        aggs = [Aggregate("charset", t, col, (
+            "isnull(sum(case when charindex("
+            + ("nchar(65533)" if kind in self.UNICODE else "'?'")
+            + f", {self._q(col)}) > 0 then 1 else 0 end), 0)",))
+            for (t, col), kind in sorted(kinds.items())]
+        got = self._value_scan(db, aggs) if aggs else None
+        unread = {}
+        for agg in aggs:
+            src, dst = got.value("src", agg), got.value("dst", agg)
+            if src is None or dst is None:
+                unread[f"{agg.table}.{agg.name}"] = _unread(got.failure(agg))
+            elif int(dst[0]) > int(src[0]):
+                bad.append(f"{agg.table}.{agg.name}: {int(dst[0]) - int(src[0])}"
+                           " more rows hold " + (
+                               "U+FFFD" if kinds[(agg.table, agg.name)]
+                               in self.UNICODE else "a ?") + " on the target")
+        if unread:
+            return Result("deep", f"{db} charset", "error",
+                          f"{len(unread)} text columns not read - unknown,"
+                          " not clean: " + _listed(unread, bad))
         if bad:
             return Result("deep", f"{db} charset", "diff", "; ".join(bad[:6]),
                           "", "keep the target column as wide as the"
@@ -1477,26 +1501,67 @@ class MSSQLEngine(DbapiRows, Engine):
                        " c.table_name and t.table_type = 'BASE TABLE')"
                        " order by 1, 2"))
 
-    def _deep_nullempty(self, db):
+    def _value_scan(self, db, aggregates):
+        """`scanplan.Got` of `aggregates` over both sides of `db`: every
+        aggregate of a table in one read a side, the rows counted as
+        `count_big` so a table past two billion rows still answers."""
+        from .. import scanplan
+        return scanplan.for_engine(
+            self, db, aggregates,
+            source=lambda side, t: self._qualified(side, db, t),
+            query=lambda side, sql: self._cmd(side, db, sql),
+            count="count_big(*)")
+
+    def _value_aggregates(self, db, which):
+        """The aggregates the NULL/empty and float checks (`which`) ask of
+        every column they read."""
+        from ..scanplan import Aggregate
+        out = []
+        if "nullempty" in which:
+            for t, col in self._columns_named(db, self.TEXT_COLUMNS):
+                c = self._q(col)
+                out.append(Aggregate("nullempty", t, col, (
+                    f"isnull(sum(case when {c} is null then 1 else 0 end), 0)",
+                    f"isnull(sum(case when {c} = '' then 1 else 0 end), 0)")))
+        if "float" in which:
+            for t, col in self._columns_named(db, self.FLOAT_COLUMNS):
+                c = self._q(col)
+                out.append(Aggregate("float", t, col, (
+                    f"count({c})", f"isnull(sum(cast({c} as float)), 0)",
+                    f"isnull(max(abs(cast({c} as float))), 0)"),
+                    ("sum", "sum", "max")))
+        return out
+
+    def _deep_scans(self, db):
+        """The NULL/empty and float checks' one plan, or None where it
+        cannot be made - each check then reads, and says, on its own."""
+        try:
+            return self._value_scan(db, self._value_aggregates(
+                db, ("nullempty", "float")))
+        except Exception:  # noqa: BLE001 - each check says its own error
+            return None
+
+    def _deep_nullempty(self, db, scans=None):
         """NULL and '' are different values a mover swaps without a word:
         both sides still hold something in the column, a row checksum can
         agree, and the application's `IS NULL` and `= ''` branches
         diverge. The two counts per text column are compared."""
-        bad = []
-        for t, col in self._columns_named(db, self.TEXT_COLUMNS)[:30]:
-            q = (f"select sum(case when {self._q(col)} is null then 1 else 0"
-                 f" end), sum(case when {self._q(col)} = '' then 1 else 0"
-                 f" end) from {self._qualified('src', db, t)}")
-            try:
-                s = [int(x) if x != "NULL" else 0
-                     for x in self._cmd("src", db, q)[0]]
-                d = [int(x) if x != "NULL" else 0
-                     for x in self._cmd("dst", db, q)[0]]
-            except (RuntimeError, IndexError, ValueError):
+        scans = scans or self._value_scan(
+            db, self._value_aggregates(db, ("nullempty",)))
+        bad, unread = [], {}
+        for agg in scans.of("nullempty"):
+            sv, dv = scans.value("src", agg), scans.value("dst", agg)
+            if sv is None or dv is None:
+                unread[f"{agg.table}.{agg.name}"] = _unread(scans.failure(agg))
                 continue
+            s, d = [int(x) for x in sv], [int(x) for x in dv]
             if s != d:
-                bad.append(f"{t}.{col}: src null/empty={s[0]}|{s[1]}"
-                           f" dst={d[0]}|{d[1]}")
+                bad.append(f"{agg.table}.{agg.name}: src null/empty="
+                           f"{s[0]}|{s[1]} dst={d[0]}|{d[1]}")
+        if unread:
+            return Result("deep", f"{db} nullempty", "error",
+                          f"{len(unread)} text columns not read - unknown,"
+                          " not clean: " + _listed(unread, bad))
         if bad:
             return Result("deep", f"{db} nullempty", "diff",
                           f"{len(bad)} text columns differ in NULL vs"
@@ -1507,25 +1572,23 @@ class MSSQLEngine(DbapiRows, Engine):
         return Result("deep", f"{db} nullempty", "ok",
                       "NULL vs empty-string consistent on text columns")
 
-    def _deep_float(self, db):
+    def _deep_float(self, db, scans=None):
         """`float` and `real` are approximations, so a checksum over them
         is the wrong instrument: the aggregate is compared with a
         tolerance against the magnitude actually present."""
-        cols = self._columns_named(db, self.FLOAT_COLUMNS)[:30]
-        bad = []
-        for t, col in cols:
-            c = self._q(col)
-            q = (f"select count({c}), isnull(sum(cast({c} as float)), 0),"
-                 f" isnull(max(abs(cast({c} as float))), 0) from "
-                 f"{self._qualified('src', db, t)}")
-            try:
-                sn, ss, smax = self._cmd("src", db, q)[0]
-                dn, ds, dmax = self._cmd("dst", db, q)[0]
-                counts = (int(sn), int(dn))
-                sums = (float(ss), float(ds))
-                top = max(float(smax), float(dmax))
-            except (RuntimeError, IndexError, ValueError):
+        scans = scans or self._value_scan(
+            db, self._value_aggregates(db, ("float",)))
+        cols = scans.of("float")
+        bad, unread = [], {}
+        for agg in cols:
+            sv, dv = scans.value("src", agg), scans.value("dst", agg)
+            if sv is None or dv is None:
+                unread[f"{agg.table}.{agg.name}"] = _unread(scans.failure(agg))
                 continue
+            t, col = agg.table, agg.name
+            counts = (int(sv[0]), int(dv[0]))
+            sums = (float(sv[1]), float(dv[1]))
+            top = max(float(sv[2]), float(dv[2]))
             if counts[0] != counts[1]:
                 bad.append(f"{t}.{col}: non-null count src={counts[0]}"
                            f" dst={counts[1]}")
@@ -1533,6 +1596,10 @@ class MSSQLEngine(DbapiRows, Engine):
             scale = max(abs(sums[0]), abs(sums[1]), top, 1.0)
             if abs(sums[0] - sums[1]) > scale * 1e-9:
                 bad.append(f"{t}.{col}: sum src={sums[0]!r} dst={sums[1]!r}")
+        if unread:
+            return Result("deep", f"{db} float", "error",
+                          f"{len(unread)} float/real columns not read -"
+                          " unknown, not clean: " + _listed(unread, bad))
         if bad:
             return Result("deep", f"{db} float", "diff",
                           f"{len(bad)} float/real columns drift beyond"
