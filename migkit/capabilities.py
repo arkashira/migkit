@@ -3177,17 +3177,22 @@ def depth():
     return {n: {i: depth_cell(n, i)[0] for i in DEPTH} for n in NAMES}
 
 
-def backlog_rows():
-    """The ids of `docs/backlog-index.md`'s rows."""
+def backlog_status():
+    """{id: status} of `docs/backlog-index.md`'s rows."""
     from pathlib import Path
     index = Path(__file__).resolve().parent.parent / "docs" / \
         "backlog-index.md"
-    rows = set()
+    rows = {}
     for line in index.read_text().splitlines() if index.exists() else ():
         cells = [c.strip() for c in line.split("|")]
-        if len(cells) > 3 and cells[1].isdigit():
-            rows.add(cells[2])
+        if len(cells) > 4 and cells[1].isdigit():
+            rows[cells[2]] = cells[4]
     return rows
+
+
+def backlog_rows():
+    """The ids of `docs/backlog-index.md`'s rows."""
+    return set(backlog_status())
 
 
 def depth_failing():

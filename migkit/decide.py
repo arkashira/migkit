@@ -2423,7 +2423,7 @@ WAYS = {
                                      " or a SUPER) and a VARCHAR 65,535"
                                      " bytes, each read whole in batches"
                                      " cut by bytes"),
-        "*": (NOT_YET, "R10"),
+        "*": (NOT_YET, "P0-PARITY.lv.new"),
     },
     "partitioned": {
         **_NONE,
@@ -2448,10 +2448,13 @@ WAYS = {
         "polardbx": ("yes", "@_deep_partitions"),
         "dcdb": ("yes", "@_deep_partitions"),
         # partitioned tables exist on these and none is read by its own
-        # partitions yet; a pair is read as its engines are
-        **{n: (NOT_YET, "R13") for n in (
-            "ase", "iceberg", "delta", "gaussdb", "oceanbase-oracle",
-            "lindorm", "hetero")},
+        # partitions yet: ASE's and the lakes' are the smaller gaps, the
+        # services' and a pair's (read as its engines are) every
+        # capability on every engine
+        **{n: (NOT_YET, "P0-PARITY.small") for n in (
+            "ase", "iceberg", "delta")},
+        **{n: (NOT_YET, "P0-PARITY.all") for n in (
+            "gaussdb", "oceanbase-oracle", "lindorm", "hetero")},
         "geminidb-redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
                                            " partitioned ones"),
         "redis": (NOT_APPLICABLE, "a keyspace has no tables, so no"
@@ -2513,7 +2516,7 @@ WAYS = {
         **{n: (NOT_APPLICABLE, "an application's data is read through its"
                                " interface, which shows no partitions")
            for n in _READ_ONLY},
-        "*": (NOT_YET, "R13"),
+        "*": (NOT_YET, "P0-PARITY.all"),
     },
     "missing grant": {
         **_NONE,
@@ -2525,8 +2528,8 @@ WAYS = {
         # the bulk sessions' one grant, named to the DBA; single statements
         # otherwise, which need none of it
         "teradata": ("yes", "dba._teradata"),
-        "hetero": (NOT_YET, "0"),
-        "mongodb": (NOT_YET, "0"),
+        "hetero": (NOT_YET, "P0-PARITY.small"),
+        "mongodb": (NOT_YET, "P0-PARITY.small"),
         "*": (NOT_APPLICABLE, _NO_PROGRAM),
     },
     # the target kept from the application while migkit moves into it
@@ -2569,7 +2572,7 @@ WAYS = {
         **{n: ("yes", f"freeze.{c}") for n, c in _HELD_AS
            + (("lindorm", "LindormHold"),)},
         **{n: (NOT_APPLICABLE, _CLOUD_POLICIES) for n in _BY_POLICY},
-        "*": (NOT_YET, "R13"),
+        "*": (NOT_YET, "F2.freeze"),
     },
     "slow link": {
         **_NONE,
@@ -2643,7 +2646,7 @@ WAYS = {
                                     " so a source's writes are stopped by"
                                     " its operator (freeze: operator) and"
                                     " proved by migkit"),
-        "*": (NOT_YET, "F2"),
+        "*": (NOT_YET, "F2.freeze"),
     },
 }
 # the copier reads a table whose only index is not unique as one with no
@@ -2736,6 +2739,18 @@ def coverage():
     "stale"}}: the matrix of shape by engine."""
     from .engines import NAMES
     return {n: {s: cell(n, s)[0] for s in SHAPES} for n in NAMES}
+
+
+def unowned_gaps():
+    """(shape, engine, item) of each not-yet cell whose item is no row of
+    `docs/backlog-index.md`, or a row already done: a gap waits on work
+    still to do, never on work closed."""
+    from .capabilities import backlog_status
+    rows = backlog_status()
+    return [(s, e, why) for s, ways in WAYS.items()
+            for e, (state, why) in ways.items()
+            if state == NOT_YET
+            and (why not in rows or rows[why].startswith("DONE"))]
 
 
 def uncovered():
@@ -2962,10 +2977,57 @@ def task_gaps():
     return out
 
 
-def change_window(changes, seconds):
-    """Seconds for a window holding the square root of a measured batch."""
+#: a tail's proof windows, as multiples of the width it began with: the
+#: square root of the batch at its measured rate, as many windows as
+#: changes in each. Wider proves a batch in fewer windows, narrower names
+#: a difference closer to when it was written; which is cheaper to read
+#: back on a hop is measured there (`change_window`)
+WINDOW_STEPS = (1, 2, 4, 0.5, 0.25)
+#: the prefix a window width's measured verify time is kept under on a hop
+WINDOW_COSTS = "change-window:"
+
+
+def window_rungs(changes, seconds):
+    """({rung name: seconds wide}, rungs): the widths a batch of `changes`
+    read over `seconds` may be proved in. The first, the square root of
+    the batch at its rate, always holds; a narrower one needs the rate
+    observed to put at least one change in each window, a wider one the
+    batch to span more than one window of it."""
+    import math
+    base = math.sqrt(changes) / (changes / seconds)
+    widths, rungs = {}, []
+    for step in WINDOW_STEPS:
+        name = f"window x{step:g}"
+        width = widths[name] = base * step
+        needs = ()
+        if step < 1:
+            needs = (Need("a change in every window at the rate observed",
+                          lambda f, w=width: f["rate"] * w >= 1,
+                          "{rung}: fewer than one change a window at the"
+                          " rate observed"),)
+        elif step > 1:
+            needs = (Need("a batch spanning more than one window",
+                          lambda f, w=width: f["span"] > w,
+                          "{rung}: the batch spans less than one window"),)
+        rungs.append(Rung(
+            name, f"windows of {step:g} times the batch's square root",
+            needs=needs, footprint=int(step != 1),
+            because="the square root of the batch at its measured rate:"
+                    " as many windows as changes in each"))
+    return widths, tuple(rungs)
+
+
+def change_window(changes, seconds, costs=None):
+    """(seconds wide, the `Choice`) of the windows a tail's batch is proved
+    in, `changes` read over `seconds`: the width climbed to on `costs` -
+    the window verify time a change measured on the hop (`WINDOW_COSTS`),
+    each width that holds timed once before the cheapest is kept. (None,
+    None) where the batch has no rate to cut by."""
     import math
     if changes <= 0 or seconds <= 0 or not math.isfinite(seconds):
-        return None
-    rate = changes / seconds
-    return math.sqrt(changes) / rate
+        return None, None
+    widths, rungs = window_rungs(changes, seconds)
+    got = climb("change windows", rungs,
+                Facts({"rate": changes / seconds, "span": seconds}),
+                costs=costs)
+    return widths[got.path or rungs[0].name], got

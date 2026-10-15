@@ -9186,25 +9186,6 @@ select json_build_object(
         return _u.judge(getattr(self._brands()[0], "name", None), stored,
                         src_m, dst_m)
 
-    def _held_for_cutover(self, db):
-        """Why this check reads every table of `db`, or '': its proof goes
-        into a cutover - the cutover's own last check
-        (`cutover._final_check` sets `cutover_proof`), or a check run while
-        a source freeze is recorded (`freeze.source_frozen`). A freeze
-        record that cannot be read is a doubt, and a doubt reads."""
-        if self.cutover_proof:
-            return "the proof goes into a cutover, which reads every table"
-        from .. import freeze
-        try:
-            frozen = freeze.source_frozen(self.hop, [db])
-        except Exception as e:  # noqa: BLE001 - a doubt reads every table
-            return ("whether the source is held for a cutover could not be"
-                    f" read ({str(e).strip()[:120]})")
-        if frozen:
-            return ("the source is held for a cutover, and the proof that"
-                    " goes into it reads every table")
-        return ""
-
     def _change_marker(self, side, db, table):
         """One table's marker (`_change_markers`), or None."""
         sch, tbl = self._split(table)
@@ -12434,17 +12415,24 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         def undo(rung, error):
             ways.give_up_passing("a range could not pass server to server:"
                                  f" {decide._first(error)}")
-        _, got = decide.attempt(
-            what, rungs, run, ways.trials.facts, keep=way.name, undo=undo,
-            log=log, prove=False, record=False, switch=movers.switchable,
-            otherwise="copying it as text")
+        def tried(go):
+            # the one way a pass is given up on: the copy failing as it
+            # runs, or its range held different after it ran
+            return decide.attempt(
+                what, rungs, go, ways.trials.facts, keep=way.name,
+                undo=undo, log=log, prove=False, record=False,
+                switch=movers.switchable, otherwise="copying it as text")[1]
+
+        def again():
+            return self._copy_checked(db, qt, cols, where, pre_sql, what,
+                                      log, way=ways.pick(way.begin),
+                                      proved=proved)
+        got = tried(run)
         if got is None or got is pg_pass.SnapshotLost:
             # given up on for the table, or a snapshot that ended before
             # the range could import it: the range again, as the table's
             # ways now pick it
-            return self._copy_checked(db, qt, cols, where, pre_sql, what,
-                                      log, way=ways.pick(way.begin),
-                                      proved=proved)
+            return again()
         rows, lsn = got
         checked = (self.hop.options or {}).get("verify_batches", True)
 
@@ -12465,13 +12453,11 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 if proved is not None:
                     proved()
                 return
-            log(f"{what}: passed server to server, {why} - copying it again"
-                " as text")
-            self._copy_checked(db, qt, cols, where, pre_sql, what, log,
-                               way=way.instead(
-                                   "a range passed server to server was"
-                                   f" held different: {why}"),
-                               proved=proved)
+            def held(choice):
+                if choice.path == way.name:
+                    raise decide.Blocked(f"it was held different: {why}")
+            tried(held)
+            again()
         ctx.check(check)
         return rows
 

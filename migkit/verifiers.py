@@ -585,16 +585,23 @@ INTERVALS = "change-intervals"
 class ChangeIntervals:
     """A batch's source-time signatures and independently read target effects."""
 
-    def __init__(self, target, db, store, changes, seconds):
+    def __init__(self, target, db, store, changes, seconds, costs=None):
         import copy
         from . import decide
         self.target, self.db = target, db
         self.changes = copy.deepcopy(changes)
         self.clock = dict(store.get(INTERVALS + "-clock") or {})
         self.receipt = {"windows": [], "unknown": [], "through": None}
+        hop = getattr(target, "hop", None)
+        # each width's verify time kept on the hop, so the next batch
+        # climbs on what this one measured
+        self.costs = costs if costs is not None else (
+            decide.HopCosts(hop, decide.WINDOW_COSTS) if hop is not None
+            else decide.Costs())
         times = [c["txn_ts"] for c in changes if c.get("txn_ts") is not None]
         span = max(times) - min(times) if times else 0
-        width = decide.change_window(len(changes), span or seconds)
+        width, self.window = decide.change_window(
+            len(changes), span or seconds, self.costs)
         self.columns, self.events = {}, []
         by = {}
         for c in self.changes:
@@ -644,8 +651,10 @@ class ChangeIntervals:
 
     def observed(self, applied):
         """Read back the final effects; an apply acknowledgement alone is no proof."""
+        import time
         from . import canon
         from .engines.base import Engine
+        began, read = time.monotonic(), True
         bad, observed = set(), {}
         unknown = set(self.receipt["unknown"])
         grouped = {}
@@ -685,6 +694,7 @@ class ChangeIntervals:
                         if mine != theirs:
                             bad.add(table)
         except Exception:
+            read = False
             unknown.update(c["table"] for c in self.changes)
         from collections import Counter
         def identity(c):
@@ -726,6 +736,9 @@ class ChangeIntervals:
                 from .verdict import interval_status
                 w["status"] = interval_status(w["source"], w["target"], True)
         self.receipt["unknown"] = sorted(unknown)
+        if read and self.window is not None and self.window.rung is not None:
+            self.costs.saw(self.window.path, len(self.changes),
+                           time.monotonic() - began)
         return self.receipt
 
 

@@ -423,18 +423,6 @@ class Way:
     def took(self, units, seconds):
         self.ways.trials.took(self.name, units, seconds)
 
-    def instead(self, why):
-        """The pass-through gone wrong on this unit: given up on for the
-        rest of the table, and the way to copy the unit again - unless
-        what went wrong is a refusal, which the text copy would meet too
-        and which stops the table in the database's words."""
-        from .. import movers
-        stop = movers.refusal(why)
-        if stop is not None:
-            raise stop
-        self.ways.give_up_passing(why)
-        return self.ways.pick(self.begin)
-
 
 class Ways:
     """The ways one table's units are copied, each unit climbing the

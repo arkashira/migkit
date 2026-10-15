@@ -62,9 +62,52 @@ def test_commit_time_covers_the_whole_transaction():
     batch = changes()
     assert all(c["txn_ts"] == 100 for c in batch)
     assert [c.get("txn_end", False) for c in batch] == [False] * 3 + [True]
-    assert decide.change_window(100, 10) == 1
-    assert decide.change_window(100, 1) == .1
-    assert decide.change_window(0, 1) is None
+    assert decide.change_window(100, 10)[0] == 1
+    assert decide.change_window(100, 1)[0] == .1
+    assert decide.change_window(0, 1) == (None, None)
+
+
+def test_the_window_width_is_climbed_on_its_measured_verify_time():
+    costs = decide.Costs()
+    width, got = decide.change_window(100, 10, costs)
+    assert (width, got.path) == (1, "window x1")
+    # the first width timed, the next one that holds is timed once
+    costs.saw("window x1", 100, 2.0)
+    width, got = decide.change_window(100, 10, costs)
+    assert (width, got.path) == (2, "window x2")
+    costs.saw("window x2", 100, 0.5)
+    for name in ("window x4", "window x0.5", "window x0.25"):
+        costs.saw(name, 100, 1.0)
+    width, got = decide.change_window(100, 10, costs)
+    assert (width, got.path) == (2, "window x2")
+    # a width no window of which holds a change at the rate observed, or
+    # wider than the batch spans, is never cut
+    _, rungs = decide.window_rungs(4, 4)
+    facts = decide.Facts({"rate": 1.0, "span": 4})
+    kept, out = decide.prune(rungs, facts)
+    assert [r.name for r in kept] == ["window x1", "window x0.5"]
+    assert {r.name for r, _ in out} == {"window x2", "window x4",
+                                        "window x0.25"}
+
+
+def test_a_proof_records_its_window_verify_time_under_the_chosen_width(
+        tmp_path):
+    costs = decide.Costs()
+    target = Target()
+    batch = changes()
+    proof = verifiers.ChangeIntervals(target, "d", tailtables.Store.of(
+        tmp_path), batch, 4, costs=costs)
+    assert proof.window.path == "window x1"
+    target.apply(batch)
+    proof.observed(len(batch))
+    assert costs.get("window x1") is not None
+    target.neutral_rows_by_key = lambda *a: (_ for _ in ()).throw(
+        RuntimeError())
+    other = decide.Costs()
+    proof = verifiers.ChangeIntervals(target, "d", tailtables.Store.of(
+        tmp_path / "b"), changes(), 4, costs=other)
+    proof.observed(4)
+    assert other.get("window x1") is None
 
 
 def test_windows_are_half_open_and_read_back_values_and_deletes(tmp_path):

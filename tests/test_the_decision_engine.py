@@ -10,8 +10,6 @@ own lists, with no server. Their live behaviour stays pinned by their own
 tests.
 """
 import os
-import re
-from pathlib import Path
 
 import pytest
 
@@ -20,7 +18,6 @@ from migkit.config import Endpoint, Hop
 from tests.test_the_report_does_not_name_its_tools import TOOLS
 
 R = d.Rung
-BACKLOG = (Path(__file__).parent.parent / "docs" / "backlog.md").read_text()
 
 
 def _hop(tmp_path=None, engine="postgres"):
@@ -269,14 +266,27 @@ def test_every_shape_has_a_way_or_an_honest_gap_on_every_engine():
 
 
 def test_a_gap_carries_its_reason_or_its_backlog_item():
+    assert d.unowned_gaps() == []
     for shape, ways in d.WAYS.items():
         assert shape in d.SHAPES
         for engine, (state, why) in ways.items():
-            if state == d.NOT_YET:
-                assert re.search(rf"^(\*\*|### ){re.escape(why)}\. ",
-                                 BACKLOG, re.M), (shape, engine, why)
-            elif state == d.NOT_APPLICABLE:
+            if state == d.NOT_APPLICABLE:
                 assert len(why.split()) >= 4, (shape, engine, why)
+
+
+def test_a_gap_waiting_on_a_closed_row_is_unowned(monkeypatch):
+    from migkit import capabilities as caps
+    rows = caps.backlog_status()
+    assert rows["0"].startswith("DONE")
+    assert not rows["P0-PARITY.small"].startswith("DONE")
+    monkeypatch.setitem(d.WAYS, "missing grant",
+                        {**d.WAYS["missing grant"],
+                         "mongodb": (d.NOT_YET, "0"),
+                         "hetero": (d.NOT_YET, "no-such-row")})
+    got = d.unowned_gaps()
+    assert ("missing grant", "mongodb", "0") in got
+    assert ("missing grant", "hetero", "no-such-row") in got
+    assert all(why not in ("P0-PARITY.small",) for _, _, why in got)
 
 
 def test_a_way_removed_from_the_code_turns_its_cell_stale(monkeypatch):
