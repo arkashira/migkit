@@ -11095,7 +11095,6 @@ Not done: a same-engine pair's inner engines must say their side (`pair_side`), 
   connections, memory or spool as numbers. No `migkit` command exports the
   change sheet or writes a run's evidence back yet.
 
-<<<<<<< HEAD
 ### W12L (2026-10-16) change-sheet command, doctor numbers
 Done: `migkit change-sheet` (export, `--back`); `doctor` says connections per side, memory and disk spool of this machine, and objects created on the servers per leg (`report.footprint_lines`).
 Not done: the run does not call `write_back` by itself as each step ends; server objects are read from each way's `leaves` words (no structured per-side counts on `decide.Rung`); the disk spool is the bytes carried, before compression.
@@ -11104,7 +11103,4 @@ Not done: the run does not call `write_back` by itself as each step ends; server
   `consolidate.settings` but the hop-key check (`hopkeys`) is not touched;
   `scenarios.storage_copy_case` is not yet read by the move's copy-way
   choice; no capabilities cell names the ClickHouse storage reads.
-||||||| c95da9db
-=======
 W12D (R19.9/R20.3/W10A tail) not done: the Arrow batches (`pgslot.columnar`) are built and proved equal on both paths but the appliers still take change records - handing them the batches is each target engine's `neutral_apply`; the MySQL stream's heartbeat period is the tail's longest idle wait, not yet measured per source; the stream-vs-poll latency is not measured into `decide.change_read`'s costs yet; MSSQL keeps polling, paced by `tailctl.Pace` like every polled tail. Sandbox proof against live PostgreSQL/MySQL streams is owed.
->>>>>>> w12d

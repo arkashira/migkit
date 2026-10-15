@@ -3339,7 +3339,6 @@ def worker_budget(facts):
     return max(1, n), choice
 
 
-<<<<<<< HEAD
 # --- a continuous hop into a warehouse (LT.P3, S4) --------------------------
 
 #: the share of a batch's interval its landing may take: the rest is the
@@ -3471,8 +3470,6 @@ def warehouse_feed(facts):
     costs = Costs({n: v for n in ("provider", "own")
                    if (v := lag(n)) is not None})
     return climb("the feed into the warehouse", rungs, f, costs=costs)
-||||||| c95da9db
-=======
 #: how a tail reads its source's log: pushed by the server as it commits,
 #: or asked again at a pace the change rate sets (`tailctl.Pace`)
 CHANGE_READS = (
@@ -3505,4 +3502,3 @@ def change_read(facts, costs=None):
     each gave a batch (`costs`: {"stream": s, "poll": s})."""
     return climb("reading the source's log", CHANGE_READS, facts,
                  costs=costs)
->>>>>>> w12d
