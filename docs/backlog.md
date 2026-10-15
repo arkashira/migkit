@@ -8230,6 +8230,21 @@ range digest, the fenced re-check, exact batches or the final proof.
     the rendering pushed into SQL where it is 80% of the cost;
     parallel workers on the server (`max_parallel_workers_per_gather`
     as a session setting) for the digest scan.
+    Done (R20.10, part): a table's leaves are hashed by the way
+    `leaves.HASH_WAYS` climbs on rows/s timed on its first 10,000 rows
+    on both sides (md5, sha256, sha1 of the canonical text, each side's
+    SQL held to the fold here on the same rows; md5 where none else
+    holds), logged as `leaf hash`; a proved PostgreSQL- or MySQL-speaking
+    server computes its leaves in that SQL (`ProvedDigest.leaf_proved`);
+    range leaves are read by `sizing.Plan`'s statements at once
+    (`leaves.gather`). Proved by `test_the_fastest_hash_the_pair_allows.py`.
+    Not done: a native row hash with no text rendering
+    (`hash_record_extended`, HASHBYTES, cityHash64, FARM_FINGERPRINT)
+    needs this process to fold the same number, which no hash here does
+    yet, so it is not a rung; the table digest (`canon.digest_expr`) is
+    still md5 (canon is another ticket's); server-side parallel workers
+    as a session setting are not set; the sandbox tests are written, not
+    run (no docker in this ticket).
 11. **Only what changed since the last proof:** tables and leaves
     untouched since they were last proved (modification counters,
     the tail's own record of keys touched) are not read again.

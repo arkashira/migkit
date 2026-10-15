@@ -82,6 +82,21 @@ class ProvedDigest:
             known[at] = ok
         return ok
 
+    def leaf_proved(self, side, db, table, columns):
+        """Whether a table's leaves (`leaves`) are computed in the server's
+        SQL: the statements they are read by are there, every column is
+        rendered in its SQL, and the rendering is proved on the table's
+        first rows - the proof the digest stands on. The hash itself is
+        held to the fold here again on the leaves' own first rows
+        (`leaves.probe`)."""
+        from .. import canon
+        if not all(callable(getattr(self, n, None)) for n in
+                   ("run_rule", "_quote_ident", "_qualified")):
+            return False
+        if any(canon.folded_here(c) for _, c in columns):
+            return False
+        return self._proved(side, db, table, list(columns))
+
     def neutral_digest(self, side, db, table, columns, where=None):
         """(rows, digest): the server's, where every column is rendered in
         its SQL and the rendering is proved on the table's first rows;

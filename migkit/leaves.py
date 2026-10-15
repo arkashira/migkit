@@ -127,11 +127,22 @@ def bytes_hash(salt, data):
                            usedforsecurity=False).hexdigest()[:HEX], 16)
 
 
-def text_hash(salt, text):
-    """A row's (or key's) hash: the first 60 bits of md5(salt || text),
-    the canonical digest's width (`canon.DIGEST_BITS`) behind this run's
-    salt (`Engine.digest_salt`), as an integer."""
-    return int(hashlib.md5((salt + text).encode(),
+#: the hashes a row's canonical text may be hashed with, here and in a
+#: server's SQL alike, each read as its first `HEX` hex digits - a leaf's
+#: sums are as wide whichever is taken; which one a table's leaves use is
+#: measured (`fastest_hash`), md5 where nothing was
+HASHES = {"md5": hashlib.md5, "sha256": hashlib.sha256,
+          "sha1": hashlib.sha1}
+#: rows a side's hashes are timed on and held to the fold here by
+PROBE_ROWS = 10_000
+
+
+def text_hash(salt, text, way="md5"):
+    """A row's (or key's) hash: the first 60 bits of `way`(salt || text),
+    md5 unless the table's leaves measured another faster, the canonical
+    digest's width (`canon.DIGEST_BITS`) behind this run's salt
+    (`Engine.digest_salt`), as an integer."""
+    return int(HASHES[way]((salt + text).encode(),
                            usedforsecurity=False).hexdigest()[:HEX], 16)
 
 
@@ -143,6 +154,7 @@ class Spec:
     base: int = 0           #: range: the lowest key at planning
     width: int = 1          #: range: keys a leaf
     salt: str = ""
+    hash: str = "md5"       #: the row hash, a key of `HASHES`
 
     def bucket(self, kh, key=None):
         if self.kind == "range":
@@ -156,25 +168,26 @@ class Spec:
 
     def as_dict(self):
         return {"kind": self.kind, "bits": self.bits, "base": self.base,
-                "width": self.width, "salt": self.salt}
+                "width": self.width, "salt": self.salt, "hash": self.hash}
 
     @classmethod
     def of(cls, d):
         return cls(d["kind"], int(d.get("bits", 0)), int(d.get("base", 0)),
-                   int(d.get("width", 1)), d.get("salt", ""))
+                   int(d.get("width", 1)), d.get("salt", ""),
+                   d.get("hash") or "md5")
 
 
-def plan(rows, kind, lo=None, hi=None, salt=""):
+def plan(rows, kind, lo=None, hi=None, salt="", way="md5"):
     """The leaves for a table of about `rows` rows: `LEAF_ROWS` a leaf on
-    average, at most 2^`MOST_BITS` of them."""
+    average, at most 2^`MOST_BITS` of them, hashed by `way`."""
     leaves = max(1, -(-int(rows or 0) // LEAF_ROWS))
     if kind == "range" and lo is not None and hi is not None:
         span = int(hi) - int(lo) + 1
         leaves = min(leaves, 1 << MOST_BITS)
         return Spec("range", base=int(lo), width=max(1, -(-span // leaves)),
-                    salt=salt)
+                    salt=salt, hash=way)
     bits = min(MOST_BITS, max(0, (leaves - 1).bit_length()))
-    return Spec(kind, bits=bits, salt=salt)
+    return Spec(kind, bits=bits, salt=salt, hash=way)
 
 
 @dataclass
@@ -203,6 +216,14 @@ class Side:
         `neutral_digest` does."""
         if any(c in canon.FOLDED_HERE for _, c in self.cols):
             return False
+        if getattr(self.eng, "PROVED_DIALECT", None):
+            # a server speaking PostgreSQL's or MySQL's SQL without being
+            # either: in that SQL once its rendering is proved on the
+            # table's first rows (`provedsql.ProvedDigest.leaf_proved`)
+            if "_in_sql" not in self.__dict__:
+                self.__dict__["_in_sql"] = bool(self.eng.leaf_proved(
+                    self.side, self.db, self.table, self.cols))
+            return self.__dict__["_in_sql"]
         if self.dialect:
             if "_in_sql" not in self.__dict__:
                 self.__dict__["_in_sql"] = bool(self.eng.leaf_ready(
@@ -221,7 +242,10 @@ class Side:
 
     @property
     def engine(self):
-        return self.eng.CANON_ENGINE
+        """The SQL this side's statements are written in: a proved
+        server's dialect (`Side.sql`), else its engine's own."""
+        return (getattr(self.eng, "PROVED_DIALECT", None)
+                or self.eng.CANON_ENGINE)
 
     def key_at(self):
         names = [n for n, _ in self.cols]
@@ -239,6 +263,7 @@ class Hasher:
 
     def __init__(self, spec, classes, key_at):
         self.spec = spec
+        self.way = spec.hash
         self.fns = [render.digest_renderer(c) for c in classes]
         self.key_at = list(key_at)
 
@@ -247,38 +272,55 @@ class Hasher:
 
     def of(self, values):
         rt = self.texts(values)
-        rh = text_hash(self.spec.salt, rowtext.encode(rt))
+        rh = text_hash(self.spec.salt, rowtext.encode(rt), self.way)
         if not self.key_at:
             return self.spec.bucket(rh), rh, rh
         kh = text_hash(self.spec.salt,
-                       rowtext.encode([rt[i] for i in self.key_at]))
+                       rowtext.encode([rt[i] for i in self.key_at]),
+                       self.way)
         key = values[self.key_at[0]] if self.spec.kind == "range" else None
         return self.spec.bucket(kh, key), rh, kh
 
 
 # --- SQL ---------------------------------------------------------------------
 
-def _h(engine, expr, salt):
-    """SQL for the 60-bit hash of a text expression, behind the salt."""
+#: each hash's hex digits in PostgreSQL's SQL over the text's UTF-8
+#: bytes, as MySQL and this process hash them (`canon.digest_expr`) - a
+#: LATIN1 database's own bytes are not; sha1 is an extension's there
+_PG_HEX = {"md5": "md5({b})", "sha256": "encode(sha256({b}), 'hex')"}
+_MY_HEX = {"md5": "md5({t})", "sha256": "sha2({t}, 256)",
+           "sha1": "sha1({t})"}
+
+
+def _h(engine, expr, salt, way="md5"):
+    """SQL for the 60-bit hash of a text expression, behind the salt, or
+    None where the engine's SQL has no such hash."""
     if engine == "postgres":
-        # the text's UTF-8 bytes, as MySQL and this process hash them
-        # (`canon.digest_expr`): a LATIN1 database's own bytes are not
-        return (f"('x'||substr(md5(convert_to('{salt}'||{expr}, 'UTF8')),"
-                f"1,{HEX}))::bit({BITS})::bigint")
-    return (f"cast(conv(substr(md5(concat('{salt}', {expr})),1,{HEX}),16,10)"
-            " as unsigned)")
+        if way not in _PG_HEX:
+            return None
+        hexed = _PG_HEX[way].format(
+            b=f"convert_to('{salt}'||{expr}, 'UTF8')")
+        return f"('x'||substr({hexed},1,{HEX}))::bit({BITS})::bigint"
+    if way not in _MY_HEX:
+        return None
+    hexed = _MY_HEX[way].format(t=f"concat('{salt}', {expr})")
+    return f"cast(conv(substr({hexed},1,{HEX}),16,10) as unsigned)"
 
 
 def _q(s, name):
     return s.eng._quote_ident(name)
 
 
-def _row_hash(s, cols, salt):
-    """SQL for a row's (or a key's) salted hash on this side."""
+def _row_hash(s, cols, salt, way="md5"):
+    """SQL for a row's (or a key's) salted hash on this side; ValueError
+    where its SQL has no such hash."""
     if s.dialect:
         return s.eng.leaf_hash(
-            s.eng.leaf_row(s.side, s.db, s.table, cols), salt)
-    return _h(s.engine, canon.row_expr(s.engine, cols), salt)
+            s.eng.leaf_row(s.side, s.db, s.table, cols), salt, way)
+    got = _h(s.engine, canon.row_expr(s.engine, cols), salt, way)
+    if got is None:
+        raise ValueError(f"no {way} in this side's SQL")
+    return got
 
 
 def _shift(s, value, bits):
@@ -314,13 +356,15 @@ def bucket_where(s, spec, bucket):
     if not cols:
         return None
     if s.engine == "sqlite":
+        if spec.hash != "md5":
+            return None
         h = (f"migkit_hash60('{spec.salt}' ||"
              f" {canon.row_expr('sqlite', cols)})")
         return f"(({h}) >> {BITS - spec.bits}) = {int(bucket)}"
     by = Side(s.eng, s.side, s.db, s.table, cols)
     if not by.sql:
         return None
-    shifted = _shift(by, _row_hash(by, cols, spec.salt), BITS - spec.bits)
+    shifted = _shift(by, _row_hash(by, cols, spec.salt, spec.hash), BITS - spec.bits)
     return f"{shifted} = {int(bucket)}"
 
 
@@ -328,10 +372,11 @@ def _inner(s, spec, extra=None, keys=False):
     """The rows as (rh[, kh][, k0, k1 ...]): what every query here reads,
     the key's raw values where `keys` or the leaves are key ranges."""
     cls = dict(s.cols)
-    parts = [f"{_row_hash(s, s.cols, spec.salt)} as rh"]
+    parts = [f"{_row_hash(s, s.cols, spec.salt, spec.hash)} as rh"]
     if s.key:
         key = [(k, cls[k]) for k in s.key]
-        parts.append(f"{_row_hash(s, key, spec.salt)} as kh")
+        parts.append(f"{_row_hash(s, key, spec.salt, spec.hash)}"
+                     " as kh")
         if keys or spec.kind == "range":
             parts += [f"{_q(s, k)} as k{i}" for i, k in enumerate(s.key)]
     where = [w for w in (s.where, extra) if w]
@@ -392,7 +437,7 @@ def range_counts(s, spec, buckets):
         part = order[i:i + 200]
         pred = _range_pred(s, spec, part)
         where = [w for w in (s.where, pred) if w]
-        if s.engine in SQL_ENGINES or s.dialect:
+        if s.eng.CANON_ENGINE in SQL_ENGINES or s.dialect or s.sql:
             k = _q(s, s.key[0])
             inner = (f"select {k} as k0 from"
                      f" {s.eng._qualified(s.side, s.db, s.table)}"
@@ -1456,6 +1501,187 @@ def both(fn, a, b, *args):
         return fa.result(), fb.result()
 
 
+# --- the fastest hash the pair allows -----------------------------------------
+# Every way below hashes the same canonical text (`rowtext.encode` of
+# `render`) and keeps the same 60 bits, so a leaf's sums mean one thing
+# whichever is used; what differs is what each costs on each server and
+# here. Which one a table's leaves take is timed on its own first rows on
+# both sides, each side's SQL held to the same rows folded here, and
+# climbed (`decide.climb`) on what was measured - never by engine.
+
+def _sample_sql(s, spec, n):
+    """(count, row-hash sum, key-hash sum) of this side's first `n` rows in
+    key order, hashed by `spec.hash` in its SQL."""
+    total = s.eng.leaf_sum if s.dialect else (lambda v: f"sum({v})")
+    order = ", ".join(_q(s, k) for k in s.key)
+    return (f"select count(*), {total('rh')}, {total('kh')} from"
+            f" ({_inner(s, spec)} order by {order} limit {int(n)}) x")
+
+
+def _fold(spec, s, rows):
+    """`_sample_sql`'s answer for these rows, folded here."""
+    h = Hasher(spec, [c for _, c in s.cols], s.key_at())
+    n = r = k = 0
+    for row in rows:
+        _, rh, kh = h.of(row)
+        n, r, k = n + 1, r + rh, k + kh
+    return n, r, k
+
+
+def probe(s, spec, ways, n=PROBE_ROWS):
+    """(rows, {way: (seconds, why)}) on one side: its first `n` rows in key
+    order hashed by each way - in its SQL where the side hashes there, and
+    held to the same rows folded here; folded here and timed so where it
+    does not. `why` is None where the way may be used, else the reason;
+    `seconds` None where it never ran."""
+    from dataclasses import replace
+    scope = {"where": s.where} if s.where else {}
+    rows, _ = s.eng.neutral_read(s.side, s.db, s.table, s.cols, None, n,
+                                 **scope)
+    out = {}
+    for way in ways:
+        sp = replace(spec, hash=way)
+        t0 = time.monotonic()
+        here = _fold(sp, s, rows)
+        took = time.monotonic() - t0
+        if not s.sql:
+            out[way] = (took, None)
+            continue
+        t0 = time.monotonic()
+        try:
+            got = s.eng.run_rule(s.side, s.db, _sample_sql(s, sp, len(rows)))
+        except Exception as e:  # noqa: BLE001 - refused: not this way
+            last = str(e).strip().splitlines()[-1][:120] if str(e) else \
+                type(e).__name__
+            out[way] = (None, f"the {s.side} side's SQL does not hash by"
+                              f" {way} ({last})")
+            continue
+        took = time.monotonic() - t0
+        said = tuple(int(v or 0) for v in got[0]) if got else None
+        out[way] = (took, None if said == here else
+                    f"{way} in the {s.side} side's SQL does not equal the"
+                    f" fold here on its first {len(rows):,} rows")
+    return len(rows), out
+
+
+def _probe_both(a, b, spec, costs):
+    """{way: (seconds, why)} over the pair: a side's cost the slower of
+    the two (they run at once), a reason either side gave; each way's rate
+    put in `costs` for the climb."""
+    ways = list(HASHES)
+    (na, pa), (nb, pb) = both(probe, a, b, spec, ways)
+    rows = max(na, nb, 1)
+    out = {}
+    for way in ways:
+        ta, wa = pa[way]
+        tb, wb = pb[way]
+        took = None if ta is None or tb is None else max(ta, tb)
+        out[way] = (took, wa or wb)
+        if took is not None:
+            costs.saw(way, rows, took)
+    out["rows"] = (rows, None)
+    return out
+
+
+def _hash_need(way):
+    return decide.Need(
+        f"{way} in both sides' SQL, timed",
+        lambda f: f["probe"][way][0] is not None,
+        lambda f: f["probe"][way][1] or f"{way} was not timed")
+
+
+def _hash_way(way, said, because=""):
+    return decide.Rung(
+        way, said,
+        needs=(decide.Need("a key the same first rows are read by",
+                           lambda f: bool(f.get("keyed")),
+                           "a table without a key has no first rows both"
+                           " sides read alike, so only md5 is taken"),
+               _hash_need(way)),
+        prove=lambda f: f["probe"][way][1],
+        because=because, loads=_BOTH, leaves="nothing")
+
+
+HASH_WAYS = (
+    decide.Rung("md5", "md5 of each row's canonical text",
+                because="the hash every engine here writes, taken where no"
+                        " other is measured faster and equal",
+                loads=_BOTH, leaves="nothing"),
+    _hash_way("sha256", "sha256 of each row's canonical text"),
+    _hash_way("sha1", "sha1 of each row's canonical text"),
+)
+
+
+def fastest_hash(work, a, b, salt, costs=None):
+    """(way, Choice): the hash this table's leaves take - the rung of
+    `HASH_WAYS` climbed on its measured rate (`probe`, both sides at
+    once), only among those whose SQL equals the fold here on both sides;
+    md5 where nothing else holds. Logged with what it stood on."""
+    costs = decide.Costs() if costs is None else costs
+    spec = Spec("hash", salt=salt)
+    facts = decide.Facts({"keyed": bool(a.key and b.key)},
+                         probe=lambda: _probe_both(a, b, spec, costs))
+    got = decide.climb(work, HASH_WAYS, facts, costs=costs)
+    way = got.rung.name if got.rung is not None else "md5"
+    timed = dict(facts["probe"]) if "probe" in facts else {}
+    rows = timed.pop("rows", (0, None))[0]
+    rates = {w: int(rows / t) for w, (t, _) in timed.items()
+             if t and rows}
+    from . import runlog
+    runlog.event("leaf hash", f"{work}: leaves hashed by {way}"
+                 + (" (" + ", ".join(f"{w} {r:,} rows/s" for w, r in
+                                     sorted(rates.items(),
+                                            key=lambda x: -x[1]))
+                    + f" on {rows:,} rows)" if rates else "")
+                 + (f"; {got.reason}" if got.reason else ""),
+                 way=way, rows=rows, rates=rates,
+                 refused={w: why for w, (_, why) in timed.items() if why})
+    return way, got
+
+
+# --- leaves gathered in parallel ---------------------------------------------
+
+def gather_plan(pair, db, a, b, leaves):
+    """The `sizing.Plan` a side's range leaves are read by: as many
+    statements at once as this machine and both servers carry, never
+    more than there are runs of `IN_LIST` leaves to read."""
+    from . import sizing
+    return sizing.estimate(
+        pair.hop, a.eng, db, units=max(1, -(-int(leaves) // IN_LIST)),
+        sides={"src": sizing.capacity(a.eng, "src", db),
+               "dst": sizing.capacity(b.eng, "dst", db)})
+
+
+def gather(s, spec, workers=1, lohi=None):
+    """`scan` of a whole side with its range leaves read by `workers`
+    statements at once over the key's index, each a run of adjacent
+    leaves, and one more for keys outside the planned range (written
+    since): where the side's server computes them. A hash leaf is found
+    only by reading every row, so those are one pass, as is a side folded
+    here."""
+    import concurrent.futures as cf
+    if (workers <= 1 or spec.kind != "range" or not s.sql
+            or lohi is None):
+        return scan(s, spec)
+    last = spec.bucket(0, lohi[1])
+    if last < 1:
+        return scan(s, spec)
+    per = -(-(last + 1) // int(workers))
+    k = _q(s, s.key[0])
+    preds = [f"{k} >= {spec.bounds(i)[0]} and"
+             f" {k} < {spec.bounds(min(last, i + per - 1))[1]}"
+             for i in range(0, last + 1, per)]
+    preds.append(f"{k} < {spec.bounds(0)[0]} or"
+                 f" {k} >= {spec.bounds(last)[1]}")
+    tree = Tree()
+    with cf.ThreadPoolExecutor(min(int(workers), len(preds))) as pool:
+        for rows in pool.map(lambda w: s.eng.run_rule(
+                s.side, s.db, _scan_sql(s, spec, extra=w)), preds):
+            for b, n, r, kk in rows:
+                tree.add(int(b), int(n), int(r), int(kk))
+    return tree
+
+
 def key_range(a, b):
     """(lowest, highest) integer key over both sides, or None."""
     got = []
@@ -1592,6 +1818,7 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
         return f"; rows not localised: {strat.why_not}"
     salt = pair.digest_salt()
     work = f"{db}.{name}"
+    way, _ = fastest_hash(work, a, b, salt)
     gens = None
     # a source written while it is read differs in leaves still being
     # written: those are read again by generations, which the sketch and
@@ -1605,8 +1832,16 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
         lohi = key_range(a, b) if kind == "range" else None
         if kind == "range" and lohi is None:
             kind = "hash"
-        spec = plan(rows, kind, *(lohi or (None, None)), salt=salt)
-        ta, tb = both(scan, a, b, spec)
+        spec = plan(rows, kind, *(lohi or (None, None)), salt=salt,
+                    way=way)
+        if kind == "range" and a.sql and b.sql:
+            sized = gather_plan(pair, db, a, b, spec.bucket(0, lohi[1]) + 1)
+            from . import runlog
+            runlog.event("leaf gather", f"{work}: range leaves read"
+                         f" {sized.line()}", workers=sized.start)
+            ta, tb = both(gather, a, b, spec, sized.start, lohi)
+        else:
+            ta, tb = both(scan, a, b, spec)
         took = time.monotonic() - t0
         if live:
             gens = generations(a, b, spec, ta, tb,
@@ -1644,7 +1879,8 @@ def drill(pair, db, src_t, dst_t, sc, dc, scope, rows, digests=None,
         try:
             if way == "sketch":
                 found, why = by_sketch(
-                    a, b, plan(rows, "hash" if a.key else "row", salt=salt),
+                    a, b, plan(rows, "hash" if a.key else "row",
+                               salt=salt, way=way),
                     facts["expected"])
             elif way == "groups":
                 found, why = by_groups(pair, db, a, b, digests, rows,

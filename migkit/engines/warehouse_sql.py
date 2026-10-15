@@ -101,6 +101,9 @@ class Dialect:
     def sha256_hex(self, e):
         return None
 
+    def sha1_hex(self, e):
+        return None
+
     def from_hex(self, hexed, n):
         """The first `n` hexadecimal digits of `hexed` as an integer."""
         raise ValueError(f"no hexadecimal reading in {type(self).__name__}")
@@ -155,8 +158,9 @@ class Dialect:
         return self.concat(pieces)
 
     def hash_hex(self, text, name):
-        got = self.md5_hex(text) if name == "md5" else \
-            self.sha256_hex(text)
+        fn = {"md5": self.md5_hex, "sha256": self.sha256_hex,
+              "sha1": self.sha1_hex}.get(name)
+        got = fn(text) if fn else None
         if got is None:
             raise ValueError(f"no {name} in {type(self).__name__}")
         return got
@@ -559,18 +563,29 @@ def row_text(dialect, parts):
     return f" || '{sep}' || ".join(f"({f})" for f in frags)
 
 
+#: each hash's hex digits in a dialect's SQL, small letters; a hash a
+#: dialect lacks is not there, and asking for it is refused
+_HEX = {
+    "bigquery": {"md5": "TO_HEX(MD5({t}))", "sha256": "TO_HEX(SHA256({t}))",
+                 "sha1": "TO_HEX(SHA1({t}))"},
+    "spanner": {"md5": "TO_HEX(MD5({t}))", "sha256": "TO_HEX(SHA256({t}))",
+                "sha1": "TO_HEX(SHA1({t}))"},
+    "snowflake": {"md5": "MD5({t})", "sha256": "SHA2({t}, 256)",
+                  "sha1": "SHA1({t})"},
+    "redshift": {"md5": "MD5({t})", "sha256": "SHA2({t}, 256)",
+                 "sha1": "SHA1({t})"},
+    "duckdb": {"md5": "md5({t})", "sha256": "sha256({t})"},
+}
+
+
 def _hash_hex(dialect, text, name):
     if dialect in SPOKEN:
         return SPOKEN[dialect].hash_hex(text, name)
-    if dialect in ("bigquery", "spanner"):
-        return f"TO_HEX({'MD5' if name == 'md5' else 'SHA256'}({text}))"
-    if dialect == "snowflake":
-        return f"MD5({text})" if name == "md5" else f"SHA2({text}, 256)"
-    if dialect == "redshift":
-        return f"MD5({text})" if name == "md5" else f"SHA2({text}, 256)"
-    if dialect == "duckdb":
-        return f"md5({text})" if name == "md5" else f"sha256({text})"
-    raise ValueError(dialect)
+    if dialect not in _HEX:
+        raise ValueError(dialect)
+    if name not in _HEX[dialect]:
+        raise ValueError(f"no {name} in {dialect}")
+    return _HEX[dialect][name].format(t=text)
 
 
 def _prefix_int(dialect, hexed):
@@ -648,9 +663,10 @@ def agree(cols, values, texts):
 
 # ---- a table's leaves (`leaves`), in the same SQL ------------------------
 
-def salted_hash(dialect, text, salt):
+def salted_hash(dialect, text, salt, name="md5"):
     """SQL for `leaves.text_hash`: the first `canon.DIGEST_HEX` hex digits
-    of md5(salt || text), as an integer."""
+    of `name`(salt || text) - md5 unless the leaves measured another
+    (`leaves.fastest_hash`) - as an integer."""
     lit = "'" + str(salt).replace("'", "''") + "'"
     if dialect in SPOKEN:
         joined = SPOKEN[dialect].concat([lit, text])
@@ -658,7 +674,7 @@ def salted_hash(dialect, text, salt):
         joined = f"CONCAT({lit}, {text})"
     else:
         joined = f"{lit} || {text}"
-    return _prefix_int(dialect, _hash_hex(dialect, joined, "md5"))
+    return _prefix_int(dialect, _hash_hex(dialect, joined, name))
 
 
 def exact_sum(dialect, value):
@@ -810,8 +826,8 @@ class DigestsInSQL:
         return row_expr(self.DIGEST_DIALECT,
                         self._declared_cols(side, db, table, cols), self._q)
 
-    def leaf_hash(self, expr, salt):
-        return salted_hash(self.DIGEST_DIALECT, expr, salt)
+    def leaf_hash(self, expr, salt, way="md5"):
+        return salted_hash(self.DIGEST_DIALECT, expr, salt, way)
 
     def leaf_sum(self, value):
         return exact_sum(self.DIGEST_DIALECT, value)
