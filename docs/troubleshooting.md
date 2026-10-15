@@ -211,6 +211,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>'s goal is <...>: its target holds rows this source does not, and sync makes a target equal to the source. It is carried by migkit move <...> --mode full --go and proved by migkit check <...>. Nothing was written
 
+* goal <...>: one of <...>
+
+* <...>'s goal is <...>: migrate runs <...>
+
 * <...>: not started - <...>
 
 * <...> reported success and <...> is still empty on the target: <...> ... | <...>. Nothing has been marked as moved - look at the copy's output above, and at the target server's log
@@ -1726,6 +1730,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: <...> rows are still on the source after their removal (<...>); the ledger has the batch
 
 * <...>: the archive holds <...> of the <...> rows to put back
+
+* goal <...>: one of <...>
+
+* no step <...>
 
 * ship: <...> names no container - write it as https://<account host>/<container>/<prefix>
 

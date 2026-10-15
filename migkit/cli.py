@@ -2731,6 +2731,146 @@ def _orchestrate(hop_name, db, mode, go, serve, interval, on_conflict=None):
     return _delta_loop(hop_name, db, interval, 0 if serve else 1, False)
 
 
+@main.command()
+@click.argument("source", required=False)
+@click.argument("target", required=False)
+@click.option("--goal", type=click.Choice(["copy", "sync", "cutover"]),
+              default=None, help="copy once, keep in sync, or move and"
+              " prepare the switch")
+@click.option("--hop", "hop_name", default="",
+              help="a hop already set up, instead of two addresses")
+@click.option("--go", is_flag=True, help="write; default shows the plan")
+@click.option("--why", is_flag=True,
+              help="the decisions and evidence of the last run")
+def migrate(source, target, goal, hop_name, go, why):
+    """Two addresses and a goal in; the whole migration run to a verified
+    outcome: the assessment, the copy, the catch-up, the proof and the
+    cutover's readiness, every way chosen by migkit, a database that
+    fails held apart while the others go on, and asked only what migkit
+    cannot find out (`autonomous.QUESTIONS`)."""
+    import os
+    import sys
+    from . import autonomous, guide, hopkeys
+    from .config import user_config_path
+    tty = sys.stdin.isatty() and sys.stdout.isatty()
+
+    def answer(q, default=""):
+        return _ask(q.asked, default=default)
+    if not hop_name:
+        if not source:
+            source = autonomous.ask(answer if tty else None, "source")
+        if not target:
+            target = autonomous.ask(answer if tty else None, "target")
+        if not goal:
+            goal = autonomous.ask(answer if tty else None, "goal",
+                                  "copy").strip().lower()
+        if goal not in autonomous.FLOWS:
+            raise SystemExit(f"goal {goal}: one of"
+                             f" {', '.join(autonomous.GOALS)}")
+        env = {**os.environ, "MIGKIT_SOURCE": source,
+               "MIGKIT_TARGET": target,
+               "MIGKIT_GOAL": autonomous.FLOWS[goal][0]}
+        hop_name = guide.run(_ask if tty else None, console.print,
+                             user_config_path(), env=env)["name"]
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    if not goal:
+        goal = next((g for g, (own, _) in autonomous.FLOWS.items()
+                     if own == (hop.goal or "copy")), None)
+        if goal is None:
+            raise SystemExit(f"{hop_name}'s goal is {hop.goal}: migrate"
+                             f" runs {', '.join(autonomous.GOALS)}")
+    path = hop.report_dir() / "workflow.json"
+    if why:
+        for d in autonomous.evidence(path):
+            console.print(f"{_esc(d['unit'])}: {d['what']}"
+                          + (f" ({_esc(d['way'])})" if d.get("way") else "")
+                          + (f" - {_esc(d['why'])}" if d.get("why") else ""))
+        return
+    console.print(f"[bold]{goal}[/bold] {_esc(hop_name)}:"
+                  f" {hopkeys.GOALS[autonomous.FLOWS[goal][0]]['what']}")
+    if not go and (not tty or autonomous.ask(
+            answer, "write", "n").strip().lower() not in ("y", "yes")):
+        _move_run(hop_name, "", "", autonomous.MOVE_MODE[goal], 500000,
+                  False, False)
+        console.print(f"nothing written; migkit migrate --hop"
+                      f" {_esc(hop_name)} --go runs it")
+        return
+    got = autonomous.run(goal, _Steps(hop_name, goal),
+                         lambda m: console.print(_esc(m)), path)
+    console.print("\n[bold]outcome[/bold]")
+    for d, (state, words) in got.databases.items():
+        color = "green" if state == "done" else "yellow"
+        console.print(f"  [{color}]{_esc(d)}[/{color}]: {_esc(words)}")
+    if goal == "cutover" and got.complete:
+        console.print("the switch itself waits for your authorization")
+    console.print(f"evidence: migkit migrate --hop {_esc(hop_name)} --why")
+    if got.exit:
+        raise SystemExit(got.exit)
+
+
+class _Steps:
+    """The steps of `migrate`, each the command's own (`autonomous.run`'s
+    `ops`)."""
+
+    def __init__(self, hop_name, goal):
+        self.name, self.goal = hop_name, goal
+        self.hop = get_hop(hop_name)
+        self.eng = get_engine(self.hop)
+
+    def dbs(self):
+        return list(self.eng.databases())
+
+    def facts(self, db):
+        return {"chunk": 500000, "resumes": True,
+                "pieces": not capabilities.unavailable(self.hop.engine,
+                                                       "resume")}
+
+    def _fails(self, dbs=None, quick=False, assessed=None, when=None):
+        from . import ready
+        return [f"{i.what}: {i.detail}" if i.detail else i.what
+                for i in ready.items(self.hop, self.eng, dbs=dbs,
+                                     quick=quick, assessed=assessed)
+                if i.level == "fail" and when in (None, i.when)]
+
+    def assess(self):
+        """What fails for the whole hop, then what fails for one database
+        alone - which holds that one apart."""
+        from . import ready, rehearsal
+        rehearsal.mark(self.hop)
+        quick, assessed, _ = ready.depth(self.hop, self.eng)
+        whole = self._fails(quick=quick, assessed=assessed)
+        if whole:
+            return [("", w) for w in whole]
+        return [(d, w) for d in self.dbs()
+                for w in self._fails([d], quick=True)]
+
+    def move(self, db, chunk):
+        from . import autonomous
+        return _move_run(self.name, db, "", autonomous.MOVE_MODE[self.goal],
+                         chunk, False, True)
+
+    def follow(self, db):
+        if capabilities.unavailable(self.hop.engine, "fence") or \
+                not hasattr(self.eng, "fence_wait"):
+            return None
+        at = self.eng.src_lsn(db)
+        return self.eng.fence_wait(db, at) if at is not None else None
+
+    def verify(self, db):
+        return _settle(self.name, db, None).status
+
+    def ready(self, db):
+        from . import ready
+        return self._fails([db], quick=True, when=ready.CUTOVER)
+
+    def forecast(self, kind, db):
+        return self.eng.forecast(kind, db).operator_line()
+
+    def progress(self, db):
+        return _move_said(self.hop, db)
+
+
 def _table_plan(hop, eng, d, via, go=False):
     """Where each table goes and why, before anything is copied.
 

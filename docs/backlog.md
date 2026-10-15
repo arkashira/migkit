@@ -10116,7 +10116,7 @@ requirement, not a claim of current resilience coverage. Status remains OPEN.
 
 ## P0-AUTONOMOUS-MIGRATION: operator intent to verified outcome
 
-Owner requirement, 2026-10-06. Status: OPEN. Provide the relevant capabilities
+Owner requirement, 2026-10-06. Status: PARTLY. Provide the relevant capabilities
 of established migration and verification products, then demonstrably exceed
 their depth, judgement and complete operator experience. Normal users state
 their goal and supply necessary access; migkit owns the technical process to
@@ -10166,7 +10166,7 @@ Acceptance criteria:
 This is the product-level acceptance target linking P0-DECISION-ALL,
 P0-WORKFLOW-DEPTH, P0-MINIMAL-INPUT, P0-AUTO-RESOURCES,
 P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL and P0-RESULT-SCOPE.
-It records requirements only; implementation and comparative proof remain OPEN.
+Status: PARTLY (see the status under the next section).
 
 
 ### P0-AUTONOMOUS-MIGRATION: recover intelligently toward completion
@@ -10211,6 +10211,21 @@ P0-AUTONOMOUS-MIGRATION:
 The target is smooth autonomous completion without sacrificing any required
 guarantee. It does not authorize source changes, destructive repair or weakened
 verification merely to keep moving. These implementation criteria remain OPEN.
+
+Status 2026-10-16: PARTLY. Built: `migkit migrate` (two addresses or a hop,
+goal copy/sync/cutover) runs assessment, copy, catch-up, proof with its one
+repair, and cutover readiness per database (`migkit/autonomous.py`,
+`cli.migrate`); every recovery through `decide.attempt` (as planned, again
+from the last position after a measured backoff, smaller pieces); a failed
+unit isolated while other databases go on; units and recovery decisions
+kept in `workflow.json` and resumed; typed questions in
+`autonomous.QUESTIONS`; mechanism comparison in
+`docs/research/autonomous-comparison.md`. Proved on fakes by
+`tests/test_autonomous_workflow.py`; sandbox scenarios written in
+`tests/test_autonomous_scenarios.py`, not run.
+Not done: the recovery Need of a shared fault catalogue (W8B `faults` was
+not on master), concurrency rebalancing and replanning inside this ladder,
+the switch itself, comparative measurements against managed services.
 
 
 ## P0-AUTOTUNE-ALL: diagnose and tune the complete migration workflow
