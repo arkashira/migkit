@@ -1,16 +1,20 @@
 """`migkit migrate`'s flow (`autonomous.run`) on fake steps: a goal runs
 its steps per database, a failed unit climbs the one decision engine's
-recovery ladder, a unit that cannot complete is held apart while the other
+recovery as `decide.recovery` chooses from the fault catalogue (a
+sizing cause retuned, not retried), a unit that cannot complete is held apart while the other
 databases go on, a run again keeps what was done and re-establishes the
-catch-up before the proof, and every question is one of `QUESTIONS`."""
+catch-up before the proof, the units left are re-planned after an
+isolate or a throttle, a cutover's switch is made only on the operator's
+yes, and every question is one of `QUESTIONS`."""
 import pytest
 
-from migkit import autonomous, decide
+from migkit import autonomous, decide, faults
 
 
 class Fake:
     def __init__(self, dbs=("a", "b"), fail=None, verdict=None, stop=None,
-                 assess=(), pieces=True, ready=()):
+                 assess=(), pieces=True, ready=(), errors=None,
+                 etas=None):
         self._dbs = list(dbs)
         #: (step, db) -> how many times it fails before it runs
         self.fail = dict(fail or {})
@@ -19,6 +23,9 @@ class Fake:
         self._assess = list(assess)
         self.pieces = pieces
         self._ready = dict(ready)
+        #: (step, db) -> [errors] raised, one a run, before it runs
+        self.errors = {k: list(v) for k, v in (errors or {}).items()}
+        self.etas = dict(etas or {})
         self.calls = []
 
     def dbs(self):
@@ -35,6 +42,8 @@ class Fake:
         self.calls.append((step, db) + extra)
         if (step, db) in self.stop:
             raise SystemExit(self.stop[(step, db)])
+        if self.errors.get((step, db)):
+            raise self.errors[(step, db)].pop(0)
         if self.fail.get((step, db), 0) > 0:
             self.fail[(step, db)] -= 1
             raise ConnectionError(f"{step} of {db}: connection reset")
@@ -60,14 +69,45 @@ class Fake:
     def progress(self, db):
         return []
 
+    def eta(self, kind, db):
+        return self.etas.get(db)
 
-def _run(goal, ops, tmp_path=None, waits=None):
+
+class Switching(Fake):
+    def __init__(self, *a, switch_fails=None, **kw):
+        super().__init__(*a, **kw)
+        self.switched, self.switch_fails = [], switch_fails
+
+    def switch(self, db):
+        self.calls.append(("switch", db))
+        if self.switch_fails:
+            raise SystemExit(self.switch_fails)
+        self.switched.append(db)
+
+
+class Reading(Fake):
+    def __init__(self, *a, read=None, **kw):
+        super().__init__(*a, **kw)
+        self.read = read
+
+    def reconcile(self, db):
+        self.calls.append(("reconcile", db))
+        return self.read
+
+
+def _run(goal, ops, tmp_path=None, waits=None, answer=None, go=False):
     said = []
     got = autonomous.run(goal, ops, said.append,
                          tmp_path / "workflow.json" if tmp_path else None,
                          wait=(waits.append if waits is not None
-                               else lambda s: None))
+                               else lambda s: None),
+                         answer=answer, go=go)
     return got, said
+
+
+def _recovered(tmp_path):
+    return [d for d in autonomous.evidence(tmp_path / "workflow.json", 500)
+            if d["what"] == "recover"]
 
 
 def test_each_goal_runs_its_own_steps_per_database():
@@ -98,29 +138,100 @@ def test_a_lost_connection_is_recovered_from_its_position_after_a_backoff(
     assert [c[0] for c in ops.calls].count("move") == 2
     assert len(waits) == 1 and autonomous.BACKOFF_MIN <= waits[0] \
         <= autonomous.BACKOFF_MAX
-    kinds = [d["what"] for d in autonomous.evidence(
-        tmp_path / "workflow.json")]
-    assert "recover" in kinds
+    rec = _recovered(tmp_path)
+    # a copy's write lost mid-way has an effect not known: it is read
+    # (from the copy's kept position) before anything runs it again
+    assert [r["way"] for r in rec] == ["reconcile"]
+    assert rec[0]["fault"] == "uncertain_commit"
+    assert rec[0]["reconciled"] == "nothing" and rec[0]["held"] is True
+    assert rec[0]["post"] == faults.CATALOGUE["uncertain_commit"].retry_after
+    assert got.workflow.by_key()["move:a"].way == "resume"
     assert any("again from its last position" in s for s in said)
 
 
-def test_a_failure_twice_resizes_the_copy_into_smaller_pieces(tmp_path):
-    ops = Fake(dbs=("a",), fail={("move", "a"): 2})
+def test_a_write_read_as_committed_proceeds_without_running_it_again(
+        tmp_path):
+    ops = Reading(dbs=("a",), fail={("move", "a"): 1}, read="committed")
     got, _ = _run("copy", ops, tmp_path, [])
     assert got.complete
-    moves = [c for c in ops.calls if c[0] == "move"]
-    assert [m[2] for m in moves] == [1000, 1000, 250]
-    assert got.workflow.by_key()["move:a"].way == "smaller"
+    assert [c[0] for c in ops.calls if c[0] in ("move", "reconcile")] \
+        == ["move", "reconcile"]
+    assert got.workflow.by_key()["move:a"].way == "reconciled"
 
 
-def test_without_pieces_the_ladder_ends_and_the_unit_is_held_apart(
+def test_a_write_whose_effect_cannot_be_read_is_not_run_again(tmp_path):
+    ops = Reading(dbs=("a",), fail={("move", "a"): 1}, read=None)
+    got, _ = _run("copy", ops, tmp_path, [])
+    u = got.workflow.by_key()["move:a"]
+    assert u.state == "failed" and "cannot be read" in u.why
+    assert [c[0] for c in ops.calls].count("move") == 1
+    assert got.workflow.by_key()["verify:a"].state == "held"
+
+
+def test_a_sizing_cause_is_retuned_never_the_same_work_again(tmp_path):
+    big = RuntimeError("Got a packet bigger than 'max_allowed_packet' bytes")
+    ops = Fake(dbs=("a",), errors={("move", "a"): [big]})
+    got, _ = _run("copy", ops, tmp_path, [])
+    assert got.complete
+    moves = [c[2] for c in ops.calls if c[0] == "move"]
+    assert len(moves) == 2 and moves[1] < moves[0] == 1000
+    assert got.workflow.by_key()["move:a"].way == "retuned"
+    rec = _recovered(tmp_path)
+    assert [r["way"] for r in rec] == ["retune"] and rec[0]["held"] is True
+
+
+def test_a_refused_account_stops_at_once_with_the_catalogue_s_reason(
         tmp_path):
+    bad = RuntimeError("password authentication failed for user x")
+    ops = Fake(dbs=("a", "b"), errors={("verify", "a"): [bad] * 5})
+    got, _ = _run("copy", ops, tmp_path, [])
+    u = got.workflow.by_key()["verify:a"]
+    assert u.state == "failed"
+    assert faults.CATALOGUE["auth"].retry_after in u.why
+    assert [c for c in ops.calls if c[0] == "verify"].count(
+        ("verify", "a")) == 1
+    assert [r["way"] for r in _recovered(tmp_path)] == ["stop"]
+    assert got.databases["b"][0] == "done"
+
+
+def test_a_throttle_replans_the_units_left_at_a_smaller_size(tmp_path):
+    ops = Fake(dbs=("a", "b"),
+               errors={("verify", "a"): [faults.Injected("quota")]})
+    waits = []
+    got, said = _run("copy", ops, tmp_path, waits)
+    assert got.complete
+    assert [r["way"] for r in _recovered(tmp_path)] == ["throttle"]
+    # the throttle waits longer than a retry of the same attempt would
+    assert waits and waits[0] >= 2 * autonomous.BACKOFF_MIN
+    # the copy of b, planned after it, runs at what the throttle left
+    assert ("move", "b", 500) in ops.calls
+    plan = [d for d in autonomous.evidence(tmp_path / "workflow.json", 500)
+            if d["what"] == "replan"]
+    assert plan and plan[0]["scale"] == 0.5
+    assert any(s.startswith("replanned after proof of a was throttled")
+               and "2 steps left over b" in s for s in said)
+
+
+def test_after_an_isolate_the_shortest_forecast_database_goes_first(
+        tmp_path):
+    bad = RuntimeError("password authentication failed")
+    ops = Fake(dbs=("a", "b", "c"), etas={"b": 600.0, "c": 5.0},
+               errors={("move", "a"): [bad]})
+    got, said = _run("copy", ops, tmp_path, [])
+    moves = [c[1] for c in ops.calls if c[0] == "move"]
+    assert moves == ["a", "c", "b"]
+    assert got.databases["c"][0] == got.databases["b"][0] == "done"
+    assert any("over c, b" in s and "about 605s of measured work left" in s
+               for s in said)
+
+
+def test_a_fault_that_does_not_clear_is_bounded_and_held_apart(tmp_path):
     ops = Fake(fail={("move", "a"): 9}, pieces=False)
     got, said = _run("sync", ops, tmp_path, [])
     assert not got.complete and got.exit == 1
     keys = got.workflow.by_key()
     assert keys["move:a"].state == "failed"
-    assert "no way of" in keys["move:a"].why
+    assert f"every try spent ({autonomous.TRIES})" in keys["move:a"].why
     # its later steps wait; the other database went on to the end
     assert keys["follow:a"].state == "held"
     assert keys["verify:a"].state == "held"
@@ -129,8 +240,11 @@ def test_without_pieces_the_ladder_ends_and_the_unit_is_held_apart(
     assert got.databases["b"][0] == "done"
     assert got.databases["a"][0] == "failed"
     assert any("the rest goes on without it" in s for s in said)
-    # bounded: one try a rung, never a storm
-    assert len([c for c in ops.calls if c[:2] == ("move", "a")]) == 2
+    # bounded: never more runs than the tries, never a storm
+    assert len([c for c in ops.calls if c[:2] == ("move", "a")]) \
+        == autonomous.TRIES
+    held = [r["held"] for r in _recovered(tmp_path)]
+    assert held and not any(held)
 
 
 def test_a_stop_of_migkit_s_own_is_never_retried():
@@ -198,6 +312,50 @@ def test_a_run_of_another_goal_starts_afresh(tmp_path):
                                          "verify", "ready"]
 
 
+def test_a_cutover_proved_ready_asks_the_switch_and_never_makes_it_alone(
+        tmp_path):
+    ops = Switching(dbs=("a", "b"))
+    got, said = _run("cutover", ops, tmp_path)
+    assert got.complete and got.exit == 0 and got.switch == "asked"
+    assert ops.switched == []
+    assert any(autonomous.BY_KEY["switch"].asked in s for s in said)
+    asked = [d for d in autonomous.evidence(tmp_path / "workflow.json")
+             if d["unit"] == "switch"]
+    assert asked[0]["what"] == "asked" and "a: copy" in asked[0]["evidence"]
+    assert "waits for the operator" in got.databases["a"][1]
+    # the next run proves the catch-up and readiness again, then asks
+    again = Switching(dbs=("a", "b"))
+    second, _ = _run("cutover", again, tmp_path, answer=lambda q, d: "no")
+    assert second.switch == "declined" and again.switched == []
+    assert [c[0] for c in again.calls] == ["follow", "ready"] * 2
+
+
+def test_a_go_given_up_front_is_the_yes_to_the_switch(tmp_path):
+    ops = Switching(dbs=("a", "b"))
+    got, _ = _run("cutover", ops, tmp_path, go=True)
+    assert got.switch == "switched" and ops.switched == ["a", "b"]
+    assert "switched to the target" in got.databases["b"][1]
+    asked = []
+    ops = Switching(dbs=("a",))
+    got, _ = _run("cutover", ops, answer=lambda q, d: asked.append(q.key)
+                  or "yes")
+    assert asked == ["switch"] and ops.switched == ["a"]
+    # a switch done is not proposed again
+    third = Switching(dbs=("a", "b"))
+    got, _ = _run("cutover", third, tmp_path, go=True)
+    assert third.calls == [] and third.switched == []
+
+
+def test_the_switch_is_not_proposed_while_a_database_is_not_ready():
+    ops = Switching(dbs=("a", "b"), ready={"b": ["the stream back is off"]})
+    got, said = _run("cutover", ops, go=True)
+    assert got.switch == "not ready" and ops.switched == []
+    assert any("not proposed: b not ready" in s for s in said)
+    failing = Switching(dbs=("a",), switch_fails="the drain timed out")
+    got, _ = _run("cutover", failing, go=True)
+    assert got.switch == "failed" and got.exit == 1
+
+
 def test_cutover_readiness_failing_is_said_and_the_rest_is_kept():
     ops = Fake(dbs=("a",), ready={"a": ["the stream back is not ready"]})
     got, _ = _run("cutover", ops)
@@ -240,11 +398,11 @@ def test_the_backoff_follows_the_failed_attempt_and_is_bounded():
     assert autonomous.backoff(200, 3) == autonomous.BACKOFF_MAX
 
 
-def test_the_ladder_is_the_decision_engine_s_rungs():
-    rungs = autonomous.ladder("move", decide.Facts({"pieces": True}))
-    assert [r.name for r in rungs] == ["as-planned", "resume", "smaller"]
-    got = decide.climb("copy", rungs, decide.Facts({"pieces": False}),
-                       need=("complete",))
-    assert got.rung.name == "as-planned"
-    assert [r.name for r in autonomous.ladder("ready", decide.Facts())] \
-        == ["as-planned"]
+def test_a_class_failing_again_cools_the_side_before_one_more_try():
+    told = faults.classify(ConnectionError("connection reset"))
+    first = autonomous.recovery_facts(told, 1, None, False, 3)
+    again = autonomous.recovery_facts(told, 2, None, False, 2)
+    assert first["breaker"] == "closed" and again["breaker"] == "open"
+    assert decide.recovery(first).path == "retry"
+    assert decide.recovery(again).path == "pause"
+    assert decide.recovery({**again, "tries_left": 0}).path == "stop"

@@ -32,7 +32,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/assist.py` - Help from a language model, from any provider, off unless configured (backlog 43).
 - `migkit/attempts.py` - Each attempt at a unit of work, the server session that is exactly its own, and a wait the server stopped answering told apart from a slow a Classes: View, Attempt, SessionHealth, Ledger, Monitor.
 - `migkit/audit.py` - The run's own record of what migkit did, written so a changed record shows.
-- `migkit/autonomous.py` - `migkit migrate`: two addresses, their access and a goal in; the whole workflow run to a verified outcome (backlog P0-AUTONOMOUS-MIGRATION). Classes: Question, Asked, Unit, Workflow, Outcome.
+- `migkit/autonomous.py` - `migkit migrate`: two addresses, their access and a goal in; the whole workflow run to a verified outcome (backlog P0-AUTONOMOUS-MIGRATION). Classes: Question, Asked, Unit, Workflow, Plan, Outcome.
 - `migkit/avrostream.py` - Changes as Avro messages through a schema registry, in Debezium's envelope: `before`, `after`, `source`, `op` and `ts_ms`, the key a record  Classes: Encoder.
 - `migkit/backupseed.py` - SQL Server's own backup, restored on the target: a database's pages carried whole, and its changes followed from the version the restored co Classes: MsFacts.
 - `migkit/barriers.py` - Barriers, tombstones, and neutral write markers across engines (BAR-1, BAR-2, BAR-3, P0-DEPTH.tombstones, P0-DE.3). Classes: Tombstone, TombstoneLedger, NeutralMark, SequenceTag, BatchSequenceLedger, TargetWriteAttribution.

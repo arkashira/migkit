@@ -2800,14 +2800,18 @@ def migrate(source, target, goal, hop_name, go, why):
         console.print(f"nothing written; migkit migrate --hop"
                       f" {_esc(hop_name)} --go runs it")
         return
+    # a --go given up front is the yes to the switch a cutover proposes
     got = autonomous.run(goal, _Steps(hop_name, goal),
-                         lambda m: console.print(_esc(m)), path)
+                         lambda m: console.print(_esc(m)), path,
+                         answer=answer if tty else None, go=go)
     console.print("\n[bold]outcome[/bold]")
     for d, (state, words) in got.databases.items():
         color = "green" if state == "done" else "yellow"
         console.print(f"  [{color}]{_esc(d)}[/{color}]: {_esc(words)}")
-    if goal == "cutover" and got.complete:
-        console.print("the switch itself waits for your authorization")
+    if got.switch == "asked":
+        console.print(f"the switch waits for your yes: migkit migrate --hop"
+                      f" {_esc(hop_name)} --go proves readiness again and"
+                      " switches")
     console.print(f"evidence: migkit migrate --hop {_esc(hop_name)} --why")
     if got.exit:
         raise SystemExit(got.exit)
@@ -2870,6 +2874,14 @@ class _Steps:
 
     def forecast(self, kind, db):
         return self.eng.forecast(kind, db).operator_line()
+
+    def eta(self, kind, db):
+        return self.eng.forecast(kind, db).seconds
+
+    def switch(self, db):
+        from .engines import ALIASES
+        return _cutover(self.hop, self.eng, db, True,
+                        ALIASES.get(self.hop.engine, self.hop.engine))
 
     def progress(self, db):
         return _move_said(self.hop, db)

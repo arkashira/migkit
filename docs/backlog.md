@@ -10305,18 +10305,27 @@ verification merely to keep moving. These implementation criteria remain OPEN.
 Status 2026-10-16: PARTLY. Built: `migkit migrate` (two addresses or a hop,
 goal copy/sync/cutover) runs assessment, copy, catch-up, proof with its one
 repair, and cutover readiness per database (`migkit/autonomous.py`,
-`cli.migrate`); every recovery through `decide.attempt` (as planned, again
-from the last position after a measured backoff, smaller pieces); a failed
-unit isolated while other databases go on; units and recovery decisions
-kept in `workflow.json` and resumed; typed questions in
-`autonomous.QUESTIONS`; mechanism comparison in
-`docs/research/autonomous-comparison.md`. Proved on fakes by
-`tests/test_autonomous_workflow.py`; sandbox scenarios written in
-`tests/test_autonomous_scenarios.py`, not run.
-Not done: the recovery Need of a shared fault catalogue (W8B `faults` was
-not on master), concurrency rebalancing and replanning inside this ladder,
-the switch itself, comparative measurements against managed services.
-
+`cli.migrate`). A failed unit is classified (`faults.classify`) and
+recovered as `decide.recovery` chooses from the fault catalogue - reconcile
+an effect not known, proceed, pause, throttle, retry from the last position
+after a measured backoff, probe, replan, isolate or stop - with a sizing
+cause retuned (`tuning.Retune`), bounded by `autonomous.TRIES`; each choice,
+its postcondition and whether it held kept in `workflow.json`. After an
+isolate or a throttle the units left are re-planned (sizes, order by the
+engine's forecast) and the scope and work left said (`autonomous.replan`).
+A cutover proved ready proposes the switch as the typed question `switch`
+with its evidence and makes it only on the operator's yes (`--go` up front
+counts). Proved on fakes by `tests/test_autonomous_workflow.py`; the proof
+harness `tests/test_autonomous_scenarios.py` (MySQL and PostgreSQL:
+healthy, recoverable in the run, recoverable by a run again,
+unrecoverable; inputs, interventions, completion, recovery, retry waste,
+time) is written, not run; `docs/research/autonomous-comparison.md` holds
+its table as "to be measured".
+Not done: the scenario numbers (no run yet); the move's own worker count
+rebalanced from the flow (the move sizes its workers itself); a reconcile
+reading of the copy's committed position beyond "nothing past the kept
+position" (`ops.reconcile` is honoured where a step has one; the CLI
+steps do not yet); comparative measurements against managed services.
 
 Not done (W9A, 2026-10-16): the MySQL range copier and the generic copier pass `check=` (`faults.landed`) and `owned=` to `faults.retried`; the PostgreSQL, SQL Server and cross-engine copiers and the tail loop do not yet. `faults.Throttle` runs between ranges in `ranges.ReadPool` only, not in the tail loop.
 
