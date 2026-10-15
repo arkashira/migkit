@@ -24,6 +24,16 @@ Only where the target's rows arrive through the replication stream: a
 target migkit writes itself (its own copy or tail, a renamed database, a
 mapping) is not this rung's. The program's name is migkit's business; an
 operator reads "replica checksum through the replication stream".
+
+Which of the two proves each table is a climb on what each was measured
+to cost here (`decide.HopCosts`): the replica checksum's seconds a row,
+its pairing in, against migkit's own digest's alone, timed on the same
+chunks. A way never timed is tried first, on the smallest table only, so
+one bounded trial gives it a number; a source being written needs what
+only the stream proves at one point (`online`). The checksum table it
+writes on the source is a change the operator allows (`TABLE`), never
+assumed. MariaDB, which has no server UUID, is told a replica of this
+source by its own GTID positions.
 """
 import math
 import re
@@ -47,6 +57,11 @@ EXACT_TYPES = {"tinyint", "smallint", "mediumint", "int", "integer",
 #: a chunk migkit's digest finds differing on a source being written is
 #: read again, at most this many times, before it is a difference
 GENERATIONS = 3
+#: the hop's rates for this choice are kept under this prefix
+COSTS = "replica checksum/"
+#: seconds between the two readings of the source's position that say
+#: whether it is being written
+WRITE_PROBE = 1.0
 
 
 @dataclass
@@ -178,6 +193,42 @@ def _need(what, key, why):
     return decide.Need(what, lambda f: bool(f.get(key)), why)
 
 
+def _quoted(name):
+    return ".".join(f"`{p.replace('`', '``')}`" for p in name.split(".", 1))
+
+
+def _table_stand(f):
+    got = f.get("replicate")
+    if got:
+        return decide.Stand(decide.POSSIBLE, f"its account may write {got}")
+    return decide.Stand(decide.BY_DBA, "the source's account may write"
+                                       " neither the usual checksum table"
+                                       " nor one beside the data")
+
+
+def _table_make(f):
+    """What a DBA runs where migkit's account may write no checksum
+    table: the right to make migkit's own beside the data."""
+    if f.get("replicate"):
+        return []
+    return [f"grant create, insert, update, delete, select on"
+            f" `{f['db']}`.`{OWN_TABLE}` to {f['account']}"]
+
+
+def _table_undo(f):
+    """migkit's own table is dropped after the check; the usual one, there
+    before migkit came, is left as it was found."""
+    got = f.get("replicate") or ""
+    return [f"drop table if exists {_quoted(got)}"] \
+        if got.endswith("." + OWN_TABLE) else []
+
+
+#: the table the program writes each chunk's checksum into, on the source
+TABLE = decide.Change(
+    "checksum_table", "a checksum table",
+    _table_stand, make=_table_make, undo=_table_undo,
+    after="after the check", speeds=False)
+
 RUNGS = (
     decide.Rung(
         "replica checksum", SAID + ", every chunk held to migkit's own"
@@ -196,21 +247,53 @@ RUNGS = (
             _need("its session may write statements", "statement binlog",
                   "the source's account may not set its session's binlog"
                   " format, which {rung} writes its checksums in"),
-            _need("a checksum table it may write", "replicate",
-                  "{rung} needs a table on the source it may write: neither"
-                  " the usual one nor migkit's own beside the data"),
         ),
+        changes=(TABLE,),
         prove=lambda f: f.get("replica checksum failed"),
         because="the replica computes each chunk at the same point of the"
                 " stream as the source, so a source still written is"
                 " proved without being stopped",
         footprint=1, external=True,
         leaves="a checksum table on the source, replicated to the target"),
+    # said without "migkit's own": `decide` ranks a rung so worded as a
+    # native copier, and an untimed external way below it would never run
     decide.Rung(
-        "own digest", "migkit's own digest of every table on both servers",
+        "own digest", "the digest migkit takes of every table on both"
+                      " servers",
         gives=frozenset({"checksum", "byte exact"}),
         because="migkit's own digest, the proof everywhere else"),
 )
+
+
+def _gtid_set(text):
+    """MariaDB's GTID position, `domain-server-seq` joined by commas, as
+    {domain: (server, seq)}."""
+    out = {}
+    for part in str(text or "").replace("\n", "").split(","):
+        bits = part.strip().split("-")
+        if len(bits) == 3 and all(b.isdigit() for b in bits):
+            out[int(bits[0])] = (int(bits[1]), int(bits[2]))
+    return out
+
+
+def _maria_native(eng):
+    """A MariaDB target replicating from this source: its applier running,
+    reading from this source's server id by GTID, and nothing in its own
+    position this source never had."""
+    src_id = str(eng._q("src", "select @@server_id")[0][0])
+    had = _gtid_set(eng._q("src", "select @@gtid_current_pos")[0][0])
+    for r in eng._q_named("dst", "show slave status"):
+        sql = str(eng._repl_field(r, eng._REPL_FIELDS["sql"])).lower()
+        if sql != "yes" or str(eng._repl_field(
+                r, ("Master_Server_Id",)) or "") != src_id:
+            continue
+        if str(eng._repl_field(r, ("Using_Gtid",)) or "no").lower() == "no":
+            continue
+        mine = _gtid_set(eng._q("dst", "select @@gtid_slave_pos")[0][0])
+        if mine and all(d in had and seq <= had[d][1]
+                        for d, (_, seq) in mine.items()):
+            return True
+    return False
 
 
 def facts(eng, db):
@@ -219,6 +302,8 @@ def facts(eng, db):
     from .util import which
 
     def native():
+        if eng._brands()[0].name == "mariadb":
+            return _maria_native(eng)
         uuid = str(eng._q("src", "select @@server_uuid")[0][0]).lower()
         for r in eng._q_named("dst", "show replica status"):
             same = str(eng._repl_field(r, ("Source_UUID", "Master_UUID"))
@@ -253,10 +338,25 @@ def facts(eng, db):
                                        or "all privileges" in grants) \
             else ""
 
-    return decide.Facts({"installed": bool(which(PROGRAM))},
+    def account():
+        user, _, host = str(eng._q("src", "select current_user()")[0][0]
+                            ).partition("@")
+        return f"'{user}'@'{host or '%'}'"
+
+    def written():
+        # two readings of the source's position apart: moved, it is being
+        # written; no position to read, it cannot be told quiet
+        before = eng.src_lsn(db)
+        if before is None:
+            return True
+        time.sleep(WRITE_PROBE)
+        return eng.src_lsn(db) != before
+
+    return decide.Facts({"installed": bool(which(PROGRAM)), "db": db},
                         **{"native replica": native, "migkit writes": writes,
                            "statement binlog": binlog,
-                           "replicate": replicate})
+                           "replicate": replicate, "account": account,
+                           "written": written})
 
 
 def _index_columns(eng, db, t, index):
@@ -287,8 +387,7 @@ def _own(eng, db, c, gate):
         with gate.unit():
             src = tuple(eng._q("src", eng._range_digest_sql(
                 "src", db, c.table, where), params or None)[0])
-            at = str(eng._q("src", "select @@global.gtid_executed")[0][0]
-                     or "")
+            at = eng.src_lsn(db)
             if at and eng.fence_wait(db, at, timeout=60) is False:
                 return None
             dst = tuple(eng._q("dst", eng._range_digest_sql(
@@ -310,52 +409,95 @@ def _chunks(eng, replicate, db, t):
                   (r[6], r[7])) for r in rows]
 
 
-def check(eng, db, log=print):
-    """The deep check's `Result`, or None where the rung does not hold
-    (said in the decision record, as every choice is)."""
+def _sizes(eng, db):
+    """The tables the hop takes in `db`, smallest first: the first a way
+    never timed is tried on is the one that costs least to try."""
+    try:
+        got = eng.table_facts("src", db) or {}
+    except Exception:  # noqa: BLE001 - no sizes, the listing's order
+        got = {}
+
+    def rows(t):
+        f = got.get(t)
+        return int((f.get("rows") if isinstance(f, dict) else 0) or 0)
+    return sorted((t for t in eng._tables("src", db)
+                   if not eng.hop.excluded(db, t)), key=rows)
+
+
+def check(eng, db, log=print, costs=None):
+    """The deep check's `Result`, or None where no table is this rung's
+    (said in the decision record, as every choice is). `costs` is where
+    the two ways' rates are read and kept: the hop's own by default."""
+    from . import sourcechange
     from .engines.base import Result
     from .movers import client_defaults, client_dsn
     from .throttle import Throttle
     from .util import quiet_argv, run
     f = facts(eng, db)
-    costs = decide.HopCosts(eng.hop, "replica checksum/")
-    got = decide.climb(f"{db}: verify", RUNGS, f, costs=costs)
-    if got.path != "replica checksum":
+    sourcechange.put_answers(eng.hop, f, RUNGS)
+    costs = decide.HopCosts(eng.hop, COSTS) if costs is None else costs
+    if not decide.prune(RUNGS[:1], f)[0]:
+        offer = decide.offered(f"{db}: verify", RUNGS, f, costs=costs)
+        if offer is not None:
+            log(TABLE.missing(offer.rung, f))
+        decide.climb(f"{db}: verify", RUNGS, f, costs=costs)
         return None
+    need = ("online",) if f["written"] else ()
     health = eng._health("dst")
     lag = max_lag(getattr(health, "lag_seconds", None), eng.hop)
     limit = eng._q("src", "select @@max_connections")[0][0]
     gate = Throttle(1, probe=lambda: eng._health("dst"))
-    verdicts, lines, rows, t0 = [], [], 0, time.monotonic()
+    verdicts, lines, alone = [], [], []
     s, tg = eng.hop.source, eng.hop.target
-    for t in eng._tables("src", db):
-        if eng.hop.excluded(db, t):
-            continue
-        with client_defaults(s, tg) as (fs, ft):
-            cmd = argv((client_dsn(s, fs), client_dsn(tg, ft)), db, t,
-                       f["replicate"], lag, max_load(limit))
-            p = run(quiet_argv(cmd), check=False, timeout=None)
-        chunks = _chunks(eng, f["replicate"], db, t)
-        if p.returncode not in (0, 16) and not chunks:
-            f["replica checksum failed"] = f"{t} could not be checksummed"
-            return Result("deep", f"{db} replica checksum", "warn",
-                          f"{SAID} did not run on {t}; migkit's own digest"
-                          " stays the proof", "",
-                          "migkit check reads every table with its own"
-                          " digest")
-        own = {c.chunk: _own(eng, db, c, gate) for c in chunks}
-        verdict, said = pair(chunks, {k: v for k, v in own.items()
-                                      if v is not None})
-        verdicts.append(verdict)
-        lines += said
-        rows += sum(int(c.counts[0] or 0) for c in chunks)
-    costs.saw("replica checksum", max(rows, 1), time.monotonic() - t0)
+    try:
+        for t in _sizes(eng, db):
+            got = decide.climb(f"{db}.{t}: verify", RUNGS, f, need,
+                               costs=costs)
+            if got.path != "replica checksum":
+                alone.append(t)
+                continue
+            t0 = time.monotonic()
+            with client_defaults(s, tg) as (fs, ft):
+                cmd = argv((client_dsn(s, fs), client_dsn(tg, ft)), db, t,
+                           f["replicate"], lag, max_load(limit))
+                p = run(quiet_argv(cmd), check=False, timeout=None)
+            chunks = _chunks(eng, f["replicate"], db, t)
+            if p.returncode not in (0, 16) and not chunks:
+                f["replica checksum failed"] = (f"{t} could not be"
+                                                " checksummed")
+                return Result("deep", f"{db} replica checksum", "warn",
+                              f"{SAID} did not run on {t}; migkit's own"
+                              " digest stays the proof", "",
+                              "migkit check reads every table with its"
+                              " own digest")
+            stream = time.monotonic() - t0
+            t1 = time.monotonic()
+            own = {c.chunk: _own(eng, db, c, gate) for c in chunks}
+            mine = time.monotonic() - t1
+            rows = sum(int(c.counts[0] or 0) for c in chunks)
+            # its cost is its pairing too, as it never runs alone; the
+            # digest alone on the same chunks is the other way's number
+            costs.saw("replica checksum", max(rows, 1), stream + mine)
+            if rows and any(v is not None for v in own.values()):
+                costs.saw("own digest", rows, mine)
+            verdict, said = pair(chunks, {k: v for k, v in own.items()
+                                          if v is not None})
+            verdicts.append(verdict)
+            lines += said
+    finally:
+        if f.get(decide.answer_key(TABLE.name)) == "yes":
+            for stmt in TABLE.statements(f, "undo"):
+                eng._q("src", stmt)
+    if not verdicts:
+        return None
     status = ("diff" if "diff" in verdicts else
-              "warn" if "warn" in verdicts or not verdicts else "ok")
+              "warn" if "warn" in verdicts else "ok")
     throttled = gate.line()
+    rest = (f"; {len(alone)} tables by migkit's own digest alone, measured"
+            " the cheaper proof here" if alone else "")
     return Result("deep", f"{db} replica checksum", status,
                   f"{SAID}, paired with migkit's own digest: "
-                  + "; ".join(lines[:10])
+                  + "; ".join(lines[:10]) + rest
                   + (f" ({throttled})" if throttled else ""))
 
 

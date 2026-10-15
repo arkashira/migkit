@@ -4670,7 +4670,17 @@ number: `docs/research/smart-decisions-2026-09-30.md`,
   run; the checksum table is not yet a `decide.Change` offered to the
   operator (it is written where the account may write it); MariaDB's
   GTIDs are not fenced; the cost is recorded per row, never yet ranked
-  against a measured own-digest rate.)
+  against a measured own-digest rate. W4E2, 2026-10-16: the table is
+  `replicasum.TABLE`, a change the operator answers (`checksum_table`),
+  migkit's own dropped after; MariaDB told a replica by its GTID
+  positions and fenced through `src_lsn`; each table climbs on the
+  replica checksum's rate against the digest's alone, timed on the same
+  chunks, an untimed way tried once on the smallest table, a source being
+  written needing `online`. *Not done:* `decide._is_native_copier` still
+  reads "migkit's own" in a rung's words as a copier - the digest rung is
+  worded around it, and a field saying "not a copier" belongs in
+  `decide.py`; the MariaDB replica and the bounded trial are proved on
+  fakes, not on a server pair.)
 * **Close the structural four as far as they go:**
   * *Oracle at high rates:* migkit's own LogMiner reader (RDS-capable,
     no licence), mining on a standby where the edition allows it, a

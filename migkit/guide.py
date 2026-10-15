@@ -115,6 +115,8 @@ def run(ask, say, path, force=False, env=None):
     from .config import build_hop, keychain_name, keychain_write
     env = dict(os.environ if env is None else env)
     asked = []
+    #: the sides whose engine was read off the server, not written
+    knocked = set()
 
     def question(text, secret=False, default=""):
         asked.append(text)
@@ -130,6 +132,7 @@ def run(ask, say, path, force=False, env=None):
             if src and "://" not in src and \
                     not imports.looks_like_a_file(src):
                 src = engineat.address(src, question if ask else None, say)
+                knocked.add("source")
             if imports.looks_like_a_file(src):
                 imported = imports.read(src)
                 break
@@ -148,11 +151,11 @@ def run(ask, say, path, force=False, env=None):
     if not raw.get("source"):
         # a task that says only where its changes went
         raw["source"] = _address(question if ask else None, say, "",
-                                 ASK_SOURCE, "source")
+                                 ASK_SOURCE, "source", knocked)
     if not raw.get("target"):
         raw["target"] = _address(question if ask else None, say,
                                  env.get("MIGKIT_TARGET", ""), ASK_TARGET,
-                                 "target")
+                                 "target", knocked)
     # the same two places as a hop the file has: that hop, updated where
     # it is - it was added again as `shop-2`, and the `--force` suggested
     # rewrote every other hop out of the file
@@ -181,6 +184,10 @@ def run(ask, say, path, force=False, env=None):
                            " signs in without one)", secret=True)
             if got:
                 typed[side] = (got, None)
+    # signed in, a server on a wire several brands speak says which it is
+    for side in sorted(knocked):
+        raw[side] = engineat.rebrand(raw[side],
+                                     typed.get(side, (None,))[0], say)
     if typed:
         keep = str(env.get("MIGKIT_SECRETS") or "").lower()
         if not keep and ask is not None and keychain_usable():
@@ -244,7 +251,7 @@ def run(ask, say, path, force=False, env=None):
             "config": small, "found": found, "scripts": written}
 
 
-def _address(question, say, given, text, side):
+def _address(question, say, given, text, side, knocked=None):
     from . import addresses
     got = given
     for _ in range(3):
@@ -258,6 +265,8 @@ def _address(question, say, given, text, side):
             if "://" not in got:
                 from . import engineat
                 got = engineat.address(got, question, say)
+                if knocked is not None:
+                    knocked.add(side)
             addresses.parse(got, side)
             return got
         except SystemExit as e:
