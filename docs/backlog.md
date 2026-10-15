@@ -11015,3 +11015,7 @@ Not done: a same-engine pair's inner engines must say their side (`pair_side`), 
   hold rung, the rungs refused above it and the rung's `loads`/`leaves`, not
   connections, memory or spool as numbers. No `migkit` command exports the
   change sheet or writes a run's evidence back yet.
+
+### W12L (2026-10-16) change-sheet command, doctor numbers
+Done: `migkit change-sheet` (export, `--back`); `doctor` says connections per side, memory and disk spool of this machine, and objects created on the servers per leg (`report.footprint_lines`).
+Not done: the run does not call `write_back` by itself as each step ends; server objects are read from each way's `leaves` words (no structured per-side counts on `decide.Rung`); the disk spool is the bytes carried, before compression.

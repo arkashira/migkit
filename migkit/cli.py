@@ -1097,6 +1097,8 @@ def _doctor_hop(name, hop, raw_hop):
             pass
     for line in _rungs_said(hop, eng, reached):
         out.append(f"{_esc(name)}: {_esc(line)}")
+    for line in _numbers_said(hop, eng, reached):
+        out.append(f"{_esc(name)} [yellow]numbers[/yellow]: {_esc(line)}")
     for d in (hop.databases or []):
         line = freeze.kept_line(hop, d)
         if line:
@@ -1116,6 +1118,46 @@ def _footprint_said(rung):
     return ((("passes " + ", ".join(parts)) if parts else
              "passes nothing it says") + "; leaves "
             + (rung.leaves or "what it has not said"))
+
+
+def _numbers_said(hop, eng, reached):
+    """What the move takes, per side and leg, as numbers: connections each
+    server is asked for, this machine's memory and disk spool, and the
+    objects created on the servers. Every figure is an owner's own
+    (`sizing.estimate`, `model.for_move`, the ways' rungs); the widest
+    database of the hop's scope sets the workers. Said only with both
+    sides reached, since the servers' free connections are what bound
+    them."""
+    if len(reached) < 2:
+        return ["not worked out - both servers must answer for the"
+                " connections, memory and disk it needs to be said"]
+    from . import model as resource_model
+    import shutil
+    from . import report, sizing
+    try:
+        dbs = list(hop.databases or eng.databases())
+        best = None
+        for d in dbs[:8]:
+            sides = {s: sizing.capacity(eng, s, d) for s in ("src", "dst")}
+            m = resource_model.for_move(hop, eng, d, write=False)
+            plan = sizing.estimate(hop, eng, d, _units(eng, d), sides=sides,
+                                   model=m)
+            if best is None or plan.most > best[1].most:
+                best = (d, plan, sides, m)
+        if best is None:
+            return ["not worked out - the hop has no database in scope"]
+        _, plan, sides, m = best
+        try:
+            spool_free = shutil.disk_usage(hop.report_dir()).free
+        except OSError:
+            spool_free = None
+        return report.footprint_lines(
+            hop, dbs, plan, sides, m.worker_memory, m.carried,
+            report.ways_of(hop, eng, _stream_climb), sizing.host(),
+            spool_free)
+    except Exception as e:  # noqa: BLE001 - a probe never fails doctor
+        why = (str(e).splitlines() or [type(e).__name__])[-1]
+        return [f"not worked out now - {_clean(why, raw=True)[:140]}"]
 
 
 def _rungs_said(hop, eng, reached):
@@ -1362,6 +1404,54 @@ def _link_line(got, name):
     if got.get("mb_s"):
         parts.append(f"{got['mb_s']} MB/s")
     return ("link: " + ", ".join(parts)) if parts else ""
+
+
+@main.command("change-sheet")
+@click.argument("hop_name")
+@click.option("--db", default="", help="one database of the hop's scope;"
+              " default all of them")
+@click.option("--back", "step", default="", help="a step's id: write the"
+              " run's evidence back to it instead of exporting the plan")
+@click.option("--status", default="done", show_default=True,
+              help="with --back: done, failed, ...")
+@click.option("--seconds", type=float, default=None,
+              help="with --back: the seconds the step took")
+@click.option("--proof", default="", help="with --back: what it stands on")
+@click.option("--rows", type=int, default=None,
+              help="with --back: rows a phase that wrote into the target"
+              " wrote")
+@click.option("--unit", default="", help="with --back: the name of that"
+              " write, if not the step's id")
+def change_sheet(hop_name, db, step, status, seconds, proof, rows, unit):
+    """Write the plan's steps as a change sheet (CSV and JSON beside the
+    hop's reports) with stable ids a team's task sheet can hold, or, with
+    --back, write a run's evidence back to one step."""
+    from . import movers, planner, report, sizing
+    from . import model as resource_model
+    from .engines import ALIASES
+    hop = get_hop(hop_name)
+    if step:
+        got = report.write_back(hop, step, status, seconds, proof,
+                                rows=rows, unit=unit or None)
+        console.print(f"{_esc(step)}: {_esc(got['status'])}"
+                      + (f" in {got['seconds']}s" if got["seconds"]
+                         is not None else ""))
+        return
+    _require_configured(hop)
+    eng = get_engine(hop)
+    steps = []
+    for d in ([db] if db else (hop.databases or eng.databases())):
+        facts = eng.table_facts("src", d)
+        m = resource_model.for_move(hop, eng, d, facts, None, write=False)
+        n = sizing.estimate(hop, eng, d, _units(eng, d), model=m).start
+        base, _ = movers.for_hop(hop, ALIASES.get(hop.engine, hop.engine))
+        via, _ = movers.fitted(hop, ALIASES.get(hop.engine, hop.engine),
+                               base)
+        steps += report.change_sheet(hop, d, planner.phases(
+            hop, m, facts, None, n, via))
+    js, cs = report.write_change_sheet(hop, steps)
+    console.print(f"{len(steps)} steps: {_esc(str(cs))} and"
+                  f" {_esc(str(js))}")
 
 
 @main.command()

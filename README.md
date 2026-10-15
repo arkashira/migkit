@@ -182,6 +182,7 @@ off for a hop where the time matters more.
 |---|---|
 | `init` | Set up a hop: in a terminal, asks for the two addresses and the passwords, connects, says what it found and what it will do, and writes the hop. |
 | `doctor` | What this machine can do, and whether the configured hops connect. |
+| `change-sheet` | Write the plan's steps as a change sheet (CSV and JSON beside the hop's reports) with stable ids a team's task sheet can hold, or, with --back, write a run's evidence back to one step. |
 | `advise` | Show the migration playbook for this hop's service. |
 | `assess` | Premigration readiness check: CDC prerequisites, risky tables, encoding, extensions, accounts. |
 | `schema` | Target schema workflows: preparation plan (default), cross-engine DDL conversion (--convert), versioned migration files (--migration). |

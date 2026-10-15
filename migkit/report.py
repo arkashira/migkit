@@ -557,3 +557,154 @@ def write_back(hop, sid, status, seconds, proof, rows=None, unit=None):
                           unit or sid, rows or 1)
     write_change_sheet(hop, steps)
     return step
+
+
+#: what a way's `leaves` words name on a server, and which side it is on
+#: ("" is the side(s) the way loads)
+SERVER_OBJECTS = (
+    ("replication slot", "src"), ("slot", "src"), ("publication", "src"),
+    ("trigger", "src"), ("user mapping", "dst"), ("subscription", "dst"),
+    ("extension", "dst"), ("server", "dst"), ("schema", ""), ("table", ""),
+    ("role", ""), ("user", ""))
+_OBJECT_RE = None
+#: the words of a way that keeps files on this machine
+_FILES_HERE = ("file", "directory", "dump")
+_SIDE_NAME = {"src": "source", "dst": "target"}
+
+
+def _objects_re():
+    global _OBJECT_RE
+    if _OBJECT_RE is None:
+        import re
+        names = "|".join(re.escape(n) for n, _ in SERVER_OBJECTS)
+        _OBJECT_RE = re.compile(rf"\b({names})(s?)\b")
+    return _OBJECT_RE
+
+
+def server_objects(leaves):
+    """[(object, side, plural)] a way's `leaves` words name on the
+    servers: nothing where it says nothing is left there, and None where
+    it does not say."""
+    low = (leaves or "").lower()
+    if not low:
+        return None
+    if "nothing on the servers" in low:
+        return []
+    found, side_of = [], dict(SERVER_OBJECTS)
+    for kind, plural in _objects_re().findall(low):
+        row = (kind, side_of[kind], bool(plural))
+        if row not in found:
+            found.append(row)
+    return found
+
+
+def _files_here(leaves):
+    low = (leaves or "").lower()
+    return "on this machine" in low and any(w in low for w in _FILES_HERE)
+
+
+def ways_of(hop, eng, stream_climb):
+    """[(leg, rung or None)] the hop's whole-database move and the follow
+    of its changes stand on, read from the decision engine's own climbs
+    (`movers`, `stream_climb`) read-only, as `waysaid` reads them."""
+    from . import capabilities, decide, movers, waysaid
+    from .engines import ALIASES
+    out = []
+    try:
+        engine = ALIASES.get(hop.engine, hop.engine)
+        base, _ = movers.for_hop(hop, engine)
+        via, _ = movers.fitted(hop, engine, base)
+        out.append(("the whole-database move", waysaid.rung_named(via)))
+    except (Exception, SystemExit):  # noqa: BLE001 - said as not chosen
+        out.append(("the whole-database move", None))
+    if capabilities.unavailable(hop.engine, "stream"):
+        return out
+    try:
+        if eng.maps_columns():
+            rung = next((r for r in movers.stream_ways()
+                         if r.name == "tail"), None)
+        else:
+            facts, rungs, _, work = stream_climb(hop, eng, None, False)
+            rung = decide.climb(work, rungs, facts, costs=facts["costs"],
+                                prove=False).rung
+    except (Exception, SystemExit):  # noqa: BLE001 - said as not chosen
+        rung = None
+    out.append(("following its changes", rung))
+    return out
+
+
+def footprint_lines(hop, databases, plan, sides, worker_memory, carried,
+                    ways, here=None, spool_free=None):
+    """The numbers a hop's move takes, a line per side and leg, from the
+    owners' own figures and none made here: the connections each server
+    gets to open (`sizing.Plan`, `sizing.CONNECTIONS_PER_WORKER`, the
+    server's free ones), the memory this machine holds (the workers the
+    plan runs at `sizing.Plan` times what one holds, `model.Model`), the
+    disk the ways keeping files here take (the bytes the move carries),
+    and the objects each way leaves on the servers (`decide.Rung.leaves`,
+    a number a database)."""
+    from . import sizing
+    from .movers import DRIVEN
+    from .wording import human_bytes, without_programs
+    out = []
+    per = sizing.CONNECTIONS_PER_WORKER
+    for side in ("src", "dst"):
+        c = sides.get(side) or {}
+        free = c.get("free_connections")
+        out.append(
+            f"{side}: opens {plan.start * per} connections at the start,"
+            f" up to {plan.most * per} as it goes ({per} a worker, "
+            + (f"{plan.start} to {plan.most} workers)" if plan.most
+               > plan.start else f"{plan.start} workers)")
+            + (f"; the server has {free} free" if free is not None
+               else "; how many the server has free could not be read"))
+    each = int(worker_memory or sizing.WORKER_MEMORY)
+    have = (here or {}).get("memory")
+    out.append(
+        f"this machine: memory {human_bytes(plan.start * each)} at the"
+        f" start, up to {human_bytes(plan.most * each)} as it goes"
+        f" ({human_bytes(each)} a worker)"
+        + (f"; {human_bytes(have)} free here" if have else
+           "; the free memory here could not be read"))
+    held = [(leg, r) for leg, r in ways if r is not None
+            and _files_here(r.leaves)]
+    for leg, r in held:
+        if carried:
+            line = (f"this machine: disk spool up to"
+                    f" {human_bytes(carried)} for {leg}, the bytes the"
+                    " move carries before any compression")
+            if spool_free is not None and carried > spool_free:
+                line += (f" - NOT ENOUGH, {human_bytes(spool_free)} free"
+                         " where the reports are kept")
+            elif spool_free is not None:
+                line += f"; {human_bytes(spool_free)} free"
+        else:
+            line = (f"this machine: {leg} keeps files here; the bytes it"
+                    " carries are not known yet, so its disk spool is not")
+        out.append(line)
+    if not held:
+        out.append("this machine: no disk spool - no way chosen keeps files"
+                   " here")
+    n = max(1, len(databases or []))
+    for leg, r in ways:
+        if r is None:
+            out.append(f"{leg}: what it creates on the servers is said when"
+                       " its way is chosen, as the move runs")
+            continue
+        objs = server_objects(r.leaves)
+        if objs is None:
+            out.append(f"{leg}: what it creates on the servers is not said")
+        elif not objs:
+            out.append(f"{leg}: creates nothing on the servers")
+        else:
+            by = {}
+            for kind, side, plural in objs:
+                where = side or "src and dst"
+                by.setdefault(where, []).append(
+                    f"{kind}{'s' if plural else ''} "
+                    + ("(several a database)" if plural else
+                       f"x{n} (one a database, {n} database"
+                       f"{'s' if n != 1 else ''})"))
+            out.append(f"{leg}: creates " + "; ".join(
+                f"on {w}: {', '.join(v)}" for w, v in by.items()))
+    return [without_programs(line, DRIVEN) for line in out]
