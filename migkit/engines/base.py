@@ -6357,18 +6357,10 @@ class Engine:
         the child's, refused by the key on every replay. An engine that
         cannot say which tables those are has every change collapsed, in the
         order rows were first touched, as before."""
-        try:
-            ordered = self._ordered_tables(side, db)
-        except Exception:  # noqa: BLE001 - not known: as before
-            ordered = None
-        if ordered is None:
+        split = self._net_split(side, db, changes)
+        if split is None:
             return self._collapsed(changes)
-        bound, loose, names = [], [], {}
-        for c in changes:
-            name = names.get(c["table"])
-            if name is None:
-                name = names[c["table"]] = self._lane_name(c["table"])
-            (bound if name in ordered else loose).append(c)
+        bound, loose = split
         out = [row for c in bound for row in self._collapsed([c])]
         # a row's shape - its kind, its key's names and all its names -
         # worked out once for each order its names came in, not once a row
@@ -6384,6 +6376,25 @@ class Engine:
             free.setdefault(shape, []).append((table, row))
         return out + [r for shape in sorted(free, key=lambda s: not s[0])
                       for r in free[shape]]
+
+    def _net_split(self, side, db, changes):
+        """(bound, loose): a batch's changes to the tables
+        `_ordered_tables` names, which go change by change in the source's
+        order, and the rest, which `_net_rows` collapses - or None where
+        this engine cannot say which tables those are."""
+        try:
+            ordered = self._ordered_tables(side, db)
+        except Exception:  # noqa: BLE001 - not known: as before
+            ordered = None
+        if ordered is None:
+            return None
+        bound, loose, names = [], [], {}
+        for c in changes:
+            name = names.get(c["table"])
+            if name is None:
+                name = names[c["table"]] = self._lane_name(c["table"])
+            (bound if name in ordered else loose).append(c)
+        return bound, loose
 
     def _lane_name(self, table):
         return str(self.local_table(table)).split(".")[-1]
@@ -6724,8 +6735,13 @@ class Engine:
         statement a row took 3.9s; the same rows 1,000 to a statement took
         0.06s. Only runs of rows next to each other are joined, so a parent
         written before its child still is. A key seen again ends the run:
-        one statement cannot write the same row twice on every engine."""
-        self._apply_net(side, db, self._net_rows(side, db, changes))
+        one statement cannot write the same row twice on every engine.
+
+        Collapsed change by change, or - where those rows applied slower
+        than the source changes - as columns (`applyway`), whichever the
+        batches measured cheaper here."""
+        from .. import applyway
+        applyway.apply(self, side, db, changes)
         return len(changes)
 
     def _apply_net(self, side, db, rows):
