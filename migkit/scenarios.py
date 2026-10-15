@@ -776,8 +776,7 @@ def storage_case(table, source, target, *, family="mysql", exists=False,
                     lambda f: accepted and not loss,
                     "storage consequences need acceptance; lost transactions, foreign keys or durability are refused"),
         decide.Need("zero rows refused by target foreign keys", lambda f: fk_safe))
-    from dataclasses import replace
-    rungs = tuple(replace(r, needs=needs + r.needs) for r in tableengine.ways())
+    rungs = decide.fenced(tableengine.ways(), *needs)
     if family == "postgres":
         needs += (decide.Need("the server's ALTER TABLE SET ACCESS METHOD support",
                               lambda f: alter_access_method,

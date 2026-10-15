@@ -1082,6 +1082,14 @@ def offered(work, rungs, facts=None, need=(), costs=None):
     return Offer(work, got.rung, asked, instead)
 
 
+def fenced(rungs, *needs):
+    """`rungs` with `needs` asked of every one of them first: a ladder's
+    shared conditions declared once, in front of each rung's own."""
+    import dataclasses
+    return tuple(dataclasses.replace(r, needs=tuple(needs) + tuple(r.needs))
+                 for r in rungs)
+
+
 def prune(rungs, facts, need=()):
     """([rung that holds], [(rung, why it does not)]): a rung lacking a
     needed capability, or one of whose needs does not hold, is out, with
