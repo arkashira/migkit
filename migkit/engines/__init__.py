@@ -8,7 +8,7 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "spanner", "bigtable", "firestore", "datastore", "gaussdb",
          "oceanbase", "oceanbase-oracle", "polardbx", "dcdb", "keyspaces",
          "neptune", "timestream", "lindorm", "geminidb-cassandra",
-         "geminidb-redis", "geminidb-mongo",
+         "geminidb-redis", "geminidb-mongo", "qdrant", "neo4j",
          "sapodp", "saas", "hetero", "generic")
 
 #: every other name an engine goes by - a brand on its wire (`mariadb`,
@@ -46,7 +46,7 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "tdsql-c": "mysql", "amazon-keyspaces": "keyspaces",
            "aws-keyspaces": "keyspaces", "amazon-neptune": "neptune",
            "amazon-timestream": "timestream",
-           "geminidb": "geminidb-cassandra"}
+           "geminidb": "geminidb-cassandra", "neo4j-aura": "neo4j"}
 
 #: engines reached over another's wire protocol, whose values a driver
 #: hands over, a table is built and a value written as that one's are
@@ -110,7 +110,7 @@ PORTS = {
     "gaussdb": 8000, "oceanbase": 2883, "oceanbase-oracle": 2883,
     "polardbx": 3306, "dcdb": 3306, "keyspaces": 9142, "neptune": 8182,
     "lindorm": 33060, "geminidb-cassandra": 8635, "geminidb-redis": 6379,
-    "geminidb-mongo": 8635,
+    "geminidb-mongo": 8635, "qdrant": 6333, "neo4j": 7474,
 }
 
 
@@ -233,6 +233,12 @@ def _class_for(name):
     if name == "hetero":
         from .hetero import HeteroEngine
         return HeteroEngine
+    if name == "qdrant":
+        from .qdrant import QdrantEngine
+        return QdrantEngine
+    if name == "neo4j":
+        from .neo4j import Neo4jEngine
+        return Neo4jEngine
     return _cloud_class(name)
 
 

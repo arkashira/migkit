@@ -1519,6 +1519,26 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: GeminiDB's Cassandra API keeps no change log a client can read, so its changes cannot be followed. Stop writes on the source and move it, then prove it with migkit check
 
+## qdrant
+
+* <...>: a row filter is SQL, and a collection takes none
+
+* <...>: a collection is made from the source's vectors, and the source has no collection of that name
+
+## neo4j
+
+* <...> <...>: the server answered <...> <...>
+
+* <...>: a row filter is SQL, and a graph takes none: name labels or types instead
+
+* <...>: a graph holds nodes and relationships - another engine's table has no place in it
+
+* <...> <...> relationships wait on nodes the target never received, first: <...>
+
+* <...>: its changes cannot be followed - <...>
+
+* <...>: the change log no longer holds <...>: <...>
+
 ## SAP application data (ODP)
 
 * sap_licence: <...> - full-use or runtime

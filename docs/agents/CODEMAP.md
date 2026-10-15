@@ -196,7 +196,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/workload.py` - Whether the target answers the source's own queries as well as the source does (backlog 24, problems file G1; R23, 4).
 - `migkit/zones.py` - The time zone the data is written in, against the one the server declares (backlog 23).
 
-## `migkit/engines/` (63 modules)
+## `migkit/engines/` (65 modules)
 
 - `migkit/engines/__init__.py` - (no docstring)
 - `migkit/engines/ase.py` - SAP ASE (Sybase) as one side of a pair (backlog 34). Classes: AseEngine.
@@ -234,6 +234,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/mssql.py` - (no docstring) Classes: MSSQLEngine.
 - `migkit/engines/my_pass.py` - MySQL into MySQL with no row passing through migkit (backlog R20 items 1 and 4). Classes: Different, TableCopy.
 - `migkit/engines/mysql.py` - (no docstring) Classes: MySQLEngine.
+- `migkit/engines/neo4j.py` - Neo4j as a side of a pair (backlog R16c), through its HTTP Cypher API. Classes: Neo4jEngine.
 - `migkit/engines/neptune.py` - Amazon Neptune as a side of a pair (backlog P0-CLOUDS): its property graph through Gremlin (or read through openCypher), its RDF store throu Classes: NeptuneEngine, NeptuneLanes.
 - `migkit/engines/oceanbase.py` - OceanBase as a side of a pair (backlog P0-CLOUDS), in both tenant modes. Classes: OceanBaseEngine, OceanBaseOracleEngine.
 - `migkit/engines/opensearch.py` - OpenSearch (and Elasticsearch) as one side of a pair (backlog 34). Classes: TooManyFields, OpenSearchEngine.
@@ -249,6 +250,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/postgres.py` - (no docstring) Classes: SqlFailed, PostgresEngine.
 - `migkit/engines/provedsql.py` - A digest worked out by a server that speaks PostgreSQL's or MySQL's SQL without being either - GaussDB, OceanBase, PolarDB-X, TDSQL - truste Classes: ProvedDigest.
 - `migkit/engines/pubsub.py` - Google Cloud Pub/Sub as the destination of a change stream (backlog 33). Classes: PubSubEngine.
+- `migkit/engines/qdrant.py` - Qdrant as a side of a pair (backlog R16b), through its HTTP API. Classes: QdrantEngine.
 - `migkit/engines/redis.py` - (no docstring) Classes: RedisEngine.
 - `migkit/engines/saas.py` - SaaS applications as sources, read by programs (backlog ER7): one adapter for every kind of connector, feeding migkit's own writers and its  Classes: Stream, Program, Singer, Airbyte, Dlt, Seen.
 - `migkit/engines/saas_salesforce.py` - Salesforce as a program source (backlog ER7): objects read through its REST API, and followed through its own change events. Classes: Salesforce.

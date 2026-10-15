@@ -445,8 +445,8 @@ in these historical totals.
 | 361 | R15.2nd | DuckDB as a second reader for Parquet, PostgreSQL, MySQL | DONE 2026-10-15 | S | verify | L6790-6791 |
 | 362 | R16a | pgvector compared value for value | DONE (in text 2026-09-27) | S | types | L6806-6809 |
 | 363 | R16a.more | MySQL 9 VECTOR and MongoDB float arrays | DONE 679b400 (`vectors`: MySQL 9 VECTOR, a MongoDB array's doubles) | S | types | L6806-6809; WAVE queue |
-| 364 | R16b | Qdrant as an engine | OPEN (review 2026-10-16: `engines/extended.py`, whose Qdrant never connected and was not registered as an engine, is deleted (a5ddd41); no Qdrant engine) | M | engines | L6800-6802, L6811-6818 |
-| 365 | R16c | Neo4j as an engine | OPEN (review 2026-10-16: `engines/extended.py`, whose Neo4j never connected and was not registered as an engine, is deleted (a5ddd41); no Neo4j engine) | M | engines | L6800-6802, L6819-6824 |
+| 364 | R16b | Qdrant as an engine | PARTLY (2026-10-16: `engines/qdrant.py` registered, collection made as the source's, scroll copy, digest, deep check of vectors and payload indexes; not done: recall at k, HNSW/quantization, snapshot path, sandbox server) | M | engines | L6800-6802, L6811-6818 |
+| 365 | R16c | Neo4j as an engine | PARTLY (2026-10-16: `engines/neo4j.py` registered, id-range copy, relationships after nodes, key property per label, constraints and indexes checked, change capture followed; not done: dump and load, users, fence, sandbox server) | M | engines | L6800-6802, L6819-6824 |
 | 366 | R17a | doctor says whether each leg is encrypted and where migkit sits; TLS options reach every PostgreSQL and MySQL connection | DONE (in text 2026-09-27) | M | security | L6860-6872 |
 | 367 | R17a.rest | TLS for the MySQL bulk programs, MongoDB's and Redis's connections | DONE 254c0f9 | S | security | L6872-6873, L8159-8160 |
 | 368 | R17c | Several SSH legs sized from the round trip | DONE (in text 2026-09-27) | M | move | L6887-6896 |

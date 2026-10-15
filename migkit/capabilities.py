@@ -2980,6 +2980,151 @@ _CLOUD_NATIVE_UNPROVED = {
 for _item, _engines in _CLOUD_NATIVE_UNPROVED.items():
     UNPROVED[_item] = f"{UNPROVED.get(_item, '')} {_engines}".strip()
 
+#: Qdrant's and Neo4j's gaps (backlog R16b, R16c): what their data model has
+#: no place for is not applicable, said in its words; the rest waits on the
+#: engine's row
+_NO_LOG = "Qdrant keeps no change log a client can read"
+_POINTS = {
+    "not applicable": {
+        **{i: _GIVEN_KEYS.format("point") for i in (
+            "scope.counters", "verify.access.sequence-grants",
+            "verify.identity.sequence-collision",
+            "verify.identity.sequence-parity")},
+        **{i: ("who may read a collection is the server's API keys, kept in"
+               " its configuration and not in a database") for i in (
+            "verify.access.object-ownership", "verify.access.table-grants")},
+        **{i: _NOTHING_BESIDE for i in ("scope.objects",
+                                        "verify.structure.objects")},
+        **{i: "a collection declares no columns: a payload's fields are its"
+              " own" for i in ("verify.structure.columns",
+                               "verify.structure.schema-diff",
+                               "schema.defaults", "verify.value.generated")},
+        **{i: "a collection declares no constraints to defer or validate"
+           for i in ("verify.structure.deferrable",
+                     "verify.structure.unvalidated-constraints")},
+        **{i: "a point refers to no other point or collection" for i in (
+            "verify.structure.foreign-keys", "schema.foreign-keys")},
+        "verify.structure.keys": "every point is kept by its id, so none"
+                                 " lacks one",
+        "verify.structure.extensions": "it installs no extensions: what a"
+                                       " server offers is its version",
+        "verify.structure.materialized-views": "it has no materialized"
+                                               " views",
+        "schema.views": "it has no views",
+        "schema.routines": "it keeps no stored code",
+        "verify.structure.triggers": "it runs no triggers inside the server",
+        "verify.structure.row-security": "it keeps no row-level security"
+                                         " policy in a collection",
+        "verify.structure.partitions": "a collection declares no partitions:"
+                                       " its shards are the server's layout",
+        **{i: "a payload is JSON, kept as UTF-8 text with no character set"
+              " or collation of its own" for i in (
+            "verify.value.charset", "verify.value.collation",
+            "verify.value.one-plan")},
+        "cutover.jobs": _NO_JOBS,
+        **{i: _NO_LOG for i in ("scope.ops", "tail.table-states",
+                                "tail.added", "tail.readded", "tail.ddl",
+                                "cutover.two-way", "cutover.drain")},
+        "tail.renames": "a collection cannot be renamed: a new name is a new"
+                        " collection",
+    },
+    "not yet": (
+        "scope.transforms verify.movement.target-ahead"
+        " verify.structure.collection-options verify.structure.sharding"
+        " verify.value.narrowing verify.value.null-empty"
+        " verify.value.precision verify.value.rendering"
+        " verify.value.timezone verify.value.type-drift verify.rows-apart"
+        " verify.tables assess.versions assess.brands assess.preflight"
+        " assess.capacity assess.writers assess.handwork schema.indexes"
+        " move.sized move.load-window move.create-missing"
+        " cutover.pause-replication security.tls managed.catalogued"
+        " operations.fencing"),
+}
+_GRAPH = {
+    "not applicable": {
+        **{i: _GIVEN_KEYS.format("node or relationship") for i in (
+            "scope.counters", "verify.access.sequence-grants",
+            "verify.identity.sequence-collision",
+            "verify.identity.sequence-parity")},
+        **{i: "a label declares no columns: a node's properties are its own"
+           for i in ("verify.structure.columns",
+                     "verify.structure.schema-diff", "schema.defaults",
+                     "verify.value.generated")},
+        "verify.structure.deferrable": "a graph's constraints are held at"
+                                       " each write and cannot be deferred",
+        "verify.structure.keys": "every node and relationship is kept by its"
+                                 " id, so none lacks one",
+        "verify.structure.materialized-views": "it has no materialized"
+                                               " views",
+        "schema.views": "it has no views",
+        "verify.structure.row-security": "it keeps no row-level security"
+                                         " policy on a label",
+        "verify.structure.partitions": "a label declares no partitions: a"
+                                       " database is held whole",
+        "verify.structure.foreign-keys": "a relationship holds both of its"
+                                         " nodes itself: none can be orphaned",
+        **{i: "its text is UTF-8 with no character set or collation of a"
+              " label's own" for i in (
+            "verify.value.charset", "verify.value.collation",
+            "verify.value.one-plan")},
+        "tail.renames": "a label or type is not renamed in place: a new name"
+                        " is a write to every element",
+        "cutover.jobs": _NO_JOBS,
+    },
+    "not yet": (
+        "scope.deep scope.objects scope.transforms"
+        " verify.access.object-ownership verify.access.table-grants"
+        " verify.movement.target-ahead verify.structure.collection-options"
+        " verify.structure.extensions verify.structure.indexes"
+        " verify.structure.objects verify.structure.sharding"
+        " verify.structure.triggers verify.structure.unvalidated-constraints"
+        " verify.value.narrowing verify.value.null-empty"
+        " verify.value.precision verify.value.rendering"
+        " verify.value.timezone verify.value.type-drift verify.rows-apart"
+        " verify.tables tail.added tail.readded tail.ddl assess.versions"
+        " assess.brands assess.preflight assess.capacity assess.writers"
+        " assess.handwork schema.indexes schema.routines move.sized"
+        " move.load-window move.create-missing cutover.drain"
+        " cutover.pause-replication cutover.two-way security.tls"
+        " managed.catalogued operations.fencing"),
+}
+for _engine, _row, _gaps in (("qdrant", "R16b", _POINTS),
+                             ("neo4j", "R16c", _GRAPH)):
+    for _item, _why in _gaps["not applicable"].items():
+        DEPTH_GAPS.setdefault(_item, {})[_engine] = (NOT_APPLICABLE, _why)
+    for _item in _gaps["not yet"].split():
+        DEPTH_GAPS.setdefault(_item, {})[_engine] = (NOT_YET, _row)
+GAPS["qdrant"] = {
+    "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("point")),
+    "users": (NOT_APPLICABLE, "who may read a collection is the server's API"
+                              " keys, kept in its configuration"),
+    **{cap: (NOT_APPLICABLE, _NO_LOG + ": a move is copied and checked"
+                                       " again before the switch")
+       for cap in ("stream", "fence", "confirm", "delta")},
+    "bulk-move": (NOT_YET, "R16b"),
+    "snapshot": (NOT_YET, "R16b"),
+}
+GAPS["neo4j"] = {
+    "sequences": (NOT_APPLICABLE, _GIVEN_KEYS.format("node or relationship")),
+    "users": (NOT_YET, "R16c"),
+    "confirm": (NOT_YET, "R16c"),
+    "bulk-move": (NOT_YET, "R16c"),
+    "snapshot": (NOT_YET, "R16c"),
+}
+#: the ways their code has whose test is owed: a server of each in the
+#: sandbox (`tests/servers.py`) is not there yet
+for _item, _engines in {
+        **{i: "qdrant neo4j" for i in (
+            "scope.listings", "scope.copy", "scope.repair",
+            "scope.row-filter", "scope.names", "verify.repair",
+            "verify.repair-undo", "verify.table", "assess.engine-checks")},
+        "scope.deep": "qdrant",
+        **{i: "neo4j" for i in ("scope.ops", "verify.delta", "verify.fence",
+                                "tail.table-states", "schema.create",
+                                "schema.foreign-keys", "move.table-copy")},
+        }.items():
+    UNPROVED[_item] = f"{UNPROVED.get(_item, '')} {_engines}".strip()
+
 #: BigQuery's ways, built from the client's and INFORMATION_SCHEMA's
 #: documented calls (`engines/bigquery_checks.py`), each run in a test only
 #: against a client that answers as documented, never against a project:

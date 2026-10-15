@@ -7816,6 +7816,22 @@ out of the comparison - a wrong vector would pass. So:
   schema's constraints and indexes carried, counts per label and type,
   property digests per label, the endpoints of every relationship
   compared; the bulk path its own dump and load.
+* **b, c begun 2026-10-16** (`engines/qdrant.py`, `engines/neo4j.py`,
+  both over their HTTP APIs, registered as `qdrant` and `neo4j`). Qdrant:
+  collections as tables, points read by scroll from each page's offset,
+  a collection made as the source's (vectors, sparse vectors, payload
+  indexes), points upserted whole, counts and a folded digest, the deep
+  check holding vectors and payload indexes to the source's; changes not
+  followed (no change log a client reads). Neo4j: `nodes` and
+  `relationships` read in ranges of the internal id, relationships after
+  nodes and refused by name when their nodes never come, the source's id
+  kept in a key property indexed per label, MERGE writes, the deep check
+  holding constraints and indexes; change capture followed (5.13+,
+  `txLogEnrichment`). Proved: `tests/test_qdrant_and_neo4j_reach_the_depth_matrix.py`.
+  Not done: recall-at-k, HNSW and quantization carried, Qdrant's snapshot
+  path, Neo4j's dump and load, its users, a fence on its change ids,
+  servers of each in the sandbox (`tests/servers.py`) and the depth items
+  marked not yet under R16b and R16c in `capabilities.py`.
 
 ### R17. The path between the databases, and what it carries (a, b and
 c done 2026-09-27; d begun: the read beside the source)
