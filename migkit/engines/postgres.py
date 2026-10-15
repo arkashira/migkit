@@ -3966,8 +3966,14 @@ select json_build_object(
     def _wal_keyless(self, side, db, table, way):
         """The way a table with no key is followed at or below `way`
         (`FOLLOW_WAYS`): copied again and held to its digest, else the
-        stop that says why neither holds."""
+        stop that says why neither holds. Climbed once for a table on a
+        side, from the facts `_follow_facts` already holds, and recorded
+        so the run says why the digest was taken."""
+        from .. import decide
         from ..decide import Facts, climb
+        held = self.__dict__.setdefault("_wal_keyless_ways", {})
+        if (side, db, table) in held:
+            return held[(side, db, table)]
         base = self._follow_facts(side, db)
         names = [r.name for r in self.FOLLOW_WAYS]
         rungs = self.FOLLOW_WAYS[names.index(way.path)
@@ -3984,6 +3990,8 @@ select json_build_object(
                 " records name by place cannot be written to the target"
                 " by key - give it one"
                 + (f" ({got.reason})" if got.reason else ""))
+        held[(side, db, table)] = got
+        decide.record(self.hop, got)
         return got
 
     def _wal_changes(self, side, db, token, limit, way):

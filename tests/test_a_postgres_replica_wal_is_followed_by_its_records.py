@@ -255,3 +255,35 @@ def test_the_depth_says_what_each_way_below_a_slot_reads():
     assert changedepth.postgres("replica", "d", False, "wal dump") == (
         "D1", "give the table a primary key")
     assert changedepth.postgres("logical", "f", True, "wal dump")[0] == "D4"
+
+
+def test_a_keyless_table_is_climbed_once_and_the_record_names_the_way(
+        monkeypatch):
+    e = engine(Server({0: [{"id": 1}]}), keys={"public.items": []})
+    asked = {"facts": 0, "digest": 0}
+    held = facts()
+
+    def follow_facts(*a, **k):
+        asked["facts"] += 1
+        return held
+
+    def digest_way(db, table):
+        asked["digest"] += 1
+        return True
+
+    monkeypatch.setattr(e, "_follow_facts", follow_facts, raising=False)
+    monkeypatch.setattr(e, "_wal_digest_way", digest_way, raising=False)
+    follow(e, [], monkeypatch, token=None)
+    recs = [wal_record("0/20", 7, "Heap", "INSERT", "off: 2",
+                       "blkref #0: rel 1663/5/16385 blk 0"),
+            wal_record("0/30", 7, "Transaction", "COMMIT", "", "")]
+    for _ in range(2):
+        out, _upto = follow(e, recs, monkeypatch)
+        assert [c["op"] for c in out] == ["ddl"]
+    assert asked == {"facts": 1, "digest": 1}
+    said = [r for r in decide.recorded(e.hop) if "public.items" in r["work"]]
+    assert len(said) == 1
+    assert said[0]["way"] == "the table copied again and held to its digest"
+    assert e._wal_keyless("src", "app", "public.items", WAY).path \
+        == "digest diff"
+    assert asked == {"facts": 1, "digest": 1}
