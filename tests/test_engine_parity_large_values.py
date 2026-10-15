@@ -5,30 +5,6 @@ import pytest
 from migkit import decide, pieces
 from migkit.engines.mysql import MySQLEngine
 from migkit.engines.oracle import OracleEngine
-<<<<<<< HEAD
-from migkit.lob_streamer import LobChunk, LobStreamSummary, LobStreamer, iter_lob_chunks
-||||||| d45f7f2
-from migkit.fk_window import ForeignKeyWindow, hold_or_sequence_dependent_tables
-from migkit.lob_streamer import LobChunk, LobStreamSummary, LobStreamer, iter_lob_chunks
-from migkit.movers import _ForeignKeyWindow
-from migkit.partitions import (
-    PartitionChunk,
-    PartitionInfo,
-    PartitionRouter,
-    chunk_partitions,
-    discover_partitions,
-)
-=======
-from migkit.fk_window import ForeignKeyWindow, hold_or_sequence_dependent_tables
-from migkit.movers import _ForeignKeyWindow
-from migkit.partitions import (
-    PartitionChunk,
-    PartitionInfo,
-    PartitionRouter,
-    chunk_partitions,
-    discover_partitions,
-)
->>>>>>> worktree-agent-a0cf3bd8e028add14
 
 
 class DummyHop:
