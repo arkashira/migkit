@@ -613,10 +613,306 @@ class GenericEngine(Engine):
                       f"{named} is filled and unique on the {side}, so every"
                       " row can be matched and addressed")
 
+    # ---- the way one table is compared ----------------------------------
+
+    #: rows sampled to measure a row's width before the whole table is read
+    SAMPLE_ROWS = 200
+    #: what a row held in this machine costs over its rendered bytes: the
+    #: driver's tuple, its values and the digest kept per row
+    HELD_FACTOR = 4.0
+    #: the share of this machine's free memory one table's read may take
+    MEMORY_SHARE = 0.5
+
+    def compare_facts(self, table):
+        """What the ways of comparing `table` stand on, each read once and
+        only for a rung still in the running (`decide.Facts`)."""
+        from .. import decide
+        return decide.Facts(
+            {"key": tuple(self._key())},
+            comparer=lambda: bool(which("reladiff")),
+            columns=lambda: self._side_columns("src", table),
+            unique=lambda: self._unique(table),
+            held=lambda: self._held_bytes(table),
+            memory=self._memory)
+
+    @staticmethod
+    def _memory():
+        from ..sizing import _memory
+        return _memory()
+
+    def compare_rungs(self):
+        """The ways one table is compared, as the decision engine's rungs.
+
+        Key ranges: both servers fold a range of the key into one checksum
+        and only the ranges that differ are split again, so a table too
+        large for one read, and a slow link, carry checksums, never rows.
+        It stands on one key column that names one row: a key naming
+        several makes the answer change between runs (`check_deep`). Row
+        digests in this machine: each side's rows read through the driver,
+        every value rendered one way (`canon`) and digested, the two
+        multisets compared by key where the table has one and by the whole
+        row where it has none - any key width or type, a key that is not
+        unique, a table with no key at all. It stands on the table fitting
+        the memory it may take, measured from a sample of its rows."""
+        from .. import decide
+        keyed = decide.Need(
+            "the hop's key among the table's columns", self._keyed,
+            lambda f: "the table has no column named "
+                      + ", ".join(self._absent(f) or f["key"] or ("a key",)))
+        return (
+            decide.Rung(
+                "key-ranges", "key ranges checksummed on both servers",
+                frozenset({"rows proved", "rows named by key"}),
+                needs=(keyed,
+                       decide.Need(
+                           "one key column", lambda f: len(f["key"]) == 1,
+                           lambda f: f"{len(f['key'])} key columns: ranges"
+                                     " are split on one column, so a key of"
+                                     " several is compared row by row"),
+                       decide.Need(
+                           "a key the catalogue does not show as repeated",
+                           lambda f: f["unique"] is not False,
+                           "{rung} needs a key that names one row, and the"
+                           " catalogue holds no unique rule on it: rows"
+                           " sharing a key make the ranges' answer change"
+                           " between runs"),
+                       decide.Need(
+                           "the comparison component installed",
+                           lambda f: f["comparer"],
+                           "the comparison component is not installed on"
+                           " this machine: migkit doctor --install puts it"
+                           " in place", programs=("reladiff",))),
+                because="only the checksums of ranges cross the link, and"
+                        " only the ranges that differ are read again",
+                leaves="nothing", external=True),
+            decide.Rung(
+                "row-digests", "row digests compared in this machine",
+                frozenset({"rows proved", "rows named by key", "keyless"}),
+                needs=(decide.Need(
+                    "the table's rows within the memory this machine may"
+                    " take", self._fits, self._fits_why),),
+                because="every row is read and digested here, by key or"
+                        " by its whole self, whatever the key's shape",
+                leaves="nothing", footprint=1),
+        )
+
+    def _keyed(self, f):
+        return bool(f["key"]) and not self._absent(f)
+
+    @staticmethod
+    def _absent(f):
+        """The hop's key columns the table does not have; none where its
+        columns were not read."""
+        cols = {c.lower() for c in (f["columns"] or ())}
+        return [k for k in f["key"] if cols and k.lower() not in cols]
+
+    def _fits(self, f):
+        held, room = f["held"], f["memory"]
+        return held is not None and room is not None \
+            and held <= room * self.MEMORY_SHARE
+
+    def _fits_why(self, f):
+        held, room = f["held"], f["memory"]
+        if held is None:
+            return "the table's rows could not be counted or sampled"
+        if room is None:
+            return "this machine's free memory could not be read"
+        return (f"the table would take {held / 2**20:,.0f} MiB held here"
+                f" and {room * self.MEMORY_SHARE / 2**20:,.0f} MiB may be"
+                " taken: only key ranges compare it")
+
+    def compare_way(self, table, need=("rows proved",)):
+        """(`decide.Choice`, facts): how `table` is compared. A table the
+        hop's key does not name is compared only by a way that carries a
+        table without one."""
+        from .. import decide
+        facts = self.compare_facts(table)
+        if not self._keyed(facts):
+            need = tuple(need) + ("keyless",)
+        return decide.climb(f"compare {table}", self.compare_rungs(), facts,
+                            need=need), facts
+
+    def _side_columns(self, which, table):
+        """The table's column names on one side, or () where the
+        catalogue does not answer."""
+        try:
+            return tuple(self._raw_schema(self._connect(which), table))
+        except (Exception, SystemExit):  # noqa: BLE001 - unread, said
+            return ()
+
+    def _unique(self, table):
+        """Whether the key is one column the source's catalogue holds
+        unique: True, False, or None where the catalogue does not say -
+        the key's own check (`check_deep`) answers that case."""
+        key = self._key()
+        try:
+            conn = self._connect("src")
+            got = {c.lower() for c in conn.query_table_unique_columns(
+                self._path(conn, table))}
+        except (Exception, SystemExit):  # noqa: BLE001 - not said there
+            return None
+        return len(key) == 1 and key[0].lower() in got
+
+    def _from(self, conn, table):
+        return ".".join(conn.dialect.quote(p) for p in self._path(conn, table))
+
+    def _held_bytes(self, table):
+        """What the source's rows would take held in this machine: its
+        count times the rendered width of a sample of its rows, times what
+        a held row costs over its bytes; None where either is unread."""
+        try:
+            conn = self._connect("src")
+            path = self._from(conn, table)
+            rows = int(conn.query(f"SELECT count(*) FROM {path}",
+                                  list)[0][0])
+            sample = conn.query(
+                f"SELECT * FROM {path} "
+                + conn.dialect.offset_limit(None, self.SAMPLE_ROWS), list)
+        except (Exception, SystemExit):  # noqa: BLE001 - unread, said
+            return None
+        if not rows:
+            return 0
+        width = (sum(len(self._row_text(r)) for r in sample)
+                 / max(1, len(sample)))
+        return int(rows * max(width, 1) * self.HELD_FACTOR)
+
+    @staticmethod
+    def _cell(value):
+        """One value as one text on every engine (`canon.render_value`),
+        whatever type the driver hands back."""
+        from ..canon import NUMBER, digest_value
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return str(int(value))
+        for cls, types in (("integer", (int,)), ("float", (float,)),
+                           (NUMBER, (decimal.Decimal,)),
+                           ("bytes", (bytes, bytearray, memoryview)),
+                           ("text", (str,))):
+            if isinstance(value, types):
+                return digest_value(cls, value)
+        if isinstance(value, (datetime.datetime, datetime.date,
+                              datetime.time)):
+            return value.isoformat()
+        return str(value)
+
+    @classmethod
+    def _row_text(cls, row):
+        return "\x1f".join("\x00" if v is None else v
+                           for v in map(cls._cell, row))
+
+    def _side_rows(self, which, table, columns):
+        """Every row of one side, its columns in `columns`' order."""
+        conn = self._connect(which)
+        cols = ", ".join(conn.dialect.quote(c) for c in columns)
+        try:
+            return conn.query(f"SELECT {cols} FROM"
+                              f" {self._from(conn, table)}", list)
+        except Exception as e:  # noqa: BLE001 - said as the table's error
+            raise SystemExit(f"cannot read {table} on the"
+                             f" {'source' if which == 'src' else 'target'}:"
+                             f" {str(e).splitlines()[-1][:160]}")
+
+    def _client_digests(self, table, facts):
+        """(rows only on the source, only on the target, changed keys,
+        (missing keys, extra keys)): each side's rows digested here and
+        the two multisets compared.
+
+        With a key, rows are matched by it, and a key holding other values
+        on the two sides is a changed row - a key the table repeats is
+        matched as the multiset of its rows, and a row with no key value is
+        matched as `[null]` rather than left out. Without one, the whole row
+        is its own key: a row on one side more often than on the other is
+        counted there, and none of them can be named for a repair."""
+        import collections
+        import hashlib
+        columns = list(facts["columns"])
+        if not columns:
+            raise SystemExit(f"the columns of {table} could not be read on"
+                             " the source")
+        lower = {c.lower(): c for c in columns}
+        key = ([lower[k.lower()] for k in facts["key"]]
+               if self._keyed(facts) else [])
+        order = key + sorted((c for c in columns if c not in key),
+                             key=str.lower)
+        width = len(key)
+
+        def fold(which):
+            got = collections.defaultdict(collections.Counter)
+            for row in self._side_rows(which, table, order):
+                digest = hashlib.blake2b(
+                    self._row_text(row).encode("utf-8", "surrogatepass"),
+                    digest_size=16).hexdigest()
+                name = (json.dumps([self._cell(v) for v in row[:width]])
+                        if width else digest)
+                got[name][digest] += 1
+            return got
+
+        src, dst = fold("src"), fold("dst")
+        missing, extra, changed = [], [], []
+        only_src = only_dst = 0
+        for name in src.keys() | dst.keys():
+            a = src.get(name, collections.Counter())
+            b = dst.get(name, collections.Counter())
+            if a == b:
+                continue
+            if not width:
+                only_src += sum((a - b).values())
+                only_dst += sum((b - a).values())
+            elif not b:
+                missing.append(name)
+            elif not a:
+                extra.append(name)
+            else:
+                changed.append(name)
+        if width:
+            only_src, only_dst = len(missing), len(extra)
+        return only_src, only_dst, sorted(changed), (sorted(missing),
+                                                     sorted(extra))
+
+    def _digest_result(self, db, scope, table, facts, choice):
+        """The data result of a table compared by row digests here."""
+        only_a, only_b, changed, (missing, extra) = self._client_digests(
+            table, facts)
+        keyed = self._keyed(facts)
+        self._write_drill(db, table, missing=missing if keyed else [],
+                          changed=changed, extra=extra if keyed else [])
+        parts = [f"{only_a} rows only on the source" if only_a else "",
+                 f"{only_b} rows only on the target" if only_b else "",
+                 f"{len(changed)} rows with different values"
+                 if changed else ""]
+        parts = [x for x in parts if x]
+        detail = ("; ".join(parts) if parts else
+                  "every row is on both sides as often, value for value")
+        fix = ""
+        if parts:
+            fix = ("`migkit sync --db - --kind rows` names them and can put"
+                   " them right" if keyed else
+                   "a table without a key cannot have one row addressed:"
+                   " key the hop on columns that name a row, then run the"
+                   " check again")
+        return Result("data", scope, "diff" if parts else "ok",
+                      f"{detail}; compared by {choice.said}: {choice.reason}",
+                      "", fix)
+
     def check_data(self, db, table=None, stream=None):
         res = []
         gate = self._gate()
         for t in ([table] if table else self._tables()):
+            choice, facts = self.compare_way(t)
+            if choice.path != "key-ranges":
+                scope = f"{db}.{t}" if db != "-" else t
+                try:
+                    got = (self._digest_result(db, scope, t, facts, choice)
+                           if choice.rung is not None else
+                           Result("data", scope, "error",
+                                  f"no way compares it here: {choice.reason}"))
+                except SystemExit as e:
+                    got = Result("data", scope, "error", str(e)[:200])
+                if stream:
+                    stream(f"{t}: {got.status}")
+                res.append(got)
+                continue
             with gate.unit():
                 p = self._reladiff(t, ["-c", "%"], jobs=gate.permits)
             got = self._stats(p)

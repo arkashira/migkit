@@ -31,7 +31,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | geminidb-cassandra | 16/16 | 11/12 | large values |
 | geminidb-mongo | 16/16 | 11/12 | large values |
 | geminidb-redis | 16/16 | 11/12 | large values |
-| generic | 4/16 | 3/12 | sequences, params, bulk-move, table-copy, stream, fence, confirm, delta, users, guard, statistics, snapshot, keyless, no unique index, wide key, too large, large values, partitioned, read-only source, missing grant, slow link |
+| generic | 4/16 | 12/12 | sequences, params, bulk-move, table-copy, stream, fence, confirm, delta, users, guard, statistics, snapshot |
 | hetero | 16/16 | 10/12 | partitioned, missing grant |
 | iceberg | 9/16 | 11/12 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
 | kafka | 16/16 | 12/12 | - |
@@ -63,7 +63,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-87 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1340, not yet 1261, test owed 1006, yes 917. A cell below is the ways proved of the items that apply.
+87 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1340, not yet 1259, test owed 1006, yes 919. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -90,7 +90,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | geminidb-cassandra | 0/9 | 1/21 | 0/1 | 0/7 | 0/4 | 0/6 | 0/5 | 1/1 | 1/1 | 0/1 | 3/56 |
 | geminidb-mongo | 0/9 | 1/23 | 0/6 | 0/7 | 0/3 | 0/5 | 0/5 | 1/1 | 1/1 | 0/1 | 3/61 |
 | geminidb-redis | 0/7 | 1/12 | - | 0/7 | 0/1 | 1/3 | 0/5 | 1/1 | 1/1 | 0/1 | 4/38 |
-| generic | 1/10 | 2/39 | 0/6 | 1/7 | 0/6 | 0/7 | 0/6 | 0/1 | 0/1 | 0/1 | 4/84 |
+| generic | 1/10 | 2/39 | 0/6 | 1/7 | 0/6 | 2/7 | 0/6 | 0/1 | 0/1 | 0/1 | 6/84 |
 | hetero | 4/10 | 6/39 | 1/2 | 2/5 | - | 6/8 | 2/5 | - | - | - | 21/69 |
 | iceberg | 0/9 | 0/23 | 0/6 | 0/5 | 1/3 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/58 |
 | kafka | 5/9 | 15/16 | 5/5 | 5/7 | 0/1 | 5/6 | 4/5 | 1/1 | 1/1 | 0/1 | 41/52 |
@@ -194,8 +194,8 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | schema.routines | mssql mysql oracle postgres | bigquery cockroachdb dcdb geminidb-mongo mongodb oceanbase polardbx | the rest (22) | bigtable copybook datastore delta dynamodb firestore hetero iceberg kafka keyspaces kinesis neptune parquet pubsub saas sapodp sqlite tidb timestream |
 | move.table-copy | the rest (36) | bigquery db2i db2zos dcdb geminidb-cassandra geminidb-mongo lindorm oceanbase-oracle polardbx snowflake timestream | generic | kinesis pubsub saas sapodp |
 | move.bulk | the rest (22) | bigquery geminidb-cassandra geminidb-mongo hetero keyspaces | ase cockroachdb cosmosdb couchbase db2 db2i db2zos dcdb delta generic iceberg oceanbase oceanbase-oracle polardbx redshift snowflake tidb | dsql geminidb-redis kinesis lindorm pubsub saas sapodp teradata |
-| move.large-values | ase clickhouse db2 delta duckdb hetero iceberg kafka mongodb mssql mysql opensearch oracle parquet postgres redis sqlite tidb | bigquery couchbase db2i db2zos snowflake teradata | the rest (19) | cassandra copybook cosmosdb dynamodb kinesis pubsub redshift saas sapodp |
-| move.partitioned | clickhouse kafka mysql postgres tidb | bigquery db2 db2i db2zos dcdb mssql oceanbase oracle parquet polardbx teradata | ase delta gaussdb generic hetero iceberg lindorm oceanbase-oracle | the rest (28) |
+| move.large-values | the rest (19) | bigquery couchbase db2i db2zos snowflake teradata | bigtable cockroachdb datastore dcdb dsql firestore gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm neptune oceanbase oceanbase-oracle polardbx spanner timestream | cassandra copybook cosmosdb dynamodb kinesis pubsub redshift saas sapodp |
+| move.partitioned | clickhouse generic kafka mysql postgres tidb | bigquery db2 db2i db2zos dcdb mssql oceanbase oracle parquet polardbx teradata | ase delta gaussdb hetero iceberg lindorm oceanbase-oracle | the rest (28) |
 | move.spread | hetero postgres | cassandra mongodb mysql | - | the rest (47) |
 | move.sized | the rest (18) | cassandra cockroachdb db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm oceanbase oceanbase-oracle oracle polardbx redshift snowflake teradata | bigtable copybook couchbase datastore delta firestore generic iceberg neptune parquet saas sapodp spanner timestream | kinesis pubsub |
 | move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse dcdb geminidb-cassandra geminidb-mongo keyspaces mongodb mssql oceanbase polardbx teradata | the rest (18) | bigquery bigtable copybook delta dynamodb geminidb-redis iceberg kafka kinesis neptune parquet pubsub redis redshift saas sapodp snowflake timestream |
@@ -214,7 +214,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 
-DONE 373 - PARTLY 54 - IN PROGRESS 4 - OPEN 46 - BLOCKED 20 - NOT PURSUED 9
+DONE 373 - PARTLY 55 - IN PROGRESS 4 - OPEN 45 - BLOCKED 20 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
@@ -225,7 +225,7 @@ DONE 373 - PARTLY 54 - IN PROGRESS 4 - OPEN 46 - BLOCKED 20 - NOT PURSUED 9
 | correctness/performance | 1 | 0 | 0 | 0 | 0 | 0 |
 | cutover | 18 | 1 | 0 | 1 | 0 | 0 |
 | ease of use | 35 | 4 | 0 | 1 | 1 | 1 |
-| engines | 34 | 7 | 1 | 8 | 6 | 1 |
+| engines | 34 | 8 | 1 | 7 | 6 | 1 |
 | maintainability | 0 | 0 | 0 | 5 | 0 | 0 |
 | move | 34 | 12 | 2 | 4 | 0 | 2 |
 | operations/scale | 51 | 6 | 0 | 9 | 5 | 3 |

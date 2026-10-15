@@ -1629,6 +1629,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * cannot read the key of <...>: <...>
 
+* cannot read <...> on the <...>: <...>
+
+* the columns of <...> could not be read on the source
+
 * cannot open the <...> url to write: <...>
 
 * cannot read the columns of <...>: <...>

@@ -2267,9 +2267,8 @@ _FILES = ("sqlite", "duckdb", "parquet", "copybook")
 _COMPARES_ONLY = ("it compares two databases and writes to neither: nothing"
                   " of migkit's lands on its target, and no cutover drains"
                   " through it")
-_NONE = {**{n: (NOT_APPLICABLE, STREAM_ONLY.format(said, n))
-            for n, said in (("kinesis", "Kinesis"), ("pubsub", "Pub/Sub"))},
-         "generic": (NOT_YET, "P0-PARITY.small")}
+_NONE = {n: (NOT_APPLICABLE, STREAM_ONLY.format(said, n))
+         for n, said in (("kinesis", "Kinesis"), ("pubsub", "Pub/Sub"))}
 #: the cloud-native services held - a source at cutover, a target kept -
 #: by the hold of the API or the wire they speak (`freeze.HOLDS`)
 _HELD_AS = (("gaussdb", "PostgresHold"), ("oceanbase", "MySQLHold"),
@@ -2691,6 +2690,35 @@ WAYS["spread target"] = {
         ("redis", "cluster client"))},
     "*": (NOT_APPLICABLE, "one server holds every row of a table"),
 }
+
+#: the generic engine, any SQL source reached through a standard driver: it
+#: compares, and each table is compared the way its facts allow
+#: (`GenericEngine.compare_rungs`) - key ranges checksummed on both servers
+#: where one key column names one row, row digests in this machine
+#: otherwise, by key or by the whole row
+_GENERIC = {
+    "keyless": ("yes", "@_client_digests"),
+    "no unique index": ("yes", "@_client_digests"),
+    "wide key": ("yes", "@_client_digests"),
+    # ranges split again only where they differ; a table the row digests
+    # cannot hold here is refused that way, said, and left to the ranges
+    "too large": ("yes", "@compare_rungs"),
+    # a value is rendered and digested whole, its width in the measured
+    # size the row digests are held to
+    "large values": ("yes", "@_client_digests"),
+    # a standard driver reads a partitioned table as one, and every row is
+    # matched whatever partition holds it: a partition that arrived empty
+    # is its rows missing, by key
+    "partitioned": ("yes", "@compare_rungs"),
+    "read-only source": ("yes", "engines.base.Engine._target_only"),
+    "missing grant": (NOT_APPLICABLE, "both of its ways only read a table:"
+                                      " a grant it lacks is the table's own"
+                                      " error, never a slower way"),
+    # only the ranges' checksums cross the link
+    "slow link": ("yes", "@compare_rungs"),
+}
+for _shape, _way in _GENERIC.items():
+    WAYS[_shape]["generic"] = _way
 
 
 def resolves(engine, where):

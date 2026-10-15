@@ -448,6 +448,7 @@ def test_byte_order_difference_is_said_and_pages_refused():
     assert "byte_order: 'little' to 'big'" in got.words()
 
 
+<<<<<<< HEAD
 class _Unread(BaseEngine):
     CANON_ENGINE = "redis"
 
@@ -492,3 +493,81 @@ def test_the_storage_needs_read_the_facts_not_the_arguments():
     assert decide.climb("t", rungs, facts, need=("engine changed",)).path \
         is None
     assert change.table == "items"
+||||||| 580cd213
+=======
+def test_the_server_says_its_build_and_the_byte_order_follows():
+    class My:
+        CANON_ENGINE = "mysql"
+        def _q(self, side, sql):
+            return [("aarch64" if side == "dst" else "x86_64", "Linux")]
+    assert scenarios.server_platform(My(), "db", "dst") == {
+        "architecture": "aarch64", "os": "linux", "byte_order": "little"}
+
+    class Ms:
+        CANON_ENGINE = "mssql"
+        def _cmd(self, side, db, sql):
+            return [("Microsoft SQL Server 2022 (RTM) (X64) ... on Windows"
+                     " Server 2022 Datacenter",)]
+    assert scenarios.server_platform(Ms(), "db", "src") == {
+        "architecture": "x86_64", "os": "windows", "byte_order": "little"}
+
+
+def test_an_unread_build_falls_to_the_instance_class_or_stays_unknown():
+    class Mute:
+        CANON_ENGINE = "mysql"
+        def _q(self, side, sql):
+            raise RuntimeError("denied")
+    arm = Instance("aws", "rds", "db-1", klass="db.r7g.large")
+    assert scenarios.server_platform(Mute(), "db", "src", arm)[
+        "architecture"] == "aarch64"
+    assert scenarios.server_platform(Mute(), "db", "src") == {
+        "architecture": None, "os": None, "byte_order": None}
+
+
+def test_a_target_that_follows_another_server_is_refused():
+    facts = hosts()
+    facts["dst"]["replica_of"] = "db-primary"
+    got = scenarios.architecture_case(facts)
+    assert got.choice.path is None
+    assert "replica of db-primary" in got.words()
+
+
+def test_a_provider_operation_is_held_until_it_is_known_to_move_instances():
+    facts = hosts()
+    facts["offers"] = ({"name": "op", "said": "the provider's switch",
+                        "checks": ()},)
+    got = scenarios.architecture_case(facts)
+    assert got.choice.path == "architecture-logical"
+    assert "not yet: whether the provider's switch places the data" \
+        in got.choice.reason
+
+
+def test_the_topology_change_is_said():
+    facts = hosts()
+    facts["src"].update(product="rds", replicas=0)
+    facts["dst"].update(product="aurora", replicas=2)
+    words = scenarios.architecture_case(facts).words()
+    assert "topology: rds, alone to aurora with 2 replicas" in words
+
+
+def test_the_plan_carries_the_architecture_case_and_records_it(monkeypatch):
+    from migkit import managed as catalogue
+    monkeypatch.setattr(catalogue, "api_conf",
+                        lambda hop, eng, which: (None, "run by its owner"))
+    recorded = []
+    monkeypatch.setattr(decide, "record",
+                        lambda hop, what, *a, **k: recorded.append(what))
+    monkeypatch.setattr(scenarios, "architecture_facts",
+                        lambda eng, db, reader: decide.Facts(hosts()))
+    eng = SimpleNamespace(CANON_ENGINE="mysql")
+    lines = scenarios.plan_lines(object(), eng, "db")
+    assert len(lines) == 1
+    assert "hardware / OS / architecture change" in lines[0]
+    assert "a logical move across hardware or OS" in lines[0]
+    assert recorded and recorded[0].path == "architecture-logical"
+    same = hosts()
+    same["dst"] = dict(same["src"])
+    monkeypatch.setattr(scenarios, "architecture_facts",
+                        lambda eng, db, reader: decide.Facts(same))
+    assert scenarios.plan_lines(object(), eng, "db") == []
+>>>>>>> worktree-agent-a5f0e055450860533
