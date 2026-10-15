@@ -10515,6 +10515,20 @@ long-running verifier still holds its earlier sequential implementation.
 Dependencies: P0-DECISION-ALL, P0-AUTO-RESOURCES.adapt, P0-RESUME-ALL,
 P0-VALIDATE.mysql-query-lifecycle, P0-CONNECTION-PROGRESS and P0-ETA-ALL.
 
+Partly done 2026-10-16 (W6C), status stays OPEN: the entry-point audit is
+`docs/research/verify-execution-audit.md`. `migkit/scanplan.py` plans every
+aggregate a check asks of a table as one set of reads (duplicates once, one
+bounded read a side or covering key range, sides and tables side by side
+under the run's slots, the way climbed from `scanplan.READS` by measured
+seconds a row with "every row" the need, values under unchanged change
+markers not read again, never for a cutover); MySQL `check_deep` charset,
+NULL/empty and float read through it, the private `Slots` and the
+30-column limits gone (tests/test_a_tables_checks_are_read_in_one_plan.py,
+written, not run). Not done: other engines' deep value checks, the delta
+loop's sequential databases, `leaves`' private pools, row parity costed end
+to end with an engine-native digest rung, unit resume without markers (MySQL
+has none), sandbox/end-to-end benchmarks.
+
 ### LT.R10 MongoDB standalone followed by buckets
 
 Done: a standalone source is followed by a bucket sweep (`MongoEngine.FOLLOW_WAYS`, `_sweep_round`): dbHash per collection as the unchanged proof, then raw-BSON bucket digests keyed by the canonical `_id` hash (`leaves.bytes_hash`, `id_bucket`), only changed buckets re-read and written; depth D1 with "convert to a single-node replica set" (`changedepth.mongodb`, `MongoEngine.change_depths`).

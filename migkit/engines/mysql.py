@@ -3094,78 +3094,106 @@ class MySQLEngine(Engine):
         return rowtext.mysql_row(self._cols(db, t))
 
     def _charset_counts(self, db, columns):
-        import copy
-        from .. import checkpoint, durable, ranges, sizing
+        """{(side, table, column): replacement characters} of `columns`,
+        every column of a table in one read a key range (`scanplan`); a
+        read that fails is raised, never a zero."""
+        from ..scanplan import Aggregate
+        got = self._value_scan(db, [Aggregate("charset", t, c, (
+            self._fffd(c),)) for t, c in columns],
+            "deep-charset-progress.json")
+        for err in got.failed.values():
+            raise err
+        return {(side, a.table, a.name): int(got.value(side, a)[0])
+                for a in got.aggregates for side in ("src", "dst")}
 
-        grouped = {}
-        for table, column in columns:
-            grouped.setdefault(table, []).append(column)
+    def _fffd(self, column):
+        col = self._my_ident(column)
+        return (f"coalesce(sum(char_length(convert({col} using utf8mb4))"
+                f" - char_length(replace(convert({col} using utf8mb4),"
+                " _utf8mb4 0xEFBFBD, ''))),0)")
+
+    def _value_scan(self, db, aggregates, progress="deep-scan-progress.json"):
+        """`scanplan.Got` of `aggregates` over both sides of `db`: a
+        table's aggregates fused into one read a key range, the ranges and
+        both sides read side by side under the check's own slots."""
+        import copy
+        from .. import checkpoint, config, decide, scanplan
         reader = copy.copy(self)
         reader.hop = copy.copy(self.hop)
         reader.hop.slice = min(max(1, self.hop.slice), 10000)
-        jobs = []
-        for table, names in grouped.items():
-            parts, key = reader._checksum_ranges(db, table,
-                                                 self._pk_cols(db, table))
-            for lo, hi in parts:
-                for side in ('src', 'dst'):
-                    jobs.append((side, table, names, key, lo, hi))
-        if not jobs:
-            return {}
-        plan = sizing.estimate(self.hop, self, db, units=len(jobs))
-        pace = sizing.Pace(plan.start, plan.most,
-                           resources=sizing.resources(self, db, self.hop),
-                           memory=sizing.Memory(sizing.WORKER_MEMORY))
-        slots = ranges.Slots(plan.most, pace=pace)
-        totals, completed = {}, [0]
-        lock = threading.Lock()
-        path = self.hop.report_dir(db) / 'deep-charset-progress.json'
+        cut = {}
 
-        def read(job):
-            side, table, names, key, lo, hi = job
-            exprs = []
-            for name in names:
-                col = self._my_ident(name)
-                exprs.append(
-                    f"coalesce(sum(char_length(convert({col} using utf8mb4))"
-                    f" - char_length(replace(convert({col} using utf8mb4),"
-                    " _utf8mb4 0xEFBFBD, ''))),0)")
-            k = key if (key and (key.startswith("`") or key.startswith("("))) else (self._my_ident(key) if key else "")
-            predicate = checkpoint.where(k, lo, hi) if k else ''
-            where = f' where {predicate}' if predicate else ''
-            sql = ('select count(*), ' + ', '.join(exprs) + ' from '
-                   + self._scope(side, db, table) + where)
-            row = self._q(side, sql)[0]
-            if len(row) != len(names) + 1:
-                raise RuntimeError('charset aggregate returned incomplete columns')
-            with lock:
-                for name, value in zip(names, row[1:]):
-                    ident = (side, table, name)
-                    totals[ident] = totals.get(ident, 0) + int(value)
-                completed[0] += 1
-                durable.write_atomic(path, json.dumps({
-                    'completed': completed[0], 'planned': len(jobs),
-                    'concurrency': pace.limit,
-                    'phase': 'charset', 'status': 'running',
-                    'table': table, 'side': side,
-                    'resume_supported': False}))
-            return int(row[0])
+        def parts(table):
+            if table not in cut:
+                got, key = reader._checksum_ranges(
+                    db, table, self._pk_cols(db, table))
+                k = key if (key and key[:1] in ("`", "(")) else (
+                    self._my_ident(key) if key else "")
+                cut[table] = [checkpoint.where(k, lo, hi) for lo, hi in
+                              (scanplan.covering(got) if k
+                               else [(None, None)])]
+            return cut[table]
+        marker = getattr(self, "_change_marker", None)
+        scope = getattr(self.hop, "scope_fingerprint", None)
+        real = isinstance(self.hop, config.Hop)
+        return scanplan.run(
+            self, db, aggregates,
+            source=lambda side, t: self._scope(side, db, t),
+            query=lambda side, sql: self._q(side, sql), parts=parts,
+            markers=(lambda side, t: marker(side, db, t)) if marker else None,
+            held=self._held_for_cutover(db) if marker else "",
+            scope=scope() if callable(scope) else None,
+            costs=decide.Layered(decide.Costs(), decide.HopCosts(
+                self.hop, "scan/")) if real else None,
+            progress=self.hop.report_dir(db) / progress,
+            evidence=scanplan.Evidence(self.hop.report_dir(db)
+                                       / "scan-evidence.json")
+            if marker else None)
 
+    def _value_aggregates(self, db, which):
+        """The aggregates of the deep value checks `which` asks
+        ("charset", "nullempty", "float"), every column each reads."""
+        from ..scanplan import Aggregate
+        out = []
+        if "charset" in which:
+            out += [Aggregate("charset", t, c, (self._fffd(c),))
+                    for t, c in self._charset_columns(db)]
+        if "nullempty" in which:
+            for t, c in self._text_columns(db):
+                col = self._my_ident(c)
+                out.append(Aggregate("nullempty", t, c, (
+                    f"coalesce(sum({col} is null),0)",
+                    f"coalesce(sum({col} = ''),0)")))
+        if "float" in which:
+            q = ("select table_name, column_name from information_schema.columns"
+                 " where table_schema=%s and data_type in (%s, %s)"
+                 " and table_name not like 'migkit%%' order by 1,2")
+            for t, c in self._scoped_rows(
+                    db, self._q("src", q, (db,) + self.FLOATY)):
+                col = self._my_ident(c)
+                out.append(Aggregate("float", t, c, (
+                    f"count({col})", f"coalesce(sum({col}),0)",
+                    f"coalesce(max(abs({col})),0)"), ("sum", "sum", "max")))
+        return out
+
+    def _deep_scans(self, db):
+        """The deep value checks' one plan, or None where it cannot be
+        made - each check then reads, and says, on its own."""
         try:
-            slots.each(jobs, read)
-        except Exception:
-            durable.write_atomic(path, json.dumps({
-                'completed': completed[0], 'planned': len(jobs),
-                'phase': 'charset', 'status': 'incomplete',
-                'resume_supported': False}))
-            raise
-        durable.write_atomic(path, json.dumps({
-            'completed': completed[0], 'planned': len(jobs),
-            'concurrency': pace.limit, 'phase': 'charset', 'status': 'complete',
-            'resume_supported': False}))
-        return totals
+            return self._value_scan(db, self._value_aggregates(
+                db, ("charset", "nullempty", "float")))
+        except Exception:  # noqa: BLE001 - each check says its own error
+            return None
 
-    def _charset_check(self, db, ddb=None):
+    def _charset_columns(self, db):
+        return self._scoped_rows(db, self._q(
+            "src", "select distinct table_name, column_name"
+                   " from information_schema.columns where table_schema=%s"
+                   " and data_type in ('char','varchar','text','tinytext',"
+                   "'mediumtext','longtext') and table_name not like"
+                   " 'migkit%%'", (db,)))
+
+    def _charset_check(self, db, ddb=None, scans=None):
         ddb = ddb or self._d("dst", db)
         csq = ("select table_name, column_name, character_set_name"
                " from information_schema.columns where table_schema=%s"
@@ -3185,12 +3213,8 @@ class MySQLEngine(Engine):
                 if WIDTH.get(d2, 9) < WIDTH.get(s2, 0):
                     note += " (DOWNGRADE, drops/truncates multibyte chars)"
                 csbad.append(note)
-        tcols = self._scoped_rows(db, self._q(
-            "src", "select distinct table_name, column_name"
-                   " from information_schema.columns where table_schema=%s"
-                   " and data_type in ('char','varchar','text','tinytext',"
-                   "'mediumtext','longtext') and table_name not like"
-                   " 'migkit%%'", (db,)))
+        tcols = ([(a.table, a.name) for a in scans.of("charset")]
+                 if scans is not None else self._charset_columns(db))
         if not tcols:
             if csbad:
                 return Result("deep", f"{db} charset", "diff",
@@ -3200,12 +3224,18 @@ class MySQLEngine(Engine):
             return Result("deep", f"{db} charset", "ok",
                           "text column charsets match, no text columns to scan")
         try:
-            counts = self._charset_counts(db, tcols[:30])
+            if scans is not None and scans.failures("charset"):
+                raise next(iter(scans.failures("charset").values()))
+            counts = ({(side, a.table, a.name): int(scans.value(side, a)[0])
+                       for a in scans.of("charset") for side in ("src", "dst")}
+                      if scans is not None else self._charset_counts(db, tcols))
         except Exception as e:
-            failed_cols = ", ".join(f"{t}.{c}" for t, c in tcols[:30][:5])
+            failed_cols = ", ".join(
+                (scans.failures("charset") if scans is not None else None)
+                or [f"{t}.{c}" for t, c in tcols[:5]])
             return Result("deep", f"{db} charset", "error",
                           f"replacement-character scan incomplete: could not read {failed_cols}: {e}")
-        for t, col in tcols[:30]:
+        for t, col in tcols:
             sv = counts[('src', t, col)]
             dv = counts[('dst', t, col)]
             if dv > sv:
@@ -5463,7 +5493,10 @@ class MySQLEngine(Engine):
                 shifts.append(line)
         res.append(verdict.timeshift_result(db, shifts))
 
-        res.append(self._charset_check(db, ddb))
+        # one plan reads what the charset, NULL/empty and float checks ask
+        # of each table: a read a key range, not a read a column a check
+        scans = self._deep_scans(db)
+        res.append(self._charset_check(db, ddb, scans))
 
         # partitioned tables (mysql): a missing partition sends rows to the
         # MAXVALUE catch-all, a changed method/expression reroutes them, and
@@ -5611,8 +5644,8 @@ class MySQLEngine(Engine):
             res.append(Result("deep", f"{db} boundary", "ok",
                               "no single-int-pk tables to boundary-check"))
 
-        res += self._deep_nullempty(db, ddb)
-        res += self._deep_float(db, ddb)
+        res += self._deep_nullempty(db, ddb, scans)
+        res += self._deep_float(db, ddb, scans)
         res += self._deep_unenforced_checks(db, ddb)
         res += self._check_grants(db)
         res += self._deep_ownership(db, ddb)
@@ -6186,7 +6219,7 @@ class MySQLEngine(Engine):
     TEXTY = ("char", "varchar", "text", "tinytext", "mediumtext", "longtext")
     FLOATY = ("float", "double")
 
-    def _text_columns(self, db, limit=30):
+    def _text_columns(self, db, limit=None):
         q = ("select table_name, column_name from information_schema.columns"
              " where table_schema=%s and data_type in ("
              + ",".join(["%s"] * len(self.TEXTY)) + ")"
@@ -6194,7 +6227,7 @@ class MySQLEngine(Engine):
         return self._scoped_rows(
             db, self._q("src", q, (db,) + self.TEXTY))[:limit]
 
-    def _deep_nullempty(self, db, ddb):
+    def _deep_nullempty(self, db, ddb, scans=None):
         """NULL and '' are different values that a mover happily swaps.
 
         Both sides still hold "something" in the column, so a row checksum
@@ -6202,22 +6235,21 @@ class MySQLEngine(Engine):
         application's `IS NULL` and `= ''` branches diverge. Comparing the
         two counts per column is what catches it.
         """
+        scans = scans or self._value_scan(
+            db, self._value_aggregates(db, ("nullempty",)))
         bad = []
-        failed = {}
-        for tbl, col in self._text_columns(db):
-            q = (f"select sum(`{col}` is null), sum(`{col}` = '')"
-                 f" from `%s`.`{tbl}`")
-            try:
-                sv = self._q("src", q % db)[0]
-                dv = self._q("dst", q % ddb)[0]
-            except Exception as e:
-                failed[f"{tbl}.{col}"] = str(e).splitlines()[-1][:90]
+        failed = {k: _first_line(e) for k, e in
+                  scans.failures("nullempty").items()}
+        for agg in scans.of("nullempty"):
+            sv, dv = scans.value("src", agg), scans.value("dst", agg)
+            if sv is None or dv is None:
+                failed.setdefault(f"{agg.table}.{agg.name}", "not read")
                 continue
             s = (int(sv[0] or 0), int(sv[1] or 0))
             d = (int(dv[0] or 0), int(dv[1] or 0))
             if s != d:
-                bad.append(f"{tbl}.{col}: src null/empty={s[0]}|{s[1]}"
-                           f" dst={d[0]}|{d[1]}")
+                bad.append(f"{agg.table}.{agg.name}: src null/empty="
+                           f"{s[0]}|{s[1]} dst={d[0]}|{d[1]}")
         if failed:
             detail = "; ".join(f"{col} ({err})" for col, err in failed.items())
             return [Result("deep", f"{db} nullempty", "error",
@@ -6235,36 +6267,33 @@ class MySQLEngine(Engine):
                        "NULL vs empty-string consistent on text columns",
                        category="value.null-empty")]
 
-    def _deep_float(self, db, ddb):
+    def _deep_float(self, db, ddb, scans=None):
         """FLOAT and DOUBLE are approximations, so a checksum over them is
         the wrong instrument: identical values can hash differently and real
         drift can hash the same. Compare the aggregate with a tolerance
         instead, which is what the value actually supports."""
-        q = ("select table_name, column_name from information_schema.columns"
-             " where table_schema=%s and data_type in (%s, %s)"
-             " and table_name not like 'migkit%%' order by 1,2")
-        cols = self._scoped_rows(
-            db, self._q("src", q, (db,) + self.FLOATY))[:30]
+        scans = scans or self._value_scan(
+            db, self._value_aggregates(db, ("float",)))
+        cols = scans.of("float")
         bad = []
-        failed = {}
-        for tbl, col in cols:
-            agg = (f"select count(`{col}`), coalesce(sum(`{col}`),0),"
-                   f" coalesce(max(abs(`{col}`)),0) from `%s`.`{tbl}`")
-            try:
-                sn, ss, smax = self._q("src", agg % db)[0]
-                dn, ds, dmax = self._q("dst", agg % ddb)[0]
-            except Exception as e:
-                failed[f"{tbl}.{col}"] = str(e).splitlines()[-1][:90]
+        failed = {k: _first_line(e) for k, e in
+                  scans.failures("float").items()}
+        for agg in cols:
+            sv, dv = scans.value("src", agg), scans.value("dst", agg)
+            if sv is None or dv is None:
+                failed.setdefault(f"{agg.table}.{agg.name}", "not read")
                 continue
+            (sn, ss, smax), (dn, ds, dmax) = sv, dv
+            col = f"{agg.table}.{agg.name}"
             if int(sn or 0) != int(dn or 0):
-                bad.append(f"{tbl}.{col}: non-null count src={sn} dst={dn}")
+                bad.append(f"{col}: non-null count src={sn} dst={dn}")
                 continue
             ss, ds = float(ss or 0), float(ds or 0)
             # relative tolerance against the magnitude actually present, so
             # the test is meaningful for both tiny and huge columns
             scale = max(abs(ss), abs(ds), float(smax or 0), float(dmax or 0), 1.0)
             if abs(ss - ds) > scale * 1e-9:
-                bad.append(f"{tbl}.{col}: sum src={ss!r} dst={ds!r}")
+                bad.append(f"{col}: sum src={ss!r} dst={ds!r}")
         if failed:
             detail = "; ".join(f"{col} ({err})" for col, err in failed.items())
             return [Result("deep", f"{db} float", "error",
@@ -10337,3 +10366,9 @@ def _load_feed(cur, db, table, names, kinds, data):
     finally:
         cur.connection.feed = None
     return got
+
+
+def _first_line(e):
+    """The last line of an error, short: what a failed read is said by."""
+    lines = str(e).strip().splitlines()
+    return lines[-1][:90] if lines else type(e).__name__
