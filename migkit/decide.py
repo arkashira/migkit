@@ -3339,7 +3339,6 @@ def worker_budget(facts):
     return max(1, n), choice
 
 
-<<<<<<< HEAD
 # --- a continuous hop into a warehouse (LT.P3, S4) --------------------------
 
 #: the share of a batch's interval its landing may take: the rest is the
@@ -3543,8 +3542,6 @@ def chunk_edges(work, facts):
     key taken now, else the key read in order - never the key's minimum
     and maximum divided alone."""
     return climb(work, CHUNK_EDGES, facts, need=("edges",))
-||||||| c95da9db
-=======
 # --- a Redis tail's live way and two sites both written (LT.C6, LT.C4) ------
 
 def _at_least(have, need):
@@ -3631,4 +3628,3 @@ def two_site_rule(facts):
                          "{rung} needs the two clocks' skew measured"),)),
         Rung("merged, else held", "counters and sets merged, any other key"
              " both wrote held and logged", footprint=1)), f)
->>>>>>> w12c
