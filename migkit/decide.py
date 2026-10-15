@@ -3057,21 +3057,12 @@ def change_window(changes, seconds, costs=None):
     None) where the batch has no rate to cut by."""
     import math
     if changes <= 0 or seconds <= 0 or not math.isfinite(seconds):
-<<<<<<< HEAD
         return None, None
     widths, rungs = window_rungs(changes, seconds)
     got = climb("change windows", rungs,
                 Facts({"rate": changes / seconds, "span": seconds}),
                 costs=costs)
     return widths[got.path or rungs[0].name], got
-||||||| 580cd213
-        return None
-    rate = changes / seconds
-    return math.sqrt(changes) / rate
-=======
-        return None
-    rate = changes / seconds
-    return math.sqrt(changes) / rate
 
 
 def session_patience(durations, predicted=None, deadline=None):
@@ -3152,4 +3143,3 @@ def session_action(facts):
         Rung("report", "say it and leave the wait to the read deadline",
              because="nothing safe to close"))
     return climb("a wait the server was asked about", rungs, f)
->>>>>>> worktree-agent-a71d4f5ba40a440ef
