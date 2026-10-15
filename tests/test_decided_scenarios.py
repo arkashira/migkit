@@ -3,19 +3,50 @@ from types import SimpleNamespace
 
 import pytest
 
-from migkit import decide, scenarios, tableengine
+from migkit import cloudapi, decide, scenarios, tableengine
 from migkit.cloudapi import Instance
 
 
+UPGRADE = next(op for op in cloudapi.OPERATIONS["aws"]
+               if op.name == "aws-major-upgrade")
+NEVER = (("an eligible class", lambda s, d: False,
+          "the provider does not offer it between these classes"),)
+
+
+def _change(table, a, b, exists):
+    return tableengine.Change(table, a, b, "", there=a if exists else "")
+
+
+def _kw(kw):
+    return {("observed_traits" if k == "postgres_traits" else k): v
+            for k, v in kw.items()}
+
+
+def storage_case(table, a, b, exists=False, **kw):
+    return tableengine.decided(_change(table, a, b, exists), **_kw(kw))
+
+
+def storage_alter(table, a, b, exists=False, family="postgres", **kw):
+    return tableengine.access_method_alter(_change(table, a, b, exists),
+                                           **_kw(kw))
+
+
+def storage_definition(ddl, table, a, b, *, hop, eng, db, **kw):
+    return tableengine.definition(hop, eng, db, table, ddl, **_kw(kw))
+
+
 def managed():
-    src = Instance("aws", "rds", "source", version="15", klass="db.large",
+    src = Instance("aws", "rds", "source", engine="postgres", version="15",
+                   klass="db.large", upgrades=frozenset({"16"}),
                    status="available", storage_gb=10,
                    maintenance="sun:03:00-sun:04:00")
     dst = replace(src, id="target", version="16")
     offer = {"name": "provider-upgrade", "said": "the service's own in-place upgrade",
-             "eligible": ((src.klass, dst.klass, "15", "16"),),
+             "checks": UPGRADE.checks,
              "execute": lambda: "completed", "startup_seconds": 60,
-             "bytes_per_second": 100, "duration_source": "provider duration and rehearsal"}
+             "startup_source": "documented startup",
+             "runs": [{"bytes": 1000, "seconds": 70}],
+             "duration_source": "on the rehearsal r", "truth": "predicted"}
     return decide.Facts({"source": src, "target": dst, "api_reachable": True,
                          "offers": (offer,), "size_bytes": 1000})
 
@@ -32,7 +63,7 @@ def test_managed_paths_need_provider_eligibility_not_service_names(label):
     assert got.choice.cost().truth == "predicted"
     assert label in got.words()
     assert "migkit's full verify" in got.words()
-    facts["offers"][0]["eligible"] = ()
+    facts["offers"][0]["checks"] = NEVER
     assert scenarios.managed_case(facts).choice.path is None
 
 
@@ -145,7 +176,7 @@ def test_unread_byte_order_is_not_assumed_from_cpu_name():
 
 @pytest.mark.parametrize("source", ["myisam", "aria", "memory"])
 def test_storage_change_reuses_schema_definition(source, monkeypatch):
-    got = scenarios.storage_case("items", source, "innodb", supported=("innodb",),
+    got = storage_case("items", source, "innodb", supported=("innodb",),
                                  accepted=True, orphan_rows=0)
     assert got.choice.path == "definition"
     for fact in ("transactions", "foreign_keys", "fulltext", "locks", "holds"):
@@ -157,7 +188,7 @@ def test_storage_change_reuses_schema_definition(source, monkeypatch):
         called.append((hop, eng, db, table))
         return tableengine.rewrite(ddl, change)
     monkeypatch.setattr(tableengine, "schema", schema)
-    ddl = scenarios.storage_definition(
+    ddl = storage_definition(
         f"CREATE TABLE `items` (`id` int) ENGINE={source}"
         + (" PACK_KEYS=1" if source != "memory" else ""),
         "items", source, "innodb", hop="hop", eng="engine", db="db",
@@ -168,37 +199,47 @@ def test_storage_change_reuses_schema_definition(source, monkeypatch):
 
 
 def test_existing_target_is_changed_in_place():
-    got = scenarios.storage_case("items", "myisam", "innodb", exists=True,
+    got = storage_case("items", "myisam", "innodb", exists=True,
                                  supported=("innodb",), accepted=True, orphan_rows=0)
     assert got.choice.path == "in place"
+
+
+def test_a_planned_change_on_an_existing_table_is_no_definition(monkeypatch):
+    change = tableengine.Change("items", "myisam", "innodb", "observed", there="myisam")
+    monkeypatch.setattr(tableengine, "plan", lambda hop, eng, db: SimpleNamespace(of=lambda table: change))
     with pytest.raises(ValueError, match="converted in place"):
-        scenarios.storage_definition("CREATE TABLE t (id int)", "items", "myisam", "innodb",
-                                     hop="hop", eng="engine", db="db", exists=True,
-                                     supported=("innodb",), accepted=True, orphan_rows=0)
+        storage_definition("CREATE TABLE t (id int)", "items", "myisam", "innodb",
+                           hop="hop", eng="engine", db="db",
+                           supported=("innodb",), accepted=True, orphan_rows=0)
+    monkeypatch.setattr(tableengine, "plan", lambda hop, eng, db: SimpleNamespace(of=lambda table: None))
+    with pytest.raises(ValueError, match="plans no storage change"):
+        storage_definition("CREATE TABLE t (id int)", "items", "myisam", "innodb",
+                           hop="hop", eng="engine", db="db",
+                           supported=("innodb",), accepted=True, orphan_rows=0)
 
 
 @pytest.mark.parametrize("target", ["aria", "memory"])
 def test_storage_transaction_or_durability_loss_is_refused(target):
-    got = scenarios.storage_case("items", "innodb", target, supported=(target,), accepted=True)
+    got = storage_case("items", "innodb", target, supported=(target,), accepted=True)
     assert got.choice.path is None
     assert "lost transactions" in got.words()
 
 
 @pytest.mark.parametrize("orphans", [None, 3])
 def test_new_foreign_keys_require_zero_orphans(orphans):
-    got = scenarios.storage_case("items", "myisam", "innodb", supported=("innodb",),
+    got = storage_case("items", "myisam", "innodb", supported=("innodb",),
                                  accepted=True, orphan_rows=orphans)
     assert got.choice.path is None
     assert "zero rows refused" in got.words()
 
 
 def test_postgres_columnar_is_not_assumed_to_have_heap_semantics():
-    got = scenarios.storage_case("public.items", "heap", "columnar", family="postgres",
+    got = storage_case("public.items", "heap", "columnar", family="postgres",
                                  supported=("heap", "columnar"), accepted=True)
     assert got.choice.path is None
     assert "known storage semantics" in got.words()
     traits = tableengine.Traits("heap", True, True, "row", "postgres")
-    got = scenarios.storage_case("public.items", "heap", "columnar", family="postgres",
+    got = storage_case("public.items", "heap", "columnar", family="postgres",
                                  supported=("columnar",), accepted=True, orphan_rows=0,
                                  postgres_traits={"heap": traits, "columnar": traits})
     assert got.choice.path is None
@@ -206,8 +247,8 @@ def test_postgres_columnar_is_not_assumed_to_have_heap_semantics():
     facts = dict(family="postgres", exists=True, supported=("columnar",),
                  accepted=True, orphan_rows=0, alter_access_method=True,
                  postgres_traits={"heap": traits, "columnar": traits})
-    assert scenarios.storage_case("public.items", "heap", "columnar", **facts).choice.path == "in place"
-    assert scenarios.storage_alter("public.items", "heap", "columnar", **facts) == (
+    assert storage_case("public.items", "heap", "columnar", **facts).choice.path == "in place"
+    assert storage_alter("public.items", "heap", "columnar", **facts) == (
         'ALTER TABLE "public"."items" SET ACCESS METHOD "columnar"')
 
 
@@ -221,7 +262,7 @@ def test_storage_reader_reads_both_servers_and_scope():
             return [("items", "MyISAM" if side == "src" else "InnoDB"), ("ignored", "MEMORY")]
         def in_scope(self, db, table):
             return table == "items"
-    assert scenarios.storage_facts(Engine(), "db") == {"src": {"items": "myisam"},
+    assert tableengine.observed(Engine(), "db") == {"src": {"items": "myisam"},
                                                             "dst": {"items": "innodb"}}
 
 
@@ -276,7 +317,7 @@ def test_postgres_storage_reader_does_not_call_heap_memory(monkeypatch):
         return [("public.items", "heap" if side == "src" else "columnar")]
     monkeypatch.setattr(upgrade, "_pg", pg)
     eng = SimpleNamespace(CANON_ENGINE="postgres", in_scope=lambda db, table: True)
-    assert scenarios.storage_facts(eng, "db") == {
+    assert tableengine.observed(eng, "db") == {
         "src": {"public.items": "heap"}, "dst": {"public.items": "columnar"}}
     assert calls == ["src", "dst"]
 
@@ -348,10 +389,10 @@ def test_the_plan_asks_nothing_of_a_side_with_no_provider_api(monkeypatch):
 
 
 def test_unsupported_target_storage_and_fulltext_loss_refuse():
-    got = scenarios.storage_case("items", "aria", "innodb", accepted=True, orphan_rows=0)
+    got = storage_case("items", "aria", "innodb", accepted=True, orphan_rows=0)
     assert got.choice.path is None
     assert "supported storage method" in got.words()
-    got = scenarios.storage_case("items", "myisam", "memory", accepted=True,
+    got = storage_case("items", "myisam", "memory", accepted=True,
                                  supported=("memory",), used_features=("fulltext",))
     assert got.choice.path is None
 
@@ -360,12 +401,12 @@ def test_size_ranks_only_safe_managed_paths():
     facts = managed()
     first = facts["offers"][0]
     second = dict(first, name="provider-blue-green", said="the service's blue/green path",
-                  startup_seconds=120, bytes_per_second=1000)
+                  startup_seconds=120, runs=[{"bytes": 1000, "seconds": 121}])
     facts["offers"] = (first, second)
     assert scenarios.managed_case(facts).choice.path == first["name"]
     facts["size_bytes"] = 100000
     assert scenarios.managed_case(facts).choice.path == second["name"]
-    second["eligible"] = ()
+    second["checks"] = NEVER
     assert scenarios.managed_case(facts).choice.path == first["name"]
 
 
@@ -380,16 +421,16 @@ def test_postgres_access_method_reader_uses_the_existing_text_protocol():
             calls.append(side)
             assert "c.relname || chr(31) || a.amname" in sql
             return "public.items\x1f" + ("heap" if side == "src" else "columnar")
-    assert scenarios.storage_facts(Engine(), "db") == {
+    assert tableengine.observed(Engine(), "db") == {
         "src": {"public.items": "heap"}, "dst": {"public.items": "columnar"}}
     assert calls == ["src", "dst"]
 
 
-def test_storage_definition_refuses_a_different_schema_plan(monkeypatch):
+def test_the_definition_decides_the_change_the_schema_step_plans(monkeypatch):
     change = tableengine.Change("items", "myisam", "aria", "observed")
     monkeypatch.setattr(tableengine, "plan", lambda hop, eng, db: SimpleNamespace(of=lambda table: change))
-    with pytest.raises(ValueError, match="differs from the schema step"):
-        scenarios.storage_definition("CREATE TABLE items (id int) ENGINE=MyISAM", "items", "myisam", "innodb",
+    with pytest.raises(ValueError, match="supported storage method"):
+        storage_definition("CREATE TABLE items (id int) ENGINE=MyISAM", "items", "myisam", "innodb",
                                      hop=object(), eng=object(), db="db", supported=("innodb",),
                                      accepted=True, orphan_rows=0)
 

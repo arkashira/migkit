@@ -49,7 +49,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/checkpoint.py` - Make a long verify restartable. Classes: Checkpoint, Rate.
 - `migkit/claims.py` - One table across machines: its ranges handed out through one record each machine writes only over the version it read (backlog W1; R5 looked Classes: Lost, Table.
 - `migkit/cli.py` - (no docstring)
-- `migkit/cloudapi.py` - What a managed database's provider says and does about it, asked through that provider's own API (backlog P0-SCENARIOS): the facts of the in Classes: NotOffered, Param, Instance, RestorePoint, Adapter, Aws.
+- `migkit/cloudapi.py` - What a managed database's provider says and does about it, asked through that provider's own API (backlog P0-SCENARIOS): the facts of the in Classes: NotOffered, Param, Instance, RestorePoint, Adapter, Operation.
 - `migkit/clouds.py` - Which cloud runs a side, and how that cloud spells a change to it. Classes: Where.
 - `migkit/cloudseed.py` - What only a cloud's control plane can do, driven through its API (backlog R19 lever 1; the owner's "structural four", 2026-09-28): the targe Classes: Aws, Azure, Google, ByApi.
 - `migkit/commercial.py` - The types only the commercial engines have (backlog W6; the type-fidelity research, docs/research/type-fidelity-2026-09-28.md, sections 6, 8 Classes: Variant.
@@ -138,7 +138,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/rules.py` - Business-rule checks: the operator's own questions, asked of both sides.
 - `migkit/runlog.py` - The run log: every event of a run as one JSON line, in migkit's words (audit 2026-10-01, LG5, LG12, LG13). Classes: RunLog.
 - `migkit/runner.py` - Every program migkit runs is started, watched, stopped and said one way. Classes: Failed, Transient, Blocked, Refused, Proc.
-- `migkit/scenarios.py` - Migration scenarios helpers (backlog P0-SCENARIOS, F1.dual): character set and collation conversion, storage engine transformation, database Classes: CharsetMigrationHelper, EngineTraits, EngineCompatibilityResult, StorageEngineTransformationHelper, ConsolidationPlan, ConsolidationCoordinator.
+- `migkit/scenarios.py` - Migration scenarios decided on observed facts (backlog P0-SCENARIOS): a managed service change through the provider's own operations (`cloud Classes: ScenarioDecision.
 - `migkit/schedule.py` - A hop that runs on a schedule of its own. Classes: NotDue, Slot.
 - `migkit/schemaformats.py` - Messages framed by a schema registry that carry JSON Schema or Protobuf rather than Avro (backlog R4.formats), read and - for JSON Schema -  Classes: Undecodable, JsonEncoder, ProtoFile.
 - `migkit/second_reader.py` - An independent second reading of the data, run out of process. Classes: Narrowing.
@@ -156,7 +156,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/state.py` - Pluggable state backend, terraform-style. Classes: LocalStore, S3Store, Taken, S3RunState, Mirror, TailMirror.
 - `migkit/streamout.py` - Changes delivered as messages into a stream, in the shapes consumers expect (backlog 35): what a message is, whatever carries it - a Kafka t
 - `migkit/subset.py` - Copies for testing (backlog R23, 5): the rows chosen and every row they refer to, masked where the hop says, into a staging or developer dat Classes: Rule, Plan.
-- `migkit/tableengine.py` - A change of storage engine, made in the schema step and held to (backlog P0-SCENARIOS): MyISAM, Aria, MEMORY, ARCHIVE, CSV and MariaDB's own Classes: Traits, Change, Plan.
+- `migkit/tableengine.py` - A change of storage engine, made in the schema step and held to (backlog P0-SCENARIOS): MyISAM, Aria, MEMORY, ARCHIVE, CSV and MariaDB's own Classes: Traits, Change, Plan, Decided.
 - `migkit/tableway.py` - How each table gets to the target: one ladder an engine, one cost model a database, one climb a table. Classes: Way, Pick, Failed.
 - `migkit/tailctl.py` - A running change tail as the rest of migkit sees it, and the one loop every tail runs. Classes: Running.
 - `migkit/tailtables.py` - A running tail's tables, each in a state of its own (backlog L1, L4, L5, L6; research: leapfrog live tail 2026-09-28, section 1.3). Classes: Store, Spool, TableSet.

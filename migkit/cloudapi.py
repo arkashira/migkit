@@ -119,6 +119,14 @@ class Instance:
     group_shared: object = None
     #: name -> Param, only the names asked for
     parameters: dict = field(default_factory=dict)
+    #: how many read replicas follow it, and the instance it follows
+    #: itself ("" for none); None where the API does not say
+    replicas: object = None
+    replica_of: object = None
+    storage_type: str = ""
+    #: the versions the provider lets it be upgraded to in place
+    #: (frozenset); None where they were not read
+    upgrades: object = None
 
 
 @dataclass
@@ -305,6 +313,199 @@ class Adapter:
                              " from a restore point it keeps, not from a"
                              " point in time")
         return point
+
+    def operations(self):
+        """The provider's own operations (`OPERATIONS`) on this product."""
+        return tuple(op for op in OPERATIONS.get(self.provider, ())
+                     if self.product in op.products)
+
+    def runner(self, op):
+        """The call running `op` and reading its outcome back, or None
+        where this adapter has none: the operation is then not yet
+        migkit's to run, never assumed done."""
+        return getattr(self, op.runs, None) if op.runs else None
+
+
+# --- the provider's own operations ---------------------------------------------
+
+@dataclass(frozen=True)
+class Operation:
+    """An operation a provider runs on its own service - an upgrade, a
+    blue/green switch, a move into another of its products - and what of
+    two instances makes it eligible, each check answering True, False or
+    None (the API did not say)."""
+    name: str
+    said: str
+    provider: str
+    #: the adapter products whose instances it starts from
+    products: tuple
+    #: ((what it needs, check(source, target), why it is refused), ...)
+    checks: tuple
+    #: seconds the provider documents beside the size-dependent part, and
+    #: where; None where it documents none
+    startup: object = None
+    startup_source: str = ""
+    #: the adapter's method running it; "" with `why_not` where none does
+    runs: str = ""
+    why_not: str = ""
+
+
+def _major(version):
+    """A version's major as providers number it: PostgreSQL's 15 of 15.4,
+    MySQL's 8.0 of 8.0.35 and of Aurora's 8.0.mysql_aurora.3.05; None
+    where none is written."""
+    parts = re.findall(r"\d+", str(version or ""))
+    if not parts:
+        return None
+    return (int(parts[0]),) if int(parts[0]) >= 10 else tuple(
+        int(p) for p in parts[:2])
+
+
+def _known(*values):
+    return all(v not in (None, "") for v in values)
+
+
+def _same_provider(s, d):
+    return s.provider == d.provider if _known(s.provider, d.provider) \
+        else None
+
+
+def _same_engine(s, d):
+    return s.engine == d.engine if _known(s.engine, d.engine) else None
+
+
+def _versions(s, d):
+    a, b = _major(s.version), _major(d.version)
+    return (a, b) if a is not None and b is not None else None
+
+
+def _not_down(s, d):
+    got = _versions(s, d)
+    return None if got is None else got[1] >= got[0]
+
+
+def _major_up(s, d):
+    got = _versions(s, d)
+    return None if got is None else got[1] > got[0]
+
+
+def _same_major(s, d):
+    got = _versions(s, d)
+    return None if got is None else got[1] == got[0]
+
+
+def _upgrade_target(s, d):
+    if not _known(s.version, d.version):
+        return None
+    if s.version == d.version:
+        return True
+    return None if s.upgrades is None else d.version in s.upgrades
+
+
+def _primary(s, d):
+    return None if s.replica_of is None else not s.replica_of
+
+
+AURORA = {"mysql": "aurora-mysql", "postgres": "aurora-postgresql"}
+
+
+def _into_aurora(s, d):
+    return (AURORA.get(s.engine) == d.engine
+            if _known(s.engine, d.engine) else None)
+
+
+SAME_PROVIDER = ("one provider holding both", _same_provider,
+                 "the two sides are with different providers")
+NOT_DOWN = ("a target version no older than the source's", _not_down,
+            "the target runs an older major version than the source")
+NOT_RUN = ("migkit's {who} adapter does not yet run {what} or read its"
+           " outcome back")
+
+#: provider -> the operations its API offers on its own services, with
+#: the eligibility the instances' facts are held to. A rule the provider
+#: states that migkit reads no fact for is not checked here: the
+#: operation is then refused for the fact it lacks, never assumed.
+OPERATIONS = {
+    "aws": (
+        Operation(
+            "aws-blue-green", "AWS's blue/green deployment", "aws", ("rds",),
+            (SAME_PROVIDER,
+             ("the same engine on both", _same_engine,
+              "a blue/green deployment keeps the engine"),
+             NOT_DOWN,
+             ("a version the source may be upgraded to", _upgrade_target,
+              "the provider lists the target's version as no upgrade of"
+              " the source's"),
+             ("a source that follows no other instance", _primary,
+              "the source is a read replica")),
+            startup=300, startup_source="the switchover's documented"
+                                        " default timeout",
+            why_not=NOT_RUN.format(who="AWS",
+                                   what="a blue/green deployment")),
+        Operation(
+            "aws-major-upgrade", "AWS's in-place major version upgrade",
+            "aws", ("rds",),
+            (SAME_PROVIDER,
+             ("the same engine on both", _same_engine,
+              "an in-place upgrade keeps the engine"),
+             ("a newer major version on the target", _major_up,
+              "the target's major version is not newer"),
+             ("a version the source may be upgraded to", _upgrade_target,
+              "the provider lists the target's version as no upgrade of"
+              " the source's")),
+            why_not=NOT_RUN.format(who="AWS",
+                                   what="an in-place major upgrade")),
+        Operation(
+            "aws-aurora-replica", "AWS's Aurora read replica of an RDS"
+                                  " instance, promoted", "aws", ("rds",),
+            (SAME_PROVIDER,
+             ("RDS for MySQL or PostgreSQL into its Aurora", _into_aurora,
+              "the target is not the source engine's Aurora"),
+             ("the same major version on both", _same_major,
+              "an Aurora read replica keeps the source's major version"),
+             ("a source that follows no other instance", _primary,
+              "the source is a read replica")),
+            why_not=NOT_RUN.format(who="AWS",
+                                   what="an Aurora read replica")),
+        Operation(
+            "aws-aurora-snapshot", "AWS's RDS snapshot restored into"
+                                   " Aurora", "aws", ("rds",),
+            (SAME_PROVIDER,
+             ("RDS for MySQL or PostgreSQL into its Aurora", _into_aurora,
+              "the target is not the source engine's Aurora"),
+             NOT_DOWN),
+            why_not=NOT_RUN.format(who="AWS",
+                                   what="a snapshot restore into Aurora")),
+    ),
+    "azure": (
+        Operation(
+            "azure-single-to-flexible", "Azure's Single Server to Flexible"
+                                        " Server migration", "azure",
+            ("flexible-postgres", "flexible-mysql"),
+            (SAME_PROVIDER,
+             ("a Single Server source", lambda s, d: s.product.startswith(
+                 "single-"), "the source is a Flexible Server already"),
+             ("a Flexible Server target", lambda s, d: d.product.startswith(
+                 "flexible-"), "the target is no Flexible Server")),
+            why_not="migkit's Azure adapter reads no Single Server, so the"
+                    " migration's source cannot be verified"),
+    ),
+    "gcp": (
+        Operation(
+            "gcp-major-upgrade", "Cloud SQL's in-place major version"
+                                 " upgrade", "gcp", ("cloudsql",),
+            (SAME_PROVIDER,
+             ("the same engine on both", _same_engine,
+              "an in-place upgrade keeps the engine"),
+             ("a newer major version on the target", _major_up,
+              "the target's major version is not newer"),
+             ("a version the source may be upgraded to", _upgrade_target,
+              "the provider lists the target's version as no upgrade of"
+              " the source's")),
+            why_not=NOT_RUN.format(who="Google Cloud",
+                                   what="an in-place major upgrade")),
+    ),
+}
 
 
 # --- AWS ---------------------------------------------------------------------
@@ -543,6 +744,21 @@ class Aws(Adapter):
         return t["VCpuInfo"]["DefaultVCpus"], _gb(
             t["MemoryInfo"]["SizeInMiB"], 1024)
 
+    def _upgrades(self, engine, version):
+        """The versions RDS lists as valid upgrade targets of `version`,
+        or None where they could not be read."""
+        if not (engine and version):
+            return None
+        try:
+            got = self.client().describe_db_engine_versions(
+                Engine=engine, EngineVersion=version)["DBEngineVersions"]
+        except Exception:  # noqa: BLE001 - not read, said as not yet
+            return None
+        if not got:
+            return None
+        return frozenset(str(t.get("EngineVersion", "")) for t in
+                         got[0].get("ValidUpgradeTarget") or ())
+
     def instance(self, names=()):
         d = self._describe()
         it, w, p = d["it"], d.get("writer") or {}, self.product
@@ -558,10 +774,21 @@ class Aws(Adapter):
             if d["kind"] == "cluster":
                 got.host, got.port = it.get("Endpoint", ""), it.get("Port")
                 got.status = it.get("Status", "")
+                got.replicas = sum(1 for m in it.get("DBClusterMembers")
+                                   or () if not m.get("IsClusterWriter"))
+                got.replica_of = it.get("ReplicationSourceIdentifier", "")
             else:
                 got.host = (it.get("Endpoint") or {}).get("Address", "")
                 got.port = (it.get("Endpoint") or {}).get("Port")
                 got.status = it.get("DBInstanceStatus", "")
+                got.replicas = len(it.get("ReadReplicaDBInstanceIdentifiers")
+                                   or ())
+                got.replica_of = it.get(
+                    "ReadReplicaSourceDBInstanceIdentifier", "")
+            got.storage_type = it.get("StorageType", "") or w.get(
+                "StorageType", "")
+            if p == "rds":
+                got.upgrades = self._upgrades(got.engine, got.version)
             if not str(got.engine).startswith(("aurora", "docdb",
                                                "neptune")):
                 got.storage_gb = _num(it.get("AllocatedStorage"))
@@ -1393,6 +1620,14 @@ class Gcp(Adapter):
             got.klass = s.get("tier", "")
             got.cpu, got.memory_gb = self._tier(got.klass)
             got.storage_gb = _num(s.get("dataDiskSizeGb"))
+            got.storage_type = s.get("dataDiskType", "")
+            # the resource leaves out a list it has nothing in
+            got.replicas = len(it.get("replicaNames") or ())
+            got.replica_of = it.get("masterInstanceName", "")
+            if "upgradableDatabaseVersions" in it:
+                got.upgrades = frozenset(
+                    self._version(v.get("name"))[1]
+                    for v in it["upgradableDatabaseVersions"])
             mw = s.get("maintenanceWindow") or {}
             got.maintenance = self._window(mw.get("day"), mw.get("hour"))
             got.time_zone, got.charset = s.get("timeZone", ""), s.get(

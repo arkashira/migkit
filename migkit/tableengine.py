@@ -705,6 +705,126 @@ def way(hop, db, change):
                         _way_facts(hop, db, change), ("engine changed",))
 
 
+# --- the change decided on observed facts -----------------------------------------
+
+@dataclass(frozen=True)
+class Decided:
+    """A storage change decided: the way chosen, and every consequence."""
+    choice: object
+    details: tuple = ()
+
+    def words(self):
+        return "; ".join(("storage engine change: " + str(self.choice.said),
+                          self.choice.reason, *self.details))
+
+
+def observed(eng, db):
+    """Every scoped table's storage engine or access method, on both
+    sides: MySQL's engines (`_engines`), PostgreSQL's access methods."""
+    from . import upgrade
+    out = {}
+    for side in ("src", "dst"):
+        if eng.CANON_ENGINE == "mysql":
+            tables = _engines(eng, side, db)
+        elif eng.CANON_ENGINE == "postgres":
+            tables = dict(upgrade._pg(
+                eng, side, db,
+                "select n.nspname || '.' || c.relname || chr(31) || a.amname"
+                " from pg_class c join pg_namespace n on n.oid=c.relnamespace"
+                " join pg_am a on a.oid=c.relam where c.relkind='r'"
+                " and n.nspname not in ('pg_catalog','information_schema')"))
+        else:
+            raise ValueError(f"table storage is not read for"
+                             f" {eng.CANON_ENGINE}")
+        out[side] = {t: n.lower() for t, n in tables.items()
+                     if eng.in_scope(db, t)}
+    return out
+
+
+def decided(change, *, family="mysql", supported=(), accepted=False,
+            orphan_rows=None, used_features=(), observed_traits=None,
+            alter_access_method=False):
+    """`change` decided on what was observed of both servers, through the
+    schema step's own ways (`ways`): the target's supported methods, the
+    consequences accepted, no row a new foreign key refuses. A loss of
+    transactions, foreign keys or durability is refused, accepted or not.
+    A PostgreSQL access method is known only by the traits observed of it
+    (`observed_traits`): a name such as columnar never promises a heap's."""
+    from . import decide
+    source, target = change.src.lower(), change.dst.lower()
+    if family == "mysql":
+        a, b = TRAITS.get(source), ONE_WAY.get(target) or TRAITS.get(target)
+    elif family == "postgres":
+        a, b = ((observed_traits or {}).get(source),
+                (observed_traits or {}).get(target))
+    else:
+        raise ValueError(f"storage changes are not read for {family}")
+    detail = [f"{change.table}: {source} to {target}"]
+    if a is not None and b is not None:
+        detail.extend(f"{k}: {getattr(a, k)} to {getattr(b, k)}" for k in
+                      ("transactions", "foreign_keys", "fulltext", "locks",
+                       "holds"))
+    loss = (a is None or b is None or b.holds != "rows"
+            or any(getattr(a, k) and not getattr(b, k)
+                   for k in ("transactions", "foreign_keys"))
+            or any(not getattr(b, k) for k in used_features))
+    fk_safe = b is not None and (not b.foreign_keys or orphan_rows == 0)
+    needs = (
+        decide.Need("known storage semantics on both servers",
+                    lambda f: a is not None and b is not None),
+        decide.Need("the target's supported storage method",
+                    lambda f: target in supported),
+        decide.Need("accepted transaction, foreign-key, full-text and"
+                    " locking consequences", lambda f: accepted and not loss,
+                    "storage consequences need acceptance; lost"
+                    " transactions, foreign keys or durability are refused"),
+        decide.Need("zero rows refused by target foreign keys",
+                    lambda f: fk_safe))
+    rungs = decide.fenced(ways(), *needs)
+    if family == "postgres":
+        rungs = (decide.Rung(
+            "in place", "the table's access method altered after the copy",
+            frozenset({"engine changed"}),
+            needs=needs + (
+                decide.Need("the server's ALTER TABLE SET ACCESS METHOD"
+                            " support", lambda f: alter_access_method,
+                            "PostgreSQL access-method changes need ALTER"
+                            " TABLE SET ACCESS METHOD support"),
+                decide.Need("the copied table on the target",
+                            lambda f: f["there"])),
+            because="the target rebuilds the copied table using its own"
+                    " access method"),)
+    choice = decide.climb(f"{change.table}: storage engine change", rungs,
+                          decide.Facts({"there": bool(change.there)}),
+                          need=("engine changed",))
+    return Decided(choice, tuple(detail))
+
+
+def definition(hop, eng, db, table, ddl, **facts):
+    """The schema step's definition of `table`, made only where the
+    change its plan holds is decided to go in the definition."""
+    change = plan(hop, eng, db).of(table)
+    if change is None:
+        raise ValueError(f"{table}: the schema step plans no storage change")
+    got = decided(change, **facts)
+    if got.choice.path != "definition":
+        raise ValueError(got.words())
+    return schema(hop, eng, db, table, ddl)
+
+
+def access_method_alter(change, **facts):
+    """The target-only statement changing a PostgreSQL table's access
+    method after its copy, once `decided` holds it."""
+    got = decided(change, family="postgres", **facts)
+    if got.choice.path != "in place":
+        raise ValueError(got.words())
+
+    def quote(name):
+        return '"' + name.replace('"', '""') + '"'
+    return (f"ALTER TABLE {'.'.join(quote(p) for p in change.table.split('.'))}"
+            f" SET ACCESS METHOD {quote(change.dst.lower())}")
+
+
 #: table options `show create table` writes and no InnoDB table reads
 _OPTION = r"\s+{name}\s*=\s*(\([^)]*\)|'[^']*'|\S+)"
 

@@ -1,561 +1,17 @@
-"""Migration scenarios helpers (backlog P0-SCENARIOS, F1.dual):
-character set and collation conversion, storage engine transformation,
-database consolidation and schema splitting, and dual writes drift detection.
+"""Migration scenarios decided on observed facts (backlog P0-SCENARIOS):
+a managed service change through the provider's own operations
+(`cloudapi.OPERATIONS`), and a hardware / OS / architecture change.
+A storage engine change is decided where it is planned, `tableengine`.
 """
 from __future__ import annotations
 
-import enum
-import hashlib
 import time
 from types import SimpleNamespace
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass
 
 from . import decide
 from .capabilities import NOT_YET
 
-
-class CharsetMigrationHelper:
-    """Character set and collation migration helpers (Item 161)."""
-
-    MYSQL_COLLATION_MAP = {
-        "latin1_swedish_ci": "utf8mb4_0900_ai_ci",
-        "latin1_general_ci": "utf8mb4_0900_ai_ci",
-        "latin1_bin": "utf8mb4_bin",
-        "utf8_general_ci": "utf8mb4_general_ci",
-        "utf8_unicode_ci": "utf8mb4_unicode_ci",
-        "utf8_bin": "utf8mb4_bin",
-        "utf8mb3_general_ci": "utf8mb4_general_ci",
-        "utf8mb3_unicode_ci": "utf8mb4_unicode_ci",
-        "utf8mb3_bin": "utf8mb4_bin",
-    }
-
-    CROSS_ENGINE_COLLATION_MAP = {
-        ("mysql", "postgres"): {
-            "utf8mb4_unicode_ci": "en_US.utf8",
-            "utf8mb4_bin": "C",
-            "latin1_general_ci": "en_US.iso88591",
-            "latin1_bin": "C",
-        },
-        ("postgres", "mysql"): {
-            "en_US.utf8": "utf8mb4_unicode_ci",
-            "C.UTF-8": "utf8mb4_bin",
-            "C": "utf8mb4_bin",
-            "default": "utf8mb4_0900_ai_ci",
-        },
-        ("mssql", "mysql"): {
-            "SQL_Latin1_General_CP1_CI_AS": "utf8mb4_0900_ai_ci",
-            "Latin1_General_BIN": "utf8mb4_bin",
-            "Latin1_General_CI_AS": "utf8mb4_0900_ai_ci",
-        },
-    }
-
-    CHARSET_BYTE_WIDTHS = {
-        "latin1": 1,
-        "cp1252": 1,
-        "ascii": 1,
-        "utf8": 3,
-        "utf8mb3": 3,
-        "utf8mb4": 4,
-        "utf16": 4,
-        "utf32": 4,
-        "gbk": 2,
-        "gb18030": 4,
-        "big5": 2,
-        "shift_jis": 2,
-    }
-
-    @classmethod
-    def map_collation(
-        cls,
-        source_engine: str,
-        target_engine: str,
-        source_collation: str,
-        target_charset: str = "utf8mb4",
-    ) -> str:
-        s_eng = source_engine.lower()
-        t_eng = target_engine.lower()
-        s_coll = (source_collation or "").strip()
-
-        if s_eng == t_eng and s_eng == "mysql":
-            if s_coll in cls.MYSQL_COLLATION_MAP:
-                return cls.MYSQL_COLLATION_MAP[s_coll]
-            if target_charset.lower() == "utf8mb4":
-                if s_coll.endswith("_bin"):
-                    return "utf8mb4_bin"
-                if "unicode" in s_coll:
-                    return "utf8mb4_unicode_ci"
-                return "utf8mb4_0900_ai_ci"
-
-        cross = cls.CROSS_ENGINE_COLLATION_MAP.get((s_eng, t_eng), {})
-        if s_coll in cross:
-            return cross[s_coll]
-
-        if t_eng == "postgres":
-            return "C" if s_coll.endswith(("_bin", "_cs")) else "en_US.utf8"
-        if t_eng == "mysql":
-            return "utf8mb4_bin" if s_coll.endswith(("_bin", "_cs", "C")) else "utf8mb4_0900_ai_ci"
-
-        return s_coll
-
-    @staticmethod
-    def detect_invalid_byte_sequences(data: bytes, encoding: str = "utf-8") -> List[Dict[str, Any]]:
-        findings = []
-        i = 0
-        n = len(data)
-
-        if encoding.lower() in ("utf-8", "utf8", "utf8mb4"):
-            while i < n:
-                b1 = data[i]
-                if b1 <= 0x7F:
-                    i += 1
-                elif 0xC2 <= b1 <= 0xDF:
-                    if i + 1 >= n:
-                        findings.append({"offset": i, "bytes": data[i:i+1].hex(), "reason": "truncated_2_byte_sequence"})
-                        break
-                    b2 = data[i + 1]
-                    if not (0x80 <= b2 <= 0xBF):
-                        findings.append({"offset": i, "bytes": data[i:i+2].hex(), "reason": "invalid_continuation_byte"})
-                    i += 2
-                elif 0xE0 <= b1 <= 0xEF:
-                    if i + 2 >= n:
-                        findings.append({"offset": i, "bytes": data[i:n].hex(), "reason": "truncated_3_byte_sequence"})
-                        break
-                    b2, b3 = data[i + 1], data[i + 2]
-                    if b1 == 0xE0 and not (0xA0 <= b2 <= 0xBF):
-                        findings.append({"offset": i, "bytes": data[i:i+3].hex(), "reason": "overlong_3_byte_sequence"})
-                    elif b1 == 0xED and not (0x80 <= b2 <= 0x9F):
-                        findings.append({"offset": i, "bytes": data[i:i+3].hex(), "reason": "surrogate_utf8_sequence"})
-                    elif not ((0x80 <= b2 <= 0xBF) and (0x80 <= b3 <= 0xBF)):
-                        findings.append({"offset": i, "bytes": data[i:i+3].hex(), "reason": "invalid_continuation_byte"})
-                    i += 3
-                elif 0xF0 <= b1 <= 0xF4:
-                    if i + 3 >= n:
-                        findings.append({"offset": i, "bytes": data[i:n].hex(), "reason": "truncated_4_byte_sequence"})
-                        break
-                    b2, b3, b4 = data[i + 1], data[i + 2], data[i + 3]
-                    if b1 == 0xF0 and not (0x90 <= b2 <= 0xBF):
-                        findings.append({"offset": i, "bytes": data[i:i+4].hex(), "reason": "overlong_4_byte_sequence"})
-                    elif b1 == 0xF4 and not (0x80 <= b2 <= 0x8F):
-                        findings.append({"offset": i, "bytes": data[i:i+4].hex(), "reason": "out_of_unicode_range"})
-                    elif not ((0x80 <= b2 <= 0xBF) and (0x80 <= b3 <= 0xBF) and (0x80 <= b4 <= 0xBF)):
-                        findings.append({"offset": i, "bytes": data[i:i+4].hex(), "reason": "invalid_continuation_byte"})
-                    i += 4
-                else:
-                    findings.append({"offset": i, "bytes": bytes([b1]).hex(), "reason": "illegal_start_byte"})
-                    i += 1
-            return findings
-
-        try:
-            data.decode(encoding)
-        except UnicodeDecodeError as err:
-            findings.append({
-                "offset": err.start,
-                "bytes": data[err.start:err.end].hex(),
-                "reason": f"decode_error: {err.reason}",
-            })
-        return findings
-
-    @classmethod
-    def detect_unrepresentable(cls, text: str, target_charset: str) -> List[Dict[str, Any]]:
-        codec = target_charset.lower().replace("-", "_")
-        if codec in ("utf8mb4", "utf_8", "utf8"):
-            codec = "utf-8"
-        elif codec == "utf8mb3":
-            return [
-                {"char": ch, "code_point": hex(ord(ch)), "reason": "exceeds_bmp_limit"}
-                for ch in text if ord(ch) > 0xFFFF
-            ]
-
-        unrep = []
-        for ch in text:
-            try:
-                ch.encode(codec)
-            except (UnicodeEncodeError, LookupError):
-                unrep.append({"char": ch, "code_point": hex(ord(ch)), "reason": "unrepresentable_in_target_encoding"})
-        return unrep
-
-    @staticmethod
-    def detect_mojibake(text: str) -> bool:
-        if not text:
-            return False
-        common_mojibake = ("Ã©", "Ã¨", "Ã ", "Ã§", "Ã±", "Ã¼", "Ã¶", "Ã¤", "Ã®", "Ã¢", "Ã´", "â€™", "â€œ", "â€“")
-        return any(pat in text for pat in common_mojibake)
-
-    @staticmethod
-    def repair_mojibake(text: str, source_encoding: str = "latin1", target_encoding: str = "utf-8") -> str:
-        if not text:
-            return text
-        try:
-            raw_bytes = text.encode(source_encoding)
-            repaired = raw_bytes.decode(target_encoding)
-            return repaired
-        except (UnicodeEncodeError, UnicodeDecodeError):
-            return text
-
-    @classmethod
-    def check_column_index_prefix(
-        cls,
-        data_type: str,
-        length: int,
-        target_charset: str,
-        max_index_bytes: int = 3072,
-    ) -> Dict[str, Any]:
-        byte_width = cls.CHARSET_BYTE_WIDTHS.get(target_charset.lower(), 4)
-        total_index_bytes = length * byte_width
-        fits = total_index_bytes <= max_index_bytes
-        max_allowed_len = max_index_bytes // byte_width
-        return {
-            "data_type": data_type,
-            "declared_length": length,
-            "target_charset": target_charset,
-            "byte_width": byte_width,
-            "total_bytes": total_index_bytes,
-            "max_index_bytes": max_index_bytes,
-            "fits": fits,
-            "recommended_prefix_length": min(length, max_allowed_len),
-        }
-
-    @classmethod
-    def generate_charset_alter_ddl(
-        cls,
-        table: str,
-        column: str,
-        data_type: str,
-        target_charset: str = "utf8mb4",
-        target_collation: Optional[str] = None,
-        nullable: bool = True,
-        default: Optional[str] = None,
-    ) -> str:
-        coll_clause = f" COLLATE {target_collation}" if target_collation else ""
-        null_clause = " NULL" if nullable else " NOT NULL"
-        default_clause = f" DEFAULT '{default}'" if default is not None else ""
-        return (
-            f"ALTER TABLE `{table}` MODIFY `{column}` {data_type} "
-            f"CHARACTER SET {target_charset}{coll_clause}{null_clause}{default_clause}"
-        )
-
-
-@dataclass(frozen=True)
-class EngineTraits:
-    """Storage engine capabilities and constraints (Item 162)."""
-    name: str
-    transactions: bool
-    foreign_keys: bool
-    locks: str
-    fulltext: bool
-    spatial: bool
-    crash_safe: bool
-    persistent: bool
-    auto_increment_group: bool
-    max_key_bytes: int
-
-
-KNOWN_ENGINES: Dict[str, EngineTraits] = {
-    "innodb": EngineTraits(
-        name="InnoDB",
-        transactions=True,
-        foreign_keys=True,
-        locks="row",
-        fulltext=True,
-        spatial=True,
-        crash_safe=True,
-        persistent=True,
-        auto_increment_group=False,
-        max_key_bytes=3072,
-    ),
-    "myisam": EngineTraits(
-        name="MyISAM",
-        transactions=False,
-        foreign_keys=False,
-        locks="table",
-        fulltext=True,
-        spatial=True,
-        crash_safe=False,
-        persistent=True,
-        auto_increment_group=True,
-        max_key_bytes=1000,
-    ),
-    "aria": EngineTraits(
-        name="Aria",
-        transactions=False,
-        foreign_keys=False,
-        locks="page",
-        fulltext=True,
-        spatial=True,
-        crash_safe=True,
-        persistent=True,
-        auto_increment_group=True,
-        max_key_bytes=2000,
-    ),
-    "memory": EngineTraits(
-        name="MEMORY",
-        transactions=False,
-        foreign_keys=False,
-        locks="table",
-        fulltext=False,
-        spatial=False,
-        crash_safe=False,
-        persistent=False,
-        auto_increment_group=False,
-        max_key_bytes=3072,
-    ),
-    "archive": EngineTraits(
-        name="ARCHIVE",
-        transactions=False,
-        foreign_keys=False,
-        locks="row",
-        fulltext=False,
-        spatial=False,
-        crash_safe=True,
-        persistent=True,
-        auto_increment_group=False,
-        max_key_bytes=0,
-    ),
-}
-
-
-@dataclass
-class EngineCompatibilityResult:
-    compatible: bool
-    source_engine: str
-    target_engine: str
-    errors: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
-    altered_options: List[str] = field(default_factory=list)
-    ddl_statements: List[str] = field(default_factory=list)
-
-
-class StorageEngineTransformationHelper:
-    """Storage engine transformation helper (Item 162)."""
-
-    MYISAM_SPECIFIC_OPTIONS = {"PACK_KEYS", "CHECKSUM", "DELAY_KEY_WRITE", "ROW_FORMAT=FIXED"}
-
-    @classmethod
-    def check_engine_compatibility(
-        cls,
-        table_name: str,
-        source_engine: str,
-        target_engine: str,
-        indexes: List[Dict[str, Any]],
-        columns: List[Dict[str, Any]],
-        table_options: Optional[Dict[str, Any]] = None,
-        mysql_version: str = "8.0",
-    ) -> EngineCompatibilityResult:
-        src = source_engine.lower()
-        dst = target_engine.lower()
-        src_traits = KNOWN_ENGINES.get(src)
-        dst_traits = KNOWN_ENGINES.get(dst)
-
-        errors: List[str] = []
-        warnings: List[str] = []
-        altered_options: List[str] = []
-
-        if not dst_traits:
-            return EngineCompatibilityResult(
-                compatible=False,
-                source_engine=source_engine,
-                target_engine=target_engine,
-                errors=[f"Unknown target storage engine '{target_engine}'"],
-            )
-
-        if not src_traits:
-            warnings.append(f"Source engine '{source_engine}' is not in known registry; assuming generic defaults")
-
-        has_fulltext = any(idx.get("type", "").upper() == "FULLTEXT" for idx in indexes)
-        if has_fulltext:
-            if not dst_traits.fulltext:
-                errors.append(f"Target engine '{dst_traits.name}' does not support FULLTEXT indexes on table '{table_name}'")
-            elif src == "myisam" and dst == "innodb":
-                warnings.append(
-                    "InnoDB full-text search uses innodb_ft_min_token_size (default 3) instead of "
-                    "MyISAM's ft_min_word_len (default 4); stopwords and ranking behavior may differ"
-                )
-
-        has_spatial = any(idx.get("type", "").upper() == "SPATIAL" for idx in indexes)
-        if has_spatial:
-            if not dst_traits.spatial:
-                errors.append(f"Target engine '{dst_traits.name}' does not support SPATIAL indexes on table '{table_name}'")
-            elif dst == "innodb":
-                for col in columns:
-                    if col.get("type", "").upper() in ("GEOMETRY", "POINT", "POLYGON", "LINESTRING"):
-                        if col.get("nullable", True):
-                            errors.append(f"InnoDB SPATIAL index requires NOT NULL on geometry column '{col.get('name')}'")
-
-        for idx in indexes:
-            if idx.get("primary", False):
-                cols = idx.get("columns", [])
-                for col in columns:
-                    if col.get("extra", "").lower() == "auto_increment":
-                        col_name = col.get("name")
-                        if col_name in cols and cols.index(col_name) > 0:
-                            if not dst_traits.auto_increment_group:
-                                errors.append(
-                                    f"Target engine '{dst_traits.name}' does not support composite per-group AUTO_INCREMENT "
-                                    f"where '{col_name}' is not the first key column in '{table_name}'"
-                                )
-
-        if dst == "memory":
-            warnings.append(f"MEMORY engine is non-persistent; table '{table_name}' will lose all data across server restarts")
-
-        if table_options:
-            for opt, val in table_options.items():
-                opt_str = f"{opt}={val}" if val is not None else opt
-                if opt.upper() in {"CHECKSUM", "DELAY_KEY_WRITE", "PACK_KEYS"} or opt_str.upper() in cls.MYISAM_SPECIFIC_OPTIONS:
-                    altered_options.append(f"Pruned MyISAM option '{opt_str}' for target '{dst_traits.name}'")
-
-        ddls = []
-        if not errors:
-            ddls.append(f"ALTER TABLE `{table_name}` ENGINE = {dst_traits.name}")
-
-        return EngineCompatibilityResult(
-            compatible=len(errors) == 0,
-            source_engine=source_engine,
-            target_engine=target_engine,
-            errors=errors,
-            warnings=warnings,
-            altered_options=altered_options,
-            ddl_statements=ddls,
-        )
-
-
-@dataclass
-class ConsolidationPlan:
-    tenant_column: str
-    strategy: str
-    tenant_configs: Dict[str, Dict[str, Any]]
-    schema_adjustments: List[str] = field(default_factory=list)
-    key_collisions: Dict[str, List[Any]] = field(default_factory=dict)
-
-
-class ConsolidationCoordinator:
-    """Database consolidation coordinator (Item 163)."""
-
-    @classmethod
-    def plan_consolidation(
-        cls,
-        tenants: List[Dict[str, Any]],
-        tenant_column: str = "tenant_id",
-        key_strategy: str = "tenant",
-        base_stride: int = 1_000_000,
-    ) -> ConsolidationPlan:
-        tenant_configs = {}
-        for idx, t in enumerate(tenants):
-            t_id = t["id"]
-            offset = t.get("offset", idx * base_stride)
-            tenant_configs[t_id] = {
-                "id": t_id,
-                "db": t.get("db", t_id),
-                "offset": offset,
-            }
-
-        adjustments = []
-        if key_strategy == "tenant":
-            adjustments.append(f"Add `{tenant_column}` VARCHAR(64) NOT NULL to all consolidated tables")
-            adjustments.append(f"Alter PRIMARY KEYs to compound `({tenant_column}, id)`")
-        elif key_strategy == "offset":
-            adjustments.append(f"Apply ID offset per tenant and cascade to referencing FOREIGN KEY columns")
-        elif key_strategy == "remap":
-            adjustments.append(f"Generate global surrogate keys with stride {base_stride}")
-
-        return ConsolidationPlan(
-            tenant_column=tenant_column,
-            strategy=key_strategy,
-            tenant_configs=tenant_configs,
-            schema_adjustments=adjustments,
-        )
-
-    @classmethod
-    def detect_key_collisions(cls, tenant_keys: Dict[str, Set[Any]]) -> Dict[Any, List[str]]:
-        collisions: Dict[Any, List[str]] = {}
-        seen: Dict[Any, str] = {}
-        for tenant_id, keys in tenant_keys.items():
-            for k in keys:
-                if k in seen:
-                    if k not in collisions:
-                        collisions[k] = [seen[k]]
-                    collisions[k].append(tenant_id)
-                else:
-                    seen[k] = tenant_id
-        return collisions
-
-    @classmethod
-    def transform_row(
-        cls,
-        row: Dict[str, Any],
-        tenant_id: Any,
-        tenant_column: str = "tenant_id",
-        key_columns: Optional[List[str]] = None,
-        foreign_key_columns: Optional[List[str]] = None,
-        offset: int = 0,
-        strategy: str = "tenant",
-    ) -> Dict[str, Any]:
-        out = dict(row)
-        if strategy == "tenant":
-            out[tenant_column] = tenant_id
-        elif strategy in ("offset", "remap"):
-            keys = set(key_columns or ["id"])
-            fks = set(foreign_key_columns or [])
-            for col in keys | fks:
-                if col in out and isinstance(out[col], int):
-                    out[col] = out[col] + offset
-            out[tenant_column] = tenant_id
-        return out
-
-
-@dataclass
-class PrefixSplitPlan:
-    table_mappings: Dict[str, str]
-    target_schemas: Set[str]
-    cross_references: List[Dict[str, str]] = field(default_factory=list)
-
-
-class SplittingCoordinator:
-    """Table prefix and schema splitting coordinator (Item 163)."""
-
-    @classmethod
-    def plan_prefix_split(
-        cls,
-        tables: List[str],
-        prefix_to_target: Dict[str, str],
-        foreign_keys: Optional[List[Dict[str, str]]] = None,
-    ) -> PrefixSplitPlan:
-        table_mappings = {}
-        target_schemas = set()
-
-        for tbl in tables:
-            target = None
-            for pfx, tgt in prefix_to_target.items():
-                if tbl.startswith(pfx):
-                    target = tgt
-                    break
-            if not target:
-                target = prefix_to_target.get("*", "default")
-            table_mappings[tbl] = target
-            target_schemas.add(target)
-
-        cross_refs = []
-        if foreign_keys:
-            for fk in foreign_keys:
-                parent_tbl = fk.get("parent_table", "")
-                child_tbl = fk.get("child_table", "")
-                parent_tgt = table_mappings.get(parent_tbl)
-                child_tgt = table_mappings.get(child_tbl)
-                if parent_tgt and child_tgt and parent_tgt != child_tgt:
-                    cross_refs.append({
-                        "fk_name": fk.get("name", "fk"),
-                        "child_table": child_tbl,
-                        "child_target": child_tgt,
-                        "parent_table": parent_tbl,
-                        "parent_target": parent_tgt,
-                        "action": "sever_physical_fk_and_decouple",
-                    })
-
-        return PrefixSplitPlan(
-            table_mappings=table_mappings,
-            target_schemas=target_schemas,
-            cross_references=cross_refs,
-        )
 
 @dataclass(frozen=True)
 class ScenarioDecision:
@@ -572,6 +28,8 @@ class ScenarioDecision:
 RUNNING = frozenset({"available", "active", "running", "runnable", "ready",
                      "normal", "online"})
 GIB = 1024 ** 3
+#: where a provider operation's runs are kept with the hop's rates
+RUN_KEY = "provider operation {}"
 
 
 def _not_yet(what):
@@ -621,45 +79,44 @@ def _room_why(f):
             f" {size / GIB:.1f} GiB")
 
 
+def _check(check, f):
+    """An operation's eligibility check on the pair: True, False, or
+    None where an instance or the fact it reads was not given."""
+    src, dst = _instances(f)
+    if src is None or dst is None:
+        return None
+    return check(src, dst)
+
+
+def _eligibility(offer):
+    """One need for each of the operation's own eligibility checks: a
+    check the facts cannot answer is not yet, never a yes."""
+    def need(what, check, refused):
+        return decide.Need(
+            what, lambda f: _check(check, f) is True,
+            lambda f: (_not_yet(f"the facts behind {what}")
+                       if _check(check, f) is None else refused))
+    return tuple(need(*c) for c in offer.get("checks", ()))
+
+
 def provider_needs(offer):
     """What a provider operation needs, each with the reason it is refused:
-    the API answering, the instances' classes and versions, the pair being
-    one the provider offers the operation for, both instances available,
-    room for the data, a maintenance window known, an owner to run it and
-    a duration read from the provider and the measured size. A fact the API
-    does not give is said as not yet, never assumed."""
-    def known(f):
-        return not _unknown(f, ("klass", "version"))
-
-    def eligible(f):
-        src, dst = _instances(f)
-        return (known(f) and (src.klass, dst.klass, src.version, dst.version)
-                in offer.get("eligible", ()))
-
-    def duration(f):
-        size = f.get("size_bytes")
-        return (size is not None and size >= 0
-                and bool(offer.get("duration_source"))
-                and offer.get("startup_seconds", -1) >= 0
-                and offer.get("bytes_per_second", 0) > 0)
-
-    def duration_why(f):
-        if f.get("size_bytes") is None:
-            return _not_yet("the measured size of the data to place")
-        return (f"{offer['said']} has no documented startup, rate and source"
-                " of its duration")
-
+    the API answering, the instances' classes and versions, the
+    operation's own eligibility on the facts read (`cloudapi.OPERATIONS`),
+    both instances available, room for the data, a maintenance window
+    known, an adapter call that runs it and reads it back, and a duration
+    from evidence (`duration`). A fact the API does not give is said as
+    not yet, never assumed."""
     return (
         decide.Need("a reachable provider API",
                     lambda f: f.get("api_reachable") is True,
                     lambda f: "the provider's API was not reached: "
                               + (f.get("api_error") or "it was not asked")),
-        decide.Need("known instance classes and engine versions", known,
+        decide.Need("known instance classes and engine versions",
+                    lambda f: not _unknown(f, ("klass", "version")),
                     lambda f: _not_yet(", ".join(_unknown(
                         f, ("klass", "version"))))),
-        decide.Need("eligible instance classes and engine versions", eligible,
-                    f"the provider does not offer {offer['said']} between"
-                    " these instance classes and versions"),
+        *_eligibility(offer),
         decide.Need("both instances available", _status_holds, _status_why),
         decide.Need("room on the target for the measured data", _room,
                     _room_why),
@@ -668,20 +125,139 @@ def provider_needs(offer):
                     lambda f: _not_yet("the target's maintenance window")),
         decide.Need("a migkit execution owner",
                     lambda f: callable(offer.get("execute")),
-                    f"no execution owner runs {offer['said']}"),
-        decide.Need("documented duration and measured size and rate",
-                    duration, duration_why))
+                    f"{NOT_YET}: " + (offer.get("why_not") or
+                                      f"no execution owner runs"
+                                      f" {offer['said']}")),
+        decide.Need("a duration from the documented startup and a measured"
+                    " rate", lambda f: duration(offer, f.get("size_bytes"))
+                    is not None,
+                    lambda f: duration_why(offer, f.get("size_bytes"))))
+
+
+def operation_runs(hop, name):
+    """([{"bytes", "seconds"}], whose, truth) of a provider operation run
+    before: this hop's own runs or its rehearsal's are measured, another
+    hop's of the same engines only predicts; ([], "", "") where none ran."""
+    from . import planner
+    from .costmodel import MEASURED_TRUTH, PREDICTED
+    key = RUN_KEY.format(name)
+    try:
+        mine = planner.runs(hop, key)
+    except Exception:  # noqa: BLE001 - a hop with no report directory
+        mine = []
+    if mine:
+        return mine, "measured on this hop", MEASURED_TRUTH
+    try:
+        got, names = planner._elsewhere(hop, key)
+    except Exception:  # noqa: BLE001 - nothing kept to read
+        got, names = [], []
+    if not got:
+        return [], "", ""
+    if names and names[0].startswith("the rehearsal "):
+        return got, f"measured on {names[0]}", MEASURED_TRUTH
+    return got, "measured on " + ", ".join(names[:3]), PREDICTED
+
+
+def record_operation(hop, name, size_bytes, seconds):
+    """One finished provider operation kept with the hop's rates: the
+    bytes it placed and the seconds it took, read by the next plan of this
+    hop or of the hop it rehearses (`operation_runs`)."""
+    from . import planner
+    if not size_bytes or seconds <= 0:
+        return
+    planner._add_run(hop, RUN_KEY.format(name), {
+        "bytes": int(size_bytes), "seconds": round(float(seconds), 3),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "kind": planner._kind(hop)})
+
+
+def _usable(runs):
+    return [(float(r["bytes"]), float(r["seconds"])) for r in runs or ()
+            if float(r.get("bytes") or 0) > 0
+            and float(r.get("seconds") or 0) > 0]
+
+
+def duration(offer, size):
+    """The operation's `costmodel.Estimate` for `size` bytes, or None.
+
+    With a documented startup, each run's rate is its bytes over the
+    seconds past the startup. With none, runs of two or more sizes are
+    fitted to a startup and a rate; one size alone is scaled up to a
+    larger move and never down - an upper bound, since its startup is
+    not known apart from its rate. A run on less data than the move
+    widens the spread (`rehearsal.sample_spread`)."""
+    import statistics
+    from . import rehearsal
+    from .costmodel import Estimate
+    runs = _usable(offer.get("runs"))
+    if size is None or size < 0 or not runs:
+        return None
+    start = offer.get("startup_seconds")
+    if start is not None:
+        seen = [start + size * (t - start) / b for b, t in runs if t > start]
+        how = f"{offer.get('startup_source') or 'documented startup'} and"
+    elif len({b for b, _ in runs}) >= 2:
+        mb, mt = (statistics.fmean(x) for x in zip(*runs))
+        slope = (sum((b - mb) * (t - mt) for b, t in runs)
+                 / sum((b - mb) ** 2 for b, _ in runs))
+        if slope <= 0:
+            return None
+        lead = max(0.0, mt - slope * mb)
+        seen = [lead + slope * size + (t - lead - slope * b)
+                for b, t in runs]
+        how = "a startup and rate fitted to runs of several sizes"
+    else:
+        seen = [t * max(1.0, size / b) for b, t in runs]
+        seen = [max(seen)]
+        how = "one run's size scaled up as a bound"
+    if not seen:
+        return None
+    mean = max(0.0, statistics.fmean(seen))
+    spread = rehearsal.sample_spread(max(b for b, _ in runs), size)
+    sd = ((statistics.stdev(seen) if len(seen) > 1 else 0.0) ** 2
+          + (mean * spread) ** 2) ** 0.5
+    return Estimate(mean, sd, truth=offer.get("truth") or "predicted",
+                    source=f"{how} {offer.get('duration_source')}",
+                    n=len(runs))
+
+
+def duration_why(offer, size):
+    if size is None:
+        return _not_yet("the measured size of the data to place")
+    if not _usable(offer.get("runs")):
+        return (f"{NOT_YET}: no rehearsal or other hop has run"
+                f" {offer['said']} to measure its rate")
+    return (f"the runs of {offer['said']} give no rate past its documented"
+            " startup")
+
+
+def provider_offers(hop, source_adapter, target_adapter=None):
+    """The provider's own operations on the source's product
+    (`cloudapi.Adapter.operations`) as rungs' offers: their eligibility
+    checks, the adapter call that runs one (None: not yet), its
+    documented startup and the runs it was measured by."""
+    ops = getattr(source_adapter, "operations", None)
+    if not callable(ops):
+        return ()
+    out = []
+    for op in ops():
+        runs, whose, truth = operation_runs(hop, op.name)
+        out.append({"name": op.name, "said": op.said, "checks": op.checks,
+                    "execute": source_adapter.runner(op),
+                    "why_not": op.why_not, "startup_seconds": op.startup,
+                    "startup_source": op.startup_source, "runs": runs,
+                    "duration_source": whose, "truth": truth})
+    return tuple(out)
 
 
 def managed_facts(hop, eng, source_api, target_api, offers, size_bytes):
     """Read provider instances without changing either side: reachability,
-    class, version, status, storage and maintenance window as the
-    provider's API states them. An API that does not answer is a fact
-    (`api_reachable`), not an exception.
+    class, version, status, storage, replicas, upgrade targets and
+    maintenance window as the provider's API states them. An API that
+    does not answer is a fact (`api_reachable`), not an exception.
 
-    Offers are the provider's eligible operations for these instance classes
-    and versions, with duration evidence and the execution owner attached.
-    """
+    Offers are the provider's operations on the source's product
+    (`offers`), each held to its eligibility on these facts."""
     from . import clouds
     src = dst = None
     error = ""
@@ -702,10 +278,10 @@ def managed_case(facts, verified=None):
     """Choose a provider operation; planning never claims verification.
 
     A duration is a documented startup plus a size-dependent rate observed
-    on a rehearsal of this path. Switchover downtime alone is not its cost.
-    `verified`, when supplied after execution, is migkit's own full check.
+    on a rehearsal of this path (`duration`). Switchover downtime alone is
+    not its cost. `verified`, when supplied after execution, is migkit's
+    own full check.
     """
-    from .costmodel import Estimate, PREDICTED
     rungs, costs = [], {}
     size = facts.get("size_bytes")
     for offer in facts.get("offers", ()):
@@ -715,14 +291,11 @@ def managed_case(facts, verified=None):
             needs=provider_needs(offer),
             prove=(lambda f: None if verified() is True else
                    "migkit's full verify did not pass") if verified else None,
-            because="the provider offers this path for both instance classes"
-                    " and versions; migkit must verify the result"))
-        if (size is not None and size >= 0 and offer.get("duration_source")
-                and offer.get("startup_seconds", -1) >= 0
-                and offer.get("bytes_per_second", 0) > 0):
-            seconds = offer["startup_seconds"] + size / offer["bytes_per_second"]
-            costs[name] = Estimate(seconds, seconds, truth=PREDICTED,
-                                   source=offer["duration_source"])
+            because="the provider offers this path for both instances as"
+                    " read; migkit must verify the result"))
+        took = duration(offer, size)
+        if took is not None:
+            costs[name] = took
     choice = decide.climb("the managed service path", rungs, facts,
                           need=("managed path", "full verify"), costs=costs)
     details = ["provider completion is followed by migkit's full verify"]
@@ -814,116 +387,25 @@ def architecture_case(facts, schema_carries=()):
     return ScenarioDecision("hardware / OS / architecture change", choice, details)
 
 
-def storage_facts(eng, db):
-    """Every scoped table's storage engine or access method, on both sides."""
-    from . import tableengine, upgrade
-    out = {}
-    for side in ("src", "dst"):
-        if eng.CANON_ENGINE == "mysql":
-            tables = tableengine._engines(eng, side, db)
-        elif eng.CANON_ENGINE == "postgres":
-            rows = upgrade._pg(eng, side, db,
-                               "select n.nspname || '.' || c.relname || chr(31) || a.amname"
-                               " from pg_class c join pg_namespace n on n.oid=c.relnamespace"
-                               " join pg_am a on a.oid=c.relam where c.relkind='r'"
-                               " and n.nspname not in ('pg_catalog','information_schema')")
-            tables = dict(rows)
-        else:
-            raise ValueError(f"table storage is not read for {eng.CANON_ENGINE}")
-        out[side] = {t: n.lower() for t, n in tables.items() if eng.in_scope(db, t)}
-    return out
-
-
-def storage_case(table, source, target, *, family="mysql", exists=False,
-                 supported=(), accepted=False, orphan_rows=None,
-                 postgres_traits=None, used_features=(), alter_access_method=False):
-    """Decide with the schema owner's rungs and say every consequence.
-
-    PostgreSQL extension access methods require observed capabilities;
-    a name such as columnar alone never promises heap semantics.
-    """
-    from . import tableengine
-    source, target = source.lower(), target.lower()
-    if family == "mysql":
-        a, b = tableengine.TRAITS.get(source), tableengine.TRAITS.get(target)
-    elif family == "postgres":
-        traits = postgres_traits or {}
-        a, b = traits.get(source), traits.get(target)
-    else:
-        raise ValueError(f"storage changes are not read for {family}")
-    detail = [f"{table}: {source} to {target}"]
-    if a is not None and b is not None:
-        detail.extend(f"{k}: {getattr(a, k)} to {getattr(b, k)}"
-                      for k in ("transactions", "foreign_keys", "fulltext", "locks", "holds"))
-    loss = a is None or b is None or any(
-        getattr(a, k) and not getattr(b, k) for k in ("transactions", "foreign_keys"))
-    if a is not None and b is not None:
-        loss = loss or any(not getattr(b, k) for k in used_features)
-    if b is not None and b.holds != "rows":
-        loss = True
-    fk_safe = b is not None and (not b.foreign_keys or
-                                                (orphan_rows is not None and orphan_rows == 0))
-    facts = decide.Facts({"there": exists})
-    needs = (
-        decide.Need("known storage semantics on both servers", lambda f: a is not None and b is not None),
-        decide.Need("the target's supported storage method", lambda f: target in supported),
-        decide.Need("accepted transaction, foreign-key, full-text and locking consequences",
-                    lambda f: accepted and not loss,
-                    "storage consequences need acceptance; lost transactions, foreign keys or durability are refused"),
-        decide.Need("zero rows refused by target foreign keys", lambda f: fk_safe))
-    rungs = decide.fenced(tableengine.ways(), *needs)
-    if family == "postgres":
-        needs += (decide.Need("the server's ALTER TABLE SET ACCESS METHOD support",
-                              lambda f: alter_access_method,
-                              "PostgreSQL access-method changes need ALTER TABLE SET ACCESS METHOD support"),)
-        rungs = (decide.Rung(
-            "in place", "the table's access method altered after the copy",
-            frozenset({"engine changed"}),
-            needs=needs + (decide.Need("the copied table on the target",
-                                      lambda f: f["there"]),),
-            because="the target rebuilds the copied table using its own access method"),)
-    choice = decide.climb(f"{table}: storage engine change", rungs, facts,
-                          need=("engine changed",))
-    return ScenarioDecision("storage engine change", choice, tuple(detail))
-
-
-def storage_definition(ddl, table, source, target, *, hop, eng, db, **facts):
-    """Use the existing schema rewrite only after the storage decision holds."""
-    from . import tableengine
-    decision = storage_case(table, source, target, **facts)
-    if decision.choice.path != "definition":
-        raise ValueError(decision.words())
-    change = tableengine.plan(hop, eng, db).of(table)
-    if change is None or (change.src, change.dst) != (source.lower(), target.lower()):
-        raise ValueError("the storage decision differs from the schema step's plan")
-    return tableengine.schema(hop, eng, db, table, ddl)
-
-
-def run_managed_case(facts, verify):
-    """Execute the eligible operation and require migkit's own verification."""
+def run_managed_case(facts, verify, hop=None):
+    """Execute the eligible operation and require migkit's own verification;
+    on a hop, the run is kept as the evidence of the next plan's duration
+    (`record_operation`)."""
     decision = managed_case(facts)
     if decision.choice.path is None:
         raise ValueError(decision.words())
     offer = next(o for o in facts["offers"] if o["name"] == decision.choice.path)
+    began = time.monotonic()
     result = offer["execute"]()
+    took = time.monotonic() - began
     checked = verify()
     selected = dict(facts, offers=(offer,))
     proved = managed_case(selected, verified=lambda: checked)
     if proved.choice.path != decision.choice.path:
         raise ValueError("managed service change: migkit's full verify did not pass")
+    if hop is not None:
+        record_operation(hop, offer["name"], facts.get("size_bytes"), took)
     return result, proved
-
-
-def storage_alter(table, source, target, **facts):
-    """The target-only statement, for the schema step after a copy."""
-    decision = storage_case(table, source, target, **facts)
-    if decision.choice.path != "in place":
-        raise ValueError(decision.words())
-    if facts.get("family", "mysql") == "postgres":
-        quote = lambda name: '"' + name.replace('"', '""') + '"'
-        name = ".".join(quote(part) for part in table.split("."))
-        return f"ALTER TABLE {name} SET ACCESS METHOD {quote(target)}"
-    raise ValueError("MySQL storage changes use the schema step's in-place handler")
 
 
 def _read_words(side, inst):
@@ -951,12 +433,13 @@ def managed_lines(facts):
     return out
 
 
-def plan_lines(hop, eng, db, offers=()):
+def plan_lines(hop, eng, db, offers=None):
     """The plan's lines of the cases decided here, said before anything is
     written: the managed service change, where both sides are services
     whose provider's API migkit drives. `offers` are the provider
-    operations catalogued for the pair; with none, the case says so and the
-    logical move stands. A side with no API asks nothing."""
+    operations for the pair, read from the source's adapter (`provider_offers`)
+    where none are given; with none, the case says so and the logical
+    move stands. A side with no API asks nothing."""
     from . import managed
     if any(managed.api_conf(hop, eng, w)[0] is None for w in ("src", "dst")):
         return []
@@ -966,9 +449,20 @@ def plan_lines(hop, eng, db, offers=()):
         sized = None
     size = (sum(float(t.get("bytes") or 0) for t in sized.values())
             if sized else None)
+    adapters = {}
+
+    def adapter(which):
+        if which not in adapters:
+            adapters[which] = managed.adapter(hop, eng, which)
+        return adapters[which]
+
+    if offers is None:
+        try:
+            offers = provider_offers(hop, adapter("src"))
+        except (Exception, SystemExit):  # noqa: BLE001 - said by the read
+            offers = ()
 
     def api(which):
-        return SimpleNamespace(
-            instance=lambda: managed.adapter(hop, eng, which).instance())
+        return SimpleNamespace(instance=lambda: adapter(which).instance())
     return managed_lines(managed_facts(hop, eng, api("src"), api("dst"),
                                        offers, size))

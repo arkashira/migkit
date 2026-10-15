@@ -3114,6 +3114,21 @@ case repeats what `tableengine` already plans and is not yet the one place it
 goes through. Pure tests prove the decisions and messages; no live provider
 or server execution is proved.
 
+W5D (2026-10-16): the providers' own operations are catalogued in
+`cloudapi.OPERATIONS` (AWS blue/green, in-place major upgrade, RDS into
+Aurora by read replica or snapshot; Azure Single to Flexible Server; Cloud
+SQL's in-place upgrade), each held to checks on the instances' facts (engine,
+version, the provider's listed upgrade targets, replicas) and timed by a
+documented startup plus runs kept per operation (rehearsal: measured, other
+hops: predicted, none: refused as not yet); the plan reads them from the
+source's adapter. The storage change is decided in `tableengine.decided`
+(one place); the unwired scenario helpers are deleted. Not done: no adapter
+runs any of these operations yet (every one is not yet with its reason);
+instance-class orderability for the target version is not read; the
+architecture and storage readers still branch on the engine name instead of
+engine-class fact readers, and the storage needs close over arguments rather
+than reading facts (CRIT1 b).
+
 
 Asked: "old version to a newer one, SQL Server Web edition to Datacenter
 (Enterprise) - does migkit do these? Think through every case a database
