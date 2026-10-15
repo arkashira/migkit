@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from . import decide
+
 
 class CharsetMigrationHelper:
     """Character set and collation migration helpers (Item 161)."""
@@ -552,3 +554,710 @@ class SplittingCoordinator:
             target_schemas=target_schemas,
             cross_references=cross_refs,
         )
+<<<<<<< HEAD
+||||||| 3c33f9a
+
+
+class DualWriteDriftType(str, enum.Enum):
+    IN_SYNC = "IN_SYNC"
+    OUT_OF_ORDER_WRITE = "OUT_OF_ORDER_WRITE"
+    IN_FLIGHT_LAG = "IN_FLIGHT_LAG"
+    GENUINE_DRIFT = "GENUINE_DRIFT"
+
+
+@dataclass
+class DualWriteClassificationResult:
+    status: DualWriteDriftType
+    key: Any
+    detail: str
+    source_timestamp: Optional[float] = None
+    target_timestamp: Optional[float] = None
+    time_delta_seconds: Optional[float] = None
+    source_version: Optional[int] = None
+    target_version: Optional[int] = None
+
+
+class DualWritesDriftDetector:
+    """Dual writes drift detector (Item 65, F1.dual)."""
+
+    def __init__(self, grace_window_seconds: float = 5.0):
+        self.grace_window_seconds = grace_window_seconds
+        self.probe_history: Dict[Any, List[Dict[str, Any]]] = {}
+
+    @staticmethod
+    def _extract_time(row: Optional[Dict[str, Any]], col: Optional[str]) -> Optional[float]:
+        if not row or not col or col not in row:
+            return None
+        val = row[col]
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, str):
+            try:
+                import datetime
+                dt = datetime.datetime.fromisoformat(val.replace("Z", "+00:00"))
+                return dt.timestamp()
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    @staticmethod
+    def _extract_version(row: Optional[Dict[str, Any]], col: Optional[str]) -> Optional[int]:
+        if not row or not col or col not in row:
+            return None
+        val = row[col]
+        if isinstance(val, int):
+            return val
+        if isinstance(val, str) and val.isdigit():
+            return int(val)
+        return None
+
+    def classify_row(
+        self,
+        key: Any,
+        source_row: Optional[Dict[str, Any]],
+        target_row: Optional[Dict[str, Any]],
+        timestamp_col: Optional[str] = "updated_at",
+        version_col: Optional[str] = "version",
+        current_time: Optional[float] = None,
+    ) -> DualWriteClassificationResult:
+        now = current_time if current_time is not None else time.time()
+
+        if source_row is None and target_row is None:
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.IN_SYNC,
+                key=key,
+                detail="Both source and target rows are absent",
+            )
+
+        src_ts = self._extract_time(source_row, timestamp_col)
+        dst_ts = self._extract_time(target_row, timestamp_col)
+        src_ver = self._extract_version(source_row, version_col)
+        dst_ver = self._extract_version(target_row, version_col)
+
+        if source_row is not None and target_row is None:
+            if src_ts is not None and (now - src_ts) <= self.grace_window_seconds:
+                return DualWriteClassificationResult(
+                    status=DualWriteDriftType.IN_FLIGHT_LAG,
+                    key=key,
+                    source_timestamp=src_ts,
+                    detail=f"Row committed on source {now - src_ts:.2f}s ago; pending replication to target",
+                )
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.GENUINE_DRIFT,
+                key=key,
+                source_timestamp=src_ts,
+                detail="Row present on source but missing on target beyond dual-write grace window",
+            )
+
+        if source_row is None and target_row is not None:
+            if dst_ts is not None and (now - dst_ts) <= self.grace_window_seconds:
+                return DualWriteClassificationResult(
+                    status=DualWriteDriftType.IN_FLIGHT_LAG,
+                    key=key,
+                    target_timestamp=dst_ts,
+                    detail=f"Row committed on target {now - dst_ts:.2f}s ago; pending arrival on source",
+                )
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.GENUINE_DRIFT,
+                key=key,
+                target_timestamp=dst_ts,
+                detail="Row present on target only beyond dual-write grace window (orphaned write)",
+            )
+
+        assert source_row is not None and target_row is not None
+        if source_row == target_row:
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.IN_SYNC,
+                key=key,
+                source_timestamp=src_ts,
+                target_timestamp=dst_ts,
+                source_version=src_ver,
+                target_version=dst_ver,
+                detail="Source and target rows are identical",
+            )
+
+        time_delta = abs(src_ts - dst_ts) if (src_ts is not None and dst_ts is not None) else None
+        latest_ts = max(src_ts, dst_ts) if (src_ts is not None and dst_ts is not None) else (src_ts or dst_ts)
+        is_recent = (now - latest_ts) <= self.grace_window_seconds if latest_ts is not None else False
+
+        if is_recent and src_ver is not None and dst_ver is not None:
+            if src_ver == dst_ver and time_delta is not None and time_delta <= self.grace_window_seconds:
+                return DualWriteClassificationResult(
+                    status=DualWriteDriftType.OUT_OF_ORDER_WRITE,
+                    key=key,
+                    source_version=src_ver,
+                    target_version=dst_ver,
+                    source_timestamp=src_ts,
+                    target_timestamp=dst_ts,
+                    time_delta_seconds=time_delta,
+                    detail=f"Same version {src_ver} with payload divergence within grace window ({time_delta:.2f}s)",
+                )
+            if src_ver > dst_ver:
+                if time_delta is not None and time_delta <= self.grace_window_seconds:
+                    return DualWriteClassificationResult(
+                        status=DualWriteDriftType.IN_FLIGHT_LAG,
+                        key=key,
+                        source_version=src_ver,
+                        target_version=dst_ver,
+                        source_timestamp=src_ts,
+                        target_timestamp=dst_ts,
+                        time_delta_seconds=time_delta,
+                        detail=f"Target lagging source by {src_ver - dst_ver} versions within grace window",
+                    )
+            if dst_ver > src_ver:
+                if time_delta is not None and time_delta <= self.grace_window_seconds:
+                    return DualWriteClassificationResult(
+                        status=DualWriteDriftType.OUT_OF_ORDER_WRITE,
+                        key=key,
+                        source_version=src_ver,
+                        target_version=dst_ver,
+                        source_timestamp=src_ts,
+                        target_timestamp=dst_ts,
+                        time_delta_seconds=time_delta,
+                        detail=f"Target received newer version {dst_ver} before source {src_ver} within grace window",
+                    )
+
+        if is_recent and time_delta is not None and time_delta <= self.grace_window_seconds:
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.OUT_OF_ORDER_WRITE,
+                key=key,
+                source_timestamp=src_ts,
+                target_timestamp=dst_ts,
+                time_delta_seconds=time_delta,
+                detail=f"Discrepancy within acceptable dual-write lag window ({time_delta:.2f}s <= {self.grace_window_seconds}s)",
+            )
+
+        return DualWriteClassificationResult(
+            status=DualWriteDriftType.GENUINE_DRIFT,
+            key=key,
+            source_timestamp=src_ts,
+            target_timestamp=dst_ts,
+            time_delta_seconds=time_delta,
+            source_version=src_ver,
+            target_version=dst_ver,
+            detail="Payload or version divergence exceeds dual-write grace window; genuine application data drift",
+        )
+
+    def record_probe(
+        self,
+        key: Any,
+        source_row: Optional[Dict[str, Any]],
+        target_row: Optional[Dict[str, Any]],
+        probe_time: float,
+    ) -> None:
+        if key not in self.probe_history:
+            self.probe_history[key] = []
+        self.probe_history[key].append({
+            "time": probe_time,
+            "source": source_row,
+            "target": target_row,
+        })
+
+    def evaluate_multi_probe_convergence(self, key: Any) -> DualWriteDriftType:
+        probes = self.probe_history.get(key, [])
+        if not probes:
+            return DualWriteDriftType.IN_SYNC
+
+        first = probes[0]
+        latest = probes[-1]
+
+        if latest["source"] == latest["target"]:
+            return DualWriteDriftType.OUT_OF_ORDER_WRITE
+
+        duration = latest["time"] - first["time"]
+        if duration > self.grace_window_seconds:
+            return DualWriteDriftType.GENUINE_DRIFT
+
+        return DualWriteDriftType.IN_FLIGHT_LAG
+=======
+
+
+class DualWriteDriftType(str, enum.Enum):
+    IN_SYNC = "IN_SYNC"
+    OUT_OF_ORDER_WRITE = "OUT_OF_ORDER_WRITE"
+    IN_FLIGHT_LAG = "IN_FLIGHT_LAG"
+    GENUINE_DRIFT = "GENUINE_DRIFT"
+
+
+@dataclass
+class DualWriteClassificationResult:
+    status: DualWriteDriftType
+    key: Any
+    detail: str
+    source_timestamp: Optional[float] = None
+    target_timestamp: Optional[float] = None
+    time_delta_seconds: Optional[float] = None
+    source_version: Optional[int] = None
+    target_version: Optional[int] = None
+
+
+class DualWritesDriftDetector:
+    """Dual writes drift detector (Item 65, F1.dual)."""
+
+    def __init__(self, grace_window_seconds: float = 5.0):
+        self.grace_window_seconds = grace_window_seconds
+        self.probe_history: Dict[Any, List[Dict[str, Any]]] = {}
+
+    @staticmethod
+    def _extract_time(row: Optional[Dict[str, Any]], col: Optional[str]) -> Optional[float]:
+        if not row or not col or col not in row:
+            return None
+        val = row[col]
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, str):
+            try:
+                import datetime
+                dt = datetime.datetime.fromisoformat(val.replace("Z", "+00:00"))
+                return dt.timestamp()
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    @staticmethod
+    def _extract_version(row: Optional[Dict[str, Any]], col: Optional[str]) -> Optional[int]:
+        if not row or not col or col not in row:
+            return None
+        val = row[col]
+        if isinstance(val, int):
+            return val
+        if isinstance(val, str) and val.isdigit():
+            return int(val)
+        return None
+
+    def classify_row(
+        self,
+        key: Any,
+        source_row: Optional[Dict[str, Any]],
+        target_row: Optional[Dict[str, Any]],
+        timestamp_col: Optional[str] = "updated_at",
+        version_col: Optional[str] = "version",
+        current_time: Optional[float] = None,
+    ) -> DualWriteClassificationResult:
+        now = current_time if current_time is not None else time.time()
+
+        if source_row is None and target_row is None:
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.IN_SYNC,
+                key=key,
+                detail="Both source and target rows are absent",
+            )
+
+        src_ts = self._extract_time(source_row, timestamp_col)
+        dst_ts = self._extract_time(target_row, timestamp_col)
+        src_ver = self._extract_version(source_row, version_col)
+        dst_ver = self._extract_version(target_row, version_col)
+
+        if source_row is not None and target_row is None:
+            if src_ts is not None and (now - src_ts) <= self.grace_window_seconds:
+                return DualWriteClassificationResult(
+                    status=DualWriteDriftType.IN_FLIGHT_LAG,
+                    key=key,
+                    source_timestamp=src_ts,
+                    detail=f"Row committed on source {now - src_ts:.2f}s ago; pending replication to target",
+                )
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.GENUINE_DRIFT,
+                key=key,
+                source_timestamp=src_ts,
+                detail="Row present on source but missing on target beyond dual-write grace window",
+            )
+
+        if source_row is None and target_row is not None:
+            if dst_ts is not None and (now - dst_ts) <= self.grace_window_seconds:
+                return DualWriteClassificationResult(
+                    status=DualWriteDriftType.IN_FLIGHT_LAG,
+                    key=key,
+                    target_timestamp=dst_ts,
+                    detail=f"Row committed on target {now - dst_ts:.2f}s ago; pending arrival on source",
+                )
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.GENUINE_DRIFT,
+                key=key,
+                target_timestamp=dst_ts,
+                detail="Row present on target only beyond dual-write grace window (orphaned write)",
+            )
+
+        assert source_row is not None and target_row is not None
+        if source_row == target_row:
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.IN_SYNC,
+                key=key,
+                source_timestamp=src_ts,
+                target_timestamp=dst_ts,
+                source_version=src_ver,
+                target_version=dst_ver,
+                detail="Source and target rows are identical",
+            )
+
+        time_delta = abs(src_ts - dst_ts) if (src_ts is not None and dst_ts is not None) else None
+        latest_ts = max(src_ts, dst_ts) if (src_ts is not None and dst_ts is not None) else (src_ts or dst_ts)
+        is_recent = (now - latest_ts) <= self.grace_window_seconds if latest_ts is not None else False
+
+        if is_recent and src_ver is not None and dst_ver is not None:
+            if src_ver == dst_ver and time_delta is not None and time_delta <= self.grace_window_seconds:
+                return DualWriteClassificationResult(
+                    status=DualWriteDriftType.OUT_OF_ORDER_WRITE,
+                    key=key,
+                    source_version=src_ver,
+                    target_version=dst_ver,
+                    source_timestamp=src_ts,
+                    target_timestamp=dst_ts,
+                    time_delta_seconds=time_delta,
+                    detail=f"Same version {src_ver} with payload divergence within grace window ({time_delta:.2f}s)",
+                )
+            if src_ver > dst_ver:
+                if time_delta is not None and time_delta <= self.grace_window_seconds:
+                    return DualWriteClassificationResult(
+                        status=DualWriteDriftType.IN_FLIGHT_LAG,
+                        key=key,
+                        source_version=src_ver,
+                        target_version=dst_ver,
+                        source_timestamp=src_ts,
+                        target_timestamp=dst_ts,
+                        time_delta_seconds=time_delta,
+                        detail=f"Target lagging source by {src_ver - dst_ver} versions within grace window",
+                    )
+            if dst_ver > src_ver:
+                if time_delta is not None and time_delta <= self.grace_window_seconds:
+                    return DualWriteClassificationResult(
+                        status=DualWriteDriftType.OUT_OF_ORDER_WRITE,
+                        key=key,
+                        source_version=src_ver,
+                        target_version=dst_ver,
+                        source_timestamp=src_ts,
+                        target_timestamp=dst_ts,
+                        time_delta_seconds=time_delta,
+                        detail=f"Target received newer version {dst_ver} before source {src_ver} within grace window",
+                    )
+
+        if is_recent and time_delta is not None and time_delta <= self.grace_window_seconds:
+            return DualWriteClassificationResult(
+                status=DualWriteDriftType.OUT_OF_ORDER_WRITE,
+                key=key,
+                source_timestamp=src_ts,
+                target_timestamp=dst_ts,
+                time_delta_seconds=time_delta,
+                detail=f"Discrepancy within acceptable dual-write lag window ({time_delta:.2f}s <= {self.grace_window_seconds}s)",
+            )
+
+        return DualWriteClassificationResult(
+            status=DualWriteDriftType.GENUINE_DRIFT,
+            key=key,
+            source_timestamp=src_ts,
+            target_timestamp=dst_ts,
+            time_delta_seconds=time_delta,
+            source_version=src_ver,
+            target_version=dst_ver,
+            detail="Payload or version divergence exceeds dual-write grace window; genuine application data drift",
+        )
+
+    def record_probe(
+        self,
+        key: Any,
+        source_row: Optional[Dict[str, Any]],
+        target_row: Optional[Dict[str, Any]],
+        probe_time: float,
+    ) -> None:
+        if key not in self.probe_history:
+            self.probe_history[key] = []
+        self.probe_history[key].append({
+            "time": probe_time,
+            "source": source_row,
+            "target": target_row,
+        })
+
+    def evaluate_multi_probe_convergence(self, key: Any) -> DualWriteDriftType:
+        probes = self.probe_history.get(key, [])
+        if not probes:
+            return DualWriteDriftType.IN_SYNC
+
+        first = probes[0]
+        latest = probes[-1]
+
+        if latest["source"] == latest["target"]:
+            return DualWriteDriftType.OUT_OF_ORDER_WRITE
+
+        duration = latest["time"] - first["time"]
+        if duration > self.grace_window_seconds:
+            return DualWriteDriftType.GENUINE_DRIFT
+
+        return DualWriteDriftType.IN_FLIGHT_LAG
+
+
+@dataclass(frozen=True)
+class ScenarioDecision:
+    case: str
+    choice: decide.Choice
+    details: tuple = ()
+
+    def words(self):
+        return "; ".join((f"{self.case}: {self.choice.said}",
+                          self.choice.reason, *self.details))
+
+
+def managed_facts(hop, eng, source_api, target_api, offers, size_bytes):
+    """Read provider instances and readiness without changing either side.
+
+    Offers are the provider's eligible operations for these instance classes
+    and versions, with duration evidence and the execution owner attached.
+    """
+    from dataclasses import asdict
+    from . import cloud_readiness, clouds
+    src, dst = source_api.instance(), target_api.instance()
+    a, b = asdict(src), asdict(dst)
+    a.update(getattr(hop, "cloud_src", {}) or {})
+    b.update(getattr(hop, "cloud_dst", {}) or {})
+    return decide.Facts({
+        "source": src, "target": dst, "api_reachable": True,
+        "locations": (clouds.of(eng, "src", hop.source),
+                      clouds.of(eng, "dst", hop.target)),
+        "readiness": cloud_readiness.audit(a, b),
+        "offers": tuple(offers), "size_bytes": size_bytes,
+    })
+
+
+def managed_case(facts, verified=None):
+    """Choose a provider operation; planning never claims verification.
+
+    A duration is a documented startup plus a size-dependent rate observed
+    on a rehearsal of this path. Switchover downtime alone is not its cost.
+    `verified`, when supplied after execution, is migkit's own full check.
+    """
+    from .costmodel import Estimate, PREDICTED
+    rungs, costs = [], {}
+    for offer in facts.get("offers", ()):
+        name = offer["name"]
+        def eligible(f, o=offer):
+            src, dst = f.get("source"), f.get("target")
+            return bool(src and dst and src.klass and dst.klass
+                        and src.version and dst.version
+                        and (src.klass, dst.klass, src.version, dst.version)
+                        in o.get("eligible", ()))
+        def duration(f, o=offer):
+            size = f.get("size_bytes")
+            return (size is not None and size >= 0
+                    and bool(o.get("duration_source"))
+                    and o.get("startup_seconds", -1) >= 0
+                    and o.get("bytes_per_second", 0) > 0)
+        rung = decide.Rung(
+            name, offer["said"], frozenset({"managed path", "full verify"}),
+            needs=(
+                decide.Need("a reachable provider API",
+                            lambda f: f.get("api_reachable") is True),
+                decide.Need("eligible instance classes and engine versions", eligible),
+                decide.Need("a migkit execution owner",
+                            lambda f, o=offer: callable(o.get("execute"))),
+                decide.Need("cloud readiness without failures",
+                            lambda f: f.get("readiness") is not None and not any(
+                                r.level == "fail" for r in f["readiness"])),
+                decide.Need("documented duration and measured size and rate", duration)),
+            prove=(lambda f: None if verified() is True else
+                   "migkit's full verify did not pass") if verified else None,
+            because="the provider offers this path for both instance classes"
+                    " and versions; migkit must verify the result")
+        rungs.append(rung)
+        if duration(facts):
+            seconds = offer["startup_seconds"] + facts["size_bytes"] / offer["bytes_per_second"]
+            costs[name] = Estimate(seconds, seconds, truth=PREDICTED,
+                                   source=offer["duration_source"])
+    choice = decide.climb("the managed service path", rungs, facts,
+                          need=("managed path", "full verify"), costs=costs)
+    details = ["provider completion is followed by migkit's full verify"]
+    if not rungs:
+        details.append("no eligible provider operation was read; consider the existing logical move")
+    return ScenarioDecision("managed service change", choice, tuple(details))
+
+
+def architecture_facts(eng, db, platform_reader):
+    """Read settings on both servers and host facts through a bounded reader.
+
+    The host reader returns architecture, OS and byte order of that server,
+    never those of the machine running migkit. Unknown facts stay unknown.
+    """
+    from . import upgrade
+    engine = eng.CANON_ENGINE
+    out = {}
+    for side in ("src", "dst"):
+        facts = dict(platform_reader(side))
+        if engine == "mysql":
+            settings = {k: v[0] for k, v in upgrade._my_vars(eng, side).items()}
+            facts.update(collation=settings.get("collation_server"),
+                         case_sensitivity=settings.get("lower_case_table_names"))
+            rows = eng._q(side, "select cast(1.2345678901234567e0 as char), 'a' = 'A'")
+            facts["case_sensitivity"] = (settings.get("lower_case_table_names"), rows[0][1])
+        elif engine == "postgres":
+            rows = upgrade._pg(eng, side, db,
+                               "select name || chr(31) || setting from pg_settings where name in"
+                               " ('lc_collate', 'lc_ctype', 'extra_float_digits')")
+            settings = dict(rows)
+            facts.update(collation=(settings.get("lc_collate"),
+                                    upgrade.pg_collations(eng, side, db)),
+                         case_sensitivity=settings.get("lc_ctype"),
+                         float_setting=settings.get("extra_float_digits"))
+            rows = upgrade._pg(eng, side, db,
+                               "select (1.2345678901234567::float8)::text || chr(31)"
+                               " || ('a' = 'A')::text")
+            facts["case_sensitivity"] = (settings.get("lc_ctype"), rows[0][1])
+        elif engine == "mssql":
+            rows = eng._cmd(side, db,
+                            "select cast(databasepropertyex(db_name(), 'Collation')"
+                            " as nvarchar(128)), case when N'a' = N'A' then 0 else 1 end")
+            facts.update(collation=rows[0][0], case_sensitivity=rows[0][1])
+            rows = eng._cmd(side, db,
+                            "select convert(varchar(64), cast(1.2345678901234567 as float), 3)")
+        else:
+            raise ValueError(f"architecture settings are not read for {engine}")
+        facts["float_rendering"] = rows[0][0] if rows else None
+        out[side] = facts
+    return decide.Facts(out)
+
+
+def architecture_case(facts, schema_carries=()):
+    """Refuse unhandled semantic differences, route byte changes logically."""
+    a, b = facts.get("src", {}), facts.get("dst", {})
+    fields = ("architecture", "os", "byte_order", "collation",
+              "case_sensitivity", "float_rendering")
+    def unread(value):
+        return value is None or value == "" or (
+            isinstance(value, tuple) and (not value or unread(value[0])))
+    missing = [k for k in fields if unread(a.get(k)) or unread(b.get(k))]
+    differences = [k for k in fields if a.get(k) != b.get(k)]
+    unhandled = [k for k in differences if k in (
+        "collation", "case_sensitivity", "float_rendering", "float_setting")
+        and k not in schema_carries]
+    if a.get("float_setting") != b.get("float_setting") and "float_setting" not in schema_carries:
+        unhandled.append("float_setting")
+    needs = (
+        decide.Need("facts read from both servers", lambda f: not missing,
+                    "unread server facts: " + ", ".join(missing)),
+        decide.Need("semantic differences carried by the schema step",
+                    lambda f: not unhandled,
+                    "the schema step does not carry: " + ", ".join(unhandled)))
+    logical = decide.Rung("architecture-logical", "a logical move across hardware or OS",
+                          frozenset({"architecture change"}), needs=needs,
+                          because="values are decoded and encoded for the target")
+    physical = decide.Rung(
+        "architecture-pages", "a copy of the server's pages",
+        frozenset({"architecture change"}),
+        needs=needs + (decide.Need("the same architecture, OS and byte order",
+                                 lambda f: not any(k in differences for k in
+                                                   ("architecture", "os", "byte_order"))),))
+    choice = decide.climb("hardware / OS / architecture", (physical, logical), facts,
+                          need=("architecture change",))
+    details = tuple(f"{k}: {a.get(k)!r} to {b.get(k)!r}" for k in fields)
+    return ScenarioDecision("hardware / OS / architecture change", choice, details)
+
+
+def storage_facts(eng, db):
+    """Every scoped table's storage engine or access method, on both sides."""
+    from . import tableengine, upgrade
+    out = {}
+    for side in ("src", "dst"):
+        if eng.CANON_ENGINE == "mysql":
+            tables = tableengine._engines(eng, side, db)
+        elif eng.CANON_ENGINE == "postgres":
+            rows = upgrade._pg(eng, side, db,
+                               "select n.nspname || '.' || c.relname || chr(31) || a.amname"
+                               " from pg_class c join pg_namespace n on n.oid=c.relnamespace"
+                               " join pg_am a on a.oid=c.relam where c.relkind='r'"
+                               " and n.nspname not in ('pg_catalog','information_schema')")
+            tables = dict(rows)
+        else:
+            raise ValueError(f"table storage is not read for {eng.CANON_ENGINE}")
+        out[side] = {t: n.lower() for t, n in tables.items() if eng.in_scope(db, t)}
+    return out
+
+
+def storage_case(table, source, target, *, family="mysql", exists=False,
+                 supported=(), accepted=False, orphan_rows=None,
+                 postgres_traits=None, used_features=(), alter_access_method=False):
+    """Decide with the schema owner's rungs and say every consequence.
+
+    PostgreSQL extension access methods require observed capabilities;
+    a name such as columnar alone never promises heap semantics.
+    """
+    from . import tableengine
+    source, target = source.lower(), target.lower()
+    if family == "mysql":
+        a, b = tableengine.TRAITS.get(source), tableengine.TRAITS.get(target)
+    elif family == "postgres":
+        traits = postgres_traits or {}
+        a, b = traits.get(source), traits.get(target)
+    else:
+        raise ValueError(f"storage changes are not read for {family}")
+    detail = [f"{table}: {source} to {target}"]
+    if a is not None and b is not None:
+        detail.extend(f"{k}: {getattr(a, k)} to {getattr(b, k)}"
+                      for k in ("transactions", "foreign_keys", "fulltext", "locks", "holds"))
+    loss = a is None or b is None or any(
+        getattr(a, k) and not getattr(b, k) for k in ("transactions", "foreign_keys"))
+    if a is not None and b is not None:
+        loss = loss or any(not getattr(b, k) for k in used_features)
+    if b is not None and b.holds != "rows":
+        loss = True
+    fk_safe = b is not None and (not b.foreign_keys or
+                                                (orphan_rows is not None and orphan_rows == 0))
+    facts = decide.Facts({"there": exists})
+    needs = (
+        decide.Need("known storage semantics on both servers", lambda f: a is not None and b is not None),
+        decide.Need("the target's supported storage method", lambda f: target in supported),
+        decide.Need("accepted transaction, foreign-key, full-text and locking consequences",
+                    lambda f: accepted and not loss,
+                    "storage consequences need acceptance; lost transactions, foreign keys or durability are refused"),
+        decide.Need("zero rows refused by target foreign keys", lambda f: fk_safe))
+    from dataclasses import replace
+    rungs = tuple(replace(r, needs=needs + r.needs) for r in tableengine.ways())
+    if family == "postgres":
+        needs += (decide.Need("the server's ALTER TABLE SET ACCESS METHOD support",
+                              lambda f: alter_access_method,
+                              "PostgreSQL access-method changes need ALTER TABLE SET ACCESS METHOD support"),)
+        rungs = (decide.Rung(
+            "in place", "the table's access method altered after the copy",
+            frozenset({"engine changed"}),
+            needs=needs + (decide.Need("the copied table on the target",
+                                      lambda f: f["there"]),),
+            because="the target rebuilds the copied table using its own access method"),)
+    choice = decide.climb(f"{table}: storage engine change", rungs, facts,
+                          need=("engine changed",))
+    return ScenarioDecision("storage engine change", choice, tuple(detail))
+
+
+def storage_definition(ddl, table, source, target, *, hop, eng, db, **facts):
+    """Use the existing schema rewrite only after the storage decision holds."""
+    from . import tableengine
+    decision = storage_case(table, source, target, **facts)
+    if decision.choice.path != "definition":
+        raise ValueError(decision.words())
+    change = tableengine.plan(hop, eng, db).of(table)
+    if change is None or (change.src, change.dst) != (source.lower(), target.lower()):
+        raise ValueError("the storage decision differs from the schema step's plan")
+    return tableengine.schema(hop, eng, db, table, ddl)
+
+
+def run_managed_case(facts, verify):
+    """Execute the eligible operation and require migkit's own verification."""
+    decision = managed_case(facts)
+    if decision.choice.path is None:
+        raise ValueError(decision.words())
+    offer = next(o for o in facts["offers"] if o["name"] == decision.choice.path)
+    result = offer["execute"]()
+    checked = verify()
+    selected = dict(facts, offers=(offer,))
+    proved = managed_case(selected, verified=lambda: checked)
+    if proved.choice.path != decision.choice.path:
+        raise ValueError("managed service change: migkit's full verify did not pass")
+    return result, proved
+
+
+def storage_alter(table, source, target, **facts):
+    """The target-only statement, for the schema step after a copy."""
+    decision = storage_case(table, source, target, **facts)
+    if decision.choice.path != "in place":
+        raise ValueError(decision.words())
+    if facts.get("family", "mysql") == "postgres":
+        quote = lambda name: '"' + name.replace('"', '""') + '"'
+        name = ".".join(quote(part) for part in table.split("."))
+        return f"ALTER TABLE {name} SET ACCESS METHOD {quote(target)}"
+    raise ValueError("MySQL storage changes use the schema step's in-place handler")
+>>>>>>> ext-scen

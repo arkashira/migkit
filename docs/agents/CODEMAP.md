@@ -138,7 +138,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/rules.py` - Business-rule checks: the operator's own questions, asked of both sides.
 - `migkit/runlog.py` - The run log: every event of a run as one JSON line, in migkit's words (audit 2026-10-01, LG5, LG12, LG13). Classes: RunLog.
 - `migkit/runner.py` - Every program migkit runs is started, watched, stopped and said one way. Classes: Failed, Transient, Blocked, Refused, Proc.
-- `migkit/scenarios.py` - Migration scenarios helpers (backlog P0-SCENARIOS, F1.dual): character set and collation conversion, storage engine transformation, database Classes: CharsetMigrationHelper, EngineTraits, EngineCompatibilityResult, StorageEngineTransformationHelper, ConsolidationPlan, ConsolidationCoordinator.
+- `migkit/scenarios.py` - (does not parse)
 - `migkit/schedule.py` - A hop that runs on a schedule of its own. Classes: NotDue, Slot.
 - `migkit/schemaformats.py` - Messages framed by a schema registry that carry JSON Schema or Protobuf rather than Avro (backlog R4.formats), read and - for JSON Schema -  Classes: Undecodable, JsonEncoder, ProtoFile.
 - `migkit/second_reader.py` - An independent second reading of the data, run out of process. Classes: Narrowing.

@@ -3101,6 +3101,16 @@ provider." Two parts:
 
 ## P0-SCENARIOS. Every reason a database is migrated (owner, 2026-10-01)
 
+Not done (SCEN, 2026-10-16): `scenarios` now decides managed paths,
+architecture changes and per-table storage changes from supplied or read facts.
+Automatic migration-flow routing, provider eligibility/duration discovery and
+remote host byte-order probes remain unwired. Managed operations require an
+existing execution owner and migkit's full verify; no new provider operation
+is implemented here. PostgreSQL access-method changes require observed
+semantics and server ALTER support, otherwise they are refused. Pure tests
+prove decisions and messages; no live provider or server execution is proved.
+
+
 Asked: "old version to a newer one, SQL Server Web edition to Datacenter
 (Enterprise) - does migkit do these? Think through every case a database
 is migrated." The cases, what migkit has (at fb5c988), what is missing:
