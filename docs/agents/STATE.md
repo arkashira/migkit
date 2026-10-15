@@ -215,7 +215,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Backlog (509 items, `docs/backlog-index.md`)
 
-DONE 353 - PARTLY 73 - IN PROGRESS 4 - OPEN 50 - BLOCKED 20 - NOT PURSUED 9
+DONE 353 - PARTLY 74 - IN PROGRESS 4 - OPEN 49 - BLOCKED 20 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
@@ -233,7 +233,7 @@ DONE 353 - PARTLY 73 - IN PROGRESS 4 - OPEN 50 - BLOCKED 20 - NOT PURSUED 9
 | operations/verify | 0 | 1 | 0 | 0 | 0 | 0 |
 | security | 10 | 5 | 0 | 1 | 2 | 1 |
 | tools used whole | 40 | 4 | 0 | 3 | 0 | 0 |
-| two-way | 6 | 1 | 0 | 2 | 0 | 0 |
+| two-way | 6 | 2 | 0 | 1 | 0 | 0 |
 | types | 12 | 1 | 1 | 0 | 0 | 0 |
 | verify | 51 | 5 | 0 | 6 | 1 | 1 |
 

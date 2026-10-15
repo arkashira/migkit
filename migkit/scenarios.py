@@ -1,7 +1,8 @@
 """Migration scenarios decided on observed facts (backlog P0-SCENARIOS):
 a managed service change through the provider's own operations
 (`cloudapi.OPERATIONS`), a hardware / OS / architecture change, and a
-shard split or merge (`shard_case`, its copy and follow `reshard`'s).
+shard split or merge (`shard_case`, its copy and follow `reshard`'s), and
+a many-node topology (`topology_case`, its math `topology`'s).
 A storage engine change is decided where it is planned, `tableengine`.
 """
 from __future__ import annotations
@@ -756,3 +757,337 @@ def shard_lines(hop, eng, db, siblings=None):
     got = shard_case(facts)
     decide.record(hop, got.choice)
     return [f"  {got.words()}"]
+
+
+# --- many-node topologies -----------------------------------------------------
+
+#: the shapes of a many-node topology (backlog R3.topo)
+TOPOLOGIES = {"many-to-one": "many sources into one target",
+              "one-to-many": "one source fanned out to many targets",
+              "mesh": "every node both a source and a target"}
+
+#: how a key both sides write may be settled, `twoway`'s policies but the
+#: one that stops
+SETTLES = ("apply_remote", "keep_local", "last_update_wins")
+
+
+def topology_facts(kind, sources, targets, tables, spaces=None,
+                   conflict=None, route=None, marks=None, links=None):
+    """The facts of a many-node topology: its kind, the source and target
+    names (a mesh's nodes are both), each table's `{"key": [...],
+    "columns": [...]}`, each source's key space of a table (`{source:
+    {table: spec}}`, `topology.KeySpace.of`), the conflict rule chosen
+    (`twoway.POLICIES`), a fan-out's routing rule (`{"by": "table" |
+    "range" | "hash", "tables": {...}, "bounds": [...]}`), whether each
+    node tells migkit's own writes apart (`twoway`'s marks) and the links
+    set up between nodes."""
+    return decide.Facts({
+        "kind": kind, "sources": tuple(sources), "targets": tuple(targets),
+        "tables": dict(tables), "spaces": dict(spaces or {}),
+        "conflict": conflict, "route": dict(route or {}),
+        "marks": dict(marks or {}), "links": tuple(links or ())})
+
+
+def _overlaps(f):
+    from . import topology
+    return topology.overlaps({s: (f.get("spaces") or {}).get(s)
+                              for s in f.get("sources", ())},
+                             f.get("tables") or {})
+
+
+def _overlap_why(f):
+    got = _overlaps(f)
+    return ("; ".join(f"{t}: {a} and {b} both write key {k!r}"
+                      for t, a, b, k in got[:4])
+            + " - give each source its own range or stride of the key, or"
+              " name a conflict rule (" + ", ".join(SETTLES) + ")")
+
+
+def _settled(f):
+    return f.get("conflict") in SETTLES
+
+
+def _route(f):
+    from . import topology
+    r = f.get("route") or {}
+    return topology.Route(r.get("by") or "hash", tuple(f.get("targets", ())),
+                          dict(r.get("tables") or {}),
+                          tuple(r.get("bounds") or ()))
+
+
+def _ruled(by):
+    return decide.Need(f"the routing rule is by {by}",
+                       lambda f: (f.get("route") or {}).get("by") in (None, by),
+                       lambda f: f"the hop routes by"
+                                 f" {(f.get('route') or {}).get('by')}")
+
+
+def _unrouted(f):
+    r = f.get("route") or {}
+    targets = set(f.get("targets", ()))
+    named = dict(r.get("tables") or {})
+    return [t for t in sorted(f.get("tables") or {})
+            if named.get(t) not in targets]
+
+
+def _keyed(f):
+    return [t for t, s in sorted((f.get("tables") or {}).items())
+            if not s.get("key") or any(k not in (s.get("columns") or ())
+                                       for k in s.get("key") or ())]
+
+
+def _unmarked(f):
+    marks = f.get("marks") or {}
+    return [n for n in f.get("sources", ()) if not marks.get(n)]
+
+
+def _mesh_gaps(f):
+    from . import topology
+    return topology.missing_links(f.get("sources", ()), f.get("links", ()))
+
+
+_PROVED = (("correct", "proved"), ("consistent", "per range"),
+           ("idempotent", "converges"), ("resumable", "goes on"))
+
+
+def _apart(name, said, because):
+    return decide.Rung(
+        name, said, frozenset({"topology"}),
+        needs=(decide.Need("key spaces apart", lambda f: not _overlaps(f),
+                           _overlap_why),),
+        holds=_PROVED + (("exactly once", "exactly once"),),
+        because=because)
+
+
+def _settling(name, said):
+    return decide.Rung(
+        name, said, frozenset({"topology"}),
+        needs=(decide.Need("a conflict rule", _settled,
+                           lambda f: _overlap_why(f)),),
+        holds=_PROVED + (("exactly once", "at least once"),),
+        because="the key spaces meet, and the rule named settles a key two"
+                " sources write: each write of it is applied, the rule"
+                " keeping one")
+
+
+def _many_to_one():
+    shape = decide.Need(
+        "many sources and one target",
+        lambda f: len(f.get("sources", ())) > 1 and len(f.get("targets", ())) == 1,
+        lambda f: f"many-to-one needs many sources and one target; the hop"
+                  f" names {len(f.get('sources', ()))} and"
+                  f" {len(f.get('targets', ()))}")
+    return decide.fenced(
+        (_apart("union-apart", "each source on its own tail into the one"
+                " target, its keys apart from the others'",
+                "the sources' key spaces were solved apart, so a row lands"
+                " once and a delete only ever meets its own source's rows"),
+         _settling("union-settled", "each source on its own tail into the"
+                   " one target, keys both write settled by the rule")),
+        shape)
+
+
+def _one_to_many():
+    shape = decide.Need(
+        "one source and many targets",
+        lambda f: len(f.get("sources", ())) == 1 and len(f.get("targets", ())) > 1,
+        lambda f: f"one-to-many needs one source and many targets; the hop"
+                  f" names {len(f.get('sources', ()))} and"
+                  f" {len(f.get('targets', ()))}")
+    from . import topology
+    holds = _PROVED + (("exactly once", "exactly once"),)
+    by_table = decide.Rung(
+        "fanout-by-table", "each table to the target the rule names",
+        frozenset({"topology"}),
+        needs=(_ruled("table"),
+               decide.Need("every table routed", lambda f: not _unrouted(f),
+                           lambda f: "no target named for "
+                                     + ", ".join(_unrouted(f)[:6]))),
+        holds=holds, because="whole tables go, no row is placed one by one")
+    by_range = decide.Rung(
+        "fanout-by-range", "rows cut by ranges of the key",
+        frozenset({"topology"}),
+        needs=(_ruled("range"),
+               decide.Need("ranges placing every key once",
+                           lambda f: not topology.range_gaps(
+                               (f.get("route") or {}).get("bounds") or (),
+                               f.get("targets", ())),
+                           lambda f: topology.range_gaps(
+                               (f.get("route") or {}).get("bounds") or (),
+                               f.get("targets", ()))),
+               decide.Need("a key on every table", lambda f: not _keyed(f),
+                           lambda f: "no key on its columns: "
+                                     + ", ".join(_keyed(f)[:6]))),
+        holds=holds, because="each key falls in exactly one range")
+    by_hash = decide.Rung(
+        "fanout-by-hash", "rows placed by a hash of the key",
+        frozenset({"topology"}),
+        needs=(_ruled("hash"),
+               decide.Need("a key on every table", lambda f: not _keyed(f),
+                           lambda f: "no key on its columns: "
+                                     + ", ".join(_keyed(f)[:6]))),
+        holds=holds, because="each key hashes into exactly one target, the"
+                             " same in every run")
+    return decide.fenced((by_table, by_range, by_hash), shape)
+
+
+def _mesh():
+    shared = (
+        decide.Need("two nodes or more",
+                    lambda f: len(f.get("sources", ())) > 1
+                    and set(f.get("sources", ())) == set(f.get("targets", ())),
+                    lambda f: "a mesh's nodes are each a source and a target"),
+        decide.Need("every node tells migkit's writes apart",
+                    lambda f: not _unmarked(f),
+                    lambda f: "no mark of migkit's own writes on "
+                              + ", ".join(_unmarked(f)[:6])
+                              + ": a change would come back round"),
+        decide.Need("a link between every two nodes",
+                    lambda f: not _mesh_gaps(f),
+                    lambda f: "links not set up: "
+                              + ", ".join(f"{a} to {b}" for a, b
+                                          in _mesh_gaps(f)[:6])
+                              + " - a node would have to pass on another's"
+                                " change, a forwarding ring, not a mesh"))
+    return decide.fenced(
+        (_apart("mesh-apart", "every node applies only the changes that"
+                " began on its sender, keys apart",
+                "each change carries its origin and goes straight from it"
+                " to every other node, so none is passed on or comes back"),
+         _settling("mesh-settled", "every node applies only the changes"
+                   " that began on its sender, keys both write settled by"
+                   " the rule")),
+        *shared)
+
+
+_LADDERS = {"many-to-one": _many_to_one, "one-to-many": _one_to_many,
+            "mesh": _mesh}
+
+
+def topology_case(facts):
+    """A many-node topology decided on its facts: a kind migkit does not
+    know refused; many-to-one with the sources' key spaces solved apart
+    (`topology.overlaps`) or, where they meet, a conflict rule named, each
+    source on its own tail so its order holds; one-to-many by the rule the
+    hop names - whole tables, ranges of the key or a hash - the source's
+    log held until the slowest target has applied it; a full mesh only
+    with every node marking migkit's writes and every link set up. What
+    the way keeps and gives up of the guarantees is said."""
+    from . import guarantees as g
+    kind = facts.get("kind")
+    ladder = _LADDERS.get(kind)
+    if ladder is None:
+        refused = decide.Rung("topology-unknown", "no way here",
+                              frozenset({"topology"}), needs=(decide.Need("a known topology",
+                                                 lambda f: False,
+                                                 lambda f: f"{kind!r} is not"
+                                                 " one of " + ", ".join(TOPOLOGIES)),))
+        choice = decide.climb("many-node topology", (refused,), facts,
+                              need=("topology",))
+        return ScenarioDecision("many-node topology", choice)
+    rungs = ladder()
+    choice = decide.climb(f"many-node topology ({kind})", rungs, facts,
+                          need=("topology",))
+    details = [f"{TOPOLOGIES[kind]}: {', '.join(facts.get('sources', ()))}"
+               f" to {', '.join(facts.get('targets', ()))}"]
+    if choice.rung is not None:
+        got = g.of([choice.rung])
+        best = g.strongest([g.of([r]) for r in rungs])
+        details.append("keeps: " + g.said(got))
+        lost = [f"{d}: {g.LEVELS[d][got[d]]} where another way here keeps"
+                f" {g.LEVELS[d][best[i]]}" for i, d in enumerate(g.ORDER)
+                if got[d] < best[i]]
+        if lost:
+            details.append("gives up: " + "; ".join(lost))
+        if kind == "one-to-many":
+            details.append("the source's log is held until the slowest"
+                           " target has applied it")
+        if kind == "many-to-one":
+            details.append("deletes are scoped to the source they began on")
+    return ScenarioDecision("many-node topology", choice, tuple(details))
+
+
+def topology_hops(facts, decision):
+    """The plan of a decided topology as hops the planner runs, one per
+    source and target pair: what it carries, the origin it applies, the
+    key space it writes and the rule it settles or routes by. Nothing
+    where the case was refused."""
+    if decision.choice.rung is None:
+        return ()
+    kind, way = facts.get("kind"), decision.choice.path
+    tables = sorted(facts.get("tables") or {})
+    spaces = facts.get("spaces") or {}
+    settle = facts.get("conflict") if way.endswith("settled") else None
+    if kind == "one-to-many":
+        route, source = _route(facts), facts["sources"][0]
+        out = []
+        for t in facts["targets"]:
+            carried = ([x for x in tables if route.place(x, ()) == t]
+                       if route.by == "table" else tables)
+            out.append({"source": source, "target": t, "tables": carried,
+                        "route": route.by, "origin": source})
+        return tuple(out)
+    if kind == "many-to-one":
+        target = facts["targets"][0]
+        pairs = [(s, target) for s in facts["sources"]]
+    else:
+        from . import topology
+        pairs = topology.mesh_links(facts["sources"])
+    return tuple({"source": s, "target": t, "tables": tables, "origin": s,
+                  "keys": dict(spaces.get(s) or {}), "settle": settle}
+                 for s, t in pairs)
+
+
+@dataclass(frozen=True)
+class TopologyCheck:
+    ok: bool
+    lines: tuple = ()
+
+
+def topology_verify(facts, rows):
+    """The proof that the parts equal the whole for a decided topology.
+    many-to-one: the target is the union of the sources (`prove_union`),
+    a key two sources write allowed only under a conflict rule, and each
+    source's changes applied in its order (`rows["applied"]`, [(source,
+    position)]). one-to-many: the targets are the source cut once by the
+    rule (`prove_partition`). mesh: every node holds the same rows
+    (`prove_converged`) and no change came round (`rows["applied"]`,
+    [(node, sender, origin, change)])."""
+    from . import topology
+    kind = facts.get("kind")
+    lines = []
+    if kind == "many-to-one":
+        both = set()
+        if _settled(facts):
+            seen = {}
+            for tables in rows["sources"].values():
+                for t, got in tables.items():
+                    for k in got:
+                        seen[(t, k)] = seen.get((t, k), 0) + 1
+            both = {x for x, n in seen.items() if n > 1}
+        proof = topology.prove_union(rows["sources"], rows["target"], both)
+        late = topology.out_of_order(rows.get("applied", ()))
+        lines.append(f"union of {len(rows['sources'])} sources: {proof.words()}")
+        if both:
+            lines.append(f"{len(both)} keys written by two sources settled by"
+                         f" {facts.get('conflict')}")
+        if late:
+            lines.append(f"{len(late)} changes applied out of their"
+                         f" source's order: {late[:3]!r}")
+        return TopologyCheck(proof.ok and not late, tuple(lines))
+    if kind == "one-to-many":
+        proof = topology.prove_partition(rows["source"], rows["targets"],
+                                         _route(facts))
+        lines.append(f"cut into {len(rows['targets'])} targets:"
+                     f" {proof.words()}")
+        return TopologyCheck(proof.ok, tuple(lines))
+    if kind == "mesh":
+        proof = topology.prove_converged(rows["nodes"])
+        came = topology.echoes(rows.get("applied", ()))
+        lines.append(f"{len(rows['nodes'])} nodes: "
+                     + ("converged" if proof.ok else proof.words()))
+        if came:
+            lines.append(f"{len(came)} changes came round or were passed"
+                         f" on: {came[:3]!r}")
+        return TopologyCheck(proof.ok and not came, tuple(lines))
+    return TopologyCheck(False, (f"{kind!r} is not a known topology",))

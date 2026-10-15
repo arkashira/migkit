@@ -6942,6 +6942,21 @@ researched:
 * **Topologies:** many-to-one (keys kept apart, deletes scoped to their
   origin, verified per origin), one-to-many (the slowest target holds the
   source's log), a full mesh rather than a forwarding ring.
+  *Decided as cases 2026-10-16 (W11D):* `scenarios.topology_case` climbs
+  a ladder per shape. Many-to-one: the sources' key spaces (ranges,
+  auto-increment strides, listed values; `topology.overlaps` solves two
+  strides by their common progression) proved apart keeps exactly once;
+  where they meet a conflict rule (`apply_remote`, `keep_local`,
+  `last_update_wins`) is needed and exactly once is given up, said in the
+  plan; neither is refused with the key both write. One-to-many: the rule
+  the hop names, whole tables, ranges of the key or a hash, refused where
+  it leaves a table or key nowhere. Mesh: every node marks migkit's writes
+  and every pair is linked, a forwarding ring refused. `topology_hops`
+  gives one hop per pair with the origin it applies; `topology_verify`
+  proves the union, the partition or the convergence, each source's order
+  and that no change came round.
+  Not done: the facts read off a hop's config and the servers, the hops
+  run by the planner, a docker run of each shape.
 * Tested in docker: pairs of mysql:8.4 and mariadb:11, both directions
   writing, echoes counted (must be 0), both sides hashed equal.
 
