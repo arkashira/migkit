@@ -309,8 +309,6 @@ def render(hop, results, generated=None, decided=None, taken=None):
     from . import result_scope
     envelope = result_scope.build_grouped_summary(results, hop)
     db_summary_html = result_scope.format_html(envelope)
-    commercial_html = result_scope.format_commercial_comparison_html(
-        ["aws_dms", "tencent_dts", "oracle_veridata", "redgate_sql_data_compare"])
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -330,7 +328,6 @@ def render(hop, results, generated=None, decided=None, taken=None):
 </tr></thead><tbody>{"".join(rows)}</tbody></table></div>
 {objects_html}
 <div class="card"><h2>issues</h2>{"".join(cards)}</div>
-{commercial_html}
 </div></body></html>"""
 
 

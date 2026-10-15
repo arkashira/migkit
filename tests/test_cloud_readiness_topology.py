@@ -1,26 +1,10 @@
 import json
 import pytest
 
-from migkit.cloud_readiness import (
-    CloudReadinessAuditor,
-    MaintenanceAuditor,
-    NetworkAuditor,
-    SizingAuditor,
-    SnapshotAuditor,
-    audit,
-    items as cloud_items,
-)
 from migkit.change_sheet import (
     ChangeSheet,
     ChangeTask,
     create_from_plan,
-)
-from migkit.topology import (
-    ChangeEvent,
-    TopologyType,
-    full_mesh,
-    many_to_one,
-    one_to_many,
 )
 from migkit.upgrade import (
     _mongo,
@@ -38,97 +22,6 @@ from migkit.engines.mysql import managed_retention
 
 
 # --- Item 433 (R25.2): Cloud Readiness Auditor ---
-
-def test_cloud_readiness_network_auditor():
-    net = NetworkAuditor()
-
-    # Same VPC -> pass
-    findings = net.audit_vpc({"id": "vpc-1", "cidr": "10.0.0.0/16"}, {"id": "vpc-1", "cidr": "10.0.0.0/16"})
-    assert any(f.level == "pass" and "same VPC" in f.detail for f in findings)
-
-    # Different VPC with collision without peering -> fail
-    findings = net.audit_vpc({"id": "vpc-1", "cidr": "10.0.0.0/16", "peered": False},
-                             {"id": "vpc-2", "cidr": "10.0.0.0/16", "peered": False})
-    assert any(f.level == "fail" and f.gates for f in findings)
-
-    # Peered VPC -> pass
-    findings = net.audit_vpc({"id": "vpc-1", "cidr": "10.0.0.0/16", "peered": True},
-                             {"id": "vpc-2", "cidr": "10.0.0.0/16", "peered": True})
-    assert any(f.level == "pass" and "peering" in f.detail for f in findings)
-
-    # Subnets available IPs check
-    subnets = [
-        {"id": "subnet-a", "az": "us-east-1a", "available_ips": 12},
-        {"id": "subnet-b", "az": "us-east-1b", "available_ips": 2},
-    ]
-    findings = net.audit_subnets(subnets, min_available_ips=5)
-    assert any(f.level == "fail" and "subnet-b" in f.resource for f in findings)
-
-    # Security groups port check
-    sg_rules = [{"direction": "ingress", "from_port": 5432, "to_port": 5432}]
-    assert any(f.level == "pass" for f in net.audit_security_groups(sg_rules, 5432))
-    assert any(f.level == "fail" for f in net.audit_security_groups(sg_rules, 3306))
-
-
-def test_cloud_readiness_maintenance_and_sizing():
-    maint = MaintenanceAuditor()
-    # Overlapping maintenance window
-    findings = maint.audit_window("Sun:03:00-Sun:04:00", {"day": "Sun", "hour": 3})
-    assert any(f.level == "warn" and "overlap" in f.resource for f in findings)
-
-    # Non-overlapping
-    findings = maint.audit_window("Sun:03:00-Sun:04:00", {"day": "Wed", "hour": 10})
-    assert any(f.level == "pass" for f in findings)
-
-    # Forced pending maintenance -> fail gate
-    pending = [{"name": "OS_PATCH", "forced": True}]
-    findings = maint.audit_pending(pending)
-    assert any(f.level == "fail" and f.gates for f in findings)
-
-    sizing = SizingAuditor()
-    src = {"cpu": 16, "memory_gb": 64, "storage_gb": 500}
-    dst = {"cpu": 8, "memory_gb": 32, "storage_gb": 400}
-    findings = sizing.audit_specs(src, dst)
-    assert any(f.resource == "sizing:cpu" and f.level == "warn" for f in findings)
-    assert any(f.resource == "sizing:storage" and f.level == "fail" and f.gates for f in findings)
-
-
-def test_cloud_readiness_snapshot_and_full_audit():
-    snap = SnapshotAuditor()
-    findings = snap.audit_readiness({"can_snapshot": False, "pitr_enabled": False, "backup_retention_days": 0})
-    assert any(f.resource == "snapshot:create_api" and f.level == "fail" for f in findings)
-    assert any(f.resource == "snapshot:pitr" and f.level == "warn" for f in findings)
-
-    src_info = {
-        "vpc": {"id": "vpc-1", "cidr": "10.0.0.0/16"},
-        "cpu": 8, "memory_gb": 32, "storage_gb": 200,
-    }
-    dst_info = {
-        "vpc": {"id": "vpc-1", "cidr": "10.0.0.0/16"},
-        "subnets": [
-            {"id": "sub-1", "az": "us-east-1a", "available_ips": 50},
-            {"id": "sub-2", "az": "us-east-1b", "available_ips": 50},
-        ],
-        "port": 5432,
-        "security_groups": [{"direction": "ingress", "from_port": 5432, "to_port": 5432}],
-        "maintenance_window": "Sun:02:00-Sun:03:00",
-        "pending_maintenance": [],
-        "cpu": 8, "memory_gb": 32, "storage_gb": 300,
-        "can_snapshot": True, "pitr_enabled": True, "backup_retention_days": 7,
-    }
-    all_findings = audit(src_info, dst_info, cutover_window={"day": "Sat", "hour": 22})
-    assert all(f.level == "pass" for f in all_findings)
-
-    # Test compatibility items adapter
-    class DummyHop:
-        cloud_src = src_info
-        cloud_dst = dst_info
-    items = cloud_items(DummyHop())
-    assert len(items) > 0
-    assert all("level" in it and "scope" in it for it in items)
-
-
-# --- Item 434 (R25.3): Org Change Sheet Exporter ---
 
 def test_change_sheet_creation_and_cutover_gating():
     sheet = create_from_plan("orders-hop", ticket_prefix="TICK")
@@ -174,81 +67,6 @@ def test_change_sheet_creation_and_cutover_gating():
 
 
 # --- Item 317 (R3.topo): Multi-Node Topologies ---
-
-def test_topology_many_to_one():
-    sources = [
-        {"id": "shard_1", "endpoint": "pg://s1/db", "shard_prefix": "s1_"},
-        {"id": "shard_2", "endpoint": "pg://s2/db", "shard_prefix": "s2_"},
-    ]
-    target = {"id": "central", "endpoint": "pg://central/db"}
-    topo = many_to_one(sources, target)
-
-    assert topo.topo_type == TopologyType.MANY_TO_ONE
-    valid, errors = topo.validate()
-    assert valid
-    assert len(topo.legs) == 2
-
-    # Collision test: missing or duplicate shard prefix
-    sources_dup = [
-        {"id": "shard_1", "endpoint": "pg://s1/db", "shard_prefix": "dup_"},
-        {"id": "shard_2", "endpoint": "pg://s2/db", "shard_prefix": "dup_"},
-    ]
-    topo_dup = many_to_one(sources_dup, target)
-    valid, errors = topo_dup.validate()
-    assert not valid
-    assert any("duplicate shard_prefix" in e for e in errors)
-
-
-def test_topology_one_to_many():
-    source = {"id": "primary", "endpoint": "pg://primary/db"}
-    targets = [
-        {"id": "read_replica_1", "endpoint": "pg://rr1/db"},
-        {"id": "analytics_node", "endpoint": "pg://an/db"},
-    ]
-    topo = one_to_many(source, targets)
-    assert topo.topo_type == TopologyType.ONE_TO_MANY
-    valid, errors = topo.validate()
-    assert valid
-    assert len(topo.legs) == 2
-
-
-def test_topology_full_mesh_and_loop_suppression():
-    nodes = [
-        {"id": "node_a", "endpoint": "pg://a/db"},
-        {"id": "node_b", "endpoint": "pg://b/db"},
-        {"id": "node_c", "endpoint": "pg://c/db"},
-    ]
-    topo = full_mesh(nodes)
-    assert topo.topo_type == TopologyType.FULL_MESH
-    valid, errors = topo.validate()
-    assert valid
-    # 3 nodes * 2 = 6 directional legs
-    assert len(topo.legs) == 6
-
-    # Test loop suppression routing
-    event = ChangeEvent(event_id="evt_01", origin_id="node_a", table="users", key="123")
-    # When node_a sends to node_b:
-    next_hops = topo.route_change(event, "node_a")
-    assert "node_b" in next_hops
-    assert "node_c" in next_hops
-    assert "node_a" not in next_hops
-
-    # Now event at node_b: it should route to node_c, but NOT back to origin node_a or visited node_b
-    next_hops_b = topo.route_change(event, "node_b")
-    assert "node_c" in next_hops_b
-    assert "node_a" not in next_hops_b
-
-    # Now at node_c: all peers visited or origin, so no forward hops
-    next_hops_c = topo.route_change(event, "node_c")
-    assert len(next_hops_c) == 0
-
-    # Convergence
-    converged, max_lag = topo.is_converged(max_allowed_lag_sec=1.0)
-    assert converged
-    assert max_lag == 0.0
-
-
-# --- Item 423 (R23.7): Major Version Upgrade Goal Runner & Extension Checks ---
 
 def test_upgrade_mongo_deep_checks():
     class DummyClient:

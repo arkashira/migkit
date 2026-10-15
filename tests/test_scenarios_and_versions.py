@@ -7,8 +7,6 @@ from migkit.scenarios import (
     StorageEngineTransformationHelper,
     ConsolidationCoordinator,
     SplittingCoordinator,
-    DualWritesDriftDetector,
-    DualWriteDriftType,
 )
 from migkit.migration_versions import (
     ApplicationMigrationTool,
@@ -245,60 +243,6 @@ def test_schema_splitting_coordinator():
     assert len(plan.cross_references) == 1
     assert plan.cross_references[0]["fk_name"] == "fk_invoice_user"
     assert plan.cross_references[0]["action"] == "sever_physical_fk_and_decouple"
-
-
-def test_dual_writes_drift_detector():
-    detector = DualWritesDriftDetector(grace_window_seconds=5.0)
-    now = 1700000000.0
-
-    # 1. Exact match
-    r1 = {"id": 1, "value": "A", "version": 1, "updated_at": now}
-    r2 = {"id": 1, "value": "A", "version": 1, "updated_at": now}
-    res = detector.classify_row(key=1, source_row=r1, target_row=r2, current_time=now)
-    assert res.status == DualWriteDriftType.IN_SYNC
-
-    # 2. In-flight lag (recently committed row within grace window)
-    src_recent = {"id": 2, "value": "B", "version": 1, "updated_at": now - 2.0}
-    res_lag = detector.classify_row(key=2, source_row=src_recent, target_row=None, current_time=now)
-    assert res_lag.status == DualWriteDriftType.IN_FLIGHT_LAG
-
-    # 3. Genuine drift (missing on target past grace window)
-    src_old = {"id": 3, "value": "C", "version": 1, "updated_at": now - 30.0}
-    res_drift = detector.classify_row(key=3, source_row=src_old, target_row=None, current_time=now)
-    assert res_drift.status == DualWriteDriftType.GENUINE_DRIFT
-
-    # 4. Out-of-order write (newer version arrived on target before source within grace window)
-    src_v1 = {"id": 4, "value": "old", "version": 1, "updated_at": now - 1.0}
-    dst_v2 = {"id": 4, "value": "new", "version": 2, "updated_at": now}
-    res_ooo = detector.classify_row(key=4, source_row=src_v1, target_row=dst_v2, current_time=now)
-    assert res_ooo.status == DualWriteDriftType.OUT_OF_ORDER_WRITE
-
-    # 5. Genuine drift: payload difference past grace window with divergent versions
-    src_diverged = {"id": 5, "value": "val1", "version": 5, "updated_at": now - 100.0}
-    dst_diverged = {"id": 5, "value": "val2", "version": 2, "updated_at": now - 100.0}
-    res_gen_drift = detector.classify_row(key=5, source_row=src_diverged, target_row=dst_diverged, current_time=now)
-    assert res_gen_drift.status == DualWriteDriftType.GENUINE_DRIFT
-
-
-def test_dual_writes_multi_probe_convergence():
-    detector = DualWritesDriftDetector(grace_window_seconds=5.0)
-    t0 = 100.0
-    r_src = {"id": 1, "val": "v2"}
-    r_dst_old = {"id": 1, "val": "v1"}
-    r_dst_converged = {"id": 1, "val": "v2"}
-
-    # Probe 1: diverging
-    detector.record_probe(1, r_src, r_dst_old, probe_time=t0)
-    # Probe 2: converged within 2 seconds
-    detector.record_probe(1, r_src, r_dst_converged, probe_time=t0 + 2.0)
-    status = detector.evaluate_multi_probe_convergence(1)
-    assert status == DualWriteDriftType.OUT_OF_ORDER_WRITE
-
-    # Persistent divergence over 10 seconds -> genuine drift
-    detector.record_probe(2, r_src, r_dst_old, probe_time=t0)
-    detector.record_probe(2, r_src, r_dst_old, probe_time=t0 + 10.0)
-    status_drift = detector.evaluate_multi_probe_convergence(2)
-    assert status_drift == DualWriteDriftType.GENUINE_DRIFT
 
 
 def test_schema_version_discovery_all_tools():

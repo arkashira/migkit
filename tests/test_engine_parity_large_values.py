@@ -5,7 +5,30 @@ import pytest
 from migkit import decide, pieces
 from migkit.engines.mysql import MySQLEngine
 from migkit.engines.oracle import OracleEngine
+<<<<<<< HEAD
 from migkit.lob_streamer import LobChunk, LobStreamSummary, LobStreamer, iter_lob_chunks
+||||||| d45f7f2
+from migkit.fk_window import ForeignKeyWindow, hold_or_sequence_dependent_tables
+from migkit.lob_streamer import LobChunk, LobStreamSummary, LobStreamer, iter_lob_chunks
+from migkit.movers import _ForeignKeyWindow
+from migkit.partitions import (
+    PartitionChunk,
+    PartitionInfo,
+    PartitionRouter,
+    chunk_partitions,
+    discover_partitions,
+)
+=======
+from migkit.fk_window import ForeignKeyWindow, hold_or_sequence_dependent_tables
+from migkit.movers import _ForeignKeyWindow
+from migkit.partitions import (
+    PartitionChunk,
+    PartitionInfo,
+    PartitionRouter,
+    chunk_partitions,
+    discover_partitions,
+)
+>>>>>>> worktree-agent-a0cf3bd8e028add14
 
 
 class DummyHop:
@@ -36,89 +59,6 @@ class DummyEngine:
                 "public.orders\x1forders_cust_fk\x1fforeign key (cust_id) references public.customers(id)\x1fpublic.customers"
             )
         return ""
-
-
-def test_lob_chunks_generator_bytes():
-    payload = b"abcdefghijklmnopqrstuvwxyz012345"
-    chunks = list(iter_lob_chunks(payload, chunk_size=10))
-    assert len(chunks) == 4
-    assert chunks[0].data == b"abcdefghij"
-    assert chunks[0].offset == 1
-    assert chunks[0].length == 10
-    assert not chunks[0].is_last
-    assert chunks[1].data == b"klmnopqrst"
-    assert chunks[2].data == b"uvwxyz0123"
-    assert chunks[3].data == b"45"
-    assert chunks[3].offset == 31
-    assert chunks[3].length == 2
-    assert chunks[3].is_last
-    assert b"".join(c.data for c in chunks) == payload
-
-
-def test_lob_chunks_generator_empty():
-    chunks = list(iter_lob_chunks(b"", chunk_size=100))
-    assert len(chunks) == 1
-    assert chunks[0].length == 0
-    assert chunks[0].data == b""
-    assert chunks[0].is_last
-
-
-def test_lob_chunks_generator_stream():
-    stream = io.BytesIO(b"0123456789" * 10)
-    chunks = list(iter_lob_chunks(stream, chunk_size=25))
-    assert len(chunks) == 4
-    assert sum(c.length for c in chunks) == 100
-    assert all(c.checksum == hashlib.md5(c.data, usedforsecurity=False).hexdigest() for c in chunks)
-
-
-def test_lob_chunks_generator_callable():
-    store = {1: b"CHUNK1", 7: b"CHUNK2", 13: b"END"}
-
-    def reader(at, n):
-        return store.get(at, b"")
-
-    chunks = list(iter_lob_chunks(reader, chunk_size=6, total_size=15))
-    assert len(chunks) == 3
-    assert b"".join(c.data for c in chunks) == b"CHUNK1CHUNK2END"
-
-
-def test_lob_streamer_stream_between():
-    streamer = LobStreamer(chunk_size=16)
-    source_data = b"migkit-cross-engine-large-value-streaming-test-bytes" * 5
-    read_stream = io.BytesIO(source_data)
-    written = []
-
-    def writer(chunk: LobChunk):
-        written.append(chunk.data)
-
-    summary = streamer.stream_between(read_stream, writer)
-    assert summary.total_bytes == len(source_data)
-    assert summary.digest == hashlib.md5(source_data, usedforsecurity=False).hexdigest()
-    assert b"".join(written) == source_data
-
-    target_summary = LobStreamSummary(
-        total_bytes=len(b"".join(written)),
-        chunk_count=len(written),
-        digest=hashlib.md5(b"".join(written), usedforsecurity=False).hexdigest(),
-    )
-    assert streamer.verify_parity(summary, target_summary)
-
-
-def test_lob_streamer_sql_dialects():
-    streamer = LobStreamer()
-    mysql_eng = DummyEngine(canon="mysql")
-    oracle_eng = DummyEngine(canon="oracle")
-    mssql_eng = DummyEngine(canon="mssql")
-    pg_eng = DummyEngine(canon="postgres")
-
-    assert streamer.read_piece_sql(mysql_eng, "content", 1, 1024) == 'substring("content", 1, 1024)'
-    assert streamer.read_piece_sql(oracle_eng, "content", 1, 1024) == 'dbms_lob.substr("content", 1024, 1)'
-    assert streamer.read_piece_sql(mssql_eng, "content", 1, 1024) == 'substring("content", 1, 1024)'
-    assert streamer.read_piece_sql(pg_eng, "content", 1, 1024) == 'substr("content", 1, 1024)'
-
-    assert streamer.append_piece_sql(mysql_eng, "content", "?") == '"content" = concat("content", ?)'
-    assert streamer.append_piece_sql(mssql_eng, "content", "?") == '"content".write(?, null, null)'
-    assert streamer.append_piece_sql(oracle_eng, "content", ":1") == '"content" = "content" || :1'
 
 
 def test_mysql_large_values_adapter():

@@ -1015,6 +1015,11 @@ def _doctor_side(name, hop, eng, side, ep):
     except Exception as e:  # noqa: BLE001 - said, and doctor ends failed
         out.append(f"{_esc(name)} {side}: [red]FAIL[/red]"
                    f" {_esc(_clean(e, (ep.password,), raw=True))}")
+        # a refusal for want of a grant is said as the grant to give
+        from .engines import enterprise_connectors
+        grant = enterprise_connectors.lacking(hop.engine, e)
+        if grant:
+            out.append(f"  the user needs {_esc(grant)}")
         return out, None, False, True
 
 

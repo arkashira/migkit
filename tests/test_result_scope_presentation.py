@@ -194,69 +194,12 @@ def test_report_render_integration():
     assert "DIFFERENT" in rendered
     assert "database summary (database-first grouping)" in rendered
     assert "shop" in rendered
-    assert "Commercial feature comparison" in rendered
-
-
-def test_commercial_feature_inventory_exhaustiveness():
-    inv = result_scope.get_commercial_inventory()
-
-    required_initial_eight = [
-        "oracle_veridata",
-        "informatica_cdv",
-        "qlik_replicate",
-        "redgate_sql_data_compare",
-        "devart_dbforge",
-        "datafold",
-        "querysurge",
-        "ibm_asntdiff",
-    ]
-    required_cloud_managed = [
-        "aws_dms",
-        "azure_dms",
-        "gcp_dms",
-        "tencent_dts",
-        "alibaba_dts",
-        "huawei_drs",
-    ]
-
-    for p in required_initial_eight + required_cloud_managed:
-        assert p in inv, f"Missing product in commercial inventory: {p}"
-        item = inv[p]
-        assert "vendor" in item
-        assert "product" in item
-        assert "official_sources" in item and len(item["official_sources"]) > 0
-        assert "ratings" in item
-
-        required_dimensions = [
-            "scope_preview",
-            "mappings_filters",
-            "database_grouping",
-            "progress_vs_correctness",
-            "incomplete_unsupported_states",
-            "diff_categories",
-            "consistency_guarantees",
-            "next_actions",
-            "structured_export",
-            "detail_navigation",
-            "unmatched_dimensions",
-        ]
-        for dim in required_dimensions:
-            assert dim in item["ratings"], f"Product {p} missing dimension {dim}"
-            status = item["ratings"][dim]["status"]
-            assert status in ("documented_present", "documented_absent", "evidence_unavailable")
-            assert len(item["ratings"][dim]["notes"]) > 0
-
-
-def test_commercial_comparison_formatting():
-    console_view = result_scope.format_commercial_comparison_console(["aws_dms", "tencent_dts", "oracle_veridata"])
-    assert "COMMERCIAL COMPARISON INVENTORY" in console_view
-    assert "AWS Database" in console_view or "DMS" in console_view
-    assert "migkit" in console_view
-
-    html_view = result_scope.format_commercial_comparison_html(["aws_dms", "azure_dms"])
-    assert "Commercial feature comparison" in html_view
-    assert "AWS Database Migration Service" in html_view
-    assert "Azure Database Migration Service" in html_view
+    # the report compares the two sides, never migkit with a product
+    low = rendered.lower()
+    assert "commercial" not in low
+    for name in ("veridata", "debezium", "awsdms", "qlik", "redgate",
+                 "datafold", "database migration service"):
+        assert name not in low, name
 
 
 def test_unmatched_dimensions_catalog_and_formatting():
@@ -274,7 +217,9 @@ def test_unmatched_dimensions_catalog_and_formatting():
         assert k in unmatched
         assert "name" in unmatched[k]
         assert "barrier_type" in unmatched[k]
-        assert unmatched[k]["commercial_status"] == "absent_in_commercial_tools"
+        assert "commercial_status" not in unmatched[k]
+        for name in ("awsdms", "debezium", "dts_"):
+            assert name not in unmatched[k]["description"], (k, name)
 
     sample_finding = {
         "dimension": "bidirectional_drift_proof",
@@ -326,11 +271,12 @@ def test_unmatched_dimensions_in_grouped_summary_and_reports():
     assert drift_finding["barrier_status"] == "passed"
 
     console_out = result_scope.format_console(envelope)
-    assert "DIMENSIONS WITHOUT COMMERCIAL EQUIVALENT:" in console_out
+    assert "PROOFS BEYOND ROW COMPARISON:" in console_out
     assert "Schema Invariant Barriers [VIOLATED]" in console_out
     assert "Bidirectional Drift Proof [PASSED]" in console_out
 
     html_out = result_scope.format_html(envelope)
-    assert "dimensions without commercial equivalent (unmatched)" in html_out
+    assert "proofs beyond row comparison" in html_out
+    assert "commercial" not in html_out.lower()
     assert "Schema Invariant Barriers" in html_out
     assert "Bidirectional Drift Proof" in html_out

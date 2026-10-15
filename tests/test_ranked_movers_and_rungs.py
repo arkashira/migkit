@@ -7,7 +7,7 @@
 """
 import pytest
 
-from migkit import decide, doctor, movers, planner, verifiers
+from migkit import decide, movers, planner, verifiers
 from migkit.config import Endpoint, Hop
 from migkit.decide import Costs, Facts, HopCosts, Need, Rung, cell, climb, coverage, rank, uncovered
 
@@ -101,31 +101,6 @@ def test_planner_plan_chooses_path_on_measured_speed(tmp_path):
 
 
 # --- Item 4: Doctor diagnoses rungs and blockers for sides and legs ---
-
-def test_doctor_diagnoses_legs_and_blockers(tmp_path):
-    hop = _hop(tmp_path, engine="postgres")
-    legs_diag = doctor.diagnose_legs(hop)
-    assert len(legs_diag) > 0
-    for d in legs_diag:
-        assert d.target_type == "leg"
-        assert d.name in ("pgpull", "pgsubscribe")
-        # Since server_to_server is not allowed in options, hop leave is a blocker
-        assert any("server_to_server" in b for b in d.blockers)
-
-
-def test_doctor_diagnoses_sides_and_lines(tmp_path):
-    hop = _hop(tmp_path, engine="postgres")
-    diag = doctor.diagnose(hop)
-    assert "legs" in diag and "sides" in diag
-    assert "source" in diag["sides"] and "target" in diag["sides"]
-
-    report_lines = doctor.lines(hop)
-    assert len(report_lines) > 0
-    assert any("leg" in l for l in report_lines)
-    assert any("source" in l for l in report_lines)
-
-
-# --- Item 6: Every shape has a viable way or explicit declared gap ---
 
 def test_coverage_has_no_unhandled_cells():
     unc = uncovered()
