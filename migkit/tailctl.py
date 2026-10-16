@@ -760,6 +760,10 @@ def quiet_line(db, state, facts, applied, since):
                 f" ({facts.get('why_detached') or 'reason unread'});"
                 f" last at {facts.get('at') or 'unknown'},"
                 f" {applied:,} changes applied, the last since {when}")
+    elif state == "elsewhere" and facts.get("elsewhere"):
+        head += (f" - quiet: the source wrote {facts['elsewhere']:,}"
+                 f" events ({facts.get('moved'):,} bytes of its log)"
+                 " elsewhere, none on your tables")
     elif state == "elsewhere":
         head += (f" - quiet: the source wrote {facts.get('moved'):,} bytes"
                  " of its log elsewhere, none on your tables")

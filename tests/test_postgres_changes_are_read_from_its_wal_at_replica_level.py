@@ -174,3 +174,59 @@ def test_the_records_are_read_by_the_functions_of_the_servers_version(
     assert "pg_get_wal_records_info" in have
     assert ("pg_get_wal_block_info" in have) == (version >= 160000)
     assert os.environ.get("MIGKIT_TEST_LANE", "0").isdigit()
+
+
+def test_the_servers_wal_directory_says_whether_a_segment_is_kept(
+        source, tmp_path):
+    """Asked of the real server: the segment of its flush point is in its
+    WAL directory; one past anything it has written is not."""
+    e = engine(source, tmp_path)
+    flush = e._wal_end("src", "postgres")
+    assert e._wal_held("src", "postgres", flush, "could not read") is True
+    assert e._wal_held("src", "postgres", "FF/0", "could not read") is False
+
+
+def _torn(said, kept):
+    """The engine reading records where the server says `said`, its WAL
+    directory holding the segment of 0/3000148 when `kept`."""
+    e = PostgresEngine.__new__(PostgresEngine)
+    e._follow_facts = lambda side, db: {"wal functions": "present"}
+
+    def ask(side, db, sql, args=None):
+        if "pg_get_wal_records_info" in sql:
+            raise psycopg2.Error(said)
+        if "wal_segment_size" in sql:
+            return [(16 * 1024 * 1024,)]
+        return [("000000010000000000000003" if kept
+                 else "000000010000000000000009",)]
+    e._wal_ask = ask
+    return PostgresEngine._wal_read(e, "src", "db", SimpleNamespace(
+        path="wal inspect"), "0/3000148", "0/3000200", 10)
+
+
+def test_a_read_inside_a_record_keeps_the_token_while_its_segment_is_kept():
+    assert _torn("could not find a valid record after 0/3000148",
+                 kept=True) is None
+    assert _torn("could not read WAL at 0/3000148", kept=True) is None
+    with pytest.raises(SystemExit, match="is gone"):
+        _torn("could not find a valid record after 0/3000148", kept=False)
+
+
+def test_only_a_segment_the_server_says_removed_is_the_wal_gone_stop():
+    with pytest.raises(SystemExit, match="is gone"):
+        _torn('requested WAL segment 000000010000000000000003 has already'
+              ' been removed', kept=True)
+    with pytest.raises(psycopg2.Error):
+        _torn("permission denied for function pg_get_wal_records_info",
+              kept=True)
+
+
+def test_the_segment_of_a_position_is_named_as_the_server_names_it():
+    from migkit.engines.postgres import wal_segment_held, wal_segment_part
+    assert wal_segment_part("0/3000148", 16 * 1024 * 1024) == \
+        "0000000000000003"
+    assert wal_segment_part("1/0", 16 * 1024 * 1024) == "0000000100000000"
+    assert wal_segment_held("0/3000148", 16 * 1024 * 1024,
+                            ["000000020000000000000003"])
+    assert not wal_segment_held("0/3000148", 16 * 1024 * 1024,
+                                ["000000010000000000000004", "archive"])

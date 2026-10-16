@@ -849,7 +849,12 @@ class MySQLEngine(Engine):
             lambda n: f"`{n}`", "%s",
             where.replace("%", "%%") if where else None, "mysql")
         rows = [list(r) for r in self._q(side, sql, args)]
-        return self._by_key_map(columns, key, rows)
+        # matched by the key's canonical text, rendered by its class: a
+        # caller may hand the declared types (`neutral_columns`)
+        from .. import canon
+        return self._by_key_map(
+            [(n, c if c in canon.CLASSES else canon.type_class("mysql", c))
+             for n, c in columns], key, rows)
 
     def neutral_rows_matching(self, side, db, table, columns, match, values):
         """Every row whose `match` columns hold one of `values`, asked of
@@ -1784,8 +1789,10 @@ class MySQLEngine(Engine):
         answers (`sizing.free_bytes`): the server's own tablespace figures
         (`information_schema.FILES`) where the tables land in a shared
         tablespace of a fixed most size, or this machine's look at the
-        data directory where it is proved the server's own (its
-        `auto.cnf` holds the server's `server_uuid`). None where neither
+        data directory where it is proved the server's own (MySQL: its
+        `auto.cnf` holds the server's `server_uuid`; MariaDB: the pid file
+        it names holds a live process, written since it started). None
+        where neither
         does: a table in a file of its own grows on a disk the server
         does not report."""
         import os
@@ -1795,11 +1802,10 @@ class MySQLEngine(Engine):
 
         def place():
             if not where:
-                d, uuid, own = self._q(side, "select @@datadir,"
-                                       " @@server_uuid,"
-                                       " @@innodb_file_per_table")[0]
-                where.update(dir=str(d), uuid=str(uuid),
-                             own=str(own) in ("1", "ON"))
+                d, own = self._q(side, "select @@datadir,"
+                                 " @@innodb_file_per_table")[0]
+                where.update(dir=str(d), own=str(own) in ("1", "ON"),
+                             family=self.server_release(side, db)[0])
             return where
 
         def server():
@@ -1819,8 +1825,28 @@ class MySQLEngine(Engine):
             return max(int(most) - int(used or 0), 0), None
 
         def same():
-            with open(os.path.join(place()["dir"], "auto.cnf")) as f:
-                return place()["uuid"] in f.read()
+            # MySQL: the directory's auto.cnf holds the server's own
+            # server_uuid. MariaDB has none: the file the server names as
+            # its pid file holds a live process and was written within the
+            # server's uptime (since it started)
+            if place()["family"] != "mariadb":
+                uuid = self._q(side, "select @@server_uuid")[0][0]
+                with open(os.path.join(place()["dir"], "auto.cnf")) as f:
+                    return str(uuid) in f.read()
+            pid_file = self._q(side, "select @@pid_file")[0][0]
+            up = self._q(side, "show global status like 'Uptime'")
+            path = os.path.join(place()["dir"], str(pid_file))
+            try:
+                with open(path) as f:
+                    pid = int(f.read().strip())
+                try:
+                    os.kill(pid, 0)
+                except PermissionError:
+                    pass  # alive, another account's
+                started = time.time() - int(up[0][1]) - 1
+                return os.path.getmtime(path) >= started
+            except (OSError, ValueError, IndexError):
+                return False
 
         def directory():
             return sizing.local_free(place()["dir"], same)
@@ -2251,6 +2277,8 @@ class MySQLEngine(Engine):
                 if ev is COMMITTED:
                     boundary = {"log_file": stream.log_file,
                                 "log_pos": stream.log_pos}
+                    self._tail_saw(side, db, start, boundary,
+                                   mine=len(out) > begun)
                     # where a read goes on after it: a batch the tail ends
                     # here saves this (`hetero.tail_apply`)
                     canon.ended(out, begun, at=dict(boundary),
@@ -2286,8 +2314,11 @@ class MySQLEngine(Engine):
                     # a DDL, at its place among the rows, for each table of
                     # this database it touches (`canon.ddl`); a table whose
                     # key it may have changed is asked for its key again
+                    had = len(out)
                     out += self._ddl_of(ev, side, db, gtid, keys_of)
                     out += self._statement_rows(ev, side, db, gtid)
+                    if len(out) == had and not in_txn:
+                        self._tail_saw(side, db, start, None, mine=False)
                     continue
                 if isinstance(ev, NotImplementedEvent):
                     if ev.event_type in self.COMPRESSED_ROWS:
@@ -2480,25 +2511,22 @@ class MySQLEngine(Engine):
                 taken[int(got[0][0])] = "the server itself"
         except pymysql.err.MySQLError:
             pass
-        for q in ("show replicas", "show slave hosts"):
-            try:
-                for row in self._q(side, q):
-                    taken.setdefault(int(row[0]), "a replica the server"
-                                     " lists")
-                break
-            except pymysql.err.MySQLError:
-                continue
+        for rid in self._replicas_listed(side) or ():
+            taken.setdefault(rid, "a replica the server lists")
         here = self._reader_source(side)
         for path in list(config.REPORTS.glob(f"*/{self.READER_IDS}")) + \
                 list(config.REPORTS.glob(f"*/*/{self.READER_IDS}")):
             hop = path.relative_to(config.REPORTS).parts[0]
-            if hop == self.hop.name:
-                continue
             try:
                 kept = json.loads(path.read_text())
             except (OSError, ValueError):
                 continue
             for purpose, got in (kept or {}).items():
+                # this hop's own reader for `purpose` is the id it may keep;
+                # its other purposes' (a proof beside the tail) are taken
+                if hop == self.hop.name and purpose == self.__dict__.get(
+                        "_ids_for"):
+                    continue
                 if isinstance(got, dict) and got.get("source") == here:
                     taken.setdefault(int(got["id"]), f"hop {hop}'s"
                                      f" {purpose} reader")
@@ -2507,6 +2535,19 @@ class MySQLEngine(Engine):
         for rid in self.__dict__.get("_reader_ended", {}).values():
             taken.setdefault(int(rid), "another reader attached under it")
         return taken
+
+    def _replicas_listed(self, side):
+        """{server_id} of the replicas `side`'s server lists, asked by the
+        statement its release takes (`show replicas` from MySQL 8.0.22,
+        `show slave hosts` before it and on MariaDB), or None where it
+        lists none to this account."""
+        import pymysql
+        for q in ("show replicas", "show slave hosts"):
+            try:
+                return {int(row[0]) for row in self._q(side, q)}
+            except pymysql.err.MySQLError:
+                continue
+        return None
 
     def reader_id(self, side, purpose, db=""):
         """The replica id a binlog reader of `side` attaches under for
@@ -2533,7 +2574,7 @@ class MySQLEngine(Engine):
             {"named": (self.hop.options or {}).get("server_id"),
              "recorded": recorded,
              "identity": f"{self.hop.name}/{db}/{side}/{purpose}"},
-            taken=lambda: self._ids_taken(side)))
+            taken=lambda: self._ids_taken_for(side, purpose)))
         self.__dict__.setdefault("_reader_choices", {})[key] = choice
         if got is None:
             raise SystemExit(
@@ -2547,6 +2588,15 @@ class MySQLEngine(Engine):
         os.replace(tmp, store)
         ids[key] = got
         return got
+
+    def _ids_taken_for(self, side, purpose):
+        """`_ids_taken`, this hop's reader for `purpose` left free to keep
+        its own id."""
+        self.__dict__["_ids_for"] = purpose
+        try:
+            return self._ids_taken(side)
+        finally:
+            self.__dict__.pop("_ids_for", None)
 
     #: what the server says to a reader another attached under its id
     COLLIDED = ("same server_uuid/server_id", "same server_id")
@@ -2578,11 +2628,78 @@ class MySQLEngine(Engine):
         ended[key] = rid
         return True
 
+    #: the tail's last change on the hop's tables and what it read since
+    TAIL_MARK = "tail-mark.json"
+
+    def _tail_mark(self, side, db, token):
+        """{at: the log position after the last change on the hop's tables,
+        elsewhere: the transactions and statements read since outside
+        them}, kept in the run store beside the token; a tail with none
+        stands on where it began."""
+        marks = self.__dict__.setdefault("_tail_marks", {})
+        if (side, db) not in marks:
+            here = self._reader_source(side)
+            try:
+                kept = json.loads((self.hop.report_dir(db)
+                                   / self.TAIL_MARK).read_text())
+            except (OSError, ValueError, TypeError):
+                kept = None
+            if not (isinstance(kept, dict) and kept.get("source") == here
+                    and isinstance(kept.get("at"), dict)):
+                kept = {"source": here, "elsewhere": 0,
+                        "at": {"log_file": (token or {}).get("log_file"),
+                               "log_pos": (token or {}).get("log_pos")}}
+            marks[(side, db)] = kept
+        return marks[(side, db)]
+
+    def _tail_saw(self, side, db, token, at, mine):
+        """A transaction (or statement) read: on the hop's tables it is the
+        new mark, elsewhere it is counted."""
+        mark = self._tail_mark(side, db, token)
+        if mine and at:
+            mark.update(at=dict(at), elsewhere=0)
+        elif not mine:
+            mark["elsewhere"] = int(mark.get("elsewhere") or 0) + 1
+
+    def _tail_mark_keep(self, db, mark):
+        store = self.hop.report_dir(db) / self.TAIL_MARK
+        tmp = store.with_name(f".{store.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(mark, sort_keys=True))
+        os.replace(tmp, store)
+
+    @staticmethod
+    def log_distance(logs, since, now):
+        """Bytes the binlog moved from `since` to `now` ((file, position)
+        each), across the files `logs` lists ([(file, size)], `show binary
+        logs`, oldest first), or None where `since`'s file is gone."""
+        names = [str(n) for n, _ in logs]
+        size = {str(n): int(z) for n, z in logs}
+        if since[0] == now[0]:
+            return max(0, int(now[1]) - int(since[1]))
+        if since[0] not in size or now[0] not in size:
+            return None
+        a, b = names.index(since[0]), names.index(now[0])
+        if a > b:
+            return None
+        return (max(0, size[since[0]] - int(since[1]))
+                + sum(size[n] for n in names[a + 1:b]) + int(now[1]))
+
+    def _target_tables(self, db):
+        """The table names the hop's target holds for `db`, through the
+        target's own engine."""
+        from . import engine_named
+        name = (self.hop.options or {}).get("target_engine") \
+            if self.hop.engine == "hetero" else None
+        eng = engine_named(name, self.hop) if name else self
+        return eng.neutral_tables("dst", db)
+
     def tail_where(self, db, token):
         """What the tail's quiet line stands on (`tailctl.run_loop`): the
-        position it is at, the server's now and how far that is past it,
-        whether the server still lists a reader under the tail's id, and
-        the provider's tables on the target."""
+        position it is at, the server's now, how far that is past the
+        tail's last change on the hop's tables (`moved`, across log files)
+        and what it read elsewhere since (`elsewhere`), whether the server
+        still lists a reader under the tail's id, and the provider's
+        tables on the target (`sync_back`)."""
         import pymysql
         from .. import leftovers
         at = f"{token.get('log_file')}:{token.get('log_pos')}" \
@@ -2593,16 +2710,46 @@ class MySQLEngine(Engine):
         except pymysql.err.MySQLError as e:
             return {**out, "attached": False,
                     "why_detached": str(e).strip().splitlines()[0][:120]}
+        mark = self._tail_mark("src", db, token)
         if now:
             out["server"] = f"{now[0]}:{now[1]}"
-            if token and token.get("log_file") == now[0]:
-                out["moved"] = max(0, now[1] - int(token.get("log_pos")
-                                                   or 0))
-        rid = self.__dict__.get("_reader_ids", {}).get(("src", "tail", db))
+            since = mark.get("at") or {}
+            try:
+                logs = [(r[0], r[1]) for r in self._q("src",
+                                                      "show binary logs")]
+            except pymysql.err.MySQLError:
+                logs = []
+            if since.get("log_file"):
+                moved = self.log_distance(
+                    logs, (since["log_file"], since.get("log_pos") or 0),
+                    now)
+                caught_up = bool(token) and (token.get("log_file"),
+                                             int(token.get("log_pos") or 0)
+                                             ) == (now[0], now[1])
+                # read to the log's end and nothing outside the hop's
+                # tables in it: the bytes are the log's own (a rotation,
+                # its header), not a write
+                if moved is not None and caught_up and \
+                        not mark.get("elsewhere"):
+                    moved = 0
+                if moved is not None:
+                    out["moved"] = moved
+            out["elsewhere"] = int(mark.get("elsewhere") or 0)
         try:
-            listed = {int(r[0]) for r in self._q("src", "show replicas")}
-        except pymysql.err.MySQLError:
-            listed = None
+            self._tail_mark_keep(db, mark)
+        except OSError:
+            pass
+        try:
+            found = [n for n in self._target_tables(db)
+                     if leftovers.provider_table(n)]
+        except Exception:  # noqa: BLE001 - not read: nothing said of it
+            found = []
+        if found:
+            out["sync_back"] = [
+                f"{n} ({leftovers.whose(str(n).rsplit('.', 1)[-1])})"
+                for n in sorted(found)]
+        rid = self.__dict__.get("_reader_ids", {}).get(("src", "tail", db))
+        listed = self._replicas_listed("src")
         # a reader that reads the log to its end each batch holds no
         # connection between batches: only a held stream can be missed
         held = self.__dict__.get("_binlog_held") is not None

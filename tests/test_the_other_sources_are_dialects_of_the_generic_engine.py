@@ -250,7 +250,11 @@ def test_each_dialects_bulk_kind_is_the_one_its_server_offers(name, kind):
     assert (bulk.kind if bulk else None) == kind
 
 
-def test_the_way_is_chosen_from_what_the_target_answers(tmp_path):
+def test_the_way_is_chosen_from_what_the_target_answers(tmp_path,
+                                                        monkeypatch):
+    # the client way stands on the driver loading on this machine
+    monkeypatch.setitem(sys.modules, dbapi.DIALECTS["vertica"].driver,
+                        types.ModuleType("driver"))
     server = Server(dbapi.DIALECTS["vertica"], may=True)
     eng = engine("vertica", tmp_path, server)
     eng._on = lambda which, table, db="-": table
@@ -302,7 +306,7 @@ def _bulk_engine(tmp_path, landed):
     eng._close = lambda: None
     path = tmp_path / "rows.csv"
     path.write_text("1,a\n2,b\n3,c\n")
-    eng._land_source = lambda table, cols, kind: (str(path), 3)
+    eng._land_source = lambda table, cols, kind, chunk=None: (str(path), 3)
     return eng, ran
 
 
@@ -334,3 +338,64 @@ def test_a_table_the_climb_gives_to_the_copier_is_copied_by_the_parent(
                         lambda self, *a: called.append(a))
     eng.move_table("app", "app", "orders", 100, Checkpoint(), None)
     assert called and not ran
+
+
+def test_a_client_way_without_its_driver_gives_way_to_the_copier(
+        monkeypatch):
+    import importlib
+
+    from migkit.config import Endpoint, Hop
+    from migkit.engines import dbapi
+    real = importlib.import_module
+
+    def fake(name, *a, **k):
+        if name == dbapi.DIALECTS["vertica"].driver:
+            raise ImportError(name)
+        return real(name, *a, **k)
+    monkeypatch.setattr(importlib, "import_module", fake)
+    hop = Hop(name="v", engine="vertica",
+              source=Endpoint(host="10.0.0.1", port=5433, user="u",
+                              password="CHANGE_ME"),
+              target=Endpoint(host="10.0.0.2", port=5433, user="u",
+                              password="CHANGE_ME"), databases=["d"])
+    eng = dbapi.VerticaEngine(hop)
+    monkeypatch.setattr(decide, "record", lambda *a, **k: None)
+    got = eng.bulk_way("s.t")
+    assert got.path == "copier", got
+    assert "needs its Python driver" in got.reason, got.reason
+
+
+def test_the_bulk_landing_streams_the_cursors_batches_and_counts_them(
+        tmp_path):
+    from types import SimpleNamespace
+
+    from migkit.engines import dbapi
+    batches = [[(1, "a"), (2, "b")], [(3, "c"), (4, "d")], [(5, "e")], []]
+    asked = []
+
+    class Cursor:
+        def execute(self, sql):
+            asked.append(sql)
+
+        def fetchmany(self, size):
+            asked.append(size)
+            return batches.pop(0)
+
+        def close(self):
+            pass
+    eng = dbapi.VerticaEngine.__new__(dbapi.VerticaEngine)
+    conn = SimpleNamespace(_conn=SimpleNamespace(cursor=Cursor),
+                           dialect=SimpleNamespace(quote=lambda c: c))
+    eng._connect = lambda side: conn
+    eng._filter = lambda table: ""
+    eng._on = lambda side, table: table
+    eng._from = lambda conn, table: table
+    eng._masked = lambda table, cols, rows: rows
+    where, n = eng._land_source("s.t", ["id", "v"], "client", chunk=2)
+    try:
+        assert n == 5
+        assert open(where).read().count("\n") == 5
+        assert asked[1:] == [2, 2, 2, 2]
+    finally:
+        import os
+        os.unlink(where)

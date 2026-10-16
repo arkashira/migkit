@@ -6422,7 +6422,8 @@ def dialect_bulk(facts, costs=None):
              needs=(only("client"),
                     Need("a driver that takes the way",
                          lambda x: bool(x.get("streams")),
-                         "the driver is not loaded")) + shared,
+                         lambda x: x.get("streams_why")
+                         or "the driver is not loaded")) + shared,
              because="the server reads the rows in one statement, where the"
                      " table copier sends them batch by batch"),
         Rung("landing", "the dialect's bulk statement over the landing"

@@ -4114,11 +4114,37 @@ select json_build_object(
             " Raise wal_keep_size or keep an archive (wal_archive), then"
             " move again with --mode full+cdc")
 
+    def _wal_held(self, side, db, start, said):
+        """Whether the WAL segment holding `start` is still in the server's
+        WAL directory (`wal_segment_part`), asked after a read that said
+        "could not": held, the read stopped inside a record and is tried
+        again; gone, the changes after `start` went with it. Not askable
+        is neither, and stops with what the server said."""
+        import psycopg2
+        try:
+            size = int(self._wal_ask(side, db, "select setting::bigint *"
+                                     " (case unit when '8kB' then 8192"
+                                     " when 'MB' then 1048576 else 1 end)"
+                                     " from pg_settings where name ="
+                                     " 'wal_segment_size'")[0][0])
+            names = [r[0] for r in self._wal_ask(
+                side, db, "select name from pg_ls_waldir()")]
+        except psycopg2.Error as e:
+            raise SystemExit(
+                f"{db}: the source's WAL from {start} was not read"
+                f" ({said.strip().splitlines()[0][:160]}), and whether it is"
+                " still kept could not be asked"
+                f" ({str(e).strip().splitlines()[0][:120]}): grant"
+                " pg_monitor to the account, then follow again") from e
+        return wal_segment_held(start, size, names)
+
     def _wal_read(self, side, db, way, start, end, limit):
         """The WAL records from `start` to `end`, `limit` at most, oldest
         first (`wal_record`), the way `way` reads them. Nothing written
         since `start` is no record, not a WAL gone: the server finds no
-        record past its own end and says so as it would of a removed one."""
+        record past its own end and says so as it would of a removed one.
+        None where the read stopped inside a record whose segment is still
+        kept (`_wal_held`): nothing is carried and the token stays."""
         if _lsn_int(start) >= _lsn_int(end):
             return []
         facts = self._follow_facts(side, db)
@@ -4135,9 +4161,18 @@ select json_build_object(
                     "%s::pg_lsn, %s::pg_lsn) limit %s",
                     (start, end, int(limit)))
             except psycopg2.Error as e:
-                if "removed" in str(e) or "could not" in str(e):
+                said = str(e)
+                if "has already been removed" in said:
                     raise self._wal_gone(db, start) from e
-                raise
+                if "could not" not in said:
+                    raise
+                # the token is the flush point, which can sit inside a
+                # record: the server cannot read past it and says so as it
+                # says of a file gone. The file still there is a torn read,
+                # asked again at the next poll from the same token.
+                if self._wal_held(side, db, start, said):
+                    return None
+                raise self._wal_gone(db, start) from e
             return [wal_record(*r) for r in rows]
         out, said = [], ""
         for where in facts["wal dirs"]:
@@ -4153,6 +4188,8 @@ select json_build_object(
             if got.returncode == 0:
                 return out
         if "could not find" in said or "could not open" in said:
+            if self._wal_held(side, db, start, said):
+                return None
             raise self._wal_gone(db, start)
         raise SystemExit(f"{db}: the source's WAL files from {start} were"
                          f" not read: {said or 'nothing came back'}")
@@ -4352,6 +4389,8 @@ select json_build_object(
             " datname = current_database()")[0]
         while True:
             records = self._wal_read(side, db, way, token, end, limit)
+            if records is None:
+                return [], token
             touched, open_at = wal_touched(records, int(oid))
             if not (open_at == token and len(records) >= limit):
                 break
@@ -15169,6 +15208,22 @@ def wal_record(lsn, xid, rmgr, kind, desc, refs):
             "kind": str(kind).split("+")[0].upper(), "desc": str(desc or ""),
             "blocks": blocks}
 
+
+
+def wal_segment_part(lsn, size):
+    """The last sixteen hex digits of the WAL file name holding `lsn` with
+    segments of `size` bytes - the timeline's eight left out, so a standby
+    that follows a newer timeline still finds the segment."""
+    seg = _lsn_int(lsn) // int(size)
+    per = 0x100000000 // int(size)
+    return f"{seg // per:08X}{seg % per:08X}"
+
+
+def wal_segment_held(lsn, size, names):
+    """Whether the WAL directory listing `names` holds the segment of
+    `lsn`."""
+    part = wal_segment_part(lsn, size)
+    return any(len(n) == 24 and n[8:].upper() == part for n in names)
 
 def waldump_records(text):
     """The records of the WAL reading program's lines; a line it prints

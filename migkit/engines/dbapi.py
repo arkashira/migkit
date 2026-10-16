@@ -1164,12 +1164,21 @@ class DialectEngine(GenericEngine):
         land = self._landing() if way == "landing" else ""
         facts = {"way": way, "none_why": row.no_bulk, "landing": land,
                  "writer": bool(land) and analyticdb.landing_writer(land),
-                 "streams": way == "client",
+                 "streams": False, "streams_why": None,
                  "tool": bool(row.bulk and row.bulk.tool
                               and which(row.bulk.tool)),
                  "may": None, "rows": None, "empty": None}
+        if way == "client":
+            # the client way is the driver's own: it takes it where its
+            # module loads on this machine, and says why where it does not
+            try:
+                row.load_driver()
+                facts["streams"] = True
+            except SystemExit as e:
+                facts["streams_why"] = str(e).split(". Nothing", 1)[0]
         if way and (way != "landing" or facts["writer"]) and \
-                (way != "tool" or facts["tool"]):
+                (way != "tool" or facts["tool"]) and \
+                (way != "client" or facts["streams"]):
             facts["may"] = self._may_bulk()
             if facts["may"]:
                 facts["rows"] = self._count("src", table)
@@ -1185,23 +1194,58 @@ class DialectEngine(GenericEngine):
             table=self._from(conn, self._on("dst", table)), where=where,
             columns=", ".join(conn.dialect.quote(c) for c in columns))
 
-    def _land_source(self, table, columns, kind):
+    def _source_batches(self, table, columns, size):
+        """The source's rows of `table`, its columns in `columns`' order and
+        masked as the target holds them, `size` rows a fetch from one
+        cursor: never the whole table in memory."""
+        conn = self._connect("src")
+        cols = ", ".join(conn.dialect.quote(c) for c in columns)
+        pred = self._filter(table)
+        cur = conn._conn.cursor()
+        try:
+            try:
+                cur.execute(f"SELECT {cols} FROM {self._from(conn, self._on('src', table))}"
+                            + (f" WHERE {pred}" if pred else ""))
+            except Exception as e:  # noqa: BLE001 - said as its grant
+                self._grant_refused("src", "reading rows", table, e)
+                raise SystemExit(f"cannot read {table} on the source:"
+                                 f" {str(e).splitlines()[-1][:160]}")
+            while True:
+                rows = cur.fetchmany(size)
+                if not rows:
+                    return
+                yield self._masked(table, list(columns),
+                                   [tuple(r) for r in rows])
+        finally:
+            cur.close()
+
+    def _land_source(self, table, columns, kind, chunk=None):
         """The source's rows as one CSV: an object in the landing store
-        (`landing`: its address), a file on this machine otherwise."""
+        (`landing`: its address), a file on this machine otherwise; and
+        the rows written, counted as each batch of the source's cursor is
+        (`chunk` rows a fetch, the copier's batch otherwise)."""
         import csv
         import tempfile
 
         from . import analyticdb
-        rows = self._side_rows("src", table, columns)
+        size = max(1, int(chunk or self.BATCH_ROWS))
+        wrote = [0]
+
+        def rows():
+            for batch in self._source_batches(table, columns, size):
+                for r in batch:
+                    wrote[0] += 1
+                    yield r
         if kind == "landing":
-            return analyticdb.land_csv(self._landing(), table.replace(
-                ".", "_"), rows, self.hop.target.options or {}), len(rows)
+            where = analyticdb.land_csv(self._landing(), table.replace(
+                ".", "_"), rows(), self.hop.target.options or {})
+            return where, wrote[0]
         with tempfile.NamedTemporaryFile(
                 "w", newline="", suffix=".csv", delete=False) as fh:
             out = csv.writer(fh, lineterminator="\n")
-            for r in rows:
+            for r in rows():
                 out.writerow([analyticdb.landing_text(v) for v in r])
-        return fh.name, len(rows)
+        return fh.name, wrote[0]
 
     def _run_bulk(self, kind, statement):
         conn = self._connect("dst")
@@ -1234,7 +1278,7 @@ class DialectEngine(GenericEngine):
         if st.get("done"):
             return None
         columns = self._copy_columns(table)
-        where, rows = self._land_source(table, columns, choice.path)
+        where, rows = self._land_source(table, columns, choice.path, chunk)
         try:
             self._run_bulk(choice.path, self._bulk_statement(
                 table, columns, where))

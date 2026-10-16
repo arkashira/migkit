@@ -196,9 +196,9 @@ mysql_pair = servers.fixture("mysql")
 
 
 @needs_docker
-@pytest.mark.xfail(strict=True, reason="the MySQL engine's keyed read by key"
-                   " renders its declared type ('int') where a class is"
-                   " expected (canon.render_value): owed by the MySQL engine")
+@pytest.mark.xfail(strict=True, reason="the keyed read now lines rows up by"
+                   " class, but the sampled check's own path still folds"
+                   " the declared type ('int') where a class is expected")
 def test_on_a_mysql_pair_the_sample_misses_what_the_full_check_finds(
         mysql_pair, tmp_path):
     from migkit.config import Hop
@@ -222,10 +222,16 @@ def test_on_a_mysql_pair_the_sample_misses_what_the_full_check_finds(
               target=mysql_pair.dst.endpoint(), databases=[db])
     hop.report_dir = lambda d=None: tmp_path
     eng = get_engine(hop)
-    cols = [(n, c) for n, c in eng.neutral_columns("src", db, "t")]
+    from migkit import canon
+    cols = [(n, canon.type_class("mysql", c))
+            for n, c in eng.neutral_columns("src", db, "t")]
     key = eng.neutral_key("src", db, "t")
     same = ranges.sampled(eng, db, "t", cols, key, 20, seed=3)
     assert same["status"] == "ok" and same["sampled"]["of"] == 500, same
+    # the keyed read lines up the rows by class whichever a caller hands
+    declared = eng.neutral_columns("src", db, "t")
+    assert set(eng.neutral_rows_by_key("src", db, "t", declared, key,
+                                       [(1,), (2,)])) == {("1",), ("2",)}
     assert verdict.decide([same]).status == "incomplete"
     from migkit import cli
     said, _ = cli._sampled_check(hop, db, "t", 0.05, eng=eng)

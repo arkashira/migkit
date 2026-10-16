@@ -861,6 +861,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: no way to follow the source's changes - <...>
 
+* <...>: the source's WAL from <...> was not read (<...>), and whether it is still kept could not be asked (<...>): grant pg_monitor to the account, then follow again
+
 * <...>: the source's WAL files from <...> were not read: <...>
 
 * <...>: <...> has no primary key, and a change its WAL records name by place cannot be written to the target by key - give it one (<...>) | <...>
@@ -1672,6 +1674,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * cannot open the <...> <...> address: <...>
 
 * <...>: a repair of rows on <...> is not written yet: the rows that differ are reported, and nothing was changed
+
+* cannot read <...> on the source: <...>
 
 * the bulk load failed: <...>
 
