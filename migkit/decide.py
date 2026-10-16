@@ -1307,7 +1307,9 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
                       else r.because or f"{r.said}: the first way that holds")
             timed = [o for o in ranked if _measured(priced.get(o.name))]
             mine = priced.get(r.name)
-            if len(timed) > 1 and r in timed:
+            # the ranking's first timed way is the cheapest; a way chosen
+            # below a cheaper one that failed won on holding, not on cost
+            if len(timed) > 1 and timed[0] is r:
                 reason += "; measured the cheapest of the ways timed here"
             elif mine is not None and not _measured(mine) and not timed:
                 reason += f"; predicted the fastest here, {mine.said()}"

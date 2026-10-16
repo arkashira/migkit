@@ -989,7 +989,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### the decision engine asks an engine (`engines.base`) what it can do; ends when the engine contract is a package below decision
 
 - `migkit/capabilities.py:34` decision -> engines (`engines.base`)
-- `migkit/decide.py:2744` decision -> engines (`engines.base`)
+- `migkit/decide.py:2746` decision -> engines (`engines.base`)
 - `migkit/model.py:1110` decision -> engines (`engines.base`)
 - `migkit/scenarios.py:505` decision -> engines (`engines.base`)
 - `migkit/workload.py:133` decision -> engines (`engines.base`)
@@ -1032,7 +1032,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/capabilities.py:33` decision -> engines (`engines`)
 - `migkit/dba.py:311` decision -> engines (`engines`)
-- `migkit/decide.py:2743` decision -> engines (`engines`)
+- `migkit/decide.py:2745` decision -> engines (`engines`)
 - `migkit/machine.py:946` decision -> engines (`engines`)
 - `migkit/tableway.py:132` decision -> engines (`engines`)
 - `migkit/waysaid.py:71` decision -> engines (`engines`)
