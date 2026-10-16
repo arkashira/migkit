@@ -114,9 +114,97 @@ def id_element(raw):
 def id_of(element):
     """The `_id` value an element (`id_element`) holds, to ask a server
     for the document by."""
-    import bson
     body = element + b"\x00"
-    return bson.decode((len(body) + 4).to_bytes(4, "little") + body)["_id"]
+    return _decode((len(body) + 4).to_bytes(4, "little") + body)["_id"]
+
+
+def _decode(raw):
+    """A stored document decoded, a date past the years a Python datetime
+    holds kept as the value `bson.DatetimeMS` that encodes back to it."""
+    import bson
+    from bson.codec_options import CodecOptions, DatetimeConversion
+    return bson.decode(raw, codec_options=CodecOptions(
+        datetime_conversion=DatetimeConversion.DATETIME_AUTO))
+
+
+def elements(raw):
+    """(type byte, name, value bytes) of each element of a stored
+    document, read off its bytes without decoding any value."""
+    raw = bytes(raw)
+    i, end = 4, len(raw) - 1
+    while i < end:
+        ty = raw[i]
+        j = raw.index(b"\x00", i + 1)
+        n = _value_len(raw, ty, j + 1)
+        yield ty, raw[i + 1:j].decode("utf-8"), raw[j + 1:j + 1 + n]
+        i = j + 1 + n
+
+
+def _value(ty, value):
+    """The value of one element (`elements`) decoded."""
+    body = bytes([ty]) + b"x\x00" + value + b"\x00"
+    return _decode((len(body) + 4).to_bytes(4, "little") + body)["x"]
+
+
+def _names(doc):
+    """The field names of a document, a stored one read off its bytes."""
+    if hasattr(doc, "raw"):
+        return [name for _, name, _ in elements(doc.raw)]
+    return list(doc)
+
+
+def _field(doc, name, default=None):
+    """One field of a document: `default` where it has none. A stored
+    document is read to that field only, and a document or an array in it
+    is decoded whole."""
+    if not hasattr(doc, "raw"):
+        return doc.get(name, default)
+    for ty, key, value in elements(doc.raw):
+        if key == name:
+            return _value(ty, value)
+    return default
+
+
+def _id_in(doc):
+    """The `_id` a document holds, a stored one found by its bytes."""
+    if not hasattr(doc, "raw"):
+        return doc.get("_id")
+    found = id_element(doc.raw)
+    return None if found is None else id_of(found)
+
+
+def _inner_ops(o):
+    """The operations a transaction's `applyOps` holds, each as
+    `oplog_entry` gives it - the array of a stored document read element
+    by element, none decoded."""
+    from bson.raw_bson import RawBSONDocument
+    if not hasattr(o, "raw"):
+        return [oplog_entry(e) for e in o.get("applyOps") or []]
+    for ty, name, value in elements(o.raw):
+        if name == "applyOps" and ty == 0x04:
+            return [oplog_entry(RawBSONDocument(sub))
+                    for _, _, sub in elements(value)]
+    return []
+
+
+def oplog_entry(entry):
+    """An oplog entry read as the bytes the server stored it as, as the
+    dict `oplog_events` takes: its small fields decoded, its `o` and `o2`
+    kept as the stored documents they are and a transaction's session as
+    the bytes that name it. A dict is given back as it is."""
+    from bson.raw_bson import RawBSONDocument
+    if isinstance(entry, dict):
+        return entry
+    raw = entry.raw if hasattr(entry, "raw") else bytes(entry)
+    out = {}
+    for ty, name, value in elements(raw):
+        if name in ("o", "o2") and ty == 0x03:
+            out[name] = RawBSONDocument(value)
+        elif name == "lsid" and ty == 0x03:
+            out[name] = {"id": value}
+        elif name in ("op", "ns", "ts", "txnNumber"):
+            out[name] = _value(ty, value)
+    return out
 
 
 def id_bucket(spec, element):
@@ -229,9 +317,11 @@ def oplog_update(o):
     whole), ("modify", the `$set` and `$unset` that make it - `$v: 1`
     operators as written, a `$v: 2` difference translated), or ("lookup",
     None) where it cannot be said so and the document is read again by
-    key."""
-    if not any(str(k).startswith("$") for k in o):
+    key. A stored document that replaces is given as it is, undecoded."""
+    if not any(str(k).startswith("$") for k in _names(o)):
         return "replace", o
+    if hasattr(o, "raw"):
+        o = _decode(o.raw)
     if o.get("$v") == 2 or "diff" in o:
         out = {}
         if isinstance(o.get("diff"), dict) and _diff_mods(o["diff"], "", out):
@@ -255,36 +345,39 @@ def _txn_key(entry):
 
 
 def _oplog_command(entry, db, txns):
-    o = entry.get("o") or {}
-    if "applyOps" in o:
-        inner = list(o.get("applyOps") or [])
+    o = entry.get("o")
+    o = {} if o is None else o
+    names = _names(o)
+    if "applyOps" in names:
+        inner = _inner_ops(o)
         if "txnNumber" not in entry:
             return [e for sub in inner for e in oplog_events(sub, db, txns)]
         key = _txn_key(entry)
         txns.setdefault(key, []).extend(inner)
-        if o.get("partialTxn") or o.get("prepare"):
+        if _field(o, "partialTxn") or _field(o, "prepare"):
             return []
         return [e for sub in txns.pop(key)
                 for e in oplog_events(sub, db, txns)]
-    if "commitTransaction" in o:
+    if "commitTransaction" in names:
         return [e for sub in txns.pop(_txn_key(entry), [])
                 for e in oplog_events(sub, db, txns)]
-    if "abortTransaction" in o:
+    if "abortTransaction" in names:
         txns.pop(_txn_key(entry), None)
         return []
     on = str(entry.get("ns") or "").partition(".")[0]
     for cmd, kind in OPLOG_STOPS.items():
-        if cmd not in o:
+        if cmd not in names:
             continue
         if cmd == "renameCollection":
-            ends = [str(o.get(k) or "") for k in ("renameCollection", "to")]
+            ends = [str(_field(o, k) or "")
+                    for k in ("renameCollection", "to")]
             hit = [n.partition(".")[2] for n in ends
                    if n.partition(".")[0] == db]
             return [{"operationType": kind,
                      "ns": {"db": db, "coll": hit[0]}}] if hit else []
         if on != db:
             return []
-        coll = o.get(cmd)
+        coll = _field(o, cmd)
         return [{"operationType": kind,
                  "ns": {"db": db, **({"coll": coll} if isinstance(coll, str)
                                      else {})}}]
@@ -298,8 +391,12 @@ def oplog_events(entry, db, txns):
     a command the stream reports - a collection dropped or renamed - as
     the event that stops a follow. A transaction's entries are held in
     `txns` ({transaction: [operations]}) until it commits and given then,
-    in the order written; one aborted is let go."""
-    op, o = entry.get("op"), entry.get("o") or {}
+    in the order written; one aborted is let go. An entry read as stored
+    (`oplog_entry`) keeps every document in it as its bytes, so a value no
+    Python type holds - a date past the year 9999 - crosses undecoded."""
+    entry = oplog_entry(entry)
+    op, o = entry.get("op"), entry.get("o")
+    o = {} if o is None else o
     if op == "c":
         return _oplog_command(entry, db, txns)
     name, _, coll = str(entry.get("ns") or "").partition(".")
@@ -309,14 +406,14 @@ def oplog_events(entry, db, txns):
     where = {"db": db, "coll": coll}
     if op == "i":
         return [{"operationType": "insert", "ns": where,
-                 "documentKey": {"_id": o.get("_id")}, "fullDocument": o}]
+                 "documentKey": {"_id": _id_in(o)}, "fullDocument": o}]
     if op == "d":
         return [{"operationType": "delete", "ns": where,
-                 "documentKey": {"_id": o.get("_id")}}]
+                 "documentKey": {"_id": _id_in(o)}}]
     kind, what = oplog_update(o)
     ev = {"operationType": "replace" if kind == "replace" else "update",
-          "ns": where, "documentKey": {"_id": (entry.get("o2") or {})
-                                       .get("_id")}}
+          "ns": where, "documentKey": {"_id": _id_in(
+              entry["o2"] if entry.get("o2") is not None else {})}}
     if kind == "replace":
         ev["fullDocument"] = what
     elif kind == "modify":
@@ -1576,7 +1673,7 @@ class MongoEngine(Engine):
         from .. import canon
         client = self._client(side)
         target = self._d(side, db)
-        args = {"full_document": "updateLookup"}
+        args = {"full_document": "updateLookup", **self._expanded_events()}
         if token:
             args["resume_after"] = {"_data": token}
         try:
@@ -2334,12 +2431,7 @@ class MongoEngine(Engine):
                 n = coll.count_documents(flt)
                 per = max(2, -(-want * n // max(docs, 1))) if n else 0
                 if n and per >= 2:
-                    out = list(coll.aggregate(
-                        [{"$match": flt},
-                         {"$bucketAuto": {"groupBy": "$_id",
-                                          "buckets": min(per, 512)}}],
-                        allowDiskUse=True))
-                    bounds = [x["_id"]["min"] for x in out][1:]
+                    bounds = self._id_edges(coll, flt, n, per, ty)
                 else:
                     bounds = []
             except Exception:
@@ -2348,6 +2440,40 @@ class MongoEngine(Engine):
             # keeps one type's boundaries from being asked about another's docs
             plan += [(ty, lo, hi) for lo, hi in _cp.plan_from_boundaries(bounds)]
         return plan
+
+    def _id_edges(self, coll, flt, n, per, ty):
+        """The `_id` edges that cut the `n` documents of `flt` (one BSON
+        type of `_id`) into about `per` ranges, through the one place
+        edges are cut (`ranges.cut`): the server's equal-count buckets of
+        the `_id` index, read now, so they are as fresh as a count; where
+        they are too coarse the cut has no other way here (a sample or a
+        read in key order is written as a statement the server does not
+        take), and no edges is one range."""
+        from .. import decide, ranges
+        buckets = min(per, 512)
+
+        def stats():
+            out = list(coll.aggregate(
+                [{"$match": flt},
+                 {"$bucketAuto": {"groupBy": "$_id", "buckets": buckets}}],
+                allowDiskUse=True))
+            total = sum(int(b.get("count") or 0) for b in out)
+            seen, points = 0, []
+            for b in out:
+                seen += int(b.get("count") or 0)
+                points.append((b["_id"]["max"], seen / total))
+            return ranges.Stats(points, modified=0, touched=False) \
+                if total else None
+
+        def ask(statement):
+            raise decide.Blocked("the server takes no statement for a"
+                                 " sample or an ordered read of its keys")
+        try:
+            return ranges.cut(ask, "mongodb", str, coll.name, "_id", n,
+                              -(-n // per), stats=stats,
+                              label=f"{coll.name} (_id of type {ty})")
+        except (decide.Blocked, decide.Exhausted):
+            return []
 
     def _coverage_ok(self, coll, plan, docs, rows=None):
         """Do these ranges actually account for every document - of the
@@ -3565,6 +3691,9 @@ class MongoEngine(Engine):
                          lambda f: f["stream opens"] is True,
                          lambda f: "the source refused to open a change"
                                    f" stream: {f['stream opens']}"),
+                    Need("a reshard or a key refined said",
+                         lambda f: f.get("reshards reported", True) is True,
+                         lambda f: str(f.get("reshards reported"))),
                     Need("the saved position held",
                          lambda f: f.get("position held", True) is True,
                          lambda f: str(f.get("position held")))),
@@ -3637,6 +3766,44 @@ class MongoEngine(Engine):
         return climb("following the source's changes", cls.FOLLOW_WAYS,
                      facts, costs=costs)
 
+    #: the server a change stream reports a collection resharded or its
+    #: shard key refined from, as an event it is asked to show
+    #: (`_expanded_events`); a sharded cluster older than this - and from
+    #: the one a key can be refined on - leaves them out
+    EXPANDED_EVENTS_FROM = (6, 0)
+    REFINE_FROM = (4, 4)
+
+    def _source_version(self):
+        """The source's version as the numbers it is written in, or ()."""
+        text = self._server_versions()[0] or ""
+        got = re.match(r"(\d+)\.(\d+)", str(text))
+        return tuple(int(x) for x in got.groups()) if got else ()
+
+    def _expanded_events(self):
+        """The stream options that make the source report a collection
+        resharded or its shard key refined: asked for where the server
+        shows them, left out where it would refuse them."""
+        ver = self._source_version()
+        return ({"show_expanded_events": True}
+                if ver and ver >= self.EXPANDED_EVENTS_FROM else {})
+
+    def _reshards_reported(self):
+        """True, or why a change stream of the source cannot be trusted to
+        say a collection was resharded or its shard key refined: a sharded
+        cluster on a version before `EXPANDED_EVENTS_FROM` that can do
+        either (`REFINE_FROM`) reports neither."""
+        ver = self._source_version()
+        if not ver or ver >= self.EXPANDED_EVENTS_FROM \
+                or ver < self.REFINE_FROM \
+                or self._hello("src").get("msg") != "isdbgrid":
+            return True
+        found = ".".join(str(x) for x in ver)
+        return (f"the source is a sharded cluster on {found}, whose change"
+                " stream says nothing of a collection resharded or its"
+                " shard key refined before"
+                f" {'.'.join(str(x) for x in self.EXPANDED_EVENTS_FROM)},"
+                " and the copy of it would go on unaware")
+
     def _stream_opens(self, db):
         """True, or the server's refusal, of a change stream opened and
         closed again without reading an event."""
@@ -3682,6 +3849,7 @@ class MongoEngine(Engine):
         from ..decide import Facts
         facts = Facts(**{"replica set": lambda: self._keeps_a_log("src"),
                          "stream opens": lambda: self._stream_opens(db),
+                         "reshards reported": self._reshards_reported,
                          "oplog reads": lambda: self._oplog_reads("src"),
                          "position held": lambda: self._position_held(db)})
         return self.follow_choice(facts, self._follow_costs(db))
@@ -3901,6 +4069,15 @@ class MongoEngine(Engine):
         from the source (`_reseed`), then followed from that position by
         the way that holds now (`tail_apply`)."""
         from .. import tailctl
+        names = [n for n in self._client("src")[db].list_collection_names()
+                 if not n.startswith("system.") and self.in_scope(db, n)]
+        gone = self._gone_from_source(db, names, log)
+        if gone:
+            from .. import interlock
+            log(f"{db}: the target holds {', '.join(gone)}, which the source"
+                " no longer has; the reseed drops "
+                + ("it" if len(gone) == 1 else "them"))
+            interlock.before_one_way(self.hop, self, db, "drop", go, log)
         if not go:
             log(f"{db}: the saved position can no longer be followed from;"
                 " --go takes a new one and copies every collection again")
@@ -3908,16 +4085,43 @@ class MongoEngine(Engine):
         point = self.change_point("src", db)
         env = tailctl.begin(self, db, token_path, point
                             if isinstance(point, dict) else {"_data": point})
-        names = [n for n in self._client("src")[db].list_collection_names()
-                 if not n.startswith("system.") and self.in_scope(db, n)]
         prefix = self.FOLLOW_KEY.format(db=db)
-        for name in names:
+        for name in names + gone:
             self._reseed(db, name, go, log,
                          f"{prefix}|{name}|reseed {env.get('id')}")
         self._keep_follow(db, {**env, "gen": -1}, env["token"],
                           {"generations": {n: 1 for n in names},
                            "parked": [], "invalidated": None})
         return self.tail_apply(db, go, token_path, log)
+
+    def _gone_from_source(self, db, names, log):
+        """The target's collections of `db` the source no longer has, whose
+        name the hop's scope takes as the same on both sides: what a
+        reseed drops, as the copy of a dropped collection does
+        (`_new_generations`). Left standing where the hop does not carry
+        deletes (`Hop.carries`) or sets a dropped collection aside
+        (`tailtables.policy`); stopped at where it says so."""
+        from ..tailtables import policy
+        out = []
+        for name in sorted(self._client("dst")[self._d("dst", db)]
+                           .list_collection_names()):
+            if name.startswith("system.") or name in names \
+                    or not self.in_scope(db, name) \
+                    or self._there(db, name) != name:
+                continue
+            pol = policy(self.hop, [db, name])
+            if pol == "stop":
+                raise SystemExit(
+                    f"{db}.{name}: the source no longer has it, and the"
+                    " hop's ddl stops at a collection dropped there. Nothing"
+                    " was copied or dropped; drop it on the target, or set"
+                    " the hop's ddl to apply it")
+            if pol == "park" or "delete" not in self.hop.carries(db, name):
+                log(f"{db}.{name}: the source no longer has it; left on the"
+                    " target by the hop's settings")
+                continue
+            out.append(name)
+        return out
 
     def _majority_ts(self, side, hello=None):
         """The time of the last write a majority of the replica set's
@@ -3927,18 +4131,23 @@ class MongoEngine(Engine):
         return (((hello.get("lastWrite") or {}).get("majorityOpTime") or {})
                 .get("ts"))
 
-    def _oplog(self, side, flt, limit=0, sort=1, projection=None):
+    def _oplog(self, side, flt, limit=0, sort=1, projection=None,
+               stored=False):
         """The entries of the server's oplog matching `flt`, oldest first
-        (newest with `sort` -1). A refusal stops as the grant it lacks -
+        (newest with `sort` -1), as the bytes the server stored where
+        `stored` (`oplog_entry`). A refusal stops as the grant it lacks -
         never an oplog with nothing in it."""
+        from bson.raw_bson import DEFAULT_RAW_BSON_OPTIONS
         from pymongo.errors import PyMongoError
         kw = {}
         if sort == 1 and "ts" in flt and self._ranges_need_replay(side):
             kw["oplog_replay"] = True
         try:
-            return list(self._client(side).local["oplog.rs"].find(
-                flt, projection, sort=[("$natural", sort)], limit=limit,
-                **kw))
+            log = self._client(side).local["oplog.rs"]
+            if stored:
+                log = log.with_options(codec_options=DEFAULT_RAW_BSON_OPTIONS)
+            return list(log.find(flt, projection, sort=[("$natural", sort)],
+                                 limit=limit, **kw))
         except PyMongoError as e:
             self._refused("reading the oplog", e, self.OPLOG_GRANT,
                           side=side)
@@ -4025,7 +4234,9 @@ class MongoEngine(Engine):
         if go and tailctl.position(token_path) is None:
             tailctl.begin(self, db, token_path,
                           oplog_token(self._majority_ts("src")))
-        src = self._client("src")[db]
+        from bson.raw_bson import DEFAULT_RAW_BSON_OPTIONS
+        src = self._client("src")[db].with_options(
+            codec_options=DEFAULT_RAW_BSON_OPTIONS)
         dst = self._client("dst")[self._d("dst", db)]
         kept = HopCosts(self.hop, "follow/")
         s = {"txns": {}, "read": None, "gave": None}
@@ -4057,8 +4268,10 @@ class MongoEngine(Engine):
                     " majority of its members hold its writes")
             began = time.monotonic()
             s["gave"] = None
-            entries = self._oplog("src", self._oplog_filter(
-                db, s["read"][0], upto, s["read"][1]), limit=self.TAIL_BATCH)
+            entries = [oplog_entry(e) for e in self._oplog(
+                "src", self._oplog_filter(db, s["read"][0], upto,
+                                          s["read"][1]),
+                limit=self.TAIL_BATCH, stored=True)]
             went, safe = 0, at
             for entry in entries:
                 for ev in oplog_events(entry, db, s["txns"]):
@@ -4689,7 +4902,8 @@ class MongoEngine(Engine):
 
         def look(at):
             if s.stream is None:
-                kwargs = {"full_document": "updateLookup"}
+                kwargs = {"full_document": "updateLookup",
+                          **self._expanded_events()}
                 ended = s.kept.get("invalidated")
                 if ended is not None and at is not None \
                         and json.loads(dumps(at)) == ended:

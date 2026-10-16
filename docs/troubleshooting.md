@@ -927,6 +927,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * this server is a standalone, and a change stream needs a replica set - the oplog a stream reads does not exist otherwise. A single node is enough: mongod --replSet rs0 mongosh --eval 'rs.initiate()'
 
+* <...>.<...>: the source no longer has it, and the hop's ddl stops at a collection dropped there. Nothing was copied or dropped; drop it on the target, or set the hop's ddl to apply it
+
 * <...>: the saved position is no point in the source's oplog. Nothing was applied. Move again with --mode full+cdc
 
 * <...>: <...>. Nothing past it was applied. Move again with --mode full+cdc
