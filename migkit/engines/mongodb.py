@@ -1980,7 +1980,7 @@ class MongoEngine(Engine):
         from .. import canon
         client = self._client(side)
         target = self._d(side, db)
-        args = {"full_document": "updateLookup", **self._expanded_events()}
+        args = {**self.image_options(db), **self._expanded_events()}
         if token:
             args["resume_after"] = {"_data": token}
         try:
@@ -4096,6 +4096,48 @@ class MongoEngine(Engine):
         got = re.match(r"(\d+)\.(\d+)", str(text))
         return tuple(int(x) for x in got.groups()) if got else ()
 
+    def image_facts(self, db, side="src"):
+        """What `decide.mongo_change_images` reads: the server's version,
+        the collections of `db` the hop takes, and those of them that keep
+        no pre- and post-images (`changeStreamPreAndPostImages`)."""
+        colls, without = [], []
+        for c in self._client(side)[self._d(side, db)].list_collections(
+                filter={"type": "collection"}):
+            name = c["name"]
+            if name.startswith("system.") or self.hop.excluded(db, name):
+                continue
+            colls.append(name)
+            if not ((c.get("options") or {}).get(
+                    "changeStreamPreAndPostImages") or {}).get("enabled"):
+                without.append(name)
+        return {"version": self._source_version(), "collections": colls,
+                "without images": without}
+
+    def image_options(self, db, log=None):
+        """The stream options of what each change event carries of its
+        document, decided each time a stream opens
+        (`decide.mongo_change_images` on `image_facts`): the post-image
+        required and the pre-image where the server still has it, or the
+        document looked up. A server that will not list its collections
+        is followed by lookup, and says why."""
+        from .. import decide
+        try:
+            facts = self.image_facts(db)
+        except Exception as e:  # noqa: BLE001 - lookup is the safe way
+            facts = {"version": None, "listed": str(e)[:120]}
+        choice = decide.mongo_change_images(facts)
+        took = choice.rung.name if choice.rung is not None else None
+        seen = self.__dict__.setdefault("_images_said", {})
+        if log is not None and seen.get(db) != took:
+            seen[db] = took
+            log(f"{db}: change events carry "
+                + (choice.rung.said if choice.rung else "nothing decided")
+                + (f" ({choice.reason})" if choice.reason else ""))
+        if took == "images":
+            return {"full_document": "required",
+                    "full_document_before_change": "whenAvailable"}
+        return {"full_document": "updateLookup"}
+
     def _expanded_events(self):
         """The stream options that make the source report a collection
         resharded or its shard key refined: asked for where the server
@@ -5454,7 +5496,7 @@ class MongoEngine(Engine):
 
         def look_in(at, unit):
             if s.stream is None:
-                kwargs = {"full_document": "updateLookup",
+                kwargs = {**self.image_options(db, log),
                           **self._expanded_events()}
                 ended = s.kept.get("invalidated")
                 if ended is not None and at is not None \

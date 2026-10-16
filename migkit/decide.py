@@ -4455,6 +4455,79 @@ def cloud_forwarder(facts):
         way("bastion", "the cloud's own bastion tunnel", 2)), f)
 
 
+def redis_site_rule(facts):
+    """The `Choice` of how two Redis sites that both took writes are made
+    alike by the rule the hop states (`two_way.on_conflict`, `stated`),
+    from the write overlap measured over the window (`overlap`,
+    `unmergeable`: keys written on both that are not both counters or both
+    sets) and the clocks' measured skew (`skew_ms`). No key written on
+    both: each site's writes go across, whatever is stated. `delta` or
+    `union` stated: counters summed and sets merged member by member, as
+    the conflict-free types of the vendors' active-active documentation
+    are; a key of any other type written on both is refused by name.
+    `newest` stated: the later write by the server's own clock, where the
+    two are further apart than the skew measured; within it, refused by
+    name. Nothing stated (or a rule that settles nothing here): every key
+    written on both refused by name - never one site's write silently
+    over the other's."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    stated = str(f.get("stated") or "").strip().lower()
+    return climb("the two sites' stated rule", (
+        Rung("apart", "each site's writes carried to the other", needs=(
+            Need("no key written on both", lambda f: not f.get("overlap"),
+                 lambda f: f"{f.get('overlap'):,} keys were written on both"
+                 " sites"),)),
+        Rung("merged", "counters summed and sets merged member by member,"
+             " as the hop states", needs=(
+                 Need("a merge stated", lambda f: stated in ("delta",
+                                                             "union"),
+                      f"the hop states {stated or 'no rule'}, not delta or"
+                      " union"),),
+             because="a counter's steps and a set's members added on two"
+                     " sites commute, so both sites reach the same value"),
+        Rung("newest", "the later write by the server's clock kept on"
+             " both, as the hop states", needs=(
+                 Need("newest stated", lambda f: stated == "newest",
+                      f"the hop states {stated or 'no rule'}, not newest"),
+                 Need("the clocks' skew measured",
+                      lambda f: f.get("skew_ms") is not None,
+                      "the two sites' clocks were not measured against each"
+                      " other, so no write can be called the later")),
+             because="each write carries its site's clock, and a gap"
+                     " wider than the skew measured orders them")), f)
+
+
+def mongo_change_images(facts):
+    """The `Choice` of what a MongoDB change event carries of the document,
+    from the server's version (`version`, a tuple) and the collections
+    followed that keep their pre- and post-images (`collections`,
+    `without images`: those that do not). Where every one keeps them on
+    6.0 or later: the document as of the change itself (the post-image,
+    required, so an expired one stops the tail at its position rather than
+    passing a key with no values) and the document before it where the
+    server still has it. Else: the document looked up as it is when the
+    event is read, which converges but may arrive newer than its event."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    ver = tuple(f.get("version") or ())
+    return climb("what a change event carries", (
+        Rung("images", "each update with the document as of the change and"
+             " the one before it", needs=(
+                 Need("6.0 or later", lambda f: bool(ver) and ver >= (6, 0),
+                      "the source predates 6.0, which keeps no document"
+                      " images for its change events"),
+                 Need("every collection keeps images",
+                      lambda f: bool(f.get("collections"))
+                      and not f.get("without images"),
+                      lambda f: "no collection followed keeps its images"
+                      if not f.get("collections") else
+                      "not every collection followed keeps its images ("
+                      + ", ".join(sorted(f.get("without images"))[:5])
+                      + ")")),
+             because="the event says the document as that change left it,"
+                     " so no later write arrives early"),
+        Rung("looked up", "each update with the document as it is when"
+             " read", because="any server answers it, and writes by key"
+                              " converge on it")), f)
 # ---- how long a stopped command's cleanup is given (W16N-BASELINE) --------
 
 def stop_grace(facts):

@@ -4916,6 +4916,13 @@ number: `docs/research/smart-decisions-2026-09-30.md`,
     stops it there); reshard events need the server's expanded events
     (6.0+), which the stream does not ask for yet; a reseed after a lost
     position does not drop target collections the source no longer has.
+    *W17I (PARTLY):* the oplog read as stored bytes gives the change
+    stream's own changes for the same writes (proved on the `mongo`
+    profile); each stream opened carries the document as of the change
+    and the one before it where every collection followed keeps images on
+    6.0+, else looked up (`decide.mongo_change_images`, re-decided at each
+    open). *Not done:* expanded pre-images not used for conflict checks;
+    the oplog rung's own decode of `ts`/small fields past year 9999.
   * *What only a cloud's control plane can do:* driven through the
     provider's API where it exists (snapshot copy, clone, restore to a
     point, zero-ETL where offered, Azure MI link), and the process
@@ -5700,6 +5707,22 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   applicable (the depth guard fails on it until the owner of
   `capabilities` re-declares); hash field expiry types (Redis 7.4+) fall
   to the scan; no server run (fakes only).
+  *Built 2026-10-16 (W17I, PARTLY):* proved on servers started from the
+  local program: 11,000 writes followed across a stop and a resume land
+  key for key and value for value, the resume said as a partial resync
+  from the backlog or a full one past it; a full start acknowledges its
+  snapshot (a diskless snapshot held the command stream back - the follow
+  never streamed on a server before); an account refused the stream is
+  swept, the sweep saying what it cannot see (a change made and undone
+  between rounds). LT.C4: the hop's stated `two_way.on_conflict` decides
+  (`decide.redis_site_rule`: delta/union merge, newest by the server's
+  clock beyond the measured skew), a key it does not settle refuses the
+  window by name with nothing written; settled writes go in marked units
+  (`apply_two_site`), echoes left out by the mark. *Not done:* the live
+  two-site window and its no-echo proof are xfail (W17I-LIVE/ECHO: a
+  continued site stream times out on some runs); a managed service
+  refusing the stream for real; CRDT types beyond counters and sets; the
+  brand fact (W17G) not read by `decide.redis_live`.
   *Built 2026-10-11, partly (LT.C2, LT.C3; no broker was reached):*
   `KafkaEngine` keeps a copied partition's offsets identical where they
   can be exact, and otherwise (with `offsets: map` and a client that runs

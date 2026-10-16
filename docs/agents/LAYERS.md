@@ -641,8 +641,8 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/dynamodb.py:1039` engines -> workflows (`barriers`)
 - `migkit/engines/kafka.py:1250` engines -> workflows (`barriers`)
-- `migkit/engines/mongodb.py:5182` engines -> workflows (`barriers`)
-- `migkit/engines/redis.py:2874` engines -> workflows (`barriers`)
+- `migkit/engines/mongodb.py:5224` engines -> workflows (`barriers`)
+- `migkit/engines/redis.py:2899` engines -> workflows (`barriers`)
 
 ### an engine calls `changetopic` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
@@ -675,10 +675,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/dynamodb.py:495` engines -> workflows (`marks`)
 - `migkit/engines/hetero.py:4064` engines -> workflows (`marks`)
 - `migkit/engines/kafka.py:1111` engines -> workflows (`marks`)
-- `migkit/engines/mongodb.py:4574` engines -> workflows (`marks`)
+- `migkit/engines/mongodb.py:4616` engines -> workflows (`marks`)
 - `migkit/engines/mysql.py:1531` engines -> workflows (`marks`)
 - `migkit/engines/postgres.py:2891` engines -> workflows (`marks`)
-- `migkit/engines/redis.py:2873` engines -> workflows (`marks`)
+- `migkit/engines/redis.py:2898` engines -> workflows (`marks`)
 
 ### an engine calls `movers` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
@@ -731,12 +731,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/mysql.py:2100` engines -> workflows (`tailctl`)
 - `migkit/engines/neo4j.py:960` engines -> workflows (`tailctl`)
 - `migkit/engines/postgres.py:3485` engines -> workflows (`tailctl`)
-- `migkit/engines/redis.py:3009` engines -> workflows (`tailctl`)
+- `migkit/engines/redis.py:3034` engines -> workflows (`tailctl`)
 
 ### an engine calls `tailtables` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/hetero.py:6` engines -> workflows (`tailtables`)
-- `migkit/engines/mongodb.py:4354` engines -> workflows (`tailtables`)
+- `migkit/engines/mongodb.py:4396` engines -> workflows (`tailtables`)
 - `migkit/engines/postgres.py:4224` engines -> workflows (`tailtables`)
 
 ### an engine calls `topicstates` for a step it cannot do itself; the engine split gives that step a contract below the engines

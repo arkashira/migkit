@@ -2541,9 +2541,22 @@ class RedisEngine(Engine):
             try:
                 got = stream.begin(spaces.replid, spaces.offset,
                                    sink=spool.write if spool else None)
+                if spaces.offset:
+                    log(f"db{db}: " + (
+                        f"resumed at offset {int(spaces.offset):,} from the"
+                        " source's backlog - a partial resync, no write"
+                        " passed over" if got["kind"] == "continue" else
+                        "the source's backlog no longer holds offset"
+                        f" {int(spaces.offset):,} - a full resync: the key"
+                        " spaces are filled again from the source"))
                 with guard:
                     self._started(db, state, spaces, got, spool, node, log)
                     save()
+                if got["kind"] == "full":
+                    # the snapshot landed and its offset saved: said so, as
+                    # a source sending a diskless snapshot holds the
+                    # command stream back until its replica acknowledges it
+                    stream.ack(got["offset"])
             except BaseException:
                 stream.close()
                 raise
@@ -2653,8 +2666,11 @@ class RedisEngine(Engine):
         choice, where = self.seed_way(db, node)
         if choice.rung is None or choice.rung.name != "snapshot":
             return None
+        import shutil
         mem = local_memory()
-        return _Spool(where, choice.facts.get("local free"),
+        # the room is the disk free as measured now, the fact the choice
+        # was made on (a `Choice` keeps its rung, not the facts it read)
+        return _Spool(where, shutil.disk_usage(where).free,
                       mem - pieces.BATCH_BYTES if mem else None)
 
     def _seed_from(self, spool, todo, node, log):
@@ -2819,6 +2835,15 @@ class RedisEngine(Engine):
                 " as an access (no-touch reads came in 7.2), so each"
                 " round's own reads make the next round read those keys"
                 " again, and the source's idle times start from them")
+        if not self.__dict__.get("_sweep_bound"):
+            self.__dict__["_sweep_bound"] = True
+            log(f"db{db}: followed by sweeps, not by the source's own stream"
+                " - after each round the target holds every key as the"
+                " source did at that round, and what no sweep can see is a"
+                " change made and undone between two rounds (a key written"
+                " then deleted, or set and set back): its end state is"
+                " carried, the change between is not, and the order of"
+                " writes inside a round is not kept")
         done = 0
         while not stop() and (rounds is None or done < rounds):
             started = int(self._client("src", db).time()[0])
@@ -3092,11 +3117,19 @@ class RedisEngine(Engine):
                                user=getattr(ep, "user", None),
                                password=ep.password or None)
         done = 0
+        # the units migkit itself wrote on this site (`apply_two_site`) are
+        # left out by their mark, so the other site's writes never echo
+        groups = OwnGroups(self.MARK_KEY)
         try:
-            stream.begin(rep.get("master_replid"),
-                         int(rep.get("master_repl_offset") or 0))
+            began = stream.begin(rep.get("master_replid"),
+                                 int(rep.get("master_repl_offset") or 0))
+            if began["kind"] == "full":
+                # a site with no backlog yet starts the window at its
+                # snapshot's offset, and streams once that is acknowledged
+                stream.ack(began["offset"])
             for argv in stream.commands():
-                changes.route(stream.offset, argv)
+                for one in groups.feed(argv):
+                    changes.route(stream.offset, one)
                 if not stream.buffered():
                     stream.ack(stream.offset)
                 done += 1
@@ -3116,6 +3149,40 @@ class RedisEngine(Engine):
         for k in keys:
             p.dump(k)
         return dict(zip(keys, p.execute()))
+
+    def apply_two_site(self, out):
+        """The writes `twoway.redis_two_site` settled (`out["to_a"]` on the
+        source, `out["to_b"]` on the target), each site's per database in
+        one transaction that opens with migkit's mark, so the site's own
+        stream (`site_changes`) leaves it out. A counter gets the other's
+        step, a set the other's members added and removed, a value its
+        serialised form, a removal the delete. Returns {side: keys}."""
+        done = {}
+        for side, writes in (("src", out.get("to_a") or ()),
+                             ("dst", out.get("to_b") or ())):
+            by_db = {}
+            for d, key, write in writes:
+                by_db.setdefault(d, []).append((key, write))
+            for d, todo in sorted(by_db.items(), key=lambda x: str(x[0])):
+                unit = self._keys(side, d, decode=False).pipeline(
+                    transaction=True)
+                unit.execute_command(*self._mark_command())
+                for key, w in todo:
+                    if w[0] == "incrby":
+                        unit.incrby(key, w[1])
+                    elif w[0] == "set":
+                        if w[1]:
+                            unit.sadd(key, *w[1])
+                        if w[2]:
+                            unit.srem(key, *w[2])
+                    elif w[0] == "del" or w[1] is None:
+                        unit.delete(key)
+                    else:
+                        unit.execute_command("RESTORE", key, 0, w[1],
+                                             "REPLACE")
+                unit.execute()
+                done[side] = done.get(side, 0) + len(todo)
+        return done
 
     def site_skew_ms(self, tries=3):
         """The two sites' clocks apart, with the reading lag, in ms: the

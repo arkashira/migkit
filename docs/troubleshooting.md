@@ -547,6 +547,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: <...> on <...> <...>: <...>, and the rule for <...> is error. Both versions are in conflicts.jsonl; decide the row on both sides, then run the tail again
 
+* <...> keys were written on both sites that the hop's rule (<...>) does not settle: <...> and <...> more | <...>; nothing was written on either site. State two_way.on_conflict: newest (the later write by the server's clock) or delta/union (counters summed, sets merged), or settle the keys by hand
+
 * two_way.tables: a mapping of each table's rules by its name
 
 * two_way.on_conflict: source_priority keeps the row of the side ranked higher - give both as two_way.source_rank and two_way.target_rank, apart

@@ -1636,7 +1636,7 @@ def _redis_carry(f):
     return ("del",) if f["removed"] else ("put", f["value"])
 
 
-def redis_two_site(a, b, skew_ms=None, log=print):
+def redis_two_site(a, b, skew_ms=None, log=print, stated=False):
     """Two Redis sites made alike from the changes each took over one
     window (`a`, `b`: [{db, key, kind: counter|set|value|removed, offset,
     time (the site's clock at the offset, ms), delta | added, gone |
@@ -1656,12 +1656,30 @@ def redis_two_site(a, b, skew_ms=None, log=print):
     A conflict is logged per key with both sides' offsets and times and
     left as each site has it - never settled silently. Returns {"to_a",
     "to_b": [(db, key, write)], "merged", "newest", "conflicts",
-    "choice"}."""
+    "choice"}.
+
+    `stated` is the rule the hop states (`two_way.on_conflict`, None where
+    it states none): the rule is then the hop's (`decide.redis_site_rule`)
+    rather than one chosen from the overlap, a merge or the later write is
+    taken only where it states one, and a key written on both that its
+    rule does not settle refuses the whole window by name, counted, with
+    nothing written on either site."""
     from . import decide
     fa, fb = _redis_folded(a), _redis_folded(b)
-    choice = decide.two_site_rule(dict(redis_overlap(a, b), skew_ms=skew_ms))
-    newest = choice.rung is not None and choice.rung.name in (
-        "merged, else newest",)
+    by_hop = stated is not False
+    if by_hop:
+        said = str(stated or "").strip().lower()
+        choice = decide.redis_site_rule(dict(
+            redis_overlap(a, b), skew_ms=skew_ms,
+            stated=ALIASES.get(said, said)))
+        merge = choice.rung is not None and choice.rung.name == "merged"
+        newest = choice.rung is not None and choice.rung.name == "newest"
+    else:
+        choice = decide.two_site_rule(dict(redis_overlap(a, b),
+                                           skew_ms=skew_ms))
+        merge = True
+        newest = choice.rung is not None and choice.rung.name in (
+            "merged, else newest",)
     out = {"to_a": [], "to_b": [], "merged": [], "newest": [],
            "conflicts": [], "choice": choice}
     for k in sorted(set(fa) | set(fb), key=str):
@@ -1672,12 +1690,12 @@ def redis_two_site(a, b, skew_ms=None, log=print):
         if x is None:
             out["to_a"].append(k + (_redis_carry(y),))
             continue
-        if x["kind"] == y["kind"] == "counter":
+        if merge and x["kind"] == y["kind"] == "counter":
             out["to_a"].append(k + (("incrby", y["delta"]),))
             out["to_b"].append(k + (("incrby", x["delta"]),))
             out["merged"].append(k)
             continue
-        if x["kind"] == y["kind"] == "set":
+        if merge and x["kind"] == y["kind"] == "set":
             out["to_a"].append(k + (("set", sorted(y["added"]),
                                      sorted(y["gone"] - x["added"])),))
             out["to_b"].append(k + (("set", sorted(x["added"]),
@@ -1708,6 +1726,18 @@ def redis_two_site(a, b, skew_ms=None, log=print):
                                        "time": y["time"]}, "why": why})
         log(f"db{k[0]} {k[1]}: a conflict - written on both sites ({why});"
             " left as each site has it for the operator")
+    if by_hop and out["conflicts"]:
+        named = ", ".join(f"db{c['db']} {c['key']!r}"
+                          for c in out["conflicts"][:5])
+        more = len(out["conflicts"]) - 5
+        raise SystemExit(
+            f"{len(out['conflicts']):,} keys were written on both sites that"
+            f" the hop's rule ({stated or 'none stated'}) does not settle: "
+            + named + (f" and {more:,} more" if more > 0 else "")
+            + "; nothing was written on either site. State two_way."
+            "on_conflict: newest (the later write by the server's clock) or"
+            " delta/union (counters summed, sets merged), or settle the"
+            " keys by hand")
     return out
 
 
@@ -1736,7 +1766,10 @@ def redis_two_site_live(eng, stop, log=print, rounds=None):
     if failed:
         raise failed[0]
     (a, held_a), (b, held_b) = got["src"], got["dst"]
-    out = redis_two_site(a, b, skew_ms=skew, log=log)
+    out = redis_two_site(a, b, skew_ms=skew, log=log,
+                         stated=((settings(eng.hop) if hasattr(
+                             eng.hop, "options") else None) or {}).get(
+                                 "on_conflict"))
     out["held"] = [dict(h, site="a") for h in held_a] + [
         dict(h, site="b") for h in held_b]
     out["skew_ms"] = skew
