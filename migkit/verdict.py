@@ -140,6 +140,9 @@ class Decision:
     #: each record's weight in the verdict (`ROWS`, or "note" for a warn
     #: the hop says does not stop the check), in the records' order
     severity: tuple
+    #: the one next step, said here once: the command line, the web view
+    #: and the report read this and no other (`why` is what was found)
+    next: str = ""
 
     @property
     def exit(self):
@@ -229,61 +232,73 @@ def decide(records, hop=None, coverage=None):
             ok.append(r)
             if r.get("reused_from") and not r.get("reuse_held"):
                 reused.append(r)
+    again = f"`migkit check {name}`"
     if bad:
         odd = [r for r in bad if r.get("status") not in STATUSES]
         why = (f"{len(bad)} answer{'s' if len(bad) > 1 else ''} could not"
-               f" be taken: {_named(bad)}. Open the named checks in the"
-               " report, resolve their connection or permission errors, then"
-               f" run `migkit check {name}`")
+               f" be taken: {_named(bad)}")
+        step = ("inspect the named failing findings in the report, resolve"
+                f" their connection or permission errors, then run {again}")
         if odd:
             why += ("; an answer migkit has no word for ("
                     + ", ".join(sorted({str(r.get('status')) for r in odd}))
-                    + ") is taken as not verified; keep the report for"
-                      " investigation")
-        return Decision("error", why, tuple(sev))
+                    + ") is taken as not verified")
+            step += ("; keep the report and the saved evidence of this run"
+                     " for the status migkit has no word for")
+        return Decision("error", why, tuple(sev), step)
     if diff:
-        return Decision("different", f"{len(diff)} differ: {_named(diff)}",
-                        tuple(sev))
+        return Decision(
+            "different", f"{len(diff)} differ: {_named(diff)}", tuple(sev),
+            f"review a repair plan with `migkit sync {name}`, which shows the"
+            f" plan before anything is written, then run {again} to prove"
+            " the repair")
     if not records:
-        return Decision("incomplete", "nothing was compared: no answer at"
-                        " all. Run `migkit doctor`, check that the hop selects"
-                        " visible databases and tables, then run"
-                        f" `migkit check {name}`. Do not treat this run as"
-                        " verified", tuple(sev))
+        return Decision(
+            "incomplete", "nothing was compared: no answer at all",
+            tuple(sev),
+            "check scope: run `migkit doctor`, check that the hop selects"
+            f" visible databases and tables, then run {again}; do not treat"
+            " this run as verified")
     if stale:
-        return Decision("incomplete", f"{len(stale)} answers were taken"
-                        " while the source's schema changed:"
-                        f" {_named(stale)}", tuple(sev))
+        return Decision(
+            "incomplete", f"{len(stale)} answers were taken while the"
+            f" source's schema changed: {_named(stale)}", tuple(sev),
+            f"let the schema change settle, then run {again} again")
     if warn:
-        return Decision("incomplete", f"{len(warn)} answer"
-                        f"{'s' if len(warn) > 1 else ''} to read before the"
-                        f" two are called the same: {_named(warn)}",
-                        tuple(sev))
+        return Decision(
+            "incomplete", f"{len(warn)} answer"
+            f"{'s' if len(warn) > 1 else ''} to read before the two are"
+            f" called the same: {_named(warn)}", tuple(sev),
+            "read each warning in the report and resolve or accept it,"
+            f" then run {again}")
     if reused:
-        return Decision("incomplete", f"{len(reused)} answers were reused"
-                        " from an earlier run and the source may have"
-                        f" changed since: {_named(reused)}. Run"
-                        f" `migkit check {name}` without `--resume` to take"
-                        " fresh answers", tuple(sev))
+        return Decision(
+            "incomplete", f"{len(reused)} answers were reused from an"
+            " earlier run and the source may have changed since:"
+            f" {_named(reused)}", tuple(sev),
+            f"run {again} without `--resume` to take fresh answers")
     if not ok:
-        return Decision("incomplete", "every answer was skipped - nothing"
-                        f" was compared: {_named(skip)}. Read each skip"
-                        " reason in the report, resolve its missing"
-                        " prerequisite or unsupported comparison, then run"
-                        f" `migkit check {name}` again. A required skipped"
-                        " check stays unproved", tuple(sev))
+        return Decision(
+            "incomplete", "every answer was skipped - nothing was"
+            f" compared: {_named(skip)}", tuple(sev),
+            "read each skip reason in the report, resolve its missing"
+            f" prerequisite or unsupported comparison, then run {again};"
+            " a required skipped check stays unproved")
     if coverage:
-        return Decision("incomplete", "the run was narrowed to "
-                        + _narrowed(coverage) + ". To verify the whole"
-                        f" configured hop, run `migkit check {name}` without"
-                        " --db, --table, --only or --exclude", tuple(sev))
+        return Decision(
+            "incomplete", "the run was narrowed to " + _narrowed(coverage),
+            tuple(sev),
+            "to verify the full configured hop, run "
+            f"{again} without --db, --table, --only or --exclude")
     kept = [r for r in ok if r.get("kept_by_hop")]
     why = "; ".join(
         ([f"{len(ok)} compared the same; not compared: {_named(skip)}"]
          if skip else [])
         + ([f"{len(kept)} hold only what the hop keeps by the changes it"
             f" does not carry: {_named(kept)}"] if kept else []))
-    return Decision("same", why, tuple(sev))
+    return Decision("same", why, tuple(sev),
+                    "confirm the intended scope in the report, then go on to"
+                    " the next step you have approved")
 
 
 def difference_kind(count_a, key_a, count_b, key_b):
@@ -1147,6 +1162,7 @@ def summarize(hop, records, engine=None, load=None, coverage=None):
         "generated": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "status": got.status,
         **({"why": got.why} if got.why else {}),
+        **({"next": got.next} if got.next else {}),
         "has_differences": bool(totals.get("diff") or totals.get("error")
                                 or got.status == "error"),
         "totals": totals,

@@ -367,7 +367,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report asks an engine (`engines`) for a name or a fact; the engine contract moves below reporting
 
 - `migkit/export.py:97` reporting -> engines (`engines`)
-- `migkit/report.py:805` reporting -> engines (`engines`)
+- `migkit/report.py:839` reporting -> engines (`engines`)
 - `migkit/telemetry.py:117` reporting -> engines (`engines`)
 - `migkit/troubleshooting.py:62` reporting -> engines (`engines`)
 
@@ -396,7 +396,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report reads `movers` for the state of the running workflow; the state moves below reporting
 
 - `migkit/export.py:129` reporting -> workflows (`movers`)
-- `migkit/report.py:804` reporting -> workflows (`movers`)
+- `migkit/report.py:838` reporting -> workflows (`movers`)
 
 ### a report reads `physical` for the state of the running workflow; the state moves below reporting
 
@@ -413,11 +413,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report states what the decision engine (`capabilities`) chose; the choice is handed down as a fact
 
 - `migkit/diagnostics.py:107` reporting -> decision (`capabilities`)
-- `migkit/report.py:804` reporting -> decision (`capabilities`)
+- `migkit/report.py:838` reporting -> decision (`capabilities`)
 
 ### a report states what the decision engine (`decide`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:804` reporting -> decision (`decide`)
+- `migkit/report.py:838` reporting -> decision (`decide`)
 - `migkit/telemetry.py:151` reporting -> decision (`decide`)
 
 ### a report states what the decision engine (`faults`) chose; the choice is handed down as a fact
@@ -430,15 +430,15 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a report states what the decision engine (`sizing`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:840` reporting -> decision (`sizing`)
+- `migkit/report.py:874` reporting -> decision (`sizing`)
 
 ### a report states what the decision engine (`waysaid`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:804` reporting -> decision (`waysaid`)
+- `migkit/report.py:838` reporting -> decision (`waysaid`)
 
 ### a report states what the decision engine (`workload`) chose; the choice is handed down as a fact
 
-- `migkit/verdict.py:164` reporting -> decision (`workload`)
+- `migkit/verdict.py:167` reporting -> decision (`workload`)
 
 ### a rung or plan reads `consolidate` for what the workflow can do; ends when the workflow publishes its abilities below decision
 

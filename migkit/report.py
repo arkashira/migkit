@@ -1,5 +1,6 @@
 import html
 import json
+import re
 import time
 from pathlib import Path
 
@@ -379,6 +380,9 @@ def render(hop, results, generated=None, decided=None, taken=None):
         f' {"diff" if decided.status != "error" else "error"}"></span>'
         f'{html.escape(said.upper())} &mdash; {len(findings)} of {n_all}'
         f' checks{why}</div>')
+    if decided.next:
+        banner += (f'<div class="sub" style="margin:-8px 0 16px">next: '
+                   f'{html.escape(decided.next)}</div>')
 
     src = f"{hop.source.user}@{hop.source.host}:{hop.source.port}"
     dst = f"{hop.target.user}@{hop.target.host}:{hop.target.port}" \
@@ -622,6 +626,28 @@ def _t(x):
     return str(x).strip().rstrip(".")
 
 
+#: an operator step already in a stop's words: a migkit command, or the
+#: rerun it asks for
+_HAS_STEP = re.compile(
+    r"`migkit [a-z]|\b(re)?run (the |`|migkit )|\bmigkit (doctor|init|check|"
+    r"move|sync|schema|history|rollback|report|watch|advise|assess|"
+    r"leftovers)\b")
+
+
+def stop_next(said, command, hop=None):
+    """The one next step of a stop whose words name none: what the
+    stopped command says is its own, so that no stop ends on a symptom.
+    Empty where the stop already names its step."""
+    if not said or _HAS_STEP.search(said):
+        return ""
+    again = f"`migkit {command}{' ' + hop if hop else ''}`"
+    if command == "doctor":
+        return (f"next: resolve what is named above, then rerun {again}")
+    return ("next: run `migkit doctor` to see what blocks it, resolve what"
+            f" is named above (and any earlier run still writing), then"
+            f" rerun {again}")
+
+
 def restore_unreachable(ts, backend, hop):
     return (f"state {ts} not retrievable from {backend}: the saved state"
             " could not be fetched, so nothing was put back. Check access"
@@ -644,6 +670,14 @@ def no_saved_states(hop):
             " evidence there is; if none fits, stop this rollback and get"
             " an approved recovery plan, and save a state with"
             f" `migkit sync {hop} --go` before the next repair")
+
+
+def no_join_key(table, hop, db):
+    return (f"{table} has no primary key for row joining, so this drilldown"
+            f" cannot run. Run `migkit check {hop} --db {db} --only data` to"
+            " request the engine's complete data comparison; if that is"
+            " unsupported, keep the table unproved and review a schema/key"
+            " plan with the database owner")
 
 
 def schema_failed(count, whole, failed, hop):

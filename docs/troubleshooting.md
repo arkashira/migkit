@@ -179,8 +179,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * --drill supports postgres and mysql hops
 
-* <...> has no primary key for row joining, so this drilldown cannot run. Run `migkit check <...> --db <...> --only data` to request the engine's complete data comparison; if that is unsupported, keep the table unproved and review a schema/key plan with the database owner
-
 * the row-by-row drilldown needs a component that is not installed here: migkit doctor --install puts it in place
 
 * --only <...>: not a check of this hop's engine; its checks are <...>

@@ -130,6 +130,7 @@ def verdict(hop):
         return None
     return {"status": got.get("status"), "generated": got.get("generated"),
             "why": _say(hop, got.get("why")),
+            "next": _say(hop, got.get("next")),
             "has_differences": got.get("has_differences"),
             "totals": got.get("totals") or {},
             "coverage": got.get("coverage"), "session": got.get("session"),

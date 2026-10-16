@@ -845,3 +845,40 @@ These sites sit in files owned by another W12 ticket (`W12-OWNERS.md`), so W12N 
 | 27 | `migkit/cli.py:1296` | W12L (migkit/cli.py) | The {side} port does not answer: {reason}. Check the configured host and port, network route, firewall and database listener, then rerun &#96;migkit doctor&#96;. |
 | 28 | `migkit/cli.py:5330` | W12L (migkit/cli.py) | This cycle could not reload the hop: {reason}; it is using the previous configuration. Correct the file or read access and confirm a later cycle reloads it. Do not approve a scope change or cutover from this stale cycle. |
 | 30 | `migkit/cli.py:1572` | W12L (migkit/cli.py) | {table} has no primary key for row joining, so this drilldown cannot run. Run &#96;migkit check {hop} --db {db} --only data&#96; to request the engine's complete data comparison. If that comparison is unsupported, keep the table unproved and review a schema/key plan with the database owner. |
+
+## Applied (W16H)
+
+Counted as the audit counted: the thirty priority sources against the inventory rows, before and after. Before: 0 yes, 1 partly, 29 no. After: 29 yes, 0 partly, 1 no (24). The whole inventory was not recounted: 95 yes / 90 partly / 388 no above, of which these thirty move 29 rows to yes (124 / 89 / 359). Every other stop that ends the command without a step now gets one at the command's end (`report.stop_next`), and every verdict carries `next`; those rows are not recounted here.
+
+| Priority | Status | Where |
+|---:|---|---|
+| 1 | Applied 2026-10-16 on e891aeea | cli `_stream_leg` tail_end |
+| 2 | Applied 2026-10-16 on e891aeea | cli `_stream_leg` tail_down |
+| 3 | Applied 2026-10-16 on e891aeea | cli `_programs_ready` |
+| 4 | Applied 2026-10-16 on e891aeea | cli `_Checkpoint._merge_into_remote` |
+| 5 | Applied 2026-10-16 on e891aeea | cli `_make_room_for_rows` |
+| 6 | Applied 2026-10-16 on e891aeea | report.restore_unreachable |
+| 7 | Applied 2026-10-16 on e891aeea | report.record_changed |
+| 8 | Applied 2026-10-16 on e891aeea | report.no_saved_states |
+| 9 | Applied 2026-10-16 on e891aeea | report.schema_failed |
+| 10 | Applied 2026-10-16 on e891aeea | report.mask_refused |
+| 11 | Applied 2026-10-16 on e891aeea | report.two_way_refused |
+| 12 | Applied 2026-10-16 on e891aeea | report.replication_refused |
+| 13 | Applied 2026-10-16 on e891aeea | report.copy_not_started |
+| 14 | Applied 2026-10-16 on e891aeea | report.repair_stopped |
+| 15 | Applied 2026-10-16 on e891aeea | report.scope_empty |
+| 16 | Applied 2026-10-16 on e891aeea | verdict.decide (`Decision.next`) |
+| 17 | Applied 2026-10-16 on e891aeea | verdict.decide (`Decision.next`) |
+| 18 | Applied 2026-10-16 on e891aeea | verdict.decide (`Decision.next`) |
+| 19 | Applied 2026-10-16 on e891aeea | verdict.decide (`Decision.next`) |
+| 20 | Applied 2026-10-16 on e891aeea | verdict.decide (`Decision.next`) |
+| 21 | Applied 2026-10-16 on e891aeea | report.config_unreadable |
+| 22 | Applied 2026-10-16 on e891aeea | report.address_unreadable (guide) |
+| 23 | Applied 2026-10-16 on e891aeea | report.source_unreachable (guide) |
+| 24 | Not applied: the doctor's own side-failure line is in the region another ticket (W16C) owns | cli `_doctor_side` |
+| 25 | Applied 2026-10-16 on e891aeea | report.probe_unasked |
+| 26 | Applied 2026-10-16 on e891aeea | report.transport_failed |
+| 27 | Applied 2026-10-16 on e891aeea | report.port_silent |
+| 28 | Applied 2026-10-16 on e891aeea | report.hop_not_reread |
+| 29 | Applied 2026-10-16 on e891aeea | verdict.partition_differences |
+| 30 | Applied 2026-10-16 on e891aeea | report.no_join_key |

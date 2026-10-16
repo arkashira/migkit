@@ -34,12 +34,19 @@ def test_a_leg_in_clear_is_said():
     said = _leg_said(_Said({"encrypted": True,
                             "how": "TLSv1.3 TLS_AES_256_GCM_SHA384"}),
                      "src", "d", far)
-    assert said == "encrypted: TLSv1.3 TLS_AES_256_GCM_SHA384"
+    assert said.startswith("encrypted: TLSv1.3 TLS_AES_256_GCM_SHA384")
+    assert "review certificate verification" in said
     tunneled = Endpoint(host="127.0.0.1", port=40001,
-                        options={"tunnel_to": "10.0.0.5:5432"})
+                        options={"tunnel_to": "10.0.0.5:5432",
+                                 "tunnel_by": "ssh"})
     said = _leg_said(_Said({"encrypted": False, "how": ""}), "src", "d",
                      tunneled)
-    assert "carried through the hop's tunnel to 10.0.0.5:5432" in said
+    assert "carried through the hop's SSH tunnel to 10.0.0.5:5432" in said
+    by_command = Endpoint(host="127.0.0.1", port=40001,
+                          options={"tunnel_to": "10.0.0.5:5432"})
+    said = _leg_said(_Said({"encrypted": False, "how": ""}), "src", "d",
+                     by_command)
+    assert "carry it through an SSH tunnel" in said
     # on this machine nothing crosses a network: nothing to say
     here = Endpoint(host="127.0.0.1", port=5432)
     assert _leg_said(_Said({"encrypted": False, "how": ""}), "src", "d",

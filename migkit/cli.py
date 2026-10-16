@@ -674,6 +674,11 @@ def _stopped(e, ctx):
         said = _clean(e.code, _secrets(ctx))
         if said:
             click.echo(said, err=True)
+            if not isinstance(e, verdict.Usage):
+                step = _words.stop_next(said, ctx.info_name,
+                                        ctx.params.get("hop_name"))
+                if step:
+                    click.echo(step, err=True)
         if isinstance(e, verdict.Usage):
             return verdict.EXIT["usage"]
         if isinstance(e, (verdict.Refused, Held)):
@@ -1385,7 +1390,10 @@ def _leg_said(eng, side, db, ep):
             checked = bool(pos and pos["state"] == "verified")
         left = got.get("unverified") or []
         return (f"encrypted: {got['how']}"
-                + (", the certificate verified" if checked else "")
+                + (", the certificate verified" if checked else
+                   "; the certificate is not checked: review certificate"
+                   " verification (sslmode verify-full, ssl-mode"
+                   " VERIFY_IDENTITY)")
                 + (f"; not verified on: {', '.join(left)}" if left else ""))
     through = (ep.options or {}).get("tunnel_to")
     if through and tls.tunnel_kind(ep) == "ssh":
@@ -1811,12 +1819,7 @@ def _drill(hop_name, db, table, limit):
                 f" where i.indrelid = '\"{sch}\".\"{tbl}\"'::regclass"
                 " and i.indisprimary").splitlines() if c]
     if not keys:
-        raise SystemExit(f"{table} has no primary key for row joining, so"
-                         " this drilldown cannot run. Run `migkit check"
-                         f" {hop_name} --db {db} --only data` to request the"
-                         " engine's complete data comparison; if that is"
-                         " unsupported, keep the table unproved and review a"
-                         " schema/key plan with the database owner")
+        raise SystemExit(_words.no_join_key(table, hop_name, db))
     # compared as shown: a masked column's values are tokens, equal where
     # the values are, so the rows still line up and still differ. In
     # migkit's words: the comparison's own report opens with its name
@@ -2457,6 +2460,8 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
                   + f"  {_esc(verdict_path)}")
     if decided.why:
         console.print(f"  {_esc(decided.why)}")
+    if decided.next:
+        console.print(f"  next: {_esc(decided.next)}")
     if env.get("load"):
         ld = env["load"]
         console.print(f"[yellow]the server was under load: backed off"
