@@ -460,7 +460,7 @@ GAPS = {
         **{cap: (NOT_APPLICABLE, "a GeminiDB instance neither is nor serves"
                                  " a replica, and keeps no change stream a"
                                  " client can read")
-           for cap in ("stream", "fence", "confirm")},
+           for cap in ("fence", "confirm")},
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
     "geminidb-mongo": {
@@ -939,6 +939,8 @@ def _reach(cls, entries):
         seen.add((fn, home))
         body = _body(fn)
         todo += [(_resolve(home, a), home) for a in body.selfs]
+        if "compare_schema" in body.calls:
+            todo.append((_resolve(home, "shape_catalog"), home))
         todo += [(_resolve(HeteroEngine, a), HeteroEngine)
                  for a in body.pairs]
         if home is HeteroEngine and cls is not HeteroEngine:
@@ -1614,13 +1616,13 @@ DEPTH_GAPS = {
                 "redis parquet dynamodb copybook"),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+
     },
     "scope.ops": {
         **_each(NOT_YET, "P0-PARITY.scope",
                 "kafka db2 ase"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+
     },
     "scope.row-filter": {
         **_each(NOT_YET, "P0-PARITY.scope",
@@ -1635,7 +1637,7 @@ DEPTH_GAPS = {
                 "copybook iceberg delta tidb cockroachdb dsql couchbase "
                 "cosmosdb sapodp saas hetero"),
         **_as("schema", "kinesis pubsub"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+
     },
     "scope.names": {
         **_each(NOT_YET, "P0-PARITY.scope",
@@ -1773,7 +1775,7 @@ DEPTH_GAPS = {
                 "duckdb cockroachdb hetero"),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+
     },
     "verify.structure.indexes": {
         **_each(NOT_APPLICABLE, _ATOMIC_INDEX, "mysql"),
@@ -1786,7 +1788,7 @@ DEPTH_GAPS = {
                 "delta"),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+
     },
     "verify.structure.keys": {
         **_each(NOT_APPLICABLE, _KEYED,
@@ -1799,7 +1801,7 @@ DEPTH_GAPS = {
         **_each(NOT_APPLICABLE, _NO_KEY, "parquet delta"),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+
     },
     "verify.structure.materialized-views": {
         **_each(NOT_APPLICABLE, _NO_MATVIEW,
@@ -1824,7 +1826,7 @@ DEPTH_GAPS = {
                 "redis parquet dynamodb copybook"),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+
     },
     "verify.structure.partitions": {
         **_each(NOT_APPLICABLE, _NO_PARTITIONS,
@@ -1967,7 +1969,7 @@ DEPTH_GAPS = {
         **_each(NOT_APPLICABLE, _NO_NULL, "redis"),
         **_as("schema", "kinesis pubsub"),
         **_as("deep", "sapodp saas"),
-        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+
     },
     "verify.value.precision": {
         **_each(NOT_YET, "P0-PARITY.verify",
@@ -2361,7 +2363,7 @@ _KEYS_GIVEN = ("bigtable firestore datastore keyspaces neptune timestream "
 #: the cloud-native services' engines whose changes are not followed - the
 #: service keeps none a client can read, or its follow is not built - said
 #: as their `stream` is (`GAPS`)
-_UNFOLLOWED = "datastore oceanbase-oracle timestream lindorm geminidb-redis"
+_UNFOLLOWED = "datastore oceanbase-oracle timestream lindorm"
 _CN = ("spanner bigtable firestore datastore gaussdb oceanbase "
        "oceanbase-oracle polardbx dcdb keyspaces neptune timestream lindorm "
        "geminidb-cassandra geminidb-redis geminidb-mongo")
@@ -2593,19 +2595,21 @@ _CLOUD_NATIVE_GAPS = {
     "tail.added": {
         **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
         **_each(NOT_YET, "P0-PARITY.tail",
-                "bigtable firestore gaussdb dcdb keyspaces neptune"),
+                "bigtable firestore gaussdb dcdb keyspaces neptune "
+                "geminidb-redis"),
     },
     **{item: {
         **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
         **_each(NOT_YET, "P0-PARITY.tail",
-                "spanner bigtable firestore gaussdb dcdb keyspaces neptune"),
+                "spanner bigtable firestore gaussdb dcdb keyspaces neptune "
+                "geminidb-redis"),
     } for item in ("tail.readded", "tail.ddl")},
     "tail.renames": {
         **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
         **_each(NOT_APPLICABLE, _NOT_RENAMED,
                 "bigtable firestore keyspaces neptune"),
         **_each(NOT_YET, "P0-PARITY.tail",
-                "spanner gaussdb dcdb"),
+                "spanner gaussdb dcdb geminidb-redis"),
     },
     "assess.versions": {
         **_each(NOT_APPLICABLE, _ONE_VERSION,
@@ -2948,7 +2952,7 @@ _CLOUD_NATIVE_UNPROVED = {
     "scope.counters": "gaussdb oceanbase oceanbase-oracle polardbx dcdb",
     "scope.objects": "oceanbase-oracle",
     "scope.ops": ("spanner bigtable firestore gaussdb oceanbase polardbx dcdb "
-                  "keyspaces neptune geminidb-cassandra"),
+                  "keyspaces neptune geminidb-cassandra geminidb-redis"),
     **{item: ("spanner bigtable firestore datastore gaussdb oceanbase "
               "oceanbase-oracle polardbx dcdb keyspaces neptune timestream "
               "lindorm geminidb-cassandra")
@@ -2987,7 +2991,7 @@ _CLOUD_NATIVE_UNPROVED = {
     "verify.table": ("spanner bigtable firestore datastore gaussdb oceanbase "
                      "oceanbase-oracle polardbx dcdb keyspaces neptune "
                      "timestream lindorm geminidb-cassandra geminidb-mongo"),
-    "tail.follows": "oceanbase polardbx geminidb-mongo",
+    "tail.follows": "oceanbase polardbx geminidb-redis geminidb-mongo",
     "tail.table-states": ("spanner bigtable firestore gaussdb oceanbase "
                           "polardbx dcdb keyspaces neptune "
                           "geminidb-cassandra geminidb-redis "
