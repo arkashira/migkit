@@ -17,13 +17,13 @@ None.
 | execution | 5 | 12 | 6739 | the running of work: processes, ranges, retries, pacing, stalls, sizing of what runs at once |
 | conversion | 6 | 58 | 38721 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 10 | 6835 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
-| decision | 8 | 30 | 28980 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
+| decision | 8 | 30 | 29023 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 72 | 118216 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 22 | 22617 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 36 | 47517 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 3 | 9500 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 5966 | the web view and its API |
-| tools | - | 11 | 6838 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
+| tools | - | 11 | 6844 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
 | data | - | 5 | 10705 | the files migkit ships as resources |
 
 ## configuration (9 files)
@@ -189,7 +189,7 @@ None.
 | `migkit/changedepth.py` | - | 144 | 5: engines.mongodb, engines.mysql, engines.postgres, ready, waysaid | decision 1 | - | 5: a_copy_goal_is_not_held_by_the_change_depth, a_mongodb_replica_set_is_followed_by_its_oplog, a_mongodb_standalone_is_followed_by_buckets (+2) |
 | `migkit/costmodel.py` | - | 780 | 9: decide, engines.generic, legs, marks, planner (+4) | configuration 1, decision 2, engines 4, persistence 2, reporting 1, workflows 1 | - | 10: a_mysql_copy_passes_rows_server_to_server, a_way_is_costed_by_what_the_unit_is, one_table_ladder (+7) |
 | `migkit/dba.py` | - | 1500 | 6: cli, guide, managed, physical, ready (+1) | configuration 3, decision 1, engines 8 | - | 11: a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do, a_source_change_is_offered_never_assumed (+8) |
-| `migkit/decide.py` | decision: every choice is a rung | 4093 | 98: advisors, applyway, archive, attempts, autonomous (+93) | decision 27, engines 5, persistence 4 | - | 119: a_clone_plugin_offer_on_mysql, a_cluster_target_is_loaded_as_it_spreads_its_rows, a_continuous_hop_feeds_a_warehouse (+116) |
+| `migkit/decide.py` | decision: every choice is a rung | 4136 | 98: advisors, applyway, archive, attempts, autonomous (+93) | decision 27, engines 5, persistence 4 | - | 119: a_clone_plugin_offer_on_mysql, a_cluster_target_is_loaded_as_it_spreads_its_rows, a_continuous_hop_feeds_a_warehouse (+116) |
 | `migkit/factbook.py` | - | 442 | 4: cli, decide, jointplan, waysaid | - | - | 1: every_fact_is_declared |
 | `migkit/faults.py` | - | 801 | 14: autonomous, cli, engines.generic, engines.hetero, engines.mssql (+9) | decision 2, execution 3, reporting 1 | - | 9: a_copier_reconciles_and_retunes, a_failed_bulk_copy_falls_back_to_the_range_copier_on_mysql, a_failure_is_told_by_what_it_did (+6) |
 | `migkit/guarantees.py` | - | 682 | 8: cli, decide, engines.base, jointplan, legs (+3) | - | - | 7: a_finished_tables_indexes_build_while_the_next_copies, a_move_keeps_what_it_must, every_way_is_weighed (+4) |
@@ -411,7 +411,7 @@ None.
 | `tools/ease_measure.py` | - | 245 | 0 | configuration 1 | - | none |
 | `tools/final_suite.py` | - | 857 | 0 | configuration 6, integrations 1, tools 1 | - | none |
 | `tools/gen_changelog.py` | - | 120 | 1: tools.gen_docs | - | - | none |
-| `tools/gen_codemap.py` | - | 1950 | 1: tools.gen_docs | configuration 4, decision 2 | - | none |
+| `tools/gen_codemap.py` | - | 1956 | 1: tools.gen_docs | configuration 4, decision 2 | - | none |
 | `tools/gen_docs.py` | - | 1782 | 0 | cli 6, configuration 25, conversion 2, decision 8, engines 5, reporting 6, tools 2, web 4, workflows 1 | - | none |
 | `tools/pin_programs.py` | - | 239 | 0 | integrations 1 | - | none |
 | `tools/whole_use.py` | - | 337 | 0 | configuration 2, integrations 1 | - | none |

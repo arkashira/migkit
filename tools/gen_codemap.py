@@ -1571,9 +1571,14 @@ KNOWN_UPWARD = {
     ),
     ("an engine calls `marks` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
+        "migkit/engines/cassandra.py migkit.marks",
+        "migkit/engines/dynamodb.py migkit.marks",
         "migkit/engines/hetero.py migkit.marks",
+        "migkit/engines/kafka.py migkit.marks",
+        "migkit/engines/mongodb.py migkit.marks",
         "migkit/engines/mysql.py migkit.marks",
         "migkit/engines/postgres.py migkit.marks",
+        "migkit/engines/redis.py migkit.marks",
     ),
     ("an engine calls `movers` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
@@ -1641,6 +1646,7 @@ KNOWN_UPWARD = {
     ("an engine calls `twoway` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/base.py migkit.twoway",
+        "migkit/engines/dynamodb.py migkit.twoway",
         "migkit/engines/hetero.py migkit.twoway",
         "migkit/engines/mysql.py migkit.twoway",
         "migkit/engines/postgres.py migkit.twoway",

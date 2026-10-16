@@ -28,15 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 365
 
-### (not listed)
-
-- `migkit/engines/cassandra.py:2536` engines -> workflows (`marks`)
-- `migkit/engines/dynamodb.py:495` engines -> workflows (`marks`)
-- `migkit/engines/dynamodb.py:919` engines -> workflows (`twoway`)
-- `migkit/engines/kafka.py:921` engines -> workflows (`marks`)
-- `migkit/engines/mongodb.py:4406` engines -> workflows (`marks`)
-- `migkit/engines/redis.py:2867` engines -> workflows (`marks`)
-
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
 
 - `migkit/charsets.py:1245` conversion -> decision (`decide`)
@@ -671,9 +662,14 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `marks` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
+- `migkit/engines/cassandra.py:2536` engines -> workflows (`marks`)
+- `migkit/engines/dynamodb.py:495` engines -> workflows (`marks`)
 - `migkit/engines/hetero.py:4064` engines -> workflows (`marks`)
+- `migkit/engines/kafka.py:921` engines -> workflows (`marks`)
+- `migkit/engines/mongodb.py:4406` engines -> workflows (`marks`)
 - `migkit/engines/mysql.py:1531` engines -> workflows (`marks`)
 - `migkit/engines/postgres.py:2892` engines -> workflows (`marks`)
+- `migkit/engines/redis.py:2867` engines -> workflows (`marks`)
 
 ### an engine calls `movers` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
@@ -741,6 +737,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an engine calls `twoway` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/base.py:6585` engines -> workflows (`twoway`)
+- `migkit/engines/dynamodb.py:919` engines -> workflows (`twoway`)
 - `migkit/engines/hetero.py:4031` engines -> workflows (`twoway`)
 - `migkit/engines/mysql.py:1531` engines -> workflows (`twoway`)
 - `migkit/engines/postgres.py:2892` engines -> workflows (`twoway`)
