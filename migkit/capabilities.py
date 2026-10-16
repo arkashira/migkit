@@ -265,21 +265,54 @@ GAPS = {
                                       " auto-increment to carry"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
     },
-    **{name: {
-        "deep": (NOT_YET, "33"),
-        "sequences": (NOT_YET, "33"),
-        "params": (NOT_YET, "33"),
-        "bulk-move": (NOT_YET, "33"),
-        "stream": (NOT_YET, "33"),
-        "fence": (NOT_YET, "33"),
-        "confirm": (NOT_YET, "33"),
-        "delta": (NOT_YET, "33"),
-        "users": (NOT_YET, "33"),
-        "statistics": (NOT_YET, "33"),
-        "snapshot": (NOT_YET, "33"),
-    } for name in ("redshift", "snowflake")},
+    # Redshift and Snowflake (ER1.acct): users, settings and counters read
+    # from each catalogue, a writer held in migkit's own table, Snowflake
+    # followed through its tables' change tracking with a rollback point in
+    # its time travel - built on fakes, not run on an account
+    # (`warehouse.UNPROVED_ON`)
+    "redshift": {
+        "bulk-move": (NOT_APPLICABLE, "a warehouse has no whole-database"
+                                      " dump and load a client runs: its"
+                                      " bulk path is its own stage load,"
+                                      " which table-copy runs table by"
+                                      " table"),
+        "stream": (NOT_APPLICABLE, "Redshift keeps no change history a"
+                                   " client reads: a Redshift source is"
+                                   " copied, not followed, and a Redshift"
+                                   " target follows by its landing's"
+                                   " position"),
+        "fence": (NOT_APPLICABLE, "nothing follows a Redshift source, so"
+                                  " there is no catch-up to wait for; a"
+                                  " writer is held to its number in"
+                                  " migkit's own table, serializable"),
+        "confirm": (NOT_APPLICABLE, "nothing follows a Redshift source, so"
+                                    " nothing is still arriving: every"
+                                    " difference is one"),
+        "delta": (NOT_APPLICABLE, "Redshift records no changed rows a"
+                                  " client reads: the full check compares"
+                                  " every row"),
+        "statistics": (NOT_APPLICABLE, "Redshift analyzes a table itself"
+                                       " after a load (its automatic"
+                                       " analyze)"),
+        "snapshot": (NOT_APPLICABLE, "a Redshift snapshot is the cluster's,"
+                                     " taken by the service, not by a"
+                                     " client: the rollback point is the"
+                                     " service's own snapshot"),
+    },
+    "snowflake": {
+        "bulk-move": (NOT_APPLICABLE, "a warehouse has no whole-database"
+                                      " dump and load a client runs: its"
+                                      " bulk path is its own stage load,"
+                                      " which table-copy runs table by"
+                                      " table"),
+        "statistics": (NOT_APPLICABLE, "Snowflake keeps each table's"
+                                       " statistics itself, in its"
+                                       " partitions' metadata written with"
+                                       " each load"),
+    },
     # BigQuery is serverless: it has no counters, settings or statistics to
-    # carry, compare or refresh. Carrying users is not built; following it
+    # carry, compare or refresh. Its users are IAM bindings, carried by
+    # grant statements with no password (`warehouse.UNPROVED_ON`); following it
     # through change history, its deep checks, snapshots and copy jobs are,
     # and owed a project to prove against (`UNPROVED`)
     "bigquery": {
@@ -289,7 +322,6 @@ GAPS = {
                                    " compare: what a dataset and a table"
                                    " are kept under are their options,"
                                    " which the deep checks compare"),
-        "users": (NOT_YET, "33"),
         "statistics": (NOT_APPLICABLE, "BigQuery keeps its tables'"
                                        " statistics itself as they change:"
                                        " there is nothing to refresh"),
@@ -474,10 +506,6 @@ GAPS = {
 }
 
 
-# Redshift and Snowflake read each side's catalogue for the deep checks
-# (`warehouse._CatalogWarehouse.check_deep`); BigQuery's are still to come
-for _warehouse in ("redshift", "snowflake"):
-    del GAPS[_warehouse]["deep"]
 
 
 @functools.lru_cache(maxsize=None)
@@ -1576,7 +1604,7 @@ DEPTH_GAPS = {
               "opensearch cassandra copybook iceberg delta couchbase "
               "cosmosdb bigquery"),
         **_each(NOT_YET, "P0-PARITY.scope",
-                "sqlite db2 db2i db2zos redshift snowflake "
+                "sqlite db2 db2i db2zos "
                 "duckdb cockroachdb dsql hetero"),
         **_as("schema", "kinesis pubsub"),
         **_as("table-copy", "sapodp saas"),
@@ -2043,7 +2071,7 @@ DEPTH_GAPS = {
     "tail.table-states": {
         **_each(NOT_YET, "P0-PARITY.tail",
                 "clickhouse ase opensearch "
-                "cassandra redshift snowflake iceberg delta"),
+                "cassandra redshift iceberg delta"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_as("schema", "kinesis pubsub"),
         **_each(NOT_YET, "P0-PARITY.small", "generic"),
@@ -2051,7 +2079,7 @@ DEPTH_GAPS = {
     "tail.added": {
         **_each(NOT_YET, "P0-PARITY.tail",
                 "redis clickhouse dynamodb db2 db2i "
-                "ase opensearch cassandra redshift snowflake "
+                "ase opensearch cassandra redshift "
                 "iceberg delta dsql couchbase cosmosdb sapodp saas"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_as("schema", "kinesis pubsub"),
@@ -2061,7 +2089,7 @@ DEPTH_GAPS = {
     "tail.readded": {
         **_each(NOT_YET, "P0-PARITY.tail",
                 "postgres redis clickhouse "
-                "db2 db2i ase opensearch cassandra redshift snowflake "
+                "db2 db2i ase opensearch cassandra redshift "
                 "iceberg delta cockroachdb dsql couchbase "
                 "sapodp saas"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
@@ -2083,7 +2111,7 @@ DEPTH_GAPS = {
     "tail.renames": {
         **_each(NOT_YET, "P0-PARITY.tail",
                 "redis clickhouse db2 db2i ase "
-                "opensearch redshift snowflake iceberg delta tidb "
+                "opensearch redshift iceberg delta tidb "
                 "cockroachdb dsql sapodp saas"),
         **_each(NOT_APPLICABLE, _NOT_RENAMED,
                 "kafka dynamodb cassandra couchbase cosmosdb"),
@@ -2263,7 +2291,7 @@ DEPTH_GAPS = {
     },
     "cutover.drain": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "db2 ase redshift snowflake iceberg "
+                "db2 ase redshift iceberg "
                 "delta hetero"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_as("schema", "kinesis pubsub"),

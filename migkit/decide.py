@@ -5742,3 +5742,120 @@ def reshard_order(facts):
     else:
         order = list(range(n))
     return choice, order
+
+# --- the warehouses' remaining ways, on what each account answers (W18G) ------
+
+def warehouse_follow_way(facts):
+    """How a warehouse source is followed.
+
+    `facts`: `engine`, `tables` (in scope), `tracked` (of them, those that
+    track their changes) and `untracked` (their names), `streams` (the
+    account read a table's changes when asked - an edition or a setting
+    that does not is `refused`, its words), `retention` (seconds of time
+    travel the least-kept table holds: all the history a change read has)
+    and `gap` (seconds the copy is forecast to take before the tail reads
+    from where it began, where measured). A history shorter than the gap
+    would be gone before it is read: refused before the copy, the two
+    figures said."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+
+    def hours(s):
+        return f"{(s or 0) / 3600:.1f} hours"
+
+    short = Need(
+        "history kept past the copy",
+        lambda x: x.get("retention") is None or x.get("gap") is None
+        or x.get("retention") > x.get("gap"),
+        lambda x: f"the tables keep {hours(x.get('retention'))} of change"
+                  f" history and the copy is forecast at {hours(x.get('gap'))}:"
+                  " where the tail would begin is forgotten before it reads"
+                  " it - raise the tables' DATA_RETENTION_TIME_IN_DAYS past"
+                  " the copy, or copy fewer tables at a time")
+    return climb("following a warehouse source", (
+        Rung("changes", "each table's changes read window by window, the"
+             " rows as they stood at each window's end", needs=(
+                 Need("an account that reads changes",
+                      lambda x: bool(x.get("streams")),
+                      lambda x: "the account did not read a table's"
+                                f" changes ({x.get('refused') or 'refused'})"),
+                 Need("every table tracking its changes",
+                      lambda x: x.get("tracked", 0) >= x.get("tables", 0),
+                      lambda x: f"{x.get('tables', 0) - x.get('tracked', 0)}"
+                                " tables track no changes: alter table "
+                                + ", ".join(list(x.get("untracked") or [])[:4])
+                                + " set change_tracking = true, before the"
+                                " copy a tail follows"),
+                 short),
+             because="the change read and time travel give each window's"
+                     " net state, one snapshot of every table"),
+        Rung("landing", "followed only where migkit lands the rows: at the"
+             " landing's position", footprint=1, needs=(
+                 Need("an account without change reads",
+                      lambda x: not x.get("streams"),
+                      "the account reads changes, so what keeps them from"
+                      " being read is said by the first way"),),
+             because="the account reads no table's changes: a table is"
+                     " followed only as migkit's own landing writes it, by"
+                     " the landing's position; a table others write cannot"
+                     " be followed"),
+        Rung("none", "not followed", footprint=2,
+             because="what the account keeps cannot carry a follow from the"
+                     " copy's start: see the first way's reason")),
+        f, prove=False)
+
+
+def warehouse_fence_way(facts):
+    """How a warehouse holds a writer to its number in migkit's own table.
+
+    `facts`: `engine`, `transactions` (the account runs a transaction of
+    several statements: Snowflake's, BigQuery's multi-statement ones) and
+    `isolation` (as the account answers it: Redshift runs `serializable`,
+    or `snapshot isolation` where a database was made so). The hold is an
+    update of the number's row inside the writer's own transaction."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("holding a warehouse writer to its number", (
+        Rung("serializable", "the number's row updated in the writer's"
+             " transaction, serializable", needs=(
+                 Need("serializable isolation",
+                      lambda x: str(x.get("isolation") or "").lower()
+                      == "serializable",
+                      lambda x: f"the database runs {x.get('isolation')}"
+                                " isolation" if x.get("isolation") else
+                                "the isolation was not answered"),),
+             because="two transactions that both update the row cannot both"
+                     " commit: a writer under an old number is aborted"),
+        Rung("transaction", "the number's row updated in the writer's"
+             " transaction, under the table's write lock", footprint=1,
+             needs=(Need("transactions of several statements",
+                         lambda x: bool(x.get("transactions")),
+                         "the account runs no transaction of several"
+                         " statements"),),
+             because="the update locks the table until the writer commits,"
+                     " so no raise passes it, and a row holding another"
+                     " number refuses the writer"),
+        Rung("none", "no writer held", footprint=2,
+             because="nothing holds the number and the writes in one"
+                     " transaction here: a standby is refused")),
+        f, prove=False)
+
+
+def warehouse_snapshot_way(facts):
+    """How a warehouse target keeps a point a rollback returns to.
+
+    `facts`: `travel_hours` (the least time travel the tables in scope
+    keep) and `tables`. A clone at an instant inside time travel is the
+    table as it stood then, made without a copy."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("a warehouse target's rollback point", (
+        Rung("travel", "the instant kept: each table cloned back from it",
+             needs=(Need("time travel on every table",
+                         lambda x: (x.get("travel_hours") or 0) > 0,
+                         "a table keeps no time travel"
+                         " (DATA_RETENTION_TIME_IN_DAYS = 0)"),),
+             because=f"every table keeps {f.get('travel_hours')} hours of"
+                     " time travel: the instant is good that long"),
+        Rung("counts", "each table's rows counted; no way back",
+             footprint=1,
+             because="a table keeps no time travel: the rows are counted,"
+                     " and a rollback has nothing to clone back from")),
+        f, prove=False)

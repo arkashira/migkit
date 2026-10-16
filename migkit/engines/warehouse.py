@@ -53,6 +53,7 @@ Snowflake, and what each emulator does not implement, only on a real
 account - each test says which.
 """
 import hashlib
+import itertools
 import json
 
 from .. import decide, nanotime, pieces
@@ -62,6 +63,88 @@ from .base import Engine, Result
 from .bigquery_changes import BigQueryChanges
 from .bigquery_checks import BigQueryChecks
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
+
+
+#: what is built here and run on no account: the catalogues' statements,
+#: the deep checks, users and grants, settings, counters, the writer's
+#: number, Snowflake's follow and rollback point and BigQuery's change
+#: history, copy jobs and IAM bindings - proved on fakes answering each
+#: catalogue and on emulators where they answer; the whole list, read
+#: by the matrix from this source (`capabilities`)
+UNPROVED_ON = ("built; not run on a real Redshift cluster, Snowflake"
+               " account or BigQuery project")
+UNPROVED_ITEMS = (
+    "bigquery:assess.capacity bigquery:assess.handwork "
+    "bigquery:assess.preflight bigquery:assess.writers "
+    "bigquery:cutover.drain bigquery:cutover.rollback "
+    "bigquery:move.bulk bigquery:move.create-missing "
+    "bigquery:move.large-values bigquery:move.partitioned "
+    "bigquery:move.table-copy bigquery:schema.defaults "
+    "bigquery:schema.foreign-keys bigquery:schema.routines "
+    "bigquery:schema.views bigquery:scope.deep bigquery:scope.objects "
+    "bigquery:scope.repair bigquery:tail.added bigquery:tail.follows "
+    "bigquery:tail.readded bigquery:tail.renames "
+    "bigquery:tail.table-states bigquery:verify.access.table-grants "
+    "bigquery:verify.confirm bigquery:verify.delta "
+    "bigquery:verify.fence bigquery:verify.movement.target-ahead "
+    "bigquery:verify.repair bigquery:verify.repair-undo "
+    "bigquery:verify.structure.collection-options "
+    "bigquery:verify.structure.columns "
+    "bigquery:verify.structure.foreign-keys "
+    "bigquery:verify.structure.indexes bigquery:verify.structure.keys "
+    "bigquery:verify.structure.materialized-views "
+    "bigquery:verify.structure.objects "
+    "bigquery:verify.structure.partitions "
+    "bigquery:verify.structure.row-security "
+    "bigquery:verify.structure.schema-diff bigquery:verify.users "
+    "bigquery:verify.value.charset bigquery:verify.value.collation "
+    "bigquery:verify.value.narrowing bigquery:verify.value.null-empty "
+    "bigquery:verify.value.precision bigquery:verify.value.rendering "
+    "bigquery:verify.value.timezone redshift:assess.capacity "
+    "redshift:assess.handwork redshift:assess.preflight "
+    "redshift:cutover.counters redshift:move.create-missing "
+    "redshift:move.sized redshift:schema.defaults "
+    "redshift:schema.foreign-keys redshift:schema.views "
+    "redshift:scope.counters redshift:scope.deep redshift:scope.names "
+    "redshift:scope.objects redshift:verify.access.object-ownership "
+    "redshift:verify.access.table-grants "
+    "redshift:verify.movement.target-ahead redshift:verify.repair "
+    "redshift:verify.repair-undo "
+    "redshift:verify.structure.collection-options "
+    "redshift:verify.structure.columns "
+    "redshift:verify.structure.foreign-keys "
+    "redshift:verify.structure.keys "
+    "redshift:verify.structure.materialized-views "
+    "redshift:verify.structure.objects "
+    "redshift:verify.structure.row-security "
+    "redshift:verify.structure.sharding redshift:verify.table "
+    "redshift:verify.tables redshift:verify.users "
+    "snowflake:assess.capacity snowflake:assess.handwork "
+    "snowflake:assess.preflight snowflake:cutover.counters "
+    "snowflake:cutover.drain snowflake:cutover.rollback "
+    "snowflake:move.create-missing snowflake:move.large-values "
+    "snowflake:move.sized snowflake:move.table-copy "
+    "snowflake:schema.defaults snowflake:schema.foreign-keys "
+    "snowflake:schema.views snowflake:scope.counters "
+    "snowflake:scope.deep snowflake:scope.names snowflake:scope.objects "
+    "snowflake:scope.row-filter snowflake:tail.added "
+    "snowflake:tail.follows snowflake:tail.readded "
+    "snowflake:tail.renames snowflake:tail.table-states "
+    "snowflake:verify.access.object-ownership "
+    "snowflake:verify.access.sequence-grants "
+    "snowflake:verify.access.table-grants snowflake:verify.confirm "
+    "snowflake:verify.delta snowflake:verify.fence "
+    "snowflake:verify.identity.sequence-parity "
+    "snowflake:verify.movement.target-ahead snowflake:verify.repair "
+    "snowflake:verify.repair-undo "
+    "snowflake:verify.structure.collection-options "
+    "snowflake:verify.structure.columns "
+    "snowflake:verify.structure.foreign-keys "
+    "snowflake:verify.structure.keys "
+    "snowflake:verify.structure.materialized-views "
+    "snowflake:verify.structure.objects "
+    "snowflake:verify.structure.row-security snowflake:verify.table "
+    "snowflake:verify.tables snowflake:verify.users")
 
 
 def _is_ddl(change):
@@ -1357,7 +1440,618 @@ class _CatalogWarehouse(_Warehouse):
 
 
 
-class RedshiftEngine(_CatalogWarehouse):
+# ---- the cells each warehouse answers by its account (ER1.acct) ----------------
+#
+# Users and grants, settings, counters, a writer's number and (Snowflake) a
+# follow and a rollback point: each way chosen by a rung on what the account
+# answers (`decide.warehouse_follow_way`, `warehouse_fence_way`,
+# `warehouse_snapshot_way`), the statements built and run on fakes answering
+# each catalogue - not run on an account (`UNPROVED_ON`).
+
+
+def _ident(name):
+    """A name quoted as both warehouses quote one."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+class _WarehouseCells:
+    """What Redshift and Snowflake share of the cells below; each class
+    names its own catalogue's statements."""
+
+    ACCOUNT_PASSWORDS = ("a warehouse keeps no password a client reads"
+                         " back: create sets the passwords file's")
+    ACCOUNT_ATTRS = ()
+    #: the accounts and roles the warehouse makes for itself, in small letters
+    SERVER_OWN = frozenset()
+    #: (name) of each user; (name) of each role; (grantee, role) of each role
+    #: held; (grantee, table, privilege) of each table grant in a schema
+    USERS_SQL = ROLES_SQL = HELD_SQL = GRANTS_SQL = ""
+    #: the settings that change what a value is or how it compares
+    CRITICAL_PARAMS = frozenset()
+    #: whether the account runs a transaction of several statements
+    TRANSACTIONS = True
+    #: the table a writer's number is kept in (`fencing`)
+    FENCE_TABLE = OWN + "fence"
+
+    # ---- users, roles and their grants --------------------------------------
+
+    def _first_db(self):
+        return (list(self.hop.databases or []) or [None])[0]
+
+    def accounts(self, side):
+        """The users and roles of `side` in `Engine.accounts`' shape: the
+        roles each holds and the hop's tables' grants; no password
+        (`ACCOUNT_PASSWORDS`)."""
+        dbs = list(self.hop.databases or [])
+        if not dbs:
+            return {}
+        out = {}
+
+        def acct(key, login):
+            return out.setdefault(key, {"login": login, "roles": [],
+                                        "grants": [], "hash": None,
+                                        "attrs": {}})
+
+        def own(name):
+            return str(name).lower() in self.SERVER_OWN
+
+        for (name,) in self._rows(side, dbs[0], self.USERS_SQL):
+            if not own(name):
+                acct(f"user:{self._said(str(name))}", True)
+        for (name,) in self._rows(side, dbs[0], self.ROLES_SQL):
+            if not own(name):
+                acct(f"role:{self._said(str(name))}", False)
+
+        def holder(who):
+            for kind in ("user", "role"):
+                if f"{kind}:{self._said(str(who))}" in out:
+                    return f"{kind}:{self._said(str(who))}"
+            return None
+
+        for who, role in self._rows(side, dbs[0], self.HELD_SQL):
+            key = holder(who)
+            if key and not own(role):
+                out[key]["roles"].append(self._said(str(role)))
+        for db in dbs:
+            for who, table, what in self._rows(side, db, self.GRANTS_SQL,
+                                               (self._schema(side, db),)):
+                key, name = holder(who), self._said(str(table))
+                if key and not self._own(name) and self.in_scope(db, name):
+                    out[key]["grants"].append(
+                        f"{str(what).upper()} ON {db}.{name}")
+        for a in out.values():
+            a["roles"] = sorted(set(a["roles"]))
+            a["grants"] = sorted(set(a["grants"]))
+        return out
+
+    def _create_user(self, name, password):
+        raise NotImplementedError
+
+    def _grantee(self, key):
+        kind, _, name = key.partition(":")
+        return f"role {_ident(self._stored(name))}" if kind == "role" \
+            else _ident(self._stored(name))
+
+    def account_steps(self, src, dst, passwords):
+        """(steps, skipped) that make the target's users, roles and grants
+        the source's: a missing role or user made (a user's password the
+        passwords file's, never shown), each role held and table grant the
+        target lacks given; each with the statement that takes it back."""
+        steps, skipped = [], []
+        passwords = passwords or {}
+        for key in sorted(src, key=lambda k: (not k.startswith("role:"), k)):
+            kind, _, name = key.partition(":")
+            want, have = src[key], dst.get(key)
+            if have is None:
+                pw = passwords.get(name)
+                run = (f"create role {_ident(self._stored(name))}"
+                       if kind == "role" else self._create_user(name, pw))
+                shown = (run if kind == "role" or pw is None else
+                         self._create_user(name, None)
+                         + " (its password the passwords file's)")
+                steps.append({"key": key, "shown": shown, "run": run,
+                              "undo": f"drop {kind} "
+                                      f"{_ident(self._stored(name))}",
+                              "made": True, "given": pw is not None})
+                have = {"roles": [], "grants": []}
+            for role in want["roles"]:
+                if role not in have.get("roles", []):
+                    run = self._grant_role(role, key)
+                    steps.append({"key": key, "shown": run, "run": run,
+                                  "undo": run.replace("grant ", "revoke ", 1)
+                                  .replace(" to ", " from ", 1),
+                                  "made": False, "given": False})
+            for grant in want["grants"]:
+                if grant in have.get("grants", []):
+                    continue
+                what, _, on = grant.partition(" ON ")
+                db, _, table = on.partition(".")
+                why = self._ungrantable(key)
+                if why:
+                    skipped.append((key, f"{grant}: {why}"))
+                    continue
+                target = self._qualified("dst", db,
+                                         self.hop.target_table_in(db, table))
+                run = (f"grant {what.lower()} on table {target} to"
+                       f" {self._grantee(key)}")
+                steps.append({"key": key, "shown": run, "run": run,
+                              "undo": f"revoke {what.lower()} on table"
+                                      f" {target} from {self._grantee(key)}",
+                              "made": False, "given": False})
+        return steps, skipped
+
+    def _ungrantable(self, key):
+        return None
+
+    def account_run(self, what):
+        """One step's statement run on the target, in a transaction of its
+        own."""
+        conn = self._connect("dst", self._first_db())
+        try:
+            cur = conn.cursor()
+            cur.execute(what)
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ---- settings, and what the plan cannot change ------------------------
+
+    def _settings(self, side, db):
+        """{setting: value} of `side`, or what stopped the reading."""
+        try:
+            return self._read_settings(side, db)
+        except Exception as e:  # noqa: BLE001 - said, as the reading's
+            return {self.UNREADABLE: self._first_line(e)}
+
+    def check_params(self, db):
+        """Both sides' settings through the report every engine's go
+        through - one that changes what a value is or how it compares
+        (`CRITICAL_PARAMS`) fails it - and what each side runs on (its
+        size, clusters or slots), which is the account's: read and said,
+        never changed by migkit."""
+        out = list(self._param_result(
+            db, self._settings("src", db), self._settings("dst", db),
+            self.CRITICAL_PARAMS, "set the target's parameter as the"
+            " source's at the account or the database (an administrator's)"))
+        said = []
+        for side, who in (("src", "source"), ("dst", "target")):
+            try:
+                said.append(f"{who}: {self._runs_on(side, db) or 'unsaid'}")
+            except Exception as e:  # noqa: BLE001 - said, not guessed
+                said.append(f"{who}: not read ({self._first_line(e)})")
+        out.append(Result("params", f"{db} capacity", "ok",
+                          "; ".join(said) + " - what a side runs on is the"
+                          " account's to size: migkit reads it and does not"
+                          " change it"))
+        return out
+
+    # ---- a writer's number, in migkit's own table (`fencing`) --------------
+
+    def fence_way(self, side, db):
+        """How this account holds a writer to its number
+        (`decide.warehouse_fence_way`), on what it answers."""
+        try:
+            isolation = self._isolation(side, db)
+        except Exception as e:  # noqa: BLE001 - not answered: not assumed
+            isolation = None
+            self.__dict__["_isolation_why"] = self._first_line(e)
+        return decide.warehouse_fence_way({
+            "engine": self.CANON_ENGINE, "transactions": self.TRANSACTIONS,
+            "isolation": isolation})
+
+    def own_table(self, side, db):
+        """(a connection of its own, the fence table's name), the table
+        made where it is not."""
+        conn = self._connect(side, db)
+        t = self._qualified(side, db, self.FENCE_TABLE)
+        cur = conn.cursor()
+        cur.execute(f"create table if not exists {t} (row_name varchar(512),"
+                    " number bigint, seen varchar(4096))")
+        conn.commit()
+        return conn, t
+
+    def fence_read(self, side, db, row):
+        conn, t = self.own_table(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute(f"select number, seen from {t} where row_name ="
+                        f" {MARK}", (row,))
+            got = cur.fetchone()
+            conn.rollback()
+        finally:
+            conn.close()
+        return (int(got[0]), got[1]) if got else (None, None)
+
+    def fence_raise(self, side, db, row, number, seen=""):
+        """The row raised to `number` where it holds a lower one (made where
+        there is none), in a transaction of its own; the number it holds
+        after. Refused where the account holds no transaction around it."""
+        way = self.fence_way(side, db)
+        if way.path == "none":
+            raise SystemExit(f"{db}: no writer can be held here: {way.reason}")
+        conn, t = self.own_table(side, db)
+        try:
+            cur = conn.cursor()
+            cur.execute(f"update {t} set number = {MARK}, seen = {MARK} where"
+                        f" row_name = {MARK} and number < {MARK}",
+                        (int(number), seen, row, int(number)))
+            if not cur.rowcount:
+                cur.execute(f"select count(*) from {t} where row_name ="
+                            f" {MARK}", (row,))
+                if not cur.fetchone()[0]:
+                    cur.execute(f"insert into {t} (row_name, number, seen)"
+                                f" values ({MARK}, {MARK}, {MARK})",
+                                (row, int(number), seen))
+            conn.commit()
+        finally:
+            conn.close()
+        return self.fence_read(side, db, row)[0]
+
+    def fence_hold(self, cur, table, row, number):
+        """In a writer's transaction, last before its commit: the number's
+        row updated where it still holds `number` - the update takes the
+        warehouse's write lock (or, serializable, conflicts with a raise),
+        so a raise cannot pass it before the commit. A row holding another
+        number refuses the transaction (`fencing.Fenced`)."""
+        from .. import fencing
+        cur.execute(f"update {table} set seen = seen where row_name = {MARK}"
+                    f" and number = {MARK}", (row, int(number)))
+        if cur.rowcount == 1:
+            return
+        cur.execute(f"select number from {table} where row_name = {MARK}",
+                    (row,))
+        got = cur.fetchone()
+        held = None if not got else int(got[0])
+        raise fencing.Fenced(
+            f"the target holds no number for {row}" if held is None else
+            f"the target holds {held} for {row}, not this writer's {number}:"
+            + (" a newer holder raised it" if held > int(number) else
+               " it was never raised for this writer"))
+
+
+class _RedshiftCells(_WarehouseCells):
+    """Redshift's users, settings, identity columns and isolation."""
+
+    SERVER_OWN = frozenset({"rdsdb", "rdsadmin", "public"})
+    USERS_SQL = "select usename from pg_user where usesysid > 1"
+    ROLES_SQL = "select role_name from svv_roles"
+    HELD_SQL = "select user_name, role_name from svv_user_grants"
+    GRANTS_SQL = ("select identity_name, relation_name, privilege_type from"
+                  " svv_relation_privileges where namespace_name = %s")
+    CRITICAL_PARAMS = frozenset({
+        "timezone", "datestyle", "enable_case_sensitive_identifier",
+        "extra_float_digits", "describe_field_name_in_uppercase",
+        "search_path"})
+    #: (table, column) of each identity column in a schema
+    IDENTITIES = ("select c.relname, a.attname from pg_attribute a join"
+                  " pg_class c on c.oid = a.attrelid join pg_namespace n on"
+                  " n.oid = c.relnamespace join pg_attrdef d on d.adrelid ="
+                  " a.attrelid and d.adnum = a.attnum where n.nspname = %s"
+                  " and d.adsrc like '%%identity%%'")
+
+    def _create_user(self, name, password):
+        return (f"create user {_ident(name)} password "
+                + ("disable" if password is None else
+                   "'" + str(password).replace("'", "''") + "'"))
+
+    def _grant_role(self, role, key):
+        kind, _, name = key.partition(":")
+        return (f"grant role {_ident(role)} to "
+                + (f"role {_ident(name)}" if kind == "role" else _ident(name)))
+
+    def _read_settings(self, side, db):
+        return {str(n): None if v is None else str(v) for n, v in self._rows(
+            side, db, "select name, setting from pg_settings")}
+
+    def _runs_on(self, side, db):
+        slots = self._rows(side, db, "select service_class, num_query_tasks"
+                                     " from stv_wlm_service_class_config"
+                                     " where service_class > 5 order by 1")
+        return ", ".join(f"queue {c}: {n} slots" for c, n in slots)
+
+    def _isolation(self, side, db):
+        got = self._rows(side, db, "select database_isolation_level from"
+                                   " stv_db_isolation_level where"
+                                   " database_name = current_database()")
+        return str(got[0][0]).lower() if got else None
+
+    def check_autoinc(self, db):
+        """Each identity column's highest value on the target at or past
+        the source's. Redshift hands out an identity's numbers by its own
+        rule and cannot be set past a value: a table loaded with the
+        source's numbers is said, with the way to give it room."""
+        from . import same_engine
+        if not same_engine(self):
+            return [Result("autoinc", db, "skip",
+                           "the target is another engine: its counters are"
+                           " carried by the move")]
+        tops = {}
+        for side in ("src", "dst"):
+            got = tops[side] = {}
+            for t, c in self._rows(side, db, self.IDENTITIES,
+                                   (self._schema(side, db),)):
+                if not self.in_scope(db, str(t)):
+                    continue
+                top = self._rows(side, db, f"select max({_ident(c)}) from"
+                                           f" {self._qualified(side, db, t)}")
+                got[str(t)] = (str(c), top[0][0] if top else None)
+        if not tops["src"]:
+            return [Result("autoinc", db, "ok", "no identity columns")]
+        behind = [(t, c, n, tops["dst"].get(t, (c, None))[1])
+                  for t, (c, n) in sorted(tops["src"].items())
+                  if n is not None and (tops["dst"].get(t, (c, None))[1]
+                                        or 0) < n]
+        if behind:
+            return [Result("autoinc", db, "diff",
+                           f"{len(behind)} identity columns behind the"
+                           " source: " + "; ".join(
+                               f"{t}.{c} {d} < source {n}"
+                               for t, c, n, d in behind[:6]),
+                           fix_hint="Redshift cannot set an identity past a value:"
+                           " make the table again with IDENTITY(<the source's"
+                           " highest + 1>, <step>) and insert its rows")]
+        return [Result("autoinc", db, "ok",
+                       f"{len(tops['src'])} identity columns, each at or past"
+                       " the source's highest; Redshift hands out the next"
+                       " numbers by its own rule")]
+
+
+class _SnowflakeCells(_WarehouseCells):
+    """Snowflake's users, settings, sequences and its rollback point."""
+
+    SERVER_OWN = frozenset({"snowflake", "accountadmin", "securityadmin",
+                            "sysadmin", "useradmin", "orgadmin", "public"})
+    USERS_SQL = "select name from snowflake.account_usage.users where" \
+                " deleted_on is null"
+    ROLES_SQL = "select name from snowflake.account_usage.roles where" \
+                " deleted_on is null"
+    HELD_SQL = ("select grantee_name, name from"
+                " snowflake.account_usage.grants_to_users where deleted_on"
+                " is null union all select grantee_name, name from"
+                " snowflake.account_usage.grants_to_roles where deleted_on"
+                " is null and granted_on = 'ROLE'")
+    GRANTS_SQL = ("select grantee, table_name, privilege_type from"
+                  " information_schema.table_privileges where table_schema"
+                  " = %s")
+    CRITICAL_PARAMS = frozenset({
+        "TIMEZONE", "TIMESTAMP_TYPE_MAPPING", "QUOTED_IDENTIFIERS_IGNORE_CASE",
+        "BINARY_INPUT_FORMAT", "BINARY_OUTPUT_FORMAT",
+        "TIMESTAMP_INPUT_FORMAT", "DATE_INPUT_FORMAT", "WEEK_START",
+        "WEEK_OF_YEAR_POLICY", "ERROR_ON_NONDETERMINISTIC_MERGE",
+        "ERROR_ON_NONDETERMINISTIC_UPDATE"})
+
+    def _create_user(self, name, password):
+        return (f"create user {_ident(self._stored(name))}"
+                + ("" if password is None else " password = '"
+                   + str(password).replace("'", "''") + "'"))
+
+    def _grant_role(self, role, key):
+        kind, _, name = key.partition(":")
+        return (f"grant role {_ident(self._stored(role))} to {kind}"
+                f" {_ident(self._stored(name))}")
+
+    def _ungrantable(self, key):
+        return (None if key.startswith("role:") else
+                "Snowflake grants a table's privileges to roles only: the"
+                " user holds them through a role")
+
+    def _read_settings(self, side, db):
+        return {str(r["key"]): None if r.get("value") is None
+                else str(r["value"])
+                for r in self._listing(side, db, "show parameters")}
+
+    def _runs_on(self, side, db):
+        name = self._rows(side, db, "select current_warehouse()")[0][0]
+        if not name:
+            return None
+        got = self._listing(side, db, f"show warehouses like {MARK}", (name,))
+        if not got:
+            return None
+        w = got[0]
+        return (f"warehouse {name}, size {w.get('size')}, clusters"
+                f" {w.get('min_cluster_count')}-{w.get('max_cluster_count')}")
+
+    def _isolation(self, side, db):
+        return "read committed"
+
+    def check_autoinc(self, db):
+        """Each sequence's next value on the target at or past the source's:
+        one behind would hand out a number the source already gave."""
+        from . import same_engine
+        if not same_engine(self):
+            return [Result("autoinc", db, "skip",
+                           "the target is another engine: its counters are"
+                           " carried by the move")]
+        src, dst = self._sequences("src", db), self._sequences("dst", db)
+        src = {s: v for s, v in src.items() if self.takes(db, "sequence", s)}
+        if not src:
+            return [Result("autoinc", db, "ok", "no sequences")]
+        gone = sorted(s for s in src if s not in dst)
+        behind = [(s, n, dst[s][0]) for s, (n, _) in sorted(src.items())
+                  if s in dst and dst[s][0] < n]
+        if gone or behind:
+            said = [f"missing on the target: {', '.join(gone[:6])}"] \
+                if gone else []
+            said += [f"{s} next {d} < source {n}" for s, n, d in behind[:6]]
+            return [Result("autoinc", db, "diff", "; ".join(said),
+                           fix_hint="Snowflake cannot move a sequence on:"
+                           " make it again at the source's next value - "
+                           + "; ".join(
+                               f"create or replace sequence"
+                               f" {self._qualified('dst', db, s)} start ="
+                               f" {n} increment = {src[s][1]}"
+                               for s, n, _ in behind[:6]))]
+        return [Result("autoinc", db, "ok",
+                       f"{len(src)} sequences, each next value at or past"
+                       " the source's")]
+
+    def _retention(self, side, db):
+        """{table: hours of time travel it keeps}, of the tables in scope."""
+        return {self._said(str(r["name"])):
+                int(r.get("retention_time") or 0) * 24
+                for r in self._show(side, db, "tables")
+                if self.in_scope(db, self._said(str(r["name"])))}
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """What the target held before a repair, by the way its time travel
+        allows (`decide.warehouse_snapshot_way`): the instant it was taken,
+        with the statements that put each table back as it stood then -
+        a clone at that instant swapped in - in `dst-snapshots.sql`; where
+        a table keeps no time travel, its rows counted and no way back said.
+        A sequence cannot be set back: `kind` "sequences" keeps nothing."""
+        if kind == "sequences":
+            return None
+        kept = self._retention("dst", db)
+        got = decide.warehouse_snapshot_way({
+            "travel_hours": min(kept.values()) if kept else 0,
+            "tables": len(kept)})
+        now = self._rows("dst", db, "select current_timestamp()")[0][0]
+        stamp = str(now.isoformat() if hasattr(now, "isoformat") else now)
+        lines = [f"-- the target as it was at {stamp}: {got.reason}"]
+        for t in sorted(kept):
+            q = self._qualified("dst", db, t)
+            back = self._qualified("dst", db, f"{OWN}back_{self._leaf(t)}")
+            if got.path == "travel":
+                lines += [f"create or replace table {back} clone {q} at("
+                          f"timestamp => '{stamp}'::timestamp_tz);",
+                          f"alter table {q} swap with {back};",
+                          f"drop table {back};"]
+            else:
+                n = self._rows("dst", db, f"select count(*) from {q}")[0][0]
+                lines.append(f"-- {t}: {n} rows, no time travel to go back by")
+        (state_dir / "dst-snapshots.sql").write_text("\n".join(lines) + "\n")
+        return got
+
+
+class _SnowflakeChanges(BigQueryChanges):
+    """A Snowflake source followed through each table's change tracking -
+    what a stream reads - window by window, as BigQuery's change history
+    is: each window's keys (`CHANGES` between two instants), and the row
+    as the table held it at the window's end. Whether the account reads
+    changes, every table tracks them and its time travel outlasts the
+    copy are the rung's (`decide.warehouse_follow_way`)."""
+
+    #: a window ends this many seconds before now: a transaction committing
+    #: as the window is read is not half in it
+    CHANGES_FLOOR = 60
+    #: the copy's forecast length in seconds, where the plan has measured
+    #: one (`warehouse_follow_way`'s `gap`)
+    copy_seconds = None
+
+    def _now(self, side):
+        import datetime as _dt
+        got = self._rows(side, self._first_db(),
+                         "select current_timestamp()")[0][0]
+        if got.tzinfo is None:
+            got = got.replace(tzinfo=_dt.timezone.utc)
+        return got.astimezone(_dt.timezone.utc)
+
+    def _history(self, side, db):
+        return {self._said(str(r["name"])):
+                str(r.get("change_tracking") or "").upper() == "ON"
+                for r in self._show(side, db, "tables")}
+
+    def _travel(self, side, db):
+        kept = self._retention(side, db)
+        return min(kept.values()) if kept else 0
+
+    def _reads_changes(self, side, db, table):
+        """None where the account reads a table's changes, else what it
+        said: one bounded probe, its answer kept."""
+        held = self.__dict__.setdefault("_reads_changes_of", {})
+        if (side, db) not in held:
+            try:
+                self._rows(side, db, f"select 1 from"
+                                     f" {self._qualified(side, db, table)}"
+                                     " changes(information => default) at("
+                                     "offset => -1) limit 0")
+                held[(side, db)] = None
+            except Exception as e:  # noqa: BLE001 - said as the edition's
+                held[(side, db)] = self._first_line(e)
+        return held[(side, db)]
+
+    def follow_way(self, side, db):
+        """The rung on what the account answers: changes read, the
+        landing's position only, or refused with the figures."""
+        tables = self.neutral_tables(side, db)
+        history = self._history(side, db)
+        kept = self._retention(side, db)
+        refused = self._reads_changes(side, db, tables[0]) if tables else None
+        return decide.warehouse_follow_way({
+            "engine": "snowflake", "tables": len(tables),
+            "tracked": sum(1 for t in tables if history.get(t)),
+            "untracked": [t for t in tables if not history.get(t)],
+            "streams": refused is None, "refused": refused,
+            "retention": min(kept.values()) * 3600 if kept else None,
+            "gap": self.copy_seconds})
+
+    def tail_blockers(self, side, db):
+        """[words] for what keeps the tables from being followed: the
+        rung's reason where the account cannot (with the statement that
+        turns tracking on, the source's owner's to run), and every table
+        with no declared key or a key that takes NULL."""
+        way = self.follow_way(side, db)
+        out = [] if way.path == "changes" else [
+            way.reason + (f" - {way.rung.because}" if way.path == "landing"
+                          else "")]
+        for t in self.neutral_tables(side, db):
+            key = self.neutral_key(side, db, t)
+            if not key:
+                out.append(f"{t} has no declared key, and a change is"
+                           " applied by its key")
+        return out
+
+    def table_oids(self, side, db):
+        return {self._said(str(t)): str(created) for t, created in self._rows(
+            side, db, "select table_name, created from information_schema"
+                      f".tables where table_schema = {MARK} and table_type ="
+                      " 'BASE TABLE'", (self._schema(side, db),))
+            if not self._own(self._said(str(t)))
+            and self.in_scope(db, self._said(str(t)))}
+
+    def _window(self, side, db, table, key, start, end, skip):
+        held = self.__dict__.setdefault("_windows", {})
+        at = (side, db, table, start.isoformat(), end.isoformat())
+        have = held.get(at)
+        if have is None or have[1] != skip:
+            tbl = self._qualified(side, db, table)
+            keys = ", ".join(self._q(k) for k in key)
+            join = " and ".join(f"ch.{self._q(k)} = cur.{self._q(k)}"
+                                for k in key)
+            s, e = (f"'{x.isoformat()}'::timestamp_tz" for x in (start, end))
+            sql = (f"with cur as (select *, true as \"_migkit_here\" from"
+                   f" {tbl} at(timestamp => {e})), ch as (select distinct"
+                   f" {keys} from {tbl} changes(information => default) at("
+                   f"timestamp => {s}) end(timestamp => {e})) select "
+                   + ", ".join(f"ch.{self._q(k)} as \"_migkit_k{i}\""
+                               for i, k in enumerate(key))
+                   + f", cur.* from ch left join cur on {join} order by "
+                   + ", ".join(f"ch.{self._q(k)}" for k in key))
+            rows = iter(_Folded(r) for r in self._listing(side, db, sql))
+            have = [itertools.islice(rows, skip, None), skip]
+            held[at] = have
+        return have
+
+    def _followed(self, side, db):
+        from .. import canon
+        return [(t, self.neutral_key(side, db, t),
+                 [(n, canon.type_class("snowflake", ty))
+                  for n, ty in self.neutral_columns(side, db, t)])
+                for t in self.neutral_tables(side, db)]
+
+
+class _Folded(dict):
+    """A row read by name in either case: Snowflake answers unquoted names
+    in capitals."""
+
+    def get(self, k, default=None):
+        for name in (k, str(k).lower(), str(k).upper()):
+            if dict.__contains__(self, name):
+                return dict.get(self, name)
+        return default
+
+
+class RedshiftEngine(_RedshiftCells, _CatalogWarehouse):
     """Amazon Redshift, through the PostgreSQL driver it speaks to, or
     through its own driver where the endpoint signs in by IAM (`iam: true`,
     with `cluster_identifier` or `serverless_work_group`, `region`).
@@ -1367,6 +2061,8 @@ class RedshiftEngine(_CatalogWarehouse):
     and `stage_endpoint_url` where the bucket is not in the machine's own
     region or is S3-compatible storage."""
     CANON_ENGINE = "redshift"
+    #: the account its cells are owed (`UNPROVED_ITEMS`)
+    UNPROVED_ON = "built; not run on a real Redshift cluster"
     DIGEST_DIALECT = "redshift"
 
     def _connect(self, side, db):
@@ -1928,7 +2624,8 @@ class RedshiftEngine(_CatalogWarehouse):
                 self._drop_files(side, url)
 
 
-class SnowflakeEngine(FoldsToCapitals, _CatalogWarehouse):
+class SnowflakeEngine(_SnowflakeChanges, _SnowflakeCells, FoldsToCapitals,
+                      _CatalogWarehouse):
     """Snowflake. The endpoint's `account` option is the account
     identifier; `warehouse` and `role`, where given, are used as they
     are; `private_key_file` (and `private_key_passphrase`) signs in by key
@@ -1936,6 +2633,8 @@ class SnowflakeEngine(FoldsToCapitals, _CatalogWarehouse):
     streaming channel. Unquoted names are kept in capitals, as Oracle's
     are."""
     CANON_ENGINE = "snowflake"
+    #: the account its cells are owed (`UNPROVED_ITEMS`)
+    UNPROVED_ON = "built; not run on a real Snowflake account"
     DIGEST_DIALECT = "snowflake"
     #: large values - a VARCHAR or VARIANT holds up to 128 MB, a BINARY
     #: 64 MB: sized by the server over a sample of a large table, a wide
@@ -2571,6 +3270,8 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
     true` signs in as nobody, which only an emulator takes."""
     READS_BILLED = True
     CANON_ENGINE = "bigquery"
+    #: the account its cells are owed (`UNPROVED_ITEMS`)
+    UNPROVED_ON = "built; not run on a real BigQuery project"
     #: the SQL a hop's row filter and defaults are written in and
     #: translated to (sqlglot's name for it)
     SQL_DIALECT = "bigquery"
@@ -2594,6 +3295,78 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
     APPEND_BYTES = 8 * 1024 * 1024
     #: seconds the project's job history is trusted before it is asked again
     JOBS_ASKED_EVERY = 600
+
+    # ---- who may read a dataset: IAM bindings, never a password ------------
+
+    ACCOUNT_PASSWORDS = ("BigQuery keeps no passwords: who reads a dataset"
+                         " is a member bound to a role by the cloud's IAM")
+    ACCOUNT_ATTRS = ()
+    #: the members a binding names that sign in themselves; the rest
+    #: (groups, domains, special groups) are held as roles
+    MEMBERS_WHO_SIGN_IN = ("user", "serviceAccount")
+
+    def _privileges_view(self, side, db):
+        """The region's view of the dataset's IAM bindings."""
+        client = self._client(side)
+        ds = client.get_dataset(self.side_database(side, db))
+        loc = str(getattr(ds, "location", None) or "US").lower()
+        return (f"{self._q(client.project)}.{self._q('region-' + loc)}"
+                ".INFORMATION_SCHEMA.OBJECT_PRIVILEGES")
+
+    def accounts(self, side):
+        """The members bound to roles on the hop's datasets and tables, in
+        `Engine.accounts`' shape: each role a binding grants as
+        "<role> ON <dataset>.<table or *>"; no password, ever
+        (`ACCOUNT_PASSWORDS`)."""
+        out = {}
+        for db in self.hop.databases or []:
+            dataset = self.side_database(side, db)
+            for obj, role, member in self._rows(
+                    side, db, "select object_name, privilege_type, grantee"
+                              f" from {self._privileges_view(side, db)}"
+                              " where object_schema ="
+                              f" {self._lit(dataset)}"):
+                kind = str(member).partition(":")[0]
+                key = ("user:" if kind in self.MEMBERS_WHO_SIGN_IN
+                       else "role:") + str(member)
+                a = out.setdefault(key, {
+                    "login": key.startswith("user:"), "roles": [],
+                    "grants": [], "hash": None, "attrs": {}})
+                on = "*" if str(obj) == dataset else str(obj)
+                if on == "*" or (not self._own(on) and self.in_scope(db, on)):
+                    a["grants"].append(f"{role} ON {db}.{on}")
+        for a in out.values():
+            a["grants"] = sorted(set(a["grants"]))
+        return out
+
+    def account_steps(self, src, dst, passwords):
+        """(steps, skipped): each binding the target's datasets lack given
+        by a grant statement, taken back by its revoke; a member is the
+        cloud's, never made here, and a password is skipped as IAM's."""
+        steps, skipped = [], []
+        for key in sorted(src):
+            member = key.partition(":")[2]
+            if member in (passwords or {}):
+                skipped.append((key, self.ACCOUNT_PASSWORDS))
+            have = set((dst.get(key) or {}).get("grants", []))
+            for grant in src[key]["grants"]:
+                if grant in have:
+                    continue
+                role, _, on = grant.partition(" ON ")
+                db, _, table = on.partition(".")
+                target = (f"schema {self._q(self._d('dst', db))}"
+                          if table == "*" else "table " + self._qualified(
+                              "dst", db, self.hop.target_table_in(db, table)))
+                run = f"grant {self._q(role)} on {target} to {self._lit(member)}"
+                steps.append({"key": key, "shown": run, "run": run,
+                              "undo": f"revoke {self._q(role)} on {target}"
+                                      f" from {self._lit(member)}",
+                              "made": False, "given": False})
+        return steps, skipped
+
+    def account_run(self, what):
+        """One step's statement run as a query of the target's project."""
+        self._client("dst").query(what).result()
 
     def _client(self, side):
         from ..cloudapi import gate

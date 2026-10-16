@@ -63,6 +63,8 @@ class BigQueryChanges:
     CHANGE_POINT_READS_ONLY = True
     #: a position says where to read on from
     READS_AHEAD = False
+    #: how far behind now a window ends (a subclass's account may differ)
+    CHANGES_FLOOR = CHANGES_FLOOR
 
     # ---- where the changes are read from ---------------------------------------
 
@@ -296,7 +298,7 @@ class BigQueryChanges:
         lost = self.position_lost(side, db, token, now)
         if lost:
             raise SystemExit(f"{db}: {lost}")
-        floor = now - datetime.timedelta(seconds=CHANGES_FLOOR)
+        floor = now - datetime.timedelta(seconds=self.CHANGES_FLOOR)
         tables = self._followed(side, db)
         start = _read(token["at"])
         end = _read(token["end"]) if token.get("end") else None

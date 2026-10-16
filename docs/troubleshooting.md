@@ -1305,6 +1305,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> on the target and in the change are not of one kind, so which version is newer cannot be told; give the column one type on both sides
 
+* <...>: no writer can be held here: <...>
+
 * <...> has no key on the target, and a change is applied by its key
 
 * the <...> needs `account`, the Snowflake account identifier

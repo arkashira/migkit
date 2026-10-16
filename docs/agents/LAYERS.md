@@ -468,7 +468,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `drainmark` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1142` decision -> workflows (`drainmark`)
+- `migkit/capabilities.py:1170` decision -> workflows (`drainmark`)
 
 ### a rung or plan reads `drift` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -476,7 +476,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `jobs` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1148` decision -> workflows (`jobs`)
+- `migkit/capabilities.py:1176` decision -> workflows (`jobs`)
 
 ### a rung or plan reads `leaves` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -485,7 +485,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a rung or plan reads `movers` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
 - `migkit/bulkways.py:73` decision -> workflows (`movers`)
-- `migkit/capabilities.py:560` decision -> workflows (`movers`)
+- `migkit/capabilities.py:588` decision -> workflows (`movers`)
 - `migkit/legs.py:182` decision -> workflows (`movers`)
 - `migkit/machine.py:466` decision -> workflows (`movers`)
 - `migkit/planner.py:64` decision -> workflows (`movers`)
@@ -511,7 +511,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `topicstates` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1084` decision -> workflows (`topicstates`)
+- `migkit/capabilities.py:1112` decision -> workflows (`topicstates`)
 
 ### a rung or plan reads `unchanged` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -525,7 +525,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `users` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:532` decision -> workflows (`users`)
+- `migkit/capabilities.py:560` decision -> workflows (`users`)
 
 ### a rung reads a wrapped tool's surface (`mirror`); the surface is a fact handed down
 
@@ -1003,7 +1003,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### the decision engine asks an engine (`engines.hetero`) what it can do; ends when the engine contract is a package below decision
 
-- `migkit/capabilities.py:906` decision -> engines (`engines.hetero`)
+- `migkit/capabilities.py:934` decision -> engines (`engines.hetero`)
 
 ### the decision engine asks an engine (`engines.mysql`) what it can do; ends when the engine contract is a package below decision
 
