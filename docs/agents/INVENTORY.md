@@ -17,20 +17,20 @@ None.
 | execution | 5 | 12 | 6993 | the running of work: processes, ranges, retries, pacing, stalls, sizing of what runs at once |
 | conversion | 6 | 58 | 39486 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 10 | 7447 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
-| decision | 8 | 31 | 33238 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
+| decision | 8 | 31 | 33320 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 79 | 127363 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 23939 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
-| workflows | 10 | 36 | 48768 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
-| cli | 11 | 4 | 10239 | the command line and the guide that asks for two addresses |
+| workflows | 10 | 36 | 48806 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
+| cli | 11 | 4 | 10234 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6449 | the web view and its API |
-| tools | - | 12 | 7059 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
+| tools | - | 12 | 7095 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
 | data | - | 5 | 10810 | the files migkit ships as resources |
 
 ## configuration (9 files)
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 1 | 48: avrostream, barriers, binlog_marks, capabilities, cli (+43) | - | - | 758: conftest.py, holdkit.py, large_values_rig.py (+755) |
+| `migkit/__init__.py` | - | 1 | 48: avrostream, barriers, binlog_marks, capabilities, cli (+43) | - | - | 760: conftest.py, holdkit.py, large_values_rig.py (+757) |
 | `migkit/addresses.py` | - | 527 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2456 | 58: approvals, backupseed, carriers, changetopic, cli (+53) | configuration 14, conversion 1, engines 1, execution 9, integrations 4, persistence 3, reporting 1, safety 4 | - | 828: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+825) |
@@ -190,7 +190,7 @@ None.
 | `migkit/cloud_readiness.py` | - | 256 | 1: ready | configuration 1, decision 2, integrations 1, safety 1 | - | 2: a_keyed_read_is_paged_by_what_it_measured, the_cloud_side_of_readiness_is_audited_before_the_move |
 | `migkit/costmodel.py` | - | 780 | 9: decide, engines.generic, legs, marks, planner (+4) | configuration 1, decision 2, engines 4, persistence 2, reporting 1, workflows 1 | - | 11: a_managed_services_own_operation_is_ranked_by_its_eligibility, a_mysql_copy_passes_rows_server_to_server, a_way_is_costed_by_what_the_unit_is (+8) |
 | `migkit/dba.py` | - | 1502 | 6: cli, guide, managed, physical, ready (+1) | configuration 3, decision 1, engines 8, integrations 1 | - | 11: a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do, a_source_change_is_offered_never_assumed (+8) |
-| `migkit/decide.py` | decision: every choice is a rung | 7400 | 129: advisors, anchor, applyway, archive, attempts (+124) | conversion 4, decision 33, engines 5, persistence 4 | - | 189: rung_branches.py, a_batch_that_is_not_a_page_is_the_decisions, a_clone_plugin_offer_on_mysql (+186) |
+| `migkit/decide.py` | decision: every choice is a rung | 7482 | 129: advisors, anchor, applyway, archive, attempts (+124) | conversion 4, decision 33, engines 5, persistence 4 | - | 190: rung_branches.py, a_batch_that_is_not_a_page_is_the_decisions, a_clone_plugin_offer_on_mysql (+187) |
 | `migkit/factbook.py` | - | 442 | 4: cli, decide, jointplan, waysaid | - | - | 1: every_fact_is_declared |
 | `migkit/faults.py` | - | 801 | 14: autonomous, cli, engines.generic, engines.hetero, engines.mssql (+9) | decision 2, execution 3, reporting 1 | - | 9: a_copier_reconciles_and_retunes, a_failed_bulk_copy_falls_back_to_the_range_copier_on_mysql, a_failure_is_told_by_what_it_did (+6) |
 | `migkit/guarantees.py` | - | 682 | 8: cli, decide, engines.base, jointplan, legs (+3) | - | - | 7: a_finished_tables_indexes_build_while_the_next_copies, a_move_keeps_what_it_must, every_way_is_weighed (+4) |
@@ -222,7 +222,7 @@ None.
 | `migkit/binlog_marks.py` | - | 151 | 2: binlog_payload, engines.mysql | configuration 1 | - | 1: two_way_rungs_are_ranked_by_measurement |
 | `migkit/binlog_payload.py` | - | 297 | 1: engines.mysql | engines 1 | - | 2: a_compressed_binlog_is_read_or_stops_the_tail, mariadb_compressed_events_are_read_or_stop_the_tail |
 | `migkit/catalog.py` | - | 274 | 6: drift, engines.mssql, engines.postgres, engines.sqlcatalog, engines.sqlite (+1) | reporting 1 | - | 8: a_catalogue_is_one_shape, a_move_keeps_what_it_must, drift_compares_whole_definitions (+5) |
-| `migkit/engines/__init__.py` | - | 449 | 53: addresses, archive, attempts, canon, capabilities (+48) | engines 38, execution 1 | - | 164: bigquery_fake.py, a_clone_goes_on_exactly_mysql, a_continuous_hop_feeds_a_warehouse (+161) |
+| `migkit/engines/__init__.py` | - | 449 | 55: addresses, archive, attempts, autonomous, canon (+50) | engines 38, execution 1 | - | 164: bigquery_fake.py, a_clone_goes_on_exactly_mysql, a_continuous_hop_feeds_a_warehouse (+161) |
 | `migkit/engines/analyticdb.py` | - | 501 | 3: engines.dbapi, engines.singlestore, engines.synapse | configuration 1, conversion 1, decision 1, engines 2, integrations 1 | - | 2: analyticdb_mysql_is_a_side_on_a_fake, analyticdb_postgres_is_a_side_on_a_fake |
 | `migkit/engines/ase.py` | - | 699 | 2: engines, tools | conversion 1, decision 4, engines 9, persistence 1 | - | 3: large_values_on_sap_ase, sap_ase_against_a_server, sap_ase_takes_params_users_statistics_and_a_snapshot_on_fakes |
 | `migkit/engines/base.py` | scope: Engine.in_scope, Engine.takes | 7910 | 87: applyway, archive, capabilities, charsets, cli (+82) | cli 1, configuration 12, conversion 29, decision 35, engines 2, execution 15, integrations 1, persistence 6, reporting 4, safety 9, scope 3, workflows 31 | - | 141: a_batch_that_is_not_a_page_is_the_decisions, a_character_set_change_is_planned_and_proved, a_check_says_what_changed_since_the_move (+138) |
@@ -334,11 +334,11 @@ None.
 | `migkit/applyway.py` | - | 359 | 1: engines.base | conversion 1, decision 1, engines 1 | - | 1: the_apply_way_climbs_to_columns |
 | `migkit/appversions.py` | - | 458 | 5: cli, cutover, engines.base, engines.mysql, engines.postgres | - | - | 1: a_migration_run_on_one_side_only_is_found |
 | `migkit/archive.py` | - | 672 | 2: cli, hopkeys | conversion 2, decision 6, engines 3, safety 2, workflows 1 | - | 1: old_rows_are_archived_then_removed_only_once_proved |
-| `migkit/autonomous.py` | - | 1195 | 3: cli, telemetry, tools.measures_table | decision 7, execution 1, persistence 1, reporting 2, workflows 1 | - | 8: autonomous_scenarios, autonomous_workflow, ease_measure (+5) |
+| `migkit/autonomous.py` | - | 1233 | 3: cli, telemetry, tools.measures_table | decision 7, engines 1, execution 1, persistence 1, reporting 2, workflows 1 | - | 9: autonomous_scenarios, autonomous_workflow, ease_measure (+6) |
 | `migkit/barriers.py` | - | 479 | 6: engines.dynamodb, engines.kafka, engines.mongodb, engines.redis, freeze (+1) | configuration 13, workflows 3 | - | 2: the_mark_travels_in_the_atomic_unit_on_kafka, tombstones_and_barriers |
 | `migkit/changetopic.py` | - | 1398 | 2: described, engines.firestore | configuration 6, conversion 4, decision 1, engines 3 | - | 7: cosmos_fake.py, a_change_feed_is_read_in_commit_order, cockroachdb_follows_through_its_changefeed (+4) |
 | `migkit/consolidate.py` | - | 1313 | 6: archive, charsets, cli, hopkeys, reshard (+1) | configuration 2, conversion 3, decision 11, engines 8, reporting 1, workflows 3 | - | 6: a_consolidations_counters_are_of_the_tables_it_takes, a_split_and_a_consolidation_are_followed_and_cut_over_as_one, consolidation_follows_every_source (+3) |
-| `migkit/crossmove.py` | - | 1101 | 2: engines.hetero, tools | conversion 10, decision 13, engines 3, execution 2, safety 1, workflows 1 | - | 5: a_cross_engine_copy_goes_server_to_server, a_cross_engine_table_goes_the_way_measured_fastest, a_fault_in_each_copier_is_recovered_on_a_server (+2) |
+| `migkit/crossmove.py` | - | 1101 | 3: engines.hetero, tools, tools.gen_codemap | conversion 10, decision 13, engines 3, execution 2, safety 1, workflows 1 | - | 5: a_cross_engine_copy_goes_server_to_server, a_cross_engine_table_goes_the_way_measured_fastest, a_fault_in_each_copier_is_recovered_on_a_server (+2) |
 | `migkit/cutover.py` | - | 2543 | 10: approvals, cli, freeze, managed, planner (+5) | configuration 8, decision 10, engines 4, execution 2, persistence 11, reporting 9, safety 16, workflows 18 | - | 21: a_cutover_proof_on_postgres_reads_every_table, a_delta_reads_what_the_hop_takes_pg, a_kafka_cutover_drains_to_the_end_offsets (+18) |
 | `migkit/drainmark.py` | - | 338 | 3: capabilities, cli, cutover | engines 1, persistence 1, safety 2, workflows 2 | - | 4: a_resumed_range_and_a_seam_leave_their_record, drain_and_readiness_are_wired, drain_to_position_and_the_approval_gate (+1) |
 | `migkit/drift.py` | - | 385 | 10: cli, cutover, engines.hetero, engines.mssql, engines.mysql (+5) | engines 5, persistence 1, safety 1 | - | 9: a_check_says_what_changed_since_the_move, a_move_keeps_what_it_must, an_online_rewrites_working_tables_are_left_alone (+6) |
@@ -372,7 +372,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/cli.py` | - | 7577 | 10: engines.base, engines.oracle_pump, estate, ha, integrations (+5) | cli 8, configuration 27, conversion 5, decision 82, engines 23, execution 31, integrations 4, persistence 33, reporting 51, safety 25, scope 1, web 1, workflows 94 | - | 236: conftest.py, cosmos_fake.py, cutover_harness.py (+233) |
+| `migkit/cli.py` | - | 7572 | 10: engines.base, engines.oracle_pump, estate, ha, integrations (+5) | cli 8, configuration 27, conversion 5, decision 82, engines 22, execution 31, integrations 4, persistence 33, reporting 51, safety 25, scope 1, web 1, workflows 95 | - | 236: conftest.py, cosmos_fake.py, cutover_harness.py (+233) |
 | `migkit/estate.py` | - | 356 | 1: cli | cli 1, configuration 2, decision 4, engines 1, integrations 1, reporting 2 | - | 1: the_estate_is_discovered_sized_and_priced |
 | `migkit/guide.py` | - | 888 | 4: cli, managed, tools.gen_docs, web.newhop | configuration 18, conversion 1, decision 8, engines 1, integrations 2, persistence 1, reporting 4 | - | 10: drain_to_position_and_the_approval_gate, every_command_ends_in_its_own_words, every_goal_and_mode_is_explained (+7) |
 | `migkit/ui.py` | - | 1418 | 4: cli, tools.gen_docs, web.app, web.views | configuration 7, decision 2, execution 1, persistence 5, reporting 4, workflows 6 | - | 13: a_tail_ends_its_batches_at_commits_and_says_when, alerts_and_notifications, every_resource_in_one_model (+10) |
@@ -421,7 +421,7 @@ None.
 | `tools/ease_measure.py` | - | 280 | 0 | configuration 1 | - | none |
 | `tools/final_suite.py` | - | 857 | 0 | configuration 6, integrations 1, tools 1 | - | none |
 | `tools/gen_changelog.py` | - | 120 | 1: tools.gen_docs | - | - | none |
-| `tools/gen_codemap.py` | - | 2027 | 1: tools.gen_docs | configuration 4, decision 2 | - | none |
+| `tools/gen_codemap.py` | - | 2063 | 1: tools.gen_docs | configuration 4, decision 2, engines 1, workflows 1 | - | none |
 | `tools/gen_docs.py` | - | 1782 | 0 | cli 6, configuration 25, conversion 2, decision 8, engines 5, reporting 6, tools 2, web 4, workflows 1 | - | none |
 | `tools/measures_table.py` | - | 42 | 0 | workflows 1 | - | none |
 | `tools/pin_programs.py` | - | 239 | 0 | integrations 1 | - | none |

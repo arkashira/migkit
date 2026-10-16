@@ -304,9 +304,87 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 81 shape lacks, 44 capability lacks, 3074 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (168).
 
-## Backlog (556 items, `docs/backlog-index.md`)
+## Gaps by pair
 
-DONE 389 - PARTLY 84 - OPEN 62 - BLOCKED 12 - NOT PURSUED 9
+71 pairs the registry carries (every engine of `engines.NAMES` to itself, and every pair a cross-engine way joins, `crossmove._joined`), each with what `autonomous.gaps(src, dst)` says it lacks by kind; 3338 lacks in all (backlog P0-DECISION-ALL.gaps).
+
+| pair | shape | capability | depth | in all |
+|---|---|---|---|---|
+| analyticdb-mysql -> analyticdb-mysql | 0 | 0 | 75 | 75 |
+| analyticdb-postgres -> analyticdb-postgres | 2 | 3 | 75 | 80 |
+| ase -> ase | 1 | 1 | 67 | 69 |
+| bigquery -> bigquery | 0 | 0 | 49 | 49 |
+| bigtable -> bigtable | 1 | 0 | 41 | 42 |
+| cassandra -> cassandra | 0 | 0 | 29 | 29 |
+| clickhouse -> clickhouse | 0 | 0 | 45 | 45 |
+| cockroachdb -> cockroachdb | 0 | 0 | 51 | 51 |
+| copybook -> copybook | 0 | 0 | 31 | 31 |
+| cosmosdb -> cosmosdb | 0 | 0 | 21 | 21 |
+| couchbase -> couchbase | 0 | 0 | 49 | 49 |
+| databricks -> databricks | 7 | 0 | 75 | 82 |
+| datastore -> datastore | 0 | 0 | 37 | 37 |
+| db2 -> db2 | 0 | 0 | 67 | 67 |
+| db2i -> db2i | 0 | 0 | 70 | 70 |
+| db2zos -> db2zos | 0 | 0 | 61 | 61 |
+| dcdb -> dcdb | 0 | 1 | 65 | 66 |
+| delta -> delta | 1 | 7 | 48 | 56 |
+| dsql -> dsql | 0 | 0 | 28 | 28 |
+| duckdb -> duckdb | 0 | 0 | 46 | 46 |
+| duckdb -> postgres | 0 | 0 | 48 | 48 |
+| dynamodb -> dynamodb | 0 | 0 | 8 | 8 |
+| exasol -> exasol | 7 | 0 | 75 | 82 |
+| firestore -> firestore | 0 | 0 | 43 | 43 |
+| gaussdb -> gaussdb | 0 | 0 | 68 | 68 |
+| geminidb-cassandra -> geminidb-cassandra | 0 | 0 | 48 | 48 |
+| geminidb-mongo -> geminidb-mongo | 0 | 0 | 50 | 50 |
+| geminidb-redis -> geminidb-redis | 0 | 0 | 36 | 36 |
+| generic -> generic | 0 | 0 | 58 | 58 |
+| hetero -> hetero | 2 | 0 | 45 | 47 |
+| iceberg -> iceberg | 1 | 7 | 49 | 57 |
+| informix -> informix | 7 | 0 | 75 | 82 |
+| kafka -> kafka | 0 | 0 | 11 | 11 |
+| keyspaces -> keyspaces | 0 | 0 | 50 | 50 |
+| kinesis -> kinesis | 0 | 0 | 4 | 4 |
+| lindorm -> lindorm | 2 | 4 | 56 | 62 |
+| mongodb -> mongodb | 1 | 0 | 11 | 12 |
+| mssql -> mssql | 0 | 0 | 34 | 34 |
+| mysql -> mysql | 0 | 0 | 4 | 4 |
+| mysql -> postgres | 0 | 0 | 6 | 6 |
+| neo4j -> neo4j | 5 | 4 | 55 | 64 |
+| neptune -> neptune | 1 | 0 | 44 | 45 |
+| netezza -> netezza | 7 | 0 | 75 | 82 |
+| oceanbase -> oceanbase | 0 | 1 | 67 | 68 |
+| oceanbase-oracle -> oceanbase-oracle | 0 | 5 | 70 | 75 |
+| opensearch -> opensearch | 0 | 0 | 26 | 26 |
+| oracle -> oracle | 0 | 0 | 40 | 40 |
+| parquet -> parquet | 0 | 0 | 32 | 32 |
+| parquet -> postgres | 0 | 0 | 34 | 34 |
+| polardbx -> polardbx | 0 | 1 | 68 | 69 |
+| postgres -> mysql | 0 | 0 | 6 | 6 |
+| postgres -> postgres | 0 | 0 | 2 | 2 |
+| progress -> progress | 7 | 0 | 75 | 82 |
+| pubsub -> pubsub | 0 | 0 | 4 | 4 |
+| qdrant -> qdrant | 5 | 2 | 36 | 43 |
+| redis -> redis | 0 | 0 | 10 | 10 |
+| redshift -> redshift | 0 | 0 | 52 | 52 |
+| saas -> saas | 0 | 0 | 22 | 22 |
+| saphana -> saphana | 7 | 0 | 75 | 82 |
+| sapodp -> sapodp | 0 | 0 | 22 | 22 |
+| singlestore -> singlestore | 0 | 0 | 75 | 75 |
+| snowflake -> snowflake | 0 | 0 | 57 | 57 |
+| spanner -> spanner | 0 | 0 | 59 | 59 |
+| sqlite -> postgres | 0 | 0 | 45 | 45 |
+| sqlite -> sqlite | 0 | 0 | 43 | 43 |
+| synapse -> synapse | 7 | 5 | 74 | 86 |
+| teradata -> teradata | 0 | 0 | 32 | 32 |
+| tidb -> tidb | 0 | 0 | 16 | 16 |
+| timestream -> timestream | 1 | 0 | 38 | 39 |
+| vertica -> vertica | 7 | 0 | 75 | 82 |
+| yugabytedb -> yugabytedb | 2 | 3 | 75 | 80 |
+
+## Backlog (557 items, `docs/backlog-index.md`)
+
+DONE 392 - PARTLY 83 - OPEN 61 - BLOCKED 12 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
@@ -317,8 +395,8 @@ DONE 389 - PARTLY 84 - OPEN 62 - BLOCKED 12 - NOT PURSUED 9
 | correctness/performance | 0 | 1 | 0 | 0 | 0 | 0 |
 | cutover | 19 | 1 | 0 | 1 | 0 | 0 |
 | ease of use | 35 | 6 | 0 | 1 | 1 | 1 |
-| engines | 37 | 13 | 0 | 10 | 3 | 1 |
-| maintainability | 4 | 2 | 0 | 6 | 0 | 0 |
+| engines | 38 | 12 | 0 | 11 | 3 | 1 |
+| maintainability | 6 | 2 | 0 | 4 | 0 | 0 |
 | move | 37 | 15 | 0 | 15 | 0 | 2 |
 | operations/scale | 48 | 15 | 0 | 9 | 5 | 3 |
 | operations/verify | 0 | 1 | 0 | 0 | 0 | 0 |
@@ -328,5 +406,5 @@ DONE 389 - PARTLY 84 - OPEN 62 - BLOCKED 12 - NOT PURSUED 9
 | types | 13 | 1 | 0 | 0 | 0 | 0 |
 | verify | 53 | 5 | 0 | 6 | 1 | 1 |
 
-Not done (158): P0-DE.1, P0-DE.2, P0-DE.4, BAR-1, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, A2/D10, C1.managed, P3.dryrun, 26.versions, MSSQL-x86, AUD.release, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.triggers, P0-DEPTH.rank, P0-AUDIT, AUD-E.pin, AUD-G2, AUD-T2, AUD-Z, P0-PARITY.small, P0-PARITY.lv.new, P0-CLOUDS.more, DEC1001.media, DEC1001.gui, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, P0-SCENARIOS.consolidate, DEC30.sweep, S1.e, S4, F3, F7.beat, F7.edges, F7.sec, CV.P9, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R8, LT.C1, LT.C4, LT.C5, LT.C6, LT.P1, LT.P2, LT.P3, W1, W2, W4.b, W8, W9, 28.rates, R5.actions, R5.anchor, 45.run, R3.topo, R17b.hmac, R17b.prog, DOCS, R8.more, R8.mv, R12.minio, R13-DB2, R13-ASE, R13-GENERIC, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R25.3, P0-SCOPE.open, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all, P0-MINIMAL-INPUT.ownership, P0-MINIMAL-INPUT.acceptance, P0-AUTO-RESOURCES.proof, P0-DECISION-ALL.engines, P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL, P0-AUTONOMOUS-MIGRATION, P0-PRODUCT-TELEMETRY, P0-AUTOTUNE-ALL, P1-SOURCE-HIERARCHY.layout, P1-SOURCE-HIERARCHY.engines, P1-SOURCE-HIERARCHY.navigation, P1-SOURCE-HIERARCHY.proof, P0-VALIDATE.unattended.proof, P0-ETA-ALL, P0-CONNECTION-PROGRESS, P0-VERIFY-EXECUTION, W7.lanes, W7.depth, W7.history, LT.R9.lane, LT.R9.shape, R13-HETERO.rest, F2.freeze.rest, W4.a.cells, W4.a.place, P0-CLOUDS.native.declare, P0-CLOUDS.native.emulators, P0-CLOUDS.more.families, P0-PARITY.synapse, TICDC.debezium, CANON.render-class, UNPROVED.mssql-split, P0-MINIMAL-INPUT.writeback, FENCE.holds-atomic, FENCE.standby-claims, LV.packet-put-back, SEED.carry, SEED.media-lanes, MOVE.overlap-range, WINDOWS.bundle, ORACLE.dataguard, DIALECTS.seven, SAML.real-idp, PROVIDERS.free-space, AUD-Z.rungs, AUD-Z.lane-names, FIELD1.tail-more, READ.literal-pages, AUD-Z.priced-rung, READ.cursor-literals, AUD-Z.rungs-outside-owed, BIGTABLE.cell-limit-emulator, TEST.keeps-move, TEST.closed-bundle-arm
+Not done (156): P0-DE.1, P0-DE.2, P0-DE.4, BAR-1, BAR-3, 0f-DVT, 0f-REST, 0a.measure, 0b.window, 6.mariadb, 6.fkwin, 7.free, A2/D10, C1.managed, P3.dryrun, 26.versions, MSSQL-x86, AUD.release, P0-DEPTH.calibrate, P0-DEPTH.json, P0-DEPTH.triggers, P0-DEPTH.rank, P0-AUDIT, AUD-E.pin, AUD-G2, AUD-T2, AUD-Z, P0-PARITY.small, P0-PARITY.lv.new, P0-CLOUDS.more, DEC1001.media, DEC1001.gui, P0-SCENARIOS.managed, P0-SCENARIOS.arch, P0-SCENARIOS.charset, P0-SCENARIOS.engine, P0-SCENARIOS.consolidate, DEC30.sweep, S1.e, S4, F3, F7.beat, F7.edges, F7.sec, CV.P9, ER1.acct, ER4, ER5, ER6, W5, LT.R1, LT.R8, LT.C1, LT.C4, LT.C5, LT.C6, LT.P1, LT.P2, LT.P3, W1, W2, W4.b, W8, W9, 28.rates, R5.actions, R5.anchor, 45.run, R3.topo, R17b.hmac, R17b.prog, DOCS, R8.more, R8.mv, R12.minio, R13-DB2, R13-ASE, R13-GENERIC, R16b, R16c, R17d, R18.6/R20.2, R18.7, R19.1, R19.3, R19.9/R20.3, R20.5, R20.6, R20.7, R20.10, R20.11, R21.8, R21.9, R21.M, DTS.sample, REL, REL.gate, R25.3, P0-SCOPE.open, P0-PARITY.scope, P0-PARITY.verify, P0-PARITY.tail, P0-PARITY.all, P0-MINIMAL-INPUT.ownership, P0-MINIMAL-INPUT.acceptance, P0-AUTO-RESOURCES.proof, P0-SAFETY-INTEGRITY, P0-RESILIENCE-ALL, P0-AUTONOMOUS-MIGRATION, P0-PRODUCT-TELEMETRY, P0-AUTOTUNE-ALL, P1-SOURCE-HIERARCHY.layout, P1-SOURCE-HIERARCHY.engines, P1-SOURCE-HIERARCHY.navigation, P1-SOURCE-HIERARCHY.proof, P0-VALIDATE.unattended.proof, P0-ETA-ALL, P0-CONNECTION-PROGRESS, P0-VERIFY-EXECUTION, W7.lanes, W7.depth, W7.history, LT.R9.lane, LT.R9.shape, R13-HETERO.rest, F2.freeze.rest, W4.a.cells, W4.a.place, P0-CLOUDS.native.declare, P0-CLOUDS.native.emulators, P0-CLOUDS.more.families, P0-PARITY.synapse, TICDC.debezium, CANON.render-class, UNPROVED.mssql-split, P0-MINIMAL-INPUT.writeback, FENCE.holds-atomic, FENCE.standby-claims, LV.packet-put-back, SEED.carry, SEED.media-lanes, MOVE.overlap-range, WINDOWS.bundle, ORACLE.dataguard, DIALECTS.seven, SAML.real-idp, PROVIDERS.free-space, AUD-Z.lane-names, FIELD1.tail-more, READ.literal-pages, READ.cursor-literals, AUD-Z.rungs-outside-owed, BIGTABLE.cell-limit-emulator, TEST.keeps-move, TEST.closed-bundle-arm, P0-DECISION-ALL.gaps
 

@@ -217,6 +217,41 @@ def _pair_gaps(lacking):
               f" {high[1]} -> {high[2]} ({high[0]}).")
 
 
+def _registry_pairs():
+    """The pairs the engine registry carries a way for, read off the code:
+    every engine of `engines.NAMES` to itself, and every pair one of the
+    cross-engine ways joins (`crossmove._joined`)."""
+    from migkit import crossmove
+    from migkit.engines import NAMES
+    return sorted({(n, n) for n in NAMES} | set(crossmove._joined()))
+
+
+def _pair_inventory(lacking):
+    """The section that says, per pair the registry carries, what it lacks
+    by kind (`autonomous.gaps`: a pair lacks what its two engines lack, an
+    engine to itself once), read off `decide.still_lacking()`."""
+    kinds = ("shape", "capability", "depth")
+    pairs = _registry_pairs()
+
+    def count(eng, kind):
+        return sum(1 for t, *_ in lacking.get(eng, ()) if t == kind)
+    rows = []
+    for src, dst in pairs:
+        per = [count(src, k) + (count(dst, k) if dst != src else 0)
+               for k in kinds]
+        rows.append(f"| {src} -> {dst} | " + " | ".join(map(str, per))
+                    + f" | {sum(per)} |")
+    total = sum(int(r.rsplit("|", 2)[1]) for r in rows)
+    return ["", "## Gaps by pair", "",
+            f"{len(pairs)} pairs the registry carries (every engine of"
+            " `engines.NAMES` to itself, and every pair a cross-engine way"
+            " joins, `crossmove._joined`), each with what"
+            " `autonomous.gaps(src, dst)` says it lacks by kind; "
+            f"{total} lacks in all (backlog P0-DECISION-ALL.gaps).", "",
+            "| pair | shape | capability | depth | in all |",
+            "|---|---|---|---|---|"] + rows
+
+
 def state():
     """What migkit can do and what is left, from the code and the
     backlog: the capability table and the decision engine's coverage for
@@ -266,6 +301,7 @@ def state():
               f" {sum(1 for f in _files() if package_of(f) is None)} files"
               " no package claims (`docs/agents/INVENTORY.md`)."]
     lines += ["", _pair_gaps(lacking)]
+    lines += _pair_inventory(lacking)
     rows = _backlog()
     by = {s: 0 for s in STATUSES}
     areas = {}

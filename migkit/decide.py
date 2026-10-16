@@ -2844,13 +2844,50 @@ RISKS = ("data_loss", "correctness", "unavailability", "performance", "none")
 LEAVES = ("read_only", "reversible", "irreversible")
 
 
+def _priority_waits(item, facts):
+    """What `item` waits on that cannot come before it: a dependency that
+    is neither among the work still schedulable (`facts["known"]`) nor
+    done already (`facts["done"]`) - and, for an irreversible item, a
+    mandatory one that cannot be scheduled (it never runs before every
+    mandatory item)."""
+    known, done = facts["known"], facts["done"]
+    waits = [d for d in item.dependencies if d not in known and d not in done]
+    if item.reversibility == "irreversible":
+        waits += sorted(m for m in facts["mandatory"] - known - done
+                        if m != item.name and m not in waits)
+    return waits
+
+
+def _priority_fits(item, facts):
+    """Whether the window (`facts["window"]`, `rank_priority`'s
+    `max_cost`) can hold `item` at all: an item no required one waits on
+    that costs more than the whole window alone never fits; a required
+    one - mandatory, or waited on by one - is always held."""
+    window = facts["window"]
+    return window is None or item.name in facts["required"] \
+        or facts["cost"][item.name] <= window
+
+
 def _priority_cost(item, costs, unit):
     """(rung, what it costs): what `costs` measured or predicted of the
     item's name, the item's own figure - a prediction - where they say
-    nothing."""
+    nothing. The rung needs what scheduling it needs (`rank_priority`
+    prunes it before it ranks): what it waits on able to come first, and
+    a window that can hold it."""
     from .costmodel import MEASURED_TRUTH, PREDICTED, Estimate
     rung = Rung(item.name, item.name, footprint=LEAVES.index(
-        item.reversibility) if item.reversibility in LEAVES else len(LEAVES))
+        item.reversibility) if item.reversibility in LEAVES else len(LEAVES),
+        needs=(Need("what it waits on able to come first",
+                    lambda f: not _priority_waits(item, f),
+                    lambda f: f"{item.name} waits on "
+                    f"{', '.join(_priority_waits(item, f))}, which is"
+                    " neither among the work that can be scheduled nor"
+                    " done"),
+               Need("a window that can hold it",
+                    lambda f: _priority_fits(item, f),
+                    lambda f: f"{item.name} costs "
+                    f"{f['said'][item.name]}, more than the whole window"
+                    f" of {f['window']:g} holds")))
     got = costed(rung, costs, unit)
     if isinstance(got, (int, float)):
         got = Estimate(float(got), truth=MEASURED_TRUTH, source="this hop",
@@ -2873,7 +2910,8 @@ def _priority_value(item, by_name, seen=frozenset()):
                      for o in after if o.name not in seen)
 
 
-def rank_priority(items, goal="copy", max_cost=None, costs=None, unit=None):
+def rank_priority(items, goal="copy", max_cost=None, costs=None, unit=None,
+                  done=()):
     """`items` (`PriorityItem`) in the order to do them (backlog
     P0-DECISION-ALL.priority): each a rung, costed as every rung is - by
     what `costs` measured of it here (`Costs`, `HopCosts`, a
@@ -2886,13 +2924,42 @@ def rank_priority(items, goal="copy", max_cost=None, costs=None, unit=None):
     decision before a long copy it decides - the rest by what they cost,
     and a tie to what each leaves behind (`LEAVES`). An item never runs
     before what it waits on, and an irreversible one never before every
-    mandatory item. `max_cost` keeps the items that fit, mandatory ones
-    always."""
+    mandatory item. `max_cost` keeps the items that fit, the required
+    ones always - mandatory, or waited on by one.
+
+    Each item's rung is pruned (`prune`) before it is ranked: one waiting
+    on what is neither among the work nor in `done`, or on an item that
+    cannot be scheduled, and one the window cannot hold alone, are out -
+    a `Ranked` list keeps them in `refused`, each with why, and the
+    mandatory ones among them in `blocked`: never run, never dropped
+    silently."""
     items = list(items)
     by_name = {it.name: it for it in items}
     priced, rungs, value = {}, {}, {}
     for it in items:
         rungs[it.name], priced[it.name] = _priority_cost(it, costs, unit)
+
+    required, more = {it.name for it in items if it.mandatory}, True
+    while more:
+        more = {d for n in required for d in by_name[n].dependencies
+                if d in by_name} - required
+        required |= more
+    facts = Facts({"known": set(by_name), "done": frozenset(done),
+                   "mandatory": {it.name for it in items if it.mandatory},
+                   "window": max_cost, "required": required,
+                   "cost": {n: c.mean for n, c in priced.items()},
+                   "said": {n: c.said() for n, c in priced.items()}})
+    refused, left = [], [rungs[it.name] for it in items]
+    while left:
+        left, out = prune(left, facts)
+        if not out:
+            break
+        for r, why in out:
+            facts["known"].discard(r.name)
+            refused.append(dataclasses.replace(by_name[r.name], why=why))
+    items = [by_name[r.name] for r in left]
+    by_name = {it.name: it for it in items}
+    for it in items:
         value[it.name] = _priority_value(it, by_name)
 
     def tier(it):
@@ -2929,14 +2996,29 @@ def rank_priority(items, goal="copy", max_cost=None, costs=None, unit=None):
             nxt, priced[nxt.name], value[nxt.name], stuck)))
 
     if max_cost is None:
-        return result
+        return Ranked(result, refused)
     budgeted, spent = [], 0.0
     for it in result:
         cost = priced[it.name].mean
-        if it.mandatory or spent + cost <= max_cost:
+        if it.name in required or spent + cost <= max_cost:
             budgeted.append(it)
             spent += cost
-    return budgeted
+    return Ranked(budgeted, refused)
+
+
+class Ranked(list):
+    """`rank_priority`'s order: the items to do, in order, with the ones
+    that cannot be scheduled beside it (`refused`, each `why` the reason)."""
+
+    def __init__(self, items=(), refused=()):
+        super().__init__(items)
+        self.refused = list(refused)
+
+    @property
+    def blocked(self):
+        """The mandatory items refused: what the work cannot be called
+        complete without, the blocker said, never a silent drop."""
+        return [it for it in self.refused if it.mandatory]
 
 
 def _priority_why(item, cost, value, stuck):

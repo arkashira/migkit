@@ -175,6 +175,33 @@ def compose(goal, dbs, can=(), facts=None):
     return choices, out
 
 
+def pair(hop, eng=None):
+    """(source engine, target engine) of `hop`, read off it, never
+    guessed: a hop between two engines names them (`source_engine`,
+    `target_engine` - as its engine read them, `src_name`/`dst_name`, else
+    its inner engines' own hops), any other hop is its own engine on both
+    sides; aliases resolved. A side the hop does not name is None."""
+    from .engines import ALIASES
+
+    def known(name):
+        return ALIASES.get(name, name) if isinstance(name, str) and name \
+            else None
+    one = known(getattr(hop, "engine", None))
+    opts = getattr(hop, "options", None) or {}
+
+    def side(attr, key, inner):
+        got = known(getattr(eng, attr, None)) or known(opts.get(key))
+        if got:
+            return got
+        e = getattr(eng, inner, None)
+        if e is None:
+            # no engine of a side of its own: the hop's engine is both
+            return None if one == "hetero" else one
+        return known(getattr(getattr(e, "hop", None), "engine", None))
+    return (side("src_name", "source_engine", "src_engine"),
+            side("dst_name", "target_engine", "dst_engine"))
+
+
 def gaps(src, dst):
     """[(engine, side, kind, name, state, why)]: what the pair `src` ->
     `dst` lacks, read off the code (`decide.still_lacking`) - each shape,
@@ -616,9 +643,17 @@ def run(goal, ops, say, path=None, wait=time.sleep, now=time.time,
         raise SystemExit(f"goal {goal}: one of {', '.join(GOALS)}")
     dbs = list(ops.dbs())
     pair = ops.pair() if callable(getattr(ops, "pair", None)) else None
-    told = gap_lines(*pair) if pair else []
+    whole = bool(pair) and all(pair)
+    told = gap_lines(*pair) if whole else []
     for line in told:
         say(line)
+    if pair:
+        said_pair = (f"the pair {pair[0]} -> {pair[1]}: {len(told)} things"
+                     " it lacks said before any step" if whole else
+                     "the pair is not known from the hop"
+                     f" ({pair[0] or '?'} -> {pair[1] or '?'}): what it"
+                     " lacks cannot be said")
+        say(said_pair)
     order = getattr(ops, "order", None)
     handed = {d: order(d) for d in dbs} if callable(order) else None
     choices, phases = compose(
@@ -626,9 +661,12 @@ def run(goal, ops, say, path=None, wait=time.sleep, now=time.time,
         handed)
     wf = Workflow.load(path, goal, dbs, phases)
     hop = Unit("assess")
+    if pair:
+        wf.decided(hop, "pair", said_pair, "->".join(
+            p or "?" for p in pair), source=pair[0], target=pair[1])
     if told:
         wf.decided(hop, "gaps", f"{len(told)} things the pair lacks said"
-                   " before any step", gaps=told)
+                   " before any step", gaps=told, pair=list(pair))
     for d, c in choices.items():
         # the dependency facts the order stood on, kept with it
         f = (handed or {}).get(d) or {}

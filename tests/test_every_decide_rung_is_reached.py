@@ -47,10 +47,7 @@ HELPER = "tests.rung_branches"
 
 #: (ladder, rung) -> the test module that should reach it on every branch
 #: it has; owned by backlog row AUD-Z.rungs-owed
-OWED = {
-    ('_priority_cost', '<item.name>'):
-        'new: tests/test_priority_cost_rungs.py',
-}
+OWED = {}
 
 
 #: (module, ladder, rung) built outside decide.py -> the test module that

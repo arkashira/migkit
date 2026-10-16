@@ -3474,15 +3474,10 @@ class _Steps:
 
     def pair(self):
         """(source engine, target engine), whose gaps (`autonomous.gaps`)
-        the flow says before any costly step."""
-        from .engines import ALIASES
-        one = ALIASES.get(self.hop.engine, self.hop.engine)
-
-        def named(side):
-            e = getattr(self.eng, f"{side}_engine", None)
-            got = getattr(getattr(e, "hop", None), "engine", None)
-            return ALIASES.get(got, got) if isinstance(got, str) else one
-        return named("src"), named("dst")
+        the flow says before any costly step - read off the hop
+        (`autonomous.pair`), a side it does not name None, never guessed."""
+        from . import autonomous
+        return autonomous.pair(self.hop, self.eng)
 
     def order(self, db):
         """The dependency facts the order of `db`'s phases is chosen from
