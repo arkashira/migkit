@@ -420,96 +420,11 @@ OWED_OUTSIDE = {
         'new: tests/test_scenarios_rungs.py',
     ('scenarios', 'topology_case', 'topology-unknown'):
         'new: tests/test_scenarios_rungs.py',
-    ('second_reader', '_walks', 'groups'):
-        'new: tests/test_second_reader_rungs.py',
-    ('second_reader', '_walks', 'walk'):
-        'new: tests/test_second_reader_rungs.py',
-    ('shared', '_rungs', 'bucket'):
-        'new: tests/test_shared_rungs.py',
-    ('shared', '_rungs', 'directory'):
-        'new: tests/test_shared_rungs.py',
-    ('shared', '_rungs', 'target'):
-        'new: tests/test_shared_rungs.py',
-    ('ship', 'CUTS', 'key order'):
-        'new: tests/test_ship_rungs.py',
-    ('ship', 'CUTS', 'one pass'):
-        'new: tests/test_ship_rungs.py',
-    ('ship', 'CUTS', 'ranges'):
-        'new: tests/test_ship_rungs.py',
-    ('ship', 'CUTS', 'whole'):
-        'new: tests/test_ship_rungs.py',
-    ('ship', 'FORMATS', 'binary copy'):
-        'new: tests/test_ship_rungs.py',
-    ('ship', 'FORMATS', 'load lines'):
-        'new: tests/test_ship_rungs.py',
-    ('ship', 'FORMATS', 'rows'):
-        'new: tests/test_ship_rungs.py',
+    # W21D: never handed to decide.prune - `_Loader.relink` builds it
+    # only to label the spool `carriers.Carrier` it reads again into,
+    # so no test can reach it (a defect of the rung, not a test owed)
     ('ship', '_Loader', 'spool'):
         'new: tests/test_ship_rungs.py',
-    ('storedcode.collations', '_climb', '<c.sig>'):
-        'new: tests/test_storedcode_collations_rungs.py',
-    ('storedcode.rungs', 'Candidate', '<name>'):
-        'new: tests/test_storedcode_rungs_rungs.py',
-    ('tableengine', 'access_method_ways', 'in place'):
-        'new: tests/test_tableengine_rungs.py',
-    ('tableengine', 'ways', 'definition'):
-        'new: tests/test_tableengine_rungs.py',
-    ('tableengine', 'ways', 'in place'):
-        'new: tests/test_tableengine_rungs.py',
-    ('tableway', 'batch_or_copier', 'copier'):
-        'new: tests/test_tableway_rungs.py',
-    ('tailtables', '_add_ways', 'copy'):
-        'new: tests/test_tailtables_rungs.py',
-    ('tailtables', '_add_ways', 'from-removal'):
-        'new: tests/test_tailtables_rungs.py',
-    ('tuning', 'Retune', 'other way'):
-        'new: tests/test_tuning_rungs.py',
-    ('tuning', 'Retune', 'pieces'):
-        'new: tests/test_tuning_rungs.py',
-    ('tuning', 'Retune', 'smaller batch'):
-        'new: tests/test_tuning_rungs.py',
-    ('tuning', 'Retune', 'smaller ranges'):
-        'new: tests/test_tuning_rungs.py',
-    ('tuning', 'Retune', 'stream'):
-        'new: tests/test_tuning_rungs.py',
-    ('tuning', 'payload_way', 'pieces'):
-        'new: tests/test_tuning_rungs.py',
-    ('tuning', 'payload_way', 'stream'):
-        'new: tests/test_tuning_rungs.py',
-    ('tuning', 'payload_way', 'whole'):
-        'new: tests/test_tuning_rungs.py',
-    ('upgrade', 'CLONE', 'clone'):
-        'new: tests/test_upgrade_rungs.py',
-    ('upgrade', 'COPY', 'copy'):
-        'new: tests/test_upgrade_rungs.py',
-    ('upgrade', 'LINK', 'link'):
-        'new: tests/test_upgrade_rungs.py',
-    ('upgrade', 'pg_in_place', '<r.name>'):
-        'new: tests/test_upgrade_rungs.py',
-    ('upgrade', 'ways', 'logical'):
-        'new: tests/test_upgrade_rungs.py',
-    ('upgrade', 'ways', 'seeded'):
-        'new: tests/test_upgrade_rungs.py',
-    ('userways', 'RUNGS', '<FILE>'):
-        'new: tests/test_userways_rungs.py',
-    ('userways', 'RUNGS', '<HASH>'):
-        'new: tests/test_userways_rungs.py',
-    ('util', '_estimate_rungs', 'eta.kept'):
-        'new: tests/test_util_rungs.py',
-    ('util', '_estimate_rungs', 'eta.none'):
-        'new: tests/test_util_rungs.py',
-    ('util', '_estimate_rungs', 'eta.window'):
-        'new: tests/test_util_rungs.py',
-    ('verifiers', 'validation_ladder', 'bisection'):
-        'new: tests/test_verifiers_rungs.py',
-    ('verifiers', 'validation_ladder', 'count'):
-        'new: tests/test_verifiers_rungs.py',
-    ('verifiers', 'validation_ladder', 'digest'):
-        'new: tests/test_verifiers_rungs.py',
-    ('verifiers', 'validation_ladder', 'row_hash'):
-        'new: tests/test_verifiers_rungs.py',
-    ('verifiers', 'validation_ladder', 'second_reader'):
-        'new: tests/test_verifiers_rungs.py',
 }
 
 
