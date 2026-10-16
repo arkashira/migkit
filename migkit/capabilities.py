@@ -27,6 +27,7 @@ command.
 """
 import ast
 import functools
+import importlib
 import inspect
 
 from .engines import NAMES, _class_for
@@ -173,7 +174,9 @@ GAPS = {
     },
     # every cell closed (F5): sequences and identity columns, settings,
     # Data Pump over a link or direct path loads, the redo read by
-    # LogMiner or by the redo-file reader, fence and confirm on the SCN
+    # LogMiner (mined on the source, a standby or a mining database, the
+    # place chosen by `oracle_logminer.place`) or by the redo-file reader,
+    # fence and confirm on the SCN
     # every commit has been read through, delta from the redo, users and
     # roles with their password hashes, the target's SCN and sequences
     "oracle": {},
@@ -1170,15 +1173,60 @@ def _jobs(n, c):
     return n in _compared(jobs._read, "kind")
 
 
+#: where an engine's own tail runs from: the loop the pair's tail hands
+#: over to, or the engine's own follow of a source that streams its changes
+_TAIL_ENTRIES = ("tail_apply", "follow_live")
+#: what a state set shares: it takes the scope's members at a boundary,
+#: routes a change to its member and counts and says what each is in
+_STATE_SET = (("boundary",), ("route", "_enter"), ("counts", "said"))
+
+
+def _state_set(obj):
+    """Whether `obj` is a state set: a migkit class that settles its
+    members at a `boundary`, keeps each in a state of its own (`route`ing
+    a change to it or `_enter`ing a state) and `count`s or `said`s them -
+    `tailtables.TableSet`, `topicstates.TopicSet`, a Redis tail's
+    `KeyspaceStates`, and any a later engine adds the same way."""
+    return inspect.isclass(obj) and obj.__module__.startswith("migkit") \
+        and all(any(callable(getattr(obj, m, None)) for m in group)
+                for group in _STATE_SET)
+
+
+def _state_sets(c):
+    """The state sets the tail an engine runs makes: a class called by
+    the name its module binds or imports, or through a migkit module's
+    name (`tailtables.TableSet`)."""
+    sets = set()
+    for fn in _reach(c, _TAIL_ENTRIES):
+        names = getattr(fn, "__globals__", {})
+        body = _body(fn)
+        made = [names.get(w) for w in body.bare]
+        for word in body.bare:
+            imp = body.imports.get(word)
+            if imp is not None:
+                level, module, attr = imp
+                base = fn.__module__.rsplit(".", level)[0] if level else ""
+                try:
+                    made.append(getattr(importlib.import_module(
+                        ".".join(p for p in (base, module) if p)), attr,
+                        None))
+                except ImportError:
+                    continue
+        for alias, attr in body.modcalls:
+            mod = _module(fn, alias)
+            made.append(getattr(mod, attr, None) if mod else None)
+        sets.update(k for k in made if _state_set(k))
+    return sets
+
+
 def _states(n, c):
-    """The tail the engine runs keeps each table in a state of its own
-    (`tailtables.TableSet`; a Kafka tail's topics, `topicstates.TopicSet`):
-    its own tail, where it hands its changes to the pair's, or - with no
-    tail of its own - the pair's tail reading its change log
-    (`cli._tail_pair`)."""
-    if _own(c, "tail_apply"):
-        return bool({"TableSet", "TopicSet"}
-                    & _reached(c, ("tail_apply",))[0])
+    """The tail the engine runs keeps each member it follows - a table, a
+    topic, a key space, a collection with its generations - in a state of
+    its own (`_state_set`): its own tail, where it hands its changes to
+    the pair's, or - with no tail of its own - the pair's tail reading its
+    change log (`cli._tail_pair`)."""
+    if any(_own(c, e) for e in _TAIL_ENTRIES):
+        return bool(_state_sets(c)) or _own(c, "_new_generations")
     return _own(c, "neutral_changes")
 
 
@@ -2016,7 +2064,7 @@ DEPTH_GAPS = {
     },
     "tail.table-states": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb redis clickhouse db2 ase opensearch "
+                "clickhouse db2 ase opensearch "
                 "cassandra redshift snowflake iceberg delta"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_as("schema", "kinesis pubsub"),
@@ -2024,7 +2072,7 @@ DEPTH_GAPS = {
     },
     "tail.added": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb redis clickhouse dynamodb db2 db2i "
+                "redis clickhouse dynamodb db2 db2i "
                 "ase opensearch cassandra redshift snowflake "
                 "iceberg delta dsql couchbase cosmosdb sapodp saas"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
@@ -2034,7 +2082,7 @@ DEPTH_GAPS = {
     },
     "tail.readded": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "postgres mongodb redis clickhouse "
+                "postgres redis clickhouse "
                 "db2 db2i ase opensearch cassandra redshift snowflake "
                 "iceberg delta cockroachdb dsql couchbase "
                 "sapodp saas"),
@@ -2045,7 +2093,7 @@ DEPTH_GAPS = {
     },
     "tail.ddl": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb mssql redis clickhouse db2 "
+                "mssql redis clickhouse db2 "
                 "db2i ase opensearch cassandra redshift snowflake bigquery "
                 "iceberg delta tidb cockroachdb dsql couchbase "
                 "sapodp saas"),
@@ -2056,7 +2104,7 @@ DEPTH_GAPS = {
     },
     "tail.renames": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "mongodb redis clickhouse db2 db2i ase "
+                "redis clickhouse db2 db2i ase "
                 "opensearch redshift snowflake iceberg delta tidb "
                 "cockroachdb dsql sapodp saas"),
         **_each(NOT_APPLICABLE, _NOT_RENAMED,
@@ -2540,28 +2588,24 @@ _CLOUD_NATIVE_GAPS = {
                                _but("geminidb-mongo")),
     "verify.tables": _each(NOT_YET, "P0-PARITY.verify", _CN),
     "verify.table": _each(NOT_YET, "P0-PARITY.verify", "geminidb-redis"),
-    "tail.table-states": {
-        **_as("stream", _UNFOLLOWED),
-        **_each(NOT_YET, "P0-PARITY.tail", "geminidb-mongo"),
-    },
+    "tail.table-states": _as("stream", _UNFOLLOWED.replace(
+        " geminidb-redis", "")),
     "tail.added": {
         **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
         **_each(NOT_YET, "P0-PARITY.tail",
-                "bigtable firestore gaussdb dcdb keyspaces neptune "
-                "geminidb-mongo"),
+                "bigtable firestore gaussdb dcdb keyspaces neptune"),
     },
     **{item: {
         **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
         **_each(NOT_YET, "P0-PARITY.tail",
-                "spanner bigtable firestore gaussdb dcdb keyspaces neptune "
-                "geminidb-mongo"),
+                "spanner bigtable firestore gaussdb dcdb keyspaces neptune"),
     } for item in ("tail.readded", "tail.ddl")},
     "tail.renames": {
         **_as("stream", _UNFOLLOWED + " geminidb-cassandra"),
         **_each(NOT_APPLICABLE, _NOT_RENAMED,
                 "bigtable firestore keyspaces neptune"),
         **_each(NOT_YET, "P0-PARITY.tail",
-                "spanner gaussdb dcdb geminidb-mongo"),
+                "spanner gaussdb dcdb"),
     },
     "assess.versions": {
         **_each(NOT_APPLICABLE, _ONE_VERSION,
@@ -2770,6 +2814,12 @@ DEPTH_GAPS["verify.value.one-plan"] = {
 # MySQL's plan (`MySQLEngine._deep_scans`) is proved through `scanplan`'s
 # own tests only; no test drives the engine's methods on fakes yet
 UNPROVED["verify.value.one-plan"] = "mysql tidb oceanbase polardbx dcdb"
+#: a collection created while a change stream is followed, and one that
+#: leaves the scope and returns, go by their generations in the code
+#: (`MongoEngine._new_generations`); no test names either yet
+for _item in ("tail.added", "tail.readded"):
+    UNPROVED[_item] = f"{UNPROVED.get(_item, '')} mongodb".strip()
+del _item
 
 
 # --- CockroachDB and Aurora DSQL, on PostgreSQL's wire (P0-PARITY) ----------
@@ -2940,9 +2990,10 @@ _CLOUD_NATIVE_UNPROVED = {
     "tail.follows": "oceanbase polardbx geminidb-mongo",
     "tail.table-states": ("spanner bigtable firestore gaussdb oceanbase "
                           "polardbx dcdb keyspaces neptune "
-                          "geminidb-cassandra"),
-    "tail.added": "spanner oceanbase polardbx",
-    **{item: "oceanbase polardbx"
+                          "geminidb-cassandra geminidb-redis "
+                          "geminidb-mongo"),
+    "tail.added": "spanner oceanbase polardbx geminidb-mongo",
+    **{item: "oceanbase polardbx geminidb-mongo"
        for item in ("tail.readded", "tail.ddl", "tail.renames")},
     "assess.versions": "geminidb-redis geminidb-mongo",
     "assess.brands": "oceanbase polardbx dcdb geminidb-redis geminidb-mongo",

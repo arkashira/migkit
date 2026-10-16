@@ -21,7 +21,12 @@ from migkit.engines.mongodb import (WRITES_BLOCKED, MongoEngine,
 from tests.mongo_fake import engine, no_real_server  # noqa: F401 - autouse
 
 #: what this module proves, item by engine (`capabilities.proofs`)
-PROVES = [("tail.follows", "mongodb")]
+PROVES = [
+    ("tail.follows", "mongodb"),
+    ("tail.table-states", "mongodb"),
+    ("tail.ddl", "mongodb"),
+    ("tail.renames", "mongodb"),
+]
 
 #: a date past year 9999, which a Python datetime cannot hold
 PAST_9999 = DatetimeMS(253402300800000 + 86_400_000)

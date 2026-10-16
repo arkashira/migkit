@@ -3630,6 +3630,7 @@ def two_site_rule(facts):
              " both wrote held and logged", footprint=1)), f)
 
 
+<<<<<<< HEAD
 # --- a tail batch applied as typed columns or as change records (R19.9) ----
 
 _TAIL_HOLDS = {"consistent": "as of one moment", "idempotent": "converges",
@@ -3685,3 +3686,42 @@ def column_write(facts, costs=None):
     nothing, so each is tried once before the forecasts decide."""
     return climb("writing a batch's columns", COLUMN_WRITES, facts,
                  costs=costs)
+||||||| 8581f2a4
+=======
+#: what a cell can say that is work still owed, of any of the three tables
+_OWED = (NOT_YET, "undeclared", "stale", "untested", "claimed")
+
+
+def still_lacking(engine=None):
+    """{engine: [(table, name, state, why)]}: what each engine still
+    lacks, read off the code and never written down: a shape of `WAYS`
+    with no way (`cell`), a capability its probe does not find
+    (`capabilities.matrix`), a depth item the code has no way for or has
+    and no test proves (`capabilities.depth_cell`). Each row says the
+    backlog row it waits on, or what the check fails on; a cell that says
+    the thing does not apply to the engine is not a lack. The depth items
+    that read a shape or a capability are listed once, under that table."""
+    from . import capabilities
+    from .engines import NAMES
+    known = capabilities.matrix()
+    out = {}
+    for n in [engine] if engine else NAMES:
+        rows = [("shape", s, *cell(n, s)) for s in SHAPES]
+        rows += [("capability", c, state,
+                  capabilities.GAPS.get(n, {}).get(c, ("", ""))[1])
+                 for c, state in known[n].items()]
+        rows += [("depth", i, *capabilities.depth_cell(n, i))
+                 for i in capabilities.DEPTH
+                 if i not in capabilities.LINKED]
+        out[n] = [r for r in rows if r[2] in _OWED]
+    return out
+
+
+def orphan_ways():
+    """(shape, engine) of each way declared in `WAYS` for a shape or an
+    engine the code does not have: a rung nobody can reach, which no cell
+    of the matrix would ever show."""
+    from .engines import NAMES
+    return [(s, e) for s, ways in WAYS.items() for e in ways
+            if s not in SHAPES or (e != "*" and e not in NAMES)]
+>>>>>>> w13m

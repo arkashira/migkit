@@ -65,7 +65,13 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
+<<<<<<< HEAD
 88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1415, not yet 1357, stale 9, test owed 1036, yes 935. A cell below is the ways proved of the items that apply.
+||||||| 8581f2a4
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1415, not yet 1365, test owed 1037, yes 935. A cell below is the ways proved of the items that apply.
+=======
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1414, not yet 1354, test owed 1045, yes 939. A cell below is the ways proved of the items that apply.
+>>>>>>> w13m
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -91,7 +97,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | gaussdb | 0/10 | 3/39 | 1/6 | 0/7 | 1/6 | 2/7 | 3/7 | 1/1 | 1/1 | 0/1 | 12/85 |
 | geminidb-cassandra | 0/9 | 1/22 | 0/1 | 0/7 | 0/4 | 0/6 | 0/5 | 1/1 | 1/1 | 0/1 | 3/57 |
 | geminidb-mongo | 0/9 | 1/24 | 0/6 | 0/7 | 0/3 | 0/5 | 0/5 | 1/1 | 1/1 | 0/1 | 3/62 |
-| geminidb-redis | 0/7 | 1/12 | - | 0/7 | 0/1 | 1/3 | 0/5 | 1/1 | 1/1 | 0/1 | 4/38 |
+| geminidb-redis | 0/7 | 1/12 | 0/1 | 0/7 | 0/1 | 1/3 | 0/5 | 1/1 | 1/1 | 0/1 | 4/39 |
 | generic | 6/10 | 5/39 | 1/6 | 1/7 | 0/6 | 3/6 | 0/4 | 0/1 | 0/1 | 0/1 | 16/81 |
 | hetero | 4/10 | 6/40 | 1/2 | 2/5 | - | 6/8 | 2/5 | - | - | - | 21/70 |
 | iceberg | 0/9 | 0/24 | 0/6 | 0/5 | 1/3 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/59 |
@@ -99,7 +105,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | keyspaces | 0/9 | 0/24 | 1/5 | 0/7 | 1/3 | 1/6 | 0/3 | 1/1 | 1/1 | 0/1 | 5/60 |
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | lindorm | 0/9 | 2/27 | 0/6 | 0/7 | 0/5 | 0/6 | 1/5 | 1/1 | 1/1 | 0/1 | 5/68 |
-| mongodb | 8/9 | 21/24 | 1/6 | 6/7 | 1/3 | 4/6 | 3/5 | 1/1 | 1/1 | 0/1 | 46/63 |
+| mongodb | 8/9 | 21/24 | 4/6 | 6/7 | 1/3 | 4/6 | 3/5 | 1/1 | 1/1 | 0/1 | 49/63 |
 | mssql | 7/10 | 18/35 | 3/6 | 0/7 | 4/6 | 4/7 | 5/7 | 0/1 | 1/1 | 0/1 | 42/81 |
 | mysql | 9/10 | 28/32 | 6/6 | 7/7 | 6/6 | 7/8 | 8/8 | 1/1 | 1/1 | 1/1 | 74/80 |
 | neo4j | 0/9 | 0/25 | 1/5 | 0/7 | 0/4 | 0/7 | 0/6 | 0/1 | 0/1 | 0/1 | 1/66 |
@@ -113,7 +119,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | postgres | 9/10 | 38/38 | 5/6 | 7/7 | 6/6 | 8/8 | 8/8 | 1/1 | 1/1 | 1/1 | 84/86 |
 | pubsub | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | qdrant | 0/7 | 1/15 | - | 0/7 | 1/2 | 1/7 | 0/4 | 0/1 | 0/1 | 0/1 | 3/45 |
-| redis | 5/8 | 12/12 | 1/6 | 7/7 | 0/1 | 4/4 | 4/6 | 1/1 | 1/1 | 0/1 | 35/47 |
+| redis | 5/8 | 12/12 | 2/6 | 7/7 | 0/1 | 4/4 | 4/6 | 1/1 | 1/1 | 0/1 | 36/47 |
 | redshift | 5/10 | 0/32 | 0/6 | 3/7 | 1/5 | 1/4 | 2/7 | 1/1 | 1/1 | 0/1 | 14/74 |
 | saas | 0/6 | 0/3 | 0/5 | 1/5 | - | 0/1 | 0/1 | 0/1 | 0/1 | - | 1/23 |
 | sapodp | 0/6 | 0/3 | 0/5 | 0/5 | 0/1 | 0/1 | 1/1 | 1/1 | 0/1 | - | 2/24 |
@@ -179,11 +185,11 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.tables | cassandra clickhouse cosmosdb dynamodb kafka mongodb mssql mysql opensearch oracle postgres redis | geminidb-cassandra geminidb-mongo geminidb-redis keyspaces redshift snowflake | the rest (34) | kinesis pubsub |
 | verify.table | bigquery cassandra clickhouse cosmosdb dsql duckdb dynamodb kafka mongodb mssql mysql opensearch oracle postgres redis sqlite teradata tidb | the rest (33) | generic | kinesis pubsub |
 | tail.follows | the rest (26) | bigquery db2i geminidb-mongo oceanbase polardbx | ase db2 delta iceberg lindorm oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
-| tail.table-states | cockroachdb cosmosdb dynamodb kafka mysql postgres tidb | the rest (20) | ase cassandra clickhouse db2 delta geminidb-mongo generic iceberg lindorm mongodb oceanbase-oracle opensearch redis redshift snowflake | copybook datastore db2zos duckdb geminidb-redis kinesis parquet pubsub qdrant sqlite teradata timestream |
-| tail.added | cockroachdb kafka mssql mysql oracle postgres tidb | bigquery oceanbase polardbx spanner | the rest (29) | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
-| tail.readded | cosmosdb dynamodb kafka mssql mysql oracle tidb | bigquery oceanbase polardbx | the rest (30) | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
-| tail.ddl | cosmosdb dynamodb kafka mysql postgres | oceanbase oracle polardbx | the rest (32) | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
-| tail.renames | mysql postgres | bigquery mssql oceanbase oracle polardbx | ase clickhouse cockroachdb db2 db2i dcdb delta dsql gaussdb geminidb-mongo generic iceberg lindorm mongodb oceanbase-oracle opensearch redis redshift saas sapodp snowflake spanner tidb | the rest (24) |
+| tail.table-states | cockroachdb cosmosdb dynamodb kafka mongodb mysql postgres redis tidb | the rest (22) | ase cassandra clickhouse db2 delta generic iceberg lindorm oceanbase-oracle opensearch redshift snowflake | copybook datastore db2zos duckdb kinesis parquet pubsub qdrant sqlite teradata timestream |
+| tail.added | cockroachdb kafka mssql mysql oracle postgres tidb | bigquery geminidb-mongo mongodb oceanbase polardbx spanner | the rest (27) | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
+| tail.readded | cosmosdb dynamodb kafka mssql mysql oracle tidb | bigquery geminidb-mongo mongodb oceanbase polardbx | the rest (28) | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
+| tail.ddl | cosmosdb dynamodb kafka mongodb mysql postgres | geminidb-mongo oceanbase oracle polardbx | the rest (30) | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
+| tail.renames | mongodb mysql postgres | bigquery geminidb-mongo mssql oceanbase oracle polardbx | ase clickhouse cockroachdb db2 db2i dcdb delta dsql gaussdb generic iceberg lindorm oceanbase-oracle opensearch redis redshift saas sapodp snowflake spanner tidb | the rest (24) |
 | assess.versions | dsql kafka mongodb mysql opensearch postgres redis redshift snowflake sqlite teradata tidb | cassandra clickhouse cockroachdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces mssql oracle | the rest (17) | bigquery bigtable copybook cosmosdb datastore delta dynamodb firestore hetero iceberg kinesis parquet pubsub spanner timestream |
 | assess.brands | kafka mongodb mysql opensearch postgres redis redshift snowflake tidb | cassandra clickhouse cockroachdb dcdb dsql gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces mssql oceanbase oracle polardbx teradata | the rest (23) | copybook delta hetero iceberg kinesis parquet pubsub |
 | assess.engine-checks | bigquery cockroachdb cosmosdb couchbase db2zos dsql dynamodb generic hetero kafka mongodb mysql oracle postgres redis redshift saas snowflake sqlite teradata tidb | the rest (24) | ase copybook db2 delta duckdb iceberg kinesis parquet pubsub | - |

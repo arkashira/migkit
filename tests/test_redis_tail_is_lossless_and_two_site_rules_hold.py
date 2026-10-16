@@ -18,6 +18,8 @@ from migkit.engines import redis as R
 from tests.redis_local import (  # noqa: F401 - fixtures
     clean, engine, needs_server, pair)
 
+PROVES = [("tail.table-states", "redis")]
+
 
 def resp(*argv):
     out = b"*%d\r\n" % len(argv)
