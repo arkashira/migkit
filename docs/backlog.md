@@ -11325,13 +11325,10 @@ What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs
 ### W10C (2026-10-16) row parity on every engine, units on restart
 Done: MySQL and generic row parity through `decide.row_parity`; SQL Server row text a key range at a time (`scan_cuts`); `attempts.reconcile_units` closes units an earlier run left open before the move or check replays; same-engine pairs keep a ledger file a side (`side_mark`).
 Not done: a same-engine pair's inner engines must say their side (`pair_side`), the hop's options cannot; range-level units of a move live in the engines' range copiers (not cli) and are not opened there yet; MySQL/generic row parity keep no measured costs between tables yet.
-* **Not done (w11c, BAR-3 / P0-DE.2 / R25.3)** - the tail's batches are
-  named per table as `Engine.neutral_apply` applies them
-  (`freeze.name_write`, proved on PostgreSQL and MySQL targets by
-  `test_every_batch_into_a_kept_target_is_named`); the repair rows of
-  `Engine._apply_rows` and the engines' own bulk copy ways are still named
-  only by the change sheet's written-back steps (`report.write_back`).
-  `doctor` says each side's
+* **Not done (w11c, BAR-3 / P0-DE.2 / R25.3)** - the engines' apply paths do
+  not yet call `freeze.name_write` per batch (they belong to other owners):
+  migkit's writes into a target nothing keeps are named today by the change
+  sheet's written-back steps (`report.write_back`). `doctor` says each side's
   hold rung, the rungs refused above it and the rung's `loads`/`leaves`, not
   connections, memory or spool as numbers. No `migkit` command exports the
   change sheet or writes a run's evidence back yet.
@@ -11405,6 +11402,4 @@ Not done: the move's copy-way choice itself (`physical.choose`, unowned this wav
 * Not read in this pass: `docs/problems-and-what-ends-them.md`, `docs/case-study-what-a-consistent-report-does-not-cover.md`, `docs/research-other-tools.md`, `docs/behavior-critical-params.md`, `docs/threat-model.md`, `docs/web.md`, `docs/goals-and-modes.md` prose, `docs/what-a-migration-actually-costs.md`, `docs/scale.md`, and the rows of `docs/backlog.md` (owned by the backlog).
 * Unverified: Debezium `table.include.list` and `pg_dump -t/-T` in the box page's item 3.
 
-### W15G (2026-10-16) writes held proved on servers, batches named, holds left behind lifted
-Done: `leftovers.holds` / `leftovers.lift` find a hold of writes (source freeze or target kept) whose process died and give it back from its record (`freeze._save` now stamps the writer's process); `tests/holdkit.py` proves it once (holder killed with -9, `doctor` names the rung, the second session's write accepted again) and `test_writes_are_held_on_redis` (accounts refuse, pause waits) and `test_writes_are_held_on_opensearch` (indices and cluster refuse) run it on servers of the test lanes; `test_every_batch_into_a_kept_target_is_named` proves three tail batches into a PostgreSQL and a MySQL target are named per table and one write by another session is the single finding.
-Not done (F2.freeze stays PARTLY): the same module for ClickHouse (needs a server profile whose default user may create users), Oracle, SQL Server, Cassandra, Kafka, MongoDB and DynamoDB (the source holds of SQL Server, Cassandra and Kafka are proved by their own `..._is_held_and_given_back` tests, without the killed-holder and `leftovers` step); Db2, ASE, Teradata, Redshift, Snowflake, Couchbase, BigQuery, Lindorm, TiDB and CockroachDB have no server here (test owed); Qdrant and Neo4j have no hold. BAR-3: `Engine._apply_rows` (repair) and the bulk copy ways do not name their batches (base.py is another owner's).
+W15E note (6.fkwin, P0-DEPTH.triggers, R20.5), 2026-10-16: 6.fkwin PARTLY - `tests/test_the_streaming_copy_runs_inside_the_key_window.py` runs the streaming copy on the pg pair: the keys on `child` are off whenever a COPY is loading and back, same definition and validated, after; a row made un-restorable inside the window stops the move with `NotPutBack` naming the `validate constraint` statement; a copy stopped mid-window leaves `dropped-fks` and the next window puts the keys back. Fixed on the way: a key both a dead load saved and the target holds half put back (not valid) was put back not valid for good (`ForeignKeyWindow` now keeps the saved validity), and a `NotPutBack` now leaves the record for the next window of the process. Left: the stop test is timing-dependent on a shared pair, the copy going on after a stopped one with keys off through the streaming copy itself (a resume on the pg pair failed in the program's schema step), the trigger/range-worker server proof (P0-DEPTH.triggers stays OPEN). R20.5 PARTLY: `movers._builds_beside_the_copy` asks `planner.overlap` (so `guarantees.breaks`) over the catalogues' semantics, and `_IndexWindow.build_table` builds a finished table's indexes while the streaming copy goes on, evidence in `overlap.json`; fakes prove the admit and the build, not yet a server run showing the timestamps, nor a refusal case.

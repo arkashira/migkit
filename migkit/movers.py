@@ -1307,6 +1307,10 @@ class _IndexWindow:
         self.hop, self.db, self.workers, self.log = hop, db, workers, log
         self.table, self.only_left = table, only_left
         self.dropped, self.ddl = [], {}
+        #: the table each index set aside is on, and when its builds ran
+        #: beside the copy ({table: (began, ended)}, `build_table`)
+        self.of, self.built = {}, {}
+        self._lock = threading.Lock()
         self.record = SetAside(hop, db, "dropped-indexes")
 
     def __enter__(self):
@@ -1337,10 +1341,12 @@ class _IndexWindow:
         # indexes, and the bare name dropped whichever the search path
         # found first - the other's definition overwrote it, and one of
         # them was never rebuilt
+        kept = _outside_exclusion(self.hop, self.db, found, self.log,
+                                  fills=fills)
         rows = [(f"{t.split('.', 1)[0]}.{name}", definition, isc)
-                for t, name, definition, isc in
-                _outside_exclusion(self.hop, self.db, found, self.log,
-                                   fills=fills)]
+                for t, name, definition, isc in kept]
+        self.of = {f"{t.split('.', 1)[0]}.{name}": t
+                   for t, name, definition, isc in kept}
         if self.table:
             # one table's copy: an index that makes its rows unique stays -
             # a copier may find rows by it, and a load that let a duplicate
@@ -1394,22 +1400,48 @@ class _IndexWindow:
         self._put_back()
         return False            # never swallow the load's own exception
 
+    def build_table(self, table):
+        """The indexes set aside from `table` (`schema.table`) built now,
+        while the copy goes on with the tables not yet in: the builds the
+        window would make at its end, started the moment the table's rows
+        are there. Those that fail stay owed to the end (`_put_back`),
+        which says them. [] where the table had none."""
+        with self._lock:
+            mine = [i for i in self.dropped if self.of.get(i) == table]
+            self.dropped = [i for i in self.dropped if i not in mine]
+        if not mine:
+            return []
+        began = time.time()
+        rebuilt, failed = self._build(mine)
+        with self._lock:
+            self.dropped += failed
+            self.built[table] = (began, time.time())
+        if self.log:
+            self.log(f"{table}: {len(rebuilt)} indexes built while the"
+                     " copy goes on with other tables")
+        return rebuilt
+
+    def _build(self, names):
+        settings = (_pg_build_settings(self.hop, self.db,
+                                       min(int(self.workers or 1),
+                                           len(names)))
+                    if names else "")
+        return _rebuild(
+            names, lambda name: _pg_psql(self.hop, self.db,
+                                         settings + self.ddl[name]),
+            self.workers, self.log)
+
     def _put_back(self):
         """Every index set aside built again, each build under the
         session settings the target's size gives (`_pg_build_settings`)."""
         from . import indexes as _ix
-        settings = (_pg_build_settings(self.hop, self.db,
-                                       min(int(self.workers or 1),
-                                           len(self.dropped)))
-                    if self.dropped else "")
-        rebuilt, failed = _rebuild(
-            self.dropped, lambda name: _pg_psql(self.hop, self.db,
-                                                settings + self.ddl[name]),
-            self.workers, self.log)
+        with self._lock:
+            left = list(self.dropped)
+        rebuilt, failed = self._build(left)
         # a table's own window, or one that only looked for what a dead
         # load left, says something only where it did something
-        if self.log and (self.dropped or not (self.table or self.only_left)):
-            self.log(_ix.summary(self.dropped, rebuilt, failed))
+        if self.log and (left or not (self.table or self.only_left)):
+            self.log(_ix.summary(left, rebuilt, failed))
         if not failed:
             self.record.done()
 
@@ -5675,8 +5707,12 @@ class _CopyProgress:
 
     EVERY = 2.0
 
-    def __init__(self, work, log):
-        self.work, self.log = work, log
+    def __init__(self, work, log, done=None):
+        """`done(table)`: called once for each table the first time its
+        rows are all in - what lets the table's index builds start beside
+        the copy of the rest. `seen` keeps when each was first seen."""
+        self.work, self.log, self.done = work, log, done
+        self.seen = {}
         self.stop = threading.Event()
         self.thread = None
 
@@ -5687,9 +5723,13 @@ class _CopyProgress:
                 so_far = tally.reached(name)
                 if so_far and self.log:
                     self.log(f"{name}: copied ({so_far})")
+                if name not in self.seen:
+                    self.seen[name] = time.time()
+                    if self.done is not None:
+                        self.done(name)
 
     def __enter__(self):
-        if self.work is None or self.log is None:
+        if self.work is None or (self.log is None and self.done is None):
             return self
         from .wording import Tally
         self.tally = Tally(_SIZES)
@@ -5715,6 +5755,55 @@ class _CopyProgress:
             except Exception:  # noqa: BLE001
                 pass
         return False
+
+
+def _builds_beside_the_copy(hop, db, workers, windowed, log=None):
+    """The `planner.Overlap` that lets a finished table's index builds
+    start while the streaming copy goes on with the others - None where
+    `decide` does not admit one: the move's guarantees are read from the
+    source's catalogue and the target's (`jointplan.semantics_of`), the
+    schedule is held to them (`guarantees.breaks`, through
+    `planner.overlap`), and a schedule that loses any of them, or a
+    catalogue that cannot be read, leaves every build to the copy's end.
+    `windowed`: the target's keys are off for the load, so no order of
+    tables is owed to them; the copy reads one moment."""
+    from . import jointplan, planner
+    from .engines.postgres import PostgresEngine
+    try:
+        sem = jointplan.semantics_of(PostgresEngine(hop), db)
+    except Exception:  # noqa: BLE001 - not read: nothing is overlapped
+        sem = None
+    if not sem:
+        return None
+    each = {t: 1.0 for t in sem}
+    got = planner.overlap(sem, each, build=each, at_once=max(int(workers), 1),
+                          fks="after" if windowed else "during", shared=True)
+    if got.way in ("free", "waves"):
+        if log:
+            log(f"index builds: {got.said}")
+        return got
+    if log:
+        why = "; ".join(w for _, w in got.refused) or got.said
+        log(f"index builds wait for the copy's end: {why[:160]}")
+    return None
+
+
+def _overlap_evidence(hop, db, beside, progress, indexes, ended):
+    """What the overlap did, kept beside the move's other evidence
+    (`overlap.json`): the way `decide` admitted, when each table was seen
+    whole, when its index builds ran, and when the copy ended. Nothing is
+    kept where no way was admitted and nothing ran."""
+    if beside is None and not indexes.built:
+        return
+    try:
+        path = hop.report_dir(db) / "overlap.json"
+        path.write_text(json.dumps({
+            "way": beside.way if beside else "",
+            "copied": progress.seen,
+            "built": {t: list(v) for t, v in indexes.built.items()},
+            "copy_ended": ended}, indent=1))
+    except (OSError, TypeError):
+        pass
 
 
 def _record_copy(hop, work, way, seconds, sizes):
@@ -5955,8 +6044,9 @@ def pgcopydb_move(hop, db, workers, go, log):
     from contextlib import ExitStack
 
     from . import decide
+    windowed = bool(blocked or _fks_off(hop, db))
     with ExitStack() as keys:
-        if blocked or _fks_off(hop, db):
+        if windowed:
             # the keys come off before the first row is emptied or written
             # and go back, validated, before the copy is done; a copy that
             # dies in between leaves them off and recorded for the one
@@ -5996,18 +6086,34 @@ def pgcopydb_move(hop, db, workers, go, log):
                 split.keep(begun)
                 # the scope it begins under, beside the record that it began
                 remember(begun, "scope", hop.scope_fingerprint())
-        with _IndexWindow(hop, db, workers, log):
+        with _IndexWindow(hop, db, workers, log) as indexes:
             if log:
                 log(copy)
                 log(split.why)
             began = time.monotonic()
+            ended = None
+            beside = (_builds_beside_the_copy(
+                hop, db, workers, windowed, log)
+                if how == "local" else None)
+            side = Beside(log) if beside else None
+            progress = _CopyProgress(
+                work if how == "local" else None, log,
+                (lambda t: side.run(lambda: indexes.build_table(t)))
+                if side else None)
             try:
-                with _CopyProgress(work if how == "local" else None, log):
-                    stream.run(args, what="the streaming copy")
+                try:
+                    with progress:
+                        stream.run(args, what="the streaming copy")
+                finally:
+                    ended = time.time()
+                    if side:
+                        side.wait()
             except RuntimeError as e:
                 if "message queue" in str(e):
                     raise runner.Failed(QUEUES_GONE) from None
                 raise
+            finally:
+                _overlap_evidence(hop, db, beside, progress, indexes, ended)
             took = time.monotonic() - began
     if how == "local":
         # a resumed copy's time is not the whole copy's, so only a copy

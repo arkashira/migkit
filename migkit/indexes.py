@@ -291,7 +291,11 @@ class ForeignKeyWindow:
             for path in stale:
                 path.unlink(missing_ok=True)
             return self
-        if not self.record.save({**left, **plan}, stale):
+        # a key both the dead load set aside and the target holds now - put
+        # back half way, added and never validated - goes back as the dead
+        # load saved it: valid where the source held it so. The target's
+        # present state (not yet valid) would have kept it so for good
+        if not self.record.save({**plan, **left}, stale):
             raise decide.Blocked(
                 "the foreign keys' definitions could not be saved to"
                 f" {self.hop.report_dir(self.db)}, so none were taken off")
@@ -309,7 +313,7 @@ class ForeignKeyWindow:
                 raise decide.Blocked(
                     f"a foreign key could not be taken off: {why}; every"
                     " key taken off before it is back") from e
-            self.dropped[key] = fk
+            self.dropped[key] = left.get(key, fk)
         if self.log and plan:
             self.log(f"{len(plan)} foreign keys taken off for the load;"
                      f" definitions saved to {self.record.path}")
@@ -349,6 +353,9 @@ class ForeignKeyWindow:
                     failed.append((sql, _words(e)))
                     break
         if failed:
+            # what went back is not owed again; the rest waits for the
+            # next window of this process, as for one that died in its load
+            ForeignKeyWindow._held.add(self.record.path)
             raise NotPutBack(failed, self.record.path)
         if self.log:
             self.log(f"{len(self.dropped)} foreign keys put back")
