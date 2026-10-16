@@ -100,12 +100,10 @@ def msk_presign(region, access_key, secret_key, session_token=None,
     return token, at.timestamp() + int(lifetime)
 
 
-#: built, and run on no broker that takes a transactional producer: the
-#: sandbox's keeps its transaction log at more replicas than it has, so the
-#: producer-epoch fence is refused there with its reason (`fencing`)
-UNPROVED_ON = ("built; not run on a real broker that takes transactional"
-               " producers")
-UNPROVED_ITEMS = ("operations.fencing verify.value.type-drift schema.create"
+#: built, and run on the sandbox's single broker only: the producer-epoch
+#: fence (`fencing`) is proved there, a cluster of several brokers is not
+UNPROVED_ON = ("built; not run on a real cluster of several brokers")
+UNPROVED_ITEMS = ("verify.value.type-drift schema.create"
                   " assess.capacity assess.writers move.create-missing")
 
 class MskToken:

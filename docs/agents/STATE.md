@@ -39,7 +39,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | hetero | 16/16 | 10/12 | 45 | partitioned, missing grant |
 | iceberg | 9/16 | 11/12 | 48 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
 | informix | 16/16 | 5/12 | 74 | keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
-| kafka | 16/16 | 12/12 | 11 | - |
+| kafka | 16/16 | 12/12 | 10 | - |
 | keyspaces | 16/16 | 12/12 | 49 | - |
 | kinesis | 16/16 | 12/12 | 4 | - |
 | lindorm | 12/16 | 10/12 | 55 | stream, fence, confirm, delta, large values, partitioned |
@@ -77,7 +77,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1235, n/a 1471, not yet 1839, test owed 300, yes 963. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1234, n/a 1471, not yet 1839, test owed 300, yes 964. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -112,7 +112,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | hetero | 4/10 | 6/40 | 1/2 | 2/5 | - | 6/8 | 2/5 | - | - | - | 21/70 |
 | iceberg | 0/9 | 0/24 | 0/6 | 0/5 | 1/3 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/59 |
 | informix | 0/10 | 0/39 | 0/6 | 0/7 | 0/6 | 0/6 | 0/6 | 0/1 | 0/1 | 0/1 | 0/83 |
-| kafka | 5/9 | 15/17 | 5/5 | 5/7 | 0/1 | 5/6 | 5/5 | 1/1 | 1/1 | 0/1 | 42/53 |
+| kafka | 5/9 | 15/17 | 5/5 | 5/7 | 0/1 | 5/6 | 5/5 | 1/1 | 1/1 | 1/1 | 43/53 |
 | keyspaces | 0/9 | 0/24 | 1/5 | 0/7 | 1/3 | 1/5 | 0/3 | 1/1 | 1/1 | 0/1 | 5/59 |
 | kinesis | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
 | lindorm | 0/9 | 2/27 | 0/6 | 0/7 | 0/5 | 0/6 | 1/5 | 1/1 | 1/1 | 0/1 | 5/68 |
@@ -169,7 +169,7 @@ Built, unproved - a way the code has on an engine no sandbox here can run; the e
 - geminidb-mongo: built; not run on a real GeminiDB instance (57 cells)
 - geminidb-redis: built; not run on a real GeminiDB instance (30 cells)
 - informix: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (21 cells)
-- kafka: built; not run on a real broker that takes transactional producers (6 cells)
+- kafka: built; not run on a real cluster of several brokers (5 cells)
 - keyspaces: built; not run on a real Amazon Keyspaces table (45 cells)
 - lindorm: built; not run on a real Lindorm instance (14 cells)
 - mssql: built; not run on a real SQL Server, only on its edge edition in the sandbox (stopped Agent, CLR off, a thinner catalogue); a cell whose lane test is not written yet is owed that test (27 cells)
@@ -196,6 +196,7 @@ Built, unproved - a way the code has on an engine no sandbox here can run; the e
 - msk: built; not run against a real MSK cluster (brand.told, sign-in.iam, sign-in.mechanisms)
 - redis-enterprise: built; not run against a real Redis Enterprise (brand.told)
 - singlestore-helios: built; not run on a real SingleStore Helios workspace (managed.readiness, managed.brand-api)
+- windows: built; not run on Windows (bundle.install, bundle.source-build, bundle.platform-markers)
 - yugabyte-aeon: built; not run on a real YugabyteDB Aeon cluster (managed.readiness, managed.brand-api)
 
 Per item: the engines in each state - "test owed" is a way in the code whose test on that engine is not written (`UNPROVED`); "built, unproved" is one whose engine module declares it was not run on a real server.
@@ -289,13 +290,13 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | cutover.jobs | mysql postgres | clickhouse oracle | mssql | the rest (31) | bigtable cassandra copybook cosmosdb datastore delta dsql duckdb dynamodb firestore geminidb-cassandra geminidb-mongo geminidb-redis hetero iceberg kafka keyspaces kinesis mongodb neo4j neptune parquet pubsub qdrant redis saas sapodp spanner sqlite tidb |
 | security.tls | the rest (44) | oracle | analyticdb-mysql analyticdb-postgres singlestore yugabytedb | ase databricks db2 db2zos exasol generic informix mssql neo4j netezza progress qdrant saas saphana synapse vertica | hetero |
 | managed.catalogued | the rest (36) | - | - | analyticdb-mysql analyticdb-postgres ase couchbase databricks db2i db2zos delta duckdb exasol generic iceberg informix neo4j netezza parquet progress qdrant saas saphana sapodp singlestore snowflake sqlite synapse tidb vertica yugabytedb | copybook hetero |
-| operations.fencing | cassandra clickhouse mongodb mysql oracle postgres redis | - | analyticdb-mysql analyticdb-postgres cockroachdb dcdb dsql gaussdb geminidb-cassandra geminidb-mongo geminidb-redis kafka keyspaces oceanbase polardbx singlestore tidb yugabytedb | the rest (40) | hetero saas sapodp |
+| operations.fencing | cassandra clickhouse kafka mongodb mysql oracle postgres redis | - | analyticdb-mysql analyticdb-postgres cockroachdb dcdb dsql gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces oceanbase polardbx singlestore tidb yugabytedb | the rest (40) | hetero saas sapodp |
 
 ## Source layout
 
 385 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
-Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 81 shape lacks, 44 capability lacks, 3028 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (164).
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 81 shape lacks, 44 capability lacks, 3027 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (164).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

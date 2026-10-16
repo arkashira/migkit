@@ -1986,8 +1986,12 @@ def _drill(hop_name, db, table, limit):
 @click.option("--resume", is_flag=True, help="skip checks already ok in last summary")
 @click.option("--exclude", default="", help="comma list of db or db.schema.table"
                                             " patterns to skip, added to the hop's")
+@click.option("--sample", "sample", default=0.0, type=float,
+              help="a quick signal in about this many seconds: random rows"
+                   " read by key on both sides, said as a sample - the full"
+                   " check still decides")
 def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
-          workers, resume, exclude):
+          workers, resume, exclude, sample):
     """Read-only validation of target vs source. Never writes to either side.
 
     When counts and data both run, row counts ride along with the checksum
@@ -2001,10 +2005,77 @@ def check(hop_name, db, table, only, do_deep, drill, limit, consistent,
         return _drill(hop_name, db, table, limit)
     hop = get_hop(hop_name)
     _require_configured(hop)
+    if sample:
+        got, _ = _sampled_check(hop, db, table, sample)
+        if got.exit:
+            raise SystemExit(got.exit)
+        return
     got, _ = _check(hop, db, table, only, do_deep, consistent, workers,
                     resume, exclude)
     if got.exit:
         raise SystemExit(got.exit)
+
+
+#: keys the keyed reader is timed on, per table, before its sample is sized
+SAMPLE_PROBE = 200
+
+
+def _sampled_check(hop, db, table, seconds, eng=None):
+    """`check --sample SECONDS`: each table in scope held first to a sample
+    of its rows read by migkit's own keyed reader (`ranges.sampled`), its
+    size the decision engine's (`decide.check_sample`) from the reader's
+    rate timed here on a bounded page of keys and each table's share of
+    the time asked. A table the rung leaves to the full check (no key, the
+    rate not measured, a sample that would be the whole table) is said as
+    not compared. What it adds up to is `verdict.decide`'s: a sample with
+    no difference is never "same", only incomplete with its sample line,
+    and a difference in it is a difference. Returns (verdict, answers)."""
+    from . import decide, ranges
+    from . import verdict as _verdict
+    eng = eng or get_engine(hop)
+    dbs = [db] if db else eng.databases()
+    todo = []
+    for d in dbs:
+        names = [table] if table else [
+            t for t in eng.neutral_tables("src", d)
+            if hop.takes_table(d, t)]
+        todo += [(d, t) for t in names]
+    share = float(seconds) / max(len(todo), 1)
+    out = []
+    for d, t in todo:
+        cols = list(eng.neutral_columns("src", d, t))
+        key = list(eng.neutral_key("src", d, t) or ())
+        rows, rate = 0, 0.0
+        if key:
+            kcols = [(n, c) for n, c in cols if n in key]
+            began = time.monotonic()
+            keys, after = eng.neutral_read("src", d, t, kcols,
+                                           limit=SAMPLE_PROBE)
+            eng.neutral_rows_by_key("src", d, t, cols, key,
+                                    [tuple(k) for k in keys])
+            took = time.monotonic() - began
+            rate = len(keys) / took if keys and took > 0 else 0.0
+            known = (eng.table_facts("src", d) or {}).get(t) or {}
+            rows = int(known.get("rows") or 0)
+            if len(keys) < SAMPLE_PROBE:
+                rows = len(keys)        # the probe read every key
+        facts = decide.Facts({"asked": True, "rows": rows, "rate": rate,
+                              "seconds": share})
+        chosen = decide.check_sample(facts)
+        decide.record(hop, chosen, work=f"{d}.{t}: the sampled check")
+        if chosen.path == "sample":
+            got = ranges.sampled(eng, d, t, cols, key,
+                                 int(facts["sample size"]))
+        else:
+            why = ("it has no key to read rows by" if not key
+                   else chosen.reason or "the full check reads it")
+            got = {"check": "sampled rows", "scope": f"{d}.{t}",
+                   "status": "skip", "detail": f"not sampled: {why}"}
+        out.append(got)
+        console.print(f"  {_esc(got['scope'])}: {_esc(got['detail'])}")
+    said = _verdict.decide(out)
+    console.print(f"{_esc(said.status)}: {_esc(said.why)}")
+    return said, out
 
 
 def _checks_for(eng, only, do_deep=False):

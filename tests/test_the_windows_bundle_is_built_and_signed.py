@@ -137,3 +137,22 @@ def test_the_windows_bundle_is_built_from_the_lock_and_signed(
     with pytest.raises(SystemExit):
         bundle.verified(one)
     assert tools.WINDOWS_UNPROVED == "built; not run on Windows"
+
+
+def test_windows_is_declared_built_and_unproved_in_the_state():
+    """The Windows cells are read by the declaration seam into the
+    state's "built, unproved" block, with the reason the bundle says."""
+    from migkit import capabilities as caps
+    assert "tools.py" in caps.DECLARING
+    why, cells = caps.UNPROVED_ELSEWHERE["windows"]
+    assert why == tools.WINDOWS_UNPROVED == tools.UNPROVED_ON["windows"]
+    assert "bundle.install" in cells
+
+
+def test_a_linux_bundle_takes_wheels_built_for_any_glibc_floor_between():
+    """A wheel built for glibc 2.24 (the only aarch64 one some pins ship)
+    is asked for, as one for 2.17 and 2.28 are."""
+    tags = tools._wheel_tags(tools._platform("linux-arm64"))
+    assert {"manylinux_2_17_aarch64", "manylinux_2_24_aarch64",
+            "manylinux_2_28_aarch64", "manylinux2014_aarch64"} <= set(tags)
+    assert "manylinux_2_29_aarch64" not in tags

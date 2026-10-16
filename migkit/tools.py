@@ -2504,8 +2504,12 @@ def _wheel_tags(target):
     arch = "aarch64" if target["machine"] in ("arm64", "aarch64") \
         else "x86_64"
     if target["system"] == "Linux":
-        return [f"manylinux2014_{arch}", f"manylinux_2_17_{arch}",
-                f"manylinux_2_28_{arch}", f"linux_{arch}"]
+        # every glibc floor from the oldest a wheel is still built for to
+        # the one current distributions carry: a wheel built for one in
+        # between (manylinux_2_24) installs there as well
+        return ([f"manylinux2014_{arch}"]
+                + [f"manylinux_2_{n}_{arch}" for n in range(17, 29)]
+                + [f"linux_{arch}"])
     mac = "arm64" if arch == "aarch64" else "x86_64"
     return [f"macosx_11_0_{mac}", f"macosx_12_0_{mac}",
             f"macosx_13_0_{mac}", f"macosx_14_0_{mac}"]
@@ -2706,6 +2710,12 @@ _LAST_SHORT = []
 #: a bundle for Windows is built, held to the lock and signed here; no
 #: install from one has run on Windows (no machine)
 WINDOWS_UNPROVED = "built; not run on Windows"
+#: the same, read literally by the declaration seam
+#: (`capabilities._merge_declared`, `DECLARING`) into the state's "built,
+#: unproved" block
+UNPROVED_ON = {"windows": "built; not run on Windows"}
+UNPROVED_ITEMS = {"windows": "bundle.install bundle.source-build"
+                             " bundle.platform-markers"}
 
 
 def _short_of(said):

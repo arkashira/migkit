@@ -221,7 +221,10 @@ class _FakeS3:
         self.uploads.pop(UploadId, None)
 
     def head_object(self, Bucket, Key):
-        return {"ETag": f'"{self.etags[Key]}"',
+        # a whole PUT's tag is its MD5; a multipart one's, its parts'
+        tag = getattr(self, "etags", {}).get(Key) or self._md5(
+            self.objects[Key])
+        return {"ETag": f'"{tag}"',
                 "ContentLength": len(self.objects[Key])}
 
     def get_object(self, Bucket, Key, Range=None):

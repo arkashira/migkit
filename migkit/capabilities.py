@@ -3652,9 +3652,10 @@ _BAD_DECLARATIONS = []
 #: the modules beside the engines' that declare cells of their own, for
 #: what they serve that is no engine - a cloud provider (the cloud side of
 #: readiness, its sign-in and forwarders) or a managed brand sharing its
-#: open-source engine's module. Each declares `UNPROVED_ON` and
+#: open-source engine's module, or a machine no sandbox here is (Windows,
+#: `tools`). Each declares `UNPROVED_ON` and
 #: `UNPROVED_ITEMS` as {who: words}, read literally as an engine's are
-DECLARING = ("cloud_readiness.py", "variants.py")
+DECLARING = ("cloud_readiness.py", "variants.py", "tools.py")
 #: {who: (the reason its module gives, its cells)} of those modules, for
 #: the state's "built, unproved" block (`tools/gen_codemap.py`)
 UNPROVED_ELSEWHERE = {}

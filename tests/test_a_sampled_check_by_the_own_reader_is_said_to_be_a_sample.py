@@ -118,3 +118,118 @@ def test_on_a_postgres_pair_the_sample_misses_what_the_full_check_finds(
     pair.dst.sql("update public.t set v = 'changed'", db=db)
     found = ranges.sampled(eng, db, "t", cols, key, 20, seed=3)
     assert found["status"] == "diff", found
+
+
+class Tables(Lists):
+    """`Lists` as one database of one keyed table, as `check` reads it."""
+
+    def databases(self):
+        return ["d"]
+
+    def neutral_tables(self, side, db):
+        return ["t"]
+
+    def neutral_columns(self, side, db, table):
+        return COLUMNS
+
+    def neutral_key(self, side, db, table):
+        return ["id"]
+
+    def table_facts(self, side, db):
+        return {"t": {"rows": len(self.sides["src"]), "key": True}}
+
+
+def _hop(tmp_path, engine="postgres"):
+    from migkit.config import Endpoint, Hop
+    hop = Hop(name="sampled", engine=engine,
+              source=Endpoint(host="10.0.0.1", port=5432, user="u",
+                              password="CHANGE_ME"),
+              target=Endpoint(host="10.0.0.2", port=5432, user="u",
+                              password="CHANGE_ME"), databases=["d"])
+    hop.report_dir = lambda d=None: tmp_path
+    return hop
+
+
+def test_check_sample_reaches_the_own_reader_and_stays_incomplete(
+        tmp_path, monkeypatch):
+    """`check --sample` sizes the sample on the rate timed here and says
+    "no difference in the sample" as incomplete; a difference inside it
+    is a difference; a table too small for a sample is left to the full
+    check, said as not sampled."""
+    from migkit import cli
+    monkeypatch.setattr(cli, "SAMPLE_PROBE", 50)
+    eng = Tables({i: f"v{i}" for i in range(5000)},
+                 {i: f"v{i}" for i in range(5000)})
+    said, got = cli._sampled_check(_hop(tmp_path), "", "", 0.001, eng=eng)
+    assert got[0]["check"] == "sampled rows"
+    assert 0 < got[0]["sampled"]["rows"] < 5000, got
+    assert said.status == "incomplete" and said.why.startswith("sampled:")
+    eng.sides["dst"] = {i: "changed" for i in range(5000)}
+    said, got = cli._sampled_check(_hop(tmp_path), "", "", 0.001, eng=eng)
+    assert got[0]["status"] == "diff" and said.status == "different"
+    small = Tables({1: "a"}, {1: "a"})
+    said, got = cli._sampled_check(_hop(tmp_path), "", "", 5, eng=small)
+    assert got[0]["status"] == "skip" and "not sampled" in got[0]["detail"]
+    assert said.status == "incomplete"
+
+
+def test_the_command_line_takes_the_sample_and_ends_three(monkeypatch):
+    from click.testing import CliRunner
+
+    from migkit import cli
+    seen = {}
+
+    def sampled(hop, db, table, seconds, eng=None):
+        seen.update(hop=hop, seconds=seconds)
+        return verdict.decide([{"check": "sampled rows", "scope": "d.t",
+                                "status": "ok", "detail": "x",
+                                "sampled": {"rows": 3, "of": 9}}]), []
+    monkeypatch.setattr(cli, "get_hop", lambda name: name)
+    monkeypatch.setattr(cli, "_require_configured", lambda hop: None)
+    monkeypatch.setattr(cli, "_sampled_check", sampled)
+    got = CliRunner().invoke(cli.main, ["check", "h", "--sample", "2.5"])
+    assert seen == {"hop": "h", "seconds": 2.5}
+    assert got.exit_code == 3, got.output
+
+
+mysql_pair = servers.fixture("mysql")
+
+
+@needs_docker
+@pytest.mark.xfail(strict=True, reason="the MySQL engine's keyed read by key"
+                   " renders its declared type ('int') where a class is"
+                   " expected (canon.render_value): owed by the MySQL engine")
+def test_on_a_mysql_pair_the_sample_misses_what_the_full_check_finds(
+        mysql_pair, tmp_path):
+    from migkit.config import Hop
+    from migkit.engines import get_engine
+    db = mysql_pair.name
+    for side in (mysql_pair.src, mysql_pair.dst):
+        side.sql("drop table if exists t", db=db)
+        side.sql("create table t (id int primary key, v text)", db=db)
+        side.sql("insert into t select n, concat('v', n) from (select"
+                 " a.i * 100 + b.i * 10 + c.i + 1 n from"
+                 " (select 0 i union select 1 union select 2 union select 3"
+                 " union select 4) a, (select 0 i union select 1 union"
+                 " select 2 union select 3 union select 4 union select 5"
+                 " union select 6 union select 7 union select 8 union"
+                 " select 9) b, (select 0 i union select 1 union select 2"
+                 " union select 3 union select 4 union select 5 union"
+                 " select 6 union select 7 union select 8 union select 9)"
+                 " c) g", db=db)
+    hop = Hop(name="sampled", engine="mysql",
+              source=mysql_pair.src.endpoint(),
+              target=mysql_pair.dst.endpoint(), databases=[db])
+    hop.report_dir = lambda d=None: tmp_path
+    eng = get_engine(hop)
+    cols = [(n, c) for n, c in eng.neutral_columns("src", db, "t")]
+    key = eng.neutral_key("src", db, "t")
+    same = ranges.sampled(eng, db, "t", cols, key, 20, seed=3)
+    assert same["status"] == "ok" and same["sampled"]["of"] == 500, same
+    assert verdict.decide([same]).status == "incomplete"
+    from migkit import cli
+    said, _ = cli._sampled_check(hop, db, "t", 0.05, eng=eng)
+    assert said.status == "incomplete", said.why
+    mysql_pair.dst.sql("update t set v = 'changed'", db=db)
+    found = ranges.sampled(eng, db, "t", cols, key, 20, seed=3)
+    assert found["status"] == "diff", found

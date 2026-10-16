@@ -27,7 +27,7 @@ from tests.conftest import needs_docker
 
 #: what this module proves, item by engine (`capabilities.proofs`)
 PROVES = [("operations.fencing", ("mongodb", "redis", "cassandra",
-                                  "clickhouse", "oracle"))]
+                                  "clickhouse", "oracle", "kafka"))]
 
 mongo = servers.fixture("mongo")
 redis_ = servers.fixture("redis")
@@ -134,17 +134,39 @@ def test_cassandra_holds_it_by_a_lightweight_transaction(cassandra):
 
 
 @needs_docker
-def test_kafka_is_refused_where_the_broker_takes_no_transactional_producer(
-        kafka):
-    """The sandbox's broker keeps its transaction log at more replicas than
-    it has: a transactional producer is never started, so the fact read is
-    False and the standby is refused with what to allow - the epoch fence
-    itself is built and declared unproved (`engines.kafka`)."""
+def test_kafka_fences_the_old_producer_by_the_brokers_epoch(kafka):
+    """The sandbox broker takes a transactional producer: the way is the
+    producer epoch, placed in migkit's own topic; a taker starting a
+    producer under the same transactional id bumps the broker's epoch, and
+    the old holder's next transactional write is refused by the broker
+    itself - said as fenced, nothing of it committed - while the number
+    read back is the taker's."""
     eng = _eng(kafka, "kafka")
     facts = eng.fence_facts("dst", eng.CLUSTER)
-    assert facts["create_in"] and facts["transactions"] is False
-    why = fencing.prove(eng, "dst", eng.CLUSTER)
-    assert "takes no transactional producer" in why
+    assert facts["create_in"] and facts["transactions"] is True
+    db = eng.CLUSTER
+    got = fencing.way(eng, "dst", db)
+    assert isinstance(got, fencing.Way), got
+    assert got.choice.path == "producer-epoch" and got.target_refuses
+    assert fencing.prove(eng, "dst", db) is None
+    row = f"{eng.hop.name}#t"
+    old = fencing.Token(row, 7, "old-mover", "store")
+    new = fencing.Token(row, 8, "taker", "store")
+    assert fencing.raise_once(eng, "dst", db, old) == 7
+    fencing.arm(eng.hop, old)
+    try:
+        fencing.hold(eng, "dst", db, None)      # the holder writes
+        assert fencing.raise_once(eng, "dst", db, new) == 8
+        with pytest.raises(fencing.Fenced) as refused:
+            fencing.hold(eng, "dst", db, None)
+        said = str(refused.value)
+        assert "refused a write" in said
+        assert "the broker fenced this producer" in said, said
+        assert fencing.raise_to(eng, "dst", db, old)[0] == 8
+    finally:
+        fencing.disarm(eng.hop)
+        fencing.forget(eng)
+    assert fencing.read(eng, "dst", db, row)[0] == 8
 
 
 @needs_docker
