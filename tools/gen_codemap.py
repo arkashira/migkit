@@ -1327,6 +1327,14 @@ KNOWN_UPWARD = {
      "the key spaces move below configuration"): (
         "migkit/hopkeys.py migkit.topology",
     ),
+    ("the deep check compares Agent jobs through `jobs.shapes`; the job "
+     "shapes move below engines"): (
+        "migkit/engines/mssql.py migkit.jobs",
+    ),
+    ("a column is hidden by the way `decide.hide_column` picks from its "
+     "facts; the rung moves below conversion"): (
+        "migkit/transforms.py migkit.decide",
+    ),
     ("a brand's confidence is a rung (`decide.brand_confidence`) the "
      "configuration reads once the server's signs are in; the rung moves "
      "below configuration"): (

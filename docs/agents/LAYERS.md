@@ -28,14 +28,13 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 380
 
-### (not listed)
-
-- `migkit/engines/mssql.py:2061` engines -> workflows (`jobs`)
-- `migkit/transforms.py:402` conversion -> decision (`decide`)
-
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
 - `migkit/variants.py:397` configuration -> decision (`decide`)
+
+### a column is hidden by the way `decide.hide_column` picks from its facts; the rung moves below conversion
+
+- `migkit/transforms.py:402` conversion -> decision (`decide`)
 
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
 
@@ -1029,6 +1028,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/machine.py:927` decision -> engines (`engines`)
 - `migkit/tableway.py:132` decision -> engines (`engines`)
 - `migkit/waysaid.py:71` decision -> engines (`engines`)
+
+### the deep check compares Agent jobs through `jobs.shapes`; the job shapes move below engines
+
+- `migkit/engines/mssql.py:2061` engines -> workflows (`jobs`)
 
 ### the hop check refuses prefixes that meet through `topology.overlaps`; the key spaces move below configuration
 
