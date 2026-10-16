@@ -768,6 +768,31 @@ class OpenSearchEngine(NeutralCopier, Engine):
                                ensure_ascii=False).encode())
                 + len(str(hit["_id"]).encode()))
 
+    def neutral_traits(self, side, db, table):
+        """{kind: value} the schema comparer holds an index to beyond its
+        fields: the settings that fix how documents are stored and placed
+        (shards, codec, sort, limits - `_OPTIONS`), its analysis, the
+        pipelines each document passes through, the policy that rolls the
+        index over and the mapping's own options (`_MAPPING_OPTIONS`)."""
+        d = self._described_index(side, db, table)
+        have = _settings_of(d)
+        out = {f"setting {k}": v for k, v in sorted(have.items())
+               if k.startswith(_OPTIONS)}
+        analysis = {k: v for k, v in sorted(have.items())
+                    if k.startswith("analysis.")}
+        if analysis:
+            out["analysis"] = json.dumps(analysis, sort_keys=True)
+        for key in ("default_pipeline", "final_pipeline", "lifecycle.name",
+                    "plugins.index_state_management.policy_id"):
+            if have.get(key) and have[key] != "_none":
+                out[f"setting {key}"] = have[key]
+        mapping = d.get("mappings") or {}
+        for key in _MAPPING_OPTIONS:
+            if key in mapping:
+                out[f"mapping {key}"] = json.dumps(mapping[key],
+                                                   sort_keys=True)
+        return out
+
     def neutral_column_rules(self, side, db, table):
         """{field: {"null", "default", "identity"}}: what a mapping says of
         a field's rules - nothing. It declares a type, and every field takes

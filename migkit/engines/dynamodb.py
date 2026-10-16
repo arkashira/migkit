@@ -1013,6 +1013,25 @@ class DynamoDBEngine(NeutralCopier, Engine):
             for i in (got.get("GlobalSecondaryIndexes") or [])
             + (got.get("LocalSecondaryIndexes") or []))
 
+    def neutral_traits(self, side, db, table):
+        """{kind: value} the schema comparer holds a table to beyond its
+        keys and indexes: the attribute the service expires items by
+        (absent where time to live is off) and the stream a change feed
+        reads. An endpoint that does not answer time to live raises, so the
+        table is named as not compared and never passed as having none."""
+        client = self._client(side)
+        name = self._name(side, db, table)
+        d = client.describe_table(TableName=name)["Table"]
+        ttl = client.describe_time_to_live(TableName=name)[
+            "TimeToLiveDescription"]
+        out = {}
+        if ttl.get("TimeToLiveStatus") in ("ENABLED", "ENABLING"):
+            out["time to live"] = str(ttl.get("AttributeName"))
+        spec = d.get("StreamSpecification") or {}
+        if spec.get("StreamEnabled"):
+            out["stream"] = str(spec.get("StreamViewType"))
+        return out
+
     def neutral_create_index_sql(self, side, db, table, name, unique,
                                  columns):
         """The index as a statement of migkit's own for `execute_ddl`: the

@@ -1513,6 +1513,36 @@ class CassandraEngine(NeutralCopier, Engine):
     CRITICAL_PARAMS = ("partitioner", "default_time_to_live",
                        "gc_grace_seconds", "change_log")
 
+    def _table_rows(self, side, db):
+        """[the system_schema.tables row of every table of the keyspace,
+        as a dict] - what `_settings` and `neutral_traits_all` read."""
+        return [r._asdict() for r in self._session(side).execute(
+            "select * from system_schema.tables where keyspace_name = %s",
+            (self._ks(side, db),))]
+
+    #: the table options held to each other by the schema comparer: those
+    #: that decide what a table keeps and for how long (`HOLDING`), whether
+    #: its changes are logged, and how its files are compressed - a
+    #: different compressor reads the same rows but is another table's
+    #: footprint
+    TRAIT_OPTIONS = ("default_time_to_live", "gc_grace_seconds", "compaction",
+                     "cdc", "compression")
+
+    def neutral_traits_all(self, side, db):
+        """{table: {option: value}} of every table in one listing, in the
+        words the settings check reads them in; an option the server's
+        version does not have is left out of both sides alike."""
+        out = {}
+        for row in self._table_rows(side, db):
+            t = row["table_name"]
+            if t.endswith(self.CDC_LOG):
+                continue
+            out[t] = {k: json.dumps(
+                dict(row[k]) if hasattr(row[k], "items") else row[k],
+                sort_keys=True, default=str)
+                for k in self.TRAIT_OPTIONS if row.get(k) is not None}
+        return out
+
     def _settings(self, side, db):
         s, out = self._session(side), {}
         try:
@@ -1528,9 +1558,7 @@ class CassandraEngine(NeutralCopier, Engine):
             out["keyspace.replication"] = json.dumps(dict(r.replication),
                                                      sort_keys=True)
             out["keyspace.durable_writes"] = str(r.durable_writes)
-        rows = [r._asdict() for r in s.execute(
-            "select * from system_schema.tables where keyspace_name = %s",
-            (ks,))]
+        rows = self._table_rows(side, db)
         # a ScyllaDB table's change log is a table beside it, there exactly
         # while the log is on
         logged = {r["table_name"][:-len(self.CDC_LOG)] for r in rows

@@ -853,6 +853,20 @@ def _side_engine(eng, side):
     return getattr(eng, "src_engine" if side == "src" else "dst_engine", eng)
 
 
+def column_with_rules(name, declared, rule=None):
+    """A `catalog.Column` from a neutral reader's name and type and the
+    engine's `neutral_column_rules` entry for it: whether it takes NULL,
+    its default, and whether the engine numbers it. A column the engine
+    says nothing of is read as taking NULL, with no default and plain -
+    what a name-and-type reading always assumed."""
+    from .catalog import Column
+    rule = rule or {}
+    default = rule.get("default")
+    return Column(str(name), str(declared), "", bool(rule.get("null", True)),
+                  None if default is None else str(default), None,
+                  "identity" if rule.get("identity") else "")
+
+
 def side_catalog(eng, side, db, acc=None, max_age=0.0):
     """One side's `catalog.Catalog`, read through its engine's one-pass
     reader where it has one, else table by table from the neutral readers;
@@ -877,8 +891,10 @@ def side_catalog(eng, side, db, acc=None, max_age=0.0):
         for t in one.neutral_tables(side, db):
             name = _named(t)
             with seen.reading(name):
-                cols = [Column(str(n), str(ty)) for n, ty
-                        in one.neutral_columns(side, db, t)]
+                say = getattr(one, "neutral_column_rules", None)
+                rules = (say(side, db, t) if say else None) or {}
+                cols = [column_with_rules(n, ty, rules.get(n))
+                        for n, ty in one.neutral_columns(side, db, t)]
                 key = tuple(one.neutral_key(side, db, t) or ())
                 indexes = [
                     Index(str(n), tuple(cols_), bool(uniq), "" if plain
@@ -948,6 +964,25 @@ def side_traits(eng, side, db, tables, acc=None, max_age=0.0):
     return got["traits"], got["unread"]
 
 
+def _drop_unpaired_traits(src, dst, loose, pairs, same):
+    """Settings read on one side only are no ground to compare on: both
+    ends of a pair give up theirs, whether the two tables carry one name
+    or a mapping renamed the target's. `loose` is [(a side's table, "<side>
+    settings", why)] by that side's own names."""
+    fold = (lambda x: x) if same else str.lower
+    by_dst = {fold(t): t for t in dst}
+    ahead = dict(pairs) if pairs is not None else {
+        t: by_dst[fold(t)] for t in src if fold(t) in by_dst}
+    back = {d: s for s, d in ahead.items()}
+    for t, aspect, _ in loose:
+        mine, mate = (src, ahead) if aspect.startswith("src") \
+            else (dst, back)
+        other = dst if mine is src else src
+        for shape, name in ((mine, t), (other, mate.get(t))):
+            if name in shape:
+                shape[name].traits = {}
+
+
 def compare_schema(eng, db, max_age=0.0, shapes=None, comparison=False,
                    takes=None):
     """`check_schema` for any engine or pair: both sides' catalogues read
@@ -999,11 +1034,6 @@ def compare_schema(eng, db, max_age=0.0, shapes=None, comparison=False,
                                                 takes[side], traits)
             held[side] = unread_tables(eng, side, db, takes[side])
         src, dst = shape["src"], shape["dst"]
-        for t in {t for t, _, _ in loose}:
-            # settings read on one side only are no ground to compare on
-            for one_side in (src, dst):
-                if t in one_side:
-                    one_side[t].traits = {}
     pairs, renamed = None, {}
     if hasattr(eng, "match_tables") and hasattr(eng, "_renamer"):
         pairs = eng.match_tables(list(src) + list(held["src"]),
@@ -1022,6 +1052,7 @@ def compare_schema(eng, db, max_age=0.0, shapes=None, comparison=False,
                               })[1].items() if s != t}
             except Exception:  # noqa: BLE001 - names stand as they are
                 renamed[a] = {}
+    _drop_unpaired_traits(src, dst, loose, pairs, same)
     got = schemaformats.compare(src, dst, same, pairs, renamed, held)
     got.unread.extend(loose)
     return got if comparison else schemaformats.results(got, db)

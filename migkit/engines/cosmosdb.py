@@ -526,6 +526,20 @@ class CosmosEngine(NeutralCopier, Engine):
                         all(p.count("/") == 1 for p in paths)))
         return out
 
+    def neutral_traits(self, side, db, table):
+        """{kind: value} the schema comparer holds a container to beyond
+        its key and indexes: how long an item stays (`defaultTtl`; -1 is
+        no expiry unless an item sets one) and how long the analytical copy
+        stays. A container with neither has no trait."""
+        props = self._container(side, db, table).read()
+        out = {}
+        for kind, field in (("default ttl", "defaultTtl"),
+                            ("analytical storage ttl",
+                             "analyticalStorageTtl")):
+            if props.get(field) is not None:
+                out[kind] = str(props[field])
+        return out
+
     def neutral_create_index_sql(self, side, db, table, name, unique,
                                  columns):
         return json.dumps({"leaf": table, "index": name,

@@ -3876,6 +3876,18 @@ once (P0, L).** Files: `migkit/engines/base.py`, `migkit/engines/hetero.py`
   `capabilities._SCOPE` should name `compare_schema` so the engines need
   not pass `takes`; a mapping that renames a table does not carry its
   traits across the rename.
+* Done in wave 14 (W14F): the comparer's neutral fallback reads
+  `neutral_column_rules` (NULL, default, numbered) for every engine through
+  it; dynamodb (time to live, stream), cosmosdb (default and analytical
+  ttl), cassandra (table options, one listing), spanner (row deletion
+  policy, interleave) and opensearch (storage settings, analysis, pipelines,
+  mapping options) give traits; a renamed table carries its traits and a
+  trait naming a renamed table is renamed with it. Not done: an engine whose
+  `neutral_column_rules` is the base `{}` is compared as taking NULL with no
+  default (no unread note is raised for it); DynamoDB Local answers no time
+  to live, so its tables are named unread; cassandra's ScyllaDB change-log
+  option is not in the comparer's traits; bigquery (warehouse.py) is still
+  not in this line.
 
 **AUD-DOC. The manual and the site from the code (P1, M; R24).** Files:
 `tools/gen_docs.py` (new), `README.md`, `docs/index.html`,

@@ -969,6 +969,8 @@ def _table(out, t, a, b, same, fold, renamed, names):
     if same:
         for kind in sorted(set(a.traits) | set(b.traits)):
             x, y = a.traits.get(kind), b.traits.get(kind)
+            if kind in NAMES_A_TABLE and x in names:
+                x = names[x]
             if x != y:
                 out.differences.append(Difference(
                     t, "setting", f"{kind} is {_said_trait(x)} on the source"
@@ -1012,6 +1014,11 @@ def _table(out, t, a, b, same, fold, renamed, names):
         add("foreign key", f"({', '.join(theirs_f[k][0])}) ->"
                            f" {theirs_f[k][1]} is on the target and not on"
                            " the source", "note")
+
+
+#: trait kinds whose value is the name of another table; a mapping that
+#: renames that table renames the value with it
+NAMES_A_TABLE = ("parent table",)
 
 
 def _said_trait(value):

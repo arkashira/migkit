@@ -508,6 +508,25 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
                 == "YES"}
         return out
 
+    #: INFORMATION_SCHEMA.TABLES columns the schema comparer holds a table
+    #: to: the rule that deletes rows by age, the table it is interleaved
+    #: in (where its rows live) and what deleting a parent row does to it
+    TRAITS = (("row deletion policy", "row_deletion_policy_expression"),
+              ("parent table", "parent_table_name"),
+              ("on delete", "on_delete_action"))
+
+    def neutral_traits_all(self, side, db):
+        """{table: {kind: value}} of every table from one listing. A
+        dialect without a column leaves that kind out of both sides."""
+        out = {}
+        for name, row in self._tables_named(side, db).items():
+            got = {kind: str(row[col]) for kind, col in self.TRAITS
+                   if row.get(col) not in (None, "")}
+            if "parent table" not in got:
+                got.pop("on delete", None)
+            out[name] = got
+        return out
+
     def neutral_indexes(self, side, db, table):
         sch, tbl = self._split(side, db, table)
         m1, m2 = self._mark(side, db, 1), self._mark(side, db, 2)
