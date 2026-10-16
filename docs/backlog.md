@@ -5643,6 +5643,12 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   row images beyond int/decimal/char/nvarchar types and LOB columns are
   read by key; the standby is restored under the source's database name;
   `mssql.py`/the tail loop reach neither reader yet (their owner's hook).
+  *LT.R6 tail (W17C2):* `Db2Engine.change_point`/`neutral_changes`/`tail_apply`
+  reach the log reader, so the pair's tail follows a Db2 LUW source through
+  its log (refusal said when the client is missing or the log circular; the
+  delta check takes its next rung); `tail.follows`, `tail.table-states` and
+  `scope.ops` are `db2.UNPROVED_ITEMS`; proved on recorded transcripts only,
+  not run on a real Db2 LUW server. IBM i keeps its journal, z/OS stays out.
 * **C1-C6, closed capabilities rebuilt from open parts:** C1 mongosync's
   job from 4.0+ sources to any destination, consistent at any moment,
   the unique-index conversion off the cutover path, and an audit of the

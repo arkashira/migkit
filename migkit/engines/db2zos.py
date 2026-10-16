@@ -21,7 +21,7 @@ proves each by `check` (`reach_items` says so in `assess`).
 Written 2026-09-30 without a z/OS to run it against; IBM Z Xplore gives a
 free shared z/OS with Db2 for a manual proof.
 """
-from .base import Engine, Result
+from .base import Engine, NotHere, Result
 from .db2 import Db2Engine, granted, large_values
 from .dbapi import MARK
 
@@ -212,6 +212,15 @@ class Db2ZosEngine(Db2Engine):
     #: large values as Db2's, a large table sized over every row: a
     #: sample of its pages is asked of Linux, UNIX and Windows only
     LARGE_VALUES = large_values()
+    #: its log is licensed code's (`capabilities._ZOS_LOG`): the reader
+    #: LUW follows by is not this platform's, so nothing is inherited
+    CHANGE_POINT_READS_ONLY = False
+    neutral_changes = Engine.neutral_changes
+    change_point = Engine.change_point
+    tail_apply = NotHere()
+
+    def _log_readable(self):
+        return False
 
     def neutral_tables(self, side, db):
         return [t for t in (self._said(n.strip()) for (n,) in self._rows(

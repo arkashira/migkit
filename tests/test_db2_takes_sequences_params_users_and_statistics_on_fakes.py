@@ -221,8 +221,8 @@ def test_the_cells_built_are_declared_unproved_with_their_reason():
     assert db2zos.UNPROVED_ON == ("built; not run on a real Db2 for z/OS"
                                   " subsystem")
     for mod, eng in ((db2, "db2"), (db2i, "db2i"), (db2zos, "db2zos")):
-        for item in mod.UNPROVED_ITEMS:
+        for item in mod.UNPROVED_ITEMS.split():
             assert capabilities.depth_cell(eng, item)[0] == "not yet", item
     m = capabilities.matrix()
-    assert {c for c, v in m["db2"].items() if v != "yes"} == {"stream"}
-    assert capabilities.GAPS["db2"] == {"stream": ("not yet", "LT.R6")}
+    assert {c for c, v in m["db2"].items() if v != "yes"} == set()
+    assert capabilities.GAPS["db2"] == {}

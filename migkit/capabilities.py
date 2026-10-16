@@ -186,11 +186,9 @@ GAPS = {
     # and delta on LUW through the pair and its row change timestamps -
     # every one "built; not run on a real Db2 server" (`db2.UNPROVED_ON`).
     # Sequences are the cutover's counters (popped below, `_GAINED`)
-    "db2": {
-        # the log read without DATA CAPTURE CHANGES is LT.R6's
-        # (`Db2Engine.change_log`, the hook its reader fills)
-        "stream": (NOT_YET, "LT.R6"),
-    },
+    # and the tail through the source's own log (LT.R6: `Db2Engine.
+    # neutral_changes`, the reader `engines.db2_log`), likewise unrun
+    "db2": {},
     "db2i": {
         "statistics": (NOT_APPLICABLE, "IBM i's query engine gathers and"
                                        " keeps its own statistics as the"
@@ -1611,7 +1609,7 @@ DEPTH_GAPS = {
     },
     "scope.ops": {
         **_each(NOT_YET, "P0-PARITY.scope",
-                "kafka db2 ase"),
+                "kafka ase"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
 
     },
@@ -2057,7 +2055,7 @@ DEPTH_GAPS = {
     },
     "tail.table-states": {
         **_each(NOT_YET, "P0-PARITY.tail",
-                "clickhouse db2 ase opensearch "
+                "clickhouse ase opensearch "
                 "cassandra redshift snowflake iceberg delta"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_as("schema", "kinesis pubsub"),

@@ -271,7 +271,15 @@ def _value(kind, raw, extra, name):
 
 class Db2iEngine(Db2Engine):
     CANON_ENGINE = "db2i"
+    #: its journal is read by its own change_point below, not the log
+    #: reader LUW follows by; the position is taken as it always was
+    CHANGE_POINT_READS_ONLY = False
     PLATFORM = "i"
+
+    def _log_readable(self):
+        """Its journal is read through SQL: no client library to load."""
+        return True
+
     #: DRDA on IBM i
     DRDA_PORT = 446
     FOLDED_BECAUSE = ("is rendered by migkit's own renderer rather than by"

@@ -196,3 +196,119 @@ def test_the_engine_reaches_the_reader_by_its_one_hook():
     reader = Db2Engine.change_log(object.__new__(Db2Engine))
     assert reader is log and callable(reader.neutral_changes)
     assert reader.CHANGE_POINT_READS_ONLY and reader.copy_point
+
+
+# ---- the tail reaches the reader through the engine (LT.R6) ----------------
+
+def _db2(capture="Y", archive="DISK:/db2/archive/"):
+    """A Db2 engine whose catalogue is answered from the recorded rows."""
+    from migkit.engines.db2 import Db2Engine
+
+    class _Real(_Eng, Db2Engine):
+        def _rows(self, side, db, sql, args=()):
+            if "dbcfg" in sql:
+                return [(archive,)]
+            return _Eng._rows(self, side, db, sql, args)
+
+    eng = _Real.__new__(_Real)
+    _Eng.__init__(eng, capture=capture)
+    return eng
+
+
+def _tail_log(*extra):
+    return [
+        _row(50, 1, log.INSERT, 7, 0x30, _image(30, Decimal("1.50"), "a")),
+        _rec(51, log.COMMIT, 1),
+        _row(52, 2, log.INSERT, 7, 0x31, _image(31, Decimal("2.50"), "b")),
+        _row(53, 3, log.DELETE, 7, 0x30, _image(30, Decimal("1.50"), "a")),
+        _rec(54, log.COMMIT, 3), *extra]
+
+
+def test_the_tail_reads_the_log_through_the_engine_and_hands_on_once(
+        monkeypatch):
+    eng = _db2()
+    assert eng.CHANGE_POINT_READS_ONLY and eng._log_readable()
+    monkeypatch.setattr(log, "api", lambda: _Transcript([
+        _rec(48, log.COMMIT, 9)]))
+    # the position is taken first (before a copy), and is only a read
+    point = eng.change_point("src", "app")
+    assert point == {"lsn": 49, "from": 49}
+    assert eng.neutral_changes("src", "app") == ([], point)
+    assert eng.copy_point("src", "app") == point
+    # the log goes on: the first read hands the transactions committed
+    api = _Transcript(_tail_log(_rec(55, log.COMMIT, 2)), per=2)
+    monkeypatch.setattr(log, "api", lambda: api)
+    got, token = eng.neutral_changes("src", "app", dict(point))
+    assert [(c["op"], c["key"]) for c in got] == [
+        ("insert", {"ID": 30}), ("delete", {"ID": 30}),
+        ("insert", {"ID": 31})]
+    assert token == {"lsn": 55, "from": 56}
+    # from the saved position: nothing again
+    assert eng.neutral_changes("src", "app", dict(token))[0] == []
+
+
+def test_a_tail_stopped_in_the_engine_resumes_twice_to_the_same_result(
+        monkeypatch):
+    eng = _db2()
+    full = _tail_log(_rec(55, log.COMMIT, 2))
+    monkeypatch.setattr(log, "api", lambda: _Transcript(full[:4], per=1))
+    got, saved = eng.neutral_changes("src", "app",
+                                     {"lsn": 49, "from": 49}, limit=1)
+    assert [c["key"] for c in got] == [{"ID": 30}]
+    # the process dies holding `saved`; two fresh ones resume from it
+    monkeypatch.setattr(log, "api", lambda: _Transcript(full, per=1))
+    first = eng.neutral_changes("src", "app", dict(saved))
+    second = eng.neutral_changes("src", "app", dict(saved))
+    assert first == second
+    assert [(c["op"], c["key"]) for c in first[0]] == [
+        ("delete", {"ID": 30}), ("insert", {"ID": 31})]
+    # what the first read handed on is not handed on again
+    handed = [c["key"] for c in got] + [c["key"] for c in first[0]]
+    assert handed == [{"ID": 30}, {"ID": 30}, {"ID": 31}]
+    assert first[1] == {"lsn": 55, "from": 56}
+
+
+def test_a_source_that_cannot_be_read_is_said_never_stepped_over(
+        monkeypatch):
+    from migkit.engines.db2 import Db2Engine
+    eng = _db2()
+    monkeypatch.setattr(log, "library", lambda: None)
+    assert not eng._log_readable()
+    for call in (lambda: eng.change_point("src", "app"),
+                 lambda: eng.neutral_changes("src", "app"),
+                 lambda: eng.neutral_changes("src", "app",
+                                             {"lsn": 1, "from": 1})):
+        with pytest.raises(log.Refused) as e:
+            call()
+        assert "install" in str(e.value)
+        assert "db2readlog" not in str(e.value).lower()
+    # no client: the delta check takes the next rung, not the log
+    assert decide.db2_delta_way({"log": eng._log_readable(), "stamped": 1,
+                                 "tables": 1, "same": True}).path == \
+        "stamped"
+    # a circular log is refused by name, the tail not started on it
+    monkeypatch.setattr(log, "library", lambda: object())
+    with pytest.raises(log.Refused, match="circular"):
+        _db2(archive="OFF").change_point("src", "app")
+    assert isinstance(eng, Db2Engine)
+
+
+def test_only_the_platform_that_has_the_reader_follows_through_it():
+    from migkit import capabilities
+    from migkit.engines.base import Engine
+    from migkit.engines.db2 import Db2Engine
+    from migkit.engines.db2i import Db2iEngine
+    from migkit.engines.db2zos import Db2ZosEngine
+    assert Db2Engine.neutral_changes is not Engine.neutral_changes
+    assert Db2Engine.change_point is not Engine.change_point
+    # IBM i follows by its journal, z/OS by nothing it may read
+    assert Db2iEngine.neutral_changes is not Db2Engine.neutral_changes
+    assert Db2iEngine.change_point is not Db2Engine.change_point
+    assert Db2ZosEngine.neutral_changes is Engine.neutral_changes
+    assert Db2ZosEngine.change_point is Engine.change_point
+    assert not Db2ZosEngine._log_readable(object.__new__(Db2ZosEngine))
+    assert not Db2ZosEngine.CHANGE_POINT_READS_ONLY
+    assert "stream" not in capabilities.GAPS["db2"]
+    from migkit.engines import db2
+    assert "tail.follows" in db2.UNPROVED_ITEMS.split()
+    assert not capabilities.depth_failing().get("untested")

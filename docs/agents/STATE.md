@@ -18,7 +18,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | cosmosdb | 14/16 | 12/12 | 20 | bulk-move, snapshot |
 | couchbase | 11/16 | 12/12 | 48 | params, bulk-move, users, statistics, snapshot |
 | datastore | 16/16 | 11/12 | 37 | large values |
-| db2 | 15/16 | 12/12 | 66 | stream |
+| db2 | 16/16 | 12/12 | 66 | - |
 | db2i | 16/16 | 12/12 | 69 | - |
 | db2zos | 16/16 | 12/12 | 61 | - |
 | dcdb | 15/16 | 12/12 | 64 | bulk-move |
@@ -65,7 +65,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 560, n/a 1414, not yet 1304, test owed 521, yes 953. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 563, n/a 1414, not yet 1301, test owed 521, yes 953. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -127,7 +127,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 Built, unproved - a way the code has on an engine no sandbox here can run; the engine's module says which server it was not run on (`UNPROVED_ON`):
 
 - ase: built; not run on a real SAP ASE server (15 cells)
-- db2: built; not run on a real Db2 LUW server (46 cells)
+- db2: built; not run on a real Db2 LUW server (49 cells)
 - db2i: built; not run on a real IBM i (52 cells)
 - db2zos: built; not run on a real Db2 for z/OS subsystem (45 cells)
 - dcdb: built; not run on a real PolarDB-X or TDSQL instance (54 cells)
@@ -151,7 +151,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | scope.repair | the rest (19) | bigquery bigtable cockroachdb couchbase datastore dsql firestore neo4j neptune qdrant spanner timestream | db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm oceanbase oceanbase-oracle polardbx | ase copybook delta duckdb iceberg parquet | kinesis pubsub saas sapodp |
 | scope.counters | mssql mysql oracle postgres tidb | cockroachdb dsql duckdb | ase db2 db2i db2zos dcdb gaussdb oceanbase oceanbase-oracle polardbx | generic hetero redshift snowflake spanner sqlite | the rest (31) |
 | scope.objects | generic kafka mongodb mssql mysql oracle postgres tidb | bigquery cassandra clickhouse cockroachdb cosmosdb dsql duckdb opensearch redshift snowflake sqlite teradata | db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo keyspaces oceanbase oceanbase-oracle | the rest (13) | copybook dynamodb geminidb-redis kinesis neptune parquet pubsub qdrant redis saas sapodp |
-| scope.ops | the rest (19) | bigtable couchbase delta firestore iceberg kinesis neo4j neptune pubsub saas sapodp spanner | db2i dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces oceanbase polardbx | ase db2 kafka lindorm oceanbase-oracle | copybook datastore db2zos duckdb parquet qdrant sqlite teradata timestream |
+| scope.ops | the rest (19) | bigtable couchbase delta firestore iceberg kinesis neo4j neptune pubsub saas sapodp spanner | db2 db2i dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces oceanbase polardbx | ase kafka lindorm oceanbase-oracle | copybook datastore db2zos duckdb parquet qdrant sqlite teradata timestream |
 | scope.row-filter | bigquery clickhouse cockroachdb dsql duckdb generic hetero mongodb mysql opensearch oracle postgres redshift sqlite teradata tidb | the rest (18) | ase db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo keyspaces lindorm oceanbase oceanbase-oracle polardbx | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
 | scope.transforms | generic | - | - | the rest (51) | kinesis pubsub |
 | scope.names | bigquery cassandra clickhouse cosmosdb dsql dynamodb generic hetero mongodb mysql opensearch oracle postgres teradata tidb | the rest (19) | ase db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo keyspaces lindorm oceanbase oceanbase-oracle polardbx | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
@@ -195,8 +195,8 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.rows-apart | cassandra clickhouse cosmosdb dsql dynamodb kafka mongodb mssql mysql opensearch oracle postgres redis sqlite | cockroachdb | gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces | the rest (32) | kinesis pubsub |
 | verify.tables | cassandra clickhouse cosmosdb dynamodb kafka mongodb mssql mysql opensearch oracle postgres redis | redshift snowflake | geminidb-cassandra geminidb-mongo geminidb-redis keyspaces | the rest (34) | kinesis pubsub |
 | verify.table | bigquery cassandra clickhouse cosmosdb dsql duckdb dynamodb kafka mongodb mssql mysql opensearch oracle postgres redis sqlite teradata tidb | the rest (19) | ase db2 db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm oceanbase oceanbase-oracle polardbx | generic | kinesis pubsub |
-| tail.follows | the rest (26) | bigquery | db2i geminidb-mongo geminidb-redis oceanbase polardbx | ase db2 delta iceberg lindorm oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
-| tail.table-states | cockroachdb cosmosdb dynamodb kafka mongodb mysql postgres redis tidb | the rest (13) | db2i dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces oceanbase polardbx | ase cassandra clickhouse db2 delta generic iceberg lindorm oceanbase-oracle opensearch redshift snowflake | copybook datastore db2zos duckdb kinesis parquet pubsub qdrant sqlite teradata timestream |
+| tail.follows | the rest (26) | bigquery | db2 db2i geminidb-mongo geminidb-redis oceanbase polardbx | ase delta iceberg lindorm oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
+| tail.table-states | cockroachdb cosmosdb dynamodb kafka mongodb mysql postgres redis tidb | the rest (13) | db2 db2i dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces oceanbase polardbx | ase cassandra clickhouse delta generic iceberg lindorm oceanbase-oracle opensearch redshift snowflake | copybook datastore db2zos duckdb kinesis parquet pubsub qdrant sqlite teradata timestream |
 | tail.added | cockroachdb kafka mssql mysql oracle postgres tidb | bigquery mongodb spanner | geminidb-mongo oceanbase polardbx | the rest (28) | copybook datastore db2zos duckdb geminidb-cassandra hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
 | tail.readded | cosmosdb dynamodb kafka mssql mysql oracle tidb | bigquery mongodb | geminidb-mongo oceanbase polardbx | the rest (29) | copybook datastore db2zos duckdb geminidb-cassandra hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
 | tail.ddl | cosmosdb dynamodb kafka mongodb mysql postgres | oracle | geminidb-mongo oceanbase polardbx | the rest (31) | copybook datastore db2zos duckdb geminidb-cassandra hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
@@ -238,7 +238,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 370 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
-Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 26 shape lacks, 72 capability lacks, 2150 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> db2i (143).
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 26 shape lacks, 71 capability lacks, 2150 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> db2i (143).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

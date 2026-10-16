@@ -122,10 +122,22 @@ def test_the_rows_changed_are_found_by_the_way_the_source_allows():
     assert path(stamped=1) == "stamped"
     assert path(stamped=1, same=False) == "none"
     assert path() == "none"
-    assert engine().change_log() is None
+    # the log is a way only where the client that reads it is installed
+    from migkit.engines import db2_log
+    with_client = db2_log.library
+    try:
+        db2_log.library = lambda: None
+        assert engine()._log_readable() is False
+        db2_log.library = lambda: object()
+        assert engine()._log_readable() is True
+    finally:
+        db2_log.library = with_client
 
 
-def test_stamped_rows_are_compared_by_key_and_the_mark_moves_when_clean():
+def test_stamped_rows_are_compared_by_key_and_the_mark_moves_when_clean(
+        monkeypatch):
+    from migkit.engines import db2_log
+    monkeypatch.setattr(db2_log, "library", lambda: None)
     rows = {"src": [(1, "a"), (2, "b")], "dst": {1: (1, "a"), 2: (2, "x")}}
     src = [("rowchangetimestamp = 'y'", [("ORDERS", "CHANGED")]),
            ("current timestamp", [("2026-10-16-10.00.00",)]),

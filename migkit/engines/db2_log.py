@@ -301,10 +301,10 @@ def neutral_changes(eng, side, db, token=None, limit=1000, reader=None,
     (`canon.ended`) at the position a read goes on from."""
     from .. import canon
     reader = reader or api()
+    way(eng, side, db)
     if token is None:
         return [], change_point(eng, side, db, reader)
     held = tables(eng, side, db)
-    way(eng, side, db)
     done, start = int(token.get("lsn") or 0), int(token.get("from") or 0)
     shapes, open_, out, at = {}, {}, [], start
     end = int(reader.query()["next"])

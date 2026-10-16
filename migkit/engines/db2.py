@@ -18,7 +18,8 @@ from .sqlcatalog import CatalogChecks
 
 #: why the ways below are owed a run: settings, the server's own load,
 #: accounts, statistics, the rollback point, fence, confirm and delta
-#: (R13-DB2), proved on fakes only
+#: (R13-DB2) and the tail through the source's own log (LT.R6), proved on
+#: fakes and recorded transcripts only
 UNPROVED_ON = "built; not run on a real Db2 LUW server"
 #: the ways built here and run against no server: the whole list, the
 #: matrix reads it from this source (`capabilities`)
@@ -34,7 +35,7 @@ UNPROVED_ITEMS = (
     "verify.structure.schema-diff verify.structure.sharding verify.structure.triggers verify.structure.unvalidated-constraints "
     "verify.table verify.users verify.value.charset verify.value.collation "
     "verify.value.generated verify.value.narrowing verify.value.null-empty verify.value.precision "
-    "verify.value.rendering verify.value.timezone")
+    "verify.value.rendering verify.value.timezone tail.follows tail.table-states scope.ops")
 
 #: a column's type: its own, or for a distinct type the built-in type it
 #: is made from (`syscat.datatypes`), whose values it holds - a distinct
@@ -299,6 +300,9 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
     #: the types whose text the server writes in a way of its own
     RENDERED = ("xml", "decfloat")
     CANON_ENGINE = "db2"
+    #: the position is read off the log and nothing is consumed by asking
+    #: (`engines.db2_log`), so a copy's start may be taken before it
+    CHANGE_POINT_READS_ONLY = True
     CHARSETS = True
     SQL_DIALECT = None
     FOLDED_BECAUSE = ("is rendered by migkit's own renderer rather than by"
@@ -970,6 +974,36 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
         from . import db2_log
         return db2_log
 
+    def _log_readable(self):
+        """Whether the source's log can be read from this machine: the
+        reader is installed and so is the client it loads."""
+        reader = self.change_log()
+        return bool(reader and getattr(reader, "neutral_changes", None)
+                    and reader.library() is not None)
+
+    def change_point(self, side, db):
+        """Where the source's log is now, as the position a tail goes on
+        from ({lsn, from}). The reader's refusal is said as it is - the
+        client not installed, the log circular, no table in scope - so a
+        tail is never started on a log nothing reads; the delta check
+        takes its own rung meanwhile (`decide.db2_delta_way`)."""
+        reader = self.change_log()
+        reader.way(self, side, db)
+        return reader.change_point(self, side, db)
+
+    def tail_apply(self, db, go, token_path, log):
+        """The change tail is the pair's, reading the source's log
+        (`neutral_changes`) and keeping each table in its own state."""
+        return self._as_pair().tail_apply(db, go, token_path, log)
+
+    def neutral_changes(self, side, db, token=None, limit=1000):
+        """The row changes of whole transactions committed after `token`,
+        read from the source's log (`engines.db2_log`); a position is
+        handed back that a stopped tail resumes from, leaving what was
+        already handed on out."""
+        return self.change_log().neutral_changes(self, side, db, token,
+                                                 limit)
+
     def src_lsn(self, db):
         return self._as_pair().src_lsn(db)
 
@@ -995,9 +1029,8 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
                   self._rows("src", db, self.STAMPS,
                              (self._owner("src", db),))}
         stamps = {t: c for t, c in stamps.items() if t in tables}
-        reader = self.change_log()
         got = decide.db2_delta_way({
-            "log": bool(reader and getattr(reader, "neutral_changes", None)),
+            "log": self._log_readable(),
             "stamped": len(stamps), "tables": len(tables),
             "same": same_engine(self)})
         if got.path == "log":

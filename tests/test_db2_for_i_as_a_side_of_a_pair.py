@@ -649,8 +649,8 @@ def test_the_capabilities_say_what_each_platform_reaches():
         assert m["db2zos"][cap] == caps.NOT_APPLICABLE, cap
     said = caps.unavailable("db2zos", "stream")
     assert "licensed code" in said and "no open reader" in said
-    # LUW is as it was
-    assert m["db2"]["stream"] == caps.NOT_YET
+    # LUW follows through its own log, built and not run on a server
+    assert m["db2"]["stream"] != caps.NOT_YET
 
 
 # ---- the terms of IBM's components -------------------------------------------
