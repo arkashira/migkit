@@ -26,12 +26,13 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 368
+## Upward imports still listed: 369
 
 ### (not listed)
 
 - `migkit/cloud_readiness.py:208` decision -> integrations (`cloudapi`)
 - `migkit/config.py:882` configuration -> integrations (`cloudapi`)
+- `migkit/telemetry.py:1642` reporting -> integrations (`tooluse`)
 - `migkit/tunnel.py:442` execution -> decision (`decide`)
 
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
@@ -363,14 +364,14 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a report asks an engine (`engines.base`) for a name or a fact; the engine contract moves below reporting
 
-- `migkit/telemetry.py:394` reporting -> engines (`engines.base`)
+- `migkit/telemetry.py:423` reporting -> engines (`engines.base`)
 - `migkit/verdict.py:30` reporting -> engines (`engines.base`)
 
 ### a report asks an engine (`engines`) for a name or a fact; the engine contract moves below reporting
 
 - `migkit/export.py:97` reporting -> engines (`engines`)
 - `migkit/report.py:839` reporting -> engines (`engines`)
-- `migkit/telemetry.py:117` reporting -> engines (`engines`)
+- `migkit/telemetry.py:146` reporting -> engines (`engines`)
 - `migkit/troubleshooting.py:62` reporting -> engines (`engines`)
 
 ### a report names a wrapped tool's account (`tools`); the account is read through a contract below reporting
@@ -385,7 +386,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a report reads `autonomous` for the state of the running workflow; the state moves below reporting
 
-- `migkit/telemetry.py:173` reporting -> workflows (`autonomous`)
+- `migkit/telemetry.py:202` reporting -> workflows (`autonomous`)
 
 ### a report reads `ha` for the state of the running workflow; the state moves below reporting
 
@@ -420,15 +421,15 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report states what the decision engine (`decide`) chose; the choice is handed down as a fact
 
 - `migkit/report.py:838` reporting -> decision (`decide`)
-- `migkit/telemetry.py:151` reporting -> decision (`decide`)
+- `migkit/telemetry.py:180` reporting -> decision (`decide`)
 
 ### a report states what the decision engine (`faults`) chose; the choice is handed down as a fact
 
-- `migkit/telemetry.py:163` reporting -> decision (`faults`)
+- `migkit/telemetry.py:192` reporting -> decision (`faults`)
 
 ### a report states what the decision engine (`guarantees`) chose; the choice is handed down as a fact
 
-- `migkit/telemetry.py:157` reporting -> decision (`guarantees`)
+- `migkit/telemetry.py:186` reporting -> decision (`guarantees`)
 
 ### a report states what the decision engine (`sizing`) chose; the choice is handed down as a fact
 
@@ -919,7 +920,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### reporting reaches `cli` (cli); the shared piece moves below both, or the call is inverted
 
-- `migkit/telemetry.py:122` reporting -> cli (`cli`)
+- `migkit/telemetry.py:151` reporting -> cli (`cli`)
 
 ### safety reaches `decide` (decision); the shared piece moves below both, or the call is inverted
 

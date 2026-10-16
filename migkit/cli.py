@@ -7159,24 +7159,47 @@ def users_cmd(hop_name, mode, do_apply, pw_file):
 
 
 @main.command("telemetry")
-@click.argument("action", type=click.Choice(["show", "off", "on"]),
-                default="show")
+@click.argument("action", type=click.Choice(["show", "off", "on", "push",
+                                             "receive"]), default="show")
+@click.argument("bucket", required=False)
 @click.option("--schema", "with_schema", is_flag=True,
               help="also print every field an event may have")
-def telemetry_cmd(action, with_schema):
+@click.option("--endpoint", default=None,
+              help="the bucket's store, where it is not the default one")
+def telemetry_cmd(action, bucket, with_schema, endpoint):
     """Product telemetry: what migkit did, never what it carried.
 
     \b
-    show   the state, what is collected, and every event kept (nothing is
-           sent: no destination is chosen)
-    off    stop keeping events and delete those already kept
-    on     keep events again, unless a policy or the environment says off
+    show     the state, what is collected, and every event kept
+    off      stop keeping events and delete those already kept, the
+             segments not yet pushed included
+    on       keep events again, unless a policy or the environment says off
+    push     send the sealed segments, once each, to BUCKET: an
+             S3-compatible bucket you run, signed in with its own
+             credentials (by hand only; nothing is ever sent on its own)
+    receive  read BUCKET's segments back, check every event again, and
+             count them by kind, engine and way
     """
-    from . import telemetry
+    from . import telemetry, verdict
+    if action in ("push", "receive"):
+        try:
+            out = (telemetry.push if action == "push" else
+                   telemetry.receive)(bucket, endpoint)
+        except verdict.Refused as e:
+            click.echo(f"telemetry {action} refused: {e}", err=True)
+            raise SystemExit(verdict.EXIT["refused"])
+        lines = (telemetry.push_lines if action == "push" else
+                 telemetry.receive_lines)(out)
+        for line in lines:
+            click.echo(line)
+        if out.get("failed") or out.get("refused"):
+            raise SystemExit(verdict.EXIT["refused"])
+        return
     if action != "show":
         gone = telemetry.turn(action == "on")
         click.echo(f"telemetry {action}"
-                   + (f"; {gone} spool file(s) deleted" if gone else ""))
+                   + (f"; {gone} file(s) deleted, pending pushes with them"
+                      if gone else ""))
     on, why = telemetry.state()
     if action == "show":
         telemetry.flush()
@@ -7190,9 +7213,15 @@ def telemetry_cmd(action, with_schema):
         for kind, field, kind_of, doc, bound in telemetry.schema():
             click.echo(f"  {kind}.{field} ({kind_of}): {doc}"
                        + (f" [{bound}]" if bound else ""))
+    held = sink.segments()
     events = sink.read()
     click.echo(f"kept: {len(events)} event(s), {sink.bytes()} bytes in"
-               f" {sink.root}")
+               f" {sink.root}; {len(held)} sealed segment(s),"
+               f" {sum(sink.pushed(p) for _, p in held)} pushed,"
+               f" {telemetry.unsent()} dropped before a push")
+    for _, path in held:
+        click.echo("segment " + json.dumps(sink.manifest(path),
+                                           sort_keys=True))
     for event in events:
         click.echo(json.dumps(event, sort_keys=True))
 

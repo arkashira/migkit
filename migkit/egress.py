@@ -53,8 +53,8 @@ KINDS = {
     "assist": "findings and code to a language model",
     "evidence": "the evidence's digests in the run state's bucket",
     "anchor": "the audit record's checkpoints in the anchor bucket",
-    "telemetry": "product telemetry, kept locally until a destination is"
-                 " chosen",
+    "telemetry": "product telemetry's sealed segments, pushed by hand to"
+                 " the operator's own bucket",
     # a sign-in minted, a forwarder opened or a network read through the
     # cloud provider's own API (backlog 38.real, R6.cloud, R25.2)
     "provider": "calls to the cloud provider's own API",

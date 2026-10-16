@@ -9,22 +9,33 @@ nowhere to go: the producer refuses an unknown field, a string outside its
 set and a value of the wrong type (`Rejected`) - exclusion by type, not
 redaction after the fact. Nothing is hashed in place of being left out.
 
-Events are kept on this machine only, in a bounded spool under the state
-directory (`spool`): a few files of a fixed size, the oldest dropped. They
-are written by a background thread from a bounded queue; a full queue
-drops the event and counts it, so a step never waits on telemetry and a
-failure here never changes a run. Nothing is sent: no destination is
-chosen, and the only `Sink` is the local one. `migkit telemetry show`
-prints the state and exactly what is kept.
+Events are kept on this machine first (`Local`, under `spool`): an open
+head file, sealed when it is full into an append-only segment - its lines
+hash-chained from the segment before, closed by a manifest naming its
+count, first and last hour, schema and digest - the oldest dropped past
+the number or age the policy keeps. They are written, synced, by a
+background thread from a bounded queue; a full queue drops the event and
+counts it, so a step never waits on telemetry and a failure here never
+changes a run. Nothing leaves on its own: `push`, by hand only, sends the
+closed segments to an S3-compatible bucket the operator runs and names,
+through the egress gate's `telemetry` kind, signed in by that store's own
+credential chain (no key in the hop or in migkit), each segment once
+under its digest; `receive` reads them back and checks every event again
+(`checked`), so a field outside the schema or a free string is refused at
+both ends. `migkit telemetry show` prints the state and exactly what is
+kept.
 
 Off, the stricter first (`state`): the organisation's policy file
 (`MIGKIT_TELEMETRY_POLICY`, `telemetry: off` or `egress: none`; one that
 cannot be read counts as off), `MIGKIT_EGRESS` naming kinds without
 `telemetry`, `MIGKIT_TELEMETRY=off`, and `migkit telemetry off`. Off stops
-queueing and disposes of the spool.
+queueing and disposes of the spool: its sealed segments and their pending
+push with it.
 """
 import atexit
+import contextlib
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -55,16 +66,23 @@ DISCLOSURE = (
      " event is made."),
     ("Why", "to tell which ways work on which engines and shapes, how good"
      " the estimates are, and where runs fail or need a hand."),
-    ("Where it goes", "nowhere yet: no destination is chosen. Events are"
-     " kept on this machine, in a spool of a fixed size under the state"
-     " directory, and nothing is sent."),
-    ("Default", "on: events are kept locally. `migkit telemetry show`"
-     " prints exactly what is kept."),
+    ("Where it goes", "this machine first: events are kept under the state"
+     " directory in sealed, append-only segments of a fixed size, each"
+     " chained to the one before, the oldest dropped past the number or age"
+     " the organisation's policy keeps (`telemetry_keep`, `telemetry_days`)."
+     " Nothing leaves on its own: `migkit telemetry push <bucket>` sends the"
+     " sealed segments, once each, to an S3-compatible bucket you run and"
+     " name, signed in with that store's own credentials, never a key"
+     " migkit carries; `migkit telemetry receive <bucket>` reads them back"
+     " and checks every event again. With `MIGKIT_EGRESS=none`, or a policy"
+     " saying `telemetry_push: off`, nothing is sent and the push says why."),
+    ("Default", "on: events are kept locally; a push happens only when"
+     " you run it. `migkit telemetry show` prints exactly what is kept."),
     ("How to turn it off", "`migkit telemetry off`, `MIGKIT_TELEMETRY=off`,"
      " `MIGKIT_EGRESS=none`, or an organisation policy file"
      " (`MIGKIT_TELEMETRY_POLICY`, `/etc/migkit/policy.yaml` by default)"
      " saying `telemetry: off`. Off stops keeping events and deletes those"
-     " already kept."),
+     " already kept, the sealed segments not yet pushed included."),
 )
 
 FILE_BYTES = 128 * 1024      #: one spool file at most
@@ -72,6 +90,17 @@ FILES = 4                    #: spool files kept, the oldest dropped
 EVENT_BYTES = 2048           #: one event at most, as written
 QUEUED = 512                 #: events waiting for the writer at most
 DEFAULT_POLICY = "/etc/migkit/policy.yaml"
+#: room the manifest line takes in a sealed segment, so a segment with
+#: its manifest stays within `FILE_BYTES`
+MANIFEST_BYTES = 512
+#: the segment's own format, in its manifest
+SEGMENT = 1
+#: the schema versions a receiver takes
+SCHEMAS = (1, 1.1)
+HOUR = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}")
+DIGEST = re.compile(r"[0-9a-f]{64}")
+#: a version as `migkit --version` prints one, for a receiver of another
+VERSION = re.compile(r"[0-9]{1,4}(\.[0-9]{1,4}){0,3}([a-z]{1,5}[0-9]{0,4})?")
 
 COMPLETIONS = ("done", "same", "different", "could not verify",
                "incomplete", "usage", "failed", "refused", "interrupted")
@@ -521,22 +550,34 @@ def spool():
         / "telemetry"
 
 
-def _policy():
-    """What the organisation's policy file says: None where there is
-    none, else (on, why)."""
+_OFF = ("none", "off", "false", "no", "0", False)
+
+
+def _policy_doc():
+    """The organisation's policy file as a mapping: {} where there is
+    none, None where it cannot be read."""
     from . import envkeys
     path = Path(envkeys.text("MIGKIT_TELEMETRY_POLICY")
                 or DEFAULT_POLICY).expanduser()
     if not path.exists():
-        return None
+        return {}
     try:
         import yaml
         got = yaml.safe_load(path.read_text()) or {}
         if not isinstance(got, dict):
             raise ValueError
     except Exception:  # noqa: BLE001 - unreadable is the stricter answer
+        return None
+    return got
+
+
+def _policy():
+    """What the organisation's policy file says: None where there is
+    none, else (on, why)."""
+    got = _policy_doc()
+    if got is None:
         return False, "the organisation's policy file cannot be read"
-    off = ("none", "off", "false", "no", "0", False)
+    off = _OFF
     if (got.get("telemetry") in off or got.get("egress") in off
             or str(got.get("telemetry", "")).lower() in off
             or str(got.get("egress", "")).lower() in off):
@@ -564,14 +605,15 @@ def state():
         return False, "MIGKIT_TELEMETRY cannot be read"
     if (spool() / "off").exists():
         return False, "turned off with `migkit telemetry off`"
-    return True, "on: events are kept on this machine, nothing is sent"
+    return True, ("on: events are kept on this machine, and nothing"
+                  " leaves unless pushed by hand")
 
 
 # ---- where events go ----------------------------------------------------------
 
 class Sink:
-    """Where kept events go. Only the local one exists: sending anywhere
-    waits on a destination being chosen."""
+    """Where kept events go: the local store is the only sink; leaving
+    this machine is `push`'s alone, asked of the egress gate."""
 
     def put(self, lines):
         raise TypeError(f"{type(self).__name__} keeps nothing")
@@ -583,56 +625,259 @@ class Sink:
         return 0
 
 
+def _chained(prev, lines):
+    """The chain's head after `lines`, from `prev`: each line's hash
+    commits to the one before, as the audit record's entries do."""
+    head = prev
+    for line in lines:
+        head = hashlib.sha256((head + "\n" + line).encode()).hexdigest()
+    return head
+
+
+def _digest(prev, body):
+    """A segment's digest: its bytes and where its chain starts, so two
+    segments holding the same events are told apart by their history."""
+    return hashlib.sha256((prev + "\n").encode() + body).hexdigest()
+
+
+def _hour_of(line):
+    try:
+        got = json.loads(line).get("hour")
+    except (ValueError, AttributeError):
+        return None
+    return got if type(got) is str and HOUR.fullmatch(got) else None
+
+
+def keeps():
+    """(segments kept, days kept or None): the organisation's policy
+    (`telemetry_keep`, `telemetry_days`), else the spool's own bound - as
+    many sealed segments as leave the store at `FILES` files - and no
+    age."""
+    doc = _policy_doc() or {}
+    count, days = FILES - 1, None
+    got = doc.get("telemetry_keep")
+    if type(got) is int and got >= 1:
+        count = got
+    got = doc.get("telemetry_days")
+    if type(got) in (int, float) and got > 0:
+        days = float(got)
+    return count, days
+
+
 class Local(Sink):
-    """The spool: `FILES` files of `FILE_BYTES` at most, the newest
-    `events-0.jsonl`; a write that would overflow it moves each file one
-    along and drops the last."""
+    """The store on this machine: the open head `events-0.jsonl` of at
+    most `FILE_BYTES` with its manifest's room, and the sealed segments
+    under `segments/`, `segment-<seq>.seg`: a manifest line, then the
+    events as they were kept. Every write is synced before it counts;
+    a head that would overflow is sealed first, and the oldest segments
+    past `keeps()` are dropped."""
 
     def __init__(self, root=None):
         self.root = Path(root) if root is not None else spool()
+        self.held = self.root / "segments"
 
     def _file(self, i):
         return self.root / f"events-{i}.jsonl"
 
-    def _rotate(self):
-        self._file(FILES - 1).unlink(missing_ok=True)
-        for i in range(FILES - 2, -1, -1):
-            if self._file(i).exists():
-                self._file(i).replace(self._file(i + 1))
+    @contextlib.contextmanager
+    def _locked(self):
+        """The store held against another process's writer or push: a
+        seal never takes a head another process is appending to."""
+        import fcntl
+        from . import durable
+        if not self.root.exists():
+            durable.private_dir(self.root)
+        fd = os.open(str(self.root / ".lock"), os.O_RDWR | os.O_CREAT,
+                     0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
     def put(self, lines):
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with self._locked():
+            self._put(lines)
+
+    def _put(self, lines):
+        from . import durable
+        head = self._file(0)
+        size = head.stat().st_size if head.exists() else 0
+        batch = []
         for line in lines:
-            data = (line + "\n").encode()
-            head = self._file(0)
-            if head.exists() and head.stat().st_size + len(data) \
-                    > FILE_BYTES:
-                self._rotate()
-            fd = os.open(head, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                         0o600)
-            with os.fdopen(fd, "ab") as f:
-                f.write(data)
+            n = len(line.encode()) + 1
+            if size + n > FILE_BYTES - MANIFEST_BYTES and (batch or size):
+                if batch:
+                    durable.append_lines(head, batch)
+                    batch = []
+                self._seal()
+                size = 0
+            batch.append(line)
+            size += n
+        if batch:
+            durable.append_lines(head, batch)
+
+    # ---- the sealed segments ----------------------------------------------
+
+    def segments(self):
+        """[(seq, path)], oldest first."""
+        got = []
+        for p in self.held.glob("segment-*.seg"):
+            seq = p.stem.split("-", 1)[1]
+            if seq.isdigit():
+                got.append((int(seq), p))
+        return sorted(got)
+
+    @staticmethod
+    def manifest(path):
+        with open(path, "rb") as f:
+            return json.loads(f.readline())
+
+    def seal(self):
+        """Close the head into the next segment (`_seal`), the store held;
+        the segment's path, or None where nothing was open."""
+        with self._locked():
+            return self._seal()
+
+    def _seal(self):
+        """The head renamed `sealing-<seq>` first, then written whole and
+        synced as segment `<seq>`, then removed. Interrupted anywhere, the
+        next seal finds the renamed head: its segment there (a write is
+        whole or absent) means it was sealed and only the removal is left;
+        else it is sealed now. No event is sealed twice or lost."""
+        from . import durable
+        got = None
+        for pending in sorted(self.root.glob("sealing-*.jsonl")):
+            got = self._close(pending) or got
+        head = self._file(0)
+        if head.exists():
+            seq = max([n for n, _ in self.segments()]
+                      + [int(p.stem.split("-")[1])
+                         for p in self.root.glob("sealing-*.jsonl")],
+                      default=0) + 1
+            pending = self.root / f"sealing-{seq:08d}.jsonl"
+            head.replace(pending)
+            durable.sync_dir(self.root)
+            got = self._close(pending) or got
+        return got
+
+    def _close(self, pending):
+        from . import durable
+        seq = int(pending.stem.split("-")[1])
+        path = self.held / f"segment-{seq:08d}.seg"
+        lines = []
+        for line in pending.read_bytes().decode(
+                errors="replace").splitlines():
+            try:
+                json.loads(line)
+            except ValueError:
+                continue    # a torn last line: nothing read it as an event
+            lines.append(line)
+        if lines and not path.exists():
+            held = [x for x in self.segments() if x[0] < seq]
+            prev = (self.manifest(held[-1][1])["chain"] if held
+                    else self.seed())
+            body = "".join(line + "\n" for line in lines).encode()
+            hours = [h for h in map(_hour_of, lines) if h]
+            doc = {"segment": SEGMENT, "seq": seq, "schema": SCHEMA,
+                   "count": len(lines), "first": min(hours, default=None),
+                   "last": max(hours, default=None), "prev": prev,
+                   "chain": _chained(prev, lines),
+                   "digest": _digest(prev, body)}
+            top = json.dumps(doc, sort_keys=True) + "\n"
+            if len(top) > MANIFEST_BYTES:
+                raise ValueError("a manifest outgrew its room")
+            if not self.held.exists():
+                durable.private_dir(self.held)
+            durable.write_atomic(path, top.encode() + body)
+            durable.sync_dir(self.held)
+        pending.unlink(missing_ok=True)
+        durable.sync_dir(self.root)
+        self.retain()
+        return path if lines else None
+
+    def seed(self):
+        """Where this store's chain starts: random, made with the store and
+        gone with it - no install, host or person in it - so two stores
+        that kept the same events never seal the same segment, and a
+        bucket two of them push to keeps both."""
+        from . import durable
+        path = self.held / "seed"
+        try:
+            got = path.read_text().strip()
+            if DIGEST.fullmatch(got):
+                return got
+        except OSError:
+            pass
+        got = os.urandom(32).hex()
+        durable.write_atomic(path, got)
+        return got
+
+    def pushed(self, path):
+        return path.with_suffix(".pushed").exists()
+
+    def retain(self):
+        """Drop the oldest segments past `keeps()`: how many went that had
+        not been pushed is counted (`unsent`)."""
+        global _UNSENT
+        count, days = keeps()
+        held = self.segments()
+        old = held[:max(len(held) - count, 0)]
+        if days is not None:
+            cut = time.strftime("%Y-%m-%dT%H", time.gmtime(
+                time.time() - days * 86400))
+            for item in held[len(old):]:
+                last = self.manifest(item[1]).get("last")
+                if last and last < cut:
+                    old.append(item)
+        for _, p in old:
+            if not self.pushed(p):
+                _UNSENT += 1
+            p.unlink(missing_ok=True)
+            p.with_suffix(".pushed").unlink(missing_ok=True)
+        return len(old)
 
     def read(self):
         got = []
-        for i in range(FILES - 1, -1, -1):
+        for _, p in self.segments():
             try:
-                text = self._file(i).read_text()
+                lines = p.read_text().splitlines()[1:]
             except OSError:
                 continue
-            got += [json.loads(x) for x in text.splitlines() if x.strip()]
+            got += [json.loads(x) for x in lines if x.strip()]
+        try:
+            text = self._file(0).read_text()
+        except OSError:
+            text = ""
+        for x in text.splitlines():
+            try:
+                got.append(json.loads(x))
+            except ValueError:
+                pass
         return got
 
     def bytes(self):
-        return sum(self._file(i).stat().st_size for i in range(FILES)
-                   if self._file(i).exists())
+        files = [self._file(0)] + [p for _, p in self.segments()]
+        return sum(p.stat().st_size for p in files if p.exists())
 
     def dispose(self):
         gone = 0
-        for p in self.root.glob("events-*.jsonl"):
+        for p in [*self.root.glob("events-*.jsonl"),
+                  *self.root.glob("sealing-*.jsonl"),
+                  *self.held.glob("segment-*.seg")]:
             p.unlink(missing_ok=True)
             gone += 1
+        for p in [*self.held.glob("segment-*.pushed"), self.held / "seed"]:
+            p.unlink(missing_ok=True)
         return gone
+
+
+_UNSENT = 0
+
+
+def unsent():
+    """Sealed segments dropped by retention before they were pushed."""
+    return _UNSENT
 
 
 # ---- the writer ---------------------------------------------------------------
@@ -647,7 +892,9 @@ _DISPOSED = False
 def _write():
     while True:
         got = [_Q.get()]
-        while True:
+        # one batch at most a queue's worth: what waits in memory is
+        # bounded by twice `QUEUED`, however fast the producers are
+        while len(got) < QUEUED:
             try:
                 got.append(_Q.get_nowait())
             except queue.Empty:
@@ -725,6 +972,309 @@ def turn(on):
     (root / "off").write_text("telemetry turned off by the operator\n")
     flush()
     return Local(root).dispose()
+
+
+# ---- out by hand, and back ----------------------------------------------------
+# `push` and `receive` reach the bucket through the one S3 seam (`anchor`'s
+# client, the store's own credential chain) and only through the egress
+# gate's `telemetry` kind; a manual act, never one a run takes on its own.
+
+def _where(bucket, endpoint=None):
+    """{"bucket", "prefix", "endpoint_url"} of `name`, `name/prefix` or
+    `s3://name/prefix`; segments go under `<prefix>/telemetry/`."""
+    from . import verdict
+    text = str(bucket or "").strip()
+    if text.startswith("s3://"):
+        text = text[5:]
+    name, _, prefix = text.partition("/")
+    if not name:
+        raise verdict.Usage("telemetry push and receive take the bucket to"
+                            " use")
+    prefix = prefix.strip("/")
+    return {"bucket": name,
+            "prefix": (prefix + "/" if prefix else "") + "telemetry/",
+            "endpoint_url": endpoint or None}
+
+
+def _gate(conf):
+    """Why the bucket may not be reached, in words, or None: asked before
+    any client is made or anything listed."""
+    from . import egress
+    ok, why = egress.decide(None, "telemetry", conf["endpoint_url"])
+    if not ok:
+        egress.permit(None, "telemetry", conf["endpoint_url"])
+    return None if ok else why
+
+
+def _client(conf):
+    from . import anchor, verdict
+    try:
+        return anchor._client(conf)
+    except anchor.Refused as e:
+        raise verdict.Refused(str(e))
+
+
+def _store_said(e):
+    """A store's failure by its code or kind alone: its message can carry
+    what the store was asked, so it is not repeated."""
+    from . import anchor
+    code = anchor._code(e)
+    return (f"the store answered {code}" if code else
+            f"the store could not be reached ({type(e).__name__})")
+
+
+def _held(s3, conf, key, data):
+    """Whether `key` holds exactly `data`: False where it is absent;
+    `Refused` where it holds other bytes."""
+    from . import anchor, verdict
+    try:
+        got = s3.get_object(Bucket=conf["bucket"], Key=key)["Body"].read()
+    except Exception as e:  # noqa: BLE001 - only absence is an answer
+        if anchor._code(e) in ("NoSuchKey", "404", "NotFound"):
+            return False
+        raise
+    if got != data:
+        raise verdict.Refused("the bucket holds other bytes under a sealed"
+                              " segment's digest - something else wrote to"
+                              " it; nothing more is sent")
+    return True
+
+
+def _put_once(s3, conf, key, data):
+    """"sent", or "already" where the key holds this segment: the put is
+    conditional (`IfNoneMatch`), so two pushes, or a push resumed after it
+    was cut, make one object."""
+    from . import anchor
+    if _held(s3, conf, key, data):
+        return "already"
+    try:
+        s3.put_object(Bucket=conf["bucket"], Key=key, Body=data,
+                      ContentType="application/x-ndjson", IfNoneMatch="*")
+        return "sent"
+    except Exception as e:  # noqa: BLE001 - one already there is read
+        if anchor._code(e) not in ("PreconditionFailed", "412",
+                                   "ConditionalRequestConflict", "409"):
+            raise
+        if _held(s3, conf, key, data):
+            return "already"
+        raise
+
+
+def push(bucket, endpoint=None, s3=None):
+    """`migkit telemetry push`: the head sealed, then every sealed
+    segment not yet pushed, oldest first, under `<digest>.seg`. A segment
+    is marked pushed only once the bucket holds it; a failure stops the
+    push with the rest left for the next one. The bytes one push sends are
+    bounded by the store's own (`keeps()` segments of `FILE_BYTES`).
+    Refused (`verdict.Refused`) where telemetry is off, the policy says
+    `telemetry_push: off` or the egress does not let telemetry out - and
+    then nothing is listed or connected to."""
+    from . import anchor, durable, verdict
+    conf = _where(bucket, endpoint)
+    on, why = state()
+    if not on:
+        raise verdict.Refused(f"telemetry is off ({why}), so nothing is"
+                              " pushed")
+    said = (_policy_doc() or {}).get("telemetry_push")
+    if said is not None and (said in _OFF or str(said).lower() in _OFF):
+        raise verdict.Refused("the organisation's policy says"
+                              " telemetry_push: off, so nothing is pushed")
+    why = _gate(conf)
+    if why:
+        raise verdict.Refused(why)
+    flush()
+    store = Local()
+    store.seal()
+    todo = [p for _, p in store.segments() if not store.pushed(p)]
+    budget = keeps()[0] * FILE_BYTES
+    out = {"sent": 0, "already": 0, "bytes": 0, "left": 0, "failed": None}
+    if not todo:
+        return out
+    s3 = s3 or _client(conf)
+    for i, path in enumerate(todo):
+        data = path.read_bytes()
+        if out["bytes"] + len(data) > budget:
+            out["left"] = len(todo) - i
+            break
+        key = f"{conf['prefix']}{store.manifest(path)['digest']}.seg"
+        try:
+            got = anchor._retry(None, lambda: _put_once(s3, conf, key, data))
+        except Exception as e:  # noqa: BLE001 - the rest waits, said
+            out["failed"], out["left"] = _store_said(e), len(todo) - i
+            break
+        durable.write_atomic(path.with_suffix(".pushed"), key)
+        out[got] += 1
+        out["bytes"] += len(data) if got == "sent" else 0
+    return out
+
+
+def push_lines(out):
+    lines = [f"pushed: {out['sent']} segment(s), {out['bytes']} bytes;"
+             f" {out['already']} already in the bucket"]
+    if out["left"]:
+        lines.append(f"left for the next push: {out['left']} segment(s)"
+                     + (f" - {out['failed']}" if out["failed"] else
+                        " - past the bytes one push sends"))
+    return lines
+
+
+_MANIFEST = ("chain", "count", "digest", "first", "last", "prev", "schema",
+             "segment", "seq")
+
+
+def _manifest_checked(doc):
+    bad = Rejected("a segment whose manifest is not one migkit seals")
+    if not isinstance(doc, dict) or tuple(sorted(doc)) != _MANIFEST:
+        raise bad
+    whole = (doc["segment"], doc["seq"], doc["count"])
+    if any(type(x) is not int for x in whole) or doc["segment"] != SEGMENT \
+            or not 1 <= doc["seq"] < 10 ** 9 \
+            or not 0 < doc["count"] <= FILE_BYTES:
+        raise bad
+    if type(doc["schema"]) not in (int, float) or doc["schema"] \
+            not in SCHEMAS:
+        raise bad
+    for k in ("first", "last"):
+        if doc[k] is not None and (type(doc[k]) is not str
+                                   or not HOUR.fullmatch(doc[k])):
+            raise bad
+    for k in ("prev", "chain", "digest"):
+        v = doc[k]
+        if type(v) is not str or not DIGEST.fullmatch(v):
+            raise bad
+
+
+def checked(event):
+    """`event` as the receiver takes it: the producer's own `_check` run
+    again on every field, an unknown kind, field or schema refused, the
+    hour an hour. Only `version` is read by its shape rather than this
+    install's own, since a receiver serves other versions."""
+    if not isinstance(event, dict):
+        raise Rejected("an event that is not a record")
+    kind = event.get("kind")
+    cls = KINDS.get(kind) if type(kind) is str else None
+    if cls is None:
+        raise Rejected("an event kind telemetry does not know")
+    got = event.get("schema")
+    if type(got) not in (int, float) or got not in SCHEMAS:
+        raise Rejected("an event of a schema this receiver does not know")
+    hour = event.get("hour")
+    if type(hour) is not str or not HOUR.fullmatch(hour):
+        raise Rejected("hour takes an hour, not free text")
+    known = {f.name: f for f in dataclasses.fields(cls)}
+    unknown = set(event) - set(known) - {"schema", "kind", "hour"}
+    if unknown:
+        raise Rejected(f"{kind} has {len(unknown)} field(s) not in its"
+                       " schema")
+    for name, f in known.items():
+        value = event.get(name)
+        if name == "version" and value is not None:
+            if type(value) is not str or not VERSION.fullmatch(value):
+                raise Rejected("version takes a version, not free text")
+            continue
+        _check(name, tuple(value) if isinstance(value, list) else value,
+               f.metadata)
+    return event
+
+
+def segment_checked(data, name=None):
+    """(manifest, events taken, [why each refused event was]) of one
+    sealed segment as stored, `name` the digest it is stored under;
+    `Rejected` where the segment is not whole as it was sealed: a chain
+    that breaks, bytes its digest does not name, another name."""
+    try:
+        top, _, body = data.partition(b"\n")
+        doc = json.loads(top)
+        text = body.decode()
+    except (ValueError, UnicodeError):
+        raise Rejected("a segment whose manifest cannot be read")
+    _manifest_checked(doc)
+    n = doc["seq"]
+    lines = text.splitlines()
+    if len(lines) != doc["count"] or _chained(doc["prev"], lines) \
+            != doc["chain"]:
+        raise Rejected(f"segment {n}'s chain breaks: it was changed after"
+                       " it was sealed")
+    if _digest(doc["prev"], body) != doc["digest"] or (
+            name is not None and name != doc["digest"]):
+        raise Rejected(f"segment {n} is not the bytes its digest names: it"
+                       " was changed after it was sealed")
+    events, bad = [], []
+    for line in lines:
+        try:
+            events.append(checked(json.loads(line)))
+        except Rejected as e:
+            bad.append(str(e))
+        except ValueError:
+            bad.append("an event that is not a record")
+    return doc, events, bad
+
+
+def receive(bucket, endpoint=None, s3=None):
+    """`migkit telemetry receive`: every segment under the bucket's
+    telemetry prefix listed, read and checked (`segment_checked`) - a
+    segment that fails is refused whole, an event that fails is refused
+    alone - and the events taken counted by kind, engine and way: the
+    analysis loop's first table. `gaps` counts segments whose chain names
+    one not received. Refused where the egress does not let telemetry
+    out, before anything is listed."""
+    import collections
+    from . import verdict
+    conf = _where(bucket, endpoint)
+    why = _gate(conf)
+    if why:
+        raise verdict.Refused(why)
+    s3 = s3 or _client(conf)
+    keys, token = [], None
+    while True:
+        kw = {"Bucket": conf["bucket"], "Prefix": conf["prefix"]}
+        if token:
+            kw["ContinuationToken"] = token
+        page = s3.list_objects_v2(**kw)
+        keys += [o["Key"] for o in page.get("Contents", ())
+                 if o["Key"].endswith(".seg")]
+        token = page.get("NextContinuationToken")
+        if not page.get("IsTruncated") or not token:
+            break
+    out = {"segments": 0, "events": 0, "refused": [], "gaps": 0,
+           "rejected": collections.Counter(),
+           "table": collections.Counter()}
+    chains, prevs = set(), []
+    for key in sorted(keys):
+        data = s3.get_object(Bucket=conf["bucket"], Key=key)["Body"].read()
+        try:
+            doc, events, bad = segment_checked(
+                data, key[len(conf["prefix"]):-len(".seg")])
+        except Rejected as e:
+            out["refused"].append(str(e))
+            continue
+        out["segments"] += 1
+        chains.add(doc["chain"])
+        if doc["seq"] > 1:
+            prevs.append(doc["prev"])
+        for e in events:
+            out["events"] += 1
+            out["table"][(e["kind"], e.get("engine") or "-",
+                          e.get("strategy") or "-")] += 1
+        out["rejected"].update(bad)
+    out["gaps"] = sum(1 for p in prevs if p not in chains)
+    return out
+
+
+def receive_lines(out):
+    lines = [f"received: {out['segments']} segment(s), {out['events']}"
+             f" event(s) taken; {len(out['refused'])} segment(s) and"
+             f" {sum(out['rejected'].values())} event(s) refused;"
+             f" {out['gaps']} segment(s) whose one before was not"
+             " received"]
+    lines += [f"  refused: {why}" for why in out["refused"]]
+    lines += [f"  refused {n} event(s): {why}"
+              for why, n in sorted(out["rejected"].items())]
+    if out["table"]:
+        lines.append("kind | engine | way | events")
+        lines += [f"{k} | {e} | {s} | {n}" for (k, e, s), n in
+                  sorted(out["table"].items(), key=lambda x: (-x[1], x[0]))]
+    return lines
 
 
 # ---- a command, as events -----------------------------------------------------
@@ -1078,3 +1628,22 @@ def crashed(command, error):
     return _emit("crash", command=command if command in _commands()
                  else "other", phase=PHASE_OF.get(command, "report"),
                  error=error_category(error))
+
+
+# ---- the library's account (`tooluse`, backlog 0f) -----------------------
+# what of the object store's client `push` and `receive` use, read off this
+# module
+
+_S3 = ("put_object", "get_object", "list_objects_v2", "IfNoneMatch",
+       "ContentType", "ContinuationToken")
+
+
+def _account():
+    from . import tooluse
+    tooluse.register(
+        "boto3-s3-telemetry", licence="Apache-2.0", release="1.40",
+        declared={"s3": frozenset(_S3)}, options={},
+        reads=(("telemetry.py",), {("s3", o): o for o in _S3}))
+
+
+_account()

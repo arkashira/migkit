@@ -196,19 +196,24 @@ def test_a_policy_saying_nothing_of_telemetry_leaves_it_on(spool, tmp_path,
     assert telemetry.state()[0]
 
 
-def test_the_spool_is_bounded_and_rotates(tmp_path):
-    sink = telemetry.Local(tmp_path)
+def test_the_store_is_bounded_and_seals_what_fills(spool):
+    sink = telemetry.Local(spool)
     line = json.dumps(telemetry.make("progress", phase="move",
                                      rows=telemetry.bucket(10 ** 6)))
     many = (telemetry.FILE_BYTES * (telemetry.FILES + 2)) // len(line)
     sink.put([line] * many)
-    files = sorted(tmp_path.glob("events-*.jsonl"))
-    assert len(files) == telemetry.FILES
+    held = sink.segments()
+    files = [p for _, p in held] + list(spool.glob("events-*.jsonl"))
+    assert len(held) == telemetry.FILES - 1 == telemetry.keeps()[0]
+    assert [n for n, _ in held] == list(range(held[0][0], held[0][0]
+                                              + len(held)))
+    assert all(p.stat().st_size <= telemetry.FILE_BYTES for p in files)
     assert sink.bytes() <= telemetry.FILE_BYTES * telemetry.FILES
     assert all(p.stat().st_mode & 0o077 == 0 for p in files)
     assert len(sink.read()) < many and sink.read()[-1]["phase"] == "move"
+    assert telemetry.unsent() >= 2     # the oldest went before a push
     assert sink.dispose() == telemetry.FILES
-    assert sink.read() == []
+    assert sink.read() == [] and not list(spool.rglob("*.seg"))
 
 
 def test_a_full_queue_drops_the_event_and_never_waits(spool, monkeypatch):
@@ -224,11 +229,20 @@ def test_a_full_queue_drops_the_event_and_never_waits(spool, monkeypatch):
     assert telemetry.dropped() - before == 49
 
 
-def test_a_sink_other_than_the_local_one_sends_nothing():
+def test_nothing_leaves_but_by_the_push_through_the_egress_gate():
+    import inspect
     with pytest.raises(TypeError):
         telemetry.Sink().put(["{}"])
     assert [k for k in dir(telemetry) if "send" in k.lower()
             or "upload" in k.lower() or "http" in k.lower()] == []
+    # the one call that writes out is the push's conditional put, and both
+    # ways out ask the gate before they make a client
+    src = inspect.getsource(telemetry)
+    assert src.count(".put_object(") == 1
+    for way in (telemetry.push, telemetry.receive):
+        body = inspect.getsource(way)
+        assert body.index("_gate(conf)") < body.index("_client(conf)")
+    assert "on-run-end" not in src and "atexit.register(push" not in src
 
 
 def test_buckets_are_coarse_and_closed():
@@ -450,6 +464,7 @@ def test_each_unit_is_kept_by_an_opaque_id_with_its_own_outcome(spool):
 
 def test_an_id_is_the_same_in_every_run_of_one_install_and_not_another(
         spool, tmp_path, monkeypatch):
+    monkeypatch.setattr(telemetry, "_SALT", None)
     first = telemetry.unit_id("table", "canary_orders")
     monkeypatch.setattr(telemetry, "_SALT", None)
     assert telemetry.unit_id("table", "canary_orders") == first
@@ -545,3 +560,181 @@ def test_databases_moving_side_by_side_keep_their_own_estimate(spool,
     assert [e["eta_off"] for e in done] == [1.0, 1.0]
     assert telemetry._PACE == {}
     assert "canary" not in _kept(spool).decode()
+
+
+# ---- the sealed store, the push's gate and the receiver's check -----------------
+
+def _lines(n, phase="move"):
+    return [json.dumps(telemetry.make("progress", phase=phase, done="<50%"),
+                       sort_keys=True) for _ in range(n)]
+
+
+def test_a_sealed_segment_is_chained_and_its_manifest_names_it(spool):
+    sink = telemetry.Local(spool)
+    sink.put(_lines(3))
+    first = sink.seal()
+    sink.put(_lines(2, "verify"))
+    second = sink.seal()
+    one, two = sink.manifest(first), sink.manifest(second)
+    assert (one["seq"], one["count"], one["prev"]) == (1, 3, sink.seed())
+    assert two["prev"] == one["chain"] and two["count"] == 2
+    assert one["first"] == one["last"] == telemetry.make(
+        "progress", phase="move")["hour"]
+    for path in (first, second):
+        doc, events, bad = telemetry.segment_checked(path.read_bytes(),
+                                                     sink.manifest(path)
+                                                     ["digest"])
+        assert len(events) == doc["count"] and bad == []
+        assert path.stat().st_mode & 0o077 == 0
+    assert [e["phase"] for e in sink.read()] == ["move"] * 3 + ["verify"] * 2
+    assert sink.seal() is None
+
+
+def test_a_seal_cut_anywhere_seals_each_event_once(spool, monkeypatch):
+    from migkit import durable
+    sink = telemetry.Local(spool)
+    sink.put(_lines(4))
+    real = durable.write_atomic
+
+    def cut(path, data, *a, **k):
+        raise OSError("power gone")
+    monkeypatch.setattr(durable, "write_atomic", cut)
+    with pytest.raises(OSError):
+        sink.seal()          # renamed, never written
+    assert list(spool.glob("sealing-*.jsonl")) and not sink.segments()
+    monkeypatch.setattr(durable, "write_atomic", real)
+    sink.put(_lines(1, "verify"))
+    sink.seal()
+    assert [sink.manifest(p)["count"] for _, p in sink.segments()] == [4, 1]
+    # written whole, then cut before the renamed head went: not twice
+    sink.put(_lines(2))
+    pending = spool / "sealing-00000003.jsonl"
+    sink._file(0).replace(pending)
+    sink._close(pending)
+    pending.write_text("\n".join(_lines(2)) + "\n")
+    sink.seal()
+    assert [sink.manifest(p)["count"] for _, p in sink.segments()] \
+        == [4, 1, 2] and len(sink.read()) == 7
+
+
+def test_the_policy_says_how_many_segments_and_days_are_kept(spool,
+                                                             tmp_path,
+                                                             monkeypatch):
+    policy = tmp_path / "policy.yaml"
+    policy.write_text("telemetry_keep: 2\n")
+    monkeypatch.setenv("MIGKIT_TELEMETRY_POLICY", str(policy))
+    sink = telemetry.Local(spool)
+    for _ in range(4):
+        sink.put(_lines(1))
+        sink.seal()
+    assert [n for n, _ in sink.segments()] == [3, 4]
+    old = json.loads(_lines(1)[0])
+    old["hour"] = "2001-01-01T00"
+    policy.write_text("telemetry_keep: 9\ntelemetry_days: 30\n")
+    sink.put([json.dumps(old)])
+    sink.seal()
+    assert [n for n, _ in sink.segments()] == [3, 4]
+
+
+def test_off_disposes_the_segments_and_the_pushes_pending(spool):
+    sink = telemetry.Local(spool)
+    sink.put(_lines(2))
+    sink.seal()
+    sink.put(_lines(2))
+    got = CliRunner().invoke(_main(), ["telemetry", "off"])
+    assert got.exit_code == 0 and "telemetry: off" in got.output
+    assert not sink.segments() and not list(spool.rglob("*.jsonl"))
+    got = CliRunner().invoke(_main(), ["telemetry", "push", "b"])
+    assert got.exit_code == 4 and "telemetry is off" in got.output
+    CliRunner().invoke(_main(), ["telemetry", "on"])
+
+
+@pytest.mark.parametrize("how", ["egress", "egress-to", "policy",
+                                 "push-off"])
+def test_a_push_refused_says_why_and_connects_nowhere(spool, tmp_path,
+                                                      monkeypatch, how):
+    from migkit import anchor, verdict
+    telemetry.Local(spool).put(_lines(2))
+    reached = []
+    monkeypatch.setattr(anchor, "_client", lambda conf: reached.append(1))
+    policy = tmp_path / "policy.yaml"
+    if how == "egress":
+        monkeypatch.setenv("MIGKIT_EGRESS", "none")
+    elif how == "egress-to":
+        monkeypatch.setenv("MIGKIT_EGRESS_TO", "10.0.0.9")
+    else:
+        policy.write_text("telemetry: off\n" if how == "policy"
+                          else "telemetry_push: off\n")
+        monkeypatch.setenv("MIGKIT_TELEMETRY_POLICY", str(policy))
+    with pytest.raises(verdict.Refused) as got:
+        telemetry.push("bucket", "http://10.0.0.1:9000")
+    said = str(got.value)
+    assert {"egress": "MIGKIT_EGRESS does not let",
+            "egress-to": "a host the egress does not name",
+            "policy": "telemetry is off",
+            "push-off": "telemetry_push: off"}[how] in said
+    if how != "policy":
+        assert telemetry.Local(spool).segments() == []   # nothing sealed
+    if how.startswith("egress"):
+        with pytest.raises(verdict.Refused):
+            telemetry.receive("bucket", "http://10.0.0.1:9000")
+    assert reached == []
+    _no_canary(said)
+
+
+def test_the_receiver_runs_the_producers_check_again():
+    good = telemetry.make("run", command="move", engine="postgres",
+                          completion="done")
+    assert telemetry.checked(dict(good)) == good
+    assert telemetry.checked({**good, "version": "9.1.0"})["version"]
+    for bad, why in (({**good, "canary_orders": 1}, "not in its schema"),
+                     ({**good, "engine": "canary_orders"}, "not free text"),
+                     ({**good, "hour": "SELECT 1"}, "takes an hour"),
+                     ({**good, "schema": 7}, "schema"),
+                     ({**good, "kind": "canary"}, "kind"),
+                     ({**good, "version": "/srv/canary/secrets.env"},
+                      "version"),
+                     ({**good, "seconds": "123-45-6789"}, "a number")):
+        with pytest.raises(telemetry.Rejected) as got:
+            telemetry.checked(bad)
+        assert why in str(got.value)
+        _no_canary(str(got.value))
+
+
+def test_a_blocked_writer_drops_and_counts_and_the_step_never_waits(
+        spool, monkeypatch):
+    import threading
+    assert telemetry._Q.maxsize == telemetry.QUEUED
+    telemetry.record("progress", phase="move", done="<50%")
+    assert telemetry.flush(5)
+    gate, real = threading.Event(), telemetry.Local.put
+    monkeypatch.setattr(telemetry.Local, "put",
+                        lambda self, lines: (gate.wait(10),
+                                             real(self, lines)))
+    before = telemetry.dropped()
+    began = time.monotonic()
+    many = telemetry.QUEUED * 4
+    got = [telemetry.record("progress", phase="move", done="<50%")
+           for _ in range(many)]
+    step = time.monotonic() - began
+    gate.set()
+    assert telemetry.flush(30)
+    assert step < 1.0, step                        # the step never waited
+    # the queue's cap held: the queue and the one batch the writer took
+    assert sum(got) <= 2 * telemetry.QUEUED
+    assert telemetry.dropped() - before == many - sum(got)
+
+
+def test_the_writer_keeps_up_in_synced_batches(spool):
+    began, kept = time.monotonic(), 0
+    for _ in range(6):
+        for _ in range(telemetry.QUEUED - 1):
+            kept += telemetry.record("progress", phase="move", done="<90%")
+        assert telemetry.flush(30)
+    took = time.monotonic() - began
+    sink = telemetry.Local(spool)
+    rate = sink.bytes() / took
+    assert kept == 6 * (telemetry.QUEUED - 1)
+    assert rate > 64 * 1024, rate        # bytes a second, synced
+    assert sink.segments() and sink.bytes() <= (telemetry.FILE_BYTES
+                                                * telemetry.FILES)

@@ -167,13 +167,18 @@ margin-top:40px;padding-top:16px}
 <p>Cloud system accounts (AWS_*, rds*, tencent*) are excluded on both sides. Never touches the source.</p>
 <table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-users-do_apply"><td><code>--apply</code></td><td>execute on the target (default is dry-run)</td></tr><tr id="opt-users-pw_file"><td><code>--passwords</code></td><td>yaml file <code>role: password</code> for postgres create and for mongo setpw (managed sources lock password hashes; mysql needs no file - the hash is copied so the password stays identical)</td></tr></table>
 <h3 id="cmd-telemetry"><code>telemetry</code></h3>
-<pre><code>migkit telemetry [OPTIONS] [show|off|on]</code></pre>
+<pre><code>migkit telemetry [OPTIONS] [show|off|on|push|receive] [BUCKET]</code></pre>
 <p>Product telemetry: what migkit did, never what it carried.</p>
-<pre><code>show   the state, what is collected, and every event kept (nothing is
-       sent: no destination is chosen)
-off    stop keeping events and delete those already kept
-on     keep events again, unless a policy or the environment says off</code></pre>
-<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-telemetry-with_schema"><td><code>--schema</code></td><td>also print every field an event may have</td></tr></table>
+<pre><code>show     the state, what is collected, and every event kept
+off      stop keeping events and delete those already kept, the
+         segments not yet pushed included
+on       keep events again, unless a policy or the environment says off
+push     send the sealed segments, once each, to BUCKET: an
+         S3-compatible bucket you run, signed in with its own
+         credentials (by hand only; nothing is ever sent on its own)
+receive  read BUCKET's segments back, check every event again, and
+         count them by kind, engine and way</code></pre>
+<table><tr><th>Option</th><th>What it does</th></tr><tr id="opt-telemetry-with_schema"><td><code>--schema</code></td><td>also print every field an event may have</td></tr><tr id="opt-telemetry-endpoint"><td><code>--endpoint</code></td><td>the bucket's store, where it is not the default one</td></tr></table>
 <h2 id="aliases">Older names</h2>
 <p>Names earlier versions used, kept so scripts written for them still run:</p>
 <table><tr><th>Name</th><th>Now</th></tr><tr><td><code>hops</code></td><td>List configured hops - now part of migkit doctor.</td></tr><tr><td><code>setup-target</code></td><td>Now: migkit schema HOP.</td></tr><tr><td><code>repair</code></td><td>Now: migkit sync HOP [--apply].</td></tr><tr><td><code>replicate</code></td><td>Now: migkit move HOP --mode cdc / full+cdc. The move itself, with every guard it holds: this alias set a stream up on its own - into a hop that masks, a <code>goal: verify</code> hop, and torn down with no approval and outside the cutover.</td></tr><tr><td><code>tail</code></td><td>Now: migkit move HOP --mode cdc --db X - the move itself, with every guard it holds.</td></tr><tr><td><code>convert-schema</code></td><td>Now: migkit schema HOP --convert.</td></tr><tr><td><code>gen-migration</code></td><td>Now: migkit schema HOP --migration.</td></tr><tr><td><code>sample-diff</code></td><td>Now: migkit check HOP --drill --db X --table Y.</td></tr><tr><td><code>ui</code></td><td>Now: migkit report --serve.</td></tr><tr><td><code>state</code></td><td>Now: migkit history HOP.</td></tr><tr><td><code>monitor</code></td><td>Now: migkit watch HOP --verify.</td></tr></table>

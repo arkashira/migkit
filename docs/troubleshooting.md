@@ -2177,6 +2177,14 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * table_engine: foreign_keys: <...> names <...> columns and <...> <...>
 
+* telemetry push and receive take the bucket to use
+
+* the bucket holds other bytes under a sealed segment's digest - something else wrote to it; nothing more is sent
+
+* telemetry is off (<...>), so nothing is pushed
+
+* the organisation's policy says telemetry_push: off, so nothing is pushed
+
 * MIGKIT_BUNDLE_PLATFORM=<...> names no machine migkit builds bundles for: linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64, a Linux named after them (linux-x86_64-ubuntu-22.04)
 
 * <...> is not an offline bundle migkit made: it has no sums

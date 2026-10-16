@@ -10942,7 +10942,7 @@ Not done (W9A, 2026-10-16): `tuning.sized` retunes the MySQL range copier on a s
 
 ## P0-PRODUCT-TELEMETRY: complete usage evidence without customer data
 
-Owner requirement, 2026-10-06. Status: PARTLY (2026-10-16). Plan comprehensive metrics and
+Owner requirement, 2026-10-06. Status: PARTLY (2026-10-16; W17J: the store - sealed, chained local segments, a manual push to an S3-compatible bucket the operator runs, the receiver's re-check - built and proved on the sandbox's object store, `docs/decisions/0001-telemetry-store.md`; left: Object Lock on the sandbox store, the production store run for real, the analysis beyond the first table). Plan comprehensive metrics and
 structured events describing migkit's behavior and actual usage outcomes to
 improve the product, decision quality, safety and performance. Customer
 database content must never leave the user's environment. Storage/backend
