@@ -14,6 +14,12 @@ that is read first instead:
   what migkit can do engine by engine and what is left, from the
   capability table, the decision engine's coverage, the depth matrix and
   the backlog;
+* `docs/agents/INVENTORY.md` and `docs/agents/LAYERS.md` (kept in the
+  repo, checked as the map is; backlog P1-SOURCE-HIERARCHY): every file
+  under `migkit/` and `tools/` with its responsibility package, owner
+  domain, importers, wrapped programs and tests; and the layering rule
+  `tests/test_the_layers_import_downward.py` holds every import to, with
+  the upward imports still allowed;
 * `.codemap/CALLERS.tsv` and `.codemap/LOCAL.md` (this machine only):
   who calls what, and what this machine last proved - the full suite,
   work not pushed, agents' branches kept;
@@ -22,8 +28,8 @@ that is read first instead:
   and the first line of what it says about itself - one grep answers
   "where is X" and "is this name taken".
 
-    python tools/gen_codemap.py            write both
-    python tools/gen_codemap.py --check    exit 3 where CODEMAP.md is behind
+    python tools/gen_codemap.py            write all four docs and .codemap/
+    python tools/gen_codemap.py --check    exit 3 where a doc is behind
     python tools/gen_codemap.py --symbols  write .codemap/ only (SYMBOLS,
                                            CALLERS, LOCAL)
     python tools/gen_codemap.py --since <ref>
@@ -32,6 +38,8 @@ that is read first instead:
                                            changed since a commit
 """
 import ast
+import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -105,11 +113,19 @@ def _walk(tree, rel):
     return out
 
 
+_PARSED = {}
+
+
 def _parse(path):
-    try:
-        return ast.parse(path.read_text())
-    except SyntaxError:
-        return None
+    """The tree of a file, parsed once per process while the file is as it
+    was (the inventory reads every file of the tree several times)."""
+    key = (str(path), path.stat().st_mtime_ns)
+    if key not in _PARSED:
+        try:
+            _PARSED[key] = ast.parse(path.read_text())
+        except SyntaxError:
+            _PARSED[key] = None
+    return _PARSED[key]
 
 
 def codemap():
@@ -120,6 +136,13 @@ def codemap():
              " `.codemap/SYMBOLS.tsv` (this machine only).", "",
              "## Hubs: what most changes touch", ""]
     lines += [f"- `{f}` - {what}" for f, what in HUBS]
+    lines += ["- [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of"
+              " `migkit/` and `tools/`: its responsibility package, owner"
+              " domain, size, importers, the packages it reaches, the"
+              " programs it wraps and the tests that reach it",
+              "- [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule"
+              " (a package imports its own rank and below) and every upward"
+              " import still listed, with its reason"]
     by_pkg = {}
     for p in _modules():
         rel = p.relative_to(ROOT).as_posix()
@@ -214,6 +237,12 @@ def state():
                      f" {len(gaps(eng, 'depth'))} |"
                      f" {', '.join(cg + sg) or '-'} |")
     lines += _depth(capabilities)
+    up = upward_imports()
+    lines += ["", "## Source layout", "",
+              f"{len(up)} upward imports still listed"
+              " (`docs/agents/LAYERS.md`; the list only shrinks);"
+              f" {sum(1 for f in _files() if package_of(f) is None)} files"
+              " no package claims (`docs/agents/INVENTORY.md`)."]
     rows = _backlog()
     by = {s: 0 for s in STATUSES}
     areas = {}
@@ -405,6 +434,1508 @@ def since(ref):
     return "\n".join(out)
 
 
+# ---- the source inventory and the layers (backlog P1-SOURCE-HIERARCHY) -------
+
+INVENTORY = ROOT / "docs" / "agents" / "INVENTORY.md"
+LAYERS_DOC = ROOT / "docs" / "agents" / "LAYERS.md"
+TESTS = ROOT / "tests"
+
+#: the layers, lowest first: a package may import its own rank and any
+#: rank below it, and nothing above. A rank of two is two packages
+#: beside each other. `P1-SOURCE-HIERARCHY.layout`; the plan is
+#: `docs/research/source-hierarchy-2026-10-06.md`
+LAYERS = (
+    (("configuration", "what a hop says: its keys, the environment, the"
+      " endpoints and the addresses it is built from"),),
+    (("scope", "which objects and rows a hop carries"),),
+    (("persistence", "state that outlives a process: checkpoints, the"
+      " audit record, the run's own files, the undo"),),
+    (("safety", "who may write, what must not leak, what keeps a mover"
+      " from writing twice"),),
+    (("execution", "the running of work: processes, ranges, retries,"
+      " pacing, stalls, sizing of what runs at once"),),
+    (("conversion", "a value or an object as another engine takes it:"
+      " canonical text, transforms, types, stored code"),),
+    (("reporting", "what the operator reads: the verdict, the result"
+      " shape, the log, the metrics, the notices"),),
+    (("decision", "choosing: the rungs, the cost model, the joint plan,"
+      " what each engine can do"),),
+    (("engines", "the contract every engine fills and each engine's own"
+      " adapter"),
+     ("integrations", "the programs, libraries and provider APIs migkit"
+      " wraps, and the other tools it meets")),
+    (("workflows", "a move's phases and what they do around the move:"
+      " copy, follow, prove, repair, cut over, recover"),),
+    (("cli", "the command line and the guide that asks for two"
+      " addresses"),
+     ("web", "the web view and its API")),
+)
+#: developer tooling and shipped resources: listed in the inventory,
+#: outside the layering rule
+OUTSIDE = (("tools", "the generators, the full suite and the checks run"
+            " by the maintainers; they import migkit and migkit never"
+            " imports them"),
+           ("data", "the files migkit ships as resources"))
+
+#: top-level modules of migkit/ by package; a module is in one package
+_BY_NAME = {
+    "configuration": "hopkeys envkeys config addresses engineat clouds"
+                     " variants managed",
+    "scope": "rowfilter case result_scope",
+    "persistence": "state checkpoint durable repairlog revert audit digests"
+                   " evidence session runlog kept anchor setaside claims"
+                   " shared",
+    "safety": "redact egress tls approvals interlock fencing ownership"
+              " masking freeze leftovers lease",
+    "execution": "runner schedule throttle stall attempts ranges util"
+                 " failpoint tunnel locks",
+    "conversion": "canon rowtext render transforms nanotime intervals geo"
+                  " vectors bsontype charsets commercial zones copybook"
+                  " pieces ddl loadtext schemaformats described tally",
+    "reporting": "verdict report wording diagnostics export"
+                 " troubleshooting telemetry traces notify servicecheck",
+    "decision": "decide costmodel jointplan factbook guarantees scanplan"
+                " tuning capabilities planner tableway repairways userways"
+                " scenarios legs sizing changedepth lacks sourcechange"
+                " bulkways ready dba handwork rehearsal faults model"
+                " machine topology waysaid workload advisors",
+    "engines": "catalog pgslot binlog_marks binlog_payload logddl standby",
+    "integrations": "tools tooluse toolversion cloudapi cloudseed"
+                    " huawei_sdk imports integrations workflow_exporter"
+                    " assist mirror redisshake dsbulk ddbexport"
+                    " fromsnapshot kafkaclient registry avrostream"
+                    " seedtools carriers ship backupseed",
+    "workflows": "movers cutover tailtables topicstates tailctl verifiers"
+                 " autonomous upgrade indexes appversions drift crossmove"
+                 " physical ha jobs users split consolidate reshard subset"
+                 " archive editions tableengine twoway barriers marks"
+                 " drainmark applyway replicasum rules leaves unchanged"
+                 " streamout changetopic fleet second_reader",
+    "cli": "cli guide ui",
+}
+#: a subpackage, whole
+_BY_PREFIX = {"engines": "engines", "storedcode": "conversion",
+              "web": "web", "runners": "execution"}
+
+#: the owners CLAUDE.md names ("One place") and the decision engine's
+#: rules: the file that holds the one reading, for the inventory
+OWNERS = {
+    "migkit/config.py": "scope: Hop.excluded, Hop.carries,"
+                        " Hop.target_table_in",
+    "migkit/engines/base.py": "scope: Engine.in_scope, Engine.takes",
+    "migkit/verdict.py": "verdict: verdict.decide",
+    "migkit/rowfilter.py": "row filter",
+    "migkit/transforms.py": "column transform",
+    "migkit/hopkeys.py": "hop keys: HOP_KEYS, HOP_OPTIONS",
+    "migkit/envkeys.py": "environment variables",
+    "migkit/decide.py": "decision: every choice is a rung",
+    "migkit/ranges.py": "ranges",
+    "migkit/diagnostics.py": "probes: ProbeAccumulator",
+}
+
+_RANK = {p: i for i, rank in enumerate(LAYERS) for p, _ in rank}
+_TOP_OF = {m: p for p, names in _BY_NAME.items() for m in names.split()}
+_COUNTED = sum(len(v.split()) for v in _BY_NAME.values())
+assert _COUNTED == len(_TOP_OF), "a module is named in two packages"
+
+
+def package_of(rel):
+    """The responsibility package of a file under migkit/ or tools/, or
+    None where the table does not claim it (the inventory lists those as
+    unassigned and a test fails on one)."""
+    parts = Path(rel).with_suffix("").parts
+    if parts[0] == "tools":
+        return "tools"
+    if parts[0] != "migkit":
+        return None
+    if len(parts) == 1:
+        return None
+    if Path(rel).suffix != ".py":
+        return "data" if parts[1] == "data" else \
+            _BY_PREFIX.get(parts[1])
+    if len(parts) == 2:
+        return "configuration" if parts[1] == "__init__" else \
+            _TOP_OF.get(parts[1])
+    return _BY_PREFIX.get(parts[1])
+
+
+def _files(root=ROOT):
+    out = []
+    for top in ("migkit", "tools"):
+        for p in (root / top).rglob("*"):
+            if p.is_file() and "__pycache__" not in p.parts \
+                    and p.suffix != ".pyc":
+                out.append(p.relative_to(root).as_posix())
+    return sorted(out)
+
+
+def _modname(rel):
+    parts = list(Path(rel).with_suffix("").parts)
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _known(files):
+    return {_modname(f) for f in files if f.endswith(".py")}
+
+
+_DOTTED = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$")
+
+
+def _imports(path, name, known):
+    """[(module, line, lazy)] every module of `known` the file imports:
+    an import statement, at the top or inside a function (lazy), and a
+    module named whole by a string (`import_module("migkit.x")`)."""
+    tree = _parse(path)
+    if tree is None:
+        return []
+    pkg = name if path.name == "__init__.py" else name.rpartition(".")[0]
+    tools = {k.split(".", 1)[1] for k in known if k.startswith("tools.")}
+    out = []
+
+    def keep(target, line, lazy):
+        while target and target not in known:
+            target = target.rpartition(".")[0]
+        if target and target != name:
+            out.append((target, line, lazy))
+
+    def visit(node, lazy):
+        for c in ast.iter_child_nodes(node):
+            if not isinstance(c, (ast.stmt, ast.ExceptHandler,
+                                  ast.match_case)):
+                continue
+            inner = lazy or isinstance(c, (ast.FunctionDef,
+                                           ast.AsyncFunctionDef))
+            if isinstance(c, ast.Import):
+                for a in c.names:
+                    first = a.name.split(".")[0]
+                    keep("tools." + a.name if first in tools and
+                         "." not in a.name else a.name, c.lineno, inner)
+            elif isinstance(c, ast.ImportFrom):
+                base = c.module or ""
+                if c.level:
+                    up = pkg.split(".")
+                    up = up[:len(up) - (c.level - 1)]
+                    base = ".".join(up + ([base] if base else []))
+                elif base in tools:
+                    base = "tools." + base
+                for a in c.names:
+                    full = f"{base}.{a.name}"
+                    keep(full if full in known else base, c.lineno, inner)
+            visit(c, inner)
+    visit(tree, False)
+    for c in ast.walk(tree):
+        if isinstance(c, ast.Constant) and isinstance(c.value, str) \
+                and c.value in known:
+            keep(c.value, c.lineno, True)
+    return out
+
+
+_GRAPHS = {}
+
+
+def import_graph(root=ROOT, files=None):
+    """{module: [(imported module, line, lazy)]} of every Python file of
+    migkit/ and tools/ under `root`."""
+    files = _files(root) if files is None else files
+    key = (str(root), tuple(files), tuple(
+        (root / f).stat().st_mtime_ns for f in files))
+    if key not in _GRAPHS:
+        known = _known(files)
+        _GRAPHS[key] = {_modname(f): _imports(root / f, _modname(f), known)
+                        for f in files if f.endswith(".py")}
+    return _GRAPHS[key]
+
+
+def upward_imports(root=ROOT, files=None):
+    """[(file, line, imported module, from package, to package)] of every
+    import in migkit/ that reaches a package of a higher rank than its
+    own's."""
+    files = _files(root) if files is None else files
+    by_mod = {_modname(f): f for f in files if f.endswith(".py")}
+    out = []
+    for mod, edges in import_graph(root, files).items():
+        rel = by_mod[mod]
+        a = package_of(rel)
+        if a not in _RANK:
+            continue
+        seen = set()
+        for target, line, _lazy in sorted(edges):
+            b = package_of(by_mod[target])
+            if b in _RANK and _RANK[b] > _RANK[a] and target not in seen:
+                seen.add(target)
+                out.append((rel, line, target, a, b))
+    return sorted(out)
+
+
+def _test_reach(known):
+    """{module: {test file}} the tests import, by import statement or by
+    a module's name as a string."""
+    out = {}
+    for t in sorted(TESTS.rglob("*.py")):
+        tree = _parse(t)
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module \
+                    and not node.level:
+                names = [node.module] + [f"{node.module}.{a.name}"
+                                         for a in node.names]
+            elif isinstance(node, ast.Constant) \
+                    and isinstance(node.value, str) \
+                    and node.value.startswith("migkit.") \
+                    and _DOTTED.match(node.value):
+                names = [node.value]
+            for n in names:
+                while n and n not in known:
+                    n = n.rpartition(".")[0]
+                if n:
+                    out.setdefault(n, set()).add(t.name)
+    return out
+
+
+def _wrapped():
+    """{file: [tool]} the wrapped programs and libraries each file
+    registers with `tooluse`, and the files whose code a tool's uses are
+    read off (`reads`) - asked in a process of its own, so what the
+    registry holds does not depend on what this one imported."""
+    code = (
+        "import json, sys\n"
+        "sys.path.insert(0, %r)\n"
+        "from migkit import tooluse\n"
+        "got = {}\n"
+        "orig = tooluse.register\n"
+        "def spy(name, **kw):\n"
+        "    f = sys._getframe(1).f_code.co_filename\n"
+        "    got.setdefault(f, set()).add(name)\n"
+        "    return orig(name, **kw)\n"
+        "tooluse.register = spy\n"
+        "tooluse._load()\n"
+        "for t in tooluse.REGISTRY.values():\n"
+        "    for r in (t.reads[0] if t.reads else ()):\n"
+        "        got.setdefault('migkit/' + r.partition('::')[0], set())"
+        ".add(t.name)\n"
+        "print(json.dumps({k: sorted(v) for k, v in got.items()}))\n"
+    ) % str(ROOT)
+    run = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, cwd=ROOT)
+    if run.returncode:
+        raise RuntimeError("the wrapped-tool registry could not be read: "
+                           + run.stderr.strip().splitlines()[-1])
+    out = {}
+    for f, names in json.loads(run.stdout.strip().splitlines()[-1]).items():
+        try:
+            rel = Path(f).relative_to(ROOT).as_posix()
+        except ValueError:
+            rel = f
+        out.setdefault(rel, set()).update(names)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def _entry_modules():
+    """The modules started from outside migkit (`tests/test_every_module_
+    is_reached.py`, the one list)."""
+    sys.path.insert(0, str(ROOT))
+    try:
+        import importlib
+        return importlib.import_module(
+            "tests.test_every_module_is_reached").ENTRY
+    finally:
+        sys.path.pop(0)
+
+
+def _short(mod):
+    return mod[len("migkit."):] if mod.startswith("migkit.") else mod
+
+
+def _cap(items, n=5):
+    items = list(items)
+    return ", ".join(items[:n]) + (f" (+{len(items) - n})"
+                                   if len(items) > n else "")
+
+
+def reached_by_tests(files=None):
+    """{file: (kind, detail)} how a test reaches each Python file of
+    migkit/: "direct" (a test imports it; detail the tests), "through"
+    (a module a test imports imports it; detail those modules) or "none"."""
+    files = _files() if files is None else files
+    known = _known(files)
+    graph = import_graph(ROOT, files)
+    direct = _test_reach(known)
+    through = {}
+    for m in direct:
+        for t, _l, _z in graph.get(m, ()):
+            through.setdefault(t, set()).add(m)
+    out = {}
+    for f in files:
+        if not (f.startswith("migkit/") and f.endswith(".py")):
+            continue
+        m = _modname(f)
+        out[f] = ("direct", sorted(direct[m])) if m in direct else \
+            ("through", sorted(through[m])) if m in through else \
+            ("none", [])
+    return out
+
+
+def inventory():
+    """Every file of migkit/ and tools/: its package, its owner, its
+    size, who imports it and what it reaches, the programs it wraps and
+    the tests that reach it."""
+    files = _files()
+    known = _known(files)
+    by_mod = {_modname(f): f for f in files if f.endswith(".py")}
+    graph = import_graph(ROOT, files)
+    importers = {}
+    for m, edges in graph.items():
+        for t, _l, _z in edges:
+            importers.setdefault(t, set()).add(m)
+    wrapped = _wrapped()
+    tests = reached_by_tests(files)
+    entry = _entry_modules()
+    unassigned = [f for f in files if package_of(f) is None]
+    pkgs = [p for rank in LAYERS for p, _ in rank] + [p for p, _ in OUTSIDE]
+    said = dict(p for rank in LAYERS for p in rank) | dict(OUTSIDE)
+    lines = [
+        "# migkit source inventory", "",
+        "Written by `tools/gen_codemap.py` from the code; the pre-commit"
+        " hook stops a commit that leaves it behind. Every file under"
+        " `migkit/` and `tools/` with the responsibility package a table"
+        " in the generator gives it (`_BY_NAME`, `_BY_PREFIX`), the owner"
+        " domain where it holds one of the one-place readings (`OWNERS`),"
+        " its size, the modules that import it and the packages it reaches"
+        " (module-level and inside functions alike), the wrapped programs"
+        " and libraries it registers or is read for, and the tests that"
+        " reach it. The layering rule these packages are held to is"
+        " [LAYERS.md](LAYERS.md); where things are by module is"
+        " [CODEMAP.md](CODEMAP.md).", "",
+        "## Unassigned", ""]
+    lines += [f"- `{f}`" for f in unassigned] or ["None."]
+    lines += ["", "## Packages", "",
+              "| package | rank | files | lines | responsibility |",
+              "|---|---|---|---|---|"]
+    count = {}
+    for f in files:
+        p = package_of(f)
+        n, ln = count.get(p, (0, 0))
+        count[p] = (n + 1, ln + len(
+            (ROOT / f).read_text(errors="replace").splitlines()))
+    for p in pkgs:
+        n, ln = count.get(p, (0, 0))
+        lines.append(f"| {p} | {_RANK[p] + 1 if p in _RANK else '-'} |"
+                     f" {n} | {ln} | {said[p]} |")
+    for p in pkgs:
+        rows = [f for f in files if package_of(f) == p]
+        if not rows:
+            continue
+        lines += ["", f"## {p} ({len(rows)} files)", "",
+                  "| file | owner | lines | imported by | reaches |"
+                  " wraps | tests |", "|---|---|---|---|---|---|---|"]
+        for f in rows:
+            mod = _modname(f) if f.endswith(".py") else None
+            n = len((ROOT / f).read_text(errors="replace").splitlines())
+            inn = sorted(_short(i) for i in importers.get(mod, ()))
+            reach = {}
+            for t, _l, _z in graph.get(mod, ()):
+                q = package_of(by_mod[t])
+                reach[q] = reach.get(q, 0) + 1
+            out = ", ".join(f"{q} {c}" for q, c in sorted(reach.items())
+                            ) or "-"
+            if mod is None:
+                tcell = "-"
+            else:
+                kind, detail = tests.get(f, ("none", []))
+                names = [d[len("test_"):-3] if d.startswith("test_")
+                         else d for d in detail]
+                tcell = f"{len(detail)}: {_cap(names, 3)}" \
+                    if kind == "direct" else \
+                    f"through {_cap([_short(d) for d in detail], 2)}" \
+                    if kind == "through" else \
+                    "entry point" if mod in entry else "none"
+            imp = f"{len(inn)}: {_cap(inn)}" if inn else "0"
+            lines.append(f"| `{f}` | {OWNERS.get(f, '-')} | {n} | {imp} |"
+                         f" {out} | {', '.join(wrapped.get(f, ())) or '-'} |"
+                         f" {tcell} |")
+    return "\n".join(lines) + "\n"
+
+
+def layers():
+    """The layering rule as a page: the ranks, and every upward import
+    still allowed, each with its reason."""
+    found = upward_imports()
+    listed = {(f, m): r for r, pairs in KNOWN_UPWARD.items()
+              for f, m in (p.split(" ") for p in pairs)}
+    lines = [
+        "# migkit layers", "",
+        "Written by `tools/gen_codemap.py` from `LAYERS` and `KNOWN_UPWARD`"
+        " in it; the pre-commit hook stops a commit that leaves it behind."
+        " `tests/test_the_layers_import_downward.py` holds every import in"
+        " `migkit/` to it. The packages are the plan's"
+        " (`docs/research/source-hierarchy-2026-10-06.md`); which file is"
+        " in which is [INVENTORY.md](INVENTORY.md).", "",
+        "## The rule", "",
+        "A package imports its own rank and the ranks below it, never one"
+        " above. A rank of two lists packages beside each other. An import"
+        " inside a function counts as one at the top of the module. A"
+        " module that must reach a higher package is a defect to move, and"
+        " until it is moved it is listed under `KNOWN_UPWARD` with its"
+        " reason: the list only shrinks (the test fails on an import added"
+        " and on one listed that is gone).", "",
+        "## Ranks, lowest first", "",
+        "| rank | package | responsibility |", "|---|---|---|"]
+    for i, rank in enumerate(LAYERS, 1):
+        for p, what in rank:
+            lines.append(f"| {i} | {p} | {what} |")
+    lines += ["", "Outside the rule: " + "; ".join(
+        f"`{p}` ({what})" for p, what in OUTSIDE) + ".", "",
+        f"## Upward imports still listed: {len(found)}", ""]
+    by = {}
+    for f, line, m, a, b in found:
+        by.setdefault(listed.get((f, m), "(not listed)"), []).append(
+            f"`{f}:{line}` {a} -> {b} (`{_short(m)}`)")
+    for reason, items in sorted(by.items()):
+        lines += [f"### {reason}", ""] + [f"- {i}" for i in items] + [""]
+    return "\n".join(lines)
+
+
+#: every import that reaches a higher package than the importer's own, each
+#: under the reason it is there and what ends it: `file module`. The list
+#: only shrinks (`tests/test_the_layers_import_downward.py`)
+KNOWN_UPWARD = {
+    ("a conversion asks the decision engine (`decide`) which way to "
+     "take; the choice is handed in as a fact"): (
+        "migkit/charsets.py migkit.decide",
+        "migkit/pieces.py migkit.decide",
+        "migkit/storedcode/collations.py migkit.decide",
+        "migkit/storedcode/rungs.py migkit.decide",
+    ),
+    ("a conversion asks the decision engine (`tuning`) which way to "
+     "take; the choice is handed in as a fact"): (
+        "migkit/canon.py migkit.tuning",
+    ),
+    ("a conversion asks the decision engine (`workload`) which way to "
+     "take; the choice is handed in as a fact"): (
+        "migkit/storedcode/statements.py migkit.workload",
+    ),
+    ("a conversion calls `changetopic`, the workflow it serves; the "
+     "call is inverted into a hook"): (
+        "migkit/described.py migkit.changetopic",
+    ),
+    ("a conversion calls `consolidate`, the workflow it serves; the "
+     "call is inverted into a hook"): (
+        "migkit/charsets.py migkit.consolidate",
+    ),
+    ("a conversion calls `cutover`, the workflow it serves; the call "
+     "is inverted into a hook"): (
+        "migkit/storedcode/reference.py migkit.cutover",
+    ),
+    ("a conversion calls `movers`, the workflow it serves; the call is "
+     "inverted into a hook"): (
+        "migkit/storedcode/statements.py migkit.movers",
+    ),
+    ("a conversion calls `physical`, the workflow it serves; the call "
+     "is inverted into a hook"): (
+        "migkit/charsets.py migkit.physical",
+    ),
+    ("a conversion calls `streamout`, the workflow it serves; the call "
+     "is inverted into a hook"): (
+        "migkit/schemaformats.py migkit.streamout",
+    ),
+    ("a conversion drives a wrapped tool or provider (`assist`); the "
+     "call goes through an integration contract below conversion"): (
+        "migkit/storedcode/convert.py migkit.assist",
+        "migkit/storedcode/model.py migkit.assist",
+    ),
+    ("a conversion drives a wrapped tool or provider (`avrostream`); "
+     "the call goes through an integration contract below conversion"): (
+        "migkit/schemaformats.py migkit.avrostream",
+    ),
+    ("a conversion drives a wrapped tool or provider (`registry`); the "
+     "call goes through an integration contract below conversion"): (
+        "migkit/schemaformats.py migkit.registry",
+    ),
+    ("a conversion drives a wrapped tool or provider (`tools`); the "
+     "call goes through an integration contract below conversion"): (
+        "migkit/storedcode/programs.py migkit.tools",
+    ),
+    ("a conversion drives a wrapped tool or provider (`tooluse`); the "
+     "call goes through an integration contract below conversion"): (
+        "migkit/storedcode/appscan.py migkit.tooluse",
+        "migkit/storedcode/indexadvice.py migkit.tooluse",
+        "migkit/storedcode/programs.py migkit.tooluse",
+    ),
+    ("a conversion reads an engine (`engines.base`) for its catalogue "
+     "or connection; the engine contract moves below conversion in the "
+     "engine split"): (
+        "migkit/charsets.py migkit.engines.base",
+        "migkit/pieces.py migkit.engines.base",
+        "migkit/schemaformats.py migkit.engines.base",
+        "migkit/storedcode/builtins.py migkit.engines.base",
+        "migkit/storedcode/collations.py migkit.engines.base",
+        "migkit/storedcode/constraints.py migkit.engines.base",
+        "migkit/storedcode/convert.py migkit.engines.base",
+        "migkit/storedcode/partitions.py migkit.engines.base",
+        "migkit/storedcode/prove.py migkit.engines.base",
+        "migkit/storedcode/reference.py migkit.engines.base",
+        "migkit/storedcode/sizing.py migkit.engines.base",
+        "migkit/storedcode/statements.py migkit.engines.base",
+        "migkit/zones.py migkit.engines.base",
+    ),
+    ("a conversion reads an engine (`engines.dbapi`) for its catalogue "
+     "or connection; the engine contract moves below conversion in the "
+     "engine split"): (
+        "migkit/pieces.py migkit.engines.dbapi",
+        "migkit/storedcode/constraints.py migkit.engines.dbapi",
+        "migkit/storedcode/corpus.py migkit.engines.dbapi",
+        "migkit/storedcode/history.py migkit.engines.dbapi",
+        "migkit/storedcode/packages.py migkit.engines.dbapi",
+        "migkit/storedcode/partitions.py migkit.engines.dbapi",
+        "migkit/storedcode/sandbox.py migkit.engines.dbapi",
+    ),
+    ("a conversion reads an engine (`engines.hetero`) for its "
+     "catalogue or connection; the engine contract moves below "
+     "conversion in the engine split"): (
+        "migkit/charsets.py migkit.engines.hetero",
+        "migkit/storedcode/sandbox.py migkit.engines.hetero",
+    ),
+    ("a conversion reads an engine (`engines.mssql`) for its catalogue "
+     "or connection; the engine contract moves below conversion in the "
+     "engine split"): (
+        "migkit/storedcode/corpus.py migkit.engines.mssql",
+    ),
+    ("a conversion reads an engine (`engines.oracle`) for its "
+     "catalogue or connection; the engine contract moves below "
+     "conversion in the engine split"): (
+        "migkit/storedcode/constraints.py migkit.engines.oracle",
+        "migkit/storedcode/packages.py migkit.engines.oracle",
+    ),
+    ("a conversion reads an engine (`engines`) for its catalogue or "
+     "connection; the engine contract moves below conversion in the "
+     "engine split"): (
+        "migkit/canon.py migkit.engines",
+        "migkit/charsets.py migkit.engines",
+        "migkit/commercial.py migkit.engines",
+        "migkit/storedcode/sandbox.py migkit.engines",
+    ),
+    ("a conversion reads an engine (`logddl`) for its catalogue or "
+     "connection; the engine contract moves below conversion in the "
+     "engine split"): (
+        "migkit/ddl.py migkit.logddl",
+    ),
+    ("a durable record uses the executor's `attempts`; the shared "
+     "piece moves below persistence"): (
+        "migkit/claims.py migkit.attempts",
+    ),
+    ("a durable record uses the executor's `failpoint`; the shared "
+     "piece moves below persistence"): (
+        "migkit/claims.py migkit.failpoint",
+    ),
+    ("a durable record uses the executor's `locks`; the shared piece "
+     "moves below persistence"): (
+        "migkit/revert.py migkit.locks",
+    ),
+    ("a durable record uses the executor's `ranges`; the shared piece "
+     "moves below persistence"): (
+        "migkit/checkpoint.py migkit.ranges",
+        "migkit/claims.py migkit.ranges",
+    ),
+    ("a durable record uses the executor's `util`; the shared piece "
+     "moves below persistence"): (
+        "migkit/digests.py migkit.util",
+        "migkit/runlog.py migkit.util",
+    ),
+    ("a durable write goes through safety's `egress`; the order of the "
+     "ranks is to be settled with the safety package"): (
+        "migkit/anchor.py migkit.egress",
+        "migkit/runlog.py migkit.egress",
+    ),
+    ("a durable write goes through safety's `fencing`; the order of "
+     "the ranks is to be settled with the safety package"): (
+        "migkit/claims.py migkit.fencing",
+    ),
+    ("a durable write goes through safety's `lease`; the order of the "
+     "ranks is to be settled with the safety package"): (
+        "migkit/claims.py migkit.lease",
+        "migkit/setaside.py migkit.lease",
+    ),
+    ("a durable write goes through safety's `redact`; the order of the "
+     "ranks is to be settled with the safety package"): (
+        "migkit/anchor.py migkit.redact",
+    ),
+    ("a hop is checked against the engines (`engines.base`) it names; "
+     "ends when the engine registry is read through a contract"): (
+        "migkit/hopkeys.py migkit.engines.base",
+    ),
+    ("a hop is checked against the engines (`engines.saas`) it names; "
+     "ends when the engine registry is read through a contract"): (
+        "migkit/addresses.py migkit.engines.saas",
+    ),
+    ("a hop is checked against the engines (`engines`) it names; ends "
+     "when the engine registry is read through a contract"): (
+        "migkit/addresses.py migkit.engines",
+        "migkit/config.py migkit.engines",
+        "migkit/engineat.py migkit.engines",
+        "migkit/hopkeys.py migkit.engines",
+        "migkit/managed.py migkit.engines",
+    ),
+    ("a hop is checked by safety's `egress`; the check moves to the "
+     "key table"): (
+        "migkit/hopkeys.py migkit.egress",
+    ),
+    ("a hop is checked by safety's `freeze`; the check moves to the "
+     "key table"): (
+        "migkit/hopkeys.py migkit.freeze",
+        "migkit/managed.py migkit.freeze",
+    ),
+    ("a hop is checked by safety's `interlock`; the check moves to the "
+     "key table"): (
+        "migkit/hopkeys.py migkit.interlock",
+    ),
+    ("a hop is checked by safety's `leftovers`; the check moves to the "
+     "key table"): (
+        "migkit/config.py migkit.leftovers",
+    ),
+    ("a hop is checked by safety's `tls`; the check moves to the key "
+     "table"): (
+        "migkit/config.py migkit.tls",
+    ),
+    ("a hop key's check or default asks `archive` what it accepts; "
+     "ends when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.archive",
+    ),
+    ("a hop key's check or default asks `consolidate` what it accepts; "
+     "ends when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.consolidate",
+    ),
+    ("a hop key's check or default asks `cutover` what it accepts; "
+     "ends when the key table is read from the owner"): (
+        "migkit/managed.py migkit.cutover",
+    ),
+    ("a hop key's check or default asks `physical` what it accepts; "
+     "ends when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.physical",
+    ),
+    ("a hop key's check or default asks `reshard` what it accepts; "
+     "ends when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.reshard",
+    ),
+    ("a hop key's check or default asks `split` what it accepts; ends "
+     "when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.split",
+    ),
+    ("a hop key's check or default asks `subset` what it accepts; ends "
+     "when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.subset",
+    ),
+    ("a hop key's check or default asks `tableengine` what it accepts; "
+     "ends when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.tableengine",
+    ),
+    ("a hop key's check or default asks `tailtables` what it accepts; "
+     "ends when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.tailtables",
+    ),
+    ("a hop key's check or default asks `twoway` what it accepts; ends "
+     "when the key table is read from the owner"): (
+        "migkit/hopkeys.py migkit.twoway",
+    ),
+    ("a hop option is explained by the decision engine (`dba`); the "
+     "explanation moves to the key table"): (
+        "migkit/managed.py migkit.dba",
+    ),
+    ("a hop option is explained by the decision engine (`decide`); the "
+     "explanation moves to the key table"): (
+        "migkit/engineat.py migkit.decide",
+        "migkit/managed.py migkit.decide",
+    ),
+    ("a hop option is explained by the decision engine (`machine`); "
+     "the explanation moves to the key table"): (
+        "migkit/hopkeys.py migkit.machine",
+    ),
+    ("a hop option is explained by the decision engine (`ready`); the "
+     "explanation moves to the key table"): (
+        "migkit/managed.py migkit.ready",
+    ),
+    ("a hop option is explained by the decision engine (`scenarios`); "
+     "the explanation moves to the key table"): (
+        "migkit/hopkeys.py migkit.scenarios",
+    ),
+    ("a hop option is explained by the decision engine "
+     "(`sourcechange`); the explanation moves to the key table"): (
+        "migkit/hopkeys.py migkit.sourcechange",
+    ),
+    ("a record is rendered by conversion's `canon`; the rendering "
+     "moves below persistence"): (
+        "migkit/digests.py migkit.canon",
+        "migkit/kept.py migkit.canon",
+        "migkit/repairlog.py migkit.canon",
+    ),
+    ("a record is rendered by conversion's `render`; the rendering "
+     "moves below persistence"): (
+        "migkit/kept.py migkit.render",
+    ),
+    ("a record is rendered by conversion's `rowtext`; the rendering "
+     "moves below persistence"): (
+        "migkit/digests.py migkit.rowtext",
+        "migkit/kept.py migkit.rowtext",
+    ),
+    ("a record is written in the shape `fleet` gives it; the shape "
+     "moves below persistence"): (
+        "migkit/claims.py migkit.fleet",
+    ),
+    ("a record is written in the shape `ha` gives it; the shape moves "
+     "below persistence"): (
+        "migkit/claims.py migkit.ha",
+        "migkit/state.py migkit.ha",
+    ),
+    ("a record is written in the shape `indexes` gives it; the shape "
+     "moves below persistence"): (
+        "migkit/setaside.py migkit.indexes",
+    ),
+    ("a record is written in the shape `leaves` gives it; the shape "
+     "moves below persistence"): (
+        "migkit/kept.py migkit.leaves",
+    ),
+    ("a record is written in the shape `tailctl` gives it; the shape "
+     "moves below persistence"): (
+        "migkit/kept.py migkit.tailctl",
+        "migkit/setaside.py migkit.tailctl",
+        "migkit/state.py migkit.tailctl",
+    ),
+    ("a record is written in the shape `twoway` gives it; the shape "
+     "moves below persistence"): (
+        "migkit/kept.py migkit.twoway",
+    ),
+    ("a record keeps what the decision engine (`decide`) measured; the "
+     "fact is handed down"): (
+        "migkit/session.py migkit.decide",
+        "migkit/shared.py migkit.decide",
+    ),
+    ("a record keeps what the decision engine (`model`) measured; the "
+     "fact is handed down"): (
+        "migkit/claims.py migkit.model",
+    ),
+    ("a record keeps what the decision engine (`sizing`) measured; the "
+     "fact is handed down"): (
+        "migkit/claims.py migkit.sizing",
+    ),
+    ("a record notifies or exports through `export`; the call is "
+     "inverted into an event"): (
+        "migkit/anchor.py migkit.export",
+        "migkit/session.py migkit.export",
+    ),
+    ("a record notifies or exports through `notify`; the call is "
+     "inverted into an event"): (
+        "migkit/session.py migkit.notify",
+    ),
+    ("a record notifies or exports through `telemetry`; the call is "
+     "inverted into an event"): (
+        "migkit/session.py migkit.telemetry",
+    ),
+    ("a record notifies or exports through `traces`; the call is "
+     "inverted into an event"): (
+        "migkit/session.py migkit.traces",
+    ),
+    ("a report asks an engine (`engines.base`) for a name or a fact; "
+     "the engine contract moves below reporting"): (
+        "migkit/telemetry.py migkit.engines.base",
+        "migkit/verdict.py migkit.engines.base",
+    ),
+    ("a report asks an engine (`engines`) for a name or a fact; the "
+     "engine contract moves below reporting"): (
+        "migkit/export.py migkit.engines",
+        "migkit/report.py migkit.engines",
+        "migkit/telemetry.py migkit.engines",
+        "migkit/troubleshooting.py migkit.engines",
+    ),
+    ("a report names a wrapped tool's account (`tools`); the account "
+     "is read through a contract below reporting"): (
+        "migkit/export.py migkit.tools",
+    ),
+    ("a report names a wrapped tool's account (`tooluse`); the account "
+     "is read through a contract below reporting"): (
+        "migkit/export.py migkit.tooluse",
+        "migkit/notify.py migkit.tooluse",
+        "migkit/traces.py migkit.tooluse",
+    ),
+    ("a report reads `autonomous` for the state of the running "
+     "workflow; the state moves below reporting"): (
+        "migkit/telemetry.py migkit.autonomous",
+    ),
+    ("a report reads `ha` for the state of the running workflow; the "
+     "state moves below reporting"): (
+        "migkit/export.py migkit.ha",
+    ),
+    ("a report reads `leaves` for the state of the running workflow; "
+     "the state moves below reporting"): (
+        "migkit/export.py migkit.leaves",
+    ),
+    ("a report reads `movers` for the state of the running workflow; "
+     "the state moves below reporting"): (
+        "migkit/export.py migkit.movers",
+        "migkit/report.py migkit.movers",
+    ),
+    ("a report reads `physical` for the state of the running workflow; "
+     "the state moves below reporting"): (
+        "migkit/export.py migkit.physical",
+    ),
+    ("a report reads `tailctl` for the state of the running workflow; "
+     "the state moves below reporting"): (
+        "migkit/notify.py migkit.tailctl",
+    ),
+    ("a report reads `twoway` for the state of the running workflow; "
+     "the state moves below reporting"): (
+        "migkit/export.py migkit.twoway",
+    ),
+    ("a report states what the decision engine (`capabilities`) chose; "
+     "the choice is handed down as a fact"): (
+        "migkit/diagnostics.py migkit.capabilities",
+        "migkit/report.py migkit.capabilities",
+    ),
+    ("a report states what the decision engine (`decide`) chose; the "
+     "choice is handed down as a fact"): (
+        "migkit/report.py migkit.decide",
+        "migkit/telemetry.py migkit.decide",
+    ),
+    ("a report states what the decision engine (`faults`) chose; the "
+     "choice is handed down as a fact"): (
+        "migkit/telemetry.py migkit.faults",
+    ),
+    ("a report states what the decision engine (`guarantees`) chose; "
+     "the choice is handed down as a fact"): (
+        "migkit/telemetry.py migkit.guarantees",
+    ),
+    ("a report states what the decision engine (`sizing`) chose; the "
+     "choice is handed down as a fact"): (
+        "migkit/report.py migkit.sizing",
+    ),
+    ("a report states what the decision engine (`waysaid`) chose; the "
+     "choice is handed down as a fact"): (
+        "migkit/report.py migkit.waysaid",
+    ),
+    ("a report states what the decision engine (`workload`) chose; the "
+     "choice is handed down as a fact"): (
+        "migkit/verdict.py migkit.workload",
+    ),
+    ("a rung or plan reads `consolidate` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/scenarios.py migkit.consolidate",
+    ),
+    ("a rung or plan reads `cutover` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/planner.py migkit.cutover",
+        "migkit/ready.py migkit.cutover",
+        "migkit/repairways.py migkit.cutover",
+        "migkit/workload.py migkit.cutover",
+    ),
+    ("a rung or plan reads `drainmark` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/capabilities.py migkit.drainmark",
+    ),
+    ("a rung or plan reads `drift` for what the workflow can do; ends "
+     "when the workflow publishes its abilities below decision"): (
+        "migkit/jointplan.py migkit.drift",
+    ),
+    ("a rung or plan reads `jobs` for what the workflow can do; ends "
+     "when the workflow publishes its abilities below decision"): (
+        "migkit/capabilities.py migkit.jobs",
+    ),
+    ("a rung or plan reads `leaves` for what the workflow can do; ends "
+     "when the workflow publishes its abilities below decision"): (
+        "migkit/repairways.py migkit.leaves",
+    ),
+    ("a rung or plan reads `movers` for what the workflow can do; ends "
+     "when the workflow publishes its abilities below decision"): (
+        "migkit/bulkways.py migkit.movers",
+        "migkit/capabilities.py migkit.movers",
+        "migkit/legs.py migkit.movers",
+        "migkit/machine.py migkit.movers",
+        "migkit/planner.py migkit.movers",
+        "migkit/repairways.py migkit.movers",
+        "migkit/waysaid.py migkit.movers",
+    ),
+    ("a rung or plan reads `physical` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/costmodel.py migkit.physical",
+    ),
+    ("a rung or plan reads `reshard` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/scenarios.py migkit.reshard",
+        "migkit/topology.py migkit.reshard",
+    ),
+    ("a rung or plan reads `subset` for what the workflow can do; ends "
+     "when the workflow publishes its abilities below decision"): (
+        "migkit/ready.py migkit.subset",
+    ),
+    ("a rung or plan reads `tableengine` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/scenarios.py migkit.tableengine",
+    ),
+    ("a rung or plan reads `topicstates` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/capabilities.py migkit.topicstates",
+    ),
+    ("a rung or plan reads `unchanged` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/scanplan.py migkit.unchanged",
+    ),
+    ("a rung or plan reads `upgrade` for what the workflow can do; "
+     "ends when the workflow publishes its abilities below decision"): (
+        "migkit/lacks.py migkit.upgrade",
+        "migkit/ready.py migkit.upgrade",
+        "migkit/workload.py migkit.upgrade",
+    ),
+    ("a rung or plan reads `users` for what the workflow can do; ends "
+     "when the workflow publishes its abilities below decision"): (
+        "migkit/capabilities.py migkit.users",
+    ),
+    ("a rung reads a wrapped tool's surface (`mirror`); the surface is "
+     "a fact handed down"): (
+        "migkit/bulkways.py migkit.mirror",
+    ),
+    ("a rung reads a wrapped tool's surface (`redisshake`); the "
+     "surface is a fact handed down"): (
+        "migkit/bulkways.py migkit.redisshake",
+    ),
+    ("a rung reads a wrapped tool's surface (`ship`); the surface is a "
+     "fact handed down"): (
+        "migkit/machine.py migkit.ship",
+    ),
+    ("a safety check reads `barriers` for the step it guards; the step "
+     "reports its own state down"): (
+        "migkit/freeze.py migkit.barriers",
+    ),
+    ("a safety check reads `cutover` for the step it guards; the step "
+     "reports its own state down"): (
+        "migkit/approvals.py migkit.cutover",
+        "migkit/freeze.py migkit.cutover",
+    ),
+    ("a safety check reads `fleet` for the step it guards; the step "
+     "reports its own state down"): (
+        "migkit/lease.py migkit.fleet",
+    ),
+    ("a safety check reads `tailctl` for the step it guards; the step "
+     "reports its own state down"): (
+        "migkit/approvals.py migkit.tailctl",
+        "migkit/freeze.py migkit.tailctl",
+    ),
+    ("a safety check reads `users` for the step it guards; the step "
+     "reports its own state down"): (
+        "migkit/freeze.py migkit.users",
+    ),
+    ("a safety refusal is said by reporting's `export`; the wording "
+     "moves below safety"): (
+        "migkit/egress.py migkit.export",
+    ),
+    ("a safety refusal is said by reporting's `notify`; the wording "
+     "moves below safety"): (
+        "migkit/approvals.py migkit.notify",
+    ),
+    ("a safety refusal is said by reporting's `verdict`; the wording "
+     "moves below safety"): (
+        "migkit/approvals.py migkit.verdict",
+    ),
+    ("a safety refusal is said by reporting's `wording`; the wording "
+     "moves below safety"): (
+        "migkit/interlock.py migkit.wording",
+    ),
+    ("a scope check asks `editions` what the workflow takes; ends when "
+     "the workflow publishes it below scope"): (
+        "migkit/case.py migkit.editions",
+    ),
+    ("a scope check asks `physical` what the workflow takes; ends when "
+     "the workflow publishes it below scope"): (
+        "migkit/case.py migkit.physical",
+    ),
+    ("a scope check asks `upgrade` what the workflow takes; ends when "
+     "the workflow publishes it below scope"): (
+        "migkit/case.py migkit.upgrade",
+    ),
+    ("a wrapper reports through `crossmove`, the workflow that drives "
+     "it; the shared piece moves below both"): (
+        "migkit/tools.py migkit.crossmove",
+    ),
+    ("a wrapper reports through `editions`, the workflow that drives "
+     "it; the shared piece moves below both"): (
+        "migkit/backupseed.py migkit.editions",
+    ),
+    ("a wrapper reports through `leaves`, the workflow that drives it; "
+     "the shared piece moves below both"): (
+        "migkit/ship.py migkit.leaves",
+    ),
+    ("a wrapper reports through `movers`, the workflow that drives it; "
+     "the shared piece moves below both"): (
+        "migkit/redisshake.py migkit.movers",
+        "migkit/ship.py migkit.movers",
+        "migkit/tooluse.py migkit.movers",
+    ),
+    ("a wrapper reports through `physical`, the workflow that drives "
+     "it; the shared piece moves below both"): (
+        "migkit/backupseed.py migkit.physical",
+        "migkit/cloudseed.py migkit.physical",
+    ),
+    ("a wrapper reports through `replicasum`, the workflow that drives "
+     "it; the shared piece moves below both"): (
+        "migkit/tooluse.py migkit.replicasum",
+    ),
+    ("a wrapper reports through `second_reader`, the workflow that "
+     "drives it; the shared piece moves below both"): (
+        "migkit/tools.py migkit.second_reader",
+    ),
+    ("a wrapper reports through `tailtables`, the workflow that drives "
+     "it; the shared piece moves below both"): (
+        "migkit/imports.py migkit.tailtables",
+    ),
+    ("a wrapper reports through `upgrade`, the workflow that drives "
+     "it; the shared piece moves below both"): (
+        "migkit/cloudseed.py migkit.upgrade",
+        "migkit/tooluse.py migkit.upgrade",
+    ),
+    ("a wrapper reports through `verifiers`, the workflow that drives "
+     "it; the shared piece moves below both"): (
+        "migkit/tooluse.py migkit.verifiers",
+    ),
+    ("an engine calls `applyway` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.applyway",
+    ),
+    ("an engine calls `appversions` for a step it cannot do itself; "
+     "the engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.appversions",
+        "migkit/engines/mysql.py migkit.appversions",
+        "migkit/engines/postgres.py migkit.appversions",
+    ),
+    ("an engine calls `changetopic` for a step it cannot do itself; "
+     "the engine split gives that step a contract below the engines"): (
+        "migkit/engines/bigtable.py migkit.changetopic",
+        "migkit/engines/cockroachdb.py migkit.changetopic",
+        "migkit/engines/cosmosdb.py migkit.changetopic",
+        "migkit/engines/couchbase.py migkit.changetopic",
+        "migkit/engines/dsql.py migkit.changetopic",
+        "migkit/engines/firestore.py migkit.changetopic",
+        "migkit/engines/keyspaces.py migkit.changetopic",
+        "migkit/engines/neptune.py migkit.changetopic",
+        "migkit/engines/pgwire.py migkit.changetopic",
+        "migkit/engines/spanner.py migkit.changetopic",
+        "migkit/engines/tidb.py migkit.changetopic",
+    ),
+    ("an engine calls `crossmove` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/hetero.py migkit.crossmove",
+    ),
+    ("an engine calls `drainmark` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/warehouse.py migkit.drainmark",
+    ),
+    ("an engine calls `drift` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/hetero.py migkit.drift",
+        "migkit/engines/mssql.py migkit.drift",
+        "migkit/engines/mysql.py migkit.drift",
+        "migkit/engines/pgwire.py migkit.drift",
+        "migkit/engines/postgres.py migkit.drift",
+    ),
+    ("an engine calls `indexes` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/postgres.py migkit.indexes",
+    ),
+    ("an engine calls `leaves` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.leaves",
+        "migkit/engines/hetero.py migkit.leaves",
+        "migkit/engines/mongodb.py migkit.leaves",
+        "migkit/engines/sqlite.py migkit.leaves",
+    ),
+    ("an engine calls `marks` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/hetero.py migkit.marks",
+        "migkit/engines/mysql.py migkit.marks",
+        "migkit/engines/postgres.py migkit.marks",
+    ),
+    ("an engine calls `movers` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.movers",
+        "migkit/engines/cassandra.py migkit.movers",
+        "migkit/engines/clickhouse.py migkit.movers",
+        "migkit/engines/generic.py migkit.movers",
+        "migkit/engines/hetero.py migkit.movers",
+        "migkit/engines/mongodb.py migkit.movers",
+        "migkit/engines/mysql.py migkit.movers",
+        "migkit/engines/pg_pass.py migkit.movers",
+        "migkit/engines/postgres.py migkit.movers",
+    ),
+    ("an engine calls `physical` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/postgres.py migkit.physical",
+    ),
+    ("an engine calls `replicasum` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/mysql.py migkit.replicasum",
+    ),
+    ("an engine calls `rules` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.rules",
+    ),
+    ("an engine calls `second_reader` for a step it cannot do itself; "
+     "the engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.second_reader",
+        "migkit/engines/hetero.py migkit.second_reader",
+        "migkit/engines/mysql.py migkit.second_reader",
+        "migkit/engines/postgres.py migkit.second_reader",
+    ),
+    ("an engine calls `streamout` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/kafka.py migkit.streamout",
+        "migkit/engines/kinesis.py migkit.streamout",
+        "migkit/engines/pubsub.py migkit.streamout",
+    ),
+    ("an engine calls `tableengine` for a step it cannot do itself; "
+     "the engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.tableengine",
+        "migkit/engines/clickhouse.py migkit.tableengine",
+        "migkit/engines/mysql.py migkit.tableengine",
+        "migkit/engines/postgres.py migkit.tableengine",
+    ),
+    ("an engine calls `tailctl` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.tailctl",
+        "migkit/engines/cassandra.py migkit.tailctl",
+        "migkit/engines/clickhouse.py migkit.tailctl",
+        "migkit/engines/generic.py migkit.tailctl",
+        "migkit/engines/hetero.py migkit.tailctl",
+        "migkit/engines/kafka.py migkit.tailctl",
+        "migkit/engines/mongodb.py migkit.tailctl",
+        "migkit/engines/mysql.py migkit.tailctl",
+        "migkit/engines/neo4j.py migkit.tailctl",
+        "migkit/engines/opensearch.py migkit.tailctl",
+        "migkit/engines/postgres.py migkit.tailctl",
+        "migkit/engines/redis.py migkit.tailctl",
+    ),
+    ("an engine calls `tailtables` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/hetero.py migkit.tailtables",
+        "migkit/engines/mongodb.py migkit.tailtables",
+        "migkit/engines/postgres.py migkit.tailtables",
+    ),
+    ("an engine calls `topicstates` for a step it cannot do itself; "
+     "the engine split gives that step a contract below the engines"): (
+        "migkit/engines/kafka.py migkit.topicstates",
+    ),
+    ("an engine calls `twoway` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/base.py migkit.twoway",
+        "migkit/engines/hetero.py migkit.twoway",
+        "migkit/engines/lake.py migkit.twoway",
+        "migkit/engines/mysql.py migkit.twoway",
+        "migkit/engines/pgwire.py migkit.twoway",
+        "migkit/engines/postgres.py migkit.twoway",
+        "migkit/engines/teradata.py migkit.twoway",
+        "migkit/engines/warehouse.py migkit.twoway",
+    ),
+    ("an engine calls `unchanged` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/mssql.py migkit.unchanged",
+        "migkit/engines/postgres.py migkit.unchanged",
+    ),
+    ("an engine calls `upgrade` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/mysql.py migkit.upgrade",
+        "migkit/engines/postgres.py migkit.upgrade",
+    ),
+    ("an engine calls `users` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/cassandra.py migkit.users",
+        "migkit/engines/clickhouse.py migkit.users",
+        "migkit/engines/kafka.py migkit.users",
+        "migkit/engines/mongodb.py migkit.users",
+        "migkit/engines/mssql.py migkit.users",
+        "migkit/engines/mysql.py migkit.users",
+        "migkit/engines/opensearch.py migkit.users",
+        "migkit/engines/oracle_deep.py migkit.users",
+        "migkit/engines/postgres.py migkit.users",
+        "migkit/engines/redis.py migkit.users",
+        "migkit/engines/sqlcatalog.py migkit.users",
+    ),
+    ("an engine calls `verifiers` for a step it cannot do itself; the "
+     "engine split gives that step a contract below the engines"): (
+        "migkit/engines/ase.py migkit.verifiers",
+        "migkit/engines/bigtable.py migkit.verifiers",
+        "migkit/engines/cassandra.py migkit.verifiers",
+        "migkit/engines/clickhouse.py migkit.verifiers",
+        "migkit/engines/cosmosdb.py migkit.verifiers",
+        "migkit/engines/couchbase.py migkit.verifiers",
+        "migkit/engines/db2.py migkit.verifiers",
+        "migkit/engines/distmysql.py migkit.verifiers",
+        "migkit/engines/duckdb.py migkit.verifiers",
+        "migkit/engines/dynamodb.py migkit.verifiers",
+        "migkit/engines/firestore.py migkit.verifiers",
+        "migkit/engines/generic.py migkit.verifiers",
+        "migkit/engines/hetero.py migkit.verifiers",
+        "migkit/engines/kafka.py migkit.verifiers",
+        "migkit/engines/lake.py migkit.verifiers",
+        "migkit/engines/lindorm.py migkit.verifiers",
+        "migkit/engines/mysql.py migkit.verifiers",
+        "migkit/engines/neptune.py migkit.verifiers",
+        "migkit/engines/oceanbase.py migkit.verifiers",
+        "migkit/engines/opensearch.py migkit.verifiers",
+        "migkit/engines/oracle.py migkit.verifiers",
+        "migkit/engines/parquet.py migkit.verifiers",
+        "migkit/engines/pgwire.py migkit.verifiers",
+        "migkit/engines/saas.py migkit.verifiers",
+        "migkit/engines/sapodp.py migkit.verifiers",
+        "migkit/engines/spanner.py migkit.verifiers",
+        "migkit/engines/sqlite.py migkit.verifiers",
+        "migkit/engines/teradata.py migkit.verifiers",
+        "migkit/engines/tidb.py migkit.verifiers",
+        "migkit/engines/timestream.py migkit.verifiers",
+    ),
+    ("an executor asks the decision engine (`decide`) how many or how "
+     "fast; the call becomes a fact handed down"): (
+        "migkit/attempts.py migkit.decide",
+        "migkit/ranges.py migkit.decide",
+        "migkit/runner.py migkit.decide",
+        "migkit/util.py migkit.decide",
+    ),
+    ("an executor asks the decision engine (`faults`) how many or how "
+     "fast; the call becomes a fact handed down"): (
+        "migkit/failpoint.py migkit.faults",
+        "migkit/util.py migkit.faults",
+    ),
+    ("an executor asks the decision engine (`sizing`) how many or how "
+     "fast; the call becomes a fact handed down"): (
+        "migkit/ranges.py migkit.sizing",
+    ),
+    ("an executor asks the decision engine (`tuning`) how many or how "
+     "fast; the call becomes a fact handed down"): (
+        "migkit/ranges.py migkit.tuning",
+        "migkit/throttle.py migkit.tuning",
+    ),
+    ("an executor calls `fleet` for a workflow step; the step is "
+     "passed in as a hook"): (
+        "migkit/attempts.py migkit.fleet",
+    ),
+    ("an executor calls `leaves` for a workflow step; the step is "
+     "passed in as a hook"): (
+        "migkit/ranges.py migkit.leaves",
+    ),
+    ("an executor calls `unchanged` for a workflow step; the step is "
+     "passed in as a hook"): (
+        "migkit/ranges.py migkit.unchanged",
+    ),
+    ("an executor says its progress through `notify`; the notice goes "
+     "through an event below execution"): (
+        "migkit/schedule.py migkit.notify",
+    ),
+    ("an executor says its progress through `verdict`; the notice goes "
+     "through an event below execution"): (
+        "migkit/schedule.py migkit.verdict",
+    ),
+    ("an executor says its progress through `wording`; the notice goes "
+     "through an event below execution"): (
+        "migkit/runner.py migkit.wording",
+        "migkit/util.py migkit.wording",
+    ),
+    ("configuration reaches `audit` (persistence); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/managed.py migkit.audit",
+    ),
+    ("configuration reaches `carriers` (integrations); the shared "
+     "piece moves below both, or the call is inverted"): (
+        "migkit/hopkeys.py migkit.carriers",
+    ),
+    ("configuration reaches `charsets` (conversion); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/hopkeys.py migkit.charsets",
+    ),
+    ("configuration reaches `cloudapi` (integrations); the shared "
+     "piece moves below both, or the call is inverted"): (
+        "migkit/managed.py migkit.cloudapi",
+    ),
+    ("configuration reaches `durable` (persistence); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/config.py migkit.durable",
+    ),
+    ("configuration reaches `evidence` (persistence); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/config.py migkit.evidence",
+    ),
+    ("configuration reaches `guide` (cli); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/managed.py migkit.guide",
+    ),
+    ("configuration reaches `rowfilter` (scope); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/hopkeys.py migkit.rowfilter",
+    ),
+    ("configuration reaches `transforms` (conversion); the shared "
+     "piece moves below both, or the call is inverted"): (
+        "migkit/config.py migkit.transforms",
+        "migkit/hopkeys.py migkit.transforms",
+    ),
+    ("configuration reaches `util` (execution); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/config.py migkit.util",
+    ),
+    ("configuration reaches `verdict` (reporting); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/config.py migkit.verdict",
+    ),
+    ("configuration reaches `web.roles` (web); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/hopkeys.py migkit.web.roles",
+    ),
+    ("engines reaches `cli` (cli); the shared piece moves below both, "
+     "or the call is inverted"): (
+        "migkit/engines/base.py migkit.cli",
+        "migkit/engines/oracle_pump.py migkit.cli",
+    ),
+    ("execution reaches `engines` (engines); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/attempts.py migkit.engines",
+        "migkit/util.py migkit.engines",
+    ),
+    ("execution reaches `tools` (integrations); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/runner.py migkit.tools",
+    ),
+    ("execution reaches `toolversion` (integrations); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/runner.py migkit.toolversion",
+    ),
+    ("integrations reaches `cli` (cli); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/integrations.py migkit.cli",
+        "migkit/ship.py migkit.cli",
+    ),
+    ("integrations reaches `web.uses` (web); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/tooluse.py migkit.web.uses",
+    ),
+    ("persistence reaches `engines.base` (engines); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/kept.py migkit.engines.base",
+    ),
+    ("persistence reaches `engines` (engines); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/shared.py migkit.engines",
+    ),
+    ("persistence reaches `tooluse` (integrations); the shared piece "
+     "moves below both, or the call is inverted"): (
+        "migkit/anchor.py migkit.tooluse",
+        "migkit/shared.py migkit.tooluse",
+    ),
+    ("reporting reaches `cli` (cli); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/telemetry.py migkit.cli",
+    ),
+    ("safety reaches `decide` (decision); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/freeze.py migkit.decide",
+    ),
+    ("safety reaches `engines.dbapi` (engines); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/freeze.py migkit.engines.dbapi",
+    ),
+    ("safety reaches `engines` (engines); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/freeze.py migkit.engines",
+    ),
+    ("safety reaches `sourcechange` (decision); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/freeze.py migkit.sourcechange",
+    ),
+    ("safety reaches `web.approve` (web); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/approvals.py migkit.web.approve",
+    ),
+    ("scope reaches `interlock` (safety); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/case.py migkit.interlock",
+    ),
+    ("scope reaches `lacks` (decision); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/case.py migkit.lacks",
+    ),
+    ("scope reaches `leftovers` (safety); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/result_scope.py migkit.leftovers",
+    ),
+    ("scope reaches `util` (execution); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/rowfilter.py migkit.util",
+    ),
+    ("scope reaches `verdict` (reporting); the shared piece moves "
+     "below both, or the call is inverted"): (
+        "migkit/result_scope.py migkit.verdict",
+    ),
+    ("the decision engine asks an engine (`engines.base`) what it can "
+     "do; ends when the engine contract is a package below decision"): (
+        "migkit/capabilities.py migkit.engines.base",
+        "migkit/decide.py migkit.engines.base",
+        "migkit/model.py migkit.engines.base",
+        "migkit/scenarios.py migkit.engines.base",
+        "migkit/workload.py migkit.engines.base",
+    ),
+    ("the decision engine asks an engine (`engines.dbapi`) what it can "
+     "do; ends when the engine contract is a package below decision"): (
+        "migkit/dba.py migkit.engines.dbapi",
+        "migkit/lacks.py migkit.engines.dbapi",
+    ),
+    ("the decision engine asks an engine (`engines.hetero`) what it "
+     "can do; ends when the engine contract is a package below "
+     "decision"): (
+        "migkit/capabilities.py migkit.engines.hetero",
+    ),
+    ("the decision engine asks an engine (`engines.mysql`) what it can "
+     "do; ends when the engine contract is a package below decision"): (
+        "migkit/costmodel.py migkit.engines.mysql",
+        "migkit/dba.py migkit.engines.mysql",
+    ),
+    ("the decision engine asks an engine (`engines.oracle_logminer`) "
+     "what it can do; ends when the engine contract is a package below "
+     "decision"): (
+        "migkit/dba.py migkit.engines.oracle_logminer",
+    ),
+    ("the decision engine asks an engine (`engines.oracle_redo`) what "
+     "it can do; ends when the engine contract is a package below "
+     "decision"): (
+        "migkit/dba.py migkit.engines.oracle_redo",
+    ),
+    ("the decision engine asks an engine (`engines.pg_pass`) what it "
+     "can do; ends when the engine contract is a package below "
+     "decision"): (
+        "migkit/model.py migkit.engines.pg_pass",
+    ),
+    ("the decision engine asks an engine (`engines.postgres`) what it "
+     "can do; ends when the engine contract is a package below "
+     "decision"): (
+        "migkit/legs.py migkit.engines.postgres",
+    ),
+    ("the decision engine asks an engine (`engines.sapodp`) what it "
+     "can do; ends when the engine contract is a package below "
+     "decision"): (
+        "migkit/ready.py migkit.engines.sapodp",
+    ),
+    ("the decision engine asks an engine (`engines`) what it can do; "
+     "ends when the engine contract is a package below decision"): (
+        "migkit/capabilities.py migkit.engines",
+        "migkit/dba.py migkit.engines",
+        "migkit/decide.py migkit.engines",
+        "migkit/machine.py migkit.engines",
+        "migkit/tableway.py migkit.engines",
+        "migkit/waysaid.py migkit.engines",
+    ),
+    ("workflows reaches `cli` (cli); the shared piece moves below "
+     "both, or the call is inverted"): (
+        "migkit/ha.py migkit.cli",
+        "migkit/tailtables.py migkit.cli",
+    ),
+}
+
+
 def main(argv):
     if argv[:1] == ["--since"] and len(argv) > 1:
         print(since(argv[1]))
@@ -412,17 +1943,19 @@ def main(argv):
     if argv[:1] == ["--symbols"]:
         _write_local()
         return 0
-    text, st = codemap(), state()
+    written = {MAP: codemap(), STATE: state(), INVENTORY: inventory(),
+               LAYERS_DOC: layers()}
     if argv[:1] == ["--check"]:
-        current = MAP.exists() and MAP.read_text() == text and \
-            STATE.exists() and STATE.read_text() == st
+        current = all(p.exists() and p.read_text() == t
+                      for p, t in written.items())
         return 0 if current else 3
     MAP.parent.mkdir(parents=True, exist_ok=True)
-    MAP.write_text(text)
-    STATE.write_text(st)
+    for p, t in written.items():
+        p.write_text(t)
     _write_local()
-    print(f"wrote {MAP.relative_to(ROOT)}, {STATE.relative_to(ROOT)} and"
-          " .codemap/ (SYMBOLS.tsv, CALLERS.tsv, LOCAL.md)")
+    print(f"wrote {MAP.relative_to(ROOT)}, {STATE.relative_to(ROOT)},"
+          f" {INVENTORY.relative_to(ROOT)}, {LAYERS_DOC.relative_to(ROOT)}"
+          " and .codemap/ (SYMBOLS.tsv, CALLERS.tsv, LOCAL.md)")
     return 0
 
 

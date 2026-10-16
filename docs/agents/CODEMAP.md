@@ -19,6 +19,8 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `tools/gen_docs.py` - the manual and the site, written from the code
 - `tools/final_suite.py` - the full suite, run once at the end
 - `tools/whole_use.py` - every wrapped program and library used, unused or topped up, written from the tool-use registry
+- [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
+- [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
 ## `migkit/` (174 modules)
 

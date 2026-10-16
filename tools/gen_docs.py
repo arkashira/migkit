@@ -42,6 +42,10 @@ What is written, and what each is read from:
   refusal (`troubleshooting.by_area`).
 * `docs/site/evidence.html` - the evidence export's files, tables and keys
   (`export.FILES`, `gather`, `_sections`, `table_rows`).
+* `docs/site/contributing.html` - where each kind of thing lives in the
+  source: the packages in layer order and what each holds, read from the
+  table the layering test uses (`tools/gen_codemap.py`: `LAYERS`,
+  `package_of`).
 * `docs/site/releases.html` - each tagged release's commits, grouped as
   `tools/gen_changelog.py` groups them, a program's name in a subject
   taken out by the words filter (`wording.without_programs`, over the
@@ -1439,7 +1443,54 @@ PAGES = (("index", "Overview"), ("quickstart", "Quickstart"),
          ("environment", "Environment"), ("commands", "Commands"),
          ("troubleshooting", "Troubleshooting"), ("evidence", "Evidence"),
          ("web", "Web and API"), ("telemetry", "Telemetry"),
-         ("releases", "Releases"))
+         ("contributing", "Contributing"), ("releases", "Releases"))
+
+
+def _source_layout():
+    """The packages of the source, lowest layer first, and the table that
+    places every file in one: read from the code map's generator, so the
+    page and the layering test are the same list."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    try:
+        import gen_codemap
+    finally:
+        sys.path.pop(0)
+    files = gen_codemap._files()
+    count = {}
+    for f in files:
+        count[gen_codemap.package_of(f)] = \
+            count.get(gen_codemap.package_of(f), 0) + 1
+    return gen_codemap, count
+
+
+def page_contributing():
+    gc, count = _source_layout()
+    ranked = [(p, what) for rank in gc.LAYERS for p, what in rank]
+    blocks = [
+        P("Where each kind of thing lives, written from the table the"
+          " source's own layering test reads. The source is grouped by what"
+          " a file is responsible for, and a package imports its own layer"
+          " and the layers below it, never one above:"
+          + " ".join(f"{p} ({what});" for p, what in ranked)
+          + " " + " ".join(f"{p} ({what})." for p, what in gc.OUTSIDE)),
+        H("The packages, lowest first", "packages"),
+        Table(["Package", "Layer", "Files", "What it holds"],
+              [[f"`{p}`", str(i + 1), str(count.get(p, 0)), Said(what)]
+               for i, rank in enumerate(gc.LAYERS) for p, what in rank]
+              + [[f"`{p}`", "-", str(count.get(p, 0)), Said(what)]
+                 for p, what in gc.OUTSIDE]),
+        H("Finding your way", "navigation"),
+        UL(["`docs/agents/CODEMAP.md`: every module in one line, and the"
+            " places most changes touch.",
+            "`docs/agents/INVENTORY.md`: every file with its package, owner,"
+            " importers, what it reaches and the tests that reach it.",
+            "`docs/agents/LAYERS.md`: the layering rule and the upward"
+            " imports still listed, each with its reason.",
+            "`docs/agents/STATE.md`: what each engine can do and what is"
+            " left."]),
+    ]
+    return Page("contributing", "Contributing", "Contributing",
+                "Where each kind of thing lives in the source.", blocks)
 
 
 def page_index():
@@ -1479,6 +1530,8 @@ def page_index():
             "[Troubleshooting](troubleshooting.html): every refusal, in"
             " migkit's words",
             "[Evidence](evidence.html): what the evidence export holds",
+            "[Contributing](contributing.html): where each kind of thing"
+            " lives in the source",
             "[Releases](releases.html): each release's changes"]),
         H("Safety", "safety"),
         UL(["Every command that writes shows its plan first, starting with"
@@ -1562,7 +1615,7 @@ BUILDERS = {"index": page_index, "quickstart": page_quickstart,
             "environment": page_environment, "commands": page_commands,
             "troubleshooting": page_troubleshooting,
             "evidence": page_evidence, "web": page_web,
-            "telemetry": page_telemetry}
+            "telemetry": page_telemetry, "contributing": page_contributing}
 
 
 def _site_base():
