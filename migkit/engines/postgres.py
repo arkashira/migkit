@@ -6153,11 +6153,8 @@ select json_build_object(
                         probe=lambda: self._health("src", db))
         keyed = self._chunkable(db, least=0)
         cp = _cp.Checkpoint(str(self.hop.report_dir(db) / "checkpoint.json"))
-        from .. import config as _config
         from .. import decide
-        parity_costs = decide.Layered(decide.Costs(), decide.HopCosts(
-            self.hop, "row parity/")) if isinstance(self.hop, _config.Hop) \
-            else decide.Costs()
+        parity_costs = self.parity_costs()
         # What was proved equal last time, and the marker it carried then.
         # `--consistent` never reaches this function; a plain check whose
         # proof goes into a cutover does, and reads every table
@@ -7401,7 +7398,9 @@ select json_build_object(
             finally:
                 conn.close()
         got = scanplan.row_text(read, preds, key_width=1 if col else 0,
-                                most=most)
+                                most=most, eng=self, table=f"{db}.{t}",
+                                scope=self.row_text_scope(col, preds),
+                                kept=self.row_texts(db))
         return scanplan.row_text_line(t, got)
 
     def scan_cuts(self, db, table, most):

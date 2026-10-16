@@ -2985,6 +2985,31 @@ class MySQLEngine(Engine):
         tid = getattr(conn, "thread_id", None)
         return tid() if callable(tid) else None
 
+    def _range_unit(self):
+        """The range unit (`ranges.each_owned`) this thread copies under,
+        or "" where it copies none."""
+        from ..attempts import monitor_of
+        unit = (self.unit_now() or ("", "", ""))[1]
+        mon = monitor_of(self) if unit else None
+        if mon is None or mon.ledger.unit_record(unit).get(
+                "level") != "range":
+            return ""
+        return unit
+
+    def _range_session(self, unit, conn, what):
+        """Bind the range's `unit` to its one load (`Ledger.unit_statement`,
+        named by a digest of `what`: the ledger keeps no statement's text)
+        and the target session `conn` holds - read off the connection
+        itself, so a retry on a new connection adds its own."""
+        if not unit:
+            return
+        import hashlib
+        session = self.session_of(conn)
+        self.attempts().ledger.unit_statement(
+            unit, "load " + hashlib.blake2b(what.encode(),
+                                            digest_size=6).hexdigest(),
+            "dst" if session is not None else "", session)
+
     def session_view(self, side, session):
         """The process list's row of `session`: its account, command, time
         and state - never its statement's text."""
@@ -4203,17 +4228,28 @@ class MySQLEngine(Engine):
         need = (("resume by chunk",) if col and (
             cp.resumed(scope) or len(pk_ranges) > 1) else ())
 
+        costs = self.parity_costs()
+
         def run(choice):
+            began = time.monotonic()
             if choice.rung.name == "row text":
-                return self._row_text_table(db, t, pks, expr, pk_ranges, col)
-            if choice.rung.name == "key-range digest":
-                return self._digest_table(db, t, pks, expr, pk_ranges, col)
-            return self._digest_table(db, t, pks, expr, [(None, None)], None)
+                got = self._row_text_table(db, t, pks, expr, pk_ranges, col)
+            elif choice.rung.name == "key-range digest":
+                got = self._digest_table(db, t, pks, expr, pk_ranges, col)
+            else:
+                got = self._digest_table(db, t, pks, expr, [(None, None)],
+                                         None)
+            if got[0].status == "ok":
+                # only a whole reading says what a row costs: a DIFF stops
+                # a range read early
+                costs.saw(choice.rung.name, int(got[1] or 0) or 1,
+                          time.monotonic() - began)
+            return got
         try:
             return decide.row_parity(
                 f"{db}.{t}: its rows alike", run, decide.Facts({
                     "server digest": True, "key": col,
-                    "rows read here": True}), need=need)[1]
+                    "rows read here": True}), need=need, costs=costs)[1]
         except decide.Exhausted as e:
             return Result("data", scope, "error",
                           (str(e).splitlines() or [""])[-1][:200]), 0, 0
@@ -4333,7 +4369,10 @@ class MySQLEngine(Engine):
                            + (f" where {where}" if where else "")
                            + f" order by {order}")
         got = scanplan.row_text(read, preds, key_width=width,
-                                most=scanplan.plan_most(self, db))
+                                most=scanplan.plan_most(self, db), eng=self,
+                                table=scope, scope=self.row_text_scope(
+                                    expr, preds),
+                                kept=self.row_texts(db))
         line = scanplan.row_text_line(t, got)
         if got.alike:
             return Result("data", scope, "ok", line.split(": OK ", 1)[1]
@@ -9124,7 +9163,11 @@ class MySQLEngine(Engine):
                         lambda item: ranges.started(
                             st, item[4], mark(), ck.save))
                 else:
-                    slots.each(todo, one)
+                    # every range a unit of the attempt ledger, its target
+                    # session recorded (`_range_session`), closed once its
+                    # checkpoint holds it
+                    ranges.each_owned(slots, self, key, st, todo, one,
+                                      log=log)
             finally:
                 for a, b in opened:
                     a.close()
@@ -9810,13 +9853,20 @@ class MySQLEngine(Engine):
                         got.row(r)
             return got
 
+        unit = self._range_unit()
+
         def tried():
             try:
                 dconn.ping(reconnect=True)
+                self._range_session(unit, dconn, f"{ddb}.{t}|{where}|{args}")
                 return once()
             except _LoadRefused:
                 raise
             except Exception:
+                if unit:
+                    # the range's load failed: its session read for move
+                    # health before it is tried again on a new one
+                    self.attempts().unit_health(unit)
                 try:
                     dconn.rollback()
                 except Exception:  # noqa: BLE001 - the link may be gone

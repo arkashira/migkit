@@ -5564,6 +5564,10 @@ class Engine:
             ledger = self.attempts().ledger if attempts is True else attempts
             units = util.merge_units(units, ledger.units(kind,
                                                          now=kw.get("now")))
+        else:
+            # the ledger this run keeps, never one opened to be asked
+            ledger = getattr(self.__dict__.get("_attempts"), "ledger", None)
+        units = self._as_ranges(units, ledger, kind, kw.get("now"))
         kept = HopCosts(self.hop, "eta.")
 
         def kept_rate():
@@ -5579,6 +5583,57 @@ class Engine:
             kept.saw(kind, sum(u.rows for u in ran),
                      sum(u.seconds for u in ran))
         return got
+
+    def parity_costs(self):
+        """The costs a table's way of proving its rows alike is ranked by
+        (`decide.row_parity`): this run's, over what earlier runs of the hop
+        kept (`decide.HopCosts`) where there is a hop to keep them."""
+        from .. import config, decide
+        if not isinstance(self.hop, config.Hop):
+            return decide.Costs()
+        return decide.Layered(decide.Costs(),
+                              decide.HopCosts(self.hop, "row parity/"))
+
+    def row_texts(self, db):
+        """The ranges a row text check of `db` has proved
+        (`scanplan.RangeTexts`), kept beside the hop's reports so a check
+        stopped half way goes on from the ranges it owes; in memory where
+        there is no hop's report directory."""
+        from .. import config, scanplan
+        cache = self.__dict__.setdefault("_row_texts", {})
+        if db not in cache:
+            path = None
+            if isinstance(self.hop, config.Hop):
+                try:
+                    path = self.hop.report_dir(db) / "row-texts.json"
+                except Exception:  # noqa: BLE001 - kept in memory then
+                    path = None
+            cache[db] = scanplan.RangeTexts(path)
+        return cache[db]
+
+    @staticmethod
+    def row_text_scope(*reading):
+        """What a row text check reads a table under - its rendering and
+        its ranges - as a short digest: a range kept by a check that read
+        otherwise is not stood on."""
+        import hashlib
+        return hashlib.blake2b(repr(reading).encode(),
+                               digest_size=8).hexdigest()
+
+    @staticmethod
+    def _as_ranges(units, ledger, kind, now=None):
+        """`units` with each table whose ranges `ledger` opened read as
+        those ranges (`attempts.Ledger.owed_parts`): the time left comes
+        from the ranges run, not from the table's size. A table with none
+        stays the one unit it is."""
+        fn = getattr(ledger, "owed_parts", None)
+        if not callable(fn):
+            return units
+        out = []
+        for u in units:
+            parts = fn(u.name, kind, now=now)
+            out.extend(parts or [u])
+        return out
 
     def _rows_of(self, side, db, table):
         """The catalogue's row estimate for one table, or None where it

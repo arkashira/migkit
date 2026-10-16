@@ -11070,6 +11070,8 @@ Acceptance: inventory every execution entry point and work unit with its resume 
 
 ## P0-ETA-ALL: calibrated remaining-time estimates across every engine and task
 
+Status (W16B): PARTLY - a move's forecast reads its range units (`Engine.forecast` over `Ledger.owed_parts`, the ranges run, the table unit otherwise); MySQL's range copier owns its ranges through `ranges.each_owned` with each target session recorded; proved on fakes. Left: the PostgreSQL and MySQL server proofs (tests/test_range_units_are_owned_on_a_server.py, tests/test_mysql_range_units_are_owned_on_a_server.py) not yet green, MySQL's range-per-process path not owned, SQL Server and hetero range units, `cli.forecast` rolling up table units.
+
 Owner request, 2026-10-14. Status: PARTLY (2026-10-16). Current verification estimates elapsed
 time against completed phase counts, which do not represent remaining work on
 large or skewed tables. Reuse the shared decision engine, durable work ledger
@@ -11162,6 +11164,8 @@ sides are the same engine shares one inner ledger file name.
 
 ## P0-CONNECTION-PROGRESS: detect and reconcile client/server progress mismatch
 
+Status (W16B): PARTLY - MySQL range loads record their session and read move health on a failed load (`Monitor.unit_health`, `decide.range_stall`); a unit spanning two statements is refused; on fakes only. Left: the server proofs (kill/terminate of the recorded session), the keepalive measured on a socket for the PostgreSQL pipe.
+
 Owner request, 2026-10-14. Status: PARTLY (2026-10-16). Priority: first incident-recovery work
 alongside P0-VALIDATE.mysql-query-lifecycle, before feature expansion. Applies
 to every engine, adapter and external worker where observations are available.
@@ -11234,6 +11238,8 @@ ETA (P0-ETA-ALL) does not yet read the attempt ledger.
 
 
 ## P0-VERIFY-EXECUTION: default adaptive verification plans, not fixed nested loops
+
+Status (W16B): PARTLY - the PostgreSQL and MySQL row text ways keep each range they prove (`Engine.row_texts`, `scanplan.RangeTexts`) under the reading's own scope, and MySQL's parity ways are costed (`Engine.parity_costs`); on fakes. Left: a keyed table cut into ranges resumed on a server.
 
 Owner rejection and requirement, 2026-10-15. Status: OPEN. Priority: first
 implementation work with #502 and #504. Increasing workers or adding a Pace

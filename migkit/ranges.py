@@ -780,18 +780,13 @@ def _said_left(led, table, slots, log):
     if log is None:
         return
     from .util import forecast
-    from .util import Unit
-    units = led.parts_as_units(table)
+    # the ranges not yet opened are owed like the rest
+    units = led.owed_parts(table)
     done = sum(1 for u in units if u.state == "done")
-    parts = int(led.unit_record(units[0].name).get("parts") or 0) \
-        if units else 0
-    parts = max(parts, len(units))
+    parts = len(units)
     owed = parts - done
     if not owed:
         return
-    # the ranges not yet opened are owed like the rest
-    units += [Unit(f"{table} owed {i}", "move")
-              for i in range(parts - len(units))]
     eta = forecast(units, scope=f"{table}'s ranges",
                    workers=min(slots.workers, owed), warmup=1)
     if eta.seconds is None:

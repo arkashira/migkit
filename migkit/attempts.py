@@ -650,6 +650,20 @@ class Ledger:
                 out.append(Unit(n, kind, state="failed", attempts=opens))
         return out
 
+    def owed_parts(self, parent, kind="move", now=None):
+        """`parts_as_units` of `parent` with the parts not yet opened
+        owed like the rest - as many as its parts' records say it has -
+        so the estimate of what is left counts every range, not only the
+        ones begun. [] where `parent` has no part in this ledger."""
+        from .util import Unit
+        units = self.parts_as_units(parent, kind, now=now)
+        if not units:
+            return []
+        parts = max(int(self.unit_record(units[0].name).get("parts") or 0),
+                    len(units))
+        return units + [Unit(f"{parent} owed {i}", kind)
+                        for i in range(parts - len(units))]
+
     def range_units(self, table):
         """{after: the unit's record} of every shared range of `table` this
         ledger has a unit for, in any state - the ranges a restart or a
