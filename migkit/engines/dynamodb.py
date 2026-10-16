@@ -968,6 +968,174 @@ class DynamoDBEngine(NeutralCopier, Engine):
     # the same-engine hop keeps its target following through the pair's
     # tail, which reads the stream above and applies by key
 
+    # ---- the mark migkit's own writes carry (BAR-1, `marks`) ----------
+
+    MARK_TABLE = "migkit_origin"
+
+    def mark_facts(self, side, db):
+        ep = self.hop.source if side == "src" else self.hop.target
+        return {"family": "dynamodb", "can_create": True,
+                "transactions": bool(ep.options.get("transactions", True))}
+
+    def _mark_table(self, side, name=None, stream=False):
+        """The origin table (outside the hop's prefix, so a move never
+        takes it) or a scratch one; made once."""
+        name = name or self.MARK_TABLE
+        c = self._client(side)
+        try:
+            c.describe_table(TableName=name)
+            return name
+        except c.exceptions.ResourceNotFoundException:
+            pass
+        c.create_table(
+            TableName=name, BillingMode="PAY_PER_REQUEST",
+            KeySchema=[{"AttributeName": "origin", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "origin",
+                                   "AttributeType": "S"}],
+            **({"StreamSpecification": {"StreamEnabled": True,
+                                        "StreamViewType":
+                                        "NEW_AND_OLD_IMAGES"}}
+               if stream else {}))
+        c.get_waiter("table_exists").wait(TableName=name)
+        return name
+
+    def mark_unit(self, side, db, rung, batch, ops, run_id=None,
+                  token=None):
+        """`ops` - ("put", table, item, key attribute that must not exist
+        or None) and ("delete", table, key) - as one TransactWriteItems.
+        Under `item` its first item puts the unit into `migkit_origin`
+        (with the keys a delete removes), and every put carries the
+        attribute `_migkit_marker`; a failed condition cancels the whole,
+        the origin item with it."""
+        from .. import failpoint
+        from ..barriers import NeutralMark
+        key = NeutralMark.MARKER_KEY
+        tag = f"{run_id or 'run'}:{batch}"
+        items = []
+        if rung == "item":
+            self._mark_table(side)
+            gone = sorted(f"{t}|{json.dumps(k, sort_keys=True)}"
+                          for kind, t, k, *_ in ops if kind == "delete")
+            items.append({"Put": {"TableName": self.MARK_TABLE, "Item": {
+                "origin": {"S": tag}, "batch": {"N": str(batch)},
+                "token": {"S": token or ""}, "run_id": {"S": run_id or ""},
+                **({"unit": {"SS": gone}} if gone else {})}}})
+        for kind, table, item, *rest in ops:
+            failpoint.hit("mark.unit")
+            if kind == "delete":
+                items.append({"Delete": {"TableName": table, "Key": item}})
+                continue
+            put = {"TableName": table,
+                   "Item": {**item, **({key: {"S": tag}}
+                                       if rung == "item" else {})}}
+            if rest and rest[0]:
+                put["ConditionExpression"] = "attribute_not_exists(#k)"
+                put["ExpressionAttributeNames"] = {"#k": rest[0]}
+            items.append({"Put": put})
+        failpoint.hit("mark.unit.send")
+        self._client(side).transact_write_items(TransactItems=items)
+
+    def mark_units(self, side):
+        """The keys the origin table names as deleted by migkit, as
+        `table|key`: a delete leaves no image to carry the attribute."""
+        c = self._client(side)
+        try:
+            got = c.scan(TableName=self.MARK_TABLE)["Items"]
+        except c.exceptions.ResourceNotFoundException:
+            return frozenset()
+        return frozenset(k for i in got for k in
+                         (i.get("unit") or {}).get("SS", []))
+
+    @staticmethod
+    def mark_own(table, record, units=frozenset()):
+        """Whether a stream record is migkit's: its new image carries
+        `_migkit_marker`, or it removed a key the origin items name."""
+        from ..barriers import NeutralMark
+        d = record.get("dynamodb") or {}
+        if NeutralMark.MARKER_KEY in (d.get("NewImage") or {}):
+            return True
+        return record.get("eventName") == "REMOVE" and \
+            f"{table}|{json.dumps(d.get('Keys') or {}, sort_keys=True)}" \
+            in units
+
+    def mark_stream(self, side, table):
+        """Every record the table's stream holds."""
+        import boto3
+        c = self._client(side)
+        s = boto3.client(
+            "dynamodbstreams", endpoint_url=c.meta.endpoint_url,
+            region_name=c.meta.region_name,
+            **self._credentials(side))
+        arn = c.describe_table(TableName=table)["Table"]["LatestStreamArn"]
+        out = []
+        for shard in s.describe_stream(StreamArn=arn)[
+                "StreamDescription"]["Shards"]:
+            it = s.get_shard_iterator(
+                StreamArn=arn, ShardId=shard["ShardId"],
+                ShardIteratorType="TRIM_HORIZON")["ShardIterator"]
+            while it:
+                got = s.get_records(ShardIterator=it)
+                out += got["Records"]
+                if not got["Records"]:
+                    break
+                it = got.get("NextShardIterator")
+        return out
+
+    def _credentials(self, side):
+        ep = self.hop.source if side == "src" else self.hop.target
+        return ({"aws_access_key_id": ep.user,
+                 "aws_secret_access_key": ep.password} if ep.user else {})
+
+    def mark_prove(self, side, db, rung):
+        import secrets
+        name = f"migkit_probe_{secrets.token_hex(6)}"
+        try:
+            self._mark_table(side, name, stream=True)
+            a, b = {"origin": {"S": "a"}}, {"origin": {"S": "b"}}
+            c = self._client(side)
+            self.mark_unit(side, db, rung, -1,
+                           [("put", name, {**a, "v": {"S": "1"}}, None),
+                            ("put", name, {**b, "v": {"S": "1"}}, None)])
+            self.mark_unit(side, db, rung, -2, [("delete", name, b)])
+            c.put_item(TableName=name, Item={"origin": {"S": "c"}})
+            units, got = self.mark_units(side), {}
+            for r in self.mark_stream(side, name):
+                k = r["dynamodb"]["Keys"]["origin"]["S"]
+                got.setdefault(k, []).append(self.mark_own(name, r, units))
+            if not got.get("a") or not got.get("c"):
+                return "its stream showed no record of the probe"
+            if not all(got["a"]) or not all(got["b"]):
+                return "the stream showed the probe's unit without its mark"
+            if any(got["c"]):
+                return "an application's write was shown as migkit's"
+            return None
+        except Exception as e:  # noqa: BLE001 - said, then the next rung
+            return (str(e).strip().splitlines() or [type(e).__name__])[0]
+        finally:
+            try:
+                self._client(side).delete_table(TableName=name)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def mark_timed(self, side, db, rung, rounds):
+        name = self._mark_table(side, "migkit_probe_timed")
+        out = []
+        for i in range(rounds):
+            ops = [("put", name, {"origin": {"S": f"{i}:{k}"}}, None)
+                   for k in range(3)]
+            at = time.perf_counter()
+            self.mark_unit(side, db, rung, i, ops)
+            out.append(time.perf_counter() - at)
+        return out
+
+    def mark_teardown(self, side, db):
+        c = self._client(side)
+        for name in (self.MARK_TABLE, "migkit_probe_timed"):
+            try:
+                c.delete_table(TableName=name)
+            except c.exceptions.ResourceNotFoundException:
+                pass
+
     def tail_start(self, db, token_path):
         return self._as_pair().tail_start(db, token_path)
 

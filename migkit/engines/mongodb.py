@@ -4935,6 +4935,169 @@ class MongoEngine(Engine):
     #: position is saved (`tail_apply`)
     TAIL_BATCH = 1000
 
+    # ---- the mark migkit's own writes carry (BAR-1, `marks`) ----------
+
+    MARK_COLLECTION = "migkit_origin"
+
+    def mark_facts(self, side, db):
+        """What decides the rungs of `marks` on this side: transactions
+        (a replica set or a sharded cluster) and pre-images on every
+        collection of the database (a delete's mark under `field`)."""
+        client = self._client(side)
+        hello = client.admin.command("hello")
+        version = tuple(
+            client.admin.command("buildInfo")["versionArray"][:2])
+        there = client[self._d(side, db)]
+        names = [n for n in there.list_collection_names()
+                 if not n.startswith("system.")
+                 and n != self.MARK_COLLECTION]
+        pre = bool(names) and version >= (6, 0) and all(
+            ((i.get("options") or {}).get("changeStreamPreAndPostImages")
+             or {}).get("enabled")
+            for i in there.list_collections(filter={"name": {"$in": names}}))
+        return {"family": "mongodb", "version": version,
+                "transactions": bool(hello.get("setName")
+                                     or hello.get("msg") == "isdbgrid"),
+                "pre_images": pre, "can_create": True}
+
+    def mark_unit(self, side, db, rung, batch, ops, run_id=None,
+                  token=None):
+        """`ops` - ("write", collection, document) and ("delete",
+        collection, {"_id": ..}) - applied as one unit that carries the
+        mark of `rung` (None: bare, as an application writes). `txn_doc`:
+        one transaction whose first write is the document of
+        `migkit_origin`, so a failure inside leaves neither it nor the
+        rows. `field`: each write carries the mark itself, and a delete
+        first sets it so the delete's pre-image does."""
+        from .. import failpoint
+        from ..barriers import NeutralMark
+        there = self._client(side)[self._d(side, db)]
+        meta = NeutralMark.format_marker(
+            "mongodb", batch=batch, token=token, run_id=run_id)
+
+        def step(coll, kind, doc, session=None):
+            failpoint.hit("mark.unit")
+            if kind == "write":
+                if rung == "field":
+                    doc = {**doc, **meta}
+                there[coll].replace_one({"_id": doc["_id"]}, doc,
+                                        upsert=True, session=session)
+                return
+            if rung == "field":
+                there[coll].update_one(doc, {"$set": meta}, session=session)
+            there[coll].delete_one(doc, session=session)
+        if rung == "txn_doc":
+            with there.client.start_session() as session:
+                with session.start_transaction():
+                    there[self.MARK_COLLECTION].insert_one(
+                        {"_id": f"{run_id or 'run'}:{batch}", **meta},
+                        session=session)
+                    for kind, coll, doc in ops:
+                        step(coll, kind, doc, session)
+            return
+        for kind, coll, doc in ops:
+            step(coll, kind, doc)
+
+    def mark_own(self, ev):
+        """Whether a change stream event is migkit's own write: the
+        origin document itself, an event of the transaction that wrote
+        one (a transaction's events come together, so the last origin
+        document's transaction is the only one to remember), or a
+        document, or the one a delete removed, that carries the field."""
+        from ..barriers import NeutralMark
+        lsid, number = ev.get("lsid"), ev.get("txnNumber")
+        txn = (bytes(lsid["id"]), int(number)) \
+            if lsid is not None and number is not None else None
+        if (ev.get("ns") or {}).get("coll") == self.MARK_COLLECTION:
+            if txn is not None:
+                self._own_txn = txn
+            return True
+        for image in ("fullDocument", "fullDocumentBeforeChange"):
+            doc = ev.get(image)
+            if doc is not None and NeutralMark.MARKER_KEY in doc:
+                return True
+        return txn is not None and txn == self.__dict__.get("_own_txn")
+
+    def mark_prove(self, side, db, rung):
+        """None where a unit written through `rung` comes back from the
+        side's change stream as migkit's own and an application's write
+        beside it does not, else why not."""
+        import secrets
+        import time as _time
+        there = self._client(side)[self._d(side, db)]
+        name = f"migkit_probe_{secrets.token_hex(6)}"
+        field = rung == "field"
+        was = self.__dict__.get("_own_txn")
+        probe = -1 - secrets.randbits(30)
+        try:
+            there.create_collection(
+                name, **({"changeStreamPreAndPostImages": {"enabled": True}}
+                         if field else {}))
+            opts = {"full_document": "updateLookup"}
+            if field:
+                opts["full_document_before_change"] = "whenAvailable"
+            ops = [("write", name, {"_id": 1})]
+            if field:
+                ops.append(("delete", name, {"_id": 1}))
+            self._own_txn = None
+            with there.watch(**opts) as stream:
+                self.mark_unit(side, db, rung, probe, ops, run_id="probe")
+                there[name].insert_one({"_id": 2})
+                got, end = [], _time.time() + 20
+                while _time.time() < end:
+                    ev = stream.try_next()
+                    if ev is None:
+                        continue
+                    if (ev.get("ns") or {}).get("coll") == name:
+                        got.append((ev["documentKey"]["_id"],
+                                    self.mark_own(ev)))
+                        if ev["documentKey"]["_id"] == 2:
+                            break
+                    else:
+                        self.mark_own(ev)
+            if not any(i == 2 for i, _ in got):
+                return "its change stream showed no event for the probe"
+            if not all(own for i, own in got if i == 1) \
+                    or not any(i == 1 for i, _ in got):
+                return "the stream showed the probe's unit without its mark"
+            if any(own for i, own in got if i == 2):
+                return "the stream showed an application's write as migkit's"
+            return None
+        except Exception as e:  # noqa: BLE001 - said, then the next rung
+            return (str(e).strip().splitlines() or [type(e).__name__])[0]
+        finally:
+            self._own_txn = was
+            there.drop_collection(name)
+            there[self.MARK_COLLECTION].delete_one({"_id": f"probe:{probe}"})
+
+    def mark_timed(self, side, db, rung, rounds):
+        """Seconds a unit of three writes takes through `rung` (None:
+        bare), `rounds` times, on a scratch collection (`marks.measure`)."""
+        import secrets
+        import time as _time
+        there = self._client(side)[self._d(side, db)]
+        name = f"migkit_probe_{secrets.token_hex(6)}"
+        there.create_collection(name)
+        out, base = [], secrets.randbits(40)
+        try:
+            for i in range(rounds):
+                ops = [("write", name, {"_id": f"{i}:{k}"})
+                       for k in range(3)]
+                at = _time.perf_counter()
+                self.mark_unit(side, db, rung, base + i, ops,
+                               run_id="probe")
+                out.append(_time.perf_counter() - at)
+        finally:
+            there.drop_collection(name)
+            there[self.MARK_COLLECTION].delete_many(
+                {"_id": {"$in": [f"probe:{base + i}"
+                                 for i in range(rounds)]}})
+        return out
+
+    def mark_teardown(self, side, db):
+        self._client(side)[self._d(side, db)].drop_collection(
+            self.MARK_COLLECTION)
+
     def _tail_event(self, db, dst, ev, go):
         """One row change of the stream applied to the target, only if the
         hop carries that kind of change for the collection (`mapping.ops`,
@@ -4948,6 +5111,11 @@ class MongoEngine(Engine):
         the check holds the collection to what is carried."""
         op = ev["operationType"]
         coll = (ev.get("ns") or {}).get("coll")
+        # what migkit applied here itself goes no further: the way back
+        # of a two-way hop reads this side, and its own would echo
+        if ((self.hop.options or {}).get("two_way")
+                or self.__dict__.get("_mark_rung")) and self.mark_own(ev):
+            return 0
         carried = self.hop.carries(db, coll)
         key = ev.get("documentKey", {})
         into = dst[self._there(db, coll)]

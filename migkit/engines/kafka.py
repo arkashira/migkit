@@ -1036,6 +1036,91 @@ class KafkaEngine(Engine):
                            self._ranges(side, topics).items()},
                           sort_keys=True)
 
+    # ---- the mark migkit's own writes carry (BAR-1, `marks`) ----------
+
+    def mark_facts(self, side, db):
+        return {"family": "kafka", "headers": True, "can_create": True}
+
+    def mark_unit(self, side, db, rung, batch, ops, run_id=None,
+                  token=None):
+        """`ops` - (topic, key, value) - produced with the header
+        `migkit-marker` on every record under `header`, so a record is
+        marked as it is written and a unit that stops half way leaves
+        only marked records."""
+        from .. import failpoint
+        from ..barriers import NeutralMark
+        headers = NeutralMark.format_marker(
+            "kafka", batch=batch, token=token, run_id=run_id) \
+            if rung == "header" else None
+        producer = self._producer(ops[0][0] if ops else None)
+        try:
+            for topic, key, value in ops:
+                failpoint.hit("mark.unit")
+                producer.send(topic, key=key, value=value, headers=headers)
+            producer.flush()
+        finally:
+            getattr(producer, "close", lambda *a, **k: None)()
+
+    def mark_records(self, side, topic):
+        """[(key, value, headers)] of every record of the topic's
+        partition 0, from the beginning."""
+        TopicPartition = self._partition(side)
+        consumer = self._consumer(side, consumer_timeout_ms=5000)
+        try:
+            tp = TopicPartition(topic, 0)
+            consumer.assign([tp])
+            consumer.seek_to_beginning(tp)
+            return [(m.key, m.value, list(m.headers or []))
+                    for m in consumer]
+        finally:
+            consumer.close()
+
+    @staticmethod
+    def mark_own(headers):
+        from ..barriers import NeutralMark
+        return NeutralMark.is_migkit_write("kafka", headers)
+
+    def mark_prove(self, side, db, rung):
+        import secrets
+        topic = f"migkit-probe-{secrets.token_hex(6)}"
+        try:
+            self.mark_unit(side, db, rung, -1, [(topic, b"own", b"1")])
+            self.mark_unit(side, db, None, -1, [(topic, b"app", b"1")])
+            got = {k: self.mark_own(h) for k, _, h in
+                   self.mark_records(side, topic)}
+            if set(got) != {b"own", b"app"}:
+                return "the probe's records did not read back"
+            if not got[b"own"]:
+                return "the probe's record came back without its mark"
+            if got[b"app"]:
+                return "an application's record was shown as migkit's"
+            return None
+        except Exception as e:  # noqa: BLE001 - said, then the next rung
+            return (str(e).strip().splitlines() or [type(e).__name__])[0]
+        finally:
+            self.__dict__.setdefault("_mark_topics", set()).add(topic)
+
+    def mark_timed(self, side, db, rung, rounds):
+        topic = self.__dict__.setdefault("_mark_timed", "migkit-probe-timed")
+        self.__dict__.setdefault("_mark_topics", set()).add(topic)
+        out = []
+        for i in range(rounds):
+            at = time.perf_counter()
+            self.mark_unit(side, db, rung, i,
+                           [(topic, b"k", b"v") for _ in range(3)])
+            out.append(time.perf_counter() - at)
+        return out
+
+    def mark_teardown(self, side, db):
+        """The header leaves nothing on the broker but the probes'
+        topics, which go."""
+        topics = sorted(self.__dict__.pop("_mark_topics", ()))
+        if topics:
+            try:
+                self._admin(side).delete_topics(topics)
+            except Exception:  # noqa: BLE001 - a probe topic is harmless
+                pass
+
     def mark_covers(self, side, db, mark, change):
         """Whether the message `change` names - `topic`, `partition`,
         `offset`, as a mapping or an object - lies below the mark's end of

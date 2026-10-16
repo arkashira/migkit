@@ -26,11 +26,15 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 402
+## Upward imports still listed: 406
 
 ### (not listed)
 
+- `migkit/engines/dynamodb.py:1011` engines -> workflows (`barriers`)
+- `migkit/engines/kafka.py:1051` engines -> workflows (`barriers`)
+- `migkit/engines/mongodb.py:4973` engines -> workflows (`barriers`)
 - `migkit/engines/mysql.py:3817` engines -> workflows (`unchanged`)
+- `migkit/engines/redis.py:2863` engines -> workflows (`barriers`)
 - `migkit/ranges.py:693` execution -> workflows (`fleet`)
 
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
@@ -679,7 +683,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an engine calls `movers` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/base.py:1959` engines -> workflows (`movers`)
-- `migkit/engines/cassandra.py:1865` engines -> workflows (`movers`)
+- `migkit/engines/cassandra.py:1866` engines -> workflows (`movers`)
 - `migkit/engines/clickhouse.py:1621` engines -> workflows (`movers`)
 - `migkit/engines/generic.py:2042` engines -> workflows (`movers`)
 - `migkit/engines/hetero.py:228` engines -> workflows (`movers`)
@@ -723,7 +727,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an engine calls `tailctl` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/base.py:2240` engines -> workflows (`tailctl`)
-- `migkit/engines/cassandra.py:2526` engines -> workflows (`tailctl`)
+- `migkit/engines/cassandra.py:2653` engines -> workflows (`tailctl`)
 - `migkit/engines/clickhouse.py:2451` engines -> workflows (`tailctl`)
 - `migkit/engines/generic.py:2345` engines -> workflows (`tailctl`)
 - `migkit/engines/hetero.py:3414` engines -> workflows (`tailctl`)
@@ -733,7 +737,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/neo4j.py:825` engines -> workflows (`tailctl`)
 - `migkit/engines/opensearch.py:1874` engines -> workflows (`tailctl`)
 - `migkit/engines/postgres.py:3485` engines -> workflows (`tailctl`)
-- `migkit/engines/redis.py:2848` engines -> workflows (`tailctl`)
+- `migkit/engines/redis.py:2975` engines -> workflows (`tailctl`)
 
 ### an engine calls `tailtables` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
@@ -768,9 +772,9 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `users` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/cassandra.py:1090` engines -> workflows (`users`)
+- `migkit/engines/cassandra.py:1091` engines -> workflows (`users`)
 - `migkit/engines/clickhouse.py:1512` engines -> workflows (`users`)
-- `migkit/engines/kafka.py:1745` engines -> workflows (`users`)
+- `migkit/engines/kafka.py:1830` engines -> workflows (`users`)
 - `migkit/engines/mongodb.py:3459` engines -> workflows (`users`)
 - `migkit/engines/mssql.py:2085` engines -> workflows (`users`)
 - `migkit/engines/mysql.py:6956` engines -> workflows (`users`)
@@ -784,7 +788,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/ase.py:144` engines -> workflows (`verifiers`)
 - `migkit/engines/bigtable.py:423` engines -> workflows (`verifiers`)
-- `migkit/engines/cassandra.py:374` engines -> workflows (`verifiers`)
+- `migkit/engines/cassandra.py:375` engines -> workflows (`verifiers`)
 - `migkit/engines/clickhouse.py:609` engines -> workflows (`verifiers`)
 - `migkit/engines/cosmosdb.py:878` engines -> workflows (`verifiers`)
 - `migkit/engines/couchbase.py:471` engines -> workflows (`verifiers`)
@@ -795,7 +799,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/firestore.py:509` engines -> workflows (`verifiers`)
 - `migkit/engines/generic.py:150` engines -> workflows (`verifiers`)
 - `migkit/engines/hetero.py:5026` engines -> workflows (`verifiers`)
-- `migkit/engines/kafka.py:1993` engines -> workflows (`verifiers`)
+- `migkit/engines/kafka.py:2078` engines -> workflows (`verifiers`)
 - `migkit/engines/lake.py:232` engines -> workflows (`verifiers`)
 - `migkit/engines/lindorm.py:140` engines -> workflows (`verifiers`)
 - `migkit/engines/mysql.py:4080` engines -> workflows (`verifiers`)

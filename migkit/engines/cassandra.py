@@ -18,6 +18,7 @@ it is a difference.
 import contextlib
 import json
 import threading
+import time
 
 from .base import Engine, NeutralCopier, Result
 
@@ -2519,6 +2520,132 @@ class CassandraEngine(NeutralCopier, Engine):
         for t in tables:
             went += self._follow_table(db, t, self._log_rows(db, t, lo, hi))
         return {"at": hi}, went
+
+    # ---- the mark migkit's own writes carry (BAR-1, `marks`) ----------
+
+    MARK_TABLE = "migkit_origin"
+
+    def mark_facts(self, side, db):
+        row = self._session(side).execute(
+            "SELECT release_version FROM system.local").one()
+        return {"family": "cassandra", "can_create": True,
+                "version": tuple(int(x) for x in
+                                 row.release_version.split(".")[:2])}
+
+    def _mark_tables(self, side, db):
+        """The origin table and a scratch table for the probes, made
+        once (`mark_teardown` drops both)."""
+        ks, s = self._q(self._ks(side, db)), self._session(side)
+        s.execute(f"CREATE TABLE IF NOT EXISTS {ks}.{self.MARK_TABLE}"
+                  " (origin text, \"batch\" bigint, seq bigint, tail_token text,"
+                  " run_id text, written_at timestamp,"
+                  " PRIMARY KEY (origin, \"batch\"))")
+        s.execute(f"CREATE TABLE IF NOT EXISTS {ks}.migkit_probe"
+                  " (id int PRIMARY KEY, v text)")
+
+    def mark_unit(self, side, db, rung, batch, ops, run_id=None,
+                  token=None):
+        """`ops` - ("write", table, {column: value}) and ("delete", table,
+        {key column: value}) - as one logged batch. Under `batch` the
+        first statement writes `migkit_origin` and every statement carries
+        the same write time, which the origin row names: the reader
+        leaves out the cells written at a time the table lists. Returns
+        that time. A statement the server refuses refuses the whole
+        batch, the origin row with it."""
+        from cassandra.query import BatchStatement, BatchType, SimpleStatement
+        from .. import failpoint
+        ks, s = self._q(self._ks(side, db)), self._session(side)
+        stamp, using = None, ""
+        if rung == "batch":
+            self._mark_tables(side, db)
+            stamp = max(int(time.time() * 1_000_000),
+                        self.__dict__.get("_mark_last", 0) + 1)
+            self._mark_last = stamp
+            using = f" USING TIMESTAMP {stamp}"
+        unit = BatchStatement(batch_type=BatchType.LOGGED)
+        if rung == "batch":
+            unit.add(SimpleStatement(
+                f"INSERT INTO {ks}.{self.MARK_TABLE} (origin, \"batch\", seq,"
+                " tail_token, run_id, written_at) VALUES (%s, %s, %s, %s, %s,"
+                f" toTimestamp(now())){using}"),
+                ("migkit", stamp, batch, token or "", run_id or ""))
+        for kind, table, row in ops:
+            failpoint.hit("mark.unit")
+            t = f"{ks}.{self._q(table)}"
+            if kind == "write":
+                cols = ", ".join(self._q(c) for c in row)
+                unit.add(SimpleStatement(
+                    f"INSERT INTO {t} ({cols}) VALUES"
+                    f" ({', '.join(['%s'] * len(row))}){using}"),
+                    tuple(row.values()))
+            else:
+                (col, val), = row.items()
+                unit.add(SimpleStatement(
+                    f"DELETE FROM {t}{using} WHERE {self._q(col)} = %s"),
+                    (val,))
+        failpoint.hit("mark.unit.send")
+        s.execute(unit)
+        return stamp
+
+    def mark_stamps(self, side, db):
+        """The write times `migkit_origin` names: the cells written at
+        one of them are migkit's own."""
+        ks = self._q(self._ks(side, db))
+        return {int(r.batch) for r in self._session(side).execute(
+            f"SELECT \"batch\" FROM {ks}.{self.MARK_TABLE}")}
+
+    @staticmethod
+    def mark_own(stamps, writetime):
+        return int(writetime) in stamps
+
+    def mark_prove(self, side, db, rung):
+        try:
+            self._mark_tables(side, db)
+            ks, s = self._q(self._ks(side, db)), self._session(side)
+            import secrets
+            a, b = secrets.randbelow(2 ** 30), secrets.randbelow(2 ** 30)
+            stamp = self.mark_unit(side, db, rung, -1,
+                                   [("write", "migkit_probe",
+                                     {"id": a, "v": "own"})])
+            self.mark_unit(side, db, None, -1,
+                           [("write", "migkit_probe", {"id": b, "v": "app"})])
+            times = {r.id: r.t for r in s.execute(
+                f"SELECT id, writetime(v) AS t FROM {ks}.migkit_probe"
+                f" WHERE id IN ({a}, {b})")}
+            stamps = self.mark_stamps(side, db)
+            if a not in times or b not in times:
+                return "the probe's rows did not read back"
+            if not self.mark_own(stamps, times[a]):
+                return "the probe's unit was not named by migkit_origin"
+            if self.mark_own(stamps, times[b]):
+                return "an application's write was shown as migkit's"
+            if stamp is not None:
+                s.execute(f"DELETE FROM {ks}.{self.MARK_TABLE} WHERE"
+                          " origin = 'migkit' AND \"batch\" = %s", (stamp,))
+            s.execute(f"DELETE FROM {ks}.migkit_probe WHERE id IN"
+                      f" ({a}, {b})")
+            return None
+        except Exception as e:  # noqa: BLE001 - said, then the next rung
+            return (str(e).strip().splitlines() or [type(e).__name__])[0]
+
+    def mark_timed(self, side, db, rung, rounds):
+        self._mark_tables(side, db)
+        ks, s, out = (self._q(self._ks(side, db)), self._session(side), [])
+        for i in range(rounds):
+            ops = [("write", "migkit_probe", {"id": 1_000_000 + k, "v": "x"})
+                   for k in range(3)]
+            at = time.perf_counter()
+            stamp = self.mark_unit(side, db, rung, i, ops)
+            out.append(time.perf_counter() - at)
+            if stamp is not None:
+                s.execute(f"DELETE FROM {ks}.{self.MARK_TABLE} WHERE"
+                          " origin = 'migkit' AND \"batch\" = %s", (stamp,))
+        return out
+
+    def mark_teardown(self, side, db):
+        ks, s = self._q(self._ks(side, db)), self._session(side)
+        s.execute(f"DROP TABLE IF EXISTS {ks}.{self.MARK_TABLE}")
+        s.execute(f"DROP TABLE IF EXISTS {ks}.migkit_probe")
 
     def tail_start(self, db, token_path):
         """The position the follow begins at, taken before the copy it

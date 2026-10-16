@@ -2841,6 +2841,133 @@ class RedisEngine(Engine):
 
     # --- the tail a run starts (`cli._tail`) -------------------------------
 
+    # ---- the mark migkit's own writes carry (BAR-1, `marks`) ----------
+
+    MARK_KEY = "migkit:origin"
+
+    def mark_facts(self, side, db):
+        c = self._client(side)
+        version = tuple(int(x) for x in
+                        c.info("server")["redis_version"].split(".")[:2])
+        return {"family": "redis", "version": version,
+                "cluster": bool(c.info("cluster").get("cluster_enabled")),
+                "can_create": True}
+
+    def mark_unit(self, side, db, rung, batch, ops, run_id=None,
+                  token=None):
+        """`ops` - ("set", key, value) and ("del", key) - sent as one
+        MULTI / EXEC; under `multi` the first command queued is the hash
+        `migkit:origin` naming the batch. Nothing is sent until EXEC, so
+        a failure before it leaves neither the marker nor the keys."""
+        from .. import failpoint
+        from ..barriers import NeutralMark
+        pipe = self._client(
+            side, db=int(db) if str(db).isdigit() else 0).pipeline(
+            transaction=True)
+        if rung == "multi":
+            pipe.execute_command(*NeutralMark.format_marker(
+                "redis", batch=batch, token=token, run_id=run_id))
+        for kind, key, *rest in ops:
+            failpoint.hit("mark.unit")
+            if kind == "set":
+                pipe.set(key, rest[0])
+            else:
+                pipe.delete(key)
+        failpoint.hit("mark.unit.exec")
+        pipe.execute()
+
+    @classmethod
+    def mark_groups(cls, lines):
+        """[{"own": bool, "commands": [argv, ..]}] from the lines a
+        monitor showed, [(client, command text)]: each MULTI .. EXEC of a
+        client is one group, own where its first command is the marker
+        hash; any other command is a group of its own, not marked."""
+        open_, out = {}, []
+        for client, line in lines:
+            argv = line.split()
+            verb = argv[0].upper() if argv else ""
+            if verb == "MULTI":
+                open_[client] = []
+            elif verb == "EXEC" and client in open_:
+                cmds = open_.pop(client)
+                out.append({"own": bool(cmds) and len(cmds[0]) > 1
+                            and cmds[0][0].upper() == "HSET"
+                            and cmds[0][1] == cls.MARK_KEY,
+                            "commands": cmds})
+            elif client in open_:
+                open_[client].append(argv)
+            else:
+                out.append({"own": False, "commands": [argv]})
+        return out
+
+    def mark_watch(self, side, work):
+        """The lines a monitor of the side shows while `work()` runs,
+        [(client, command text)]; ended by a command of its own."""
+        import threading
+        c, lines = self._client(side), []
+        ready = threading.Event()
+
+        def listen():
+            with c.monitor() as m:
+                ready.set()
+                for got in m.listen():
+                    if got["command"].startswith("PING migkit-end"):
+                        return
+                    lines.append((f"{got['client_address']}:"
+                                  f"{got['client_port']}", got["command"]))
+        t = threading.Thread(target=listen, daemon=True)
+        t.start()
+        if not ready.wait(15):
+            raise SystemExit("the side's monitor did not open")
+        time.sleep(0.2)
+        try:
+            work()
+        finally:
+            time.sleep(0.2)
+            self._client(side).execute_command("PING", "migkit-end")
+            t.join(15)
+        return lines
+
+    def mark_prove(self, side, db, rung):
+        import secrets
+        a, b = (f"migkit:probe:{secrets.token_hex(6)}:{x}" for x in "ab")
+        try:
+            lines = self.mark_watch(side, lambda: (
+                self.mark_unit(side, db, rung, -1, [("set", a, "1")]),
+                self.mark_unit(side, db, None, -1, [("set", b, "1")])))
+            groups = self.mark_groups(lines)
+            mine = [g for g in groups
+                    if any(a in " ".join(c) for c in g["commands"])]
+            theirs = [g for g in groups
+                      if any(b in " ".join(c) for c in g["commands"])]
+            if not mine or not theirs:
+                return "the monitor showed no command of the probe"
+            if not all(g["own"] for g in mine):
+                return "the probe's unit did not open with its mark"
+            if any(g["own"] for g in theirs):
+                return "an application's write was shown as migkit's"
+            return None
+        except Exception as e:  # noqa: BLE001 - said, then the next rung
+            return (str(e).strip().splitlines() or [type(e).__name__])[0]
+        finally:
+            self._client(side).delete(a, b)
+
+    def mark_timed(self, side, db, rung, rounds):
+        import secrets
+        key, out = f"migkit:probe:{secrets.token_hex(6)}", []
+        try:
+            for i in range(rounds):
+                ops = [("set", f"{key}:{k}", "1") for k in range(3)]
+                at = time.perf_counter()
+                self.mark_unit(side, db, rung, i, ops)
+                out.append(time.perf_counter() - at)
+        finally:
+            self._client(side).delete(*[f"{key}:{k}" for k in range(3)])
+        return out
+
+    def mark_teardown(self, side, db):
+        self._client(side).delete(self.MARK_KEY)
+
     def tail_start(self, db, token_path):
         """Before the copy: the source's clock kept as the tail's
         `copied_at`, so a full start where no snapshot is kept reads again

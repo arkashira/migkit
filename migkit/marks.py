@@ -56,6 +56,43 @@ rungs that are apart only.
                 as well - `doctor` says both.
       table     as on PostgreSQL.
 
+    MongoDB
+      txn_doc   a document of `migkit_origin` first in a multi-document
+                transaction: the change stream names the transaction
+                (`lsid`, `txnNumber`) of every event, so what follows an
+                insert into `migkit_origin` in the same transaction is
+                migkit's own. Apart and exact; needs a replica set.
+      field     the field `_migkit_marker` on every document written (and,
+                before a delete, set on the document so the pre-image of
+                the delete carries it): needs change stream pre-images on
+                the collections already, as migkit changes no setting.
+                Apart only; no transaction needed.
+    Cassandra
+      batch     a logged batch whose first statement writes `migkit_origin`
+                and whose every statement carries the batch's write time:
+                the reader leaves out the cells written at a time the origin
+                table names. Apart and exact.
+    Redis
+      multi     MULTI / EXEC with `HSET migkit:origin` first: a monitor
+                or a replication stream shows the marker command opening
+                the transaction. Apart and exact; not on a cluster that
+                spreads the unit over slots.
+    DynamoDB
+      item      TransactWriteItems whose first item puts the unit into
+                `migkit_origin` and whose items carry `_migkit_marker`; a
+                delete is told by the keys the origin item names. Apart
+                and exact.
+    Kafka
+      header    the header `migkit-marker` on every record produced.
+                Apart only.
+
+No sandbox, so not proved (the rung each would take, written): Cosmos DB,
+a transactional batch whose first operation upserts a `migkit_origin`
+item in the partition; Couchbase, a transaction whose first mutation
+writes a `migkit_origin` document; Keyspaces, a logged batch as on
+Cassandra; Spanner, a read-write transaction whose first mutation writes
+`migkit_origin` (a change stream names the transaction).
+
 The reader knows every rung's mark at once, whichever the other hop
 chose: the hop that applies into a side and the one that reads it are
 two tails, and neither has to tell the other anything.
@@ -126,9 +163,18 @@ def brand(facts):
     return "mariadb" if facts.get("mariadb") else facts.get("family", "")
 
 
+#: what a probe on this side measured (`measure`), by the brand and rung:
+#: the same pair as `COST`, and over it - the owner's rule, what is measured
+#: here wins over what was measured once elsewhere
+MEASURED = {}
+
+
 def cost(r, facts):
-    """What a rung was measured to cost on the side's kind of server."""
-    return sum(COST.get((brand(facts), r.name), (0.0, 0.0)))
+    """What a rung costs on the side's kind of server: what a probe on
+    this very side measured (`measure`), else what was measured once."""
+    key = (brand(facts), r.name)
+    return sum(MEASURED[key] if key in MEASURED else
+               COST.get(key, (0.0, 0.0)))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -234,6 +280,66 @@ RUNGS = (
     Rung("table", "mysql", frozenset({APART, EXACT}),
          "a row of the table migkit_origin first in each transaction",
          "the table migkit_origin", _table),
+)
+
+
+def _mongo_txn(f):
+    if not f.get("transactions"):
+        return ("a transaction needs a replica set or a sharded cluster,"
+                " and this deployment is neither")
+    return _table(f)
+
+
+def _mongo_field(f):
+    if not f.get("pre_images"):
+        return ("a delete leaves the field on nothing the change stream"
+                " shows unless pre-images are on for every collection"
+                " (changeStreamPreAndPostImages), and migkit changes no"
+                " setting")
+    return None
+
+
+def _batch(f):
+    return _table(f)
+
+
+def _redis_multi(f):
+    if f.get("cluster"):
+        return ("a cluster's transaction keeps to one slot, and the marker"
+                " key is in another")
+    return None if tuple(f.get("version") or ()) >= (2, 6) else \
+        "MULTI with a first command is Redis 2.6 and later"
+
+
+def _ddb_item(f):
+    if not f.get("transactions"):
+        return "this endpoint takes no TransactWriteItems"
+    return _table(f)
+
+
+def _kafka_header(f):
+    return None if f.get("headers") else \
+        "this broker takes no record headers (0.11 and later do)"
+
+
+RUNGS = RUNGS + (
+    Rung("txn_doc", "mongodb", frozenset({APART, EXACT}),
+         "a document of migkit_origin first in the transaction",
+         "the collection migkit_origin", _mongo_txn),
+    Rung("field", "mongodb", frozenset({APART}),
+         "the field _migkit_marker on every document written", "",
+         _mongo_field),
+    Rung("batch", "cassandra", frozenset({APART, EXACT}),
+         "a logged batch whose first statement writes migkit_origin",
+         "the table migkit_origin", _batch),
+    Rung("multi", "redis", frozenset({APART, EXACT}),
+         "MULTI / EXEC with the marker key migkit:origin first",
+         "the hash migkit:origin", _redis_multi),
+    Rung("item", "dynamodb", frozenset({APART, EXACT}),
+         "a transaction whose first item puts the unit into migkit_origin",
+         "the table migkit_origin", _ddb_item),
+    Rung("header", "kafka", frozenset({APART}),
+         "the header migkit-marker on every record", "", _kafka_header),
 )
 
 
@@ -486,3 +592,79 @@ def batch_of(engine):
     from . import twoway
     got = twoway.seen_of(twoway.batch_seen(engine))
     return int(got["batch"]) if got else None
+
+
+def measure(side_engine, side, db, facts, rungs):
+    """Probe what each of `rungs` adds to a unit on this side, in
+    microseconds: the side writes a scratch unit through each rung and
+    bare, the rungs in turn within every round (`Engine.mark_timed`), and
+    a rung's cost is its median less the bare median of the same rounds.
+    The rounds go on until the median of the last three agrees with the
+    one before to within the bare rounds' own spread, or the side has
+    been probed as many rounds as it has rungs times three - a side that
+    will not settle is priced by what it did show. Kept in `MEASURED`."""
+    import statistics
+    brand_ = brand(facts)
+    names = [None] + [r.name for r in rungs]
+    seen = {n: [] for n in names}
+    last = None
+    for rnd in range(1, 3 * len(names) + 1):
+        for n in names:
+            seen[n].extend(side_engine.mark_timed(side, db, n, 1))
+        if rnd >= 3:
+            now = {n: statistics.median(seen[n][-rnd:]) for n in names}
+            spread = (max(seen[None]) - min(seen[None])) or 1e-9
+            if last is not None and all(
+                    abs(now[n] - last[n]) <= spread for n in names):
+                break
+            last = now
+    bare = statistics.median(seen[None])
+    for r in rungs:
+        MEASURED[(brand_, r.name)] = (
+            max(0.0, (statistics.median(seen[r.name]) - bare) * 1e6), 0.0)
+    return {r.name: cost(r, facts) for r in rungs}
+
+
+def choice(side_engine, side, db, exact=False):
+    """The decision engine's `Choice` of the rung this side's marks go by:
+    the rungs the side allows (`choose_rung`), each priced by a probe on
+    the side itself (`measure`), ranked by `decide.climb` on those prices
+    and proved (`Engine.mark_prove`) before it is taken. The rung stands
+    on `side_engine._mark_rung`; the Choice names the cost of each."""
+    from . import decide
+    facts = dict(side_engine.mark_facts(side, db), exact=bool(exact))
+    facts["family"] = facts.get("family") or getattr(
+        side_engine, "CANON_ENGINE", "")
+    allowed, _ = choose_rung(side_engine, facts)
+    priced = measure(side_engine, side, db, facts, allowed) if allowed else {}
+    def why_not(r, f):
+        if f.get("exact") and EXACT not in r.gives:
+            return ("it tells migkit's writes apart but cannot say which"
+                    " batch the side last committed, and this hop counts")
+        return r.needs(f)
+    rungs = [decide.Rung(
+        r.name, r.words, footprint=1 if r.footprint else 0,
+        needs=(decide.Need(
+            "the side to allow it", lambda f, r=r: why_not(r, f) is None,
+            lambda f, r=r: why_not(r, f)),),
+        prove=lambda f, r=r: side_engine.mark_prove(side, db, r.name))
+        for r in RUNGS if r.family == facts["family"]]
+    got = decide.climb(f"the mark of migkit's writes on {side}", rungs,
+                       facts, costs={n: c / 1e6 for n, c in priced.items()})
+    if got.rung is None:
+        raise SystemExit(
+            "no way of marking migkit's own writes proved itself here: "
+            + ("; ".join(f"{r.said}: {why}" for r, why in got.passed)
+               or "none of them is allowed there"))
+    side_engine._mark_rung = got.rung.name
+    hop = getattr(side_engine, "hop", None)
+    if hop is not None:
+        decide.record(hop, got)
+    return got
+
+
+def teardown(side_engine, side, db):
+    """Take away what the marks left on the side (`Engine.mark_teardown`):
+    the origin table, the marker key. The rung stands no more."""
+    side_engine.mark_teardown(side, db)
+    side_engine.__dict__.pop("_mark_rung", None)

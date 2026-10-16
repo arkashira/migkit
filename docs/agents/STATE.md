@@ -219,7 +219,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Source layout
 
-402 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+406 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

@@ -487,6 +487,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: no way of marking migkit's own writes proved itself on the target, so what it applies would come back to where it began. <...> | None of them is allowed there.
 
+* no way of marking migkit's own writes proved itself here: <...>
+
 * format: protobuf is not written: <...>
 
 * format: <...> is not one of <...>
@@ -962,6 +964,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * db<...>: the stream fails again at offset <...> - <...>; the tail stops there, its offset saved
 
 * db<...>: the target refused a key of the snapshot: <...>
+
+* the side's monitor did not open
 
 ## Kafka
 
