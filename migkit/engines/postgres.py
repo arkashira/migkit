@@ -2667,8 +2667,8 @@ select json_build_object(
         sets = ", ".join(f'{_ident(n)} = excluded.{_ident(n)}'
                          for n in names if n not in key)
         conflict = ", ".join(f'{_ident(k)}' for k in sorted(key))
-        tail = (f" on conflict ({conflict}) do update set {sets}" if sets
-                else f" on conflict ({conflict}) do nothing")
+        tail = ((f" on conflict ({conflict}) do update set {sets}" if sets
+                 else f" on conflict ({conflict}) do nothing") if key else "")
         into = (f'insert into {_ident(sch)}.{_ident(tbl)} ({cols})'
                 + self._insert_override(side, db, table, names))
         arrays = self._array_columns(side, db, table)
@@ -4616,7 +4616,7 @@ select json_build_object(
                 keys[table] = (self.neutral_key(side, db, table, ask=ask)
                                or (self.neutral_key(side, db, leaf, ask=ask)
                                    if leaf != table else []))
-                if not keys[table]:
+                if not keys[table] and parsed["op"] != "insert":
                     raise SystemExit(
                         f"no primary key on {table} - a change to a keyless"
                         " table cannot be addressed on the target, and"

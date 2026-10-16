@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (188 modules)
+## `migkit/` (190 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -36,6 +36,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/attempts.py` - Each attempt at a unit of work, the server session that is exactly its own, and a wait the server stopped answering told apart from a slow a Classes: View, Attempt, SessionHealth, Spanning, Ledger, Monitor.
 - `migkit/audit.py` - The run's own record of what migkit did, written so a changed record shows.
 - `migkit/autonomous.py` - `migkit migrate`: two addresses, their access and a goal in; the whole workflow run to a verified outcome (backlog P0-AUTONOMOUS-MIGRATION). Classes: Question, Asked, Unit, Workflow, Plan, Outcome.
+- `migkit/autopilot.py` - (no docstring) Classes: AutopilotPhase, AutopilotStatus, PhaseResult, AutopilotResult, AutopilotOrchestrator.
 - `migkit/avrostream.py` - Changes as Avro messages through a schema registry, in Debezium's envelope: `before`, `after`, `source`, `op` and `ts_ms`, the key a record  Classes: Encoder.
 - `migkit/backupseed.py` - SQL Server's own backup, restored on the target: a database's pages carried whole, and its changes followed from the version the restored co Classes: MsFacts.
 - `migkit/barriers.py` - Barriers, tombstones, and neutral write markers across engines (BAR-1, BAR-2, BAR-3, P0-DEPTH.tombstones, P0-DE.3). Classes: Tombstone, TombstoneLedger, NeutralMark, SequenceTag, BatchSequenceLedger, TargetWriteAttribution.
@@ -160,6 +161,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/scenarios.py` - Migration scenarios decided on observed facts (backlog P0-SCENARIOS): a managed service change through the provider's own operations (`cloud Classes: ScenarioDecision, TopologyCheck.
 - `migkit/schedule.py` - A hop that runs on a schedule of its own. Classes: NotDue, Slot.
 - `migkit/schema.py` - (no docstring)
+- `migkit/schema_drift.py` - (no docstring) Classes: SchemaDriftError, DriftType, DriftAction, BackfillTask, DriftResolutionResult, BackfillOrchestrator.
 - `migkit/schemaformats.py` - Messages framed by a schema registry that carry JSON Schema or Protobuf rather than Avro (backlog R4.formats), read and - for JSON Schema -  Classes: Undecodable, JsonEncoder, ProtoFile, Col, NeutralTable, Difference.
 - `migkit/second_reader.py` - An independent second reading of the data, run out of process. Classes: Narrowing.
 - `migkit/seedtools.py` - What the seed on media (`ship`, `carriers`) asks of each library it wraps, against what each offers (backlog 0f): the compression of a part,

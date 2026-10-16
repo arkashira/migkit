@@ -561,7 +561,7 @@ _BY_NAME = {
                  " failpoint tunnel locks",
     "conversion": "canon rowtext render transforms nanotime intervals geo"
                   " vectors bsontype charsets commercial zones copybook"
-                  " pieces ddl ddl_shield merkle schema loadtext schemaformats described tally",
+                  " pieces ddl ddl_shield merkle schema schema_drift loadtext schemaformats described tally",
     "reporting": "verdict report wording diagnostics export"
                  " troubleshooting telemetry traces notify servicecheck query_guard",
     "decision": "decide costmodel jointplan factbook guarantees scanplan"
@@ -583,7 +583,7 @@ _BY_NAME = {
                  " archive editions tableengine twoway barriers marks"
                  " drainmark applyway replicasum rules leaves unchanged"
                  " streamout changetopic fleet second_reader proxy ring_buffer"
-                 " dag_scheduler reverse",
+                 " dag_scheduler reverse autopilot",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole

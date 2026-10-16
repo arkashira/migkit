@@ -7220,6 +7220,31 @@ def _dbs_with_history(hop):
 
 @main.command()
 @click.argument("hop_name")
+@click.option("--dry-run", is_flag=True, help="Rehearse migration flight sim and stages without applying live cutover")
+@click.option("--skip-tuning", is_flag=True, help="Skip target hardware parameter tuning profile")
+@click.option("--skip-flight-sim", is_flag=True, help="Skip pre-cutover shadow flight simulator rehearsal")
+@click.option("--auto-approve", is_flag=True, default=True, help="Auto-approve verified stages")
+@click.option("--timeout", default=3600.0, type=float, help="Overall migration timeout in seconds")
+def autopilot(hop_name, dry_run, skip_tuning, skip_flight_sim, auto_approve, timeout):
+    """Execute turn-key autonomous end-to-end migration pipeline."""
+    from . import autopilot as ap
+    hop = get_hop(hop_name)
+    orch = ap.AutopilotOrchestrator(
+        hop,
+        dry_run=dry_run,
+        skip_tuning=skip_tuning,
+        skip_flight_sim=skip_flight_sim,
+        auto_approve=auto_approve,
+        timeout=timeout,
+    )
+    res = orch.execute()
+    if not res.ok:
+        raise click.ClickException(f"autopilot failed at phase: {res.error}")
+    click.echo(f"autopilot finished successfully in {res.total_duration_seconds:.2f}s (status: {res.status.value})")
+
+
+@main.command()
+@click.argument("hop_name")
 @click.option("--force", is_flag=True, help="Force failback even if past 48h retention window")
 @click.option("--timeout", default=30.0, type=float, help="Failback timeout in seconds")
 def failback(hop_name, force, timeout):

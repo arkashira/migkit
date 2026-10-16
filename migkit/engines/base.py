@@ -7161,12 +7161,13 @@ class Engine:
                 this = shapes[seen] = (table, kind, tuple(sorted(key)),
                                        tuple(sorted({**key, **values})),
                                        adds)
-            ident = _ident(key, str)
-            if run and (this != shape or ident in keys):
+            ident = _ident(key, str) if key else None
+            if run and (this != shape or (ident is not None and ident in keys)):
                 self._apply_run(side, db, shape, run)
                 run, keys = [], set()
             shape = this
-            keys.add(ident)
+            if ident is not None:
+                keys.add(ident)
             run.append((key, values))
         if run:
             self._apply_run(side, db, shape, run)
@@ -7272,7 +7273,7 @@ class Engine:
         net, order = {}, []
 
         def touch(table, kind, key, values):
-            ident = (table, _ident(key, repr))
+            ident = (table, _ident(key, repr)) if key else (table, len(order))
             have = net.get(ident)
             if have is None:
                 order.append(ident)

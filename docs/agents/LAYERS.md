@@ -897,7 +897,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### engines reaches `cli` (cli); the shared piece moves below both, or the call is inverted
 
-- `migkit/engines/base.py:7925` engines -> cli (`cli`)
+- `migkit/engines/base.py:7926` engines -> cli (`cli`)
 - `migkit/engines/oracle_pump.py:227` engines -> cli (`cli`)
 
 ### every provider call waits on the egress gate (`cloudapi.gate`, `egress.decide`) before its client is made; the gate moves to a contract below persistence
