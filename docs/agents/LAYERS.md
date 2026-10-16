@@ -28,11 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 387
 
-### (not listed)
-
-- `migkit/engines/mssql.py:4234` engines -> workflows (`tailctl`)
-- `migkit/engines/oracle.py:2393` engines -> workflows (`tailctl`)
-
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
 - `migkit/variants.py:397` configuration -> decision (`decide`)
@@ -741,8 +736,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/hetero.py:3417` engines -> workflows (`tailctl`)
 - `migkit/engines/kafka.py:1150` engines -> workflows (`tailctl`)
 - `migkit/engines/mongodb.py:2732` engines -> workflows (`tailctl`)
+- `migkit/engines/mssql.py:4234` engines -> workflows (`tailctl`)
 - `migkit/engines/mysql.py:2215` engines -> workflows (`tailctl`)
 - `migkit/engines/neo4j.py:960` engines -> workflows (`tailctl`)
+- `migkit/engines/oracle.py:2393` engines -> workflows (`tailctl`)
 - `migkit/engines/postgres.py:3543` engines -> workflows (`tailctl`)
 - `migkit/engines/redis.py:3084` engines -> workflows (`tailctl`)
 
