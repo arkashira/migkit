@@ -2,15 +2,23 @@
 types that render differently, and the options each table is stored with
 (P0-PARITY.verify).
 
-The logic is held here on answers given in-process. The catalogue reads
-behind it (`information_schema.triggers`, the `cast(... as char)` of a
-sample of rows, `information_schema.tables`' engine, row format and
-create options) have not run against a server in this checkout, so these
-three are not named in `PROVES`: `capabilities.UNPROVED` says a test on a
-sandbox pair is owed (verify.structure.triggers, verify.value.rendering,
-verify.structure.collection-options).
+The logic is held here on answers given in-process, and the catalogue
+reads behind the triggers and the tables' options
+(`information_schema.triggers`, `information_schema.tables`' engine, row
+format and create options) on the sandbox's servers below, with the value
+checks' one plan: every column of a table in each read of it, a side
+(`_deep_scans`). The rendering's sample read (`cast(... as char)`) has not
+run against a server, so it is not named in `PROVES`:
+`capabilities.UNPROVED` says its sandbox test is owed.
 """
+from migkit import hopkeys
 from migkit.config import Endpoint, Hop
+from tests import servers
+from tests.conftest import needs_docker
+
+PROVES = [("verify.structure.triggers", "mysql"),
+          ("verify.structure.collection-options", "mysql"),
+          ("verify.value.one-plan", "mysql")]
 
 
 def _engine(tmp_path, answer, **kw):
@@ -247,3 +255,114 @@ def test_the_deep_check_runs_all_three(tmp_path):
     src = inspect.getsource(MySQLEngine.check_deep)
     for name in ("_deep_triggers", "_deep_render", "_deep_table_options"):
         assert f"self.{name}(db, ddb)" in src, name
+
+
+# ---- on the sandbox's servers ------------------------------------------------
+
+my = servers.fixture("mysql")
+
+
+def _served(space, tmp_path):
+    from migkit.engines.mysql import MySQLEngine
+    hop = Hop(name="deep", engine="mysql", source=space.src.endpoint(),
+              target=space.dst.endpoint(), databases=[space.name],
+              options=hopkeys.normalised(hopkeys.HOP_OPTIONS, {}))
+    hop.report_dir = lambda db=None, _p=tmp_path: _p
+    eng = MySQLEngine(hop)
+    return eng, space.name, eng._d("dst", space.name)
+
+
+def _on_both(space, db, *stmts):
+    for side in (space.src, space.dst):
+        for s in stmts:
+            side.sql(s, db)
+
+
+@needs_docker
+def test_mysql_holds_each_trigger_to_the_targets_on_a_server(my, tmp_path):
+    eng, db, ddb = _served(my, tmp_path)
+    _on_both(my, db, f"drop table if exists `{db}`.t",
+             f"create table `{db}`.t (id int primary key, b varchar(20))",
+             f"create trigger `{db}`.trg before insert on `{db}`.t for each"
+             " row set new.b = upper(new.b)")
+    got = eng._deep_triggers(db, ddb)
+    assert [r.status for r in got] == ["ok"], [r.detail for r in got]
+    assert "1 triggers" in got[0].detail
+    # the target's fires after, and does something else
+    my.dst.sql(f"drop trigger `{db}`.trg", db)
+    my.dst.sql(f"create trigger `{db}`.trg after insert on `{db}`.t for"
+               " each row set @seen = new.id", db)
+    got = eng._deep_triggers(db, ddb)
+    assert got[0].status == "diff", got[0].detail
+    assert "timing BEFORE -> AFTER" in got[0].detail
+    assert "the body differs" in got[0].detail
+    # one the target lacks is named, never read as clean
+    my.dst.sql(f"drop trigger `{db}`.trg", db)
+    got = eng._deep_triggers(db, ddb)
+    assert got[0].status == "diff" and "on the source only" in got[0].detail
+
+
+@needs_docker
+def test_mysql_holds_each_tables_storage_to_the_targets_on_a_server(
+        my, tmp_path):
+    eng, db, ddb = _served(my, tmp_path)
+    _on_both(my, db, f"drop table if exists `{db}`.t",
+             f"create table `{db}`.t (id int primary key) engine=InnoDB"
+             " row_format=dynamic")
+    got = eng._deep_table_options(db, ddb)
+    assert got.status == "ok", got.detail
+    assert got.category == "structure.collection-options"
+    # an option that changes its size and speed only is a note
+    my.dst.sql(f"alter table `{db}`.t stats_persistent=0", db)
+    got = eng._deep_table_options(db, ddb)
+    assert got.status == "warn", got.detail
+    assert "stats_persistent" in got.detail.lower()
+    # an engine that takes no transaction is a difference
+    my.dst.sql(f"alter table `{db}`.t engine=MyISAM", db)
+    got = eng._deep_table_options(db, ddb)
+    assert got.status == "diff", got.detail
+    assert "engine innodb -> myisam" in got.detail
+
+
+@needs_docker
+def test_mysql_reads_every_column_of_a_table_in_one_read_a_side_on_a_server(
+        my, tmp_path):
+    eng, db, ddb = _served(my, tmp_path)
+    _on_both(my, db, f"drop table if exists `{db}`.t",
+             f"create table `{db}`.t (id int primary key, a varchar(20),"
+             " b text, f double) character set utf8mb4")
+    my.src.sql(f"insert into `{db}`.t values (1, 'x', null, 1.5),"
+               " (2, '', 'y', 2.5), (3, null, 'z', null)", db)
+    # the target holds one empty text as NULL
+    my.dst.sql(f"insert into `{db}`.t values (1, 'x', null, 1.5),"
+               " (2, null, 'y', 2.5), (3, null, 'z', null)", db)
+    asked, real = [], eng._q
+
+    def q(side, sql, args=None, fresh=False):
+        asked.append((side, sql))
+        return real(side, sql, args, fresh)
+    eng._q = q
+    scans = eng._deep_scans(db)
+    assert scans is not None
+    reads = [(side, sql) for side, sql in asked
+             if "is null)" in sql and "`t`" in sql]
+    assert {side for side, _ in reads} == {"src", "dst"}
+    # each read of the table carries every column's aggregates, never one
+    # column a read: as many reads a side as the table has key ranges
+    for _, sql in reads:
+        assert all(f"`{c}` is null" in sql for c in ("a", "b")), sql
+        assert "count(`f`)" in sql, sql
+    by_side = {s: sum(1 for side, _ in reads if side == s)
+               for s in ("src", "dst")}
+    assert by_side["src"] == by_side["dst"] == len(
+        {sql for side, sql in reads if side == "src"}), by_side
+    def said(got):
+        return [(r.status, r.detail) for r in
+                (got if isinstance(got, list) else [got])]
+    null = said(eng._deep_nullempty(db, ddb, scans))
+    assert any(status == "diff" for status, _ in null), null
+    # a check given the plan reads the table no more
+    before = len(asked)
+    flt = said(eng._deep_float(db, ddb, scans))
+    assert flt and all(status == "ok" for status, _ in flt), flt
+    assert not [s for _, s in asked[before:] if "`t`" in s and "sum(" in s]

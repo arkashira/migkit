@@ -9,9 +9,10 @@ from migkit import decide, hopkeys, transforms
 from tests import servers
 from tests.conftest import needs_docker
 
-# the depth matrix's scope.transforms cell for postgres and mysql is
-# still declared not yet in `capabilities`; this module proves it once
-# that cell is the owner's to turn
+# the move hands a masked or transformed table to the pair, which writes
+# it through the hop's transforms, and the check asks the pair of it: the
+# depth matrix's scope.transforms cell, on both servers below
+PROVES = [("scope.transforms", ("postgres", "mysql"))]
 
 LOWER = "lower(email)"
 DIGITS = "regexp_replace(phone, '[0-9]', '#', 'g')"

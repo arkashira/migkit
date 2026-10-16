@@ -462,7 +462,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `drainmark` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1212` decision -> workflows (`drainmark`)
+- `migkit/capabilities.py:1214` decision -> workflows (`drainmark`)
 
 ### a rung or plan reads `drift` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -470,7 +470,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `jobs` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1218` decision -> workflows (`jobs`)
+- `migkit/capabilities.py:1220` decision -> workflows (`jobs`)
 
 ### a rung or plan reads `leaves` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -505,7 +505,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `topicstates` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1154` decision -> workflows (`topicstates`)
+- `migkit/capabilities.py:1156` decision -> workflows (`topicstates`)
 
 ### a rung or plan reads `unchanged` for what the workflow can do; ends when the workflow publishes its abilities below decision
 

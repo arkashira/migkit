@@ -23,7 +23,7 @@ UNPROVED_ITEMS = (
     "assess.brands assess.capacity assess.engine-checks assess.handwork "
     "assess.preflight assess.versions assess.writers cutover.jobs "
     "move.create-missing move.load-window move.partitioned schema.defaults "
-    "schema.indexes tail.quiet tail.renames "
+    "schema.indexes scope.transforms tail.quiet tail.renames "
     "tail.table-states verify.access.object-ownership "
     "verify.access.sequence-grants verify.access.table-grants "
     "verify.structure.indexes verify.structure.partitions "

@@ -1021,6 +1021,8 @@ _SCOPE = (frozenset({"in_scope", "_scoped_rows", "takes", "takes_table",
 _OBJECTS = (frozenset({"takes", "takes_object"}), frozenset())
 _ROW_FILTER = (frozenset({"row_filter"}), frozenset({"rowfilter"}))
 _TRANSFORMS = (frozenset({"masked_on_the_way"}), frozenset({"transforms"}))
+#: a table whose columns the hop masks handed to the pair (`through_pair`)
+_PAIR_MASKS = (frozenset({"through_pair"}), frozenset())
 #: a table the hop renames or maps handed to the pair, which reads the
 #: name rules (`through_pair`), or the rules read here
 _NAME_RULES = (frozenset({"target_table_in", "target_table",
@@ -1363,8 +1365,16 @@ def _items():
                                                     "check_data"),
                                                    _ROW_FILTER)),
         "scope.transforms": ("a column written transformed is copied and"
-                             " checked as written",
-                             _both(("check_data",), _TRANSFORMS)),
+                             " checked as written", lambda n, c: _both(
+                                 ("check_data",), _TRANSFORMS)(n, c) or (
+                                 # the move hands a masked table to the
+                                 # pair, which writes it through the hop's
+                                 # transforms (`cli._copy_table_by`), and
+                                 # its check asks the pair of it too
+                                 not getattr(c, "OWN_PATHS_READ_COLUMN_MAPPING",
+                                             True)
+                                 and _every(("check_data",),
+                                            _PAIR_MASKS)(n, c))),
         "scope.names": ("the hop's name rules read by its copy and its"
                         " check alike", lambda n, c: _both(
                             ("check_data",), _NAME_RULES)(n, c) or (
@@ -1682,7 +1692,7 @@ DEPTH_GAPS = {
     },
     "scope.transforms": {
         **_each(NOT_YET, "P0-PARITY.scope",
-                "postgres mysql mongodb mssql redis kafka sqlite parquet "
+                "mongodb redis kafka sqlite parquet "
                 "clickhouse dynamodb oracle db2 db2i db2zos ase teradata "
                 "opensearch cassandra redshift snowflake bigquery duckdb "
                 "copybook iceberg delta tidb cockroachdb dsql couchbase "
@@ -2787,8 +2797,8 @@ UNPROVED = {
     "verify.confirm": "clickhouse db2i cockroachdb dsql couchbase",
     # the catalogue reads of these are written and have not run against a
     # server (`_deep_triggers`, `_deep_render`, `_deep_table_options`)
-    "verify.structure.triggers": "mysql oracle cassandra teradata cosmosdb",
-    "verify.structure.collection-options": "mysql clickhouse oracle cassandra tidb redshift snowflake",
+    "verify.structure.triggers": "oracle cassandra teradata cosmosdb",
+    "verify.structure.collection-options": "clickhouse oracle cassandra tidb redshift snowflake",
     "verify.value.rendering": "clickhouse mssql oracle",
     "verify.repair": "cockroachdb dsql couchbase clickhouse opensearch cassandra redshift snowflake",
     "verify.repair-undo": "cockroachdb dsql couchbase clickhouse opensearch cassandra redshift snowflake",
@@ -2881,9 +2891,9 @@ DEPTH_GAPS["verify.value.one-plan"] = {
     **{n: v for n, v in DEPTH_GAPS["verify.value.null-empty"].items()
        if v[0] == NOT_APPLICABLE},
 }
-# MySQL's plan (`MySQLEngine._deep_scans`) is proved through `scanplan`'s
-# own tests only; no test drives the engine's methods on fakes yet
-UNPROVED["verify.value.one-plan"] = "mysql tidb oceanbase polardbx dcdb"
+# MySQL's plan (`MySQLEngine._deep_scans`) is proved on the sandbox's
+# MySQL; the servers on its dialect have not run it
+UNPROVED["verify.value.one-plan"] = "tidb oceanbase polardbx dcdb"
 #: a collection created while a change stream is followed, and one that
 #: leaves the scope and returns, go by their generations in the code
 #: (`MongoEngine._new_generations`); no test names either yet
