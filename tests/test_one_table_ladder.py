@@ -211,8 +211,11 @@ def test_every_measured_number_seeds_the_cost_model():
     # the copier's two ways share one start: one program, the table copier
     assert ways[PT].start == ways[ROWS].start == "copier"
     assert ways[ROWS].through and not ways[PT].through
+    # only the dump and the copier's rows mask: the rows go through the pair
+    # (`through_pair`); the straight and pass-through copies move the values
+    # as they are
     assert [w.name for w in MySQLEngine.TABLE_WAYS
-            if "masked on the way" in w.gives] == [DL]
+            if "masked on the way" in w.gives] == [DL, ROWS]
     from tests.test_the_report_does_not_name_its_tools import TOOLS
     said = " ".join(w.said + " " + w.short
                     for w in MySQLEngine.TABLE_WAYS).lower()

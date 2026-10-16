@@ -6,7 +6,8 @@ cutover (R20.11). Never because of what the server is called.
 Without a server: a scripted one (`tests/mssql_stub.py`) answers the
 counters and the hashes, and what is held is which tables the check reads
 again and what it says about them. The two counter statements have not run
-on a SQL Server; CockroachDB and MySQL have no counters read (`UNPROVED`).
+on a SQL Server; CockroachDB has no counters read (`UNPROVED`); MySQL reads
+its table I/O counters (stub tests only).
 """
 import json
 
@@ -249,11 +250,24 @@ def test_no_brand_list_decides_what_is_trusted():
 
 
 def test_kinds_without_counters_read_are_declared_unproved_and_never_skip():
-    assert {"mysql", "cockroachdb"} <= set(unchanged.UNPROVED)
-    for kind in ("mysql", "cockroachdb", "citus", "no-such-kind"):
+    assert "cockroachdb" in unchanged.UNPROVED
+    assert "mysql" not in unchanged.UNPROVED
+    assert unchanged.COUNTERS["mysql"].counted == ("inserts", "updates",
+                                                   "deletes")
+    for kind in ("cockroachdb", "citus", "no-such-kind"):
         got = unchanged.judge(kind, {"src": "A", "dst": "B"}, "A", "B")
         assert not got.skip and got.why, kind
     assert "empty" in unchanged.UNPROVED["cockroachdb"]
+    mark = "1700000000|5|2|1|2026-10-01 08:00:00|77|3:abc"
+    assert unchanged.judge("mysql", {"src": mark, "dst": mark}, mark, mark).skip
+    moved = "1700000000|6|2|1|2026-10-01 08:00:00|77|3:abc"
+    got = unchanged.judge("mysql", {"src": mark, "dst": mark}, moved, mark)
+    assert not got.skip and "rows were inserted" in got.why
+    # a marker the kind does not write is never believed, equal or not
+    for junk in ("A", "1|2"):
+        got = unchanged.judge("mysql", {"src": junk, "dst": junk}, junk, junk)
+        assert not got.skip and "not one this kind of server writes" in \
+            got.why, junk
 
 
 def test_the_verdict_says_why_for_every_refusal():

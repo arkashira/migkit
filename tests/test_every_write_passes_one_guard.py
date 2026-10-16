@@ -73,7 +73,7 @@ def _change_target(root):
 # ---- the aliases are the move ----------------------------------------------
 
 def test_tail_into_a_hop_that_masks_is_refused(lite):
-    root = lite("    options: {mask_on_write: {t.v: null}}\n")
+    root = lite("    options: {mask_on_write: {t.v: 'null'}}\n")
     before = _target(root)
     got, said = _run("tail", "lite", "--db", "main", "--go")
     assert got.exit_code == verdict.EXIT["refused"], said
@@ -278,11 +278,12 @@ def test_a_guard_says_in_a_plan_what_stops_go(monkeypatch):
     said = []
     monkeypatch.setattr(cli.console, "print",
                         lambda m="", **k: said.append(str(m)))
-    cli._guard_write(hop, None, "a move", None, False)
+    monkeypatch.setattr(cli, "_interlock", lambda *a, **k: None)
+    cli._guard_write(hop, None, "a move", ["main"], False)
     assert any("with --go this stops" in m and "goal verify" in m
                for m in said), said
     with pytest.raises(verdict.Refused, match="goal verify"):
-        cli._guard_write(hop, None, "a move", None, True)
+        cli._guard_write(hop, None, "a move", ["main"], True)
 
 
 # ---- flags that do not go together ------------------------------------------
@@ -377,7 +378,7 @@ def test_the_guard_s_refusals_are_in_the_troubleshooting_guide():
     the guide an operator searches, as a `SystemExit` always was."""
     from migkit import troubleshooting
     texts = [t for _, _, t in troubleshooting.refusals()]
-    assert any("masks columns on the way, and a change stream" in t
+    assert any("masks columns on the way, and this engine's change stream" in t
                for t in texts), texts
     assert any(t.startswith("--drop tears the stream down") for t in texts)
     # another module's `Refused` is its own: a converter's reason, not a

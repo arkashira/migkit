@@ -110,8 +110,9 @@ VARS = {
     "MIGKIT_EXPLAIN": Var("print why each way was chosen", "flag", False),
     "MIGKIT_CROSSCHECK": Var("read the data a second way beside the"
                              " first", "flag", False),
-    "MIGKIT_REPAIR_TEXT": Var("include the statements of a repair in its"
-                              " report", "flag", False),
+    "MIGKIT_REPAIR_TEXT": Var("let the repair of double-encoded text write its"
+                              " fixes to the target; off, it only says"
+                              " what it would change", "flag", False),
     "GRANTS_IGNORE_ROLES": Var("accounts and roles the grant checks leave"
                                " out, beside the servers' and providers'"
                                " own", "list"),

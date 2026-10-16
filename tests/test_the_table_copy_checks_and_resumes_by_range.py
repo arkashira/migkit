@@ -11,6 +11,7 @@ since ("done earlier, skip").
 import pytest
 
 from migkit.config import Endpoint, Hop
+from migkit.decide import Exhausted
 from tests.conftest import needs_docker, psql
 
 #: what this module proves, item by engine (`capabilities.proofs`)
@@ -121,8 +122,9 @@ def test_a_crash_resumes_with_the_ranges_not_done(engine, pg_pair,
         return real(*a, **k)
     monkeypatch.setattr(engine, "_copy_checked", dies_on_the_third)
     ck = _Checkpoint(tmp_path / "move.json")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(Exhausted) as e:
         _move(engine, ck, [])
+    assert isinstance(e.value.__cause__, RuntimeError)
     planned = len(ck["public.big"]["ranges"])
     finished = len(ck["public.big"]["ranges_done"])
     assert 0 < finished < planned
@@ -207,8 +209,9 @@ def test_a_table_with_no_key_resumes_by_where_its_rows_are_stored(
         return real(*a, **k)
     monkeypatch.setattr(engine, "_copy_pipe", dies_on_the_third)
     ck = _Checkpoint(tmp_path / "move.json")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(Exhausted) as e:
         engine.move_table("postgres", "public", "log", 500_000, ck, [].append)
+    assert "the connection went away" in str(e.value)
     st = _Checkpoint(tmp_path / "move.json")["public.log"]
     assert len(st["spans"]) >= 4 and len(st["spans_done"]) == 2, st
 
@@ -220,9 +223,10 @@ def test_a_table_with_no_key_resumes_by_where_its_rows_are_stored(
     def lost_after_commit(*a, **k):
         raise RuntimeError("stopped before the checkpoint")
     monkeypatch.setattr(ranges, "span_copied", lost_after_commit)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(Exhausted) as e:
         engine.move_table("postgres", "public", "log", 500_000,
                           _Checkpoint(tmp_path / "move.json"), [].append)
+    assert "stopped before the checkpoint" in str(e.value)
     monkeypatch.setattr(ranges, "span_copied", real_done)
     again = []
     monkeypatch.setattr(engine, "_copy_pipe",

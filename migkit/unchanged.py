@@ -259,6 +259,8 @@ class MySqlCounters(Counters):
 
     def dead(self, marker):
         p = self.parts(marker)
+        if not p:
+            return "the marker is not one this kind of server writes"
         if p.get("inserts") in ("", "NULL", "None"):
             return "the table has no row counter, and no counter is not zero"
         if p.get("table_id") in ("", "NULL", "None"):
