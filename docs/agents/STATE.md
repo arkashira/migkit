@@ -8,7 +8,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 | engine | capabilities | shapes | depth owed | not yet |
 |---|---|---|---|---|
-| ase | 6/16 | 11/12 | 66 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| ase | 15/16 | 11/12 | 66 | stream, partitioned |
 | bigquery | 15/16 | 12/12 | 48 | users |
 | bigtable | 16/16 | 11/12 | 40 | large values |
 | cassandra | 16/16 | 12/12 | 29 | - |
@@ -65,7 +65,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 150, n/a 1412, not yet 1325, test owed 912, yes 953. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 158, n/a 1412, not yet 1317, test owed 912, yes 953. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -126,7 +126,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 Built, unproved - a way the code has on an engine no sandbox here can run; the engine's module says which server it was not run on (`UNPROVED_ON`):
 
-- ase: built; not run on a real SAP ASE server (7 cells)
+- ase: built; not run on a real SAP ASE server (15 cells)
 - db2: built; not run on a real Db2 LUW server (46 cells)
 - db2i: built; not run on a real IBM i (52 cells)
 - db2zos: built; not run on a real Db2 for z/OS subsystem (45 cells)
@@ -139,7 +139,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | scope.deep | cassandra clickhouse cockroachdb cosmosdb db2 dynamodb generic kafka mongodb mssql mysql opensearch oracle postgres redis teradata tidb | the rest (21) | ase db2i db2zos | copybook couchbase delta iceberg neo4j neptune parquet sqlite | kinesis pubsub saas sapodp timestream |
 | scope.copy | the rest (20) | bigtable datastore dcdb firestore gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm neo4j neptune oceanbase oceanbase-oracle polardbx qdrant spanner timestream | ase db2 | copybook couchbase db2i db2zos delta duckdb hetero iceberg parquet saas sapodp sqlite | kinesis pubsub |
 | scope.repair | cassandra clickhouse cosmosdb dynamodb generic hetero kafka mongodb mssql mysql opensearch oracle postgres redis redshift snowflake sqlite teradata tidb | the rest (22) | db2 db2i db2zos | ase copybook delta duckdb iceberg parquet | kinesis pubsub saas sapodp |
-| scope.counters | mssql mysql oracle postgres tidb | cockroachdb dcdb dsql duckdb gaussdb oceanbase oceanbase-oracle polardbx | db2 db2i db2zos | ase generic hetero redshift snowflake spanner sqlite | the rest (31) |
+| scope.counters | mssql mysql oracle postgres tidb | cockroachdb dcdb dsql duckdb gaussdb oceanbase oceanbase-oracle polardbx | ase db2 db2i db2zos | generic hetero redshift snowflake spanner sqlite | the rest (31) |
 | scope.objects | generic kafka mongodb mssql mysql oracle postgres tidb | the rest (19) | db2 db2i db2zos | ase bigtable couchbase datastore delta firestore hetero iceberg lindorm neo4j polardbx spanner timestream | copybook dynamodb geminidb-redis kinesis neptune parquet pubsub qdrant redis saas sapodp |
 | scope.ops | bigquery cassandra clickhouse cockroachdb cosmosdb dsql dynamodb generic hetero mongodb mssql mysql opensearch oracle postgres redis redshift snowflake tidb | the rest (20) | db2i | ase db2 kafka lindorm oceanbase-oracle | copybook datastore db2zos duckdb parquet qdrant sqlite teradata timestream |
 | scope.row-filter | bigquery clickhouse cockroachdb dsql duckdb generic hetero mongodb mysql opensearch oracle postgres redshift sqlite teradata tidb | the rest (27) | ase db2 db2i db2zos | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
@@ -176,10 +176,10 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | verify.value.rendering | dsql mongodb mysql postgres | bigquery clickhouse cockroachdb dcdb geminidb-mongo mssql oceanbase oracle | db2 db2i db2zos | the rest (27) | bigtable cassandra cosmosdb dynamodb geminidb-redis kafka kinesis opensearch pubsub redis saas sapodp |
 | verify.value.timezone | cassandra dsql mongodb mysql postgres teradata tidb | bigquery clickhouse cockroachdb dcdb geminidb-cassandra geminidb-mongo keyspaces mssql oceanbase opensearch oracle | db2 db2i db2zos | the rest (23) | bigtable cosmosdb dynamodb geminidb-redis kafka kinesis pubsub redis saas sapodp |
 | verify.value.type-drift | cosmosdb dynamodb mongodb opensearch | geminidb-mongo kafka | - | bigtable couchbase datastore firestore geminidb-redis generic hetero neo4j neptune qdrant sqlite timestream | the rest (36) |
-| verify.delta | cassandra clickhouse cosmosdb dynamodb generic hetero kafka mongodb mssql mysql opensearch oracle postgres redis tidb | the rest (16) | db2 db2i | ase delta iceberg lindorm oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
-| verify.fence | the rest (22) | bigquery bigtable geminidb-mongo keyspaces neo4j neptune oceanbase polardbx | db2 db2i | ase delta iceberg lindorm oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
-| verify.confirm | cassandra cosmosdb dynamodb generic hetero kafka mongodb mssql mysql opensearch oracle postgres redis tidb | the rest (15) | db2 db2i | ase delta iceberg lindorm neo4j oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
-| verify.users | the rest (23) | - | db2 db2zos | ase bigquery cockroachdb couchbase dsql neo4j redshift snowflake tidb | bigtable copybook cosmosdb datastore delta duckdb dynamodb firestore generic iceberg keyspaces kinesis neptune parquet pubsub qdrant saas sapodp sqlite timestream |
+| verify.delta | cassandra clickhouse cosmosdb dynamodb generic hetero kafka mongodb mssql mysql opensearch oracle postgres redis tidb | the rest (16) | ase db2 db2i | delta iceberg lindorm oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
+| verify.fence | the rest (22) | bigquery bigtable geminidb-mongo keyspaces neo4j neptune oceanbase polardbx | ase db2 db2i | delta iceberg lindorm oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
+| verify.confirm | cassandra cosmosdb dynamodb generic hetero kafka mongodb mssql mysql opensearch oracle postgres redis tidb | the rest (15) | ase db2 db2i | delta iceberg lindorm neo4j oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb geminidb-cassandra geminidb-redis kinesis parquet pubsub qdrant saas sapodp sqlite teradata timestream |
+| verify.users | the rest (23) | - | ase db2 db2zos | bigquery cockroachdb couchbase dsql neo4j redshift snowflake tidb | bigtable copybook cosmosdb datastore delta duckdb dynamodb firestore generic iceberg keyspaces kinesis neptune parquet pubsub qdrant saas sapodp sqlite timestream |
 | verify.repair | cosmosdb dsql dynamodb generic hetero kafka mongodb mssql mysql oracle postgres redis sqlite teradata tidb | the rest (26) | db2 db2i db2zos | ase copybook delta duckdb iceberg parquet | kinesis pubsub saas sapodp |
 | verify.repair-undo | cosmosdb dsql dynamodb generic hetero kafka mongodb mssql mysql oracle postgres redis sqlite teradata tidb | the rest (26) | db2 db2i db2zos | ase copybook delta duckdb iceberg parquet | kinesis pubsub saas sapodp |
 | verify.rows-apart | cassandra clickhouse cosmosdb dsql dynamodb kafka mongodb mssql mysql opensearch oracle postgres redis sqlite | cockroachdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces | - | the rest (32) | kinesis pubsub |
@@ -205,7 +205,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | schema.views | dsql mssql mysql oracle postgres tidb | bigquery clickhouse cockroachdb dcdb gaussdb geminidb-mongo mongodb oceanbase polardbx redshift snowflake teradata | - | ase bigtable couchbase db2 db2i db2zos duckdb generic iceberg lindorm oceanbase-oracle opensearch spanner sqlite | the rest (22) |
 | schema.routines | mssql mysql oracle postgres | bigquery cockroachdb dcdb geminidb-mongo mongodb oceanbase polardbx | - | the rest (23) | bigtable copybook datastore delta dynamodb firestore hetero iceberg kafka keyspaces kinesis neptune parquet pubsub qdrant saas sapodp sqlite tidb timestream |
 | move.table-copy | the rest (38) | bigquery dcdb geminidb-cassandra geminidb-mongo lindorm neo4j oceanbase-oracle polardbx snowflake timestream | db2i db2zos | - | kinesis pubsub saas sapodp |
-| move.bulk | the rest (22) | bigquery geminidb-cassandra geminidb-mongo hetero keyspaces | db2 db2i db2zos | ase cockroachdb cosmosdb couchbase dcdb delta iceberg neo4j oceanbase oceanbase-oracle polardbx qdrant redshift snowflake tidb | dsql geminidb-redis generic kinesis lindorm pubsub saas sapodp teradata |
+| move.bulk | the rest (22) | bigquery geminidb-cassandra geminidb-mongo hetero keyspaces | ase db2 db2i db2zos | cockroachdb cosmosdb couchbase dcdb delta iceberg neo4j oceanbase oceanbase-oracle polardbx qdrant redshift snowflake tidb | dsql geminidb-redis generic kinesis lindorm pubsub saas sapodp teradata |
 | move.large-values | ase clickhouse db2 delta duckdb generic hetero iceberg kafka mongodb mssql mysql opensearch oracle parquet postgres redis sqlite tidb | bigquery couchbase snowflake teradata | db2i db2zos | the rest (20) | cassandra copybook cosmosdb dynamodb kinesis pubsub redshift saas sapodp |
 | move.partitioned | clickhouse generic kafka mysql postgres tidb | bigquery dcdb mssql oceanbase oracle parquet polardbx teradata | db2 db2i db2zos | ase delta gaussdb hetero iceberg lindorm neo4j oceanbase-oracle qdrant | the rest (28) |
 | move.spread | hetero postgres | cassandra mongodb mysql | - | - | the rest (49) |
@@ -214,8 +214,8 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | move.create-missing | cosmosdb dsql dynamodb hetero mysql opensearch oracle postgres teradata tidb | bigquery cassandra clickhouse cockroachdb dcdb gaussdb geminidb-cassandra kafka keyspaces mssql oceanbase polardbx redshift snowflake | - | the rest (19) | datastore firestore geminidb-mongo geminidb-redis kinesis mongodb neptune pubsub redis saas sapodp |
 | cutover.freeze | cassandra clickhouse cockroachdb kafka mongodb mssql mysql opensearch postgres redis redshift snowflake teradata tidb | couchbase dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis hetero oceanbase oceanbase-oracle oracle polardbx | ase db2 | - | the rest (27) |
 | cutover.read-only-target | the rest (22) | dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis hetero oceanbase oceanbase-oracle polardbx | db2i db2zos | - | bigtable copybook cosmosdb datastore delta duckdb firestore generic iceberg keyspaces kinesis neo4j neptune parquet pubsub qdrant saas sapodp spanner sqlite timestream |
-| cutover.counters | dcdb duckdb gaussdb hetero mssql mysql oceanbase-oracle oracle polardbx postgres spanner sqlite tidb | cockroachdb dsql oceanbase | db2 db2i db2zos | ase redshift snowflake | the rest (32) |
-| cutover.rollback | the rest (20) | bigquery bigtable copybook datastore geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm mongodb neptune oceanbase polardbx | db2 db2i db2zos | ase cockroachdb cosmosdb couchbase delta dsql iceberg neo4j qdrant redshift snowflake tidb | generic kinesis pubsub saas sapodp teradata |
+| cutover.counters | dcdb duckdb gaussdb hetero mssql mysql oceanbase-oracle oracle polardbx postgres spanner sqlite tidb | cockroachdb dsql oceanbase | ase db2 db2i db2zos | redshift snowflake | the rest (32) |
+| cutover.rollback | the rest (20) | bigquery bigtable copybook datastore geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm mongodb neptune oceanbase polardbx | ase db2 db2i db2zos | cockroachdb cosmosdb couchbase delta dsql iceberg neo4j qdrant redshift snowflake tidb | generic kinesis pubsub saas sapodp teradata |
 | cutover.drain | the rest (21) | bigquery bigtable geminidb-cassandra geminidb-mongo geminidb-redis keyspaces neptune oceanbase polardbx saas | db2 db2i | ase delta generic hetero iceberg lindorm neo4j oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb kinesis parquet pubsub qdrant sqlite teradata timestream |
 | cutover.pause-replication | mysql postgres | - | - | generic neo4j qdrant redis | the rest (48) |
 | cutover.two-way | cassandra dynamodb kafka mongodb mysql postgres redis teradata | geminidb-cassandra geminidb-mongo geminidb-redis keyspaces | - | the rest (31) | copybook db2zos duckdb hetero kinesis parquet pubsub qdrant saas sapodp sqlite |
@@ -228,7 +228,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 369 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
-Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 37 shape lacks, 81 capability lacks, 2150 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> ase (153).
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 37 shape lacks, 72 capability lacks, 2150 depth lacks in all; fewest kinesis -> postgres (6), most polardbx -> oceanbase-oracle (145).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

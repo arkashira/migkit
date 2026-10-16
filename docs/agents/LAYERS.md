@@ -30,7 +30,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
 
-- `migkit/charsets.py:1245` conversion -> decision (`decide`)
+- `migkit/charsets.py:1427` conversion -> decision (`decide`)
 - `migkit/pieces.py:155` conversion -> decision (`decide`)
 - `migkit/storedcode/collations.py:78` conversion -> decision (`decide`)
 - `migkit/storedcode/rungs.py:22` conversion -> decision (`decide`)
@@ -49,7 +49,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a conversion calls `consolidate`, the workflow it serves; the call is inverted into a hook
 
-- `migkit/charsets.py:1430` conversion -> workflows (`consolidate`)
+- `migkit/charsets.py:1612` conversion -> workflows (`consolidate`)
 
 ### a conversion calls `cutover`, the workflow it serves; the call is inverted into a hook
 
@@ -61,7 +61,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a conversion calls `physical`, the workflow it serves; the call is inverted into a hook
 
-- `migkit/charsets.py:1074` conversion -> workflows (`physical`)
+- `migkit/charsets.py:1253` conversion -> workflows (`physical`)
 
 ### a conversion calls `streamout`, the workflow it serves; the call is inverted into a hook
 
@@ -92,7 +92,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a conversion reads an engine (`engines.base`) for its catalogue or connection; the engine contract moves below conversion in the engine split
 
-- `migkit/charsets.py:231` conversion -> engines (`engines.base`)
+- `migkit/charsets.py:261` conversion -> engines (`engines.base`)
 - `migkit/pieces.py:579` conversion -> engines (`engines.base`)
 - `migkit/schemaformats.py:1079` conversion -> engines (`engines.base`)
 - `migkit/storedcode/builtins.py:378` conversion -> engines (`engines.base`)
@@ -118,7 +118,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a conversion reads an engine (`engines.hetero`) for its catalogue or connection; the engine contract moves below conversion in the engine split
 
-- `migkit/charsets.py:286` conversion -> engines (`engines.hetero`)
+- `migkit/charsets.py:316` conversion -> engines (`engines.hetero`)
 - `migkit/storedcode/sandbox.py:275` conversion -> engines (`engines.hetero`)
 
 ### a conversion reads an engine (`engines.mssql`) for its catalogue or connection; the engine contract moves below conversion in the engine split
@@ -133,7 +133,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a conversion reads an engine (`engines`) for its catalogue or connection; the engine contract moves below conversion in the engine split
 
 - `migkit/canon.py:346` conversion -> engines (`engines`)
-- `migkit/charsets.py:204` conversion -> engines (`engines`)
+- `migkit/charsets.py:234` conversion -> engines (`engines`)
 - `migkit/commercial.py:84` conversion -> engines (`engines`)
 - `migkit/storedcode/sandbox.py:274` conversion -> engines (`engines`)
 

@@ -1175,6 +1175,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * ODBC is not usable on this machine (<...>): brew install unixodbc freetds, or apt-get install unixodbc tdsodbc
 
+* <...>: the server inserted <...> rows of <...>. The table is not taken as moved; move it with the table copier
+
 ## Teradata
 
 * <...> holds months, which a Teradata <...> has no room for

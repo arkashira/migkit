@@ -245,17 +245,17 @@ GAPS = {
         ("saas", "a SaaS application",
          "who may use an application is the application's own, not"
          " carried"))},
+    # built on what the ASE 16 reference documents and proved on fakes
+    # answering its catalogue (R13-ASE): settings, identity counters, the
+    # server's own insert-select, logins, users, groups and roles,
+    # statistics, the rollback point; fence and confirm through the pair,
+    # delta by each table's timestamp column - every one "built; not run
+    # on a real SAP ASE server" (`ase.UNPROVED_ON`)
     "ase": {
-        "sequences": (NOT_YET, "34"),
-        "params": (NOT_YET, "34"),
-        "bulk-move": (NOT_YET, "34"),
+        # its log is read by the replication agent into the replication
+        # server, licensed apart from the database; a follow of its own
+        # by the timestamp sweep is not built
         "stream": (NOT_YET, "34"),
-        "fence": (NOT_YET, "34"),
-        "confirm": (NOT_YET, "34"),
-        "delta": (NOT_YET, "34"),
-        "users": (NOT_YET, "34"),
-        "statistics": (NOT_YET, "34"),
-        "snapshot": (NOT_YET, "34"),
     },
     "opensearch": {
         "sequences": (NOT_APPLICABLE, "an index has no sequences or"
@@ -1591,7 +1591,7 @@ DEPTH_GAPS = {
               "opensearch cassandra copybook iceberg delta couchbase "
               "cosmosdb bigquery"),
         **_each(NOT_YET, "P0-PARITY.scope",
-                "sqlite db2 db2i db2zos ase redshift snowflake "
+                "sqlite db2 db2i db2zos redshift snowflake "
                 "duckdb cockroachdb dsql hetero"),
         **_as("schema", "kinesis pubsub"),
         **_as("table-copy", "sapodp saas"),

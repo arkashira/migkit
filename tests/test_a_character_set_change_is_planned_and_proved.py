@@ -402,3 +402,132 @@ def test_a_value_the_target_has_no_code_for_is_refused_by_name(conf):
     assert "wide: notes.body" in out, out
     assert "1 values hold a character latin1 has no code for - by key:" \
         " '2'" in out, out
+
+
+# --- the sets ASE and Teradata keep, and Oracle's column collations ------------
+
+class _Said:
+    """A side answering its catalogue by the statement's words."""
+
+    def __init__(self, engine, answers):
+        self.CANON_ENGINE, self.answers, self.asked = engine, answers, []
+
+    def _answer(self, side, db, sql, args=None):
+        self.asked.append((sql, tuple(args or ())))
+        for key, rows in self.answers:
+            if key in sql:
+                if isinstance(rows, Exception):
+                    raise rows
+                return [list(r) for r in rows]
+        return []
+
+    _rows = run_rule = _answer
+
+    def _d(self, side, db):
+        return db
+
+    def _owner(self, side, db):
+        return db.upper()
+
+
+def _ase(sort="bin_utf8", desc="Binary ordering, for use with UTF-8"):
+    return _Said("ase", [("master..syscharsets", [("utf8", sort, desc)]),
+                         ("default unicode sortorder", [("binary",)])])
+
+
+def test_an_ase_binary_sort_order_into_utf8mb4_says_the_case_rule_change():
+    e = _ase()
+    got = charsets._reader(e, "src", "app", "dbo.t", [
+        ("name", "varchar(20)"), ("u", "univarchar(20)")])
+    assert got["name"].unicode and got["name"].collation == "bin_utf8"
+    assert got["name"].exact is True
+    assert "the server's sort order (bin_utf8)" in got["name"].unread
+    assert got["u"].name == "utf-16" and got["u"].collation == "binary"
+    assert "Unicode sort order" in got["u"].unread
+    # the server's set and sort order are read once, not once a table
+    charsets._reader(e, "src", "app", "dbo.u", [("name", "varchar(20)")])
+    assert sum("syscharsets" in s for s, _ in e.asked) == 1
+    mb4 = charsets.charset("mysql", "utf8mb4", "utf8mb4_0900_ai_ci",
+                           charsets._mysql_exact("utf8mb4_0900_ai_ci"))
+    col = charsets.Column("dbo.t", "t", "name", got["name"], mb4)
+    assert not col.recoded and col.recollated
+    assert "the target takes values the source keeps apart by case" \
+        in col.said()
+    p = charsets.Plan("app", [col])
+    assert charsets.needs_scan(p)
+    rows = charsets._case_rules("app", p)
+    # nothing the source took as one is split: the merges are the
+    # value scan's; what ASE does not give is said
+    assert not any("case rule not kept" in str(r) for r in rows)
+    assert any("ASE keeps no collation of a column" in str(r) for r in rows)
+
+
+def test_an_ase_sort_order_without_case_is_not_exact():
+    assert charsets._ase_exact("nocase_utf8", "Case-insensitive") is False
+    assert charsets._ase_exact("dictionary", "Dictionary order, case"
+                               " sensitive") is True
+    assert charsets._ase_exact("", "") is None
+    assert charsets.charset("ase", "iso_1").codec == "latin_1"
+    assert charsets.charset("ase", "cp1252").codec == "cp1252"
+
+
+def _td(rows):
+    return _Said("teradata", [("DBC.ColumnsV", rows)])
+
+
+def test_a_teradata_latin_column_into_unicode_is_taken_and_back_is_refused():
+    got = charsets._reader(_td([("a", 1, "C"), ("b", 2, "C"),
+                                ("c", 1, "N")]), "src", "app", "t",
+                           [("a", "VARCHAR(9)"), ("b", "VARCHAR(9)"),
+                            ("c", "VARCHAR(9)")])
+    latin, uni = got["a"], got["b"]
+    assert latin.name == "LATIN" and latin.codec == "latin_1"
+    assert uni.name == "UNICODE" and uni.unicode and uni.top == 0xFFFF
+    assert got["c"].collation == "NOT CASESPECIFIC" and got["c"].exact is False
+    assert "beyond its case rule" in latin.unread
+    # LATIN into UNICODE: every character has a code there, nothing to read
+    up = charsets.Plan("app", [charsets.Column("t", "t", "a", latin, uni)])
+    assert up.columns[0].recoded and not charsets.needs_scan(up)
+    assert charsets.convert("café", latin, uni, False) == "café"
+    # UNICODE into LATIN: read, and a value LATIN has no code for refused
+    down = charsets.Plan("app", [charsets.Column("t", "t", "b", uni, latin)])
+    assert charsets.needs_scan(down)
+    assert charsets.fits("ภาษา", latin) is False
+    with pytest.raises(charsets.Unfit):
+        charsets.convert("ภาษา", uni, latin, False)
+
+
+ORA = [("nls_database_parameters", [("NLS_CHARACTERSET", "AL32UTF8"),
+                                    ("NLS_NCHAR_CHARACTERSET", "AL16UTF16")])]
+
+
+def test_an_oracle_case_insensitive_column_into_postgres_is_refused_by_name():
+    e = _Said("oracle", ORA + [("all_tab_cols", [("NAME", "BINARY_CI"),
+                                                 ("CODE", "BINARY")])])
+    got = charsets._reader(e, "src", "app", "PEOPLE", [
+        ("NAME", "VARCHAR2(40)"), ("CODE", "VARCHAR2(4)")])
+    assert got["NAME"].collation == "BINARY_CI" and got["NAME"].exact is False
+    # the database's own comparison is no change to plan
+    assert got["CODE"].collation is None and got["CODE"].exact is True
+    pg = charsets.charset("postgres", "UTF8", "en_US.utf8", True)
+    col = charsets.Column("PEOPLE", "people", "NAME", got["NAME"], pg)
+    assert col.recollated and "the target keeps them apart" in col.said()
+    rows = charsets._case_rules("app", charsets.Plan("app", [col]))
+    refused = [r for r in rows if "case rule not kept" in str(r)]
+    assert refused and "people.NAME (BINARY_CI)" in str(refused[0])
+    assert "nondeterministic" in str(refused[0])
+    # a PostgreSQL target column that compares without case takes it
+    ci = charsets.charset("postgres", "UTF8", "und-u-ks-level2", False)
+    kept = charsets.Column("PEOPLE", "people", "NAME", got["NAME"], ci)
+    assert not any("case rule not kept" in str(r) for r in
+                   charsets._case_rules("app", charsets.Plan("app", [kept])))
+
+
+def test_an_oracle_older_than_column_collations_says_so():
+    e = _Said("oracle", ORA + [("all_tab_cols", RuntimeError(
+        "ORA-00904: \"COLLATION\": invalid identifier"))])
+    got = charsets._reader(e, "src", "app", "PEOPLE", [
+        ("NAME", "VARCHAR2(40)")])
+    assert got["NAME"].collation is None and got["NAME"].exact is True
+    assert "keeps no collation of a column (Oracle 12.2 on does)" \
+        in got["NAME"].unread

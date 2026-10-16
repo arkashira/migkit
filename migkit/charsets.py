@@ -68,6 +68,9 @@ class Charset:
     #: False for a collation under which two different strings can be
     #: one key; None where the server does not say
     exact: bool = None
+    #: what the server does not give of the column, said: "" where it
+    #: gives all of it
+    unread: str = ""
 
     @property
     def known(self):
@@ -149,6 +152,29 @@ DB2 = {1208: _u(""), 1200: _u(""), 13488: _u("", 0xFFFF),
        1383: ("gb2312", 0xFFFF), 1392: ("gb18030", 0x10FFFF),
        950: ("cp950", 0xFFFF), 37: ("cp037", 0xFF), 500: ("cp500", 0xFF),
        **{n: (f"cp{n}", 0xFFFF) for n in range(1250, 1259)}}
+#: SAP ASE's character sets, by their names in `syscharsets`; a `unichar`,
+#: `univarchar` or `unitext` column is UTF-16 whatever the server's is
+ASE = {"utf8": _u(""), "utf-16": _u(""), "iso_1": ("latin_1", 0xFF),
+       "iso15": ("iso8859_15", 0xFFFF), "ascii": ("ascii", 0x7F),
+       "roman8": ("hp_roman8", 0xFFFF), "mac": ("mac_roman", 0xFFFF),
+       "tis620": ("tis_620", 0xFFFF), "sjis": ("shift_jis", 0xFFFF),
+       "eucjis": ("euc_jp", 0xFFFF), "eucgb": ("gb2312", 0xFFFF),
+       "gb18030": ("gb18030", 0x10FFFF), "big5": ("big5", 0xFFFF),
+       "cp936": ("gbk", 0xFFFF), "eucksc": ("euc_kr", 0xFFFF),
+       "iso88592": ("iso8859_2", 0xFFFF), "iso88595": ("iso8859_5", 0xFFFF),
+       "iso88597": ("iso8859_7", 0xFFFF), "iso88598": ("iso8859_8", 0xFFFF),
+       "iso88599": ("iso8859_9", 0xFFFF), "koi8": ("koi8_r", 0xFFFF),
+       **{f"cp{n}": (f"cp{n}", 0xFFFF) for n in (437, 850, 852, 855, 857,
+                                                 860, 864, 866, 869, 874,
+                                                 932, 949, 950)},
+       **{f"cp{n}": (f"cp{n}", 0xFFFF) for n in range(1250, 1259)}}
+#: Teradata's server character sets, by `DBC.ColumnsV.CharType`'s number
+#: and name: its LATIN holds the first 256 code points, its UNICODE the
+#: basic plane
+TERADATA_TYPES = {1: "LATIN", 2: "UNICODE", 3: "KANJISJIS", 4: "GRAPHIC",
+                  5: "KANJI1"}
+TERADATA = {"latin": ("latin_1", 0xFF), "unicode": _u("", 0xFFFF),
+            "graphic": _u("", 0xFFFF), "kanjisjis": ("shift_jis", 0xFFFF)}
 #: the engines whose text is Unicode and nothing else
 UNICODE_ONLY = {"sqlite", "duckdb", "mongodb", "cassandra", "redshift",
                 "snowflake", "bigquery", "dynamodb", "opensearch",
@@ -156,7 +182,7 @@ UNICODE_ONLY = {"sqlite", "duckdb", "mongodb", "cassandra", "redshift",
                 "parquet", "kafka", "kinesis", "pubsub", "cockroachdb",
                 "dsql", "generic", "saas", "sapodp"}
 #: the engines whose charsets `_reader` reads from the server
-READ = ("mysql", "postgres", "mssql", "oracle", "db2")
+READ = ("mysql", "postgres", "mssql", "oracle", "db2", "ase", "teradata")
 #: the engines whose text comparison is exact unless a collation says
 #: otherwise, which `key_merges` answering None means there
 EXACT_BY_DEFAULT = {"postgres", "sqlite", "duckdb", "clickhouse",
@@ -164,7 +190,7 @@ EXACT_BY_DEFAULT = {"postgres", "sqlite", "duckdb", "clickhouse",
                     "snowflake", "bigquery", "dynamodb", "parquet"}
 
 
-def charset(engine, name, collation=None, exact=None):
+def charset(engine, name, collation=None, exact=None, unread=""):
     """The `Charset` an engine's name for a character set is."""
     engine = _family(engine)
     text = str(name or "").strip()
@@ -191,11 +217,15 @@ def charset(engine, name, collation=None, exact=None):
             got = DB2.get(int(low))
         except ValueError:
             got = None
+    elif engine == "ase":
+        got = ASE.get(low)
+    elif engine == "teradata":
+        got = TERADATA.get(low)
     elif engine in UNICODE_ONLY or low in ("utf-8", "utf8"):
         got = _u("")
     if got is None:
-        return Charset(text or "unknown", None, 0, collation, exact)
-    return Charset(text, got[0], got[1], collation, exact)
+        return Charset(text or "unknown", None, 0, collation, exact, unread)
+    return Charset(text, got[0], got[1], collation, exact, unread)
 
 
 def _family(engine):
@@ -375,9 +405,37 @@ def _reader(e, side, db, table, columns):
                              _ms_exact(coll))
     elif engine == "oracle":
         main, national = _ora_db(e, side, db)
+        colls, unread = _ora_collations(e, side, db, table)
         for n, typ in columns:
             nat = str(typ).lower().startswith(("nchar", "nvarchar", "nclob"))
-            out[n] = charset("oracle", national if nat else main, None, True)
+            coll = colls.get(n) or colls.get(str(n).upper())
+            out[n] = charset("oracle", national if nat else main, coll,
+                             _ora_exact(coll), unread)
+    elif engine == "ase":
+        cs, sort, desc, uni, unread = _ase_server(e, side, db)
+        for n, typ in columns:
+            if str(typ).lower().startswith("uni"):
+                out[n] = charset("ase", "utf-16", uni, _ase_exact(uni),
+                                 unread.replace("sort order", "Unicode"
+                                                " sort order"))
+            else:
+                out[n] = charset("ase", cs, sort, _ase_exact(sort, desc),
+                                 unread)
+    elif engine == "teradata":
+        rows = {str(r[0]).strip(): r for r in e._rows(
+            side, db, "select ColumnName, CharType, UpperCaseFlag from"
+                      " DBC.ColumnsV where DatabaseName = \x00?\x00 and"
+                      " TableName = \x00?\x00",
+            (e._d(side, db), str(table).split(".")[-1]))}
+        for n, _ in columns:
+            r = rows.get(str(n)) or (n, None, None)
+            name = TERADATA_TYPES.get(int(r[1])) if r[1] is not None else ""
+            flag = str(r[2] or "").strip().upper()
+            out[n] = charset("teradata", name or "", _TD_CASE.get(flag),
+                             None if not flag else flag == "C",
+                             "Teradata keeps no collation of a column beyond"
+                             " its case rule (CASESPECIFIC or NOT"
+                             " CASESPECIFIC)")
     elif engine == "db2":
         rows = dict(e._rows(side, db, "select colname, codepage from"
                                       " syscat.columns where tabschema ="
@@ -391,6 +449,87 @@ def _reader(e, side, db, table, columns):
             out[n] = charset(engine, "utf-8" if engine in UNICODE_ONLY
                              else "", None, None)
     return out
+
+
+#: Teradata's case rule of a column, by `DBC.ColumnsV.UpperCaseFlag`
+_TD_CASE = {"C": "CASESPECIFIC", "N": "NOT CASESPECIFIC",
+            "U": "UPPERCASE NOT CASESPECIFIC"}
+#: SAP ASE's character set and sort order, the server's alone (its
+#: `default character set id`, 131, and `default sortorder id`, 123, as
+#: `sp_helpsort` reads them), and the sort order of its Unicode columns
+ASE_SORT_SQL = ("select c.name, s.name, s.description from"
+                " master..syscharsets c, master..syscharsets s,"
+                " master..syscurconfigs k, master..syscurconfigs o where"
+                " k.config = 131 and o.config = 123 and c.id = k.value and"
+                " c.type < 2000 and s.id = o.value and s.type >= 2000")
+ASE_UNICODE_SQL = ("select rtrim(cc.value2) from master..sysconfigures c,"
+                   " master..syscurconfigs cc where cc.config = c.config and"
+                   " c.name = 'default unicode sortorder'")
+
+
+def _ase_server(e, side, db):
+    """(character set, sort order, its description, Unicode sort order,
+    what is not read) of an ASE server, read once."""
+    def read():
+        rows = e._rows(side, db, ASE_SORT_SQL)
+        cs, sort, desc = ((str(v).strip() if v is not None else "")
+                          for v in rows[0]) if rows else ("", "", "")
+        try:
+            got = e._rows(side, db, ASE_UNICODE_SQL)
+            uni = str(got[0][0]).strip() if got and got[0][0] else ""
+        except Exception:  # noqa: BLE001 - said, not read
+            uni = ""
+        return (cs, sort or None, desc, uni or None,
+                f"ASE keeps no collation of a column: the server's sort"
+                f" order ({sort or 'not read'}) is each one's")
+    return _cached(e, ("asesrv", side, db), read)
+
+
+def _ase_exact(name, description=""):
+    """Whether an ASE sort order keeps every two different strings apart:
+    a binary or case-sensitive one does, one without case or accents does
+    not; None where its name and description say neither."""
+    text = f"{name or ''} {description or ''}".lower()
+    if not text.strip():
+        return None
+    if any(w in text for w in ("nocase", "noaccent", "insensitive",
+                               "altnoacc", "altnocsp", "noacc")):
+        return False
+    if any(w in text for w in ("bin", "case sensitive", "dict")):
+        return True
+    return None
+
+
+def _ora_collations(e, side, db, table):
+    """({column: collation} of one Oracle table where a column's is other
+    than the database's own comparison, what is not read): the column
+    collations of Oracle 12.2 on; an older server keeps none."""
+    def read():
+        owner = getattr(e, "_owner", None)
+        owner = owner(side, db) if owner else str(db).upper()
+        leaf = str(table).split(".")[-1]
+        names = ", ".join("'" + v.replace("'", "''") + "'"
+                          for v in sorted({leaf, leaf.upper()}))
+        try:
+            rows = e.run_rule(side, db, "select column_name, collation from"
+                                        " all_tab_cols where owner = '"
+                              + str(owner).replace("'", "''")
+                              + f"' and table_name in ({names})")
+        except Exception as ex:  # noqa: BLE001 - said, not read
+            return {}, ("the server keeps no collation of a column (Oracle"
+                        f" 12.2 on does): {_last(ex)}")
+        return {str(n): str(c) for n, c in rows
+                if c and str(c).upper() not in ("BINARY",
+                                                "USING_NLS_COMP")}, ""
+    return _cached(e, ("oracoll", side, db, table), read)
+
+
+def _ora_exact(coll):
+    """An Oracle collation ending _CI or _AI takes case (and accents) as
+    one; the database's own comparison is exact."""
+    if not coll:
+        return True
+    return not str(coll).upper().endswith(("_CI", "_AI"))
 
 
 #: each engine's text columns of a whole database, their declared types,
@@ -551,6 +690,19 @@ class Column:
                                                   self.dst.top)
 
     @property
+    def case_rule(self):
+        """What the move changes of how the column's values compare, or
+        "": by each side's collation keeping two strings apart or not."""
+        a, b = self.src.exact, self.dst.exact
+        if a is True and b is False:
+            return ("the target takes values the source keeps apart by case"
+                    " or accents as one")
+        if a is False and b is True:
+            return ("the source takes values differing in case or accents"
+                    " as one, the target keeps them apart")
+        return ""
+
+    @property
     def recollated(self):
         return bool(self.src.collation and self.dst.collation
                      and self.src.collation.lower()
@@ -563,6 +715,8 @@ class Column:
         if self.recollated:
             parts.append(f"collation {self.src.collation} to"
                          f" {self.dst.collation}")
+        if self.case_rule:
+            parts.append(self.case_rule)
         return ", ".join(parts) or f"{self.dst.name} already"
 
 
@@ -970,6 +1124,7 @@ def checks(hop, eng, dbs, quick=False):
                             " one migkit names (UTF-8 holds every"
                             " character), or exclude these tables"))
         out += _declared(hop, eng, db, p)
+        out += _case_rules(db, p)
         try:
             long_ = _mysql_key_lengths(hop, eng, db, p)
         except Exception as e:  # noqa: BLE001 - unknown, said so
@@ -1015,6 +1170,30 @@ def checks(hop, eng, dbs, quick=False):
                             " not clean"))
             continue
         out += _found_rows(hop, db, p, f)
+    return out
+
+
+def _case_rules(db, p):
+    """A column the source compares without case or accents going where
+    it is compared exactly - refused by name, never dropped silently - and
+    what each server does not give of its columns, said."""
+    out = []
+    lost = sorted({f"{c.target}.{c.column} ({c.src.collation})"
+                   for c in p.columns
+                   if c.src.exact is False and c.dst.exact is True})
+    if lost:
+        out.append(_row("fail", f"{db}: a case rule not kept",
+                        f"{len(lost)} columns compare without case or"
+                        " accents on the source and exactly on the target: "
+                        + ", ".join(lost[:4]) + " - a lookup or a key that"
+                        " took 'a' and 'A' as one would take them as two",
+                        "give each target column a collation that compares"
+                        " as the source's (PostgreSQL: a nondeterministic"
+                        " one; MySQL: a _ci one) in the target's schema"
+                        " first, then move"))
+    for u in sorted({cs.unread for c in p.columns for cs in (c.src, c.dst)
+                     if cs.unread})[:3]:
+        out.append(_row("pass", f"{db}: what the server does not give", u))
     return out
 
 
@@ -1177,7 +1356,10 @@ def plan_lines(hop, eng, db):
     if p.repair:
         how.append("double-encoded text repaired row by row")
     how.append("every row proved by key in the new character set")
-    return [f"  a character set change: {p.words()} - " + "; ".join(how)]
+    unread = sorted({cs.unread for c in p.columns for cs in (c.src, c.dst)
+                     if cs.unread})
+    return [f"  a character set change: {p.words()} - " + "; ".join(how)] \
+        + [f"    not read: {u}" for u in unread[:3]]
 
 
 # --- the conversion on the target --------------------------------------------------

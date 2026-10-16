@@ -4483,3 +4483,145 @@ def stop_grace(facts):
              because=said)), f)
     secs = 2 * grace if got.path == "programs" else grace
     return max(secs, 2 * slow), got
+
+def ase_bulk_way(facts):
+    """How one table of an SAP ASE pair is carried: by the server itself,
+    one database's rows inserted into the other's in one statement, or by
+    the table copier.
+
+    `facts`: `rows` and `pages` (the source table's rows and data pages
+    as the server counts them, `row_count` and `data_pages`, which
+    `sp_spaceused` reports; None where not read), `page_size` (the
+    server's page in bytes, `@@maxpagesize`), `log_free` (pages free on
+    the target database's log segment, None where not read), `empty` (the
+    target table holds no row), `mapped` (the hop renames or transforms
+    its columns) and `same_place` (both databases are one server's). The
+    statement is logged whole, so the target's log must hold every page
+    of the table at once; anything else, or a fact not read, is the
+    copier's, which commits by key ranges."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    said = (f"{f.get('rows') if f.get('rows') is not None else 'unknown'}"
+            f" rows in {f.get('pages') if f.get('pages') is not None else '?'}"
+            " pages")
+
+    def room(f):
+        pages, free = f.get("pages"), f.get("log_free")
+        return pages is not None and free is not None and free >= pages
+    return climb("an SAP ASE table carried", (
+        Rung("insert-select", "the server's own insert of one database's"
+             " rows into the other's, in one logged statement", needs=(
+                 Need("a table the hop takes as it is",
+                      lambda f: not f.get("mapped"),
+                      "the hop renames or transforms its columns: the"
+                      " copier carries what one statement cannot"),
+                 Need("a size the server knows",
+                      lambda f: (f.get("rows") or 0) > 0,
+                      f"the server says {said}: the copier sizes its own"
+                      " ranges"),
+                 Need("an empty target table", lambda f: bool(f.get("empty")),
+                      "the target table holds rows, and an insert only adds"
+                      " to them"),
+                 Need("both databases on one server",
+                      lambda f: bool(f.get("same_place")),
+                      "the two sides are two servers: one statement reads"
+                      " only the databases of its own server"),
+                 Need("a target log that holds the whole table", room,
+                      lambda f: f"the target's log has"
+                                f" {f.get('log_free') if f.get('log_free') is not None else 'an unread number of'}"
+                                f" pages free for {said}: one statement"
+                                " would fill it")),
+             because=f"{said}: the rows never leave the server"),
+        Rung("copier", "the table copier", footprint=1,
+             because=f"{said}: the copier reads and writes it by key"
+                     " ranges")), f)
+
+
+def ase_statistics(facts):
+    """How an SAP ASE table's statistics are refreshed after the move.
+
+    `facts`: `changed` (the share of its rows changed since statistics
+    were last updated, in percent, as `datachange` answers it; None where
+    never gathered), `gathered` (statistics rows the table has in
+    `sysstatistics`), `indexes` (how many it has) and `ratio`
+    (`Engine.STALE_STATS_RATIO`). A table with indexes is gathered on
+    every column of each (`update index statistics`), one without on its
+    rows (`update statistics`); a table changed less than the ratio is
+    left."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+
+    def stale(f):
+        if not f.get("gathered") or f.get("changed") is None:
+            return True
+        return f.get("changed") > f.get("ratio") * 100
+    said = (f"{f.get('changed') if f.get('changed') is not None else 'never'}"
+            f"% changed since its statistics, {f.get('indexes')} indexes")
+    old = Need("statistics older than the rows", stale,
+               f"{said}: the statistics are current")
+    return climb("an SAP ASE table's statistics", (
+        Rung("index", "statistics on every column of each index", needs=(
+            old, Need("an index to choose", lambda f: f.get("indexes") > 0,
+                      "the table has no index")), because=said),
+        Rung("table", "statistics of the table", needs=(old,), because=said),
+        Rung("current", "left as the server holds them", footprint=1,
+             because=said)), f)
+
+
+def ase_snapshot_mark(facts):
+    """What an SAP ASE target's rollback point holds beside its identity
+    counters.
+
+    `facts`: `dbts` (None where the database answered its timestamp,
+    `@@dbts`, else why not). The counters are read in one transaction at
+    isolation level 3; the database's timestamp, which every change to a
+    row moves on, is kept with them where it answers, so a later sweep of
+    the rows stamped since starts where the counters stood."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("an SAP ASE rollback point", (
+        Rung("timestamp mark", "the counters read together, and the"
+             " database timestamp they stand at", needs=(Need(
+                 "a database that says its timestamp",
+                 lambda f: f.get("dbts") is None,
+                 lambda f: f"the database timestamp was not read:"
+                           f" {f.get('dbts')}"),),
+             because="the counters and the database timestamp are one"
+                     " moment"),
+        Rung("together", "the counters read together at isolation level 3",
+             footprint=1,
+             because="the counters are one moment; no timestamp is kept")),
+        f)
+
+
+def ase_delta_way(facts):
+    """How the rows an SAP ASE source changed since the last clean pass
+    are found.
+
+    `facts`: `stamped` (tables in scope with a `timestamp` column, which
+    the server sets from the database timestamp on every insert and
+    update), `tables` (those in scope), `same` (both sides are ASE, whose
+    rows compare as the driver hands them) and `agent` (the source's
+    replication agent is configured and running on the database, as
+    `sp_config_rep_agent` says; its log is the replication server's to
+    read, licensed apart, so it is said, not read). A timestamp names
+    every row written since, never one deleted: the full check stays
+    owed for deletes."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("the rows an SAP ASE source changed", (
+        Rung("stamped", "the rows whose timestamp is past the last clean"
+             " pass", needs=(
+                 Need("a table with a timestamp column",
+                      lambda f: f.get("stamped", 0) > 0,
+                      lambda f: f"none of the {f.get('tables')} tables has"
+                                " a timestamp column" + (
+                                    " (the replication agent runs, and its"
+                                    " log is the replication server's)"
+                                    if f.get("agent") else "")),
+                 Need("two ASE sides", lambda f: bool(f.get("same")),
+                      "the target is another engine: its rows are compared"
+                      " by the full check")),
+             because="the database timestamp names every row written"
+                     " since; deletes stay the full check's"),
+        Rung("none", "not verified by change", footprint=1,
+             because="nothing here names the rows changed" + (
+                 " (the replication agent runs, and its log is the"
+                 " replication server's)" if f.get("agent") else "")
+             + ": the full check compares every row")), f)
