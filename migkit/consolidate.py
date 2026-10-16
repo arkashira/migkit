@@ -53,6 +53,8 @@ import json
 import time
 from dataclasses import dataclass, field
 
+from . import hopkeys
+
 GOAL = "consolidate"
 OPTION = "consolidate"
 RULES = ("refuse", "tenant", "offset", "remap", "prefix")
@@ -74,14 +76,14 @@ def settings(hop):
     consolidate; None for any other."""
     if (getattr(hop, "goal", "") or "") != GOAL:
         return None
-    raw = (hop.options or {}).get("consolidate") or {}
+    raw = hopkeys.opt(hop, "consolidate") or {}
     if not isinstance(raw, dict):
         raise SystemExit("consolidate: is a mapping - column, value or"
                          " values, keys, offsets, with")
     column = str(raw.get("column") or "").strip()
-    rule = str(raw.get("keys") or "refuse").lower()
-    if rule not in RULES:
-        raise SystemExit(f"consolidate: keys: {rule} - one of"
+    rule = hopkeys.sub_choice("consolidate", "keys", raw.get("keys"))
+    if rule is None:
+        raise SystemExit(f"consolidate: keys: {raw.get('keys')} - one of"
                          f" {', '.join(RULES)}")
     offsets = {}
     for v, n in (raw.get("offsets") or {}).items():
@@ -1091,9 +1093,14 @@ def topology_decision(hop, eng, db, group_=None, plans=None):
                 off = offset_of(hop, eng, s, group_, [p.table])
                 spaces[s.name][p.table] = topology.KeySpace(
                     lo=min(keys) + off, hi=max(keys) + off)
+    said = scenarios.topology_settings(hop)
+    for source, tables in said["spaces"].items():
+        for table, space in tables.items():
+            spaces.setdefault(source, {}).setdefault(table, space)
     facts = scenarios.topology_facts(
         "many-to-one", [s.name for s in group_], [hop.target_db(db)],
-        {p.table: {"key": p.key} for p in plans}, spaces)
+        {p.table: {"key": p.key} for p in plans}, spaces,
+        conflict=said["conflict"], marks=said["marks"])
     return scenarios.topology_case(facts)
 
 

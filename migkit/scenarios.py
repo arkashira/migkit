@@ -588,8 +588,8 @@ def plan_lines(hop, eng, db, offers=None):
     on the instances the providers' APIs gave where both sides have one."""
     from . import managed
     if any(managed.api_conf(hop, eng, w)[0] is None for w in ("src", "dst")):
-        return architecture_lines(hop, eng, db) + shard_lines(hop, eng,
-                                                              db)
+        return architecture_lines(hop, eng, db) + shard_lines(
+            hop, eng, db) + copy_lines(hop, eng, db)
     try:
         sized = eng.table_sizes(db, quick=True) if db else None
     except Exception:  # noqa: BLE001 - unmeasured, said as not yet
@@ -627,7 +627,7 @@ def plan_lines(hop, eng, db, offers=None):
              " again"] if offers_error else [])
     return managed_lines(facts) + said + architecture_lines(
         hop, eng, db, {"src": facts.get("source"), "dst": facts.get("target")},
-        offers, size) + shard_lines(hop, eng, db)
+        offers, size) + shard_lines(hop, eng, db) + copy_lines(hop, eng, db)
 
 
 # --- shard split and merge ------------------------------------------------------
@@ -769,6 +769,42 @@ TOPOLOGIES = {"many-to-one": "many sources into one target",
 #: how a key both sides write may be settled, `twoway`'s policies but the
 #: one that stops
 SETTLES = ("apply_remote", "keep_local", "last_update_wins")
+
+
+def topology_settings(hop):
+    """What only the operator knows of a many-node topology, read from the
+    hop's `nodes:` as `hopkeys` holds it: each source's key space of each
+    table (`topology.KeySpace`), the conflict rule, a fan-out's routing and
+    which nodes mark migkit's writes. Each is empty where the hop names
+    none; a word that is not one it may be is refused."""
+    from . import hopkeys, topology
+    raw = hopkeys.opt(hop, "nodes") or {}
+    if not isinstance(raw, dict):
+        raise SystemExit("nodes: is a mapping - spaces, conflict, route,"
+                         " marks")
+    conflict = hopkeys.sub_choice("nodes", "conflict", raw.get("conflict"))
+    if raw.get("conflict") not in (None, "") and conflict is None:
+        raise SystemExit(f"nodes: conflict: {raw.get('conflict')} - one of"
+                         f" {', '.join(SETTLES)}")
+    route = dict(raw.get("route") or {})
+    by = hopkeys.sub_choice("nodes", "route.by", route.get("by"))
+    if route.get("by") not in (None, "") and by is None:
+        raise SystemExit(f"nodes: route: by: {route.get('by')} - one of"
+                         " table, range, hash")
+    if by is not None:
+        route["by"] = by
+    spaces = {}
+    for source, tables in (raw.get("spaces") or {}).items():
+        for table, spec in (tables or {}).items():
+            try:
+                spaces.setdefault(str(source), {})[str(table)] = \
+                    topology.KeySpace.of(spec)
+            except (TypeError, ValueError) as e:
+                raise SystemExit(f"nodes: spaces: {source}: {table}: the"
+                                 f" key space is not read ({e})")
+    return {"spaces": spaces, "conflict": conflict, "route": route,
+            "marks": {str(k): bool(v) for k, v in
+                      (raw.get("marks") or {}).items()}}
 
 
 def topology_facts(kind, sources, targets, tables, spaces=None,
@@ -1147,3 +1183,44 @@ def storage_copy_case(facts):
                   if m not in ("heap", "mergetree")}.items())
     return ScenarioDecision("copy way by storage", choice, tuple(
         f"{t}: stored as {m}, not copied as pages" for t, m in odd[:5]))
+
+
+def storage_copy_way(hop, eng, db):
+    """(the copy way the tables' storage allows, the decision) for a
+    database - "physical" or "logical" - recorded in the run's record; None
+    where the storage cannot be read of either side. The one answer the
+    move's copy-way choice asks before it offers pages or parts."""
+    try:
+        facts = storage_copy_facts(eng, db)
+    except Exception:  # noqa: BLE001 - unread storage keeps the logical way
+        return None
+    if facts.get("source") is None and facts.get("target") is None:
+        return None
+    got = storage_copy_case(facts)
+    decide.record(hop, got.choice)
+    return (got.choice.rung.name if got.choice.rung is not None else None,
+            got)
+
+
+def copy_lines(hop, eng, db):
+    """The plan's lines of the copy way by storage, and for a consolidation
+    the group as a many-to-one topology (`consolidate.topology_decision`,
+    its conflict rule and key spaces from `nodes:`), each decision kept in
+    the run's record. Nothing where nothing was read."""
+    out = []
+    if not db:
+        return out
+    got = storage_copy_way(hop, eng, db)
+    if got is not None:
+        out.append(f"  {got[1].words()}")
+    if (getattr(hop, "goal", "") or "") == "consolidate":
+        from . import consolidate
+        try:
+            topo = consolidate.topology_decision(hop, eng, db)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - said, plan goes on
+            out.append("  the consolidation's topology could not be decided:"
+                       f" {(str(e).strip().splitlines() or [''])[-1][:160]}")
+        else:
+            decide.record(hop, topo.choice)
+            out.append(f"  {topo.words()}")
+    return out

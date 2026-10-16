@@ -180,6 +180,18 @@ def opt(hop, name, registry=None):
     return got
 
 
+def sub_choice(option, path, value):
+    """The word `value` stands for under a hop option's key `path` (dotted),
+    in its own spelling - the sub-key's default where nothing is said, None
+    where the word is not one it may be."""
+    key = HOP_OPTIONS[option]
+    for part in (path.split(".") if isinstance(path, str) else path):
+        key = key.subs[part]
+    if value in (None, ""):
+        return key.default
+    return _chosen(key, value)
+
+
 def topology(hop):
     """A hop's `topology:` in its own spelling - `one_way` or `two_way` -
     whichever way it was written (`two-way`, `bidirectional`); `one_way`
@@ -308,6 +320,10 @@ HOP_OPTIONS = {
                   " the API - viewer, operator, approver, admin - added to"
                   " the file's own `access`", "dict",
                   subs=("viewer", "operator", "approver", "admin")),
+    "account_host": Key("the host part of a MySQL account made on the target"
+                        " for a user the source names without one (the"
+                        " default is any host, %)", "str", ("mysql",),
+                        default="%"),
     "accounts": Key("false: the move does not carry users, roles or grants"
                     " - the target's are made apart from it - so their"
                     " checks are skipped and said as not compared, and no"
@@ -349,11 +365,71 @@ HOP_OPTIONS = {
                    "str|dict", subs=("to", "collation", "repair")),
     "consolidate": Key("goal consolidate: column - the column each"
                        " source's rows are held under, value or values -"
-                       " this source's, keys - refuse, tenant, offset or"
-                       " remap, offsets - each value's under offset, with"
+                       " this source's, keys - how keys two sources hold"
+                       " are kept apart (refuse, tenant, offset, remap or"
+                       " prefix), offsets - each value's under offset, with"
                        " - the other hops writing the same target",
-                       "dict", subs=("column", "value", "values", "keys",
-                                     "offsets", "with")),
+                       "dict",
+                       subs={"column": Key("the column each source's rows"
+                                           " are held under", "str"),
+                             "value": Key("this source's value in it",
+                                          "any"),
+                             "values": Key("{database: value} for a hop"
+                                           " of several", "dict"),
+                             "keys": Key("what keeps two sources' keys"
+                                         " apart", "str",
+                                         choices="migkit.consolidate:RULES",
+                                         fold=True, default="refuse"),
+                             "offsets": Key("{value: the number its keys"
+                                            " are shifted by}", "dict",
+                                            each=Key("a whole number",
+                                                     "int")),
+                             "with": Key("the other hops writing the same"
+                                         " target", "list",
+                                         each=Key("a hop's name", "str"))}),
+    "index_advice": Key("indexes the translated workload needs, made on"
+                        " the target hypothetically and advised only where"
+                        " its own planner's estimate falls by half",
+                        "bool"),
+    "nodes": Key("what only the operator knows of a many-node topology,"
+                 " read where migkit decides it: spaces - {source: {table:"
+                 " {range: [lo, hi], stride: [offset, step], values:"
+                 " [...]}}} the keys each source writes, conflict - the"
+                 " rule for a key two sources write (apply_remote,"
+                 " keep_local or last_update_wins), route - how a fan-out"
+                 " places a row (by table, range or hash, with tables or"
+                 " bounds), marks - {node: true} where the node tells"
+                 " migkit's writes apart", "dict",
+                 subs={"spaces": Key("each source's key space of each"
+                                     " table", "dict",
+                                     each=Key("one source's tables", "dict",
+                                              each=Key(
+                                                  "one table's key space",
+                                                  "dict",
+                                                  subs={"range": Key(
+                                                      "[lo, hi], either"
+                                                      " null for open",
+                                                      "list"),
+                                                      "stride": Key(
+                                                          "[offset, step]",
+                                                          "list"),
+                                                      "values": Key(
+                                                          "the keys, one by"
+                                                          " one", "list")}))),
+                       "conflict": Key("what settles a key two sources"
+                                       " write", "str",
+                                       choices="migkit.scenarios:SETTLES"),
+                       "route": Key("how a fan-out places a row", "dict",
+                                    subs={"by": Key(
+                                        "table, range or hash", "str",
+                                        choices=("table", "range", "hash")),
+                                        "tables": Key("{table: target}",
+                                                      "dict"),
+                                        "bounds": Key(
+                                            "the first keys of the second"
+                                            " target on, sorted", "list")}),
+                       "marks": Key("{node: true} where the node tells"
+                                    " migkit's own writes apart", "dict")}),
     "split": Key("goal split: with - the other parts of the same source,"
                  " shared - tables every part takes whole, rest - refuse"
                  " or stays (the rows no part takes stay on the source)",
@@ -368,6 +444,9 @@ HOP_OPTIONS = {
                    " default - the target hop of a value not named",
                    "dict", subs=("with", "by", "key", "shared", "ranges",
                                  "values", "lookup", "default")),
+    "stream_lag": Key("seconds a Keyspaces change position is held behind"
+                      " the clock, for writes the service has not yet"
+                      " made readable", "number", ("keyspaces",), least=0),
     "table_engine": Key("the storage engine the target's tables are made"
                         " in - a name, or {to, accept: [group numbering,"
                         " remote rows], foreign_keys: {child.column:"
@@ -472,13 +551,13 @@ HOP_OPTIONS = {
                           ("postgres",)),
     "export_bucket": Key("s3://bucket/prefix the source's own export of a"
                          " table is written under, for a copy that reads"
-                         " the table off it", "str", ("dynamodb",)),
+                         " the table off it", "str", ("dynamodb", "firestore", "datastore", "neptune", "timestream")),
     "fence_timeout": Key("seconds a fenced re-check waits", "int",
                          default=300, least=0),
     "fk_scan_seconds": Key("the budget of the orphaned-row scan", "int",
                            ("postgres",)),
     "float_tolerance": Key("how far two floats may differ", "number",
-                           ("postgres", "cassandra")),
+                           ("postgres", "cassandra", "cockroachdb", "dsql")),
     "format": Key("the change stream's message format", "str", STREAMS,
                   check="migkit.streamout:options"),
     "keep_proof": Key("the tail keeps every table's digest leaves up as"
@@ -673,7 +752,7 @@ HOP_OPTIONS = {
                        " is the customer's) or runtime (bought through SAP,"
                        " which allows no direct read)", "str",
                        ("oracle", "mssql", "db2", "db2i", "db2zos", "ase",
-                        "hana", "hetero"),
+                        "hana", "hetero", "sapodp"),
                        choices=("full-use", "runtime"), fold=True,
                        check="migkit.engines.sapodp:licence"),
     "schedule": Key("when the hop runs by itself", "dict",
@@ -745,7 +824,7 @@ HOP_OPTIONS = {
     "snapshot_limit": Key("how old a snapshot may get", "number",
                           ("postgres",)),
     "source_engine": Key("the source's engine of a hetero hop", "str",
-                         ("hetero",)),
+                         ("hetero", "sapodp")),
     "spool_limit": Key("bytes a parked table's changes may take on this"
                        " machine before the table is copied again instead",
                        "int", knob="size",
@@ -786,7 +865,7 @@ HOP_OPTIONS = {
                          " at cutover - or no", "str|bool",
                          ("dynamodb", "bigquery")),
     "target_engine": Key("the target's engine of a hetero hop", "str",
-                         ("hetero",)),
+                         ("hetero", "sapodp")),
     "target_has_replicas": Key("false: the target has no replicas and no"
                                " restore replays its binlog, so a load"
                                " may leave the binlog off", "bool",
@@ -822,6 +901,20 @@ HOP_OPTIONS = {
                            " narrowing recorded and proved", "bool",
                            ("hetero",)),
     "verify_batches": Key("compare a bulk copy with the source", "bool"),
+    "versions": Key("{table: the column whose value orders a row's"
+                    " versions}, for a warehouse fed from more than one"
+                    " place: rows arrive in any order, and a late row"
+                    " never overwrites a newer one", "dict",
+                    ("redshift", "snowflake", "bigquery"),
+                    each=Key("the version column", "str")),
+    "wal_archive": Key("the directory the write-ahead log is archived to,"
+                       " read after the live one", "str", ("postgres",)),
+    "wal_dir": Key("where the PostgreSQL write-ahead log is read from on"
+                   " this machine, when the data directory is not", "str",
+                   ("postgres",)),
+    "wal_program": Key("the program that decodes a write-ahead log file,"
+                       " where it is not on the path", "str",
+                       ("postgres",), named_for_a_program=True),
     "workload_replay": Key("the source's record of what the application"
                            " ran, every statement on it translated, run on"
                            " both sandboxes and compared by its answers and"
@@ -846,9 +939,17 @@ PG_FAMILY = ("postgres", "redshift")
 TLS_OWN = ("mongodb", "redis", "cassandra")
 #: the keys of a side's own options (under it, or under its `options`)
 ENDPOINT_OPTIONS = {
+    "api_key": Key("a reference to the key the service is signed in"
+                   " with - env:, file:, vault:, keyring:", "secret",
+                   ("qdrant",)),
     "auth": Key("password, or aws_iam for a token the cloud signs", "str",
-                ("postgres", "mysql", "dsql"),
+                ("postgres", "mysql", "dsql", "keyspaces", "neptune"),
                 choices=("password", "aws_iam"), fold=True),
+    "authSource": Key("the database the user is defined in", "str",
+                      ("mongodb",)),
+    "change_stream": Key("the change stream the tail reads, where not"
+                         " one that watches every table in scope", "str",
+                         ("spanner",)),
     "changes": Key("where the source publishes its changes, where a"
                    " client cannot read its log: a Kafka topic (servers,"
                    " topic or topics, format, and how to sign in), a"
@@ -868,9 +969,32 @@ ENDPOINT_OPTIONS = {
                        " no all-versions-and-deletes feed", "str",
                        ("cosmosdb",), choices=("latest", "latest_version"),
                        fold=True),
+    "collection_groups": Key("the collection groups read, each with every"
+                             " collection of its name", "list|str",
+                             ("firestore",)),
+    "data_boost": Key("true: reads go through Spanner's independent"
+                      " compute, away from the application's", "bool",
+                      ("spanner",)),
+    "decoding": Key("the logical decoding slot or plugin the changes are"
+                    " read through", "str", ("gaussdb",)),
+    "dialect": Key("the SQL dialect of the Spanner database", "str",
+                   ("spanner",)),
+    "emulator": Key("the address of a local emulator the service is"
+                    " reached through instead of the cloud", "str",
+                    ("spanner", "bigtable", "firestore", "datastore",
+                     "pubsub")),
+    "graph_api": Key("the query language the graph is read in: gremlin"
+                     " or opencypher", "str", ("neptune",)),
+    "instance": Key("the Spanner or Bigtable instance", "str",
+                    ("spanner", "bigtable")),
+    "key_property": Key("the property that holds a node's key", "str",
+                        ("neo4j",)),
+    "labels": Key("the node labels read", "list", ("neo4j",)),
+    "namespace": Key("the namespace of the documents", "str",
+                     ("firestore", "datastore")),
     "priority": Key("low: reads yield to the application where the"
                     " account runs priority-based execution", "str",
-                    ("cosmosdb",), choices=("low", "high"), fold=True),
+                    ("cosmosdb", "spanner"), choices=("low", "high"), fold=True),
     "network": Key("external: reach the cluster's nodes at their"
                    " alternate addresses", "str", ("couchbase",)),
     "mgmt_port": Key("the cluster manager's port, where not 8091 (18091"
@@ -879,6 +1003,21 @@ ENDPOINT_OPTIONS = {
                       ("postgres", "mysql")),
     "aws_role_arn": Key("the role an aws_iam token is signed as", "str",
                         ("postgres", "mysql")),
+    "rdf_default": Key("the graph a triple with none is put in", "str",
+                       ("neptune",)),
+    "retention": Key("how long Timestream keeps what is written:"
+                     " memory_hours and magnetic_days", "dict",
+                     ("timestream",),
+                     subs=("memory_hours", "magnetic_days")),
+    "sets": Key("the sets of a distributed cluster to read, each its own"
+                " server", "list|dict", ("polardbx", "dcdb")),
+    "shardkey": Key("the columns each table is spread by, or none for a"
+                    " table that is not sharded: a name, or {table: columns"
+                    " | none}", "str|dict|list", ("polardbx", "dcdb")),
+    "sparql": Key("the query that reads the RDF side", "str",
+                  ("neptune",)),
+    "sparql_update": Key("the update that writes the RDF side", "str",
+                         ("neptune",)),
     "sslmode": Key("TLS: disable ... verify-full", "str",
                    PG_FAMILY + ("teradata",),
                    choices="migkit.addresses:LIBPQ_MODES", fold=True),
@@ -925,6 +1064,11 @@ ENDPOINT_OPTIONS = {
                                "bool", ("mysql",)),
     "hosts": Key("more than one server", "str|list",
                  ("mongodb", "kafka")),
+    "timeout": Key("seconds a request may take before it is given up",
+                   "number", ("neo4j", "qdrant"), least=0),
+    "tunnel_by": Key("ssh, for a tunnel opened by the ssh client; any"
+                     " other word runs the tunnel command", "str"),
+    "types": Key("the relationship types read", "list", ("neo4j",)),
     "uri_options": Key("the driver's own options", "str", ("mongodb",)),
     "path": Key("the file or directory", "str",
                 ("sqlite", "duckdb", "parquet", "copybook",
@@ -1021,7 +1165,7 @@ ENDPOINT_OPTIONS = {
     "stage": Key("an S3 prefix the cluster reads staged files from", "str",
                  ("redshift",)),
     "iam_role": Key("the role the cluster reads the stage as", "str",
-                    ("redshift",)),
+                    ("redshift", "neptune")),
     "stage_region": Key("the stage bucket's region", "str", ("redshift",)),
     "stage_endpoint_url": Key("the stage's S3-compatible endpoint", "str",
                               ("redshift",)),
@@ -1042,18 +1186,15 @@ ENDPOINT_OPTIONS = {
                         "str", ("iceberg",)),
     "catalog_properties": Key("anything else the catalog takes", "dict",
                               ("iceberg",)),
-    "project": Key("the project", "str", ("pubsub",)),
+    "project": Key("the project", "str", ("pubsub", "bigtable", "firestore", "datastore", "spanner")),
     "region": Key("the region", "str", ("dynamodb", "kinesis", "parquet",
-                                        "redshift", "delta", "dsql")),
+                                        "redshift", "delta", "dsql", "keyspaces", "neptune",
+                                        "timestream")),
     "endpoint_url": Key("an endpoint of its own (a local one, a"
                         " compatible store)", "str",
-                        ("dynamodb", "kinesis", "parquet", "delta")),
+                        ("dynamodb", "kinesis", "parquet", "delta", "keyspaces", "timestream")),
     "table_prefix": Key("the table names' template", "str",
                         ("dynamodb",)),
-    "index_advice": Key("indexes the translated workload needs, made on"
-                        " the target hypothetically and advised only where"
-                        " its own planner's estimate falls by half",
-                        "bool"),
     "index_prefix": Key("the index names' template", "str",
                         ("opensearch",)),
     "tls": Key("TLS, the certificate checked against the system's"
@@ -2768,7 +2909,8 @@ def _scenario_settings(where, opts, goal):
     what a goal needs of its own: a consolidation's column."""
     from types import SimpleNamespace
 
-    from . import archive, charsets, consolidate, reshard, split, tableengine
+    from . import (archive, charsets, consolidate, reshard, scenarios, split,
+                   tableengine)
     out = []
     probe = SimpleNamespace(goal=goal, options=opts)
     for key, read in (("charset", charsets.settings),
@@ -2776,7 +2918,8 @@ def _scenario_settings(where, opts, goal):
                       ("consolidate", consolidate.settings),
                       ("split", split.settings),
                       ("reshard", reshard.settings),
-                      ("archive", archive.settings)):
+                      ("archive", archive.settings),
+                      ("nodes", scenarios.topology_settings)):
         try:
             read(probe)
         except SystemExit as e:

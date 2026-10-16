@@ -2089,6 +2089,14 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * rules.<...>: asks <...> nothing - a rule is one question both sides answer, or a question for each (source: ..., target: ...)
 
+* nodes: is a mapping - spaces, conflict, route, marks
+
+* nodes: conflict: <...> - one of <...>
+
+* nodes: route: by: <...> - one of table, range, hash
+
+* nodes: spaces: <...>: <...>: the key space is not read (<...>)
+
 * <...>: no database to keep the machines' records in on the target
 
 * <...>: its machines have nowhere to agree on who writes - <...>. Keep the hop's run state in a bucket (state: {backend: s3}), or name a directory every machine sees (state: {shared: <path>})

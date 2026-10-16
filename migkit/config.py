@@ -5,7 +5,7 @@ from pathlib import Path
 
 import yaml
 
-from . import envkeys
+from . import envkeys, hopkeys
 from .engines import PORTS
 
 BASE = Path(__file__).resolve().parent.parent
@@ -1014,6 +1014,13 @@ class Hop:
     #: (`hopkeys.brands`)
     brand: dict = field(default_factory=dict)
 
+    @property
+    def versions(self):
+        """{table: the column whose value orders a row's versions}, the
+        hop's `versions:` (`hopkeys`), for a target fed from more than one
+        place; empty where the hop names none."""
+        return dict(hopkeys.opt(self, "versions") or {})
+
     def reversed(self):
         """The same hop run the other way: the target as the source, every
         name as the target has it - databases mapped back, tables renamed
@@ -1165,7 +1172,7 @@ class Hop:
         (`mask_on_write`) are part of it where it masks any: an answer
         taken over values masked one way is not one over values masked
         another, and a hop that masks nothing keeps the record it had."""
-        masks = (self.options or {}).get("mask_on_write")
+        masks = hopkeys.opt(self, "mask_on_write")
         return {"databases": sorted(str(d) for d in self.databases or []),
                 "db_map": {str(k): str(v) for k, v in
                            sorted((self.db_map or {}).items())},
@@ -1481,7 +1488,7 @@ class Hop:
         from .util import _canonical
         eng = self.engine
         if eng == "hetero":
-            eng = (self.options or {}).get("source_engine") or "mysql"
+            eng = hopkeys.opt(self, "source_engine") or "mysql"
         return _canonical(eng)
 
     def unused_include(self, tables):
@@ -1662,7 +1669,7 @@ class Hop:
         the column it names there, matched the same way. Empty where
         nothing is masked; SystemExit for a rule that is not a transform
         (`transforms.parse`), never a rule passed over."""
-        raw = (self.options or {}).get("mask_on_write") or {}
+        raw = hopkeys.opt(self, "mask_on_write") or {}
         if not isinstance(raw, dict) or not raw:
             return {}
         from . import transforms
@@ -1695,7 +1702,7 @@ class Hop:
         name), or one whose database is `db`. What a way that carries a
         database whole asks before it is taken, the source's tables not
         yet listed."""
-        raw = (self.options or {}).get("mask_on_write") or {}
+        raw = hopkeys.opt(self, "mask_on_write") or {}
         if not isinstance(raw, dict):
             return False
         whole = self.whole_name()
@@ -1718,7 +1725,7 @@ class Hop:
         got = getattr(self, "_mask_key", None)
         if got is not None:
             return got or None
-        ref = (self.options or {}).get("mask_key")
+        ref = hopkeys.opt(self, "mask_key")
         got = str(_secret(ref)) if ref not in (None, "") else ""
         self._mask_key = got
         return got or None
@@ -1832,7 +1839,7 @@ class Hop:
         from .util import _canonical
         eng = self.engine
         if eng == "hetero":
-            eng = (self.options or {}).get("target_engine") or ""
+            eng = hopkeys.opt(self, "target_engine") or ""
         return _canonical(eng) in FOLDS_CASE
 
     def name_collisions(self, tables):
@@ -1850,7 +1857,7 @@ class Hop:
         from .util import DEFAULT_SCHEMA, _canonical
         fold = self.target_folds_case()
         eng = self.engine if self.engine != "hetero" else (
-            (self.options or {}).get("target_engine") or "")
+            hopkeys.opt(self, "target_engine") or "")
         # a name the rule gives without its schema is in the target's
         # default one, as the copier makes and finds it there
         schema = DEFAULT_SCHEMA.get(_canonical(eng), "") \
@@ -1883,7 +1890,7 @@ class Hop:
             ((self.mapping or {}).get("tolerance") or {}))
         # a masking rule names its table before its column; a pattern
         # takes what it takes
-        masks = (self.options or {}).get("mask_on_write") or {}
+        masks = hopkeys.opt(self, "mask_on_write") or {}
         masked = {str(k) for k in masks if isinstance(masks, dict)
                   and not has_wildcard(str(k).rpartition(".")[0])
                   and str(k).rpartition(".")[0] not in known}

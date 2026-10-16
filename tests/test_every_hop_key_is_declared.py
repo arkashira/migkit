@@ -80,7 +80,24 @@ DYNAMIC = {
     # `topology`, `reverse`)
     ("hopkeys.py", "_option"): ("hop", ("topology", "reverse",
                                         "fence_timeout", "repair_window",
-                                        "settle")),
+                                        "settle", "versions", "nodes", "consolidate",
+                                        "mask_on_write", "mask_key",
+                                        "source_engine", "target_engine")),
+    # the roles a pair's inner engines are looked up by
+    ("attempts.py", "pair_side"): ("hop", ("source_engine",
+                                           "target_engine")),
+    ("attempts.py", "same_engine"): ("hop", ("source_engine",
+                                             "target_engine")),
+    ("freeze.py", "answered"): ("hop", ("target_access",)),
+    ("neo4j.py", "_scope"): ("endpoint", ("labels", "types")),
+    ("postgres.py", "_optional_off"): ("hop", ("atlas", "liquibase")),
+    # the options each TLS reader of an engine names (`tls.REACH`)
+    ("tls.py", "_cloud"): ("endpoint", ("api_endpoint", "url",
+                                        "endpoint_url")),
+    ("tls.py", "_options"): ("endpoint", ("secure", "tls", "tls_ca_file",
+                                          "tls_insecure")),
+    # a registered tool's own account, not a side's options
+    ("tooluse.py", "accounts"): ("endpoint", ()),
     # a side's secret options, read once where used
     # (`Endpoint.option_secret`)
     ("config.py", "option_secret"): ("endpoint", (
