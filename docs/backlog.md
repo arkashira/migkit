@@ -3970,6 +3970,7 @@ running work merges.
 * Every decide rung held and refused by a test (AUD-Z.rungs, DONE W19F:
   `tests/test_every_decide_rung_is_reached.py`; the owed rungs are
   AUD-Z.rungs-owed, those built outside decide.py AUD-Z.rungs-outside).
+  AUD-Z.rungs-owed slice B (W20B): the workflow, leftover, engine-way, sign-in, provider, free-space, hidden-value and estate ladders' 72 rungs held and refused on fakes (`tests/test_the_workflow_and_leftover_rungs_hold_and_refuse.py`, `tests/test_the_engines_own_way_rungs_hold_and_refuse.py`, `tests/test_the_sign_in_provider_and_estate_rungs_hold_and_refuse.py`); 135 owed rungs left.
 
 * AUD-Z.rungs-owed slice A (W20A) 2026-10-16: 59 rungs of 25 ladders - change reads, chunk edges, tail applies, column writes, admit, check sample, change depth, the seed carriers, the Db2/ASE/CockroachDB/Couchbase/Cosmos ways, cloud sign-in and forwarder, brand confidence, connector port, account carried - held and refused under `watched()` and out of `OWED`; `_priority_cost`'s rung stays owed: `rank_priority` prices it through `costed`/`_ranked` and never prunes it, so no recorder sees it.
 
