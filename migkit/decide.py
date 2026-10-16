@@ -5189,3 +5189,69 @@ def managed_against_own(choice, costs):
         Rung(MANAGED_OWN_MOVE, "migkit's own move and its full verify",
              because="the first way that holds")),
         Facts({"path": choice.path, "op": op, "mine": mine}))
+
+# ---- how a SQL Server source is followed (MSSQL-x86, W17E) ---------------
+
+def mssql_follow_way(facts, costs=None):
+    """How a SQL Server source's changes are followed: through Change Data
+    Capture, through Change Tracking, or through its own log
+    (`engines.mssql_log`). `facts`: `capture` (the database captures
+    changes: `sys.databases.is_cdc_enabled`), `capturing` (what fills the
+    change tables runs: the server's Agent is running, or the service runs
+    the capture itself), `captured` and `tables` (of the tables in scope,
+    how many have a capture instance; how many there are), `tracking`
+    (the database tracks changes), `tracked` (how many of the tables in
+    scope are tracked), and `log` (the source's own log can be followed
+    here: `mssql_log.follow_way` holds). None of them is assumed: a fact
+    the server would not give holds no rung.
+
+    Capture is ranked first where it holds: it keeps every change of a
+    row, its delete and the order of the changes inside a transaction,
+    where tracking keeps only the last operation of each row, read as the
+    row is now. Neither is a default: each is taken on what the server
+    says, and a database switched from one to the other is followed the
+    other way at the next start, from the position its own token names."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def every(have):
+        return lambda x: (x.get("tables") or 0) > 0 and (
+            x.get(have) or 0) >= (x.get("tables") or 0)
+    scope = f"{f.get('tables') or 0} tables in scope"
+    return climb("how a SQL Server source's changes are followed", (
+        Rung("capture", "Change Data Capture: every change of each row, in"
+             " the order it committed",
+             needs=(Need("the database capturing changes",
+                         lambda x: bool(x.get("capture")),
+                         "Change Data Capture is off for the database"
+                         " (exec sys.sp_cdc_enable_db, then"
+                         " sys.sp_cdc_enable_table for each table)"),
+                    Need("what fills the change tables running",
+                         lambda x: bool(x.get("capturing")),
+                         "the server's Agent is not running, so nothing"
+                         " fills the change tables: start it, or follow"
+                         " another way"),
+                    Need("every table in scope captured", every("captured"),
+                         lambda x: f"only {x.get('captured') or 0} of the"
+                         f" {scope} have a capture instance")),
+             because=scope + ": the change tables hold each change with its"
+                     " commit's position, before and after an update"),
+        Rung("tracking", "Change Tracking: the last change of each row,"
+             " read as the row is now", footprint=1,
+             needs=(Need("the database tracking changes",
+                         lambda x: bool(x.get("tracking")),
+                         "Change Tracking is off for the database"
+                         " (alter database ... set change_tracking = on)"),
+                    Need("every table in scope tracked", every("tracked"),
+                         lambda x: f"only {x.get('tracked') or 0} of the"
+                         f" {scope} are tracked (alter table ... enable"
+                         " change_tracking)")),
+             because=scope + ": a tail applied by key converges on the row"
+                     " as it is now"),
+        Rung("log", "the source's own log, or its log backups restored",
+             footprint=2,
+             needs=(Need("the log followable here",
+                         lambda x: bool(x.get("log")),
+                         "the source's log can be followed no way here"),),
+             because="neither capture nor tracking is on; the log names"
+                     " every row change as it commits")),
+        f, costs=costs or None, prove=False)

@@ -943,9 +943,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * mssql cannot apply a <...> action
 
-* Change Tracking is off for <...>, and it is the change log migkit reads here - <...>. Then each table: alter table ... enable change_tracking
+* Change Tracking is off for <...>, and no way to follow it holds (<...>) - <...>. Then each table: alter table ... enable change_tracking
 
 * Change Tracking does not follow <...> and <...> more | <...>, so their changes would be carried by nothing - <...>
+
+* <...> captures changes and nothing has been captured yet: the capture job has not run - start the server's Agent
+
+* Change Data Capture does not capture <...>, so their changes would be carried by nothing - exec sys.sp_cdc_enable_table for each
 
 * <...>: the triggers the load would switch off on the target could not be recorded first, so none was switched off and nothing was loaded
 

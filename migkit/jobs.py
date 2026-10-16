@@ -165,6 +165,74 @@ def _ms_jobs(eng, db, side):
             sorted(out.items())]
 
 
+#: each Agent job with a step in this database: its steps and schedules,
+#: what the deep check compares (`shapes`)
+_MS_STEPS = ("select j.name, j.enabled, s.step_id, s.step_name, s.subsystem,"
+             " cast(s.command as nvarchar(max)), s.on_success_action,"
+             " s.on_fail_action from msdb.dbo.sysjobs j join"
+             " msdb.dbo.sysjobsteps s on s.job_id = j.job_id where"
+             " s.database_name = db_name() order by j.name, s.step_id")
+_MS_SCHEDULES = (
+    "select j.name, c.enabled, c.freq_type, c.freq_interval,"
+    " c.freq_subday_type, c.freq_subday_interval, c.freq_relative_interval,"
+    " c.freq_recurrence_factor, c.active_start_time, c.active_end_time from"
+    " msdb.dbo.sysjobs j join msdb.dbo.sysjobschedules js on js.job_id ="
+    " j.job_id join msdb.dbo.sysschedules c on c.schedule_id ="
+    " js.schedule_id where j.job_id in (select job_id from"
+    " msdb.dbo.sysjobsteps where database_name = db_name()) order by"
+    " j.name, c.freq_type, c.active_start_time")
+
+
+def shapes(eng, db, side):
+    """{job: {"on", "steps", "schedules"}} of the SQL Server Agent jobs
+    with a step in this database, each step and schedule as the Agent
+    keeps it; whitespace in a step's command is not a difference."""
+    import re
+    out = {}
+    for name, on, sid, sname, sub, cmd, ok, fail in eng._rows(
+            side, db, _MS_STEPS):
+        one = out.setdefault(str(name), {"on": bool(on), "steps": [],
+                                         "schedules": []})
+        one["steps"].append((int(sid), str(sname), str(sub),
+                             re.sub(r"\s+", " ", str(cmd or "")).strip(),
+                             int(ok), int(fail)))
+    for name, *rest in eng._rows(side, db, _MS_SCHEDULES):
+        if str(name) in out:
+            out[str(name)]["schedules"].append(tuple(
+                int(v) if v is not None else None for v in rest))
+    for one in out.values():
+        one["schedules"].sort(key=lambda r: tuple(
+            -1 if v is None else v for v in r))
+    return out
+
+
+def compare(src, dst):
+    """What differs between two sides' `shapes`, one line a job: a job
+    the target lacks, one switched on only on one side (run on one side at
+    a time is `switch`'s, so a difference in `on` alone is said, not
+    failed), a step or a schedule that differs."""
+    bad, said = [], []
+    for name, one in sorted(src.items()):
+        there = dst.get(name)
+        if there is None:
+            bad.append(f"job {name}: missing on target")
+            continue
+        if one["steps"] != there["steps"]:
+            k = next((i for i, (a, b) in enumerate(zip(
+                one["steps"], there["steps"])) if a != b),
+                min(len(one["steps"]), len(there["steps"])))
+            bad.append(f"job {name}: step {k + 1} differs")
+        if one["schedules"] != there["schedules"]:
+            bad.append(f"job {name}: its schedules differ"
+                       f" ({len(one['schedules'])} on the source,"
+                       f" {len(there['schedules'])} on the target)")
+        if one["on"] != there["on"]:
+            said.append(f"job {name}: on only on the "
+                        + ("source" if one["on"] else "target"))
+    bad += [f"job {n}: only on target" for n in sorted(dst) if n not in src]
+    return bad, said
+
+
 def _ms_tables(eng, db, side):
     """Every table of the database as SQL Server lists them, the hop's or
     not: what a job's text is read against."""

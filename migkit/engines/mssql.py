@@ -5,6 +5,24 @@ from .. import canon, commercial, decide, diagnostics, pieces
 from .base import Engine, RepairAction, Result, clauses, rows_counted
 from .dbapi import MARK, DbapiRows
 
+#: the sandbox is SQL Server's edge edition: no Agent, no Change Data
+#: Capture, and the cells below not run against a full server - built,
+#: unproved (`capabilities.UNPROVED_WHY`)
+UNPROVED_ON = ("built; not run on a real SQL Server, only on its edge"
+               " edition in the sandbox")
+UNPROVED_ITEMS = (
+    "assess.brands assess.capacity assess.engine-checks assess.handwork "
+    "assess.preflight assess.versions assess.writers cutover.jobs "
+    "move.create-missing move.load-window move.partitioned schema.defaults "
+    "schema.indexes scope.names scope.row-filter tail.renames "
+    "tail.table-states verify.access.object-ownership "
+    "verify.access.sequence-grants verify.access.table-grants "
+    "verify.structure.indexes verify.structure.partitions "
+    "verify.structure.unvalidated-constraints verify.value.collation "
+    "verify.value.generated verify.value.narrowing verify.value.null-empty "
+    "verify.value.precision verify.value.timezone verify.value.charset"
+    " verify.value.rendering verify.structure.row-security")
+
 #: the server's own databases, and the one a managed server keeps
 #: for its provider
 SKIP_DBS = frozenset({"master", "tempdb", "model", "msdb", "rdsadmin"})
@@ -1256,7 +1274,8 @@ class MSSQLEngine(DbapiRows, Engine):
                 ("indexes", self._deep_indexes),
                 ("rls", self._deep_row_security),
                 ("ownership", self._deep_ownership),
-                ("grants", self._deep_grants)):
+                ("grants", self._deep_grants),
+                ("jobs", self._deep_jobs)):
             res += self._guarded(db, word, check)
         return res
 
@@ -2032,6 +2051,34 @@ class MSSQLEngine(DbapiRows, Engine):
                       f"{len(read['src'])} security policies match, switched"
                       " on as on the source" if read["src"]
                       else "no row-level security policies")
+
+    def _deep_jobs(self, db):
+        """The Agent jobs with a step in this database, compared step by
+        step and schedule by schedule (`jobs.compare`): a job that arrives
+        without its schedule never runs, and nothing says so. A server
+        whose Agent keeps no jobs (`msdb` refuses the read) is said as
+        unknown, never as clean."""
+        from .. import jobs
+        got = {}
+        for side in ("src", "dst"):
+            try:
+                got[side] = jobs.shapes(self, db, side)
+            except Exception as e:  # noqa: BLE001 - said as unknown
+                return Result("deep", f"{db} jobs", "skip",
+                              "the Agent's jobs could not be read on the "
+                              + ("source" if side == "src" else "target")
+                              + f": {_said(e)[-120:]} - unknown, not clean")
+        bad, said = jobs.compare(got["src"], got["dst"])
+        if bad:
+            return Result("deep", f"{db} jobs", "diff", "; ".join(bad[:5]),
+                          "", "script the job with its steps and schedules"
+                              " onto the target (msdb.dbo.sp_add_job,"
+                              " sp_add_jobstep, sp_add_jobschedule)")
+        return Result("deep", f"{db} jobs", "ok",
+                      f"{len(got['src'])} Agent jobs match, step by step and"
+                      " schedule by schedule" + (f"; {'; '.join(said[:3])}"
+                                                 if said else "")
+                      if got["src"] else "no Agent jobs run in it")
 
     #: what runs as whom: a module's EXECUTE AS clause, per object
     EXECUTES_AS = (
@@ -4131,14 +4178,20 @@ class MSSQLEngine(DbapiRows, Engine):
         """The database's Change Tracking version now. Refused where the
         database does not track, or where a table the hop moves is not
         tracked: its changes would be carried by nothing, and nothing would
-        say so."""
+        say so. The feed is the decision's (`follow_way`): the token a
+        capture, the log or tracking mints is the way it is read on."""
+        way = self.follow_way(side, db)
+        if way.path == "capture":
+            return self._cdc_point(side, db)
+        if way.path == "log":
+            return self.log_follower().change_point(self, side, db)
         got = self._rows(side, db, "select change_tracking_current_version()")
         at = got[0][0] if got else None
         if at is None:
             from .. import sourcechange as sc
             raise SystemExit(
-                f"Change Tracking is off for {db}, and it is the change log"
-                " migkit reads here - "
+                f"Change Tracking is off for {db}, and no way to follow it"
+                f" holds ({way.reason}) - "
                 + sc.requirement("change_tracking", "off", sc.Ctx(db=db))
                 + ". Then each table: alter table ... enable change_tracking")
         self._all_tracked(side, db)
@@ -4162,12 +4215,35 @@ class MSSQLEngine(DbapiRows, Engine):
                                  sc.Ctx(db=db, tables=tables)))
 
     def log_position(self, side, db):
+        """The position now, in the notation of the feed this database is
+        followed through (`follow_way`, asked once and kept)."""
+        kept = self.__dict__.get("_follows", {}).get((side, db))
+        way = (kept or self.follow_way(side, db)).path
+        if way == "capture":
+            got = self._rows(side, db, "select sys.fn_cdc_get_max_lsn()")
+            at = self._lsn_hex(got[0][0]) if got else None
+            return {"cdc": at} if at else None
+        if way == "log":
+            return self.log_follower().change_point(self, side, db)
         got = self._rows(side, db, "select change_tracking_current_version()")
         return int(got[0][0]) if got and got[0][0] is not None else None
 
     @staticmethod
     def position_reached(have, want):
+        """Whether `have` is at or past `want`; None where either is not
+        known or the two are of different feeds, which say nothing of
+        each other."""
         if have is None or want is None:
+            return None
+        if isinstance(have, dict) or isinstance(want, dict):
+            if not (isinstance(have, dict) and isinstance(want, dict)):
+                return None
+            if "cdc" in have and "cdc" in want:
+                return int(have["cdc"], 16) >= int(want["cdc"], 16)
+            if "lsn" in have and "lsn" in want:
+                from . import mssql_log
+                return mssql_log.lsn(have["lsn"]) >= mssql_log.lsn(
+                    want["lsn"])
             return None
         return int(have) >= int(want)
 
@@ -4209,6 +4285,10 @@ class MSSQLEngine(DbapiRows, Engine):
         from `token` would skip it."""
         if token is None:
             return None
+        if self._way_of(token) == "capture":
+            return self._cdc_lost(side, db, token)
+        if self._way_of(token) == "log":
+            return None  # the log reader stops, named, on a lost position
         conn = self._connect(side, db)
         try:
             return self._lost_since(conn.cursor(), token)
@@ -4291,9 +4371,211 @@ class MSSQLEngine(DbapiRows, Engine):
         """The follower of the source's own log where neither tracking
         way is on (`engines.mssql_log`: its live log, or its log backups
         restored onto a server migkit owns): the one hook it is reached
-        by, wired into the follow ladder by this module's owner."""
+        by, the follow ladder's last rung (`follow_way`)."""
         from . import mssql_log
         return mssql_log
+
+    def _endpoint(self, side):
+        """The side's endpoint, as the log reader asks it (`log_standby`)."""
+        return self.hop.source if side == "src" else self.hop.target
+
+    # ---- which feed follows the source: a rung on what the server says ---
+
+    #: whether the database captures and tracks changes, in one round trip
+    _FEEDS = ("select d.is_cdc_enabled, case when exists (select 1 from"
+              " sys.change_tracking_databases c where c.database_id ="
+              " d.database_id) then 1 else 0 end, cast(serverproperty("
+              "'EngineEdition') as int) from sys.databases d where"
+              " d.database_id = db_id()")
+    #: the server's Agent and whether it runs, where the login may see it
+    _AGENT = ("select status_desc from sys.dm_server_services where"
+              " servicename like 'SQL Server Agent%'")
+    #: each captured table and its newest capture instance
+    _CAPTURES = ("select s.name + '.' + t.name, ct.capture_instance from"
+                 " cdc.change_tables ct join sys.tables t on t.object_id ="
+                 " ct.source_object_id join sys.schemas s on s.schema_id ="
+                 " t.schema_id order by ct.create_date")
+
+    def _captures(self, side, db):
+        """{schema.table: its newest capture instance}; empty where the
+        database captures nothing (the `cdc` schema is not there)."""
+        try:
+            return {str(t): str(i) for t, i in
+                    self._rows(side, db, self._CAPTURES)}
+        except Exception:  # noqa: BLE001 - no cdc schema: nothing captured
+            return {}
+
+    def follow_facts(self, side, db):
+        """What `decide.mssql_follow_way` reads, each asked of the server
+        once and only when a rung needs it."""
+        from ..decide import Facts
+        memo = {}
+
+        def feeds():
+            if "feeds" not in memo:
+                got = self._rows(side, db, self._FEEDS)
+                memo["feeds"] = got[0] if got else (0, 0, 0)
+            return memo["feeds"]
+
+        def scoped():
+            if "scoped" not in memo:
+                memo["scoped"] = [t for t in self.neutral_tables(side, db)
+                                  if self.in_scope(db, t)]
+            return memo["scoped"]
+
+        def capturing():
+            # Azure SQL Database runs the capture on its own scheduler
+            if feeds()[2] == 5:
+                return True
+            try:
+                got = self._rows(side, db, self._AGENT)
+            except Exception:  # noqa: BLE001 - not visible: not known
+                return False
+            return any(str(r[0]).lower() == "running" for r in got)
+
+        def log():
+            try:
+                return self.log_follower().follow_way(
+                    self, side, db).rung is not None
+            except (Exception, SystemExit):  # noqa: BLE001 - not here
+                return False
+        return Facts(
+            {}, capture=lambda: bool(feeds()[0]),
+            tracking=lambda: bool(feeds()[1]), capturing=capturing,
+            tables=lambda: len(scoped()),
+            captured=lambda: len(set(scoped()) & set(
+                self._captures(side, db))),
+            tracked=lambda: len(set(scoped()) & self._tracked(side, db)),
+            log=log)
+
+    def follow_way(self, side, db):
+        """The `Choice` of the feed the source is followed through
+        (`decide.mssql_follow_way`), kept on the engine: the fence and the
+        tail ask the way the token was minted by."""
+        from .. import decide
+        got = decide.mssql_follow_way(self.follow_facts(side, db))
+        self.__dict__.setdefault("_follows", {})[(side, db)] = got
+        return got
+
+    @staticmethod
+    def _way_of(token):
+        """The feed a saved token belongs to: a capture's position, the
+        log's, or a tracking version."""
+        if isinstance(token, dict):
+            return "capture" if "cdc" in token else "log"
+        return None if token is None else "tracking"
+
+    # ---- the change feed: Change Data Capture ----------------------------
+    #
+    # The change tables the capture fills from the log: each change of a
+    # row, its commit's position (`__$start_lsn`) and its place inside the
+    # transaction (`__$seqval`). The token is {"cdc": the commit position
+    # last handed on, as 0x-hex}: a read starts after it, so a tail stopped
+    # mid-batch and started again hands no transaction on twice.
+
+    @staticmethod
+    def _lsn_hex(v):
+        if v is None:
+            return None
+        if isinstance(v, (bytes, bytearray)):
+            return "0x" + bytes(v).hex().upper()
+        return str(v)
+
+    def _cdc_point(self, side, db):
+        got = self._rows(side, db, "select sys.fn_cdc_get_max_lsn()")
+        at = self._lsn_hex(got[0][0]) if got else None
+        if at is None:
+            raise SystemExit(
+                f"{db} captures changes and nothing has been captured yet:"
+                " the capture job has not run - start the server's Agent")
+        return {"cdc": at}
+
+    def _cdc_lost(self, side, db, token, captures=None):
+        """A table whose change table no longer reaches back to `token`:
+        its retention has cleaned up what changed there since."""
+        captures = captures if captures is not None else \
+            self._captures(side, db)
+        gone = []
+        for t, inst in sorted(captures.items()):
+            if not self.in_scope(db, t):
+                continue
+            got = self._rows(side, db, "select sys.fn_cdc_get_min_lsn("
+                             f"{MARK})", (inst,))
+            low = self._lsn_hex(got[0][0]) if got else None
+            if low is None or int(low, 16) == 0:
+                gone.append(t)
+            elif int(low, 16) > int(token["cdc"], 16) + 1:
+                gone.append(t)
+        if not gone:
+            return None
+        return (f"Change Data Capture no longer keeps the changes of"
+                f" {', '.join(gone[:6])} after {token['cdc']}: its retention"
+                " has cleaned them up, or the capture instance is gone")
+
+    def _cdc_changes(self, side, db, token, limit=1000):
+        """Each change committed after the token's position, whole
+        transactions in commit order; the position to go on from."""
+        from .. import canon
+        captures = self._captures(side, db)
+        scoped = [t for t in self.neutral_tables(side, db)
+                  if self.in_scope(db, t)]
+        missed = sorted(set(scoped) - set(captures))
+        if missed:
+            raise SystemExit(
+                "Change Data Capture does not capture "
+                + ", ".join(missed[:6]) + ", so their changes would be"
+                " carried by nothing - exec sys.sp_cdc_enable_table for each")
+        top = self._cdc_point(side, db)["cdc"]
+        if int(top, 16) <= int(token["cdc"], 16):
+            return [], dict(token)
+        lost = self._cdc_lost(side, db, token, captures)
+        if lost:
+            raise SystemExit(lost)
+        found = []
+        for t in sorted(scoped):
+            key = self.neutral_key(side, db, t)
+            cols = [n for n, _ in self.neutral_columns(side, db, t)]
+            fn = "cdc." + self._q("fn_cdc_get_all_changes_" + captures[t])
+            rows = self._rows(
+                side, db,
+                "select __$start_lsn, __$seqval, __$operation, datediff("
+                "second, sys.fn_cdc_map_lsn_to_time(__$start_lsn),"
+                " getdate()), " + ", ".join(self._q(c) for c in cols)
+                + f" from {fn}(sys.fn_cdc_increment_lsn(convert(binary(10),"
+                f" {MARK}, 1)), convert(binary(10), {MARK}, 1), N'all')"
+                " order by __$start_lsn, __$seqval",
+                (token["cdc"], top))
+            for r in rows:
+                at = self._lsn_hex(r[0])
+                # redelivered: at or before what was handed on already
+                if int(at, 16) <= int(token["cdc"], 16):
+                    continue
+                values = dict(zip(cols, r[4:]))
+                ident = {k: values.get(k) for k in key}
+                op = int(r[2])
+                kind = {1: "delete", 2: "insert", 4: "update"}.get(op)
+                if kind is None:
+                    continue  # 3: the row before an update
+                found.append((at, self._lsn_hex(r[1]), r[3], canon.change(
+                    kind, t, ident, None if kind == "delete" else values)))
+        found.sort(key=lambda x: (int(x[0], 16), int(x[1], 16)))
+        now = time.time()
+        out, group, last = [], [], token["cdc"]
+        for i, (at, _, age, c) in enumerate(found):
+            group.append(c)
+            if i + 1 == len(found) or found[i + 1][0] != at:
+                canon.ended(group, 0, at=at, ts=None if age is None
+                            else now - max(float(age), 0.0))
+                out += group
+                group, last = [], at
+                if len(out) >= limit:
+                    break
+        # the read went to `top`: a later batch begins after it unless the
+        # limit cut it short at a transaction's end
+        lost = self._cdc_lost(side, db, token, captures)
+        if lost:
+            raise SystemExit(lost)
+        return out, {"cdc": top if len(out) < limit else last}
 
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Each row changed since `token`, as it is now: a delete where it
@@ -4302,6 +4584,12 @@ class MSSQLEngine(DbapiRows, Engine):
         from .. import canon
         if token is None:
             return [], self.change_point(side, db)
+        way = self._way_of(token)
+        if way == "capture":
+            return self._cdc_changes(side, db, token, limit)
+        if way == "log":
+            return self.log_follower().neutral_changes(
+                self, side, db, token, limit)
         self._all_tracked(side, db)
         plans = []
         for t in sorted(self._tracked(side, db)):
