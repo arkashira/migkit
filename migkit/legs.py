@@ -1313,6 +1313,23 @@ def far_from_target(ms):
     return b is not None and b >= FAR_MS
 
 
+def relay_compression(hop, sample, rows, codec=None, clock=None,
+                      near_cores=None):
+    """{leg: Compressing} for the leg across the wide network from the
+    tunnel's machine: `sample` is a batch of `rows` rows as they travel,
+    the link the bytes a second the newest kept copy of this hop reached
+    (`planner.link_speed` times a row's bytes). Nothing is chosen, and
+    nothing said, where no copy has been kept: a link not measured is not
+    guessed."""
+    from . import movers, planner
+    rate = planner.link_speed(hop)
+    if not rate or not rows or not sample:
+        return {}
+    wide = movers.Leg("relay to here", rate * len(sample) / rows, near_cores)
+    return movers.choose_compression(
+        [wide], sample, codec, **({"clock": clock} if clock else {}))
+
+
 def plan_line(hop, via, db=None):
     """The plan's line about where migkit stands, from the round trips it
     measures now, or ""."""

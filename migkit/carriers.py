@@ -88,6 +88,9 @@ BLOCK_BLOB, AZURE_FILE, BLOB_NAME = 14 * TIB, 4 * TIB, 1024
 GCS_OBJECT, GCS_NAME = 5 * TIB, 1024
 #: the AWS appliance takes a part of a multipart upload of 2 GiB at most
 SNOWBALL_PART = 2 * 2 ** 30
+#: a block blob's own block size and count, an object's parts to compose
+AZURE_BLOCK, AZURE_BLOCKS = 4000 * 2 ** 20, 50_000
+GCS_COMPOSE, GCS_COMPONENTS = 32, 1024
 #: what a multipart upload sends at once: well under that
 UPLOAD_PART = 512 * 2 ** 20
 
@@ -147,6 +150,8 @@ class Store:
     """One place parts are written to or read from, by name under its
     root. `said` is what an operator reads; no store names a program."""
     said = ""
+    #: the `Link` measured to this store, where one was (`move_file`)
+    link = None
 
     def limits(self):
         return Limits()
@@ -267,9 +272,6 @@ class S3Store(Store):
 
     def _key(self, name):
         return self.prefix + name
-
-    #: the `Link` measured to this store, where one was (`move_file`)
-    link = None
 
     def _transfer(self, size=None):
         from boto3.s3.transfer import TransferConfig
@@ -912,17 +914,87 @@ def measure_link(read_range, size, clock=None, most_streams=None):
     return Link(best, one, rtt, streams)
 
 
+_CRC32C = 0x82F63B78
+
+
+def crc32c(data, start=0):
+    """CRC-32C (Castagnoli) of `data`, folded onto `start`: the library
+    the Google client already needs where it is there, else a table."""
+    try:
+        import google_crc32c
+        return google_crc32c.extend(start, bytes(data))
+    except ImportError:
+        pass
+    table = _crc_table()
+    crc = start ^ 0xFFFFFFFF
+    for b in bytes(data):
+        crc = table[(crc ^ b) & 0xFF] ^ (crc >> 8)
+    return crc ^ 0xFFFFFFFF
+
+
+def _crc_table():
+    out = []
+    for n in range(256):
+        for _ in range(8):
+            n = (n >> 1) ^ _CRC32C if n & 1 else n >> 1
+        out.append(n)
+    return out
+
+
+def _gf2_times(mat, vec):
+    out, i = 0, 0
+    while vec:
+        if vec & 1:
+            out ^= mat[i]
+        vec >>= 1
+        i += 1
+    return out
+
+
+def crc32c_combine(first, second, length):
+    """The CRC-32C of two pieces joined, from each piece's own and the
+    second's length - so parts hashed in parallel give the whole's."""
+    if length <= 0:
+        return first
+    odd = [_CRC32C] + [1 << n for n in range(31)]
+    even = [_gf2_times(odd, odd[n]) for n in range(32)]
+    odd = [_gf2_times(even, even[n]) for n in range(32)]
+    while True:
+        even = [_gf2_times(odd, odd[n]) for n in range(32)]
+        if length & 1:
+            first = _gf2_times(even, first)
+        length >>= 1
+        if not length:
+            break
+        odd = [_gf2_times(even, even[n]) for n in range(32)]
+        if length & 1:
+            first = _gf2_times(odd, first)
+        length >>= 1
+        if not length:
+            break
+    return first ^ second
+
+
 class Streamed:
     """What a file's parts carried, hashed as they streamed: each part's
     MD5 (what an object store says of a part it took) and SHA-256, the
     whole as a SHA-256 of the parts' in order."""
 
-    def __init__(self):
-        self.parts = {}
+    def __init__(self, crc=False):
+        self.parts, self.crcs, self._crc = {}, {}, crc
 
     def saw(self, i, data):
         self.parts[i] = (hashlib.md5(data, usedforsecurity=False).hexdigest(),
                          hashlib.sha256(data).hexdigest(), len(data))
+        if self._crc:
+            self.crcs[i] = crc32c(data)
+
+    def crc32c(self):
+        """The CRC-32C of the whole, folded from the parts' in order."""
+        whole = 0
+        for i in sorted(self.parts):
+            whole = crc32c_combine(whole, self.crcs[i], self.parts[i][2])
+        return whole
 
     def digest(self):
         h = hashlib.sha256()
@@ -970,11 +1042,29 @@ def _s3_read_range(store, name):
     return read
 
 
+def _azure_read_range(store, name):
+    def read(start, end):
+        return store._box().download_blob(
+            store._key(name), offset=start, length=end - start).readall()
+    return read
+
+
+def _gcs_read_range(store, name):
+    def read(start, end):
+        return store._gcs().blob(store._key(name)).download_as_bytes(
+            start=start, end=end - 1)
+    return read
+
+
 def read_range_of(store, name):
     """`read_range(start, end)` of a file in `store`, or None where the
     store cannot read a range."""
     if isinstance(store, S3Store):
         return _s3_read_range(store, name)
+    if isinstance(store, AzureBlobStore):
+        return _azure_read_range(store, name)
+    if isinstance(store, GcsStore):
+        return _gcs_read_range(store, name)
     if store.local(name) is not None:
         return _local_read_range(store, name)
     return None
@@ -998,10 +1088,77 @@ def _parallel(plan, each):
         return list(pool.map(lambda r: each(*r), _ranges(plan)))
 
 
+#: what a copy inside a store is held to, best proof first
+SOURCE_PROOFS = (
+    decide.Rung("source checksum", "the source object's own whole-object"
+                " checksum",
+                needs=(decide.Need("a whole-object checksum on the source",
+                                   lambda f: bool(f["checksum"])),),
+                because="the source says what the copy must be, and the"
+                " store computes the copy's the same way", leaves="nothing"),
+    decide.Rung("source digest", "the source object's own digest",
+                needs=(decide.Need("a source object written in one piece",
+                                   lambda f: f["plain etag"]),
+                       decide.Need("an object a single copy can carry",
+                                   lambda f: f["size"] <= S3_COPY_ONE),),
+                leaves="nothing"),
+    decide.Rung("parts reported", "the parts the store reported",
+                because="the source gave nothing to hold the copy to",
+                leaves="nothing"),
+)
+#: the largest object one copy request carries
+S3_COPY_ONE = 5 * 2 ** 30
+#: the whole-object checksums an object store can give, name -> algorithm
+_S3_FULL = (("ChecksumCRC64NVME", "CRC64NVME"), ("ChecksumCRC32C", "CRC32C"),
+            ("ChecksumCRC32", "CRC32"))
+
+
+def _source_says(src, name):
+    """(facts for `SOURCE_PROOFS`, the source's head): what the source
+    object says of itself - a whole-object checksum, or the digest of an
+    object written whole - or nothing where it cannot be asked."""
+    s3 = src._s3()
+    try:
+        head = s3.head_object(Bucket=src.bucket, Key=src._key(name),
+                              ChecksumMode="ENABLED")
+        etag = str(head.get("ETag") or "").strip('"')
+        full = head.get("ChecksumType") == "FULL_OBJECT" or \
+            "ChecksumCRC64NVME" in head
+        got = next(((k, a, head[k]) for k, a in _S3_FULL
+                    if full and head.get(k)), None)
+        plain = bool(etag) and "-" not in etag and \
+            head.get("ServerSideEncryption") != "aws:kms"
+        return {"checksum": got, "plain etag": plain,
+                "size": int(head.get("ContentLength") or 0)}, head
+    except Exception:  # noqa: BLE001 - said by the rung that holds the copy
+        return {"checksum": None, "plain etag": False, "size": 0}, {}
+
+
 def _server_side(src, name, dst, dst_name, plan):
+    says, head = _source_says(src, name)
+    says["size"] = says["size"] or plan.size
+    proof = decide.climb(f"holding the copy of {name} to the source",
+                         SOURCE_PROOFS, facts=says, prove=False)
     s3, key = dst._s3(), dst._key(dst_name)
-    up = s3.create_multipart_upload(Bucket=dst.bucket, Key=key)["UploadId"]
     source = {"Bucket": src.bucket, "Key": src._key(name)}
+    if proof.path == "source digest":
+        s3.copy_object(Bucket=dst.bucket, Key=key, CopySource=source)
+        got = s3.head_object(Bucket=dst.bucket, Key=key)
+        want = str(head.get("ETag") or "").strip('"')
+        if got["ETag"].strip('"') != want or \
+                int(got["ContentLength"]) != plan.size:
+            dst.delete(dst_name)
+            raise BadCopy(f"{dst_name}: the copy's digest is not the"
+                          " source's - moved again whole")
+        return Moved("copied inside the store", plan, want,
+                     "the copy's digest equal to the source object's own")
+    extra = {}
+    if proof.path == "source checksum":
+        field, algorithm, _ = says["checksum"]
+        extra = {"ChecksumAlgorithm": algorithm, "ChecksumType":
+                 "FULL_OBJECT"}
+    up = s3.create_multipart_upload(Bucket=dst.bucket, Key=key,
+                                    **extra)["UploadId"]
 
     def each(i, start, end):
         got = s3.upload_part_copy(
@@ -1020,6 +1177,17 @@ def _server_side(src, name, dst, dst_name, plan):
     md5s = b"".join(bytes.fromhex(p["ETag"].strip('"')) for p in done)
     want = hashlib.md5(md5s, usedforsecurity=False).hexdigest() \
         + f"-{len(done)}"
+    if proof.path == "source checksum":
+        field, algorithm, value = says["checksum"]
+        got = s3.head_object(Bucket=dst.bucket, Key=key,
+                             ChecksumMode="ENABLED")
+        if got.get(field) != value or int(got["ContentLength"]) != plan.size:
+            dst.delete(dst_name)
+            raise BadCopy(f"{dst_name}: the copy's {algorithm} checksum is"
+                          " not the source's - moved again whole")
+        return Moved("copied inside the store", plan, value,
+                     f"every part's digest the store returned, and the"
+                     f" whole's {algorithm} equal to the source object's own")
     head = s3.head_object(Bucket=dst.bucket, Key=key)
     if head["ETag"].strip('"') != want or \
             int(head["ContentLength"]) != plan.size:
@@ -1027,7 +1195,8 @@ def _server_side(src, name, dst, dst_name, plan):
         raise BadCopy(f"{dst_name}: the store's copy is not the parts it"
                       " said it wrote - moved again whole")
     return Moved("copied inside the store", plan, want,
-                 "every part's digest the store returned, and the whole's")
+                 "every part's digest the store returned, and the whole's;"
+                 " the source gave no checksum of its own to hold it to")
 
 
 def _to_s3(read, dst, dst_name, plan):
@@ -1098,6 +1267,84 @@ def _to_local(read, dst, dst_name, plan):
                  "every part hashed as it streamed, the whole sized")
 
 
+def _block_id(i):
+    import base64
+    return base64.b64encode(f"migkit-{i:08d}".encode()).decode()
+
+
+def _to_azure(read, dst, dst_name, plan):
+    from azure.storage.blob import BlobBlock
+    blob = dst._box().get_blob_client(dst._key(dst_name))
+    seen = Streamed()
+
+    def each(i, start, end):
+        data = read(start, end)
+        seen.saw(i, data)
+        blob.stage_block(_block_id(i), data, length=len(data),
+                         validate_content=True)
+        return _block_id(i)
+    ids = _parallel(plan, each)
+    blob.commit_block_list([BlobBlock(block_id=b) for b in ids])
+    committed = blob.get_block_list("committed")[0]
+    held = [int(b.size) for b in committed]
+    sent = [seen.parts[i][2] for i in sorted(seen.parts)]
+    if held != sent or int(blob.get_blob_properties().size) != plan.size:
+        dst.delete(dst_name)
+        raise BadCopy(f"{dst_name}: the blob holds other blocks than were"
+                      " streamed to it")
+    return Moved("parallel ranged parts", plan, seen.digest(),
+                 "each block's digest checked by the store as it took it,"
+                 " and the blocks and size it committed")
+
+
+def _to_gcs(read, dst, dst_name, plan):
+    bucket, key = dst._gcs(), dst._key(dst_name)
+    seen = Streamed(crc=True)
+    made = []
+
+    def temp(tag):
+        made.append(f"{key}.migkit-{tag}")
+        return bucket.blob(made[-1])
+
+    def each(i, start, end):
+        data = read(start, end)
+        seen.saw(i, data)
+        piece = temp(f"part-{i:06d}")
+        piece.upload_from_string(data, checksum="md5")
+        return piece
+    try:
+        level = _parallel(plan, each)
+        step = 0
+        while len(level) > GCS_COMPOSE:
+            level = [_composed(temp, level[k:k + GCS_COMPOSE], step, k)
+                     for k in range(0, len(level), GCS_COMPOSE)]
+            step += 1
+        final = bucket.blob(key)
+        final.compose(level)
+        final.reload()
+    finally:
+        for n in made:
+            try:
+                bucket.blob(n).delete()
+            except Exception:  # noqa: BLE001 - a part already gone
+                pass
+    import base64
+    held = int.from_bytes(base64.b64decode(final.crc32c), "big")
+    if int(final.size) != plan.size or held != seen.crc32c():
+        final.delete()
+        raise BadCopy(f"{dst_name}: the object holds other bytes than were"
+                      " streamed to it")
+    return Moved("parallel ranged parts", plan, seen.digest(),
+                 "each part's digest checked by the store as it took it,"
+                 " and the composed whole's CRC-32C equal to the parts'")
+
+
+def _composed(temp, group, step, at):
+    out = temp(f"join-{step}-{at:06d}")
+    out.compose(group)
+    return out
+
+
 class BadCopy(SystemExit):
     """A moved file whose bytes are not what was sent: taken away again."""
 
@@ -1134,31 +1381,94 @@ FILE_WAYS = (
 )
 
 
+def _write_probe(read, dst, dst_name):
+    """(probe, clean): `probe(start, end)` puts that range of the file as
+    a scratch object in `dst` and returns the bytes, so `measure_link`
+    times the way up; `clean()` takes the scratch objects away."""
+    import itertools
+    import threading
+    count, made, lock = itertools.count(), [], threading.Lock()
+
+    def probe(start, end):
+        data = read(start, end)
+        name = f"{dst_name}.migkit-probe-{next(count)}"
+        with lock:
+            made.append(name)
+        dst.put_bytes(name, data)
+        return data
+
+    def clean():
+        for n in made:
+            try:
+                dst.delete(n)
+            except Exception:  # noqa: BLE001 - a scratch object already gone
+                pass
+    return probe, clean
+
+
+def _remote(store):
+    return isinstance(store, (S3Store, AzureBlobStore, GcsStore))
+
+
+def _bounds(dst):
+    """(least, most, count) of a part in `dst`: the store's own."""
+    if isinstance(dst, S3Store):
+        return S3_PART_LEAST, S3_PART_MOST, S3_PARTS
+    if isinstance(dst, AzureBlobStore):
+        return S3_PART_LEAST, AZURE_BLOCK, AZURE_BLOCKS
+    if isinstance(dst, GcsStore):
+        return S3_PART_LEAST, GCS_OBJECT, GCS_COMPONENTS
+    return 1, None, None
+
+
+def _measured(src, name, dst, dst_name, read, size, clock):
+    """The `Link` of the way: the remote end's ranged reads where the
+    source is remote; where the file is here and goes to a store, the
+    way up, timed by writing scratch objects - a read of this disk says
+    nothing of the link."""
+    here = src.local(name) is not None
+    if here and _remote(dst):
+        probe, clean = _write_probe(read, dst, dst_name)
+        try:
+            from dataclasses import replace
+            return replace(measure_link(probe, size, clock),
+                           whence="measured by writing scratch objects")
+        finally:
+            clean()
+    return measure_link(read, size, clock)
+
+
 def move_file(src, name, dst, dst_name=None, link=None, clock=None):
     """`Moved`: a dump file, Parquet or spool file from one store to
-    another as the way the stores allow - copied inside one object store,
-    else as parallel ranged parts hashed while they stream and checked at
-    the end, else the store's own transfer - chosen through `decide`,
-    the parts' size and number from the link measured on the file
-    (`measure_link`) where `link` is not given."""
+    another as the way the stores allow - copied inside one object store
+    (held to the source's own checksum where it gives one), else as
+    parallel ranged parts (object stores, blob and Cloud Storage
+    included) hashed while they stream and checked at the end, else the
+    store's own transfer - chosen through `decide`, the parts' size and
+    number from the link measured on the way (`measure_link`) where
+    `link` is not given and none was kept on the store. Two directories
+    here are no link: with none given the file is copied whole."""
     dst_name = dst_name or name
     size = src.size(name)
     if size is None:
         raise SystemExit(f"{name} is not in {src.said}")
     read = read_range_of(src, name)
+    both_here = src.local(name) is not None and not _remote(dst)
+    ranged = read is not None and size > 0 and \
+        not (both_here and link is None and dst.link is None)
     facts = {"same store": _same_s3(src, dst) and size > 0,
-             "ranged": read is not None and size > 0,
-             "parts": isinstance(dst, S3Store) or dst.local(dst_name)
-             is not None}
-    if link is None and read is not None and size:
-        link = measure_link(read, size, clock)
-    if link is not None and isinstance(dst, S3Store):
-        dst.link = link
-    if isinstance(dst, S3Store):
-        plan = part_plan(size, link) if link else None
-    else:
-        plan = part_plan(size, link, least=1, most=None, count=None) \
-            if link else None
+             "ranged": ranged,
+             "parts": _remote(dst) or dst.local(dst_name) is not None}
+    far = dst if _remote(dst) and src.local(name) is not None else src
+    link = link or far.link
+    if link is None and ranged:
+        link = _measured(src, name, dst, dst_name, read, size, clock)
+    if link is not None:
+        for st in (far, dst):
+            if _remote(st):
+                st.link = link
+    least, most, count = _bounds(dst)
+    plan = part_plan(size, link, least, most, count) if link else None
     if plan is None:
         plan = PartPlan(size, size, 1, 1, "one part: nothing to measure on")
     choice = decide.climb(f"moving {name}", FILE_WAYS, facts=facts,
@@ -1168,5 +1478,9 @@ def move_file(src, name, dst, dst_name=None, link=None, clock=None):
     if choice.path == "ranged parts":
         if isinstance(dst, S3Store):
             return _to_s3(read, dst, dst_name, plan)
+        if isinstance(dst, AzureBlobStore):
+            return _to_azure(read, dst, dst_name, plan)
+        if isinstance(dst, GcsStore):
+            return _to_gcs(read, dst, dst_name, plan)
         return _to_local(read, dst, dst_name, plan)
     return _one_stream(src, name, dst, dst_name, plan)

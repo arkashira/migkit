@@ -1115,7 +1115,8 @@ class _Exporter:
             sha, stored, plain = seal_part(pieces_of(stats), tmp,
                                            self.recipients)
             self._room(stored)
-            self.carrier.store.put(name, tmp)
+            carriers.move_file(carriers.LocalStore(tmp.parent), tmp.name,
+                               self.carrier.store, name)
             there = self.carrier.store.size(name)
             if there != stored:
                 raise SystemExit(f"{self.carrier.said} holds {there} bytes"
@@ -1738,8 +1739,10 @@ class _Loader:
         if local is None:
             fetched = self.w.spool / os.path.basename(part["name"])
             try:
-                store.fetch(part["name"], fetched)
-            except Exception as e:  # noqa: BLE001 - read again then
+                carriers.move_file(store, part["name"],
+                                   carriers.LocalStore(fetched.parent),
+                                   fetched.name)
+            except (Exception, carriers.BadCopy) as e:  # noqa: BLE001 - read again then
                 fetched.unlink(missing_ok=True)
                 raise BadPart(f"it could not be read ({_first(e)})") from e
             local = fetched

@@ -1157,6 +1157,38 @@ def overlap(semantics, copy, build=None, check=None, at_once=1,
                          if k != w))
 
 
+def scheduled(model, facts, semantics, tables=None, n=None, shared=False,
+              followed=False):
+    """`overlap` of a move from the rates its model measured: each
+    table's copy at its share of the rate with `n` going at once, its
+    index builds at the rate the target writes and its check at the rate
+    the source reads - None where the copy's rate is not measured, as
+    nothing is then known to lay out. What `progress(overlap=)` says."""
+    if model is None or not model.measured:
+        return None
+    names = [t for t in (tables if tables is not None else facts)
+             if t in facts]
+    n = n or model.little or 1
+    rate = model.rate(n)
+    disk = sum(int((facts[t] or {}).get("bytes") or 0) for t in names)
+    if not rate or not disk:
+        return None
+    ratio = model.carried / disk if model.carried else 1.0
+    target, src = model.stages.get("target"), model.stages.get("source")
+    copy, build, check, ranges = {}, {}, {}, {}
+    for t in names:
+        f = facts[t] or {}
+        size = int(f.get("bytes") or 0) * ratio
+        copy[t] = size * n / rate
+        if target is not None and target.bound() and f.get("index_bytes"):
+            build[t] = int(f["index_bytes"]) / target.bound()
+        if src is not None and src.bound():
+            check[t] = size / src.bound()
+        ranges[t] = _ranges_of(f, n)
+    return overlap(semantics, copy, build, check, at_once=n, shared=shared,
+                   followed=followed, ranges=ranges)
+
+
 # ---- topology hops, run in the decided order -----------------------------------
 
 def link_speed(hop):

@@ -8447,6 +8447,20 @@ range digest, the fenced re-check, exact batches or the final proof.
    a copy inside the store is checked against the parts it reported,
    not against the source object's own checksum.
 
+   Done (W13L, 2026-10-16): Azure and Cloud Storage move as parallel
+   ranged parts (blocks checked by the store as it takes them and by what
+   it committed; parts composed in tiers and held to the parts' folded
+   CRC-32C); a copy inside an object store is held to the source's own
+   whole-object checksum or digest (`carriers.SOURCE_PROOFS`) and says so
+   where the source gives none; a file here going to a store is timed on
+   the way up by scratch objects; ship's parts and reads go through
+   `move_file`; `planner.scheduled` lays a move out from its model's
+   rates; `legs.relay_compression` chooses per leg. Tested:
+   `tests/test_moves_use_overlap_compression_and_parts.py`.
+   Not done (W13L): the engines' copies (other tickets' files) do not yet
+   call `planner.scheduled` or `legs.relay_compression`; the Azure and
+   Cloud Storage in-store copy; Azure/Google proof on a real account.
+
 **Verifying**
 8. **The proof kept up as the data moves (incremental multiset
    hashing):** the digest is a sum of row hashes, so it can be
