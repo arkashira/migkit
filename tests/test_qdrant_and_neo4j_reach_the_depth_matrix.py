@@ -165,14 +165,14 @@ def test_a_payload_index_the_target_lacks_fails_the_deep_check(qdrant):
     eng, src, dst = qdrant
     dst.make("docs", {"size": 3, "distance": "Cosine"})
     got = {r.scope: r for r in eng.check_deep("qdrant")}
-    assert got["qdrant docs indexes"].status == "fail"
+    assert got["qdrant docs indexes"].status == "diff"
     assert "lang (keyword)" in got["qdrant docs indexes"].detail
     assert got["qdrant docs vectors"].status == "ok"
     dst.cols["docs"]["indexes"]["lang"] = "keyword"
     dst.cols["docs"]["vectors"] = {"size": 3, "distance": "Dot"}
     got = {r.scope: r for r in eng.check_deep("qdrant")}
     assert got["qdrant docs indexes"].status == "ok"
-    assert got["qdrant docs vectors"].status == "fail"
+    assert got["qdrant docs vectors"].status == "diff"
 
 
 def test_points_are_read_page_by_page_from_each_offset(qdrant):

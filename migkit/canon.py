@@ -1375,15 +1375,31 @@ def folded_here(cls):
     return cls in FOLDED_HERE or str(cls).startswith(bsontype_prefixes())
 
 
-def fold_batches(columns, batches, way="md5"):
+def fold_batches(columns, batches, way="md5", engine=None):
     """(rows, digest) over batches of rows - `fold_rows` across them, as a
-    digest `neutral_digest` gives, each row hashed by `way`."""
-    classes = [c for _, c in columns]
+    digest `neutral_digest` gives, each row hashed by `way`. `columns` are
+    as `neutral_columns` says them, (name, declared type): an `engine`'s
+    declared type is folded by its class (`fold_class`)."""
+    classes = [fold_class(engine, c, n) for n, c in columns]
     total, n = 0, 0
     for batch in batches:
         k, total = fold_rows(classes, batch, total, way)
         n += k
     return n, str(total)
+
+
+def fold_class(engine, declared, name=None):
+    """The class a column folds by: the declared type where it is one,
+    else the class `engine` maps it to. A declared type with neither is
+    refused by name: folding it as some other class would hash a
+    rendering nobody checked the other side agrees with."""
+    if declared in CLASSES or folded_here(declared) or engine is None:
+        return declared
+    got = type_class(engine, declared)
+    if got is None:
+        raise ValueError(f"{engine} column {name or ''} of type"
+                         f" {declared!r} has no class to compare it by")
+    return got
 
 
 def json_text(value):
@@ -4551,6 +4567,10 @@ TYPES["gaussdb"] = {
 #: Neptune: an element's id, label and ends as text, its properties one
 #: JSON object of typed values; an RDF term as its N-Triples text
 TYPES["neptune"] = {"string": "text", "properties": "json", "term": "text"}
+#: Neo4j's and Qdrant's elements: an id and its ends as text; labels,
+#: properties, vectors and payload each one JSON value
+TYPES["neo4j"] = {"string": "text", "json": "json"}
+TYPES["qdrant"] = {"string": "text", "json": "json"}
 #: Timestream: its query's column types
 TYPES["timestream"] = {
     "varchar": "text", "bigint": "integer", "integer": "integer",

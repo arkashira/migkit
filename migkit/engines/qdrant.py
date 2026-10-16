@@ -200,7 +200,7 @@ class QdrantEngine(NeutralCopier, Engine):
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         return canon.fold_batches(columns, self.neutral_batches(
-            side, db, table, columns, 1000, where))
+            side, db, table, columns, 1000, where), engine="qdrant")
 
     # ---- making a collection ---------------------------------------------------
 
@@ -329,7 +329,7 @@ class QdrantEngine(NeutralCopier, Engine):
                 same = src[what] == dst[what]
                 out.append(Result(
                     "deep", f"{db} {t} {what.replace('_', ' ')}",
-                    "ok" if same else "fail",
+                    "ok" if same else "diff",
                     "as the source's" if same else
                     f"source {json.dumps(src[what], sort_keys=True)[:120]},"
                     f" target {json.dumps(dst[what], sort_keys=True)[:120]}",
@@ -342,7 +342,7 @@ class QdrantEngine(NeutralCopier, Engine):
                 a = json.dumps(src[what], sort_keys=True)[:120]
                 b = json.dumps(dst[what], sort_keys=True)[:120]
                 out.append(Result(
-                    "deep", f"{db} {t} {what}", "ok" if held else "fail",
+                    "deep", f"{db} {t} {what}", "ok" if held else "diff",
                     f"the source's {label} settings are the target's" if held
                     else f"source {a}, target {b}", "",
                     "" if held else f"make the target collection again with"
@@ -351,7 +351,7 @@ class QdrantEngine(NeutralCopier, Engine):
             missing = sorted(set(src["indexes"].items())
                              - set(dst["indexes"].items()))
             out.append(Result(
-                "deep", f"{db} {t} indexes", "fail" if missing else "ok",
+                "deep", f"{db} {t} indexes", "diff" if missing else "ok",
                 f"payload indexes missing or of another kind:"
                 f" {', '.join(f'{n} ({k})' for n, k in missing)}" if missing
                 else f"the source's {len(src['indexes'])} payload indexes all"
@@ -386,16 +386,22 @@ class QdrantEngine(NeutralCopier, Engine):
         return min(count, math.ceil(wide / (1 + (wide - 1) / count)))
 
     @staticmethod
-    def _dense(vector):
-        """(name, values) of a point's first dense vector - the name None
-        for a collection of one unnamed vector - or (None, None) where it
-        holds none."""
+    def _query_vector(vector):
+        """(name, query, kind) a point is searched by: its first dense
+        vector - the name None for a collection of one unnamed vector -
+        else its first sparse one, searched through the sparse index by
+        its indices and values; (None, None, None) where it holds none."""
         if isinstance(vector, list):
-            return None, vector
-        for name, v in sorted((vector or {}).items()):
+            return None, vector, "dense"
+        named = sorted((vector or {}).items())
+        for name, v in named:
             if isinstance(v, list):
-                return name, v
-        return None, None
+                return name, v, "dense"
+        for name, v in named:
+            if isinstance(v, dict) and v.get("indices"):
+                return name, {"indices": v["indices"],
+                              "values": v["values"]}, "sparse"
+        return None, None, None
 
     def _sample_points(self, side, table, n):
         """`n` points with their vectors: drawn at random by the server
@@ -453,25 +459,26 @@ class QdrantEngine(NeutralCopier, Engine):
             return "the collection holds no points"
         want = self.recall_sample(count, k)
         points, how = self._sample_points("src", table, want)
-        src, dst = [], []
+        src, dst, kinds = [], [], set()
         for p in points:
-            using, vec = self._dense(p.get("vector"))
+            using, vec, kind = self._query_vector(p.get("vector"))
             if vec is None:
                 continue
+            kinds.add(kind)
             truth = self._nearest("src", table, using, vec, k, True)
             src.append(len(truth & self._nearest(
                 "src", table, using, vec, k, False)) / k)
             dst.append(len(truth & self._nearest(
                 "dst", table, using, vec, k, False)) / k)
         if not src:
-            return "the collection has no dense vector to search by"
+            return "the collection has no vector to search by"
         gap = [a - b for a, b in zip(src, dst)]
         slack = (statistics.stdev(gap) / math.sqrt(len(gap))
                  if len(gap) > 1 else 0.0)
         return {"k": k, "n": len(src), "source": statistics.fmean(src),
                 "target": statistics.fmean(dst),
                 "behind": statistics.fmean(gap), "slack": slack,
-                "sampled": how}
+                "sampled": how, "by": " and ".join(sorted(kinds))}
 
     def check_recall(self, db):
         """Recall at k of the target against the source, per collection:
@@ -496,7 +503,8 @@ class QdrantEngine(NeutralCopier, Engine):
             worse = got["behind"] > 2 * got["slack"] and got["behind"] > 0
             says = (f"recall at {got['k']} over {got['n']} queries"
                     f" ({'random' if got['sampled'] == 'random' else 'leading'}"
-                    f" points): source {got['source']:.3f}, target"
+                    f" points, {got.get('by') or 'dense'} vectors):"
+                    f" source {got['source']:.3f}, target"
                     f" {got['target']:.3f}")
             out.append(Result(
                 "deep", f"{db} {t} recall",

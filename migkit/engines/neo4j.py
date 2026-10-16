@@ -289,7 +289,7 @@ class Neo4jEngine(NeutralCopier, Engine):
     def neutral_digest(self, side, db, table, columns, where=None):
         from .. import canon
         return canon.fold_batches(columns, self.neutral_batches(
-            side, db, table, columns, 5000, where))
+            side, db, table, columns, 5000, where), engine="neo4j")
 
     def neutral_create_sql(self, side, db, table, columns, key=()):
         if table not in COLUMNS:
@@ -665,7 +665,7 @@ class Neo4jEngine(NeutralCopier, Engine):
                 continue
             missing = sorted(src - dst)
             out.append(Result(
-                "deep", f"{db} {what}", "fail" if missing else "ok",
+                "deep", f"{db} {what}", "diff" if missing else "ok",
                 f"{len(missing)} of the source's {len(src)} {what} not on"
                 f" the target: {', '.join(missing[:5])}" if missing else
                 f"the source's {len(src)} {what} all on the target", "",
@@ -819,10 +819,71 @@ class Neo4jEngine(NeutralCopier, Engine):
         return self._as_pair().tail_apply(db, go, token_path, log)
 
     def src_lsn(self, db):
-        return self._as_pair().src_lsn(db)
+        """Where the source's log is now, while a tail follows it: the
+        change id `db.cdc.current()` names, for `fence_wait` to count
+        from."""
+        from .. import tailctl
+        if not tailctl.alive(self.hop.report_dir(db), self.hop):
+            return None
+        try:
+            return {"cdc": self._run("src", db,
+                                     "CALL db.cdc.current()")[0]["id"]}
+        except (RuntimeError, IndexError, KeyError):
+            return None
+
+    def fence_reached(self, db, have, want):
+        """Whether a tail at `have` has read as far as `want`: True, False,
+        or None where the log no longer holds the tail's position.
+
+        A change id says nothing of order, so the two are compared by what
+        the log holds after each (`changes_behind`): a tail at or past
+        `want` has no more changes ahead of it than `want` has. The ones
+        after `want` are counted first, so a change committed between the
+        two counts can only make the tail look further behind; the tail's
+        count stops one past that, all the answer needs."""
+        if have.get("cdc") == want.get("cdc"):
+            return True
+        try:
+            ahead, _ = self.changes_behind("src", db, want)
+            behind, whole = self.changes_behind("src", db, have, ahead + 1)
+        except RuntimeError:
+            if self.position_lost("src", db, have):
+                return None
+            raise
+        return whole and behind <= ahead
 
     def fence_wait(self, db, lsn, timeout=300):
-        return self._as_pair().fence_wait(db, lsn, timeout)
+        """Wait until the tail's saved position has reached `lsn`: True,
+        False on timeout, None where there is nothing to wait on or the
+        log has dropped the tail's position. Each look counts the log on
+        the source, so the next one waits at least twice as long as the
+        last count took."""
+        from .. import tailctl
+        if lsn is None:
+            return None
+        path = tailctl.token_path(self.hop, db)
+        began = time.monotonic()
+        while time.monotonic() - began < timeout:
+            try:
+                have = tailctl.saved(path)
+            except SystemExit:
+                return None
+            took = 0.0
+            if have is not None:
+                at = time.monotonic()
+                try:
+                    reached = self.fence_reached(db, have, lsn)
+                except RuntimeError:
+                    # a count the server did not answer proves nothing:
+                    # not reached, looked at again
+                    reached = False
+                took = time.monotonic() - at
+                if reached is None:
+                    return None
+                if reached:
+                    return True
+            time.sleep(max(tailctl.POLL, 2 * took))
+        return False
 
     def delta_verify(self, db, limit=20000, log=None):
         return self._as_pair().delta_verify(db, limit, log)

@@ -108,9 +108,9 @@ def test_the_deep_check_fails_a_target_with_other_hnsw_or_no_quantization(
     _copy(eng, src, dst)
     dst.settings["docs"] = {"hnsw_config": {"m": 16, "ef_construct": 150}}
     got = {r.scope: r for r in eng.check_deep("qdrant")}
-    assert got["qdrant docs hnsw"].status == "fail"
+    assert got["qdrant docs hnsw"].status == "diff"
     assert "16" in got["qdrant docs hnsw"].detail
-    assert got["qdrant docs quantization"].status == "fail"
+    assert got["qdrant docs quantization"].status == "diff"
 
 
 def test_a_target_that_states_more_than_the_source_still_holds_it(tmp_path):
