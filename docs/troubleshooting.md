@@ -271,6 +271,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * no state matching '<...>', have: <...>
 
+* the masking key was not replaced
+
 * the move's checkpoint <...> kept changing while it was written; nothing past the last save is lost. Check which machines still own this move and reconcile their state; the checkpoint is kept, and once the contention is resolved the original move command goes on from it
 
 * the move's checkpoint kept changing under migkit while it saved it. Check which machines still own this move and reconcile their state before retrying; once the contention is resolved, rerun the original move command
@@ -2057,6 +2059,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...>: <...>:<...> is no instance the provider's API lists for these credentials - name it under the side's managed option (id)
 
+* the masking key was not replaced: <...> cannot be written (<...>)
+
 * <...>: <...>; the row is not written cut or in part
 
 * reshard: is a mapping - with, by, key, shared, ranges, values, lookup, default
@@ -2249,7 +2253,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...> sends <...> to <...>, another hop to <...>
 
-* `<...>` is not a transform: null, constant <text>, hash or truncate <n>
+* `<...>` is not a transform: null, constant <text>, hash, truncate <n>, fpe [alphabet] or token [domain]
 
 * a random value cannot be held to anything after the load, and a second run writes another
 
@@ -2260,5 +2264,21 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * truncate takes how many characters to keep, a whole number above 0
 
 * hash needs the hop's mask_key (a secret reference): a digest without a key is a dictionary away from the value
+
+* fpe alphabet `<...>` is neither digits, lower, upper, alpha, alnum nor two or more different characters
+
+* fpe and token need the cryptography library, which is not installed
+
+* fpe over <...> refuses a value of <...> characters: only <...> values exist, fewer than the <...> below which the encryption is a dictionary away; the column takes a token or a hash
+
+* fpe over <...> refuses a value with a character outside the alphabet (position <...> of <...>): <...>
+
+* a token collided on every length; nothing is written
+
+* a value made by <...> cannot be reversed: only fpe and token keep the way back
+
+* this token is not in the vault of this user: it was made elsewhere or the vault was removed
+
+* the key does not open this token: it is not the key the token was made under
 
 * MIGKIT_UI_USER_HEADER names the header a signing-in proxy puts who it let in into, and anything that reaches the view can send that header: set MIGKIT_UI_PROXY_SECRET too - the value the proxy sends in <...> - and the view believes only the proxy

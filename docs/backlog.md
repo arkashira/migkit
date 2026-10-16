@@ -8308,6 +8308,19 @@ reads nothing; a file written before the hop asked reads as it was. Still
 to: the keyed HMAC for what a shared report shows, and what a program
 migkit drives writes itself (a dump's files: an encrypted disk for now).
 
+Done (d, 2026-10-16, `test_a_shown_hash_is_keyed.py`,
+`test_a_programs_files_go_where_at_rest_says.py`,
+`test_values_are_encrypted_in_their_own_shape_and_tokenised.py`):
+R17b.hmac - `migkit secrets rotate-mask` replaces the masking key and a
+token of the old one is refused with its reason, `export-mask` shows the
+key's shape and never its value. R17b.prog - a program's temporary files
+and logs go under `at_rest.scratch`, and a killed run's dump directory is
+removed at the hop's next start and by `migkit leftovers`, as
+`decide.leftover_dump` rules on its recorded owner. W4.b - `fpe` and `token`
+are transforms, and `decide.hide_column` chooses between them and a hash on
+the column's facts. Unproved on a real server: all three are proved on
+fakes only.
+
 Done (c, 2026-09-27, `test_a_server_behind_a_bastion_is_reached.py`):
 where the round trip to the bastion (a TCP connect, the least of three)
 says one SSH window cannot carry 100 MB/s, as many ssh connections as it

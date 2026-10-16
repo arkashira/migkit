@@ -338,3 +338,81 @@ def lift(hop, eng, say, dbs=None, force=False):
         if h["side"] == "dst" and h["db"]:
             freeze.thaw(hop, eng, h["db"], say, side="dst")
     return lifted, left
+
+
+# --- dumps a killed run left ---------------------------------------------------
+
+def dumps(hop, dbs=None, now=None):
+    """[{path, owner, gone, age}] of every dump directory of a driven
+    program (`evidence.PROGRAM_DIRS`) under the hop's report directory and
+    its `at_rest.scratch`, for `dbs` (the hop's databases where not given,
+    and every database found under the scratch). `owner` is the process
+    recorded beside it (`evidence.owner_file`), `gone` whether it has died
+    (None where none is recorded), `age` seconds since it was written."""
+    import pathlib
+    import time
+    from . import evidence
+    now = time.time() if now is None else now
+    names = list(dbs if dbs is not None else hop.databases or [])
+    bases = []
+    for d in names or [None]:
+        try:
+            bases.append(pathlib.Path(hop.report_dir(d)))
+        except Exception:  # noqa: BLE001 - no such directory: no dump in it
+            continue
+    where = evidence.scratch_of(hop)
+    if where:
+        top = pathlib.Path(where).expanduser() / str(hop.name)
+        if names:
+            bases += [top / str(d) for d in names]
+        elif top.is_dir():
+            bases += [p for p in top.iterdir() if p.is_dir()]
+    out, seen = [], set()
+    for base in bases:
+        try:
+            entries = sorted(base.iterdir()) if base.is_dir() else []
+        except OSError:
+            continue
+        for p in entries:
+            if p in seen or not p.is_dir() or not (
+                    p.name in evidence.PROGRAM_DIRS
+                    or p.name.startswith(evidence.PROGRAM_PREFIX)):
+                continue
+            seen.add(p)
+            try:
+                pid = int(evidence.owner_file(p).read_text().strip())
+            except (OSError, ValueError):
+                pid = None
+            try:
+                age = now - p.stat().st_mtime
+            except OSError:
+                age = None
+            out.append({"path": p, "owner": pid, "gone": _gone(pid),
+                        "age": age})
+    return out
+
+
+def clear_dumps(hop, dbs=None, say=None, now=None):
+    """Every dump `dumps` finds removed where `decide.leftover_dump` says
+    its owner is gone (or, with none recorded, that it is older than any
+    step a run took), each with its owner record; one a run may still be
+    writing is left, with why. Returns (removed, kept), each as `dumps`
+    lists them. Nothing is removed for a hop with a run in progress."""
+    import shutil
+    from . import decide, evidence
+    step = longest_step(hop)
+    removed, kept = [], []
+    for d in dumps(hop, dbs, now):
+        c = decide.leftover_dump({"owner gone": d["gone"], "age": d["age"],
+                                  "longest step": step})
+        if c.path == "remove":
+            shutil.rmtree(d["path"], ignore_errors=True)
+            evidence.owner_file(d["path"]).unlink(missing_ok=True)
+            removed.append(d)
+            if say:
+                say(f"removed the dump {d['path']} a killed run left")
+        else:
+            kept.append(d)
+            if say:
+                say(f"left the dump {d['path']}: {c.reason}")
+    return removed, kept

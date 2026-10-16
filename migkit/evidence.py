@@ -320,10 +320,12 @@ def program_path(hop, db, name):
 
     Limits, stated plainly: migkit does not check that the volume is
     encrypted or memory-backed - it can only be asked for and recorded
-    (`program_files_note`); a killed run leaves a dump there until the next
-    run of the same hop and database removes it first; files a program
-    writes elsewhere (its own temporary directory, a log) are not moved;
-    and nothing here encrypts the bytes a program has written.
+    (`program_files_note`); a killed run leaves a dump there until the
+    hop's next start removes it (`leftovers.clear_dumps`, also what
+    `migkit leftovers` gives back) or the next run of the same hop and
+    database does; a program's temporary files and logs go to
+    `program_temp`, under the same scratch; and nothing here encrypts the
+    bytes a program has written.
     """
     where = scratch_of(hop)
     if not where:
@@ -342,6 +344,46 @@ def program_path(hop, db, name):
         raise SystemExit(f"at_rest.scratch {where} cannot be used for the"
                          f" files a program writes ({e})") from None
     return d / name
+
+
+#: what a driven program's files are called under the hop's report
+#: directory or `at_rest.scratch`: its dump directories and the place its
+#: temporary files and logs go (`program_temp`); a table's own dump
+#: begins with the prefix
+PROGRAM_DIRS = ("pgdump", "mydumper", "straight-copy", "tmp")
+PROGRAM_PREFIX = "dump-table-"
+
+
+def program_temp(hop, db):
+    """The directory a driven program's temporary files and logs go to
+    (`TMPDIR`, a shell's home), private to this user: under
+    `at_rest.scratch` where the hop names one, so they lie where the dump
+    does and not in the system's temporary directory. None where it names
+    none - the program keeps its own place."""
+    if not scratch_of(hop):
+        return None
+    from . import durable
+    where = program_path(hop, db, "tmp")
+    try:
+        return durable.private_dir(where) or where
+    except OSError as e:
+        raise SystemExit(f"at_rest.scratch {scratch_of(hop)} cannot be used"
+                         f" for the files a program writes ({e})") from None
+
+
+def program_env(hop, db):
+    """The environment that sends a program's temporary files to
+    `program_temp`; empty where the hop names no scratch."""
+    where = program_temp(hop, db)
+    return {"TMPDIR": str(where)} if where else {}
+
+
+def owner_file(path):
+    """The record beside a dump directory of the process that made it
+    (`movers._LocalCopy`): beside it, not in it, because the dump program
+    wants its directory empty. `leftovers.dumps` reads it."""
+    path = pathlib.Path(path)
+    return path.with_name(path.name + ".owner")
 
 
 def program_files_note(hop):

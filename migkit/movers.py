@@ -1519,7 +1519,8 @@ def pgdump_move(hop, db, workers, go, log):
     if unresolved:
         raise _unresolved_exclusion(db, unresolved)
     env_t = {**t.libpq_env(),
-             "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
+             "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15",
+             **evidence.program_env(hop, db)}
     from .engines.postgres import PostgresEngine
     quiet = _pg_quiet_triggers(
         hop, db, [n for n in PostgresEngine(hop)._all_tables("src", db)
@@ -1534,7 +1535,8 @@ def pgdump_move(hop, db, workers, go, log):
                 log(evidence.program_files_note(hop))
             log(dump)
         _sh(dump.argv, {**s.libpq_env(), "PGPASSWORD": s.password,
-                        "PGCONNECT_TIMEOUT": "15"},
+                        "PGCONNECT_TIMEOUT": "15",
+                        **evidence.program_env(hop, db)},
             log, progress=_tables_done(PG_DUMP_TABLE, "read"))
         _pg_create_missing(hop, db, log)
         _pg_truncate_target(hop, db, log)
@@ -1564,11 +1566,15 @@ class _LocalCopy:
         shutil.rmtree(self.path, ignore_errors=True)
         self.path.mkdir(parents=True)
         os.chmod(self.path, 0o700)
+        # who made it, beside it: a killed run leaves both, and the hop's
+        # next start tells a dump left behind from one in use
+        evidence.owner_file(self.path).write_text(str(os.getpid()))
         return self.path
 
     def __exit__(self, *exc):
         import shutil
         shutil.rmtree(self.path, ignore_errors=True)
+        evidence.owner_file(self.path).unlink(missing_ok=True)
         return False
 
 
@@ -3520,8 +3526,10 @@ def mydumper_table(hop, db, table, workers, rows, log=None):
         conn.close()
     try:
         with _LocalCopy(outdir):
-            _sh(dump, {"MYSQL_PWD": hop.source.password}, log)
-            _sh(load, {"MYSQL_PWD": hop.target.password}, log)
+            _sh(dump, {"MYSQL_PWD": hop.source.password,
+                       **evidence.program_env(hop, db)}, log)
+            _sh(load, {"MYSQL_PWD": hop.target.password,
+                       **evidence.program_env(hop, db)}, log)
     finally:
         shutil.rmtree(outdir, ignore_errors=True)
 
@@ -4313,13 +4321,15 @@ def _shell_run(hop, db, spec, script, log=None):
     import os
     import tempfile
     reader = _ShellLog()
-    with tempfile.TemporaryDirectory(prefix="migkit-") as home:
+    with tempfile.TemporaryDirectory(
+            prefix="migkit-", dir=evidence.program_temp(hop, db)) as home:
         env = {"MIGKIT_SPEC": json.dumps(spec),
                "MIGKIT_SOURCE_PASSWORD": str(hop.source.password or ""),
                "MIGKIT_TARGET_PASSWORD": str(hop.target.password or ""),
                # its history, log and settings in a place of its own that
                # goes with the run, not under this user's home
-               "MYSQLSH_USER_CONFIG_HOME": home}
+               "MYSQLSH_USER_CONFIG_HOME": home,
+               **evidence.program_env(hop, db)}
         os.chmod(home, 0o700)
         _sh(_shell_argv(script), env, log, progress=reader)
     result = reader.result or {}
@@ -4654,7 +4664,8 @@ def mydumper_move(hop, db, workers, go, log, only=None):
             reading = _MyDumpLog()
             began = time.monotonic()
             if or_copier(DUMP_LOAD, dump_tables, lambda: _sh(
-                    dump.argv, {"MYSQL_PWD": hop.source.password}, log,
+                    dump.argv, {"MYSQL_PWD": hop.source.password,
+                                **evidence.program_env(hop, db)}, log,
                     progress=reading)):
                 took[DUMP_LOAD] = time.monotonic() - began
                 spans[DUMP_LOAD] = reading.spans.seconds()
@@ -4716,7 +4727,8 @@ def mydumper_move(hop, db, workers, go, log, only=None):
                     log(load)
                 began = time.monotonic()
                 if or_copier(DUMP_LOAD, dump_tables, lambda: (_sh(
-                        load.argv, {"MYSQL_PWD": hop.target.password}, log,
+                        load.argv, {"MYSQL_PWD": hop.target.password,
+                                    **evidence.program_env(hop, db)}, log,
                         progress=loading), failpoint.hit("bulk.loaded"))):
                     took[DUMP_LOAD] = took.get(DUMP_LOAD, 0) + (
                         time.monotonic() - began)
@@ -9097,6 +9109,9 @@ def run_via(via, hop, db, workers, go, log):
         # a mover nobody has taught this function about must stop here rather
         # than fall through to whatever happens to be first
         raise SystemExit(f"no bulk path named {via!r}")
+    if go:
+        # a dump a killed run left, removed as the hop starts again
+        leftovers.clear_dumps(hop, [db], log)
     tools = programs(via)
     missing = [t for t in tools if not which(t)]
     if missing:

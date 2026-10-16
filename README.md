@@ -198,6 +198,7 @@ off for a hop where the time matters more.
 | `rollback` | Restore target sequences from a saved state, put back the rows the repairs since it wrote, where the target still holds what they wrote; where the hop streamed back or cut over, the old source's counters raised past the new primary's. |
 | `users` | Sync logins source -> target keeping the same password. |
 | `telemetry` | Product telemetry: what migkit did, never what it carried. |
+| `secrets` | The user's own keys: replace the masking key, describe it. |
 <!-- /gen_docs: commands -->
 
 Every check is read-only and rerunnable. Every repair is dry-run unless

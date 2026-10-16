@@ -26,11 +26,12 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 379
+## Upward imports still listed: 380
 
 ### (not listed)
 
 - `migkit/engines/mssql.py:2061` engines -> workflows (`jobs`)
+- `migkit/transforms.py:402` conversion -> decision (`decide`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 

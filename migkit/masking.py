@@ -39,6 +39,14 @@ ones. Not covered here: the integrity digests of files that hold values
 are plain hashes of a whole file, checked by recomputing them, and stay so.
 What migkit keeps on disk for its own repairs (the drilldown key files) is
 not masked: those are its working state, not a report.
+
+The secret can be replaced (`rotate`, `migkit secrets rotate-mask`): every
+token made under the old one stops matching, and says so with its reason
+(`verify`) - a report records the key's id beside its salt (`mask.keyid`),
+an id that is a digest of the key under a fixed label, so the old key need
+not be kept to tell a token of the old key from a wrong value. `export`
+describes the key by its shape (length, alphabet, id, when it was made),
+never by its value.
 """
 import hashlib
 import hmac
@@ -106,19 +114,23 @@ def _salt(hop):
         return path.read_bytes()
 
 
-#: {state directory: the user's local secret}, read once per process
+#: {state directory: the user's local secret}, read once per process; the
+#: other local keys (`state_key`) are kept as "<directory>|<file>"
 _SECRETS = {}
 
 
-def _secret():
-    """The user's local secret: 32 random bytes in `mask.key` under the
-    state directory, 0600, made once. Never inside a report directory."""
+def state_key(name="mask.key"):
+    """A local key: 32 random bytes in file `name` under the state
+    directory, 0600, made once. Never inside a report directory. The one
+    place a key of the user's own is made and read (`mask.key` here,
+    `transform.key` for `transforms`' encryption and tokens)."""
     from . import config
     where = config.state_home()
-    got = _SECRETS.get(str(where))
+    slot = str(where) if name == "mask.key" else f"{where}|{name}"
+    got = _SECRETS.get(slot)
     if got is not None:
         return got
-    path = where / "mask.key"
+    path = where / name
     try:
         got = path.read_bytes()
     except OSError:
@@ -141,8 +153,13 @@ def _secret():
             pass  # the process's own: it agrees within this run only
         if len(got) < 32:
             got = fresh
-    _SECRETS[str(where)] = got
+    _SECRETS[slot] = got
     return got
+
+
+def _secret():
+    """The user's local masking secret (`state_key`)."""
+    return state_key("mask.key")
 
 
 def keyed(hop, data):
@@ -151,7 +168,9 @@ def keyed(hop, data):
     is made for a report that may be shared (R17b.hmac)."""
     if not isinstance(data, bytes):
         data = str(data).encode("utf-8", "surrogatepass")
-    key = hmac.new(_secret(), b"migkit-mask-v1|" + _salt(hop),
+    salt = _salt(hop)
+    _stamp(hop)
+    key = hmac.new(_secret(), b"migkit-mask-v1|" + salt,
                    hashlib.sha256).digest()
     return hmac.new(key, data, hashlib.sha256).hexdigest()
 
@@ -177,3 +196,123 @@ def frame(hop, table, df):
         if column(hop, table, c):
             df[c] = df[c].map(lambda v: token(hop, v))
     return df
+
+
+# --- the key's life: its id, its rotation, its description -------------------
+
+def key_id():
+    """A short id of the current key: a digest of it under a fixed label,
+    which says which key made a token and tells nothing of the key."""
+    return hmac.new(_secret(), b"migkit-mask-id-v1",
+                    hashlib.sha256).hexdigest()[:12]
+
+
+def _history_path():
+    from . import config
+    return config.state_home() / "mask.history"
+
+
+def _history():
+    """[{id, retired}] of the keys replaced, oldest first; the keys
+    themselves are not kept."""
+    import json
+    try:
+        got = json.loads(_history_path().read_text())
+    except (OSError, ValueError):
+        return []
+    return [h for h in got if isinstance(h, dict)] \
+        if isinstance(got, list) else []
+
+
+def rotate(now=None):
+    """Replace the masking secret by a new one. Returns (old id, new id).
+    The old key is not kept: a token it made can no longer be made, and
+    `verify` says so for a report that records its id. A state directory
+    that cannot be written refuses (a key drawn for this process alone
+    would be the same loss with nothing to show for it)."""
+    import json
+    import time
+    from . import config, durable
+    where = config.state_home()
+    old = key_id()
+    fresh = os.urandom(32)
+    try:
+        durable.private_dir(where)
+        durable.write_atomic(where / "mask.key", fresh, mode=0o600)
+        durable.write_atomic(_history_path(), json.dumps(
+            _history() + [{"id": old, "retired": time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime(now))}]))
+    except OSError as e:
+        raise SystemExit(f"the masking key was not replaced: {where} cannot"
+                         f" be written ({e})") from None
+    _SECRETS[str(where)] = fresh
+    return old, key_id()
+
+
+def export():
+    """The key described by its shape, never its value: {id, bytes, bits,
+    alphabet, length_of_text, made, replaced, where}. `alphabet` and
+    `length_of_text` are those of the key written as hex digits, the form
+    a person would be shown it in; the value itself is not in the result."""
+    import time
+    from . import config
+    path = config.state_home() / "mask.key"
+    key = _secret()
+    try:
+        made = time.strftime("%Y-%m-%d %H:%M:%S",
+                             time.localtime(path.stat().st_mtime))
+    except OSError:
+        made = None
+    return {"id": key_id(), "bytes": len(key), "bits": 8 * len(key),
+            "alphabet": "hex digits 0-9a-f", "length_of_text": 2 * len(key),
+            "made": made, "replaced": len(_history()), "where": str(path)}
+
+
+def _stamp(hop):
+    """Record, beside the salt, which key the tokens of this report are
+    made under: the id of each key that has made one, oldest first, added
+    once. A report made before a rotation keeps the id of the key that
+    made it until a run makes tokens under the new one."""
+    path = hop.report_dir() / "mask.keyid"
+    now = key_id()
+    try:
+        if now in path.read_text().split():
+            return
+    except OSError:
+        pass
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(now + "\n")
+    except OSError:
+        pass
+
+
+def made_under(hop):
+    """[id] of the keys this hop's report records its tokens under, oldest
+    first; empty where it records none (a report made before keys were
+    recorded)."""
+    try:
+        return (hop.report_dir() / "mask.keyid").read_text().split()
+    except OSError:
+        return []
+
+
+def verify(hop, shown, value, under=None):
+    """(whether `shown` is the token of `value` now, why not). A token made
+    under a key since replaced is said to be so, with when - it no longer
+    matches whatever the value is; any other mismatch is a different
+    value. `under` is the key id the token was made under (a saved report
+    carries it); where not given, the report's record is used, which names
+    the old key only while no run has made tokens under the new one."""
+    ids = [under] if under else made_under(hop)
+    if ids and key_id() not in ids:
+        when = next((h.get("retired") for h in _history()
+                     if h.get("id") == ids[0]), None)
+        return False, (f"made under masking key {ids[0]}, replaced"
+                       + (f" on {when}" if when else "")
+                       + f" by {key_id()}: a token of the old key matches no"
+                       " value now; run the report again to make them anew")
+    if shown == token(hop, value):
+        return True, ""
+    return False, "a different value than the one shown"

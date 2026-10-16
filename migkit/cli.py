@@ -1086,6 +1086,13 @@ def leftovers_cmd(hop_name, db, only_list):
     chosen = _left.decided(hop, dbs)
     for line in _holds_said(hop_name, hop, chosen):
         console.print(line)
+    # the dumps a killed run left (`decide.leftover_dump`)
+    if only_list:
+        for d in _left.dumps(hop, dbs):
+            console.print(f"{_esc(hop_name)}: a dump left at"
+                          f" {_esc(str(d['path']))}")
+    else:
+        _left.clear_dumps(hop, dbs, lambda m: console.print(f"  {_esc(m)}"))
     if not chosen:
         console.print(f"{_esc(hop_name)}: no writes held on either side")
         return
@@ -7277,6 +7284,47 @@ def telemetry_cmd(action, bucket, with_schema, endpoint):
                                            sort_keys=True))
     for event in events:
         click.echo(json.dumps(event, sort_keys=True))
+
+
+# --- secrets: the masking key's life (backlog R17b.hmac) --------------------
+
+@main.group("secrets")
+def secrets_cmd():
+    """The user's own keys: replace the masking key, describe it."""
+
+
+@secrets_cmd.command("rotate-mask")
+@click.option("--yes", is_flag=True,
+              help="replace the key without asking")
+def secrets_rotate_mask(yes):
+    """Replace the key that masks the values a report shows. Every masked
+    token made under the old key stops matching, and says so; the old key
+    is not kept."""
+    from . import masking
+    if not yes and not click.confirm(
+            "Every masked value in a report already made stops matching a"
+            " new one. Replace the masking key?"):
+        raise SystemExit("the masking key was not replaced")
+    old, new = masking.rotate()
+    click.echo(f"masking key {old} replaced by {new}: tokens made under"
+               f" {old} no longer match, and reports made under it say so")
+
+
+@secrets_cmd.command("export-mask")
+@click.option("--json", "as_json", is_flag=True, help="as JSON")
+def secrets_export_mask(as_json):
+    """Describe the masking key by its shape - length, alphabet, id, when
+    it was made - never by its value."""
+    from . import masking
+    got = masking.export()
+    if as_json:
+        click.echo(json.dumps(got, sort_keys=True))
+        return
+    click.echo(f"masking key {got['id']}: {got['bytes']} bytes"
+               f" ({got['bits']} bits), written as {got['length_of_text']}"
+               f" {got['alphabet']}; made {got['made'] or 'unknown'};"
+               f" replaced {got['replaced']} time(s); kept in {got['where']}"
+               " (the value is not shown)")
 
 
 if __name__ == "__main__":

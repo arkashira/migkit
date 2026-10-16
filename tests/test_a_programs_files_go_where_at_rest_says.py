@@ -89,3 +89,106 @@ def test_every_dump_path_asks_the_one_owner_where_it_lies():
         assert "evidence.program_path(" in src, fn.__name__
         assert 'report_dir(db) / "pgdump"' not in src
         assert 'root / "mydumper"' not in src
+
+
+# --- the programs' temporary files and logs, and a killed run's dump --------
+
+def test_the_programs_temporary_files_land_under_scratch(tmp_path):
+    hop = _hop(tmp_path)
+    assert evidence.program_temp(hop, "shop") is None
+    assert evidence.program_env(hop, "shop") == {}
+    vol = tmp_path / "vol"
+    hop = _hop(tmp_path, {"scratch": str(vol)})
+    got = evidence.program_temp(hop, "shop")
+    assert got == vol / "h1" / "shop" / "tmp"
+    assert stat.S_IMODE(got.stat().st_mode) == 0o700
+    assert evidence.program_env(hop, "shop") == {"TMPDIR": str(got)}
+
+
+def test_the_straight_copys_home_and_temp_are_put_under_scratch(
+        tmp_path, monkeypatch):
+    seen = {}
+
+    def fake(argv, env, log=None, progress=None, **kw):
+        seen.update(env)
+        seen["home_is_dir"] = (tmp_path / "vol").exists() and \
+            __import__("os").path.isdir(env["MYSQLSH_USER_CONFIG_HOME"])
+
+    monkeypatch.setattr(movers, "_sh", fake)
+    hop = _hop(tmp_path, {"scratch": str(tmp_path / "vol")})
+    with pytest.raises(RuntimeError):
+        movers._shell_run(hop, "shop", {}, tmp_path / "script.py")
+    vol = str(tmp_path / "vol" / "h1" / "shop" / "tmp")
+    assert seen["TMPDIR"] == vol
+    assert seen["MYSQLSH_USER_CONFIG_HOME"].startswith(vol + "/")
+    assert seen["home_is_dir"]
+    # with no scratch the home is the system's, as it was
+    seen.clear()
+    with pytest.raises(RuntimeError):
+        movers._shell_run(_hop(tmp_path), "shop", {}, tmp_path / "s.py")
+    assert "TMPDIR" not in seen
+    assert not seen["MYSQLSH_USER_CONFIG_HOME"].startswith(str(tmp_path))
+
+
+def test_every_program_call_of_a_dump_path_carries_the_scratch_env():
+    for fn in (movers.pgdump_move, movers.mydumper_table,
+               movers.mydumper_move):
+        assert "evidence.program_env(hop, db)" in inspect.getsource(fn), \
+            fn.__name__
+
+
+def _dead_pid():
+    import subprocess
+    import sys
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def test_a_dump_left_by_a_killed_run_is_removed_and_a_live_one_is_not(
+        tmp_path):
+    import os
+
+    from migkit import leftovers
+    vol = tmp_path / "vol"
+    hop = _hop(tmp_path, {"scratch": str(vol)})
+    hop.databases = ["shop"]
+    base = evidence.program_path(hop, "shop", "pgdump").parent
+    dead = base / "pgdump"
+    dead.mkdir()
+    (dead / "toc.dat").write_text("rows")
+    evidence.owner_file(dead).write_text(str(_dead_pid()))
+    live = base / "mydumper"
+    live.mkdir()
+    evidence.owner_file(live).write_text(str(os.getpid()))
+    unknown = base / "straight-copy"
+    unknown.mkdir()
+    found = {d["path"].name: d for d in leftovers.dumps(hop)}
+    assert found["pgdump"]["gone"] is True
+    assert found["mydumper"]["gone"] is False
+    assert found["straight-copy"]["gone"] is None
+    said = []
+    removed, kept = leftovers.clear_dumps(hop, say=said.append)
+    assert [d["path"] for d in removed] == [dead]
+    assert not dead.exists() and not evidence.owner_file(dead).exists()
+    assert live.exists() and unknown.exists()
+    assert {d["path"] for d in kept} == {live, unknown}
+    assert any("still runs" in m for m in said)
+    assert any("no run is recorded" in m for m in said)
+
+
+def test_the_copy_records_its_owner_and_the_hops_start_clears_the_rest():
+    from migkit import leftovers
+    assert "evidence.owner_file(" in inspect.getsource(movers._LocalCopy)
+    assert "leftovers.clear_dumps(" in inspect.getsource(movers.run_via)
+    assert callable(leftovers.clear_dumps)
+
+
+def test_the_copy_leaves_its_owner_while_it_runs_and_none_after(tmp_path):
+    import os
+    hop = _hop(tmp_path)
+    where = evidence.program_path(hop, "shop", "pgdump")
+    where.parent.mkdir(parents=True)
+    with movers._LocalCopy(where):
+        assert evidence.owner_file(where).read_text() == str(os.getpid())
+    assert not where.exists() and not evidence.owner_file(where).exists()

@@ -108,3 +108,78 @@ def test_a_short_or_torn_secret_is_not_used(state, tmp_path):
     hop = _hop(tmp_path / "r")
     masking.token(hop, "x")
     assert len(masking._secret()) == 32
+
+
+# --- the key's life: rotation and export (backlog R17b.hmac) ----------------
+
+def test_a_rotated_key_refuses_old_tokens_and_says_why(state, tmp_path):
+    hop = _hop(tmp_path / "r")
+    shown = masking.token(hop, "ann@example.com")
+    ok, why = masking.verify(hop, shown, "ann@example.com")
+    assert ok and why == ""
+    old = masking.key_id()
+    got_old, got_new = masking.rotate()
+    assert got_old == old and got_new == masking.key_id() != old
+    # the token the old key made matches nothing now, whatever the value,
+    # and the report that holds only it says why
+    ok, why = masking.verify(hop, shown, "ann@example.com")
+    assert not ok
+    assert old in why and "replaced" in why and "no value now" in why
+    assert masking.token(hop, "ann@example.com") != shown
+    # once a run has made tokens under the new key, the old token is
+    # still told by the key id it carries
+    ok, why = masking.verify(hop, shown, "ann@example.com", under=old)
+    assert not ok and old in why and "no value now" in why
+    # a mismatch under the current key is a different value, not a rotation
+    fresh = masking.token(hop, "bob@example.com")
+    assert masking.verify(hop, fresh, "ann@example.com") == (
+        False, "a different value than the one shown")
+    assert masking.verify(hop, fresh, "bob@example.com")[0]
+    # the history keeps ids, never keys
+    kept = (state / "mask.history").read_text()
+    assert old in kept
+    assert (state / "mask.key").read_bytes().hex() not in kept
+    assert stat.S_IMODE((state / "mask.key").stat().st_mode) == 0o600
+
+
+def test_the_export_describes_the_key_and_never_holds_it(state, tmp_path):
+    import base64
+    import json
+    from click.testing import CliRunner
+    from migkit import cli
+    canary = bytes(range(1, 33))
+    state.mkdir(parents=True)
+    (state / "mask.key").write_bytes(canary)
+    os.chmod(state / "mask.key", 0o600)
+    got = masking.export()
+    assert got["bytes"] == 32 and got["bits"] == 256
+    assert got["length_of_text"] == 64 and "0-9a-f" in got["alphabet"]
+    outputs = [json.dumps(got), repr(got)]
+    for args in (["secrets", "export-mask"],
+                 ["secrets", "export-mask", "--json"]):
+        r = CliRunner().invoke(cli.main, args)
+        assert r.exit_code == 0, r.output
+        outputs.append(r.output)
+    shapes = [canary.hex(), canary.hex().upper(),
+              base64.b64encode(canary).decode(),
+              base64.urlsafe_b64encode(canary).decode().rstrip("="),
+              canary.decode("latin-1")]
+    for text in outputs:
+        for shape in shapes:
+            assert shape not in text
+        assert masking.key_id() in text
+
+
+def test_rotate_mask_command_replaces_the_key_and_says_so(state):
+    from click.testing import CliRunner
+    from migkit import cli
+    before = masking.key_id()
+    r = CliRunner().invoke(cli.main, ["secrets", "rotate-mask", "--yes"])
+    assert r.exit_code == 0, r.output
+    assert before in r.output and masking.key_id() in r.output
+    assert "no longer match" in r.output
+    assert masking.key_id() != before
+    # without --yes and without an answer, nothing is replaced
+    now = masking.key_id()
+    r = CliRunner().invoke(cli.main, ["secrets", "rotate-mask"], input="n\n")
+    assert r.exit_code != 0 and masking.key_id() == now

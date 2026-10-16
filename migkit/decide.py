@@ -5094,6 +5094,108 @@ def written_in_pieces(facts):
     return got.path == "pieces", got
 
 
+# ---- a dump a killed run left, and how a column is hidden (backlog R17b.prog,
+# ---- W4.b) ------------------------------------------------------------------
+def leftover_dump(facts):
+    """The `Choice` for a dump directory a run left (`leftovers.dumps`):
+    remove it, or leave it. Read from `owner gone` (True where the process
+    recorded beside it has died, False where it still runs - it may be
+    writing now - None where no owner is recorded), `age` (seconds since
+    it was last written) and `longest step` (seconds the longest step of
+    the hop's last run took, None where none was kept). A dump with no
+    recorded owner is removed only where it is older than any step the run
+    took; one whose owner still runs is never removed here."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+
+    def stale(f):
+        age, step = f.get("age"), f.get("longest step")
+        return age is not None and step is not None and age > step
+    return climb("a dump directory left behind", (
+        Rung("remove", "removed with everything in it", needs=(
+            Need("its owner gone",
+                 lambda f: f.get("owner gone") is True or (
+                     f.get("owner gone") is None and stale(f)),
+                 lambda f: "the run that made it still runs and may be"
+                 " writing" if f.get("owner gone") is False else
+                 "no run is recorded as its owner, and it is not older than"
+                 " the longest step a run took"
+                 if f.get("longest step") is not None else
+                 "no run is recorded as its owner and none was kept to tell"
+                 " a dump left behind from one in use"),),
+             because="nothing that made it is left to use it"),
+        Rung("keep", "left as it is", footprint=1,
+             because="the run that made it may still be using it")), f)
+
+
+def hide_column(facts):
+    """The `Choice` for how a column's values are hidden: `fpe` (encrypted
+    in their own shape), `token` (a stand-in kept in the user's vault) or
+    `hash` (a keyed digest, no way back). Read from `kind` (`digits`,
+    `alphabet` for a text in a known set, `text`, `other`), `alphabet` (the
+    set's name or characters), `length` (the longest value, in
+    characters), `shape` (a reader of the value needs its shape and
+    length), `unique` (the column must stay unique), `referenced` (keys
+    that refer to it, or that it refers to: the same value must come out
+    wherever it stands) and `reversible` (the holder of the key must be
+    able to get the value back).
+
+    A value whose shape is read is encrypted in it where its set is known
+    and its length leaves a domain big enough to hold (`transforms.
+    LEAST_DOMAIN`); a value that must come back, or stay unique or
+    joined, and cannot be encrypted in its shape is tokenised; one that
+    needs nothing of the three is hashed, which keeps nothing to reverse."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    from . import transforms
+    chars = None
+    if f.get("kind") in ("digits", "alphabet"):
+        try:
+            chars = transforms.alphabet(
+                "digits" if f.get("kind") == "digits" else f.get("alphabet"))
+        except SystemExit:
+            chars = None
+    said = (f"a {f.get('kind') or 'column of unknown type'}"
+            + (", unique" if f.get("unique") else "")
+            + (f", {int(f.get('referenced'))} key(s) joined on it"
+               if f.get("referenced") else "")
+            + (", to come back" if f.get("reversible") else "")
+            + (", read by its shape" if f.get("shape") else ""))
+
+    def room(x):
+        n = int(x.get("length") or 0)
+        return chars is not None and len(chars) ** n \
+            >= transforms.LEAST_DOMAIN
+    return climb("how a column's values are hidden", (
+        Rung("fpe", "encrypted in their own shape and length", because=said,
+             needs=(
+                 Need("a value read by its shape, or to be unique, joined"
+                      " or restored",
+                      lambda x: bool(x.get("shape") or x.get("unique")
+                                     or x.get("referenced")
+                                     or x.get("reversible")),
+                      "nothing reads the shape or needs the value back: a"
+                      " hash is enough"),
+                 Need("a known set of characters", lambda x: chars is not None,
+                      "the values are not digits or a known set of"
+                      " characters"),
+                 Need("a domain big enough to hold", room,
+                      lambda x: f"values of {int(x.get('length') or 0)}"
+                      " characters leave fewer than"
+                      f" {transforms.LEAST_DOMAIN:,} possible values"))),
+        Rung("token", "replaced by a token kept in a local vault",
+             because=said, needs=(
+                 Need("a value to be unique, joined or restored, and not"
+                      " read by its shape",
+                      lambda x: not x.get("shape") and bool(
+                          x.get("unique") or x.get("referenced")
+                          or x.get("reversible")),
+                      lambda x: "its shape is read and the encryption in"
+                      " its shape cannot hold: nothing else keeps it"
+                      if x.get("shape") else
+                      "the value need not come back, stay unique or join:"
+                      " a hash is enough"),)),
+        Rung("hash", "a keyed digest, with no way back", because=said)), f)
+
+
 # --- whether a side's provider is asked what it holds of it (W17F2) ---------
 
 def provider_asked(facts):
