@@ -6631,3 +6631,134 @@ def tail_state(facts):
         Rung("following", "following", because="the quiet is ordinary")),
         f, prove=False)
 ||||||| b4242c6d
+
+def free_space_source(facts, costs=None):
+    """Where the target's free space is read from (backlog 7.free): the
+    server's own report, a look at the server's data directory from this
+    machine where it is proved to be the server's own, or the managed
+    service's provider - and nobody, said so, where none answers. Facts
+    (each read only for a rung still in the running): `server` (bytes the
+    server reported, None where it did not), `server_why` (why not),
+    `directory` (bytes free on the disk under the data directory this
+    machine sees, None where it does not), `directory_why`, `provider`
+    (bytes the provider's metric says), `provider_why`. A guess is never a
+    rung: the capacity gate reads None as "nobody knows" and says so. A
+    source after the first that answers is not read."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    order = ("server", "directory", "provider")
+
+    def said(key):
+        # the first source that answers ends the climb: a later one is
+        # never read once an earlier one gave a figure (its reader may run
+        # a program on the server)
+        before = order[:order.index(key)]
+
+        def holds(x, k=key):
+            return all(x.get(b) is None for b in before) and \
+                x.get(k) is not None
+
+        def why(x, k=key):
+            for b in before:
+                if x.get(b) is not None:
+                    return f"the {b} answered first"
+            return x.get(f"{k}_why") or f"the {k} did not answer"
+        return Need(f"a figure from the {key}", holds, why)
+    return climb("where the target's free space is read from", (
+        Rung("server", "the server's own report of the disk under its"
+             " data", needs=(said("server"),),
+             because="the server reads its own disk, under the account's"
+                     " right"),
+        Rung("directory", "the disk under the server's data directory, seen"
+             " from this machine and proved the server's own",
+             needs=(said("directory"),),
+             because="this machine sees the server's own data directory"),
+        Rung("provider", "the managed service's own metric of free storage",
+             needs=(said("provider"),),
+             because="the provider measures the volume the service runs"
+                     " on"),
+        Rung("none", "nobody says: the plan names no free space",
+             footprint=1, because="no source answered, and a guess would"
+                                  " be worse than saying so")),
+        f, costs=costs or None, prove=False)
+
+
+#: The releases migkit has run each engine on (backlog 26.versions), as
+#: (oldest, newest) - PostgreSQL by its major, the others by (major,
+#: minor): the lanes' and the tests' own images -
+#: PostgreSQL 14, 16 and 17, MySQL 8.4 and 9.4, MariaDB 10.11 to 11.8. A
+#: release outside is one no choice keyed on a version was ever run on.
+VERSIONS_SEEN = {"postgres": ((14,), (17,)),
+                 "mysql": ((8, 0), (9, 4)),
+                 "mariadb": ((10, 11), (11, 8))}
+
+#: What each engine chooses by its server's version, as (since, what): the
+#: release from which the choice is taken - the thresholds the engines
+#: test (`server_version_num` on PostgreSQL, the banner on MySQL and
+#: MariaDB), listed so a version test can say which a server takes
+VERSION_KEYS = {
+    "postgres": (((10, 0), "identity columns read from the catalogue"),
+                 ((11, 0), "procedures told from functions"),
+                 ((12, 0), "generated columns read and left to the target"),
+                 ((13, 0), "the snapshot read through pg_current_snapshot"),
+                 ((14, 0), "a table read in spans of its pages, and large"
+                           " transactions streamed to the subscriber"),
+                 ((15, 0), "WAL records read in the server, and the"
+                           " database's default collation checked"),
+                 ((16, 0), "the subscriber applies streamed transactions in"
+                           " parallel")),
+    "mysql": (((8, 0, 17), "the server's own clone of its data files"),
+              ((8, 3), "tagged GTIDs as the change marks")),
+    "mariadb": ()}
+
+
+def version_choices(family, version):
+    """[(since, what, taken)] of the engine's version-keyed choices for a
+    server at `version` (a tuple; None where it was not read: nothing is
+    taken)."""
+    have = tuple(version) if version else None
+    return [(since, what, have is not None and have >= since)
+            for since, what in VERSION_KEYS.get(family, ())]
+
+
+def version_seen(facts):
+    """Whether the server's release is one migkit has run on (backlog
+    26.versions): `family` (postgres, mysql, mariadb) and `version` (a
+    tuple, None where it was not read). Inside `VERSIONS_SEEN` it is
+    taken; a release before or after is refused in words - the choices
+    keyed on a version were never run against it, and a server newer than
+    any seen may have moved what one of them reads. One not read is taken
+    and said so: nothing keyed on a version is chosen for it."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    fam = f.get("family")
+    low, high = VERSIONS_SEEN.get(fam, (None, None))
+
+    def text(v):
+        return ".".join(str(x) for x in v or ()) or "not read"
+    return climb(f"whether migkit has run on this {fam} release", (
+        Rung("unread", "the release was not read: nothing keyed on a"
+             " version is chosen",
+             needs=(Need("the release not read",
+                         lambda x: not x.get("version"),
+                         "the server said its release"),),
+             because="the server did not say its release"),
+        Rung("seen", "a release migkit has run on",
+             needs=(Need("an engine whose releases are listed",
+                         lambda x: low is not None,
+                         f"no release of {fam} is listed as run on"),
+                    Need("no older than the oldest run on",
+                         lambda x: bool(x.get("version")) and tuple(
+                             x["version"][:len(low)]) >= low,
+                         lambda x: f"release {text(x['version'])} is older"
+                         f" than {text(low)}, the oldest migkit has run"
+                         f" {fam} on"),
+                    Need("no newer than the newest run on",
+                         lambda x: bool(x.get("version")) and tuple(
+                             x["version"][:len(high)]) <= high,
+                         lambda x: f"release {text(x['version'])} is newer"
+                         f" than {text(high)}, the newest migkit has run"
+                         f" {fam} on: the choices keyed on a version were"
+                         " never run against it")),
+             because="the version-keyed choices were run on it")),
+        f, prove=False)
+||||||| b4242c6d

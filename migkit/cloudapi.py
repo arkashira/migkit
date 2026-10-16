@@ -274,6 +274,12 @@ class Adapter:
         raise NotOffered(f"{self.WHO}'s API is not asked here for every"
                          f" instance of {self.product}")
 
+    def free_bytes(self):
+        """The instance's free storage as the provider's metric says it,
+        or None where this adapter does not read it (backlog 7.free: built,
+        unproved on a real service)."""
+        return None
+
     def restore_point(self, name, log):
         """A restore point made and waited for until the provider says it
         is ready. A product whose nature is a point in time has one at any

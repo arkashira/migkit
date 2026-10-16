@@ -1894,6 +1894,8 @@ and the plan does not guess it. A MongoDB move's plan had no size line
 at all before; the collections' own statistics now give it one
 (`tests/test_the_plan_says_the_targets_free_space.py`).
 
+*7.free (W18P, 2026-10-16), PARTLY:* PostgreSQL and MySQL/MariaDB now say free space from the first source that answers (`decide.free_space_source`, `sizing.free_bytes`): the server's own `df` of the tablespace where the account may run a program on the server (PostgreSQL), the shared tablespace's fixed most size (MySQL `information_schema.FILES`), this machine's look at the data directory where it is proved the server's own (`postmaster.pid` through `pg_stat_file`; `auto.cnf` holding `server_uuid`), the provider's metric (`cloudapi.Adapter.free_bytes`, None in every adapter: unproved on a real service), else none with every why; the capacity gate reads it. Proved on fakes (tests/test_free_space_and_release_are_read_from_who_says.py); the lane tests there are written, not yet run.
+
 Bytes per table are already known. Add the transfer cost for the network
 path the hop uses, the target storage, and the time from the measured
 throughput of the chosen path.
@@ -2868,6 +2870,7 @@ its schema version, which migkit should read (26.versions):
   where migkit changes the target's schema itself (the schema fix, a DDL
   the tail applies), said that the application's tool does not know of
   it.
+  Server release (W18P, 2026-10-16), PARTLY: each side's release held to the releases run on (`decide.VERSIONS_SEEN`, `version_seen`), the version-keyed choices listed against it (`VERSION_KEYS`, `version_choices`), one never run on refused in words by the readiness gate (`ready._releases`); proved on fakes, the pg/mysql/mariadb lane tests written but not yet run (tests/test_free_space_and_release_are_read_from_who_says.py).
   Not done (APPVERS, 2026-10-16): built and proved on stand-ins only - every engine through the neutral contract (`Engine.history_*`), 15 tool shapes, failed/out-of-order/checksum, the cutover gate (`cutover._version_rows`), migkit's own changes with how each tool records them; owed: a server test per engine (SQL Server, Oracle, Snowflake and the rest never asked), schemachange's history in its own METADATA database (not in the hop's), a history table the hop excludes is not read on the neutral path.
 
 **27. SQL Server depth.** Closed as untestable on this arm64 machine. Either

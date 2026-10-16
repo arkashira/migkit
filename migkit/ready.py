@@ -221,6 +221,52 @@ def _target(hop, eng, dbs):
     return out
 
 
+def _releases(eng, dbs):
+    """Each side's release against the ones migkit has run its engine on
+    (`decide.version_seen`, backlog 26.versions). One run on passes with
+    the version-keyed choices it takes; one not run on goes on, said as
+    unproved on this run with those choices named (built anyway); only a
+    release below every version-keyed choice's threshold
+    (`decide.VERSION_KEYS`) is refused - the code cannot choose there."""
+    from . import decide
+    out = []
+    ask = getattr(eng, "server_release", None)
+    for side, who in (("src", "the source"), ("dst", "the target")):
+        try:
+            fam, ver = ask(side, dbs[0]) if ask and dbs else (None, None)
+        except Exception:  # noqa: BLE001 - not read, and said so
+            continue
+        if fam is None or fam not in decide.VERSIONS_SEEN or not ver:
+            continue
+        text = ".".join(map(str, ver))
+        got = decide.version_seen({"family": fam, "version": ver})
+        listed = decide.version_choices(fam, ver)
+        taken = [w for _, w, t in listed if t]
+        floor = min((since for since, _ in decide.VERSION_KEYS.get(fam, ())),
+                    default=None)
+        if floor is not None and tuple(ver[:len(floor)]) < floor:
+            out.append(Item("fail", BEFORE, f"{who}'s release",
+                            f"{fam} {text} is older than"
+                            f" {'.'.join(map(str, floor))}, below every"
+                            " choice migkit keys on the version: none of"
+                            " them can be made for it",
+                            f"a {fam} release from"
+                            f" {'.'.join(map(str, floor))}", gates=True))
+        elif got.path == "seen":
+            out.append(Item("pass", BEFORE, f"{who}'s release",
+                            f"{fam} {text}"
+                            + (f": {'; '.join(taken)}" if taken else "")))
+        else:
+            out.append(Item("warn", BEFORE, f"{who}'s release",
+                            f"release {text} not run on here; the choices"
+                            " keyed on version are: "
+                            + ("; ".join(
+                                f"{w} ({'taken' if t else 'not taken'})"
+                                for _, w, t in listed) or "none")
+                            + f" - unproved on this run ({got.reason})"))
+    return out
+
+
 def _resources(hop, eng, dbs):
     """Room on the target's disk for the tables, and this machine's memory
     for one worker of the copy - from the catalogue, no probe run."""
@@ -593,6 +639,7 @@ def items(hop, eng, dbs=None, mode=None, quick=False, assessed=None):
                  lambda: _cloud_side(hop, eng) if not quick else [],
                  lambda: _target(hop, eng, dbs),
                  lambda: _resources(hop, eng, dbs),
+                 lambda: _releases(eng, dbs),
                  lambda: _change_reader(hop, eng, dbs, mode) if quick
                  else [],
                  lambda: _case(hop, eng, dbs, quick),

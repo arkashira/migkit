@@ -217,6 +217,68 @@ def capacity(eng, side, db):
     return _asked(eng, "capacity", side, db, lambda: fn(side, db))
 
 
+def free_bytes(eng, side, db, server=None, directory=None):
+    """What `side`'s disk has free, from the first source that answers
+    (`decide.free_space_source`): `server` and `directory` are the
+    engine's readers, each giving (bytes or None, why not); the managed
+    service's provider is asked last, through its API
+    (`cloudapi.Adapter.free_bytes`). None where nobody says - the choice,
+    with what each source said, is kept on the engine (`free_choice`,
+    (bytes, choice) by (side, db)) and is the answer for the rest of the
+    run: the server's program runs once, not on every question."""
+    from . import decide
+    kept = eng.__dict__.setdefault("free_choice", {})
+    if (side, db) in kept:
+        return kept[(side, db)][0]
+
+    def ask(reader):
+        if reader is None:
+            return None, "not asked of this engine"
+        try:
+            return reader()
+        except Exception as e:  # noqa: BLE001 - this source does not say
+            return None, f"could not be asked: {str(e).strip()[:200]}"
+    said = {}
+
+    def reader(key, fn):
+        def read():
+            if key not in said:
+                said[key] = ask(fn)
+            return said[key]
+        return {key: lambda: read()[0], f"{key}_why": lambda: read()[1]}
+    got = decide.free_space_source(decide.Facts(**{
+        **reader("server", server), **reader("directory", directory),
+        **reader("provider", lambda: _provider_free(eng, side))}))
+    free = said[got.path][0] if got.path in said else None
+    kept[(side, db)] = (free, got)
+    return free
+
+
+def _provider_free(eng, side):
+    """(bytes, why not) from the managed service's provider."""
+    from . import managed
+    api, conf = managed.api_conf(eng.hop, eng, side)
+    if api is None:
+        return None, "the side is not a managed service the hop names"
+    got = managed.adapter(eng.hop, eng, side).free_bytes()
+    return (got, None) if got is not None else (
+        None, "the provider's API does not say its free storage here")
+
+
+def local_free(path, same):
+    """(bytes, why not) free on this machine's disk under `path` - only
+    where `same()` proves the directory is the server's own (a server in a
+    container or on another host has a path of the same name here)."""
+    import os
+    import shutil
+    if not path or not os.path.isdir(path):
+        return None, "the server's data directory is not on this machine"
+    if not same():
+        return None, ("a directory of that name is here, but it is not"
+                      " the server's own")
+    return shutil.disk_usage(path).free, None
+
+
 def io_wait(eng, side, db):
     """How many of a server's sessions wait on storage
     (`Engine.io_wait`), {} where it says nothing."""

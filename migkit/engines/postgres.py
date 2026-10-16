@@ -13857,6 +13857,84 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 "cache_bytes": int(cache or 0), "cache_share": 0.25,
                 "hit": num(hit)}
 
+    def server_release(self, side, db):
+        """(engine, (major, minor)) of a side, the release None where it
+        was not read (`decide.version_seen`)."""
+        v = self._server_version(side, db)
+        return "postgres", ((v // 10000, v % 10000) if v else None)
+
+    def free_bytes(self, side, db):
+        """What the disk under the database's tablespace has free, from
+        the first source that answers (`sizing.free_bytes`): the server
+        running `df` on it where the account may run a program on the
+        server, or this machine's own look where the server's data
+        directory is proved to be here - the server's `postmaster.pid`
+        as `pg_stat_file` sees it is the file here. None where neither
+        does: PostgreSQL has no SQL that says it."""
+        import os
+        import shlex
+
+        from .. import sizing
+        where = {}
+
+        def place():
+            if not where:
+                conn = self._connect(side, db, "probe")
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "select current_setting('data_directory'),"
+                            " nullif(pg_tablespace_location(d.dattablespace),"
+                            " ''), r.rolsuper or pg_has_role(current_user,"
+                            " 'pg_execute_server_program', 'member')"
+                            " from pg_database d, pg_roles r where"
+                            " d.datname = current_database() and"
+                            " r.rolname = current_user")
+                        data, space, run = cur.fetchone()
+                    where.update(data=data, dir=space or data, run=run)
+                finally:
+                    conn.close()
+            return where
+
+        def server():
+            w = place()
+            if not w["run"]:
+                return None, ("the account may not run a program on the"
+                              " server (pg_execute_server_program)")
+            conn = self._connect(side, db, "probe")
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("create temp table migkit_free (l text)")
+                    cmd = cur.mogrify("%s", (
+                        "df -Pk -- " + shlex.quote(w["dir"]),)).decode()
+                    cur.execute(f"copy migkit_free from program {cmd}")
+                    cur.execute("select l from migkit_free")
+                    lines = [r[0] for r in cur.fetchall()]
+                    cur.execute("drop table migkit_free")
+            finally:
+                conn.close()
+            fields = lines[-1].split() if len(lines) > 1 else []
+            if len(fields) < 4 or not fields[3].isdigit():
+                return None, "the server's disk report was not one read here"
+            return int(fields[3]) * 1024, None
+
+        def same():
+            conn = self._connect(side, db, "probe")
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("select size, extract(epoch from"
+                                " modification) from"
+                                " pg_stat_file('postmaster.pid')")
+                    size, at = cur.fetchone()
+            finally:
+                conn.close()
+            mine = os.stat(os.path.join(place()["data"], "postmaster.pid"))
+            return mine.st_size == size and abs(mine.st_mtime - at) < 1
+
+        def directory():
+            return sizing.local_free(place()["dir"], same)
+        return sizing.free_bytes(self, side, db, server, directory)
+
     def capacity(self, side, db):
         """PostgreSQL says nothing of its CPUs in SQL. Where the server's
         own files may be read (a superuser on a server it runs itself) they

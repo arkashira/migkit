@@ -1765,6 +1765,67 @@ class MySQLEngine(Engine):
             self._gtid_n += 1
             return f"{uid}:{TAG}:{self._gtid_n}"
 
+    def server_release(self, side, db):
+        """(engine, (major, minor, patch)) of a side, MySQL or MariaDB by
+        its banner, the release None where it was not read
+        (`decide.version_seen`)."""
+        import re
+        try:
+            got = self._q(side, "select version(), @@version_comment")
+        except Exception:  # noqa: BLE001 - not read, and said so
+            return "mysql", None
+        banner = " ".join(str(x) for x in (got[0] if got else ()))
+        nums = tuple(int(x) for x in re.findall(r"\d+", banner)[:3])
+        return ("mariadb" if "mariadb" in banner.lower() else "mysql",
+                nums or None)
+
+    def free_bytes(self, side, db):
+        """What the target has room for, from the first source that
+        answers (`sizing.free_bytes`): the server's own tablespace figures
+        (`information_schema.FILES`) where the tables land in a shared
+        tablespace of a fixed most size, or this machine's look at the
+        data directory where it is proved the server's own (its
+        `auto.cnf` holds the server's `server_uuid`). None where neither
+        does: a table in a file of its own grows on a disk the server
+        does not report."""
+        import os
+
+        from .. import sizing
+        where = {}
+
+        def place():
+            if not where:
+                d, uuid, own = self._q(side, "select @@datadir,"
+                                       " @@server_uuid,"
+                                       " @@innodb_file_per_table")[0]
+                where.update(dir=str(d), uuid=str(uuid),
+                             own=str(own) in ("1", "ON"))
+            return where
+
+        def server():
+            if place()["own"]:
+                return None, ("each table is a file of its own, on a disk"
+                              " whose free space the server does not"
+                              " report")
+            got = self._q(side, "select sum(MAXIMUM_SIZE),"
+                                " sum((TOTAL_EXTENTS - FREE_EXTENTS) *"
+                                " EXTENT_SIZE), max(MAXIMUM_SIZE is null)"
+                                " from information_schema.FILES where"
+                                " TABLESPACE_NAME = 'innodb_system'")
+            most, used, grows = got[0] if got else (None, None, 1)
+            if grows or most is None:
+                return None, ("the shared tablespace grows on a disk whose"
+                              " free space the server does not report")
+            return max(int(most) - int(used or 0), 0), None
+
+        def same():
+            with open(os.path.join(place()["dir"], "auto.cnf")) as f:
+                return place()["uuid"] in f.read()
+
+        def directory():
+            return sizing.local_free(place()["dir"], same)
+        return sizing.free_bytes(self, side, db, server, directory)
+
     def mark_facts(self, side, db):
         """What decides the rungs this side allows (`marks.choose_rung`)."""
         import re
