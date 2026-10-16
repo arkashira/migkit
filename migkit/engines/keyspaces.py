@@ -116,6 +116,11 @@ class KeyspacesEngine(CassandraEngine):
     CANON_ENGINE = "cassandra"
     PAIR_ENGINE = "keyspaces"
     _sessions = {}
+    #: the CQL requests a second the service documents it takes on one
+    #: connection (its quotas page): the width of a chunk is what this rate
+    #: keeps busy over the latency measured (`decide.request_width`); it has
+    #: no table that says a node's pools
+    SERVICE_RATE = 3000
 
     def _session(self, side):
         from ..cloudapi import gate
@@ -215,8 +220,9 @@ class KeyspacesEngine(CassandraEngine):
                                               for k in key))
         keys = [tuple(r) for r in session.execute(
             f"select {', '.join(self._q(k) for k in key)} from {q}")]
-        for ok, got in execute_concurrent_with_args(session, stmt, keys,
-                                                    concurrency=64):
+        for ok, got in self._in_flight(
+                side, "write", lambda c, n: execute_concurrent_with_args(
+                    session, stmt, c, concurrency=n), keys):
             if not ok:
                 raise got
         return len(keys)

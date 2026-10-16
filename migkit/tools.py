@@ -1301,7 +1301,7 @@ def install_missing(log=print, ask=None):
         if not ok:
             log(f"  vendor component {n} did not install; run migkit"
                 " doctor again to see which capability is still short")
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=_fetch_width(jobs)) as pool:
         list(pool.map(fetch_one, jobs))
     _replace_old_builds(wanted, log)
     if teradata and answer.get(TERADATA_DRIVER):
@@ -1342,6 +1342,19 @@ def install_missing(log=print, ask=None):
         log("installing the server to server copy's parts ...")
         crossmove.install_extensions(log)
     return [(n, m) for n, _, st, m in capabilities() if st != "ready"]
+
+
+def _fetch_width(jobs, ask=None, host=None):
+    """How many of `jobs` ((n, command, open build)) are fetched at once:
+    the decision's (`decide.fetch_width`) from what this machine says -
+    its cores for the open builds, which compile, and its free memory -
+    never a number written here. `ask` and `host` are a test's fakes."""
+    from . import decide, sizing
+    here = (host or sizing.host)()
+    n, _ = (ask or decide.fetch_width)({
+        "jobs": len(jobs), "builds": sum(1 for j in jobs if j[2]),
+        "cpus": here.get("cpus"), "free": here.get("memory")})
+    return max(1, n)
 
 
 def _replace_old_builds(wanted, log):

@@ -24,15 +24,10 @@ TWO_SIDES = {
     ("migkit/engines/hetero.py", "ThreadPoolExecutor", 2),
     ("migkit/interlock.py", "ThreadPoolExecutor", 2),
 }
-#: ceilings no rung measured, each owned by backlog row AUD-Z.workers
-#: (the driver's in-flight requests as a rung on the cluster's answers;
-#: the installer's parallel fetches on the link)
-OWED = {
-    ("migkit/engines/cassandra.py", "concurrency", 32),
-    ("migkit/engines/cassandra.py", "concurrency", 64),
-    ("migkit/engines/keyspaces.py", "concurrency", 64),
-    ("migkit/tools.py", "max_workers", 4),
-}
+#: ceilings no rung measured yet: none since AUD-Z.workers (the driver's
+#: in-flight requests are `decide.request_width`, the installer's fetches
+#: `decide.fetch_width`); a new one is named here with its backlog row
+OWED = set()
 
 
 def _int(node):

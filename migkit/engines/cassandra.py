@@ -52,6 +52,67 @@ class CassandraEngine(NeutralCopier, Engine):
     OWN_PATHS_READ_COLUMN_MAPPING = False
 
     _sessions = {}
+    #: {(session, kind): (requests one node works at once, a probe's
+    #: seconds)} - read once a session (`_cluster_facts`)
+    _pools = {}
+    #: the server's own setting that says how many requests of a kind one
+    #: node works at once (`system_views.settings`)
+    POOL_SETTING = {"read": "concurrent_reads", "write": "concurrent_writes"}
+    #: requests a second a service documents it takes on one connection;
+    #: None for a server, whose nodes' own pools say
+    SERVICE_RATE = None
+
+    def _cluster_facts(self, side, kind):
+        """What `decide.request_width` reads of this cluster: the nodes the
+        driver sees up (asked of it every time: a node may leave or join),
+        how many requests of `kind` one node works at once (its own
+        setting, read once a session; None where it has no such table) and
+        one request's seconds, probed once, for the first chunk."""
+        s = self._session(side)
+        try:
+            hosts = [h for h in s.cluster.metadata.all_hosts()
+                     if getattr(h, "is_up", True) is not False]
+        except Exception:  # noqa: BLE001 - no metadata: no node seen
+            hosts = []
+        key = (id(s), kind)
+        if key not in self._pools:
+            try:
+                row = s.execute("select value from system_views.settings"
+                                " where name = %s",
+                                (self.POOL_SETTING[kind],)).one()
+                per = int(row[0]) if row and row[0] else None
+            except Exception:  # noqa: BLE001 - not said: None
+                per = None
+            began = time.monotonic()
+            try:
+                s.execute("select release_version from system.local")
+                probed = time.monotonic() - began
+            except Exception:  # noqa: BLE001 - not probed: None
+                probed = None
+            self._pools[key] = (per, probed)
+        per, probed = self._pools[key]
+        rate = (self.SERVICE_RATE * max(1, len(hosts))
+                if self.SERVICE_RATE else None)
+        return {"nodes": len(hosts) or None, "per_node": per, "side": side,
+                "rate": rate, "latency": probed}
+
+    def _requests(self, side, kind, readers=1):
+        """A `decide.Requests` for this cluster: one caller's requests,
+        their width asked again before every chunk."""
+        from .. import decide
+        return decide.Requests(self._cluster_facts(side, kind),
+                               readers=readers)
+
+    def _in_flight(self, side, kind, call, items, requests=None):
+        """`call(chunk, width)`'s answers over `items`, in order, the
+        width the decision's (`decide.request_width`) - never a number
+        written here."""
+        from .. import decide
+        items = list(items)
+        if not items:
+            return []
+        return decide.in_flight(call, items,
+                                requests or self._requests(side, kind))
 
     def _session(self, side):
         from cassandra.auth import PlainTextAuthProvider
@@ -334,9 +395,10 @@ class CassandraEngine(NeutralCopier, Engine):
             f"select {', '.join(self._q(n) for n, _ in columns)} from"
             f" {self._qualified(side, db, table)} where "
             + " and ".join(f"{self._q(k)} = ?" for k in key))
-        got = execute_concurrent_with_args(
-            session, stmt, [tuple(canon.sql_value(v) for v in kk)
-                            for kk in keys], concurrency=32)
+        got = self._in_flight(
+            side, "read", lambda c, n: execute_concurrent_with_args(
+                session, stmt, c, concurrency=n),
+            [tuple(canon.sql_value(v) for v in kk) for kk in keys])
         found = []
         for ok, result in got:
             if not ok:
@@ -404,12 +466,12 @@ class CassandraEngine(NeutralCopier, Engine):
             f" ({', '.join(self._q(n) for n in names)}) values"
             f" ({', '.join('?' for _ in names)})")
         clear = getattr(_WRITING, "nulls", False)
-        got = execute_concurrent_with_args(
-            session, stmt, [tuple((None if clear else UNSET_VALUE)
-                                  if v is None
-                                  else canon.write_value("cassandra", c, v)
-                                  for (_, c), v in zip(columns, r))
-                            for r in rows], concurrency=64)
+        got = self._in_flight(
+            side, "write", lambda c, n: execute_concurrent_with_args(
+                session, stmt, c, concurrency=n),
+            [tuple((None if clear else UNSET_VALUE) if v is None
+                   else canon.write_value("cassandra", c, v)
+                   for (_, c), v in zip(columns, r)) for r in rows])
         failed = [result for ok, result in got if not ok]
         if failed:
             raise SystemExit(f"{table}: the target refused {len(failed)}"
@@ -550,8 +612,10 @@ class CassandraEngine(NeutralCopier, Engine):
                            f" {self._qualified('dst', db, there)} where "
                            + " and ".join(f"{q(k)} = ?" for k in key))
         asked = time.time()
-        got = execute_concurrent_with_args(
-            dst, stmt, [tuple(r[:len(key)]) for r in rows], concurrency=64)
+        got = self._in_flight(
+            "dst", "read", lambda c, n: execute_concurrent_with_args(
+                dst, stmt, c, concurrency=n),
+            [tuple(r[:len(key)]) for r in rows])
         at = {n: i for i, n in enumerate(key + plain)}
         base = len(key) + len(plain)
         missing, cells, when, expiry, counted = 0, 0, [], [], []
@@ -2190,16 +2254,20 @@ class CassandraEngine(NeutralCopier, Engine):
         def one(rng):
             from cassandra.concurrent import execute_concurrent
             moved, batch = 0, []
+            sent = self._requests("dst", "write", readers=workers)
+
+            def send(c, n):
+                return execute_concurrent(dst, c, concurrency=n)
             for row in self._session("src").execute(read, rng):
                 batch += writes(row)
                 moved += 1
                 if len(batch) >= 500:
-                    self._sent(execute_concurrent(dst, batch,
-                                                  concurrency=64), t)
+                    self._sent(self._in_flight("dst", "write", send, batch,
+                                               sent), t)
                     batch = []
             if batch:
-                self._sent(execute_concurrent(dst, batch,
-                                              concurrency=64), t)
+                self._sent(self._in_flight("dst", "write", send, batch,
+                                           sent), t)
             return moved
         with ThreadPoolExecutor(max_workers=workers) as pool:
             moved = sum(pool.map(one, bounds))
@@ -2439,9 +2507,10 @@ class CassandraEngine(NeutralCopier, Engine):
             end = gens[i + 1][0] if i + 1 < len(gens) else None
             if (end is not None and end <= lo) or start > hi:
                 continue
-            for ok, got in execute_concurrent_with_args(
-                    s, stmt, [(sid, since, until) for sid in streams],
-                    concurrency=64):
+            for ok, got in self._in_flight(
+                    "src", "read", lambda c, n: execute_concurrent_with_args(
+                        s, stmt, c, concurrency=n),
+                    [(sid, since, until) for sid in streams]):
                 if not ok:
                     raise got
                 names = got.column_names
@@ -2579,7 +2648,9 @@ class CassandraEngine(NeutralCopier, Engine):
                 prepared[text] = dst.prepare(text)
             batch.append((prepared[text], args))
         self._origin(db, [a[0] for _, a in deletes])
-        self._sent(execute_concurrent(dst, batch, concurrency=64), table)
+        self._sent(self._in_flight("dst", "write", lambda c, n:
+                                   execute_concurrent(dst, c, concurrency=n),
+                                   batch), table)
         key, select, writes = self._row_writer(db, table)
         src = self._session("src")
         read = src.prepare(f"select {select} from"
@@ -2587,8 +2658,9 @@ class CassandraEngine(NeutralCopier, Engine):
                            + " and ".join(f"{self._q(k)} = ?" for k in key))
         keys = list(touched)
         batch = []
-        for full, (ok, got) in zip(keys, execute_concurrent_with_args(
-                src, read, keys, concurrency=64)):
+        for full, (ok, got) in zip(keys, self._in_flight(
+                "src", "read", lambda c, n: execute_concurrent_with_args(
+                    src, read, c, concurrency=n), keys)):
             if not ok:
                 raise got
             for row in got:
@@ -2597,7 +2669,9 @@ class CassandraEngine(NeutralCopier, Engine):
         self._origin(db, [int(w) for stmt, _ in batch for w in re.findall(
             r"timestamp (\d+)", stmt.query_string, re.I)] + list(
             touched.values()))
-        self._sent(execute_concurrent(dst, batch, concurrency=64), table)
+        self._sent(self._in_flight("dst", "write", lambda c, n:
+                                   execute_concurrent(dst, c, concurrency=n),
+                                   batch), table)
         return len(rows)
 
     def _origin(self, db, stamps):
@@ -2933,12 +3007,13 @@ class CassandraEngine(NeutralCopier, Engine):
             f"insert into {self._qualified(side, db, table)} ("
             + ", ".join(self._q(n) for n in names) + ") values ("
             + ", ".join("?" for _ in names) + ")")
-        got = execute_concurrent_with_args(
-            session, stmt,
+        got = self._in_flight(
+            side, "write", lambda c, n: execute_concurrent_with_args(
+                session, stmt, c, concurrency=n),
             [tuple(None if v is None else canon.write_value(
                 "cassandra", classes.get(n, canon.OWN), v)
                 for n, v in ((n, {**k, **vals}[n]) for n in names))
-             for k, vals in rows], concurrency=64)
+             for k, vals in rows])
         self._sent(got, table)
 
     def _apply_upsert(self, side, db, table, key, values):

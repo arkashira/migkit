@@ -3971,6 +3971,8 @@ running work merges.
   `tests/test_every_decide_rung_is_reached.py`; the owed rungs are
   AUD-Z.rungs-owed, those built outside decide.py AUD-Z.rungs-outside).
 
+* AUD-Z.workers DONE 2026-10-16: no width is a literal outside `decide.py` - a driver's requests in flight are `decide.request_width` asked before every chunk, the installer's fetches `decide.fetch_width`; tests/test_a_drivers_requests_in_flight_are_decided.py, the lint test's `OWED` empty.
+
 Done when every ID in the research document is fixed with its test or
 struck with the owner's reason, the lint tests hold, and the final suite
 runs through `tools/final_suite.py` with its time measured.

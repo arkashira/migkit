@@ -6996,3 +6996,203 @@ def page_given(limit):
     read nothing has measured (`page_rows`) - for a reader below an
     engine's own, whose engine sizes its pages and hands the size down."""
     return limit if limit is not None else page_rows({})[0]
+
+
+# --- a driver's requests in flight at once (AUD-Z.workers) ------------------
+
+#: a chunk's latency at or under the best measured over this share of it is
+#: a link and a cluster not yet queueing: the width grows; above it the
+#: requests wait behind each other and the width follows the latency down
+LATENCY_KEPT = 0.8
+
+
+def _sides_share(side):
+    """The share of a cluster's own pools a move may take of one side: less
+    of a source that serves an application, more of a target
+    (`sizing.SHARE_PRIMARY`, `SHARE_OTHER`)."""
+    from . import sizing
+    return sizing.SHARE_PRIMARY if side == "src" else sizing.SHARE_OTHER
+
+
+def request_width(facts):
+    """(requests, the `Choice`) a driver keeps in flight at once on one
+    cluster - asked again before every chunk of requests, each chunk's
+    answers all back before the next is sent (the safe boundary).
+
+    `facts`: `nodes` (the cluster's nodes the driver sees up), `per_node`
+    (requests of this kind one node works at once, its own setting read
+    from it; None where it says none), `side` (`src` or `dst`: the share
+    of those pools taken), `rate` (requests a second the service takes on
+    the driver's connections, its documented limit; None for a server),
+    `latency` (seconds one request took: the last chunk's, else a probe's),
+    `base` (the lowest latency a chunk measured), `last` (the width the
+    last chunk ran at), `free` (bytes of memory this process may still
+    take), `bytes` (the largest request measured), `readers` (callers
+    sharing the cluster at once) and `left` (requests still to send).
+
+    Measured: the last width doubled (`PAGE_GROWTH`) while the latency
+    stays within `LATENCY_KEPT` of the best, else cut in the ratio the
+    latency rose by. Unmeasured: the cluster's own pools' share across
+    its nodes, else what the service's rate keeps busy over the probed
+    latency (Little's law), else one request a node, else one. Always held
+    to the pools' share, the service's rate, the free memory's share at
+    the measured size and the requests left; never below one."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    for k in ("nodes", "per_node", "side", "rate", "latency", "base",
+              "last", "free", "bytes", "readers", "left"):
+        f.setdefault(k, None)
+    readers = max(1, _count(f.get("readers")) or 1)
+    nodes, per = _count(f.get("nodes")), _count(f.get("per_node"))
+    rate, latency = _positive(f.get("rate")), _positive(f.get("latency"))
+    pools = (max(1, int(nodes * per * _sides_share(f.get("side"))
+                        // readers)) if nodes and per else None)
+    service = (max(1, math.ceil(rate * latency / readers))
+               if rate and latency else None)
+    rungs = (
+        Rung("measured", "the last chunk's width, grown while the latency"
+             " holds and cut as it rises",
+             needs=(Need("a chunk timed",
+                         lambda x: bool(_count(x.get("last"))
+                                        and _positive(x.get("base"))
+                                        and _positive(x.get("latency"))),
+                         "no chunk of these requests has been timed"),),
+             because="the latency of this cluster's last chunk was"
+                     " measured"),
+        Rung("the cluster's pools", "the share of the requests the nodes"
+             " work at once, as each node's own setting says",
+             needs=(Need("the nodes' pools read", lambda x: bool(pools),
+                         "the cluster does not say how many requests a"
+                         " node works at once"),),
+             because="each node said how many requests it works at once"),
+        Rung("the service's rate", "as many as the service's rate keeps"
+             " busy over the probed latency",
+             needs=(Need("a rate and a latency", lambda x: bool(service),
+                         "no documented rate, or no latency probed"),),
+             because="the service documents its rate and one request was"
+                     " timed"),
+        Rung("one a node", "one request on each node the driver sees",
+             needs=(Need("the nodes seen", lambda x: bool(nodes),
+                         "the driver sees no node up"),),
+             because="nothing measured yet: each node is given one until"
+                     " a chunk is timed"),
+        Rung("one at a time", "one request until a chunk is timed",
+             because="nothing measured and no node seen"))
+    choice = climb("a driver's requests in flight", rungs, f, prove=False)
+    if choice.path == "measured":
+        last = _count(f["last"])
+        ratio = _positive(f["base"]) / _positive(f["latency"])
+        n = (last * PAGE_GROWTH if ratio >= LATENCY_KEPT
+             else int(last * ratio))
+    else:
+        n = {"the cluster's pools": pools, "the service's rate": service,
+             "one a node": max(1, nodes // readers)}.get(choice.path, 1)
+    for most in (pools, service):
+        if most:
+            n = min(n, most)
+    free, size = _positive(f.get("free")), _positive(f.get("bytes"))
+    if free and size:
+        n = min(n, max(1, int(free // (PAGE_MEMORY_SHARE * readers * size))))
+    left = _count(f.get("left"))
+    if left:
+        n = min(n, left)
+    return max(1, n), choice
+
+
+class Requests:
+    """One caller's requests to a cluster, sent chunk by chunk: the width
+    of the next (`request_width`) from what the last measured. A chunk
+    runs about `PAGE_SECONDS` at the latency measured (one round where
+    none is), so the width is asked again at that pace. `facts` are the
+    cluster's answers (`nodes`, `per_node`, `side`, `rate`, `latency`
+    probed); `ask` is the decision (a test's fake); `memory` reads the
+    free bytes."""
+
+    def __init__(self, facts=None, readers=1, ask=None, memory=None,
+                 seconds=None):
+        self.facts, self.readers = dict(facts or {}), readers
+        self.ask, self.memory = ask or request_width, memory
+        self.seconds = seconds or PAGE_SECONDS
+        self.latency = self.base = self.last = self.bytes = None
+        self.choice = None
+
+    def size(self, left):
+        """(width, requests in the chunk) for the next chunk of `left`."""
+        from . import sizing
+        read = self.memory or (lambda: sizing.host().get("memory"))
+        try:
+            free = read()
+        except Exception:  # noqa: BLE001 - unread is a fact: None
+            free = None
+        n, self.choice = self.ask({
+            **self.facts, "latency": self.latency or self.facts.get(
+                "latency"), "base": self.base, "last": self.last,
+            "free": free, "bytes": self.bytes, "readers": self.readers,
+            "left": left})
+        self.last = n
+        lat = self.latency
+        rounds = max(1, int(self.seconds / lat)) if lat else 1
+        return n, max(1, min(left, n * rounds))
+
+    def measured(self, chunk, width, seconds):
+        """One chunk answered: `chunk` (the requests' arguments) at `width`
+        in `seconds`. A request's latency is the time the chunk held each
+        slot for (Little's law: in flight over the rate)."""
+        count = len(chunk)
+        if not count or not seconds or seconds <= 0:
+            return
+        self.latency = seconds * min(width, count) / count
+        self.base = min(self.base or self.latency, self.latency)
+        try:
+            size = max(_measure(a) for a in chunk)
+        except Exception:  # noqa: BLE001 - an argument not measured
+            size = None
+        if size:
+            self.bytes = max(self.bytes or 0, size)
+
+
+def in_flight(call, items, requests):
+    """The answers of `call(chunk, width)` over `items`, in their order:
+    `requests` (`Requests`) sizes each chunk, and each chunk's answers are
+    all back before the next is sent."""
+    items = list(items)
+    out, done = [], 0
+    while done < len(items):
+        width, take = requests.size(len(items) - done)
+        chunk = items[done:done + take]
+        began = time.monotonic()
+        out += list(call(chunk, width))
+        requests.measured(chunk, width, time.monotonic() - began)
+        done += take
+    return out
+
+
+# --- the installer's components fetched at once (AUD-Z.workers) -------------
+
+def fetch_width(facts):
+    """(fetches, the `Choice`) the installer runs at once: every component
+    whose fetch is only a download (the link is shared, its wait is
+    hidden), and the open builds no more than the cores this machine may
+    use - each build compiles - all held to the free memory a worker
+    holds (`sizing.WORKER_MEMORY`) and the descriptors this process may
+    open (`probe_width`). `facts`: `jobs`, `builds` (the jobs that
+    build), `cpus`, `free` (bytes). The cores unread: one at a time."""
+    from . import sizing
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    jobs, builds = _count(f.get("jobs")), _count(f.get("builds"))
+    cpus = _count(f.get("cpus"))
+    rungs = (
+        Rung("the machine's cores", "the downloads at once, the builds"
+             " no more than the cores",
+             needs=(Need("the cores read", lambda x: bool(cpus),
+                         "this machine's cores could not be read"),),
+             because="the cores this machine may use were read"),
+        Rung("one at a time", "one component at a time",
+             because="the cores could not be read"))
+    choice = climb("the components fetched at once", rungs, f, prove=False)
+    if choice.path == "one at a time" or not jobs:
+        return 1, choice
+    n = (jobs - builds) + (min(builds, cpus) if builds else 0)
+    free = _positive(f.get("free"))
+    if free:
+        n = min(n, max(1, int(free // sizing.WORKER_MEMORY)))
+    return max(1, min(n, jobs, probe_width(jobs, per_item=2))), choice

@@ -679,7 +679,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `marks` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/cassandra.py:2614` engines -> workflows (`marks`)
+- `migkit/engines/cassandra.py:2688` engines -> workflows (`marks`)
 - `migkit/engines/dynamodb.py:505` engines -> workflows (`marks`)
 - `migkit/engines/hetero.py:4063` engines -> workflows (`marks`)
 - `migkit/engines/kafka.py:1189` engines -> workflows (`marks`)
@@ -691,7 +691,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an engine calls `movers` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/base.py:2029` engines -> workflows (`movers`)
-- `migkit/engines/cassandra.py:1922` engines -> workflows (`movers`)
+- `migkit/engines/cassandra.py:1986` engines -> workflows (`movers`)
 - `migkit/engines/generic.py:2051` engines -> workflows (`movers`)
 - `migkit/engines/hetero.py:223` engines -> workflows (`movers`)
 - `migkit/engines/mongodb.py:891` engines -> workflows (`movers`)
@@ -731,7 +731,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an engine calls `tailctl` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/base.py:2310` engines -> workflows (`tailctl`)
-- `migkit/engines/cassandra.py:2777` engines -> workflows (`tailctl`)
+- `migkit/engines/cassandra.py:2851` engines -> workflows (`tailctl`)
 - `migkit/engines/generic.py:2348` engines -> workflows (`tailctl`)
 - `migkit/engines/hetero.py:3417` engines -> workflows (`tailctl`)
 - `migkit/engines/kafka.py:192` engines -> workflows (`tailctl`)
@@ -774,7 +774,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `users` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/cassandra.py:1147` engines -> workflows (`users`)
+- `migkit/engines/cassandra.py:1211` engines -> workflows (`users`)
 - `migkit/engines/kafka.py:2151` engines -> workflows (`users`)
 - `migkit/engines/mongodb.py:3700` engines -> workflows (`users`)
 - `migkit/engines/mssql.py:2154` engines -> workflows (`users`)
@@ -784,7 +784,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `verifiers` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/cassandra.py:431` engines -> workflows (`verifiers`)
+- `migkit/engines/cassandra.py:493` engines -> workflows (`verifiers`)
 - `migkit/engines/distmysql.py:200` engines -> workflows (`verifiers`)
 - `migkit/engines/dynamodb.py:549` engines -> workflows (`verifiers`)
 - `migkit/engines/firestore.py:517` engines -> workflows (`verifiers`)
