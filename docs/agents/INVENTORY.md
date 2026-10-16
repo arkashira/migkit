@@ -19,7 +19,7 @@ None.
 | reporting | 7 | 10 | 7447 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 31 | 32022 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 78 | 125025 | the contract every engine fills and each engine's own adapter |
-| integrations | 9 | 22 | 23381 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
+| integrations | 9 | 22 | 23475 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 36 | 48372 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 4 | 10095 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 5988 | the web view and its API |
@@ -30,7 +30,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 1 | 48: avrostream, barriers, binlog_marks, capabilities, cli (+43) | - | - | 720: conftest.py, holdkit.py, large_values_rig.py (+717) |
+| `migkit/__init__.py` | - | 1 | 48: avrostream, barriers, binlog_marks, capabilities, cli (+43) | - | - | 722: conftest.py, holdkit.py, large_values_rig.py (+719) |
 | `migkit/addresses.py` | - | 527 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2456 | 58: approvals, backupseed, carriers, changetopic, cli (+53) | configuration 14, conversion 1, engines 1, execution 9, integrations 4, persistence 3, reporting 1, safety 4 | - | 821: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+818) |
@@ -92,7 +92,7 @@ None.
 | `migkit/failpoint.py` | - | 59 | 16: claims, cli, crossmove, cutover, engines.cassandra (+11) | decision 1 | - | 22: a_copier_reconciles_and_retunes, a_cross_engine_copy_goes_server_to_server, a_cutover_without_a_position_drains_by_a_mark (+19) |
 | `migkit/locks.py` | - | 173 | 2: engines.postgres, revert | - | - | 4: constraint_repair_pg, locks, locks_live_pg (+1) |
 | `migkit/ranges.py` | ranges | 1954 | 16: checkpoint, claims, cli, crossmove, engines.base (+11) | conversion 1, decision 5, execution 5, safety 1, workflows 4 | - | 41: a_begun_range_is_found_again_after_a_reload_whatever_its_key, a_cross_engine_copy_goes_server_to_server, a_fault_in_each_copier_is_recovered_on_a_server (+38) |
-| `migkit/runner.py` | - | 928 | 14: cli, dsbulk, engines.my_pass, fromsnapshot, mirror (+9) | decision 1, execution 5, integrations 4, persistence 2, reporting 2, safety 1 | - | 12: a_fallback_says_why_and_a_refusal_stops, a_stopped_command_ends_inside_its_bound, mysql_tls_on_every_path (+9) |
+| `migkit/runner.py` | - | 928 | 14: cli, dsbulk, engines.my_pass, fromsnapshot, mirror (+9) | decision 1, execution 5, integrations 4, persistence 2, reporting 2, safety 1 | - | 13: a_fallback_says_why_and_a_refusal_stops, a_stopped_command_ends_inside_its_bound, mysql_tls_on_every_path (+10) |
 | `migkit/runners/__init__.py` | - | 0 | 0 | - | - | 1: every_module_is_reached |
 | `migkit/runners/second_reader.py` | - | 149 | 0 | configuration 1 | dvt | 1: every_module_is_reached |
 | `migkit/schedule.py` | - | 323 | 7: cli, engines.hetero, integrations, movers, tailctl (+2) | persistence 1, reporting 3, safety 2 | - | 7: a_follow_ends_when_caught_up_or_asked, a_hop_runs_on_its_schedule, a_schedule_holds_its_slot_by_lease (+4) |
@@ -320,7 +320,7 @@ None.
 | `migkit/registry.py` | - | 243 | 3: avrostream, engines.kafka, schemaformats | - | - | 4: a_kafka_registry_schema_drift_is_found_by_field_type, a_secret_is_read_once_where_it_is_used, changes_go_as_avro_through_a_registry (+1) |
 | `migkit/seedtools.py` | - | 187 | 1: tooluse | integrations 1 | azure-storage-blob, boto3-s3, google-cloud-storage, pyrage, zstandard | through tooluse |
 | `migkit/ship.py` | - | 2620 | 2: cli, machine | cli 2, conversion 4, decision 8, engines 11, execution 5, integrations 1, persistence 13, reporting 5, safety 2, workflows 3 | pyrage, zstandard | 11: a_carrier_is_held_to_its_limits, a_managed_mysql_says_how_long_its_log_is_kept, a_repair_never_writes_what_the_hop_leaves_out (+8) |
-| `migkit/tools.py` | - | 2737 | 17: cli, cloudapi, engines.mssql, engines.oracle_redo, engines.saas (+12) | configuration 9, engines 8, execution 9, integrations 4, persistence 3, reporting 1, workflows 3 | - | 21: a_cross_engine_table_goes_the_way_measured_fastest, a_native_replica_is_proved_two_ways, an_upgrade_goes_to_the_new_version (+18) |
+| `migkit/tools.py` | - | 2831 | 17: cli, cloudapi, engines.mssql, engines.oracle_redo, engines.saas (+12) | configuration 9, engines 8, execution 10, integrations 4, persistence 3, reporting 1, workflows 3 | - | 23: a_cross_engine_table_goes_the_way_measured_fastest, a_migration_completes_inside_a_closed_network, a_native_replica_is_proved_two_ways (+20) |
 | `migkit/tooluse.py` | - | 317 | 37: anchor, cloudapi, ddbexport, dsbulk, engines.bigtable (+32) | conversion 3, engines 16, integrations 8, persistence 2, reporting 2, web 1, workflows 4 | - | 15: a_native_replica_is_proved_two_ways, each_cloud_is_asked_through_its_own_api, every_verifier_feature_is_used_or_explained (+12) |
 | `migkit/toolversion.py` | - | 268 | 5: engines.base, movers, runner, tools, unchanged | execution 4, integrations 1 | - | 6: handwork_pg, one_runner_for_every_program, the_install_is_pinned (+3) |
 | `migkit/workflow_exporter.py` | - | 176 | 1: integrations | configuration 1 | - | 1: the_folded_ha_and_workflow_ways |

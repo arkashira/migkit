@@ -6027,6 +6027,20 @@ the gaps nothing above covers yet, now items of their own.
   (every wheel and every wrapped program, checksummed and signed), a
   container image, and Windows; GoldenGate runs on every platform
   including z/OS and AIX.
+  PARTLY (W18H): a bundle for `windows-x86_64` is built - every pinned
+  wheel fetched alone for win_amd64, a pinned source with no wheel built
+  here and kept only as a wheel for every machine, else the build refused
+  naming it with nothing left behind - summed and signed as the others;
+  built; not run on Windows (`tools.WINDOWS_UNPROVED`). The closed-network
+  proof is built (`tests/test_a_migration_completes_inside_a_closed_network.py`,
+  `servers.closed`, an `--internal` network, an audit hook naming who
+  looks up or connects, a canary) and runs in CI (`closed-network`).
+  *Not done:* the lock does not resolve for another machine: on the
+  arm64 sandbox `arro3-core==0.8.3` has no linux-aarch64 cp312 wheel and
+  the second reading's `pure-sasl==0.6.2` is source only, so the proof
+  stops at its bundle step here (init, the move with its tail, check and
+  report inside the network unproved); markers are read off the building
+  machine, so a win32-only pin (`tzdata`) is left out of a Windows bundle.
 * **W9. Compiled end to end at the very top of the rate.** R19 lever 9
   compiles the decoder; above ~100k changes a second sustained the apply
   side (collapse, render, write) needs the same, measured first.

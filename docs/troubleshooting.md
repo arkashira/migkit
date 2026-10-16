@@ -2261,7 +2261,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the organisation's policy says telemetry_push: off, so nothing is pushed
 
-* MIGKIT_BUNDLE_PLATFORM=<...> names no machine migkit builds bundles for: linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64, a Linux named after them (linux-x86_64-ubuntu-22.04)
+* MIGKIT_BUNDLE_PLATFORM=<...> names no machine migkit builds bundles for: linux-x86_64, linux-arm64, darwin-arm64, darwin-x86_64, windows-x86_64, a Linux named after them (linux-x86_64-ubuntu-22.04)
+
+* the bundle for Windows is not built: no wheel for win_amd64 of <...>. Nothing of it is signed
 
 * <...> is not an offline bundle migkit made: it has no sums
 

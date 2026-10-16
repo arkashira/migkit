@@ -169,6 +169,33 @@ def network():
     return net
 
 
+@contextlib.contextmanager
+def closed(module):
+    """A docker network of the module's own with no way out
+    (`--internal`: no route off it, no name outside it answers), named for
+    the module and this lane; the containers a test puts on it (`private`
+    with `--network`) reach each other by their aliases and nothing else.
+    Removed, with anything still on it, when the block ends. Yields its
+    name."""
+    net = name(f"{PREFIX}-{space_name(module)[2:]}-closed".replace("_", "-"))
+
+    def gone():
+        held = docker("network", "inspect", "-f",
+                      "{{range .Containers}}{{.Name}} {{end}}", net)
+        if held.returncode == 0:
+            remove(*held.stdout.split())
+            docker("network", "rm", net, timeout=120)
+
+    gone()
+    got = docker("network", "create", "--internal", *labels(), net)
+    if got.returncode != 0:
+        raise RuntimeError(f"creating {net}: {got.stderr.strip()}")
+    try:
+        yield net
+    finally:
+        gone()
+
+
 # ---- images a test builds (T11) ---------------------------------------------
 
 def image(tag_name, dockerfile, files=None, platform=""):
@@ -312,6 +339,10 @@ _KAFKA_ENV = (
     ("KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
      "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"),
     ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1"),
+    #: one broker holds the transaction log alone: a transactional
+    #: producer (the producer-epoch fence) cannot start otherwise
+    ("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1"),
+    ("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1"),
     ("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0"))
 #: SQL Server's image: SQL Edge where nothing else runs (arm64), the full
 #: 2022 server where `MIGKIT_MSSQL_IMAGE` says (the x86 workflow)

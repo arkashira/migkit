@@ -2469,14 +2469,19 @@ def _loaded(name, ref, image_id):
 
 def _platform(text):
     """{system, machine, release} of a bundle's machine as
-    `MIGKIT_BUNDLE_PLATFORM` names it: `linux-x86_64`, `darwin-arm64`, or
-    with its Linux, `linux-x86_64-ubuntu-22.04`."""
+    `MIGKIT_BUNDLE_PLATFORM` names it: `linux-x86_64`, `darwin-arm64`,
+    `windows-x86_64`, or with its Linux, `linux-x86_64-ubuntu-22.04`."""
     parts = str(text).strip().lower().split("-")
-    if len(parts) < 2 or parts[0] not in ("linux", "darwin"):
+    windows = parts[0] == "windows" and parts[1:2] in (["x86_64"],
+                                                         ["amd64"])
+    if len(parts) < 2 or not (parts[0] in ("linux", "darwin") or windows):
         raise SystemExit(f"MIGKIT_BUNDLE_PLATFORM={text} names no machine"
                          " migkit builds bundles for: linux-x86_64,"
-                         " linux-arm64, darwin-arm64, darwin-x86_64, a Linux"
-                         " named after them (linux-x86_64-ubuntu-22.04)")
+                         " linux-arm64, darwin-arm64, darwin-x86_64,"
+                         " windows-x86_64, a Linux named after them"
+                         " (linux-x86_64-ubuntu-22.04)")
+    if windows:
+        return {"system": "Windows", "machine": "x86_64"}
     out = {"system": "Linux" if parts[0] == "linux" else "Darwin",
            "machine": parts[1]}
     if len(parts) >= 4:
@@ -2494,6 +2499,8 @@ def _wheel_tags(target):
     machine: [] for this one."""
     if not target:
         return []
+    if target["system"] == "Windows":
+        return ["win_amd64"]
     arch = "aarch64" if target["machine"] in ("arm64", "aarch64") \
         else "x86_64"
     if target["system"] == "Linux":
@@ -2596,6 +2603,8 @@ def build_bundle(where, log=print, ask=None):
     _bundle_wheels(out, target, log)
     _bundle_images(out, answer, log)
     _sign_bundle(out, log)
+    if target and target["system"] == "Windows":
+        log(f"  the bundle for Windows: {WINDOWS_UNPROVED}")
     log(f"the offline bundle is in {out}. On the machine with no network:"
         f" pip install --no-index --find-links {out}/wheels migkit, then"
         f" MIGKIT_BUNDLE={out} migkit doctor --install")
@@ -2641,8 +2650,13 @@ def _bundle_wheels(out, target, log):
     wheels = out / "wheels"
     wheels.mkdir(exist_ok=True)
     tags = [a for t in _wheel_tags(target) for a in ("--platform", t)]
-    pinned_to = (["--only-binary=:all:", "--python-version", "3.12",
-                  "--implementation", "cp", *tags] if tags else [])
+    machine = ["--python-version", "3.12", "--implementation", "cp", *tags]
+    pinned_to = (["--only-binary=:all:", *machine] if tags else [])
+    # a lock pins every dependency with its hash, so each is fetched alone:
+    # its wheel for the machine, or where it publishes only its source,
+    # that - built here into a wheel only where it is one for every machine
+    # (`_universal`)
+    locked = (["--no-deps", "--prefer-binary", *machine] if tags else [])
     quiet = (lambda m: None)
     if (_BASE / "pyproject.toml").exists():
         ok = _step([*pip, "wheel", "--no-deps", "-w", str(wheels),
@@ -2654,19 +2668,99 @@ def _bundle_wheels(out, target, log):
                    "migkit's own wheel was not fetched")
     deps = ((["-r", str(REQUIREMENTS_LOCK), "--require-hashes"]
              if REQUIREMENTS_LOCK.exists() else _requirements()))
-    ok = _step([*pip, "download", "-d", str(wheels), *pinned_to, *deps],
-               log, "its dependencies' wheels were not all fetched") and ok
+    _LAST_SHORT.clear()
+    ok = _wheels_step([*pip, "download", "-d", str(wheels),
+                       *(locked if REQUIREMENTS_LOCK.exists() else
+                         pinned_to), *deps], log,
+                      "its dependencies' wheels were not all fetched") and ok
+    ok = _universal(wheels, pip, log) and ok
     reader = out / "second-reader"
     reader.mkdir(exist_ok=True)
     what = (["-r", str(SECOND_READER_LOCK), "--require-hashes"]
             if SECOND_READER_LOCK.exists() else [SECOND_READER_PACKAGE])
-    ok = _step([*pip, "download", "-d", str(reader), "--only-binary=:all:",
-                "--python-version", "3.12", "--implementation", "cp",
-                *tags, *what], log,
-               "the second reading's wheels were not all fetched") and ok
+    ok = _wheels_step([*pip, "download", "-d", str(reader),
+                       *(["--no-deps", "--prefer-binary", *machine]
+                         if SECOND_READER_LOCK.exists() else
+                         ["--only-binary=:all:", *machine]), *what], log,
+                      "the second reading's wheels were not all fetched") \
+        and ok
+    ok = _universal(reader, pip, log) and ok
+    if not ok and target and target["system"] == "Windows":
+        # a machine that cannot build a wheel from source is not handed a
+        # bundle it cannot install from: the build stops, naming what lacks
+        # one, and leaves nothing a later install could take for whole
+        shutil.rmtree(wheels, ignore_errors=True)
+        shutil.rmtree(reader, ignore_errors=True)
+        raise SystemExit("the bundle for Windows is not built: no wheel"
+                         " for win_amd64 of " + (", ".join(
+                             _short_of(_LAST_SHORT)) or "what the lock"
+                             " names") + ". Nothing of it is signed")
     if not ok:
         log("  the bundle is short of wheels: the machine it is for"
             " installs what it lacks from an index, or not at all")
+
+
+#: what pip said last when a bundle's wheels fell short (`_wheels_step`)
+_LAST_SHORT = []
+
+#: a bundle for Windows is built, held to the lock and signed here; no
+#: install from one has run on Windows (no machine)
+WINDOWS_UNPROVED = "built; not run on Windows"
+
+
+def _short_of(said):
+    """The requirements pip found no wheel for, in what it said."""
+    import re
+    out = []
+    for text in said:
+        for m in re.finditer(r"(?:No matching distribution found for|"
+                             r"Could not find a version that satisfies the"
+                             r" requirement)\s+([A-Za-z0-9_.\-]+)", text):
+            if m.group(1) not in out:
+                out.append(m.group(1))
+    return out
+
+
+def _universal(where, pip, log):
+    """Each source a lock pinned with no wheel for the bundle's machine,
+    built here into a wheel and kept only where that wheel is one for every
+    machine (`py3-none-any`); one that is not is named (`_LAST_SHORT`) and
+    the step fails: the machine would have to build it. Its source's hash
+    was held to the lock as it was fetched; the wheel's goes in the sums."""
+    import tempfile
+    ok = True
+    for src in sorted([*where.glob("*.tar.gz"), *where.glob("*.zip")]):
+        with tempfile.TemporaryDirectory() as work:
+            built = _step([*pip, "wheel", "--no-deps", "-w", work, str(src)],
+                          log, "a pinned source was not built")
+            got = list(Path(work).glob("*-none-any.whl")) if built else []
+            if got:
+                shutil.move(str(got[0]), str(where / got[0].name))
+                src.unlink()
+                continue
+        ok = False
+        name = src.name.rsplit("-", 1)[0]
+        _LAST_SHORT.append(f"No matching distribution found for {name}")
+    return ok
+
+
+def _wheels_step(argv, log, failed):
+    """`_step` for a bundle's wheels, keeping what pip said when it fell
+    short, for `_short_of`."""
+    from . import runner
+    try:
+        got = runner.run(argv, None, check=False, check_flags=False)
+    except runner.Blocked as e:
+        log(f"  {failed}: {e}")
+        _LAST_SHORT.append(str(e))
+        return False
+    if got.returncode != 0:
+        text = (got.stderr or "") + (got.stdout or "")
+        _LAST_SHORT.append(text)
+        said = runner.said(text)
+        log(f"  {failed}: {(said.splitlines() or [''])[-1][:120]}")
+        return False
+    return True
 
 
 def _bundle_images(out, answer, log):

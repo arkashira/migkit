@@ -396,7 +396,7 @@ def test_a_bundle_names_the_machine_it_is_for():
     assert got["system"] == "Linux" and got["machine"] == "x86_64"
     assert got["release"]["VERSION_CODENAME"] == "jammy"
     with pytest.raises(SystemExit):
-        tools._platform("windows-x86_64")
+        tools._platform("windows-arm64")
     assert "manylinux2014_x86_64" in tools._wheel_tags(
         tools._platform("linux-x86_64"))
     assert tools._wheel_tags(None) == []

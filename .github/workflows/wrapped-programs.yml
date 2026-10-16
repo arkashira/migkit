@@ -17,6 +17,8 @@ on:
             "migkit/data/**", "deploy/Dockerfile",
             "tests/test_wrapped_flags_exist.py",
             "tests/test_the_installed_build_takes_the_options.py",
+            "tests/test_a_migration_completes_inside_a_closed_network.py",
+            "tests/test_the_windows_bundle_is_built_and_signed.py",
             ".github/workflows/wrapped-programs.yml"]
 
 jobs:
@@ -107,3 +109,21 @@ jobs:
               pip install --no-index --find-links /bundle/wheels migkit
               MIGKIT_BUNDLE=/bundle migkit doctor --install
               migkit doctor"
+
+  # W8: the whole migration where nothing but the two databases is
+  # reachable - install from the bundle, init, a move with its tail,
+  # check and a report on an internal docker network, every outbound
+  # call named - and the bundle for Windows from the lock, signed. The
+  # Windows bundle is built here, not run: no Windows machine runs it.
+  closed-network:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . pytest
+      - name: a migration inside a network with no way out
+        run: pytest -q tests/test_a_migration_completes_inside_a_closed_network.py
+      - name: the bundle for Windows, from the lock, signed
+        run: pytest -q tests/test_the_windows_bundle_is_built_and_signed.py
