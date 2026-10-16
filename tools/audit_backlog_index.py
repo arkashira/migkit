@@ -7,6 +7,11 @@ A row whose words are mostly not found names a capability the code does
 not show, and is printed for a person to check and reopen.
 
     python tools/audit_backlog_index.py [--below 0.5] [--min 3]
+
+A row that is not DONE and says a thing is missing ("missing:", "does not
+exist", "not in the code", "no X") is read the other way too: a backticked
+module (`x.py`) or name in that clause which the package defines is printed
+as a stale row, to be rewritten from the code.
 """
 import argparse
 import re
@@ -65,6 +70,47 @@ def rows():
             yield n, cells
 
 
+def defined():
+    """Every module stem and every function, class or constant name the
+    package defines, whole (not split into parts)."""
+    got = set()
+    for path in (ROOT / "migkit").rglob("*.py"):
+        got.add(path.stem)
+        text = path.read_text(errors="replace")
+        got |= set(re.findall(r"^\s*(?:def|class)\s+(\w+)", text, re.M))
+        got |= set(re.findall(r"^([A-Z][A-Z0-9_]+)\s*=", text, re.M))
+    return got
+
+
+SAYS_MISSING = re.compile(
+    r"(missing:|does not exist|not in the code|is not in the code|"
+    r"are not in the code|\bno `)[^;]*", re.I)
+
+
+def stale_rows():
+    """[(line, row id, [names])]: rows not DONE whose 'missing' clause
+    names something the package has."""
+    have = defined()
+    out = []
+    for n, line in enumerate((ROOT / "docs/backlog-index.md")
+                             .read_text().splitlines(), 1):
+        cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
+        if len(cells) < 5 or not cells[0].isdigit() \
+                or cells[3].startswith("DONE"):
+            continue
+        found = []
+        for clause in SAYS_MISSING.finditer(cells[3]):
+            for tok in re.findall(r"`([^`]+)`", clause.group(0)):
+                name = tok[:-3] if tok.endswith(".py") else \
+                    tok.split("(")[0].split(".")[-1]
+                if name in have and len(name) > 4 and (
+                        "_" in name or tok.endswith(".py") or "." in tok):
+                    found.append(tok)
+        if found:
+            out.append((n, cells[1], sorted(set(found))))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--below", type=float, default=0.5)
@@ -86,6 +132,11 @@ def main():
         print(f"{score:.2f} line {n} row {num} {key}: not in code: "
               + ", ".join(lacking))
     print(f"{len(out)} rows below {args.below}", file=sys.stderr)
+    stale = stale_rows()
+    for n, key, toks in stale:
+        print(f"stale line {n} row {key}: says missing, the code has: "
+              + ", ".join(toks))
+    print(f"{len(stale)} stale rows", file=sys.stderr)
     dup = {}
     for n, line in enumerate((ROOT / "docs/backlog-index.md")
                              .read_text().splitlines(), 1):

@@ -122,12 +122,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/storedcode/history.py:337` conversion -> engines (`engines.dbapi`)
 - `migkit/storedcode/packages.py:30` conversion -> engines (`engines.dbapi`)
 - `migkit/storedcode/partitions.py:51` conversion -> engines (`engines.dbapi`)
-- `migkit/storedcode/sandbox.py:120` conversion -> engines (`engines.dbapi`)
+- `migkit/storedcode/sandbox.py:159` conversion -> engines (`engines.dbapi`)
 
 ### a conversion reads an engine (`engines.hetero`) for its catalogue or connection; the engine contract moves below conversion in the engine split
 
 - `migkit/charsets.py:316` conversion -> engines (`engines.hetero`)
-- `migkit/storedcode/sandbox.py:275` conversion -> engines (`engines.hetero`)
+- `migkit/storedcode/sandbox.py:314` conversion -> engines (`engines.hetero`)
 
 ### a conversion reads an engine (`engines.mssql`) for its catalogue or connection; the engine contract moves below conversion in the engine split
 
@@ -143,7 +143,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/canon.py:346` conversion -> engines (`engines`)
 - `migkit/charsets.py:234` conversion -> engines (`engines`)
 - `migkit/commercial.py:84` conversion -> engines (`engines`)
-- `migkit/storedcode/sandbox.py:274` conversion -> engines (`engines`)
+- `migkit/storedcode/sandbox.py:313` conversion -> engines (`engines`)
 
 ### a conversion reads an engine (`logddl`) for its catalogue or connection; the engine contract moves below conversion in the engine split
 

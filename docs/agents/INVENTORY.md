@@ -15,22 +15,22 @@ None.
 | persistence | 3 | 15 | 6864 | state that outlives a process: checkpoints, the audit record, the run's own files, the undo |
 | safety | 4 | 11 | 11298 | who may write, what must not leak, what keeps a mover from writing twice |
 | execution | 5 | 12 | 6993 | the running of work: processes, ranges, retries, pacing, stalls, sizing of what runs at once |
-| conversion | 6 | 58 | 39444 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
+| conversion | 6 | 58 | 39483 | a value or an object as another engine takes it: canonical text, transforms, types, stored code |
 | reporting | 7 | 10 | 7447 | what the operator reads: the verdict, the result shape, the log, the metrics, the notices |
 | decision | 8 | 31 | 32647 | choosing: the rungs, the cost model, the joint plan, what each engine can do |
 | engines | 9 | 78 | 126430 | the contract every engine fills and each engine's own adapter |
 | integrations | 9 | 23 | 23913 | the programs, libraries and provider APIs migkit wraps, and the other tools it meets |
 | workflows | 10 | 36 | 48694 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
-| cli | 11 | 4 | 10200 | the command line and the guide that asks for two addresses |
+| cli | 11 | 4 | 10202 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 6449 | the web view and its API |
-| tools | - | 12 | 6991 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
+| tools | - | 12 | 7042 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
 | data | - | 5 | 10810 | the files migkit ships as resources |
 
 ## configuration (9 files)
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 1 | 48: avrostream, barriers, binlog_marks, capabilities, cli (+43) | - | - | 732: conftest.py, holdkit.py, large_values_rig.py (+729) |
+| `migkit/__init__.py` | - | 1 | 48: avrostream, barriers, binlog_marks, capabilities, cli (+43) | - | - | 734: conftest.py, holdkit.py, large_values_rig.py (+731) |
 | `migkit/addresses.py` | - | 527 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 13: case, cli, cloudseed, engines.kafka, engines.mysql (+8) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2456 | 58: approvals, backupseed, carriers, changetopic, cli (+53) | configuration 14, conversion 1, engines 1, execution 9, integrations 4, persistence 3, reporting 1, safety 4 | - | 826: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+823) |
@@ -120,7 +120,7 @@ None.
 | `migkit/render.py` | - | 102 | 4: canon, engines.saas, kept, leaves | conversion 3 | - | 2: a_column_renders_as_canon_renders, wide_values_are_hashed_where_they_lie |
 | `migkit/rowtext.py` | - | 213 | 12: canon, digests, engines.mysql, engines.opensearch, engines.oracle (+7) | conversion 2 | - | 16: a_column_renders_as_canon_renders, charset_encoding_mysql, every_ad_hoc_switch_goes_through_the_decision (+13) |
 | `migkit/schemaformats.py` | - | 1108 | 3: engines.kafka, streamout, verifiers | configuration 1, conversion 2, engines 1, execution 1, integrations 2, workflows 2 | - | 4: nosql_engines_compare_schemas_one_way, probes_accumulate_and_schemas_compare_one_way, registry_messages_in_json_schema_and_protobuf (+1) |
-| `migkit/storedcode/__init__.py` | - | 8 | 0 | - | - | 15: collations_agree_on_the_columns_own_values, constraints_accept_and_refuse_the_same_rows, conversion_breadth_mysql_to_postgres (+12) |
+| `migkit/storedcode/__init__.py` | - | 8 | 0 | - | - | 16: collations_agree_on_the_columns_own_values, constraints_accept_and_refuse_the_same_rows, conversion_breadth_mysql_to_postgres (+13) |
 | `migkit/storedcode/appscan.py` | - | 507 | 3: storedcode.builtins, storedcode.prove, tooluse | conversion 4, integrations 1 | ast-grep-py | 1: the_applications_sql_is_found_and_held_to_the_source |
 | `migkit/storedcode/bench.py` | - | 37 | 1: storedcode.prove | conversion 1 | - | 2: collations_agree_on_the_columns_own_values, constraints_accept_and_refuse_the_same_rows |
 | `migkit/storedcode/builtins.py` | - | 472 | 3: storedcode.convert, storedcode.prove, storedcode.statements | conversion 15, engines 1 | - | 1: where_two_versions_part_and_what_holds_for_every_input |
@@ -150,7 +150,7 @@ None.
 | `migkit/storedcode/reference.py` | - | 198 | 1: storedcode.prove | conversion 5, engines 1, safety 1, workflows 1 | - | 2: conversion_breadth_mysql_to_postgres, where_two_versions_part_and_what_holds_for_every_input |
 | `migkit/storedcode/routines.py` | - | 64 | 15: engines.bigquery_checks, engines.cockroachdb, engines.mongodb, engines.mssql, engines.mysql (+10) | - | - | 9: migkits_own_rules_convert_procedural_code, plsql_rules_carry_packages, postgresql_code_converted_to_mysql_by_rules (+6) |
 | `migkit/storedcode/rungs.py` | - | 209 | 2: storedcode.convert, tools.gen_docs | conversion 8, decision 1, persistence 1 | - | 3: stored_code_candidates_are_ranked_by_what_proved, stored_code_fixes_drafted_through_proof, where_two_versions_part_and_what_holds_for_every_input |
-| `migkit/storedcode/sandbox.py` | - | 808 | 2: storedcode.convert, storedcode.prove | configuration 3, conversion 2, engines 4, execution 1 | - | 11: collations_agree_on_the_columns_own_values, constraints_accept_and_refuse_the_same_rows, oracle_code_converted_and_proved (+8) |
+| `migkit/storedcode/sandbox.py` | - | 847 | 3: cli, storedcode.convert, storedcode.prove | configuration 3, conversion 2, engines 4, execution 1 | - | 12: collations_agree_on_the_columns_own_values, constraints_accept_and_refuse_the_same_rows, doctor_says_the_stored_code_check_rung (+9) |
 | `migkit/storedcode/scalar.py` | - | 131 | 1: storedcode.prove | conversion 5 | - | 1: where_two_versions_part_and_what_holds_for_every_input |
 | `migkit/storedcode/sequences.py` | - | 253 | 2: storedcode.convert, storedcode.prove | conversion 6 | - | through storedcode.convert, storedcode.prove |
 | `migkit/storedcode/sizing.py` | - | 276 | 2: engines.hetero, storedcode.prove | conversion 3, engines 1 | - | 1: the_proof_reads_history_clock_and_cuts |
@@ -185,7 +185,7 @@ None.
 |---|---|---|---|---|---|---|
 | `migkit/advisors.py` | - | 178 | 1: cli | decision 1 | - | 2: advise_follows_the_service_the_hop_names, every_command_ends_in_its_own_words |
 | `migkit/bulkways.py` | - | 143 | 1: movers | decision 4, integrations 5, persistence 1, workflows 2 | - | 1: the_non_sql_tools_are_used_whole |
-| `migkit/capabilities.py` | - | 3750 | 11: cli, decide, diagnostics, engines.base, report (+6) | configuration 4, decision 3, engines 8, safety 3, workflows 6 | - | 33: a_document_store_assessment_names_versions_writers_and_what_the_target_lacks, a_document_store_carries_its_indexes_views_and_functions, accounts_are_carried_across_engines (+30) |
+| `migkit/capabilities.py` | - | 3750 | 11: cli, decide, diagnostics, engines.base, report (+6) | configuration 4, decision 3, engines 8, safety 3, workflows 6 | - | 34: a_document_store_assessment_names_versions_writers_and_what_the_target_lacks, a_document_store_carries_its_indexes_views_and_functions, accounts_are_carried_across_engines (+31) |
 | `migkit/changedepth.py` | - | 197 | 8: engines.cassandra, engines.kafka, engines.mongodb, engines.mysql, engines.postgres (+3) | decision 1 | - | 6: a_copy_goal_is_not_held_by_the_change_depth, a_mongodb_replica_set_is_followed_by_its_oplog, a_mongodb_standalone_is_followed_by_buckets (+3) |
 | `migkit/cloud_readiness.py` | - | 256 | 1: ready | configuration 1, decision 2, integrations 1, safety 1 | - | 1: the_cloud_side_of_readiness_is_audited_before_the_move |
 | `migkit/costmodel.py` | - | 780 | 9: decide, engines.generic, legs, marks, planner (+4) | configuration 1, decision 2, engines 4, persistence 2, reporting 1, workflows 1 | - | 11: a_managed_services_own_operation_is_ranked_by_its_eligibility, a_mysql_copy_passes_rows_server_to_server, a_way_is_costed_by_what_the_unit_is (+8) |
@@ -222,7 +222,7 @@ None.
 | `migkit/binlog_marks.py` | - | 151 | 2: binlog_payload, engines.mysql | configuration 1 | - | 1: two_way_rungs_are_ranked_by_measurement |
 | `migkit/binlog_payload.py` | - | 297 | 1: engines.mysql | engines 1 | - | 2: a_compressed_binlog_is_read_or_stops_the_tail, mariadb_compressed_events_are_read_or_stop_the_tail |
 | `migkit/catalog.py` | - | 274 | 6: drift, engines.mssql, engines.postgres, engines.sqlcatalog, engines.sqlite (+1) | reporting 1 | - | 8: a_catalogue_is_one_shape, a_move_keeps_what_it_must, drift_compares_whole_definitions (+5) |
-| `migkit/engines/__init__.py` | - | 449 | 53: addresses, archive, attempts, canon, capabilities (+48) | engines 38, execution 1 | - | 161: bigquery_fake.py, a_clone_goes_on_exactly_mysql, a_continuous_hop_feeds_a_warehouse (+158) |
+| `migkit/engines/__init__.py` | - | 449 | 53: addresses, archive, attempts, canon, capabilities (+48) | engines 38, execution 1 | - | 163: bigquery_fake.py, a_clone_goes_on_exactly_mysql, a_continuous_hop_feeds_a_warehouse (+160) |
 | `migkit/engines/analyticdb.py` | - | 429 | 3: engines.dbapi, engines.singlestore, engines.synapse | configuration 1, decision 1, engines 2 | - | 2: analyticdb_mysql_is_a_side_on_a_fake, analyticdb_postgres_is_a_side_on_a_fake |
 | `migkit/engines/ase.py` | - | 699 | 2: engines, tools | conversion 1, decision 4, engines 9, persistence 1 | - | 3: large_values_on_sap_ase, sap_ase_against_a_server, sap_ase_takes_params_users_statistics_and_a_snapshot_on_fakes |
 | `migkit/engines/base.py` | scope: Engine.in_scope, Engine.takes | 7807 | 86: applyway, archive, capabilities, charsets, cli (+81) | cli 1, configuration 12, conversion 29, decision 30, engines 2, execution 15, integrations 1, persistence 6, reporting 4, safety 9, scope 3, workflows 31 | - | 137: a_character_set_change_is_planned_and_proved, a_check_says_what_changed_since_the_move, a_cluster_target_is_loaded_as_it_spreads_its_rows (+134) |
@@ -371,7 +371,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/cli.py` | - | 7538 | 10: engines.base, engines.oracle_pump, estate, ha, integrations (+5) | cli 8, configuration 27, conversion 4, decision 82, engines 23, execution 31, integrations 4, persistence 33, reporting 50, safety 25, scope 1, web 1, workflows 94 | - | 236: conftest.py, cosmos_fake.py, cutover_harness.py (+233) |
+| `migkit/cli.py` | - | 7540 | 10: engines.base, engines.oracle_pump, estate, ha, integrations (+5) | cli 8, configuration 27, conversion 5, decision 82, engines 23, execution 31, integrations 4, persistence 33, reporting 50, safety 25, scope 1, web 1, workflows 94 | - | 236: conftest.py, cosmos_fake.py, cutover_harness.py (+233) |
 | `migkit/estate.py` | - | 356 | 1: cli | cli 1, configuration 2, decision 4, engines 1, integrations 1, reporting 2 | - | 1: the_estate_is_discovered_sized_and_priced |
 | `migkit/guide.py` | - | 888 | 4: cli, managed, tools.gen_docs, web.newhop | configuration 18, conversion 1, decision 8, engines 1, integrations 2, persistence 1, reporting 4 | - | 10: drain_to_position_and_the_approval_gate, every_command_ends_in_its_own_words, every_goal_and_mode_is_explained (+7) |
 | `migkit/ui.py` | - | 1418 | 4: cli, tools.gen_docs, web.app, web.views | configuration 7, decision 2, execution 1, persistence 5, reporting 4, workflows 6 | - | 13: a_tail_ends_its_batches_at_commits_and_says_when, alerts_and_notifications, every_resource_in_one_model (+10) |
@@ -415,7 +415,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `tools/audit_backlog_index.py` | - | 102 | 0 | configuration 1 | - | none |
+| `tools/audit_backlog_index.py` | - | 153 | 0 | configuration 2 | - | none |
 | `tools/check_no_secrets.py` | - | 106 | 0 | configuration 1 | - | none |
 | `tools/ease_measure.py` | - | 280 | 0 | configuration 1 | - | none |
 | `tools/final_suite.py` | - | 857 | 0 | configuration 6, integrations 1, tools 1 | - | none |

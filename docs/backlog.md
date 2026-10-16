@@ -6034,6 +6034,7 @@ the gaps nothing above covers yet, now items of their own.
   sql_variant, FILESTREAM; Db2 DECFLOAT and GRAPHIC - mapped, carried,
   rendered for the digest, or refused before the move (the type-fidelity
   research, 2026-09-28).
+  *Status 2026-10-16:* done - `commercial.py` (`ENGINES`: ase, db2, db2i, db2zos, mssql, oracle, teradata) with 37 tests in `tests/test_types_only_commercial_engines_have.py`; the commercial servers that cannot run here are declared `UNPROVED_ON` in their modules.
 * **W7. Resharding.** One database split across N targets by key, N
   merged into one with DDL coordinated (TiDB DM's shard merge), and a
   load that follows the target's own distribution (Citus, Vitess,
@@ -6057,6 +6058,7 @@ the gaps nothing above covers yet, now items of their own.
   across a group (`Cluster.history_tables` missing: the cutover warns);
   the older one-into-three lane test fails at its column-added step on
   master as well.
+  *Status 2026-10-16:* done - `reshard.py`, two shards into three proved on the lane with a key moving during the follow and a stop resumed to one copy; owed as rows W7.lanes, W7.depth, W7.history.
 * **W8. Installed where nothing can be downloaded - the places the
   clouds' services cannot reach** (the owner, 2026-09-29: DMZs, secure
   zones and networks with no way out are exactly where DMS and DTS

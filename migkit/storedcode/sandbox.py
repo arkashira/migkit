@@ -53,6 +53,45 @@ def pg_tag(major):
     return f"{PG_IMAGE}:{major}-r{PG_RECIPE}"
 
 
+def static_check_said(run=subprocess.run, have_docker=None):
+    """The rung the stored-code proof stands on for PostgreSQL, said by
+    `doctor` (backlog DEC.deps): the sandbox image carrying the static
+    check and profiler (`PG_IMAGE`) is installed - used to gate routines
+    and measure their coverage; not yet built - the first proof builds it
+    and the plan says what it adds; or docker is absent - the proof runs
+    on the plain server and every verdict says nothing was gated. Never a
+    silent skip. Returns the line."""
+    import shutil
+    if have_docker is None:
+        have_docker = shutil.which("docker") is not None
+    adds = ("the static check of stored PostgreSQL code and its profiler,"
+            " added to the sandbox's server")
+    if not have_docker:
+        return ("stored PostgreSQL code: the static check is not here and"
+                " docker is not on this machine; routines are proved on a"
+                " plain server and say they were not gated. With docker it"
+                f" would add {adds}")
+    try:
+        got = run(["docker", "images", "--format", "{{.Tag}}", PG_IMAGE],
+                  capture_output=True, text=True, timeout=30)
+        tags = sorted(t for t in got.stdout.split() if t.endswith(
+            f"-r{PG_RECIPE}")) if got.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        tags = None
+    if tags is None:
+        return ("stored PostgreSQL code: whether the static check is built"
+                " could not be asked of docker; routines say whether they"
+                " were gated")
+    if tags:
+        majors = ", ".join(t.split("-")[0] for t in tags)
+        return (f"stored PostgreSQL code: the static check is installed"
+                f" (server versions {majors}) and gates routines and"
+                " measures their coverage")
+    return ("stored PostgreSQL code: the static check is not built yet; the"
+            f" first proof on a PostgreSQL target builds it once, adding"
+            f" {adds}")
+
+
 def foreign_key_statements(like, side, db, tables):
     """The statements making the foreign keys among `tables` of a hop's
     own server (`like`, `side`) again in its sandbox, as the server keeps

@@ -1046,6 +1046,8 @@ def doctor(install):
     said = _tools.schema_reading_note()
     if said:
         console.print(f"note: {said}")
+    from .storedcode import sandbox as _sandbox
+    console.print(f"note: {_esc(_sandbox.static_check_said())}")
     if short:
         console.print("\nto enable everything on this machine:"
                       " [bold]migkit doctor --install[/bold]")
