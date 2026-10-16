@@ -473,3 +473,45 @@ def test_a_change_that_comes_round_stops_a_mesh_before_the_next_link():
                                lambda: state)
     assert not out.ok and len(ran) == 1 and out.stopped[0] == ran[0]
     assert "came round" in " ".join(out.lines)
+
+
+def test_a_carrier_with_several_streams_stages_its_parts_at_once(
+        tmp_path, small_parts):
+    """The streams the link's rate fills are really in flight together: a
+    fake store counts the parts it is staging at one moment."""
+    import threading
+    import time
+    live = {"now": 0, "most": 0}
+    lock = threading.Lock()
+
+    class Counting(_Blob):
+        def stage_block(self, block_id, data, length=None,
+                        validate_content=False):
+            with lock:
+                live["now"] += 1
+                live["most"] = max(live["most"], live["now"])
+            time.sleep(0.05)
+            try:
+                super().stage_block(block_id, data, length,
+                                    validate_content)
+            finally:
+                with lock:
+                    live["now"] -= 1
+
+    class CountingBox(_Box):
+        def get_blob_client(self, key):
+            return Counting(self, key)
+
+    (tmp_path / "f.bin").write_bytes(DATA)
+    dst = _azure(CountingBox())
+    got = carriers.move_file(carriers.LocalStore(tmp_path), "f.bin", dst,
+                             link=LINK)
+    assert got.plan.streams > 1 and got.plan.parts > got.plan.streams
+    assert 1 < live["most"] <= got.plan.streams, live
+    # a carrier whose link fills with one stream stages one at a time
+    live.update(now=0, most=0)
+    one = _azure(CountingBox())
+    solo = carriers.move_file(
+        carriers.LocalStore(tmp_path), "f.bin", one,
+        link=carriers.Link(rate=1e5, per_stream=1e5, rtt=0.001))
+    assert solo.plan.streams == 1 and live["most"] == 1, live

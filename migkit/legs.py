@@ -862,6 +862,7 @@ def pull_move(hop, db, workers, go, log):
         plan = schedule(hop, db, known, carried, workers)
         if plan is not None:
             work = in_schedule(work, plan)
+            record_schedule(hop, plan, db)
             if log:
                 for line in plan.lines():
                     log(line)
@@ -1430,6 +1431,32 @@ def schedule(hop, db, known, tables, workers, model=None):
     facts = {t: known.get(t) or {} for t in tables}
     sem = {t: Semantics(table=t) for t in tables}
     return planner.scheduled(model, facts, sem, n=max(1, int(workers or 1)))
+
+
+def record_schedule(hop, plan, db=None, relay=None):
+    """What the copy runs with, in the run's decision record: the way
+    `planner.overlap` admitted (`plan`), the time it laid out against one
+    table after another, how many tables start before the first ends, and
+    - where the source is read through a relay - the wide leg's
+    compression (`relay`, a `movers.Compressing`). The record is what a
+    reader of the run finds the copy was given; None where nothing was
+    laid out. Returns the entry."""
+    if plan is None:
+        return None
+    from . import decide
+    first = min((e for _, _, e in plan.copies), default=0.0)
+    entry = {"work": f"{db or hop.name}: the copy's schedule",
+             "way": plan.way,
+             "reason": plan.said,
+             "tables": len(plan.copies),
+             "before_the_first_ends": sum(1 for _, s, _ in plan.copies
+                                          if s < first),
+             "makespan_seconds": round(plan.makespan, 3),
+             "serial_seconds": round(plan.serial, 3),
+             "relay": relay.line() if relay is not None else ""}
+    decide.record(hop, entry, work=entry["work"], way=plan.way,
+                  reason=plan.said)
+    return entry
 
 
 def in_schedule(work, plan):

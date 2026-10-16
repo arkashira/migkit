@@ -6267,3 +6267,62 @@ def check_sample(facts, costs=None):
              because="only every row compared can say the two are the"
                      " same")),
         f, costs=costs or None, prove=False)
+
+def connector_port(facts):
+    """Where a hop's change-stream runtime answers on this machine, and
+    where its reader answers its readings: the ports the hop's stack
+    already records, taken again while they are the hop's own (the runtime
+    answers there) or free; else ports found free that no other hop's
+    stack records. A port is a fact of the hop, never one number for every
+    hop: two hops on one machine run two runtimes. `facts`: `recorded`
+    (the port the stack names, or None), `mine` (it answers as this hop's
+    own runtime), `free` (nothing holds it), `found` (a free port no other
+    hop's stack names)."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("the port of a hop's change-stream runtime", (
+        Rung("recorded", "the port the hop's stack already names",
+             needs=(Need("a port recorded", lambda x: bool(x.get("recorded")),
+                         "the hop's stack names no port yet"),
+                    Need("it is the hop's own or free",
+                         lambda x: bool(x.get("mine") or x.get("free")),
+                         "another program holds the recorded port")),
+             because="a restart finds the runtime where it was left"),
+        Rung("found", "a port found free that no other hop's stack names",
+             needs=(Need("a free port found", lambda x: bool(x.get("found")),
+                         "no free port could be found on this machine"),),
+             because="the machine gives a free port; another hop's record"
+                     " is not taken from it")),
+        f, prove=False)
+
+
+def quiet_way(facts):
+    """How a load keeps a PostgreSQL target's triggers from firing on its
+    rows, from what the target holds and what its user may do: nothing at
+    all where no table it loads has a trigger or a foreign key (the
+    session is left as it is), the restore's own disabling for a
+    superuser, the load's session as a replica for a user who may set
+    `session_replication_role`. Only the load's connections to the target
+    are ever asked for it - never an export connection to the source.
+    `facts`: `triggers` (the loaded tables that have triggers, foreign
+    keys' among them), `superuser`, `settable` (the user may set the
+    role)."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("how a load keeps the target's triggers quiet", (
+        Rung("untouched", "no trigger or key on the loaded tables: the"
+             " session is left as it is",
+             needs=(Need("no triggers among the loaded tables",
+                         lambda x: not x.get("triggers"),
+                         lambda x: "the target's tables "
+                         + ", ".join(sorted(x.get("triggers") or ())[:3])
+                         + " have triggers or keys"),),
+             because="a rule not needed is not set"),
+        Rung("flag", "the restore disables each trigger itself",
+             needs=(Need("a superuser", lambda x: bool(x.get("superuser")),
+                         "the user is not a superuser"),),
+             because="the restore's own switch, as it always has"),
+        Rung("session", "the load's session runs as a replica",
+             needs=(Need("the user may set the role",
+                         lambda x: bool(x.get("settable")),
+                         "the user may not set session_replication_role"),),
+             because="no change to any table")),
+        f, prove=False)

@@ -81,8 +81,9 @@ def every_reading(tmp_path, monkeypatch):
     (root / "cutover.json").write_text(json.dumps({"state": "running"}))
     (root / "stream").mkdir()
     (root / "stream" / "docker-compose.yml").write_text("services: {}\n")
+    movers.connector_ports(root / "stream", make=True)
     monkeypatch.setattr(movers, "stream_parts",
-                        lambda name, port=8083, timeout=2:
+                        lambda name, port, timeout=2:
                         [("source", True), ("sink", False)])
     monkeypatch.setattr(movers, "stream_readings",
                         lambda attrs, port, timeout=2, server=None: {
@@ -211,7 +212,7 @@ def test_the_stream_readers_own_readings_are_read(tmp_path, monkeypatch):
     import inspect
     made = inspect.getsource(movers.stream_codegen)
     assert 'ENABLE_JOLOKIA: "true"' in made
-    assert '"127.0.0.1:8778:8778"' in made
+    assert '"127.0.0.1:{readings}:{RUNTIME_INSIDE[\'readings\']}"' in made
 
 
 def test_the_shipped_dashboard_shows_only_metrics_that_exist(tmp_path,

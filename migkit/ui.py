@@ -857,11 +857,13 @@ def _conflict_metrics(where, lbl):
     return out
 
 
-#: where the change stream's pipeline answers for its parts, where its
-#: reader answers its own readings, and the readings carried out: {its
+#: where the change stream's pipeline answers for its parts and where its
+#: reader answers its own readings are the hop's own (`movers.connector_ports`
+#: of its stack); a number set here overrides both - for a test or an
+#: operator's runtime of their own. The readings carried out: {its
 #: attribute: migkit's metrics}
-STREAM_API = 8083
-STREAM_READINGS = 8778
+STREAM_API = None
+STREAM_READINGS = None
 STREAM_METRICS = {
     "MilliSecondsBehindSource": ("migkit_stream_behind_source_seconds",),
     "TotalNumberOfEventsSeen": ("migkit_stream_events_seen_total",
@@ -884,15 +886,20 @@ def _stream_metrics(where, lbl):
     from . import movers
     if not (where / "stream" / "docker-compose.yml").exists():
         return []
+    ports = movers.connector_ports(where / "stream")
+    api = STREAM_API or (ports[0] if ports else None)
+    readings = STREAM_READINGS or (ports[1] if ports else None)
     out = []
-    parts = movers.stream_parts(where.name, STREAM_API)
+    if not api:
+        return out
+    parts = movers.stream_parts(where.name, api)
     for part, running in parts:
         out.append(_sample("migkit_stream_running", lbl, int(running),
                            part=part))
     if not any(running for part, running in parts if part == "source"):
         return out
     for attr, value in movers.stream_readings(
-            tuple(STREAM_METRICS), STREAM_READINGS,
+            tuple(STREAM_METRICS), readings,
             server=f"migkit-{where.name}").items():
         if attr == "MilliSecondsBehindSource":
             value = value / 1000.0

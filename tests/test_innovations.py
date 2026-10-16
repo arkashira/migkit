@@ -263,7 +263,7 @@ def test_stream_status_parses(monkeypatch):
     monkeypatch.setattr(movers, "_connect_api", lambda m, p, **k: (200, {
         "connector": {"state": "RUNNING"},
         "tasks": [{"state": "RUNNING"}, {"state": "FAILED"}]}))
-    s = movers.stream_status("migkit-h-source")
+    s = movers.stream_status("migkit-h-source", 18083)
     assert "connector=RUNNING" in s and "RUNNING,FAILED" in s
 
 
@@ -276,8 +276,9 @@ def test_stream_register_creates_and_updates(tmp_path, monkeypatch):
     (tmp_path / "sink-connector.json").write_text(json.dumps(
         {"name": "k", "config": {"y": "2"}}))
     calls = []
+    movers.connector_ports(tmp_path, make=True)
 
-    def fake_api(method, path, body=None, port=8083):
+    def fake_api(method, path, body=None, port=None):
         calls.append((method, path))
         if method == "POST" and path == "/connectors" and body["name"] == "k":
             raise urllib.error.HTTPError(path, 409, "exists", {}, None)

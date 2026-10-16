@@ -5122,13 +5122,14 @@ def _stream(hop, eng, db, do_drop, go, engine):
         return
     console.print("starting the streaming pipeline ...")
     movers.stream_up(out, lambda m: chat(f"  {m}"))
-    if not movers.stream_wait(log=lambda m: chat(f"  {m}")):
+    if not movers.stream_wait(out, log=lambda m: chat(f"  {m}")):
         raise SystemExit("the streaming pipeline did not come up (its stack"
                          f" is written under {out}); migkit doctor says what"
                          " this machine is missing")
     movers.stream_register(out, log=lambda m: console.print(f"  {m}"))
     for c in (f"{name}-source", f"{name}-sink"):
-        console.print("  " + movers.stream_status(c))
+        console.print("  " + movers.stream_status(
+            c, movers.connector_ports(out)[0]))
     # a pipeline started again says how far its reads have got
     for line in movers.stream_progress(out, hop.name)[0]:
         console.print(f"  {line}")
@@ -6246,8 +6247,9 @@ def _pipeline_runs(hop):
     out = _pipeline_out(hop)
     if not (out / "docker-compose.yml").exists():
         return False
-    return "connector=RUNNING" in movers.stream_status(
-        f"migkit-{hop.name}-source")
+    ports = movers.connector_ports(out)
+    return bool(ports) and "connector=RUNNING" in movers.stream_status(
+        f"migkit-{hop.name}-source", ports[0])
 
 
 def _rpk(out, *args, timeout=30):
@@ -6322,7 +6324,8 @@ def _pipeline_leg(hop, eng, dbs):
 
     def connectors(verb):
         for c in (f"{name}-source", f"{name}-sink"):
-            movers._connect_api("PUT", f"/connectors/{c}/{verb}")
+            movers._connect_api("PUT", f"/connectors/{c}/{verb}",
+                                port=movers.connector_ports(out)[0])
 
     def down(d):
         if d == dbs[0]:

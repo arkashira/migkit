@@ -284,8 +284,9 @@ def test_a_finished_re_read_is_not_under_way():
 def test_a_configuration_the_runtime_refuses_registers_nothing(
         tmp_path, monkeypatch):
     calls = []
+    movers.connector_ports(tmp_path, make=True)
 
-    def fake_api(method, path, body=None, port=8083):
+    def fake_api(method, path, body=None, port=None):
         calls.append((method, path))
         if path.endswith("/config/validate"):
             return 200, {"configs": [{"value": {
@@ -334,7 +335,8 @@ def test_the_running_build_has_what_the_account_says():
                                      ".MySqlConnector")):
         _, got = movers._connect_api(
             "PUT", f"/connector-plugins/{cls}/config/validate",
-            {"connector.class": cls, "topic.prefix": "x"})
+            {"connector.class": cls, "topic.prefix": "x"},
+            port=int(os.environ["MIGKIT_LIVE_CONNECT_PORT"]))
         names = {c["definition"]["name"] for c in got["configs"]}
         declared = tooluse.surface("debezium")[connector]
         # measured working and not advertised by the PostgreSQL connector

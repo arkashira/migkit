@@ -311,3 +311,34 @@ def test_two_stores_apart_do_not_copy_server_side(tmp_path):
     assert got.way == "parallel ranged parts"
     assert "upload_part_copy" not in fake.calls + other.calls
     assert other.objects[dst._key("big")] == DATA * 4
+
+
+def test_the_schedule_the_copy_is_given_is_in_the_run_record(
+        tmp_path, monkeypatch):
+    """What the planner laid out (the way, the time against one after
+    another, the tables started before the first ends) and the relay's
+    compression are kept in the run's decision record by the copy."""
+    from migkit import config, decide
+    from migkit.config import Endpoint, Hop
+    monkeypatch.setattr(config, "REPORTS", tmp_path)
+    hop = Hop(name="w18k", engine="postgres",
+              source=Endpoint(host="10.0.0.1", port=5432, user="u",
+                              password="CHANGE_ME"),
+              target=Endpoint(host="10.0.0.2", port=5432, user="u",
+                              password="CHANGE_ME"),
+              databases=["appdb"])
+    plan = planner.overlap({}, {"a": 8.0, "b": 4.0, "c": 4.0}, at_once=2)
+
+    class Relay:
+        def line(self):
+            return "the wide leg is sent at level 3"
+    entry = legs.record_schedule(hop, plan, "appdb", relay=Relay())
+    assert legs.record_schedule(hop, None, "appdb") is None
+    got = [e for e in decide.recorded(hop)
+           if e["work"] == "appdb: the copy's schedule"]
+    assert len(got) == 1 and got[0]["way"] == plan.way
+    detail = got[0]["detail"]
+    assert detail["tables"] == 3 and detail["relay"].startswith("the wide")
+    assert detail["makespan_seconds"] == round(plan.makespan, 3)
+    assert detail["makespan_seconds"] <= detail["serial_seconds"]
+    assert entry["before_the_first_ends"] >= 1

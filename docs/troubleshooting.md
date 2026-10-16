@@ -365,6 +365,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the tables masked on the way are not what the hop's transforms make them: <...>
 
+* no free port could be found on this machine
+
 * <...>: the online sync carried collections the hop leaves out: <...> ... | <...>. They are on the target now; nothing has been marked as moved - drop them there, or move this hop by the dump
 
 * MIGKIT_CDC=<...> is not one of native, follow. native = the database's own replication, which needs the target to dial the source; follow = a leg driven from where migkit runs, which connects out to both sides instead

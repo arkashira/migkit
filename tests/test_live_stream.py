@@ -40,7 +40,7 @@ def test_stream_supervision_launches_and_streams(pg_pair, tmp_path):
     out = movers.stream_codegen(hop, ["postgres"], "postgres")
     try:
         movers.stream_up(out, print)
-        assert movers.stream_wait(timeout=240, log=print), "Connect not up"
+        assert movers.stream_wait(out, timeout=240, log=print), "Connect not up"
         movers.stream_register(out, log=print)
         # let the snapshot + streaming settle, then write a row on source
         time.sleep(15)
@@ -54,7 +54,8 @@ def test_stream_supervision_launches_and_streams(pg_pair, tmp_path):
                 break
             time.sleep(3)
         assert got == "100", "row did not stream to target"
-        status = movers.stream_status(f"migkit-{hop.name}-source")
+        status = movers.stream_status(f"migkit-{hop.name}-source",
+                                      movers.connector_ports(out)[0])
         assert "RUNNING" in status
     finally:
         movers.stream_down(out, print)

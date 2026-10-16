@@ -2279,42 +2279,51 @@ PG_TRIGGERED_SQL = """
 
 def _pg_quiet_triggers(hop, db, tables):
     """How the load keeps the target's triggers from firing, from what the
-    target's user may do.
+    target holds and what its user may do (`decide.quiet_way`).
 
-    `flag` - a superuser: the restore disables every trigger itself, as it
-    always has. `session` - allowed `session_replication_role`, which a
-    managed service's admin user is: the load's own connections run as a
-    replica, with no change to any table. `none` - neither, and nothing to
-    keep quiet among `tables`. Anything else stops the move before the
-    target is emptied: measured as a plain owner, the restore's own attempt
-    was refused on the foreign keys' system triggers (`permission denied:
+    `none` - no table loaded has a trigger or a key: nothing is switched,
+    the session stays as it is. `flag` - a superuser: the restore disables
+    every trigger itself, as it always has. `session` - allowed
+    `session_replication_role`, which a managed service's admin user is:
+    the load's own connections run as a replica, with no change to any
+    table. Only the target is asked; the source's export connections are
+    never given the role. Anything else stops the move before the target
+    is emptied: measured as a plain owner, the restore's own attempt was
+    refused on the foreign keys' system triggers (`permission denied:
     "RI_ConstraintTrigger_c_16399" is a system trigger`) and the child
     table's rows were then refused on its foreign key - 100 of 100 rows
     missing - which the load used to report as complete.
     """
+    from . import decide
     t = hop.target
     ask = ["psql", "-h", t.host, "-p", str(t.port), "-U", t.user,
            "-d", hop.target_db(db), "-X", "-At", "-v", "ON_ERROR_STOP=1"]
     env = {**t.libpq_env(),
            "PGPASSWORD": t.password, "PGCONNECT_TIMEOUT": "15"}
-    if _sh(ask + ["-c", "select rolsuper from pg_roles"
-                        " where rolname = current_user"],
-           env).stdout.strip() == "t":
-        return "flag"
-    try:
-        _sh(ask + ["-c", "set session_replication_role = replica"], env)
-        return "session"
-    except RuntimeError:
-        pass
     triggered = set(_sh(ask + ["-c", PG_TRIGGERED_SQL], env
                         ).stdout.split())
     # by `schema.table` or by the bare name, which is all some callers have
     # - a bare name matches it in every schema, which can only refuse more
-    hit = sorted(t for t in triggered
-                 if tables is None or t in tables
-                 or t.rpartition(".")[2] in tables)
-    if not hit:
-        return "none"
+    hit = sorted(x for x in triggered
+                 if tables is None or x in tables
+                 or x.rpartition(".")[2] in tables)
+    sup = settable = False
+    if hit:
+        sup = _sh(ask + ["-c", "select rolsuper from pg_roles"
+                               " where rolname = current_user"],
+                  env).stdout.strip() == "t"
+        if not sup:
+            try:
+                _sh(ask + ["-c", "set session_replication_role = replica"],
+                    env)
+                settable = True
+            except RuntimeError:
+                pass
+    got = decide.quiet_way({"triggers": hit, "superuser": sup,
+                            "settable": settable})
+    decide.record(hop, got, work=f"{db}: the target's triggers")
+    if got.path:
+        return "none" if got.path == "untouched" else got.path
     raise SystemExit(
         f"{db}: {', '.join(hit[:5])}" + (" ..." if len(hit) > 5 else "")
         + f" have triggers on the target - foreign keys among them - and"
@@ -5248,11 +5257,16 @@ def riotx_move(hop, db, workers, go, log):
     return [step]
 
 
-def _free_port():
+def _free_port(avoid=()):
+    """A port nothing holds, asked of the machine, other than `avoid`."""
     import socket as _socket
-    with _socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    for _ in range(64):
+        with _socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        if port not in avoid:
+            return port
+    raise SystemExit("no free port could be found on this machine")
 
 
 def _sync_api(port, method, path, body=None, timeout=15):
@@ -5950,6 +5964,8 @@ def _builds_beside_the_copy(hop, db, workers, windowed, log=None):
     if got.way in ("free", "waves"):
         if log:
             log(f"index builds: {got.said}")
+        from . import legs
+        legs.record_schedule(hop, got, db)
         return got
     if log:
         why = "; ".join(w for _, w in got.refused) or got.said
@@ -7913,6 +7929,7 @@ def stream_codegen(hop, dbs, engine):
             "batch.size": buffers["max.batch.size"],
         },
     }
+    api, readings = connector_ports(out, make=True)
     compose = f"""services:
   redpanda:
     image: {IMAGES["redpanda"]}
@@ -7922,7 +7939,8 @@ def stream_codegen(hop, dbs, engine):
   connect:
     image: {IMAGES["debezium"]}
     depends_on: [redpanda]
-    ports: ["127.0.0.1:8083:8083", "127.0.0.1:8778:8778"]
+    ports: ["127.0.0.1:{api}:{RUNTIME_INSIDE['api']}",
+            "127.0.0.1:{readings}:{RUNTIME_INSIDE['readings']}"]
     environment:
       BOOTSTRAP_SERVERS: redpanda:9092
       GROUP_ID: migkit
@@ -8485,9 +8503,95 @@ def _redpanda_account():
 tooluse.register("redpanda", options=_redpanda_account())
 
 
-def _connect_api(method, path, body=None, port=8083, timeout=15):
+#: the ports the runtime's image listens on inside its own container
+#: (its REST API, its readings agent); the host side of each is the hop's
+#: own (`connector_ports`)
+RUNTIME_INSIDE = {"api": 8083, "readings": 8778}
+
+
+def connector_ports(out, make=False):
+    """(api, readings): the ports on this machine where the hop's stack in
+    `out` answers - a fact of the hop, kept in its stack beside the
+    compose file (`connector.ports`), so a restart finds the runtime where
+    it was left and two hops run two runtimes. `make` chooses them where
+    the stack has none (`decide.connector_port`: the recorded, else found
+    free and not named by another hop's stack); None where it has none and
+    `make` is not asked."""
+    import json as _json
+    from pathlib import Path
+    from . import decide
+    path = Path(out) / "connector.ports"
+    try:
+        got = _json.loads(path.read_text())
+        have = (int(got["api"]), int(got["readings"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        have = None
+    if not make:
+        return have
+    taken = _ports_of_other_stacks(Path(out))
+    chosen = []
+    for i, key in enumerate(("api", "readings")):
+        rec = have[i] if have else None
+        free = _port_is_free(rec) if rec else False
+        got = decide.connector_port({
+            "recorded": rec, "free": free,
+            "mine": bool(rec and not free and _answers_here(rec, key)),
+            "found": _free_port(taken | set(chosen))})
+        chosen.append(rec if got.path == "recorded" else
+                      _free_port(taken | set(chosen)))
+    ports = (chosen[0], chosen[1])
+    if ports != have:
+        _write_private(path, _json.dumps({"api": ports[0],
+                                          "readings": ports[1]}))
+    return ports
+
+
+def _ports_of_other_stacks(out):
+    """The ports other hops' stacks name (those beside `out`'s hop)."""
+    import json as _json
+    taken = set()
+    for f in out.parent.parent.glob("*/stream/connector.ports"):
+        if f.parent == out:
+            continue
+        try:
+            got = _json.loads(f.read_text())
+            taken |= {int(got["api"]), int(got["readings"])}
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return taken
+
+
+def _port_is_free(port):
+    import socket
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", int(port)))
+        except OSError:
+            return False
+    return True
+
+
+def _answers_here(port, key):
+    """Whether a runtime answers on `port` as this hop's own was left."""
+    if key != "api":
+        return True
+    try:
+        return _connect_api("GET", "/", port=port, timeout=2)[0] == 200
+    except Exception:  # noqa: BLE001 - nothing answers: not a runtime
+        return False
+
+
+def _the_port(port):
+    if not port:
+        raise ValueError("the connector's port is the hop's own:"
+                         " movers.connector_ports(<its stack>)")
+    return int(port)
+
+
+def _connect_api(method, path, body=None, port=None, timeout=15):
     import json as _json
     import urllib.request
+    port = _the_port(port)
     data = _json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         f"http://localhost:{port}{path}", data=data, method=method,
@@ -8632,7 +8736,7 @@ def send_resnapshot(out, hop_name, tables, kind="blocking", log=None):
     """Put the request on the signal topic, through the compose file.
 
     The broker publishes no port to the host - only the connector's REST
-    API on 8083 is exposed - so the message goes in the way migkit already
+    API (on the hop's own port) is exposed - so the message goes in the way migkit already
     drives the rest of this stack, with `docker compose exec`. Opening 9092
     to the host to avoid one exec would widen the pipeline's surface for
     the convenience of the tool, which is the wrong trade.
@@ -8771,8 +8875,9 @@ def stream_down(out, log=None):
          "down", "-v"], log=log)
 
 
-def stream_wait(port=8083, timeout=180, log=None):
+def stream_wait(out, timeout=180, log=None):
     import time
+    port = _the_port((connector_ports(out) or (None,))[0])
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -8787,7 +8892,7 @@ def stream_wait(port=8083, timeout=180, log=None):
     return False
 
 
-def refused_config(cfg, port=8083):
+def refused_config(cfg, port):
     """What the connector runtime refuses in `cfg`, asked before it is
     registered: [(option, why)], [] where it takes all of it. The runtime
     validates against the build it runs, which is the build that matters -
@@ -8808,9 +8913,10 @@ def refused_config(cfg, port=8083):
     return out
 
 
-def stream_register(out, port=8083, log=None):
+def stream_register(out, port=None, log=None):
     import json as _json
     import urllib.error
+    port = _the_port(port or (connector_ports(out) or (None,))[0])
     for f in ("source-connector.json", "sink-connector.json"):
         cfg = _json.loads((out / f).read_text())
         name = cfg["name"]
@@ -8835,7 +8941,7 @@ def stream_register(out, port=8083, log=None):
                 raise
 
 
-def stream_parts(hop_name, port=8083, timeout=2):
+def stream_parts(hop_name, port, timeout=2):
     """[(part, running)] of the hop's pipeline: its source and sink
     connectors and each of their tasks, as the pipeline's API says - for
     `/metrics`; nothing where the API does not answer."""
@@ -8859,7 +8965,7 @@ def stream_readings(attributes, port, timeout=2, server=None):
     read over HTTP through the agent its image carries (`ENABLE_JOLOKIA`
     in the pipeline's compose), summed over the reader's contexts where
     it has more than one; {} where nothing answers. The image's 3.0
-    entrypoint, read for this, starts that agent on port 8778 when
+    entrypoint, read for this, starts that agent on its own port inside the container when
     `ENABLE_JOLOKIA` is `true`; no pipeline was run to see it answer.
     `server` keeps the readings of one hop's connector only - its topic
     prefix, `migkit-<hop>`, which each MBean names as `server=`: the
@@ -8894,7 +9000,7 @@ def stream_readings(attributes, port, timeout=2, server=None):
     return out
 
 
-def stream_status(name, port=8083):
+def stream_status(name, port):
     """Summarize a connector + its tasks: RUNNING/FAILED per component."""
     try:
         _, body = _connect_api("GET", f"/connectors/{name}/status", port=port)
