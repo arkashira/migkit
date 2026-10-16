@@ -1,67 +1,67 @@
 # migkit state
 
-Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage()`, `capabilities.depth()` and `docs/backlog-index.md`; the pre-commit hook keeps it current. What this machine last proved (the full suite, unpushed work) is in `.codemap/LOCAL.md`.
+Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage()`, `decide.still_lacking()`, `capabilities.depth()` and `docs/backlog-index.md`; the pre-commit hook keeps it current. What this machine last proved (the full suite, unpushed work) is in `.codemap/LOCAL.md`.
 
 ## Capabilities by engine
 
-16 capabilities (`capabilities.CAPABILITIES`) and 12 shapes (`decide.coverage()`); a row lists what is not yet there.
+16 capabilities (`capabilities.CAPABILITIES`) and 12 shapes (`decide.coverage()`); a row lists what is not yet there and counts the depth items owed, as each engine says it still lacks them (`decide.still_lacking()`).
 
-| engine | capabilities | shapes | not yet |
-|---|---|---|---|
-| ase | 6/16 | 11/12 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
-| bigquery | 15/16 | 12/12 | users |
-| bigtable | 16/16 | 11/12 | large values |
-| cassandra | 16/16 | 12/12 | - |
-| clickhouse | 16/16 | 12/12 | - |
-| cockroachdb | 12/16 | 11/12 | params, bulk-move, users, snapshot, large values |
-| copybook | 16/16 | 12/12 | - |
-| cosmosdb | 14/16 | 12/12 | bulk-move, snapshot |
-| couchbase | 11/16 | 12/12 | params, bulk-move, users, statistics, snapshot |
-| datastore | 16/16 | 11/12 | large values |
-| db2 | 7/16 | 12/12 | params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
-| db2i | 13/16 | 12/12 | params, bulk-move, snapshot |
-| db2zos | 11/16 | 12/12 | params, bulk-move, users, statistics, snapshot |
-| dcdb | 15/16 | 11/12 | bulk-move, large values |
-| delta | 9/16 | 11/12 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
-| dsql | 13/16 | 11/12 | users, statistics, snapshot, large values |
-| duckdb | 16/16 | 12/12 | - |
-| dynamodb | 16/16 | 12/12 | - |
-| firestore | 16/16 | 11/12 | large values |
-| gaussdb | 16/16 | 10/12 | large values, partitioned |
-| geminidb-cassandra | 16/16 | 11/12 | large values |
-| geminidb-mongo | 16/16 | 11/12 | large values |
-| geminidb-redis | 16/16 | 11/12 | large values |
-| generic | 16/16 | 12/12 | - |
-| hetero | 16/16 | 10/12 | partitioned, missing grant |
-| iceberg | 9/16 | 11/12 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
-| kafka | 16/16 | 12/12 | - |
-| keyspaces | 16/16 | 11/12 | large values |
-| kinesis | 16/16 | 12/12 | - |
-| lindorm | 12/16 | 10/12 | stream, fence, confirm, delta, large values, partitioned |
-| mongodb | 16/16 | 11/12 | missing grant |
-| mssql | 16/16 | 12/12 | - |
-| mysql | 16/16 | 12/12 | - |
-| neo4j | 10/16 | 5/12 | params, bulk-move, confirm, users, statistics, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
-| neptune | 16/16 | 11/12 | large values |
-| oceanbase | 15/16 | 11/12 | bulk-move, large values |
-| oceanbase-oracle | 11/16 | 10/12 | bulk-move, stream, fence, confirm, delta, large values, partitioned |
-| opensearch | 16/16 | 12/12 | - |
-| oracle | 16/16 | 12/12 | - |
-| parquet | 16/16 | 12/12 | - |
-| polardbx | 15/16 | 11/12 | bulk-move, large values |
-| postgres | 16/16 | 12/12 | - |
-| pubsub | 16/16 | 12/12 | - |
-| qdrant | 13/16 | 5/12 | params, bulk-move, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
-| redis | 16/16 | 12/12 | - |
-| redshift | 6/16 | 12/12 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
-| saas | 16/16 | 12/12 | - |
-| sapodp | 16/16 | 12/12 | - |
-| snowflake | 6/16 | 12/12 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
-| spanner | 16/16 | 11/12 | large values |
-| sqlite | 16/16 | 12/12 | - |
-| teradata | 16/16 | 12/12 | - |
-| tidb | 13/16 | 12/12 | bulk-move, users, snapshot |
-| timestream | 16/16 | 11/12 | large values |
+| engine | capabilities | shapes | depth owed | not yet |
+|---|---|---|---|---|
+| ase | 6/16 | 11/12 | 66 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot, partitioned |
+| bigquery | 15/16 | 12/12 | 48 | users |
+| bigtable | 16/16 | 11/12 | 40 | large values |
+| cassandra | 16/16 | 12/12 | 30 | - |
+| clickhouse | 16/16 | 12/12 | 45 | - |
+| cockroachdb | 12/16 | 11/12 | 50 | params, bulk-move, users, snapshot, large values |
+| copybook | 16/16 | 12/12 | 31 | - |
+| cosmosdb | 14/16 | 12/12 | 20 | bulk-move, snapshot |
+| couchbase | 11/16 | 12/12 | 48 | params, bulk-move, users, statistics, snapshot |
+| datastore | 16/16 | 11/12 | 37 | large values |
+| db2 | 7/16 | 12/12 | 66 | params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
+| db2i | 13/16 | 12/12 | 69 | params, bulk-move, snapshot |
+| db2zos | 11/16 | 12/12 | 61 | params, bulk-move, users, statistics, snapshot |
+| dcdb | 15/16 | 11/12 | 64 | bulk-move, large values |
+| delta | 9/16 | 11/12 | 47 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
+| dsql | 13/16 | 11/12 | 27 | users, statistics, snapshot, large values |
+| duckdb | 16/16 | 12/12 | 46 | - |
+| dynamodb | 16/16 | 12/12 | 8 | - |
+| firestore | 16/16 | 11/12 | 42 | large values |
+| gaussdb | 16/16 | 10/12 | 67 | large values, partitioned |
+| geminidb-cassandra | 16/16 | 11/12 | 48 | large values |
+| geminidb-mongo | 16/16 | 11/12 | 49 | large values |
+| geminidb-redis | 16/16 | 11/12 | 35 | large values |
+| generic | 16/16 | 12/12 | 57 | - |
+| hetero | 16/16 | 10/12 | 45 | partitioned, missing grant |
+| iceberg | 9/16 | 11/12 | 48 | deep, bulk-move, stream, fence, confirm, delta, snapshot, partitioned |
+| kafka | 16/16 | 12/12 | 12 | - |
+| keyspaces | 16/16 | 11/12 | 49 | large values |
+| kinesis | 16/16 | 12/12 | 4 | - |
+| lindorm | 12/16 | 10/12 | 55 | stream, fence, confirm, delta, large values, partitioned |
+| mongodb | 16/16 | 11/12 | 12 | missing grant |
+| mssql | 16/16 | 12/12 | 38 | - |
+| mysql | 16/16 | 12/12 | 5 | - |
+| neo4j | 10/16 | 5/12 | 54 | params, bulk-move, confirm, users, statistics, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
+| neptune | 16/16 | 11/12 | 43 | large values |
+| oceanbase | 15/16 | 11/12 | 66 | bulk-move, large values |
+| oceanbase-oracle | 11/16 | 10/12 | 69 | bulk-move, stream, fence, confirm, delta, large values, partitioned |
+| opensearch | 16/16 | 12/12 | 25 | - |
+| oracle | 16/16 | 12/12 | 40 | - |
+| parquet | 16/16 | 12/12 | 32 | - |
+| polardbx | 15/16 | 11/12 | 67 | bulk-move, large values |
+| postgres | 16/16 | 12/12 | 2 | - |
+| pubsub | 16/16 | 12/12 | 4 | - |
+| qdrant | 13/16 | 5/12 | 36 | params, bulk-move, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
+| redis | 16/16 | 12/12 | 11 | - |
+| redshift | 6/16 | 12/12 | 52 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
+| saas | 16/16 | 12/12 | 22 | - |
+| sapodp | 16/16 | 12/12 | 22 | - |
+| snowflake | 6/16 | 12/12 | 56 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
+| spanner | 16/16 | 11/12 | 58 | large values |
+| sqlite | 16/16 | 12/12 | 43 | - |
+| teradata | 16/16 | 12/12 | 32 | - |
+| tidb | 13/16 | 12/12 | 15 | bulk-move, users, snapshot |
+| timestream | 16/16 | 11/12 | 38 | large values |
 
 ## Depth by engine
 

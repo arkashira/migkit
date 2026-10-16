@@ -1522,7 +1522,8 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
                                 + _drain_left(leg.fence, d, pos))
                 say(f"  {d}: the stream passed {pos}, taken after the"
                     " freeze")
-                _seam(hop, leg, d, pos, time.monotonic() - drained_from, say)
+                _seam(hop, leg, d, pos, time.monotonic() - drained_from, say,
+                      rec=rec)
             if leg.settle is not None:
                 got = _bounded(leg.settle, left(), d, max(0.1, left()))
                 if not got:
@@ -2011,16 +2012,20 @@ def _sheet_ended(hop, dbs, name, at):
                     "why": str(e).strip()[:200]})
 
 
-def _seam(hop, leg, db, pos, took, say):
+def _seam(hop, leg, db, pos, took, say, rec=None):
     """Where the drain of the cutover really stopped, written beside the
     operator's drains (`drainmark.seam`): the position passed, what the
-    stream had applied, whether a batch in flight went past it."""
+    stream had applied, whether a batch in flight went past it. A seam
+    that cannot be read back is written in the cutover's record with its
+    cause (`_audit`), so the change sheet carries the gap."""
     from . import drainmark
     try:
         got = drainmark.seam(hop, leg.fence, db, pos, took)
     except Exception as e:  # noqa: BLE001 - the drain itself has passed
-        say(f"  {db}: the seam could not be read back: "
-            f"{str(e).strip()[:120]}")
+        why = str(e).strip()[:120] or type(e).__name__
+        say(f"  {db}: the seam could not be read back: {why}")
+        _audit(hop, rec or {}, {"event": "seam unread", "db": db,
+                                "position": pos, "why": why})
         return None
     if got["past"] and got["past"] > 0:
         say(f"  {db}: the batch in flight went past {pos}; the fenced"

@@ -187,29 +187,31 @@ def state():
     shapes = sorted({k for cells in cov.values() for k in cells})
     lines = ["# migkit state", "",
              "Written by `tools/gen_codemap.py` from `capabilities.matrix()`,"
-             " `decide.coverage()`, `capabilities.depth()` and"
+             " `decide.coverage()`, `decide.still_lacking()`,"
+             " `capabilities.depth()` and"
              " `docs/backlog-index.md`; the"
              " pre-commit hook keeps it current. What this machine last"
              " proved (the full suite, unpushed work) is in"
              " `.codemap/LOCAL.md`.", ""]
 
-    def gaps(cells):
-        return [k for k, v in cells.items()
-                if str(v).lower() not in ("yes", "not applicable", "n/a",
-                                          "instead") and not str(
-                    v).lower().startswith(("yes", "not applicable",
-                                           "instead"))]
+    lacking = decide.still_lacking()
+
+    def gaps(eng, table):
+        return [name for t, name, *_ in lacking.get(eng, ()) if t == table]
     lines += ["## Capabilities by engine", "",
               f"{len(names)} capabilities (`capabilities.CAPABILITIES`) and"
               f" {len(shapes)} shapes (`decide.coverage()`); a row lists"
-              " what is not yet there.", "",
-              "| engine | capabilities | shapes | not yet |",
-              "|---|---|---|---|"]
+              " what is not yet there and counts the depth items owed, as"
+              " each engine says it still lacks them"
+              " (`decide.still_lacking()`).", "",
+              "| engine | capabilities | shapes | depth owed | not yet |",
+              "|---|---|---|---|---|"]
     for eng in sorted(set(caps) | set(cov)):
-        cg = gaps(caps.get(eng, {})) if eng in caps else ["(no row)"]
-        sg = gaps(cov.get(eng, {})) if eng in cov else ["(no row)"]
+        cg = gaps(eng, "capability") if eng in caps else ["(no row)"]
+        sg = gaps(eng, "shape") if eng in cov else ["(no row)"]
         lines.append(f"| {eng} | {len(names) - len(cg)}/{len(names)} |"
                      f" {len(shapes) - len(sg)}/{len(shapes)} |"
+                     f" {len(gaps(eng, 'depth'))} |"
                      f" {', '.join(cg + sg) or '-'} |")
     lines += _depth(capabilities)
     rows = _backlog()

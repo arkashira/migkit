@@ -56,6 +56,11 @@ def test_every_declaration_and_proof_names_an_item_and_an_engine(failing):
     assert failing["unknown"] == []
 
 
+def test_every_way_the_decision_engine_declares_can_be_reached():
+    from migkit import decide
+    assert decide.orphan_ways() == []
+
+
 def test_every_item_is_in_an_area_and_said_in_words():
     for item in caps.DEPTH:
         area = item.split(".", 1)[0]

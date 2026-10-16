@@ -1156,8 +1156,9 @@ class MongoEngine(Engine):
                 bound = self._within(self._span(lo, hi, one_type), rows)
                 if ranges.ident(rng[0]) in seen:
                     # begun before a stop: what it wrote then is taken out
-                    # and the range copied whole again
-                    dst.delete_many(self._span(lo, hi, one_type))
+                    # and the range copied whole again - only what the
+                    # hop's row filter takes, as the reads are bounded
+                    dst.delete_many(bound)
                 ranges.started(st, rng[0], None, ck.save)
                 got, after = 0, lo
                 while True:
@@ -2568,18 +2569,27 @@ class MongoEngine(Engine):
         """The `_id` edges that cut the `n` documents of `flt` (one BSON
         type of `_id`) into about `per` ranges, through the one place
         edges are cut (`ranges.cut`): the server's equal-count buckets of
-        the `_id` index, read now, so they are as fresh as a count; where
-        they are too coarse the cut has no other way here (a sample or a
-        read in key order is written as a statement the server does not
-        take), and no edges is one range."""
+        the `_id` index, read now, so they are as fresh as a count. As many
+        buckets are asked as the ranges need, never more than the
+        documents counted; a pass the server answers with fewer buckets
+        than the ranges need is asked again once, finer by the measured
+        shortfall. Where the buckets are still too coarse the cut has no
+        other way here (a sample or a read in key order is written as a
+        statement the server does not take), and no edges is one range."""
         from .. import decide, ranges
-        buckets = min(per, 512)
+        every = -(-n // per)
+        need = -(-n // every)
 
-        def stats():
-            out = list(coll.aggregate(
+        def bucketed(buckets):
+            return list(coll.aggregate(
                 [{"$match": flt},
                  {"$bucketAuto": {"groupBy": "$_id", "buckets": buckets}}],
                 allowDiskUse=True))
+
+        def stats():
+            out = bucketed(min(need, n))
+            if 0 < len(out) < need < n:
+                out = bucketed(min(n, -(-need * need // len(out))))
             total = sum(int(b.get("count") or 0) for b in out)
             seen, points = 0, []
             for b in out:
@@ -2593,7 +2603,7 @@ class MongoEngine(Engine):
                                  " sample or an ordered read of its keys")
         try:
             return ranges.cut(ask, "mongodb", str, coll.name, "_id", n,
-                              -(-n // per), stats=stats,
+                              every, stats=stats,
                               label=f"{coll.name} (_id of type {ty})")
         except (decide.Blocked, decide.Exhausted):
             return []
