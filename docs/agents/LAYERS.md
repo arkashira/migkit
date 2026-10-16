@@ -28,10 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 385
 
-### (not listed)
-
-- `migkit/ranges.py:1914` execution -> conversion (`canon`)
-
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
 - `migkit/variants.py:397` configuration -> decision (`decide`)
@@ -578,6 +574,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a safety refusal is said by reporting's `wording`; the wording moves below safety
 
 - `migkit/interlock.py:231` safety -> reporting (`wording`)
+
+### a sampled check folds the drawn rows of both sides through the one folder (`canon.fold_rows`), so the sample compares as the full check does
+
+- `migkit/ranges.py:1914` execution -> conversion (`canon`)
 
 ### a scope check asks `editions` what the workflow takes; ends when the workflow publishes it below scope
 

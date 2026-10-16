@@ -1347,6 +1347,11 @@ KNOWN_UPWARD = {
      "measured entry rate; the anchor hands the rate in as a fact"): (
         "migkit/anchor.py migkit.decide",
     ),
+    ("a sampled check folds the drawn rows of both sides through the one "
+     "folder (`canon.fold_rows`), so the sample compares as the full "
+     "check does"): (
+        "migkit/ranges.py migkit.canon",
+    ),
     ("a brand's confidence is a rung (`decide.brand_confidence`) the "
      "configuration reads once the server's signs are in; the rung moves "
      "below configuration"): (
