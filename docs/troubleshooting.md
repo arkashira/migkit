@@ -485,9 +485,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * two_way: this tail numbers its batches on the target by <...>, and the target no longer allows it: <...>. Which batch it last committed is kept there, so put that right and start the tail again
 
-* two_way: no way of marking migkit's own writes proved itself on the target, so what it applies would come back to where it began. <...> | None of them is allowed there.
-
-* no way of marking migkit's own writes proved itself here: <...>
+* two_way: no way of marking migkit's own writes proved itself on <...>, so what it applies would come back to where it began. <...>
 
 * format: protobuf is not written: <...>
 

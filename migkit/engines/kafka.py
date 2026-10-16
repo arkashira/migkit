@@ -1111,15 +1111,19 @@ class KafkaEngine(Engine):
             out.append(time.perf_counter() - at)
         return out
 
-    def mark_teardown(self, side, db):
+    def mark_teardown(self, side, db, rung, go):
         """The header leaves nothing on the broker but the probes'
-        topics, which go."""
-        topics = sorted(self.__dict__.pop("_mark_topics", ()))
-        if topics:
+        topics, which go, whatever `rung` stands. [what is taken away,
+        done where `go`]"""
+        topics = sorted(self.__dict__.get("_mark_topics", ()))
+        steps = [f"delete the topic {t}" for t in topics]
+        if go and topics:
+            self.__dict__.pop("_mark_topics", None)
             try:
                 self._admin(side).delete_topics(topics)
             except Exception:  # noqa: BLE001 - a probe topic is harmless
                 pass
+        return steps
 
     def mark_covers(self, side, db, mark, change):
         """Whether the message `change` names - `topic`, `partition`,

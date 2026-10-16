@@ -163,18 +163,57 @@ def brand(facts):
     return "mariadb" if facts.get("mariadb") else facts.get("family", "")
 
 
-#: what a probe on this side measured (`measure`), by the brand and rung:
-#: the same pair as `COST`, and over it - the owner's rule, what is measured
-#: here wins over what was measured once elsewhere
+#: what a probe on a side measured (`measure`), by the brand, the side
+#: ("src" / "dst") and the rung: the same pair as `COST`, and over it - the
+#: owner's rule, what is measured here wins over what was measured once
+#: elsewhere. Keyed by the side too: the two sides of a two-way hop of one
+#: brand are two servers, and one's probe says nothing of the other's
 MEASURED = {}
+#: how far a side's bare rounds spread in that probe, microseconds, by
+#: (brand, side): two rungs closer than it cannot be told apart there
+SPREAD = {}
 
 
-def cost(r, facts):
+def cost_us(brand_, name, side=None):
+    """Microseconds a transaction rung `name` costs: what a probe on
+    `side` measured (`measure`), else what was measured once on that
+    brand (`COST`), 0.0 where neither says."""
+    key = (brand_, side, name)
+    return sum(MEASURED[key] if key in MEASURED else
+               COST.get((brand_, name), (0.0, 0.0)))
+
+
+def cost(r, facts, side="dst"):
     """What a rung costs on the side's kind of server: what a probe on
     this very side measured (`measure`), else what was measured once."""
-    key = (brand(facts), r.name)
-    return sum(MEASURED[key] if key in MEASURED else
-               COST.get(key, (0.0, 0.0)))
+    return cost_us(brand(facts), r.name, side)
+
+
+def prices(rungs, facts, side="dst"):
+    """{rung name: `costmodel.Estimate` in seconds, or None} - the facts
+    the decision engine ranks `rungs` by (`decide.rank`, `decide.climb`):
+    measured on this side where a probe ran (`measure`), else what was
+    measured once on that brand, handed in as a prediction (`COST`); None
+    where nothing was. Each carries as its noise how far a side's bare
+    rounds spread - measured here, else `TIE_US` - so two rungs within it
+    tie, and the tie goes to the one that leaves nothing on the side."""
+    from .costmodel import MEASURED_TRUTH, PREDICTED, Estimate
+    brand_ = brand(facts)
+    out = {}
+    for r in rungs:
+        here = (brand_, side, r.name) in MEASURED
+        us = cost_us(brand_, r.name, side)
+        if not here and not us:
+            out[r.name] = None
+            continue
+        tie = SPREAD.get((brand_, side)) if here else None
+        tie = TIE_US.get(brand_, 0.0) if tie is None else tie
+        out[r.name] = Estimate(
+            us / 1e6, truth=MEASURED_TRUTH if here else PREDICTED,
+            source=("a probe of this side" if here else
+                    "measured once on this kind of server"),
+            noise=(tie / us) if us else 0.0)
+    return out
 
 
 @dataclasses.dataclass(frozen=True)
@@ -350,41 +389,58 @@ def rung(family, name):
     return None
 
 
-def choose_rung(side_engine, facts):
+def _why_not(r, facts):
+    """Why the side does not allow rung `r`, None where it does."""
+    if facts.get("exact") and EXACT not in r.gives:
+        return ("it tells migkit's writes apart but cannot say which batch"
+                " the side last committed, and this hop counts")
+    return r.needs(facts)
+
+
+def _decided(rungs, side_engine, side, db, facts):
+    """`rungs` as the decision engine's (`decide.Rung`): allowed by
+    `_why_not`, proved by `Engine.mark_prove`, what each leaves on the
+    side its footprint. Handed over cheapest first on this side: the
+    engine breaks a tie by the footprint and then by the order it was
+    given, so of two within the spread that both leave something, the
+    cheaper goes first."""
+    from . import decide
+    rungs = sorted(rungs, key=lambda r: cost(r, facts, side))
+    return [decide.Rung(
+        r.name, r.words, footprint=1 if r.footprint else 0,
+        leaves=r.footprint or "nothing",
+        needs=(decide.Need(
+            "the side to allow it", lambda f, r=r: _why_not(r, f) is None,
+            lambda f, r=r: _why_not(r, f)),),
+        prove=lambda f, r=r: side_engine.mark_prove(side, db, r.name))
+        for r in rungs]
+
+
+def choose_rung(side_engine, facts, side="dst"):
     """([rungs to try, best first], [(rung, why not)]) for one side.
 
     `facts` are the side's (`Engine.mark_facts`) with `exact` added: a
-    hop with counters takes only rungs that give it. The rest are ranked
-    by their measured cost on that kind of server; where two are within
-    its `TIE_US` of each other, the one that leaves nothing on the side
-    goes first. The seam for the decision layer: the rungs are data, and
-    this is the one place they are ranked."""
+    hop with counters takes only rungs that give it. The rest are put in
+    order by the decision engine (`decide.rank`) on what each costs on
+    that side (`prices`): within its spread of each other, the one that
+    leaves nothing on the side goes first. What `doctor` says it would
+    try; the tail's own choice is `choice`."""
+    from . import decide
     family = facts.get("family") or getattr(side_engine, "CANON_ENGINE", "")
     facts = dict(facts, family=family)
-    tie = TIE_US.get(brand(facts), 0.0)
     kept, dropped = [], []
     for r in RUNGS:
         if r.family != family:
             continue
-        if facts.get("exact") and EXACT not in r.gives:
-            dropped.append((r, "it tells migkit's writes apart but cannot"
-                               " say which batch the side last committed,"
-                               " and this hop counts"))
-            continue
-        why = r.needs(facts)
+        why = _why_not(r, facts)
         if why:
             dropped.append((r, why))
             continue
         kept.append(r)
-    kept.sort(key=lambda r: cost(r, facts))
-    # footprint only breaks a tie
-    for _ in range(len(kept)):
-        for i in range(len(kept) - 1):
-            a, b = kept[i], kept[i + 1]
-            if (cost(b, facts) - cost(a, facts) <= tie and a.footprint
-                    and not b.footprint):
-                kept[i], kept[i + 1] = b, a
-    return kept, dropped
+    by = {r.name: r for r in kept}
+    order = decide.rank(_decided(kept, side_engine, side, None, facts),
+                        prices(kept, facts, side))
+    return [by[r.name] for r in order], dropped
 
 
 def saved(token_path):
@@ -445,7 +501,8 @@ def settle(pair, db, token_path, exact, log):
                     f" ({why}); choosing again")
                 name = None
     if name is None:
-        name = climb(dst, db, exact, log)
+        name = choice(dst, "dst", db, exact, log,
+                      hop=getattr(pair, "hop", None)).rung.name
         _keep_rung(token_path, name)
     dst._mark_rung = name
     return name
@@ -519,26 +576,6 @@ def settle_exact(pair, db, token_path, log):
         " stop goes on after the last batch the target committed, not"
         " from before it")
     return "table"
-
-
-def climb(side_engine, db, exact, log):
-    facts = dict(side_engine.mark_facts("dst", db), exact=bool(exact))
-    ranked, _ = choose_rung(side_engine, facts)
-    tried = []
-    for r in ranked:
-        why = side_engine.mark_prove("dst", db, r.name)
-        if why is None:
-            log(f"two_way: migkit's own writes on the target carry {r.words}"
-                " - a probe written so came back from its log as migkit's")
-            return r.name
-        tried.append(f"{r.words}: {why}")
-        log(f"two_way: {r.words} did not prove itself on the target"
-            f" ({why}); trying the next")
-    raise SystemExit(
-        "two_way: no way of marking migkit's own writes proved itself on"
-        " the target, so what it applies would come back to where it"
-        " began. " + ("; ".join(tried) if tried else
-                      "None of them is allowed there."))
 
 
 def said(side_engine, token_path, db):
@@ -619,52 +656,62 @@ def measure(side_engine, side, db, facts, rungs):
                 break
             last = now
     bare = statistics.median(seen[None])
+    SPREAD[(brand_, side)] = (max(seen[None]) - min(seen[None])) * 1e6
     for r in rungs:
-        MEASURED[(brand_, r.name)] = (
+        MEASURED[(brand_, side, r.name)] = (
             max(0.0, (statistics.median(seen[r.name]) - bare) * 1e6), 0.0)
-    return {r.name: cost(r, facts) for r in rungs}
+    return {r.name: cost(r, facts, side) for r in rungs}
 
 
-def choice(side_engine, side, db, exact=False):
-    """The decision engine's `Choice` of the rung this side's marks go by:
-    the rungs the side allows (`choose_rung`), each priced by a probe on
-    the side itself (`measure`), ranked by `decide.climb` on those prices
-    and proved (`Engine.mark_prove`) before it is taken. The rung stands
-    on `side_engine._mark_rung`; the Choice names the cost of each."""
+def choice(side_engine, side, db, exact=False, log=None, hop=None):
+    """The decision engine's `Choice` of the rung this side's marks go by
+    (`decide.climb`): the rungs the side allows, each priced by a probe
+    on the side itself where it can be probed (`measure`,
+    `Engine.mark_timed`) and by what was measured once on that kind of
+    server where it cannot (`prices`), and proved (`Engine.mark_prove`)
+    before it is taken - a rung that does not prove itself falls to the
+    next. The rung stands on `side_engine._mark_rung`; the Choice, with
+    the cost of each rung and every one passed over, goes into the hop's
+    decision record (`decide.record`)."""
     from . import decide
+    log = log or (lambda _m: None)
+    where = "the target" if side == "dst" else "the source"
     facts = dict(side_engine.mark_facts(side, db), exact=bool(exact))
     facts["family"] = facts.get("family") or getattr(
         side_engine, "CANON_ENGINE", "")
-    allowed, _ = choose_rung(side_engine, facts)
-    priced = measure(side_engine, side, db, facts, allowed) if allowed else {}
-    def why_not(r, f):
-        if f.get("exact") and EXACT not in r.gives:
-            return ("it tells migkit's writes apart but cannot say which"
-                    " batch the side last committed, and this hop counts")
-        return r.needs(f)
-    rungs = [decide.Rung(
-        r.name, r.words, footprint=1 if r.footprint else 0,
-        needs=(decide.Need(
-            "the side to allow it", lambda f, r=r: why_not(r, f) is None,
-            lambda f, r=r: why_not(r, f)),),
-        prove=lambda f, r=r: side_engine.mark_prove(side, db, r.name))
-        for r in RUNGS if r.family == facts["family"]]
-    got = decide.climb(f"the mark of migkit's writes on {side}", rungs,
-                       facts, costs={n: c / 1e6 for n, c in priced.items()})
+    allowed, _ = choose_rung(side_engine, facts, side)
+    if allowed and callable(getattr(side_engine, "mark_timed", None)):
+        measure(side_engine, side, db, facts, allowed)
+    family = [r for r in RUNGS if r.family == facts["family"]]
+    got = decide.climb(f"the mark of migkit's writes on {where}",
+                       _decided(family, side_engine, side, db, facts),
+                       facts,
+                       costs=prices(allowed, facts, side))
+    for r, why in got.passed:
+        if "did not prove itself" in why:
+            log(f"two_way: {why} on {where}; trying the next")
     if got.rung is None:
         raise SystemExit(
-            "no way of marking migkit's own writes proved itself here: "
-            + ("; ".join(f"{r.said}: {why}" for r, why in got.passed)
-               or "none of them is allowed there"))
+            f"two_way: no way of marking migkit's own writes proved itself"
+            f" on {where}, so what it applies would come back to where it"
+            " began. " + ("; ".join(why for _, why in got.passed)
+                          or "None of them is allowed there."))
+    log(f"two_way: migkit's own writes on {where} carry {got.rung.said}"
+        " - a probe written so came back from its log as migkit's")
     side_engine._mark_rung = got.rung.name
-    hop = getattr(side_engine, "hop", None)
+    hop = hop if hop is not None else getattr(side_engine, "hop", None)
     if hop is not None:
         decide.record(hop, got)
     return got
 
 
-def teardown(side_engine, side, db):
-    """Take away what the marks left on the side (`Engine.mark_teardown`):
-    the origin table, the marker key. The rung stands no more."""
-    side_engine.mark_teardown(side, db)
-    side_engine.__dict__.pop("_mark_rung", None)
+def teardown(side_engine, side, db, go=True):
+    """Take away what the marks left on the side (`Engine.mark_teardown`,
+    one signature on every engine: side, db, the rung, go): the origin
+    table, the marker key. The rung stands no more where `go`. [what it
+    takes away, done where `go`]"""
+    steps = side_engine.mark_teardown(
+        side, db, side_engine.__dict__.get("_mark_rung"), go)
+    if go:
+        side_engine.__dict__.pop("_mark_rung", None)
+    return steps

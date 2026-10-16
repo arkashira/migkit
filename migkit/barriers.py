@@ -471,9 +471,7 @@ class MarkLadder:
     @staticmethod
     def get_cost(family: str, rung_name: str) -> float:
         from . import marks
-        key = (family, rung_name)
-        return sum(marks.MEASURED[key] if key in marks.MEASURED else
-                   marks.COST.get(key, (0.0, 0.0)))
+        return marks.cost_us(family, rung_name)
 
     @staticmethod
     def doctor_said(side_engine, token_path, db):

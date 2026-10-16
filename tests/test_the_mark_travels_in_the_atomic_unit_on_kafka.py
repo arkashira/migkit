@@ -42,8 +42,8 @@ def test_the_rung_is_chosen_from_a_probe_and_the_choice_names_its_cost(space):
     marks.MEASURED.clear()
     got = marks.choice(eng, "dst", DB)
     assert got.path == "header" and eng._mark_rung == "header"
-    assert isinstance(got.cost(), float) and got.cost() >= 0.0
-    assert ("kafka", "header") in marks.MEASURED          # a probe ran
+    assert got.cost().measured and got.cost().mean >= 0.0
+    assert ("kafka", "dst", "header") in marks.MEASURED          # a probe ran
 
 
 def test_every_record_carries_the_header_and_a_reader_skips_only_its_own(

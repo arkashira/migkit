@@ -127,7 +127,9 @@ def test_skip_replication_is_mariadbs_and_needs_no_global_grant():
     ranked, dropped = marks.choose_rung(Side("mysql", maria),
                                         dict(maria, family="mysql"))
     assert set(_names(ranked)) == {"skip_flag", "table"}
-    assert {r.name for r, _ in dropped} == {"gtid_tag", "comment"}
+    # and no GTID domain is configured on it
+    assert {r.name for r, _ in dropped} == {"gtid_tag", "comment",
+                                            "gtid_domain"}
     ranked, dropped = marks.choose_rung(Side("mysql", MY84),
                                         dict(MY84, family="mysql"))
     assert "skip_flag" not in _names(ranked)
@@ -147,7 +149,7 @@ def test_a_rung_that_does_not_prove_itself_falls_to_the_next():
     ranked, _ = marks.choose_rung(side, dict(PG, family="postgres"))
     side.fails = {ranked[0].name: "refused on purpose"}
     said = []
-    got = marks.climb(side, "app", False, said.append)
+    got = marks.choice(side, "dst", "app", False, said.append).path
     assert got == ranked[1].name
     assert side.proved == [ranked[0].name, ranked[1].name]
     assert any("did not prove itself" in m and "refused on purpose" in m
@@ -157,7 +159,7 @@ def test_a_rung_that_does_not_prove_itself_falls_to_the_next():
 def test_nothing_proves_and_the_tail_stops_before_applying():
     side = Side("postgres", PG, fails=("origin", "message", "table"))
     with pytest.raises(SystemExit, match="no way of marking"):
-        marks.climb(side, "app", False, print)
+        marks.choice(side, "dst", "app", False, print)
 
 
 def test_a_token_from_before_the_rungs_stays_on_the_table(tmp_path):
@@ -195,7 +197,8 @@ def test_the_two_way_teardown_takes_away_what_the_rung_left(tmp_path,
     assert any("pg_replication_origin_drop" in s for s in said), said
     assert ran == []
     cli._two_way_teardown(hop, eng, "app", True)
-    assert ran and "migkit\\_twoway\\_m2p" in ran[0], ran
+    # the LIKE's escapes, written as an escaped string literal
+    assert ran and "migkit\\\\_twoway\\\\_m2p" in ran[0], ran
     # a token from before the rungs: the table was the rung
     ran.clear()
     (tmp_path / "tail-token.json").write_text('{"token": "0/16", "batch": 7}')
@@ -294,3 +297,142 @@ def test_the_highest_number_a_gtid_set_holds_for_a_tag():
     assert gtid_top(got, uid, "other") == 9000
     assert gtid_top(got, uid, "none") == 0
     assert gtid_top("", uid, "migkit") == 0
+
+
+class Timed(Side):
+    """A side that can be probed: each unit through a rung takes what
+    `took` says, the bare one `bare`."""
+
+    def __init__(self, family, facts, took, bare=0.001, fails=()):
+        super().__init__(family, facts, fails)
+        self.took, self.bare = dict(took), bare
+
+    def mark_timed(self, side, db, rung, rounds):
+        return [self.took.get(rung, self.bare) if rung else self.bare] * \
+            rounds
+
+
+def test_the_tail_settles_its_rung_through_the_decision_engine(
+        tmp_path, monkeypatch):
+    """`settle` - the product's path - takes the rung through `choice`:
+    a probe of the side prices each rung it allows, the decision engine
+    climbs on those prices, a rung that does not prove itself falls to
+    the next, and the Choice goes into the hop's decision record with
+    the measured cost of each and every rung passed over."""
+    import types
+
+    from migkit import decide
+    monkeypatch.setattr(marks, "MEASURED", {})
+    monkeypatch.setattr(marks, "SPREAD", {})
+    recorded = []
+    monkeypatch.setattr(decide, "record",
+                        lambda hop, what, *a, **k: recorded.append(
+                            (hop, what)))
+    # measured here, the origin is the cheaper by far - against the
+    # table's 204 us the once-measured `COST` holds it at 676
+    side = Timed("postgres", PG, {"origin": 0.0011, "table": 0.0019},
+                 fails=("origin",))
+    hop = types.SimpleNamespace(name="h", options={})
+    pair = types.SimpleNamespace(dst_engine=side, hop=hop)
+    said = []
+    got = marks.settle(pair, "app", tmp_path / "tail-token.json", True,
+                       said.append)
+    assert got == "table" and side._mark_rung == "table"
+    assert side.proved == ["origin", "table"]          # measured order
+    assert marks.kept_rung(tmp_path / "tail-token.json") == "table"
+    [(at, choice)] = recorded
+    assert at is hop and choice.path == "table"
+    costs = dict(choice.costs)
+    assert costs["origin"].measured and costs["table"].measured
+    assert costs["origin"].mean == pytest.approx(100e-6)
+    assert costs["table"].mean == pytest.approx(900e-6)
+    passed = dict((r.name, w) for r, w in choice.passed)
+    assert "counts" in passed["message"]                # not allowed
+    assert "refused on purpose" in passed["origin"]     # did not prove
+    assert any("did not prove itself" in m for m in said), said
+
+
+def test_without_a_probe_the_once_measured_cost_is_handed_in(monkeypatch):
+    """A side that cannot be probed is ranked by what was measured once
+    on its kind of server, handed to the decision engine as a
+    prediction, never as a measurement of this side."""
+    monkeypatch.setattr(marks, "MEASURED", {})
+    side = Side("postgres", PG)
+    got = marks.choice(side, "dst", "app", True)
+    assert got.path == "table"                  # 204 + 612 < 676 + 600
+    costs = dict(got.costs)
+    assert not costs["table"].measured and not costs["origin"].measured
+    assert costs["origin"].mean == pytest.approx((676.0 + 600.0) / 1e6)
+
+
+def test_two_sides_of_one_brand_keep_their_own_measurements(monkeypatch):
+    """A two-way hop between two servers of one brand: each side's probe
+    is kept under its side, so the second never prices the first."""
+    monkeypatch.setattr(marks, "MEASURED", {})
+    monkeypatch.setattr(marks, "SPREAD", {})
+    facts = dict(PG, family="postgres", exact=True)
+    allowed, _ = marks.choose_rung(Side("postgres", PG), facts)
+    a = Timed("postgres", PG, {"origin": 0.0011, "table": 0.0019})
+    b = Timed("postgres", PG, {"origin": 0.0031, "table": 0.0012})
+    marks.measure(a, "src", "app", facts, allowed)
+    marks.measure(b, "dst", "app", facts, allowed)
+    assert marks.MEASURED[("postgres", "src", "origin")][0] == \
+        pytest.approx(100.0)
+    assert marks.MEASURED[("postgres", "dst", "origin")][0] == \
+        pytest.approx(2100.0)
+    assert _names(marks.choose_rung(a, facts, "src")[0]) == [
+        "origin", "table"]
+    assert _names(marks.choose_rung(b, facts, "dst")[0]) == [
+        "table", "origin"]
+    # and neither is what a side never probed is priced by
+    assert marks.cost_us("postgres", "origin", "other") == 676.0 + 600.0
+
+
+def test_every_engine_that_marks_a_unit_tears_down_by_one_signature():
+    """`marks.teardown` and `move --drop` call `mark_teardown` one way on
+    every engine: (side, db, the rung, go), handing back what it takes
+    away."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    import migkit.engines as engines
+    want = ["self", "side", "db", "rung", "go"]
+    seen = {}
+    for m in pkgutil.iter_modules(engines.__path__):
+        mod = importlib.import_module(f"migkit.engines.{m.name}")
+        for name, cls in vars(mod).items():
+            if not inspect.isclass(cls) or cls.__module__ != mod.__name__:
+                continue
+            fn = cls.__dict__.get("mark_teardown")
+            if inspect.isfunction(fn):
+                seen[f"{m.name}.{name}"] = list(
+                    inspect.signature(fn).parameters)
+            if inspect.isfunction(cls.__dict__.get("mark_unit")):
+                assert inspect.isfunction(
+                    getattr(cls, "mark_teardown", None)), name
+    for e in ("mongodb", "cassandra", "redis", "dynamodb", "kafka",
+              "mysql", "postgres"):
+        assert any(k.startswith(e + ".") for k in seen), (e, seen)
+    assert {k: v for k, v in seen.items() if v != want} == {}
+
+
+def test_teardown_hands_the_standing_rung_and_go_to_the_side():
+    class Torn:
+        _mark_rung = None
+
+        def __init__(self):
+            self.__dict__["_mark_rung"] = "table"
+            self.calls = []
+
+        def mark_teardown(self, side, db, rung, go):
+            self.calls.append((side, db, rung, go))
+            return [f"drop {rung}"]
+
+    side = Torn()
+    assert marks.teardown(side, "dst", "app", go=False) == ["drop table"]
+    assert side.__dict__["_mark_rung"] == "table"       # a dry run
+    assert marks.teardown(side, "dst", "app") == ["drop table"]
+    assert side.calls == [("dst", "app", "table", False),
+                          ("dst", "app", "table", True)]
+    assert "_mark_rung" not in side.__dict__

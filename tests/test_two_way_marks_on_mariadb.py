@@ -101,11 +101,11 @@ def test_the_climb_and_what_doctor_says_of_the_flag(mariadb, tmp_path):
         side, dict(side.mark_facts("dst", "app"), exact=False))
     assert {r.name for r in ranked} == {"skip_flag", "table"}
     assert {r.name for r, _ in dropped} == {"gtid_tag", "comment"}
-    got = marks.climb(side, "app", False, print)
+    got = marks.choice(side, "dst", "app", False, print).path
     assert got == ranked[0].name
     # a hop that counts stands on the table: the flag says nothing of
     # which batch was committed
-    assert marks.climb(side, "app", True, print) == "table"
+    assert marks.choice(side, "dst", "app", True, print).path == "table"
     token = tmp_path / "tail-token.json"
     token.write_text(json.dumps({"token": {}, "rung": "skip_flag"}))
     said = marks.said(side, token, "app")

@@ -36,8 +36,8 @@ def test_the_rung_is_chosen_from_a_probe_and_the_choice_names_its_cost(space):
     marks.MEASURED.clear()
     got = marks.choice(eng, "dst", DB)
     assert got.path == "multi" and eng._mark_rung == "multi"
-    assert isinstance(got.cost(), float) and got.cost() >= 0.0
-    assert ("redis", "multi") in marks.MEASURED            # a probe ran
+    assert got.cost().measured and got.cost().mean >= 0.0
+    assert ("redis", "dst", "multi") in marks.MEASURED            # a probe ran
 
 
 def test_a_unit_opens_with_the_mark_and_a_reader_skips_only_its_own(space):

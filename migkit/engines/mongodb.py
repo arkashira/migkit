@@ -5094,9 +5094,17 @@ class MongoEngine(Engine):
                                  for i in range(rounds)]}})
         return out
 
-    def mark_teardown(self, side, db):
-        self._client(side)[self._d(side, db)].drop_collection(
-            self.MARK_COLLECTION)
+    def mark_teardown(self, side, db, rung, go):
+        """What the marks left on this side, taken away: the collection
+        the transaction's first document goes to (the field leaves
+        nothing; a probe drops its own scratch collection). Dropped
+        whatever `rung` stands, as a missing one drops as nothing. [what
+        is taken away, done where `go`]"""
+        there = self._d(side, db)
+        steps = [f"drop the collection {there}.{self.MARK_COLLECTION}"]
+        if go:
+            self._client(side)[there].drop_collection(self.MARK_COLLECTION)
+        return steps
 
     def _tail_event(self, db, dst, ev, go):
         """One row change of the stream applied to the target, only if the

@@ -2642,10 +2642,18 @@ class CassandraEngine(NeutralCopier, Engine):
                           " origin = 'migkit' AND \"batch\" = %s", (stamp,))
         return out
 
-    def mark_teardown(self, side, db):
-        ks, s = self._q(self._ks(side, db)), self._session(side)
-        s.execute(f"DROP TABLE IF EXISTS {ks}.{self.MARK_TABLE}")
-        s.execute(f"DROP TABLE IF EXISTS {ks}.migkit_probe")
+    def mark_teardown(self, side, db, rung, go):
+        """What the marks left on this side, taken away: the origin table
+        and the probe's scratch table, whatever `rung` stands (each drops
+        as nothing where it is not there). [statements, run where `go`]"""
+        ks = self._q(self._ks(side, db))
+        steps = [f"DROP TABLE IF EXISTS {ks}.{self.MARK_TABLE}",
+                 f"DROP TABLE IF EXISTS {ks}.migkit_probe"]
+        if go:
+            s = self._session(side)
+            for cql in steps:
+                s.execute(cql)
+        return steps
 
     def tail_start(self, db, token_path):
         """The position the follow begins at, taken before the copy it

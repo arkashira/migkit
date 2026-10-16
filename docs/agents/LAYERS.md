@@ -725,7 +725,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an engine calls `tailctl` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/base.py:2240` engines -> workflows (`tailctl`)
-- `migkit/engines/cassandra.py:2653` engines -> workflows (`tailctl`)
+- `migkit/engines/cassandra.py:2661` engines -> workflows (`tailctl`)
 - `migkit/engines/clickhouse.py:2451` engines -> workflows (`tailctl`)
 - `migkit/engines/generic.py:2345` engines -> workflows (`tailctl`)
 - `migkit/engines/hetero.py:3414` engines -> workflows (`tailctl`)
@@ -735,7 +735,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/neo4j.py:825` engines -> workflows (`tailctl`)
 - `migkit/engines/opensearch.py:1874` engines -> workflows (`tailctl`)
 - `migkit/engines/postgres.py:3486` engines -> workflows (`tailctl`)
-- `migkit/engines/redis.py:2975` engines -> workflows (`tailctl`)
+- `migkit/engines/redis.py:2980` engines -> workflows (`tailctl`)
 
 ### an engine calls `tailtables` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
@@ -773,7 +773,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/cassandra.py:1091` engines -> workflows (`users`)
 - `migkit/engines/clickhouse.py:1512` engines -> workflows (`users`)
-- `migkit/engines/kafka.py:1830` engines -> workflows (`users`)
+- `migkit/engines/kafka.py:1834` engines -> workflows (`users`)
 - `migkit/engines/mongodb.py:3459` engines -> workflows (`users`)
 - `migkit/engines/mssql.py:2085` engines -> workflows (`users`)
 - `migkit/engines/mysql.py:6956` engines -> workflows (`users`)
@@ -798,7 +798,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/firestore.py:509` engines -> workflows (`verifiers`)
 - `migkit/engines/generic.py:150` engines -> workflows (`verifiers`)
 - `migkit/engines/hetero.py:5026` engines -> workflows (`verifiers`)
-- `migkit/engines/kafka.py:2078` engines -> workflows (`verifiers`)
+- `migkit/engines/kafka.py:2082` engines -> workflows (`verifiers`)
 - `migkit/engines/lake.py:232` engines -> workflows (`verifiers`)
 - `migkit/engines/lindorm.py:140` engines -> workflows (`verifiers`)
 - `migkit/engines/mysql.py:4080` engines -> workflows (`verifiers`)

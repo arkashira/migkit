@@ -48,8 +48,8 @@ def test_the_rung_is_chosen_from_a_probe_and_the_choice_names_its_cost(space):
     marks.MEASURED.clear()
     got = marks.choice(eng, "dst", DB)
     assert got.path == "txn_doc" and eng._mark_rung == "txn_doc"
-    assert isinstance(got.cost(), float) and got.cost() >= 0.0
-    assert ("mongodb", "txn_doc") in marks.MEASURED        # a probe ran
+    assert got.cost().measured and got.cost().mean >= 0.0
+    assert ("mongodb", "dst", "txn_doc") in marks.MEASURED        # a probe ran
     # the field rung needs pre-images that this database does not have
     assert any(r.name == "field" for r, _ in got.passed)
     assert "pre-images" in dict((r.name, w) for r, w in got.passed)["field"]

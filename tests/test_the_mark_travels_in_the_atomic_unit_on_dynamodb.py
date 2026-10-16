@@ -61,8 +61,8 @@ def test_the_rung_is_chosen_from_a_probe_and_the_choice_names_its_cost(space):
     marks.MEASURED.clear()
     got = marks.choice(eng, "dst", DB)
     assert got.path == "item" and eng._mark_rung == "item"
-    assert isinstance(got.cost(), float) and got.cost() >= 0.0
-    assert ("dynamodb", "item") in marks.MEASURED         # a probe ran
+    assert got.cost().measured and got.cost().mean >= 0.0
+    assert ("dynamodb", "dst", "item") in marks.MEASURED         # a probe ran
 
 
 def test_a_transaction_carries_the_mark_and_a_reader_skips_only_its_own(

@@ -2965,8 +2965,13 @@ class RedisEngine(Engine):
             self._client(side).delete(*[f"{key}:{k}" for k in range(3)])
         return out
 
-    def mark_teardown(self, side, db):
-        self._client(side).delete(self.MARK_KEY)
+    def mark_teardown(self, side, db, rung, go):
+        """What the marks left on this side, taken away: the marker hash,
+        whatever `rung` stands. [what is taken away, done where `go`]"""
+        steps = [f"delete the key {self.MARK_KEY}"]
+        if go:
+            self._client(side).delete(self.MARK_KEY)
+        return steps
 
     def tail_start(self, db, token_path):
         """Before the copy: the source's clock kept as the tail's

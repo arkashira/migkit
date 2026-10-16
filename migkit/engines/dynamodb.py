@@ -1128,13 +1128,20 @@ class DynamoDBEngine(NeutralCopier, Engine):
             out.append(time.perf_counter() - at)
         return out
 
-    def mark_teardown(self, side, db):
-        c = self._client(side)
-        for name in (self.MARK_TABLE, "migkit_probe_timed"):
-            try:
-                c.delete_table(TableName=name)
-            except c.exceptions.ResourceNotFoundException:
-                pass
+    def mark_teardown(self, side, db, rung, go):
+        """What the marks left on this side, taken away: the origin table
+        and the probe's scratch table, whatever `rung` stands. [what is
+        taken away, done where `go`]"""
+        names = (self.MARK_TABLE, "migkit_probe_timed")
+        steps = [f"delete the table {name}" for name in names]
+        if go:
+            c = self._client(side)
+            for name in names:
+                try:
+                    c.delete_table(TableName=name)
+                except c.exceptions.ResourceNotFoundException:
+                    pass
+        return steps
 
     def tail_start(self, db, token_path):
         return self._as_pair().tail_start(db, token_path)
