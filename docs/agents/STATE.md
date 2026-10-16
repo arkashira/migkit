@@ -77,7 +77,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-89 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1291, n/a 1491, not yet 1873, test owed 253, yes 966. A cell below is the ways proved of the items that apply.
+89 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1311, n/a 1491, not yet 1844, test owed 262, yes 966. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -151,43 +151,43 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 Built, unproved - a way the code has on an engine no sandbox here can run; the engine's module says which server it was not run on (`UNPROVED_ON`):
 
 - analyticdb-mysql: built; not run on a real AnalyticDB for MySQL or AnalyticDB for PostgreSQL instance (66 cells)
-- analyticdb-postgres: built; not run on a real AnalyticDB for MySQL or AnalyticDB for PostgreSQL instance (55 cells)
+- analyticdb-postgres: built; not run on a real AnalyticDB for MySQL or AnalyticDB for PostgreSQL instance (56 cells)
 - ase: built; not run on a real SAP ASE server (15 cells)
-- bigquery: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (48 cells)
-- cockroachdb: built; not run on a real CockroachDB cluster, only on its single-node container and on fakes: the accounts, the cluster settings compared, the export and import through a stage, the snapshot's mark and large values read in pieces (44 cells)
-- cosmosdb: built; not run on a real Cosmos DB account, only on its emulator and on fakes: the bulk writes and the snapshot's continuation per feed range (10 cells)
-- couchbase: built; not run on a real Couchbase cluster, only on its community container and on fakes: the accounts, the bucket settings compared, the statistics refreshed, the bulk importer and the snapshot's mark (15 cells)
-- databricks: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (21 cells)
-- db2: built; not run on a real Db2 LUW server (49 cells)
-- db2i: built; not run on a real IBM i (52 cells)
+- bigquery: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (49 cells)
+- cockroachdb: built; not run on a real CockroachDB cluster, only on its single-node container and on fakes: the accounts, the cluster settings compared, the export and import through a stage, the snapshot's mark and large values read in pieces (45 cells)
+- cosmosdb: built; not run on a real Cosmos DB account, only on its emulator and on fakes: the bulk writes and the snapshot's continuation per feed range (11 cells)
+- couchbase: built; not run on a real Couchbase cluster, only on its community container and on fakes: the accounts, the bucket settings compared, the statistics refreshed, the bulk importer and the snapshot's mark (16 cells)
+- databricks: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
+- db2: built; not run on a real Db2 LUW server (50 cells)
+- db2i: built; not run on a real IBM i (53 cells)
 - db2zos: built; not run on a real Db2 for z/OS subsystem (45 cells)
 - dcdb: built; not run on a real PolarDB-X or TDSQL instance (55 cells)
-- dsql: built; not run on a real Aurora DSQL cluster, only on a PostgreSQL server and on fakes: the statistics refreshed, the snapshot's mark and large values read in pieces (19 cells)
-- exasol: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (21 cells)
-- gaussdb: built; not run on a real GaussDB instance (34 cells)
+- dsql: built; not run on a real Aurora DSQL cluster, only on a PostgreSQL server and on fakes: the statistics refreshed, the snapshot's mark and large values read in pieces (20 cells)
+- exasol: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
+- gaussdb: built; not run on a real GaussDB instance (35 cells)
 - geminidb-cassandra: built; not run on a real GeminiDB instance (46 cells)
 - geminidb-mongo: built; not run on a real GeminiDB instance (58 cells)
-- geminidb-redis: built; not run on a real GeminiDB instance (30 cells)
-- informix: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (21 cells)
-- kafka: built; not run on a real cluster of several brokers (5 cells)
+- geminidb-redis: built; not run on a real GeminiDB instance (31 cells)
+- informix: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
+- kafka: built; not run on a real cluster of several brokers (6 cells)
 - keyspaces: built; not run on a real Amazon Keyspaces table (45 cells)
 - lindorm: built; not run on a real Lindorm instance (14 cells)
 - mongodb: built; not run on a real MongoDB replica set, only on fakes; a cell whose lane test is not written yet is owed that test (11 cells)
 - mssql: built; not run on a real SQL Server, only on its edge edition in the sandbox (stopped Agent, CLR off, a thinner catalogue); a cell whose lane test is not written yet is owed that test (28 cells)
-- netezza: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (21 cells)
+- netezza: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
 - oceanbase: built; not run on a real OceanBase tenant (63 cells)
 - oceanbase-oracle: built; not run on a real OceanBase tenant (22 cells)
 - oracle: built; not run on a real Oracle server, only on fakes and stand-ins; a cell whose lane test is not written yet is owed that test (38 cells)
 - polardbx: built; not run on a real PolarDB-X or TDSQL instance (43 cells)
-- progress: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (21 cells)
+- progress: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
 - redshift: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (29 cells)
-- saphana: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (21 cells)
+- saphana: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
 - singlestore: built; not run on a real SingleStore workspace (66 cells)
-- snowflake: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (43 cells)
+- snowflake: built; not run on a real Redshift cluster, Snowflake account or BigQuery project (44 cells)
 - synapse: built; not run on a real Synapse dedicated SQL pool (32 cells)
 - tidb: built; not run on a real TiDB cluster, only on its single-node container and on fakes: the accounts, the bulk load, the snapshot's mark and TiCDC's open-protocol and Avro messages (8 cells)
-- vertica: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (21 cells)
-- yugabytedb: built; not run on a real YugabyteDB cluster (56 cells)
+- vertica: built; not run on a real Netezza, SAP HANA, Informix, OpenEdge, Vertica, Exasol or Databricks server (22 cells)
+- yugabytedb: built; not run on a real YugabyteDB cluster (57 cells)
 - alibaba-analyticdb-mysql: built; not run on a real AnalyticDB for MySQL cluster (managed.readiness, managed.brand-api)
 - alibaba-analyticdb-postgres: built; not run on a real AnalyticDB for PostgreSQL instance (managed.readiness, managed.brand-api)
 - aws: built; not run against a real AWS account (managed.sign-in, managed.forwarder, managed.readiness, managed.brand-api, managed.retention-api, managed.egress-gate, free.provider-metric)
@@ -264,7 +264,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | tail.readded | cosmosdb dynamodb kafka mssql mysql oracle tidb | - | analyticdb-mysql bigquery geminidb-mongo mongodb oceanbase polardbx singlestore snowflake | the rest (38) | copybook datastore db2zos duckdb geminidb-cassandra hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
 | tail.ddl | cosmosdb dynamodb kafka mongodb mysql postgres | - | analyticdb-mysql geminidb-mongo oceanbase oracle polardbx singlestore | the rest (41) | copybook datastore db2zos duckdb geminidb-cassandra hetero kinesis parquet pubsub qdrant sqlite teradata timestream |
 | tail.renames | mongodb mysql postgres | - | analyticdb-mysql bigquery geminidb-mongo mssql oceanbase oracle polardbx singlestore snowflake | the rest (31) | bigtable cassandra copybook cosmosdb couchbase datastore db2zos duckdb dynamodb firestore geminidb-cassandra hetero kafka keyspaces kinesis neo4j neptune parquet pubsub qdrant sqlite teradata timestream |
-| tail.quiet | mysql postgres | - | analyticdb-mysql dcdb geminidb-mongo mongodb mssql oceanbase oracle polardbx singlestore tidb | the rest (37) | copybook datastore db2zos duckdb geminidb-cassandra hetero kinesis parquet pubsub qdrant redshift saas sapodp sqlite synapse teradata timestream |
+| tail.quiet | mysql postgres | bigtable clickhouse dynamodb firestore neo4j neptune opensearch redis spanner | the rest (30) | ase cassandra delta generic iceberg keyspaces lindorm oceanbase-oracle | copybook datastore db2zos duckdb geminidb-cassandra hetero kinesis parquet pubsub qdrant redshift saas sapodp sqlite synapse teradata timestream |
 | assess.versions | dsql kafka mongodb mysql opensearch postgres redis redshift snowflake sqlite teradata tidb | cassandra clickhouse | analyticdb-postgres cockroachdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces mssql oracle synapse yugabytedb | the rest (26) | bigquery bigtable copybook cosmosdb datastore delta dynamodb firestore hetero iceberg kinesis parquet pubsub spanner timestream |
 | assess.brands | kafka mongodb mysql opensearch postgres redis redshift snowflake tidb | cassandra clickhouse teradata | analyticdb-mysql analyticdb-postgres cockroachdb dcdb dsql gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces mssql oceanbase oracle polardbx singlestore synapse yugabytedb | the rest (30) | copybook delta hetero iceberg kinesis parquet pubsub |
 | assess.engine-checks | bigquery cockroachdb cosmosdb couchbase db2zos dsql dynamodb generic hetero kafka mongodb mysql oracle postgres redis redshift saas snowflake sqlite teradata tidb | bigtable cassandra clickhouse datastore firestore neo4j neptune opensearch qdrant sapodp spanner timestream | the rest (24) | ase copybook db2 delta duckdb iceberg kinesis parquet pubsub | - |
@@ -300,7 +300,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Source layout
 
-388 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+401 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
 Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 81 shape lacks, 44 capability lacks, 3074 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (168).
 

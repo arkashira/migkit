@@ -60,6 +60,7 @@ UNPROVED_ON = "built; not run on a real IBM i"
 #: the ways built here and run against no server: the whole list, the
 #: matrix reads it from this source (`capabilities`)
 UNPROVED_ITEMS = (
+    "db2i:tail.quiet "
     "assess.engine-checks assess.preflight cutover.counters cutover.drain "
     "cutover.read-only-target cutover.rollback move.bulk move.large-values "
     "move.partitioned move.sized move.table-copy schema.create "

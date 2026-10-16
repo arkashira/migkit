@@ -40,6 +40,7 @@ UNPROVED_ON = "built; not run on a real GaussDB instance"
 #: the ways built here and run against no such server: the whole
 #: list, the matrix reads it from this source (`capabilities`)
 UNPROVED_ITEMS = (
+    "gaussdb:tail.quiet "
     "assess.brands assess.engine-checks assess.handwork assess.preflight "
     "assess.versions cutover.freeze cutover.read-only-target "
     "move.create-missing move.sized operations.fencing schema.defaults "

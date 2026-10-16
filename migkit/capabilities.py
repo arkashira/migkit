@@ -2898,6 +2898,11 @@ del _item
 #: in the transaction) have their rungs written only in `marks`' docstring:
 #: they stay "not yet" above.
 UNPROVED["cutover.two-way"] = _TWO_WAY_INHERITED
+# a quiet tail's position, the source's now and its write counter
+# (`tailctl.where_from`) on engines whose modules declare no unproved
+# server of their own: built, not run on their servers (FIELD1.tail-more)
+UNPROVED["tail.quiet"] = ("redis clickhouse dynamodb opensearch spanner"
+                          " bigtable firestore neptune neo4j")
 
 
 # --- CockroachDB and Aurora DSQL, on PostgreSQL's wire (P0-PARITY) ----------
@@ -3643,16 +3648,16 @@ del _item, _ways, _name
 #: engine's gaps are built; one that follows waits on the row that gives
 #: its quiet line the facts it stands on
 for _engine in (
-        "redis kafka clickhouse dynamodb db2 db2i opensearch cassandra"
-        " snowflake bigquery cockroachdb dsql couchbase cosmosdb spanner"
-        " bigtable firestore gaussdb keyspaces neptune geminidb-redis neo4j"
-        " analyticdb-postgres yugabytedb netezza saphana informix progress"
-        " vertica exasol databricks sqlite parquet db2zos ase teradata"
+        "cassandra keyspaces sqlite parquet db2zos ase teradata"
         " redshift kinesis pubsub duckdb copybook iceberg delta datastore"
         " oceanbase-oracle timestream lindorm geminidb-cassandra qdrant"
         " synapse sapodp saas").split():
     DEPTH_GAPS["tail.quiet"][_engine] = GAPS.get(_engine, {}).get(
         "stream", (NOT_YET, "FIELD1.tail-more"))
+# a dialect answers its own (`dbapi.DialectEngine.tail_where`), not the
+# generic engine's gap
+for _engine in _DIALECTS:
+    DEPTH_GAPS["tail.quiet"].pop(_engine, None)
 del _engine
 
 

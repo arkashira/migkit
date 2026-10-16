@@ -49,6 +49,7 @@ UNPROVED_ON = ("built; not run on a real CockroachDB cluster, only on its"
                " a stage, the snapshot's mark and large values read in"
                " pieces")
 UNPROVED_ITEMS = (
+    "cockroachdb:tail.quiet "
     "scope.repair scope.counters scope.objects scope.names "
     "verify.access.object-ownership verify.access.sequence-grants "
     "verify.access.table-grants verify.identity.sequence-collision "

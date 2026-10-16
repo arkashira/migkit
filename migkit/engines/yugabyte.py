@@ -20,6 +20,7 @@ from .pgwire import PgWireEngine
 UNPROVED_ON = "built; not run on a real YugabyteDB cluster"
 #: the cells built here and run against no such service
 UNPROVED_ITEMS = (
+    "yugabytedb:tail.quiet "
     "assess.brands assess.engine-checks assess.handwork "
     "assess.preflight assess.versions cutover.counters cutover.freeze "
     "cutover.read-only-target move.create-missing "

@@ -59,6 +59,7 @@ UNPROVED_ON = ("built; not run on a real Aurora DSQL cluster, only on a"
                " PostgreSQL server and on fakes: the statistics refreshed,"
                " the snapshot's mark and large values read in pieces")
 UNPROVED_ITEMS = (
+    "dsql:tail.quiet "
     "scope.deep scope.repair scope.counters scope.objects "
     "verify.access.sequence-grants verify.access.table-grants "
     "verify.identity.sequence-collision verify.identity.sequence-parity "

@@ -103,7 +103,8 @@ def msk_presign(region, access_key, secret_key, session_token=None,
 #: built, and run on the sandbox's single broker only: the producer-epoch
 #: fence (`fencing`) is proved there, a cluster of several brokers is not
 UNPROVED_ON = ("built; not run on a real cluster of several brokers")
-UNPROVED_ITEMS = ("verify.value.type-drift schema.create"
+UNPROVED_ITEMS = ("kafka:tail.quiet "
+                  "verify.value.type-drift schema.create"
                   " assess.capacity assess.writers move.create-missing")
 
 class MskToken:
@@ -182,6 +183,14 @@ class KafkaEngine(Engine):
     #: AWS_MSK_IAM signs in to Amazon MSK with the machine's AWS
     #: credentials (the client signs the request itself, over SASL_SSL)
     MECHANISMS = ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512", "AWS_MSK_IAM")
+
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        tail's position and the source's now (`log_position`). The server keeps no
+        count of its writes the tail could read in one bounded round, and lists
+        no reader of the tail's: both are said unread, never assumed."""
+        from .. import tailctl
+        return tailctl.where_from(self, db, token)
 
     def _connection(self, side):
         """What every client of a side is given: where the cluster is, and

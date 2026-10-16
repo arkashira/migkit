@@ -198,6 +198,14 @@ class NeptuneEngine(NeutralCopier, Engine):
     CHANGE_POINT_READS_ONLY = True
     READS_AHEAD = False
 
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        tail's position and the source's now (`log_position`). The server keeps no
+        count of its writes the tail could read in one bounded round, and lists
+        no reader of the tail's: both are said unread, never assumed."""
+        from .. import tailctl
+        return tailctl.where_from(self, db, token)
+
     def _ep(self, side):
         return self.hop.source if side == "src" else self.hop.target
 

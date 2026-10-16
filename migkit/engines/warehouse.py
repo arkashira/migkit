@@ -74,6 +74,7 @@ from .dbapi import MARK, DbapiRows, FoldsToCapitals
 UNPROVED_ON = ("built; not run on a real Redshift cluster, Snowflake"
                " account or BigQuery project")
 UNPROVED_ITEMS = (
+    "bigquery:tail.quiet snowflake:tail.quiet "
     "bigquery:assess.capacity bigquery:assess.handwork "
     "bigquery:assess.preflight bigquery:assess.writers "
     "bigquery:cutover.drain bigquery:cutover.rollback "

@@ -24,6 +24,7 @@ UNPROVED_ON = "built; not run on a real Db2 LUW server"
 #: the ways built here and run against no server: the whole list, the
 #: matrix reads it from this source (`capabilities`)
 UNPROVED_ITEMS = (
+    "db2:tail.quiet "
     "assess.preflight cutover.counters cutover.drain cutover.freeze "
     "cutover.rollback move.bulk move.partitioned scope.copy "
     "scope.counters scope.listings scope.names scope.objects "
@@ -315,6 +316,23 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
     #: large values: Linux, UNIX and Windows sizes a large table over a
     #: sample of its pages
     LARGE_VALUES = large_values("tablesample system ({pct})")
+
+    #: the log pages the database's logger wrote, every member summed
+    TAIL_WROTE_SQL = ("select sum(log_writes)"
+                      " from table(mon_get_transaction_log(-2))")
+
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        tail's position, the source's now (`log_position`) and the counter
+        `TAIL_WROTE_SQL` read since the hop's last carried change, in one
+        statement - unread where the server refuses it. The source lists
+        no reader of the tail's to ask: attached is said unread."""
+        from .. import tailctl
+
+        def wrote():
+            got = self._rows("src", db, self.TAIL_WROTE_SQL)
+            return got[0][0] if got else None
+        return tailctl.where_from(self, db, token, wrote, "log pages")
 
     def _nanos_text(self, quoted, declared):
         """A `TIMESTAMP(p)` of more than six digits as the server writes

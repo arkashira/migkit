@@ -68,6 +68,7 @@ UNPROVED_ON = ("built; not run on a real Couchbase cluster, only on its"
                " bucket settings compared, the statistics refreshed, the"
                " bulk importer and the snapshot's mark")
 UNPROVED_ITEMS = (
+    "couchbase:tail.quiet "
     "scope.repair scope.ops scope.row-filter scope.names verify.delta "
     "verify.confirm verify.repair verify.repair-undo verify.table "
     "tail.table-states move.large-values cutover.freeze verify.users "
@@ -95,6 +96,14 @@ class CouchbaseEngine(NeutralCopier, Engine):
     LARGE_VALUES = pieces.Way(
         "read and written whole in batches cut by bytes, a document past"
         " 20 MB named before anything of its write is sent")
+
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        tail's position and the source's now (`log_position`). The server keeps no
+        count of its writes the tail could read in one bounded round, and lists
+        no reader of the tail's: both are said unread, never assumed."""
+        from .. import tailctl
+        return tailctl.where_from(self, db, token)
 
     def _ep(self, side):
         return self.hop.source if side == "src" else self.hop.target

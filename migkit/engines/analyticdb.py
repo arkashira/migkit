@@ -37,6 +37,7 @@ UNPROVED_ON = ("built; not run on a real AnalyticDB for MySQL or AnalyticDB"
                " for PostgreSQL instance")
 #: the cells built here and run against no such service
 UNPROVED_ITEMS = (
+    "analyticdb-postgres:tail.quiet "
     "analyticdb-mysql:tail.quiet "
     "analyticdb-mysql:assess.brands analyticdb-mysql:assess.capacity "
     "analyticdb-mysql:assess.engine-checks "

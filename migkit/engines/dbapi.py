@@ -1071,6 +1071,7 @@ UNPROVED_ON = ("built; not run on a real Netezza, SAP HANA, Informix,"
                " OpenEdge, Vertica, Exasol or Databricks server")
 #: the cells built here and run against no such server
 UNPROVED_ITEMS = (
+    "tail.quiet "
     "assess.engine-checks",
     "move.table-copy",
     "scope.copy",
@@ -1102,6 +1103,15 @@ class DialectEngine(GenericEngine):
     the climb (`decide.dialect_bulk`) finds one that holds."""
     #: the dialect's row in `DIALECTS`
     DIALECT = ""
+
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        tail's position and the source's now (`log_position`). The tail reads the tables'
+        changes by a column it keeps, not a log: the source keeps no count
+        of its writes to read and no reader of the tail's to list - both
+        are said unread, never assumed."""
+        from .. import tailctl
+        return tailctl.where_from(self, db, token)
 
     def _dialect(self):
         return DIALECTS[self.DIALECT]

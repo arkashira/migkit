@@ -199,6 +199,9 @@ CATALOGUE = {
 
 class Db2ZosEngine(Db2Engine):
     CANON_ENGINE = "db2zos"
+    #: a z/OS source follows nothing (its `stream` gap): no quiet tail
+    #: to say anything of
+    tail_where = None
     PLATFORM = "zos"
     #: z/OS's own catalogue (`SYSIBM`): left unbound, every question was
     #: asked of Linux, UNIX and Windows's `SYSCAT`, which z/OS lacks

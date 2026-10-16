@@ -50,6 +50,24 @@ class PgWireEngine(DbapiRows, Engine):
     #: schemas that are the server's, never the application's
     SYSTEM_SCHEMAS = ("pg_catalog", "information_schema")
 
+    #: the rows the database wrote (inserted, updated, deleted) since its
+    #: statistics were reset, on the hop's tables or not
+    TAIL_WROTE_SQL = ("select sum(tup_inserted + tup_updated + tup_deleted)"
+        " from pg_stat_database where datname = current_database()")
+
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        tail's position, the source's now (`log_position`) and the counter
+        `TAIL_WROTE_SQL` read since the hop's last carried change, in one
+        statement - unread where the server refuses it. The source lists
+        no reader of the tail's to ask: attached is said unread."""
+        from .. import tailctl
+
+        def wrote():
+            got = self._rows("src", db, self.TAIL_WROTE_SQL)
+            return got[0][0] if got else None
+        return tailctl.where_from(self, db, token, wrote, "rows")
+
     def _password(self, side, ep):
         return ep.password
 
