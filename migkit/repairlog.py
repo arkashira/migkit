@@ -388,7 +388,7 @@ def canon_rows(columns, rows):
             for r in rows]
 
 
-#: rows a snapshot of a table is read and put back in at once
+#: rows of a snapshot put back into a table at once
 SNAPSHOT_BATCH = 5000
 
 
@@ -421,13 +421,14 @@ def _all_rows(engine, side, db, table, columns, key):
         after = None
         while True:
             rows, after = engine.neutral_read(side, db, table, columns,
-                                              after, SNAPSHOT_BATCH)
+                                              after)
             if rows:
                 yield rows
             if not rows or after is None:
                 return
+    from . import decide
     yield from engine.neutral_batches(side, db, table, columns,
-                                      SNAPSHOT_BATCH)
+                                      decide.page_given(None))
 
 
 def table_digest(engine, side, db, table, columns):

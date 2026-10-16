@@ -188,6 +188,8 @@ def placement(hop, eng, db, parts_=None):
         def shown(pred, n=n, t=t, key=key, cls=cls):
             if not key:
                 return []
+            # page: the rows named as examples are a few, never a read to
+            # the end of the table
             got, _ = src.neutral_read("src", db, t,
                                       [(k, cls.get(k)) for k in key], None,
                                       EXAMPLES, where=f"({n}) {pred}")

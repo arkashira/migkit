@@ -94,8 +94,6 @@ ROW_BYTES = 200
 #: rows one span holds at most: neighbouring spans that differ are joined
 #: up to it, so a span's transaction stays bounded
 SPAN_MOST = 200_000
-#: rows read at once for a span's record or a table's snapshot
-READ = 5000
 
 #: what each way guarantees, in the words the plan says them in
 GUARANTEES = {
@@ -747,7 +745,7 @@ class Ladder:
     def _pre_image(self, record, span):
         """Every row of `span` that differs, recorded with what the target
         holds (before) and what the source does (after): both sides read in
-        key order and merged, `READ` rows at a time."""
+        key order and merged, a page the decision sizes at a time."""
         from . import canon, repairlog
         s = self.sides
         src = _span_rows(s.src, "src", self.db, s.src_t, s.sc, s.key[0],
@@ -809,13 +807,13 @@ class Ladder:
 
 def _span_rows(eng, side, db, table, cols, key, span):
     """(key as an integer, row) of one side's rows in `span`, in key
-    order, `READ` at a time."""
+    order, a page the decision sizes at a time."""
     q = eng._quote_ident(key)
     where = f"{q} >= {int(span.lo)} and {q} < {int(span.hi)}"
     at = [n for n, _ in cols].index(key)
     after = None
     while True:
-        rows, after = eng.neutral_read(side, db, table, cols, after, READ,
+        rows, after = eng.neutral_read(side, db, table, cols, after,
                                        where=where)
         for r in rows:
             yield int(r[at]), r

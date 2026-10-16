@@ -943,12 +943,50 @@ def test_a_dynamodb_endpoint_without_tags_keeps_the_table_described_here(
 
 # --- a keyed read's page is the decision's, never a literal (DEC.page) -----
 
+def _number_constants(tree):
+    """{name} of every constant a module or a class sets to a number: a
+    page passed by one of these is as fixed as the number itself."""
+    import ast
+
+    def number(v):
+        return (isinstance(v, ast.Constant) and isinstance(v.value, int)
+                and not isinstance(v.value, bool)) or (
+            isinstance(v, ast.BinOp) and number(v.left) and number(v.right))
+    out = set()
+    for scope in ast.walk(tree):
+        if isinstance(scope, (ast.Module, ast.ClassDef)):
+            for st in scope.body:
+                if isinstance(st, ast.Assign) and number(st.value):
+                    out |= {t.id for t in st.targets
+                            if isinstance(t, ast.Name)}
+    return out
+
+
+def _fixed(expr, constants):
+    """What in `expr`, the page a call passes, is fixed: a number written
+    out, or a name that is a number set once (`_number_constants`); None
+    for a page that is a variable, an expression of variables and a
+    decision's answer."""
+    import ast
+    for n in ast.walk(expr):
+        if isinstance(n, ast.Constant) and isinstance(n.value, int) \
+                and not isinstance(n.value, bool):
+            return str(n.value)
+        name = n.id if isinstance(n, ast.Name) else (
+            n.attr if isinstance(n, ast.Attribute) else None)
+        if name in constants:
+            return name
+    return None
+
+
 def _fixed_pages(tree, lines):
     """[(line, what)] of a page reader whose `limit` defaults to a number,
-    and of a call to one that names a literal page with no `# page:` reason
-    on its lines or in the comment just above them."""
+    and of a call to one that names a fixed page - a number, or a constant
+    set once, by keyword or in the place its `limit` takes - with no
+    `# page:` reason on its lines or in the comment just above them."""
     import ast
     from migkit.engines.base import PAGED
+    constants = _number_constants(tree)
     out = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -965,16 +1003,20 @@ def _fixed_pages(tree, lines):
                                          f"{default.value}"))
         elif isinstance(node, ast.Call) and getattr(
                 node.func, "attr", None) in PAGED:
-            for k in node.keywords:
-                if k.arg == "limit" and isinstance(k.value, ast.Constant) \
-                        and isinstance(k.value.value, int):
-                    top = node.lineno - 1
-                    while top > 0 and lines[top - 1].strip().startswith("#"):
-                        top -= 1
-                    said = "\n".join(lines[top:node.end_lineno])
-                    if "# page:" not in said:
-                        out.append((node.lineno, f"{node.func.attr}"
-                                                 f" limit={k.value.value}"))
+            given = [k.value for k in node.keywords if k.arg == "limit"]
+            if len(node.args) > PAGED[node.func.attr]:
+                given.append(node.args[PAGED[node.func.attr]])
+            for value in given:
+                what = _fixed(value, constants)
+                if what is None:
+                    continue
+                top = node.lineno - 1
+                while top > 0 and lines[top - 1].strip().startswith("#"):
+                    top -= 1
+                said = "\n".join(lines[top:node.end_lineno])
+                if "# page:" not in said:
+                    out.append((node.lineno, f"{node.func.attr}"
+                                             f" limit={what}"))
     return out
 
 
@@ -986,7 +1028,7 @@ def test_a_fixed_page_outside_the_decision_is_refused():
     found = []
     for path in sorted(home.rglob("*.py")):
         text = path.read_text()
-        if "limit" not in text:
+        if "neutral_" not in text and "limit" not in text:
             continue
         for line, what in _fixed_pages(ast.parse(text), text.split("\n")):
             found.append(f"{path.relative_to(home)}:{line} {what}")
@@ -1003,3 +1045,33 @@ def test_the_page_guard_sees_a_fixed_page():
     got = _fixed_pages(ast.parse(src), src.split("\n"))
     assert got == [(1, "neutral_read limit=500"),
                    (3, "neutral_changes limit=200")]
+
+
+def test_the_page_guard_sees_a_page_passed_by_place_or_by_a_constant():
+    """The literal pages that slipped by - a number in the place `limit`
+    takes, a module's or a class's constant, a number inside a `min` - are
+    seen; a variable, the decision's answer and a reasoned number are not."""
+    import ast
+    src = ("BATCH = 1000\n"
+           "class E:\n"
+           "    MOST = 5 * 1000\n"
+           "    def f(self, x, size, pages, left):\n"
+           "        x.neutral_read('s', db, t, c, after, 5000)\n"
+           "        x.neutral_read('s', db, t, c, after, BATCH)\n"
+           "        x.neutral_read('s', db, t, c, after, self.MOST)\n"
+           "        x.neutral_read('s', db, t, c, after,\n"
+           "                       min(1000, left))\n"
+           "        x.neutral_changes('s', db, 3, size)\n"
+           "        x.neutral_read('s', db, t, c, after, size)\n"
+           "        x.neutral_read('s', db, t, c, after, min(pages.size(),"
+           " left))\n"
+           "        x.neutral_read('s', db, t, c, after)\n"
+           "        # page: one row answers whether any exists\n"
+           "        x.neutral_read('s', db, t, c, after, 1)\n"
+           "        x.neutral_changes('s', db, 3, 200)\n")
+    got = _fixed_pages(ast.parse(src), src.split("\n"))
+    assert got == [(5, "neutral_read limit=5000"),
+                   (6, "neutral_read limit=BATCH"),
+                   (7, "neutral_read limit=MOST"),
+                   (8, "neutral_read limit=1000"),
+                   (16, "neutral_changes limit=200")]

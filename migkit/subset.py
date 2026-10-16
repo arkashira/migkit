@@ -59,7 +59,8 @@ from dataclasses import dataclass, field
 GOAL = "subset"
 #: rows a subset holds at most where the hop does not say
 MOST = 1_000_000
-#: rows read, or values asked for, at once
+#: values asked of a side by key, and rows written to one, at once - not a
+#: keyed read's page, which the decision sizes (`decide.page_rows`)
 BATCH = 1000
 #: the share rule's buckets: a key hashing below share x SHARE_OF is taken
 SHARE_OF = 1_000_000
@@ -200,11 +201,11 @@ def _raw(plan, table, row, columns):
 
 
 def _scan(src, db, table, cols, where=None, stop=None):
-    """The rows of `table` in key order, `BATCH` a read; `stop` rows at
-    most."""
+    """The rows of `table` in key order, a page the decision sizes at a
+    time; `stop` rows at most."""
     got, after = 0, None
     while True:
-        rows, last = src.neutral_read("src", db, table, cols, after, BATCH,
+        rows, last = src.neutral_read("src", db, table, cols, after,
                                       **({"where": where} if where else {}))
         for r in rows:
             yield r
@@ -620,7 +621,7 @@ def _kept_rows(hop, db, entry):
 def _count(eng, side, db, table, cols):
     n, after = 0, None
     while True:
-        rows, last = eng.neutral_read(side, db, table, cols, after, 5000)
+        rows, last = eng.neutral_read(side, db, table, cols, after)
         n += len(rows)
         if last is None or not rows:
             return n
@@ -726,7 +727,7 @@ def prove(hop, eng, db, p=None):
 def _scan_all(eng, db, table, cols):
     after = None
     while True:
-        rows, last = eng.neutral_read("dst", db, table, cols, after, 5000)
+        rows, last = eng.neutral_read("dst", db, table, cols, after)
         yield from rows
         if last is None or not rows:
             return

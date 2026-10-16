@@ -2114,6 +2114,8 @@ def _sampled_check(hop, db, table, seconds, eng=None):
         if key:
             kcols = [(n, c) for n, c in cols if n in key]
             began = time.monotonic()
+            # page: the probe reads exactly this many keys, to time the
+            # keyed reader and to know a table that holds fewer is read whole
             keys, after = eng.neutral_read("src", d, t, kcols,
                                            limit=SAMPLE_PROBE)
             eng.neutral_rows_by_key("src", d, t, cols, key,

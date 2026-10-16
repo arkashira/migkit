@@ -1921,7 +1921,7 @@ def sampled(eng, db, table, columns, key, size, seed=None, dst=None,
     drawn, seen, after = [], 0, None
     while size > 0:
         rows, after = eng.neutral_read("src", db, table, kcols, after=after,
-                                       limit=page or 1000)
+                                       limit=page or None)
         for r in rows:
             seen += 1
             if len(drawn) < size:

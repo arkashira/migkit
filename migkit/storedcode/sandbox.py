@@ -734,6 +734,8 @@ class Sandbox:
                 continue
             names = [n for n, _ in cols[t]]
             at = [names.index(k) for k in keys[t]]
+            # page: the fixture holds this many rows of each table, a
+            # sample sized by what a routine is tried on, not a read to its end
             rows, _ = eng.neutral_read("src", db, t, cols[t], None,
                                        SAMPLE_ROWS)
             chosen[t] = {tuple(r[i] for i in at) for r in rows}

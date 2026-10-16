@@ -522,7 +522,7 @@ def range_counts(s, spec, buckets):
         while True:
             rows, after = s.eng.neutral_read(
                 s.side, s.db, s.table, [(s.key[0], cls[s.key[0]])], after,
-                10_000, where=" and ".join(f"({w})" for w in where))
+                where=" and ".join(f"({w})" for w in where))
             for (v,) in rows:
                 b = spec.bucket(0, v)
                 out[b] = out.get(b, 0) + 1
@@ -598,28 +598,32 @@ def _first_rows(s, n):
         got.close()
 
 
-def _rows(s, size=10_000):
-    """Every row of a side read into this process: by key in turns where
-    the engine resumes by key, else in batches."""
+def _rows(s):
+    """Every row of a side read into this process: by key in turns, a page
+    the decision sizes (`decide.page_rows`, asked again at every page),
+    where the engine resumes by key, else in batches of the page it gives a
+    read nothing has measured - a cursor the server keeps takes its batch
+    once."""
     scope = {"where": s.where} if s.where else {}
     text = _text_read(s)
     if text:
         # in key order, through one cursor the server keeps
         for batch in s.eng.neutral_batches(s.side, s.db, s.table, s.cols,
-                                           size, as_text=text, **scope):
+                                           decide.page_given(None),
+                                           as_text=text, **scope):
             yield from batch
         return
     if s.key and getattr(s.eng, "RESUMES_BY_KEY", True):
         after = None
         while True:
             rows, after = s.eng.neutral_read(s.side, s.db, s.table, s.cols,
-                                             after, size, **scope)
+                                             after, **scope)
             yield from rows
             if not rows or after is None:
                 return
     else:
         for batch in s.eng.neutral_batches(s.side, s.db, s.table, s.cols,
-                                           size, **scope):
+                                           decide.page_given(None), **scope):
             yield from batch
 
 

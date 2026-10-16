@@ -1043,9 +1043,6 @@ class Engine:
             return where, f"max(octet_length({col}))"
         return where, f"max(abs({col}))"
 
-    #: rows of a table read at once when the values are asked here
-    UNFIT_BATCH = 5000
-
     def count_unfit(self, side, db, table, columns, checks, key=(),
                     where=None, examples=3):
         """[(rows, [key of an example row, ...])] for each (column, kind,
@@ -1111,13 +1108,14 @@ class Engine:
                else [])
         scope = {"where": where} if where else {}
         if not key or not set(key) <= names:
+            from .. import decide
             yield from self.neutral_batches(side, db, table, columns,
-                                            self.UNFIT_BATCH, **scope)
+                                            decide.page_given(None), **scope)
             return
         after = None
         while True:
             rows, last = self.neutral_read(side, db, table, columns, after,
-                                           self.UNFIT_BATCH, **scope)
+                                           **scope)
             if rows:
                 yield rows
             if not rows or last is None:
@@ -4132,8 +4130,7 @@ class Engine:
                       for m, v in zip(match, value)) for value in values}
         out, after = [], None
         while True:
-            rows, last = self.neutral_read(side, db, table, columns, after,
-                                           5000)
+            rows, last = self.neutral_read(side, db, table, columns, after)
             for r in rows:
                 if tuple(canon.render_value(classes[match[i]], r[j])
                          for i, j in enumerate(at)) in want:
@@ -4635,6 +4632,7 @@ class Engine:
         be lined up says why instead of writing an empty list, which `sync`
         would read as nothing to do.
         """
+        from .. import decide
         names = [n for n, _ in src_cols]
         try:
             key = list(src_engine.neutral_key("src", db, src_t))
@@ -4666,11 +4664,16 @@ class Engine:
                  other_cols, on_absent, on_differs):
             seen = 0
             after = None
+            # the decision's page, never past the rows the cap leaves
+            pages = decide.Pages()
             while seen < self.DRILL_CAP:
-                got, after = engine.neutral_read(side, db, table, cols, after,
-                                                 min(1000,
-                                                     self.DRILL_CAP - seen),
-                                                 **scope(side))
+                page_began = time.monotonic()
+                # page: the decision's page, held to the rows the drill's
+                # evidence cap leaves (the cap is said when it stops a drill)
+                got, after = engine.neutral_read(
+                    side, db, table, cols, after,
+                    min(pages.size(), self.DRILL_CAP - seen), **scope(side))
+                pages.measured(got, time.monotonic() - page_began)
                 if not got:
                     return False
                 seen += len(got)
@@ -5482,11 +5485,19 @@ class Engine:
         import time
         if part or self.READS_BILLED:
             return None
+        from .. import decide
         cols = self.neutral_columns(side, db, table)
         began, rows, size, after, kept = time.monotonic(), 0, 0, None, []
+        # a page the decision sizes to this probe's seconds, and held to
+        # the bytes the budget has left once a row's width is known
+        pages = decide.Pages(seconds=seconds)
         while size < budget and time.monotonic() - began < seconds:
-            got, after = self.neutral_read(side, db, table, cols, after,
-                                           1000)
+            ask = pages.size()
+            if pages.width:
+                ask = max(1, min(ask, int((budget - size) // pages.width)))
+            page_began = time.monotonic()
+            got, after = self.neutral_read(side, db, table, cols, after, ask)
+            pages.measured(got, time.monotonic() - page_began)
             for r in got:
                 n = _row_bytes(r)
                 size += n

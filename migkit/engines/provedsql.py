@@ -57,6 +57,8 @@ class ProvedDigest:
             return False
         names = [n for n, _ in columns]
         try:
+            # page: the proof compares the server's rendering of exactly the
+            # first rows this process renders - a sample, not a read to its end
             rows, _ = self.neutral_read(side, db, table, columns, None,
                                         self.PROOF_ROWS, where)
             # canon's renderings quote each name as their dialect does
