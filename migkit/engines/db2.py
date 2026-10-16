@@ -398,7 +398,8 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
         return out
 
     def check_schema(self, db):
-        return self._as_pair().check_schema(db)
+        from .. import verifiers
+        return verifiers.compare_schema(self._as_pair(), db)
 
     def check_counts(self, db):
         return self._as_pair().check_counts(db)

@@ -968,7 +968,7 @@ def _asks(cls, entries, ask):
 #: the one scope answer a listing asks (backlog P0-SCOPE.6) - never a name
 #: split by hand and handed to `Hop.excluded`
 _SCOPE = (frozenset({"in_scope", "_scoped_rows", "takes", "takes_table",
-                     "_drills_in_scope"}), frozenset())
+                     "_drills_in_scope", "compare_schema"}), frozenset())
 _OBJECTS = (frozenset({"takes", "takes_object"}), frozenset())
 _ROW_FILTER = (frozenset({"row_filter"}), frozenset({"rowfilter"}))
 _TRANSFORMS = (frozenset({"masked_on_the_way"}), frozenset({"transforms"}))

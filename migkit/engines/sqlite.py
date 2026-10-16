@@ -1,4 +1,3 @@
-import difflib
 import hashlib
 import time
 
@@ -657,40 +656,64 @@ class SQLiteEngine(NeutralCopier, Engine):
             "correct those values, or widen the column to text on both"
             " sides, before the move rather than during it")
 
-    def check_schema(self, db):
-        def dump(side):
-            rows = self._q(side, "select type, name, tbl_name,"
-                                 " coalesce(sql, '') from sqlite_master"
-                                 " where name not like 'sqlite_%'"
-                                 " order by type, name")
-            # an excluded table's indexes and triggers go with it, a view or
-            # a trigger the hop's `objects` does not carry is left out
-            # (`takes`); a table whose columns the hop maps is compared
-            # through the mapping
-            return "\n".join(f"{t} {n}\n{s};" for t, n, owner, s in rows
-                             if self.takes(db, t, n if t == "view"
-                                           else f"{owner}.{n}", owner)
-                             and owner not in mapped)
+    def shape_catalog(self, side, db):
+        """The whole shape of what the hop takes on `side`, in the one form
+        the schema comparer reads: each table and view with its columns and
+        their rules, its key, its indexes (a partial or expression index
+        with its definition) and its triggers; a view's definition is held
+        as a part of the view. What the hop's `objects` leaves out is not
+        read."""
+        import re
 
-        mapped = {t for t in self._tables("src")
-                  if self.hop.column_rules(db, t)}
-        extra = ([r for r in self._as_pair().check_schema(db)
-                  if r.scope.split(".", 1)[-1] in mapped] if mapped else [])
-        a, b = dump("src"), dump("dst")
-        d = self.hop.report_dir(db)
-        (d / "schema-src.sql").write_text(a)
-        (d / "schema-dst.sql").write_text(b)
-        diff = [l for l in difflib.unified_diff(
-                    a.splitlines(), b.splitlines(), "src", "dst", lineterm="")
-                if l[:1] in "+-" and not l.startswith(("+++", "---"))]
-        if not diff:
-            return [Result("schema", db, "ok",
-                           "tables, indexes, views, triggers identical")] \
-                + extra
-        (d / "schema.diff").write_text("\n".join(diff))
-        return [Result("schema", db, "diff", f"{len(diff)} changed lines",
-                       str(d / "schema.diff"),
-                       "apply DDL from schema-src.sql on target")] + extra
+        from ..catalog import Catalog, Column, Index
+        fold = lambda sql: " ".join(str(sql or "").split())  # noqa: E731
+        held = lambda text: hashlib.sha256(  # noqa: E731
+            fold(text).encode()).hexdigest()[:12]
+        master = self._q(side, "select type, name, tbl_name, sql from"
+                               " sqlite_master where name not like"
+                               " 'sqlite_%' order by type, name")
+        sql_of = {(k, n): s for k, n, _, s in master}
+        cat = Catalog()
+        taken = [(t, "table") for t in self._tables(side)] + [
+            (n, "view") for k, n, _, _ in master
+            if k == "view" and self.takes(db, "view", n)]
+        for t, kind in taken:
+            rules = self.neutral_column_rules(side, db, t) or {}
+            cat.columns[t] = [
+                Column(str(n), str(d), "",
+                       (rules.get(n) or {}).get("null", True) is not False,
+                       (rules.get(n) or {}).get("default"), None,
+                       "identity" if (rules.get(n) or {}).get("identity")
+                       else "")
+                for n, d in self.neutral_columns(side, db, t)]
+            cat.tables.append(t)
+            if kind == "view":
+                cat.others[t] = [
+                    f"view definition ({held(sql_of[(kind, t)])})"]
+                continue
+            cat.keys[t] = tuple(self.neutral_key(side, db, t))
+            for name, unique, cols, plain in self.neutral_indexes(
+                    side, db, t):
+                if not self.takes(db, "index", f"{t}.{name}", t):
+                    continue
+                text = fold(sql_of.get(("index", name)))
+                cat.indexes.setdefault(t, []).append(Index(
+                    name, tuple(cols), bool(unique),
+                    "" if plain else re.sub(
+                        r"^create\s+(unique\s+)?index\s+(if\s+not\s+exists"
+                        r"\s+)?\S+\s+", "", text, flags=re.I)
+                    or "(not carried)"))
+        kept = {t for t, kind in taken if kind == "table"}
+        for kind, name, owner, sql in master:
+            if kind == "trigger" and owner in kept and self.takes(
+                    db, "trigger", f"{owner}.{name}", owner):
+                cat.others.setdefault(owner, []).append(
+                    f"trigger {name} ({held(sql)})")
+        return cat
+
+    def check_schema(self, db):
+        from .. import verifiers
+        return verifiers.compare_schema(self._as_pair(), db)
 
     def settle_target(self, db, from_source=True):
         """`ANALYZE` the target file after a load, so its query planner has

@@ -252,7 +252,8 @@ class PgWireEngine(DbapiRows, Engine):
     def check_schema(self, db):
         """The columns the pair compares, and the whole structure - columns,
         keys, indexes and views - held to the target's in one answer."""
-        found = self._as_pair().check_schema(db)
+        from .. import verifiers
+        found = verifiers.compare_schema(self._as_pair(), db)
         try:
             found.append(self._structural(db))
         except SystemExit:

@@ -139,7 +139,8 @@ class OceanBaseOracleEngine(FoldsToCapitals, DbapiRows, Engine):
         return {"version": version, "id": f"{ep.host}:{ep.port}/{ep.user}"}
 
     def check_schema(self, db):
-        return self._as_pair().check_schema(db)
+        from .. import verifiers
+        return verifiers.compare_schema(self._as_pair(), db)
 
     def check_counts(self, db):
         return self._as_pair().check_counts(db)

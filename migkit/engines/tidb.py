@@ -526,7 +526,9 @@ class TiDBEngine(MySQLEngine):
         """The pair's comparison of every table's columns, and the objects
         beside them - tables, views and indexes by name - held to the
         hop's `objects` (`check_objects`)."""
-        return self._as_pair().check_schema(db) + [self.check_objects(db)]
+        from .. import verifiers
+        return verifiers.compare_schema(self._as_pair(), db) + [
+            self.check_objects(db)]
 
     def check_counts(self, db):
         return self._as_pair().check_counts(db)

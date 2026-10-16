@@ -1654,7 +1654,8 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
     # ---- the checks, through the pair every engine compares by --------
 
     def check_schema(self, db):
-        return self._as_pair().check_schema(db)
+        from .. import verifiers
+        return verifiers.compare_schema(self._as_pair(), db)
 
     def check_counts(self, db):
         """The pair's counts, the database's one answer saying how each

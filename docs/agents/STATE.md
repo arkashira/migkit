@@ -65,7 +65,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1415, not yet 1357, stale 8, test owed 1037, yes 935. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: n/a 1415, not yet 1357, stale 9, test owed 1036, yes 935. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -133,7 +133,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | scope.copy | the rest (20) | ase bigtable datastore db2 dcdb firestore gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm neo4j neptune oceanbase oceanbase-oracle polardbx qdrant spanner timestream | copybook couchbase db2i db2zos delta duckdb hetero iceberg parquet saas sapodp sqlite | kinesis pubsub |
 | scope.repair | cassandra clickhouse cosmosdb dynamodb generic hetero kafka mongodb mssql mysql opensearch oracle postgres redis redshift snowflake sqlite teradata tidb | the rest (25) | ase copybook delta duckdb iceberg parquet | kinesis pubsub saas sapodp |
 | scope.counters | mssql mysql oracle postgres tidb | cockroachdb db2 db2i db2zos dcdb dsql duckdb gaussdb oceanbase oceanbase-oracle polardbx | ase generic hetero redshift snowflake spanner sqlite | the rest (31) |
-| scope.objects | kafka mongodb mssql mysql oracle postgres tidb | the rest (22) | ase bigtable couchbase datastore delta firestore hetero iceberg lindorm neo4j polardbx spanner timestream | copybook dynamodb geminidb-redis kinesis neptune parquet pubsub qdrant redis saas sapodp |
+| scope.objects | kafka mongodb mssql mysql oracle postgres tidb | the rest (21) | ase bigtable couchbase datastore delta firestore hetero iceberg lindorm neo4j polardbx spanner timestream | copybook dynamodb geminidb-redis kinesis neptune parquet pubsub qdrant redis saas sapodp |
 | scope.ops | bigquery cassandra clickhouse cockroachdb cosmosdb dsql dynamodb hetero mongodb mssql mysql opensearch oracle postgres redis redshift snowflake tidb | the rest (20) | ase db2 kafka lindorm oceanbase-oracle | copybook datastore db2zos duckdb geminidb-redis parquet qdrant sqlite teradata timestream |
 | scope.row-filter | bigquery clickhouse cockroachdb dsql duckdb generic hetero mongodb mysql opensearch oracle postgres redshift sqlite teradata tidb | the rest (31) | geminidb-redis kafka redis saas sapodp | kinesis pubsub |
 | scope.transforms | - | - | the rest (51) | kinesis pubsub |
