@@ -3979,6 +3979,7 @@ running work merges.
 * AUD-Z.workers DONE 2026-10-16: no width is a literal outside `decide.py` - a driver's requests in flight are `decide.request_width` asked before every chunk, the installer's fetches `decide.fetch_width`; tests/test_a_drivers_requests_in_flight_are_decided.py, the lint test's `OWED` empty.
 
 * AUD-Z.rungs-owed slice C DONE W20C 2026-10-16: the 75 owed rungs of 29 ladders (reader_server_id through written_in_pieces) held and refused on fakes in tests/test_the_{session_and_failure,warehouse,redis,reshard_and_slice,copy_way,server_reading}_ladders_decide_on_facts.py, out of `OWED`; no rung unreachable.
+* AUD-Z.rungs-outside-owed slice B (W21B) 2026-10-16: 111 of the slice's 113 rungs - the freeze holds' ways and the mssql, mysql, neo4j, neptune, opensearch, oracle, logminer, pump, postgres, digest, qdrant, redis, salesforce, sapodp, spanner, teradata, timestream and warehouse ladders - held and refused on fakes (`tests/test_freeze_rungs.py`, `tests/test_engine_ladders_hold_and_refuse.py`, `tests/test_the_ways_chosen_as_they_run_hold_and_refuse.py`), out of `OWED_OUTSIDE`; SpannerEngine.native_bulk's `restore`/`tables` cannot be reached as built (row 557 SPANNER.native-bulk-facts).
 
 Done when every ID in the research document is fixed with its test or
 struck with the owner's reason, the lint tests hold, and the final suite
