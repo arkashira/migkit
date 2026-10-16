@@ -30,7 +30,7 @@ None.
 
 | file | owner | lines | imported by | reaches | wraps | tests |
 |---|---|---|---|---|---|---|
-| `migkit/__init__.py` | - | 1 | 47: avrostream, barriers, binlog_marks, capabilities, cli (+42) | - | - | 662: conftest.py, holdkit.py, large_values_rig.py (+659) |
+| `migkit/__init__.py` | - | 1 | 47: avrostream, barriers, binlog_marks, capabilities, cli (+42) | - | - | 663: conftest.py, holdkit.py, large_values_rig.py (+660) |
 | `migkit/addresses.py` | - | 527 | 10: config, diagnostics, engineat, guide, hopkeys (+5) | configuration 2, engines 4 | - | 5: a_hop_file_is_checked_whole_at_load, a_hop_from_two_addresses, copybook_files_as_a_side_of_a_pair (+2) |
 | `migkit/clouds.py` | - | 337 | 11: case, cli, cloudseed, engines.mysql, guide (+6) | configuration 3 | - | 11: a_hop_from_two_addresses, a_managed_mysql_says_how_long_its_log_is_kept, a_managed_side_is_read_and_held_by_what_its_admin_may_do (+8) |
 | `migkit/config.py` | scope: Hop.excluded, Hop.carries, Hop.target_table_in | 2436 | 56: approvals, backupseed, carriers, changetopic, cli (+51) | configuration 14, conversion 1, engines 1, execution 9, persistence 3, reporting 1, safety 4 | - | 788: bigquery_fake.py, cosmos_fake.py, dynamodb_on_moto.py (+785) |
@@ -324,7 +324,7 @@ None.
 | `migkit/applyway.py` | - | 359 | 1: engines.base | conversion 1, decision 1, engines 1 | - | 1: the_apply_way_climbs_to_columns |
 | `migkit/appversions.py` | - | 458 | 5: cli, cutover, engines.base, engines.mysql, engines.postgres | - | - | 1: a_migration_run_on_one_side_only_is_found |
 | `migkit/archive.py` | - | 670 | 2: cli, hopkeys | conversion 2, decision 6, engines 3, safety 2, workflows 1 | - | 1: old_rows_are_archived_then_removed_only_once_proved |
-| `migkit/autonomous.py` | - | 1163 | 2: cli, telemetry | decision 6, execution 1, persistence 1, reporting 2, workflows 1 | - | 3: autonomous_workflow, every_phase_declares_its_contract, telemetry_carries_no_customer_data |
+| `migkit/autonomous.py` | - | 1163 | 2: cli, telemetry | decision 6, execution 1, persistence 1, reporting 2, workflows 1 | - | 4: autonomous_scenarios, autonomous_workflow, every_phase_declares_its_contract (+1) |
 | `migkit/barriers.py` | - | 481 | 6: engines.dynamodb, engines.kafka, engines.mongodb, engines.redis, freeze (+1) | configuration 13, workflows 3 | - | 2: the_mark_travels_in_the_atomic_unit_on_kafka, tombstones_and_barriers |
 | `migkit/changetopic.py` | - | 1127 | 12: described, engines.bigtable, engines.cockroachdb, engines.cosmosdb, engines.couchbase (+7) | configuration 6, conversion 4, engines 2 | - | 6: cosmos_fake.py, a_change_feed_is_read_in_commit_order, cockroachdb_follows_through_its_changefeed (+3) |
 | `migkit/consolidate.py` | - | 1124 | 6: archive, charsets, cli, hopkeys, reshard (+1) | configuration 2, conversion 3, decision 10, engines 7, workflows 1 | - | 5: a_consolidations_counters_are_of_the_tables_it_takes, a_split_and_a_consolidation_are_followed_and_cut_over_as_one, consolidation_follows_every_source (+2) |

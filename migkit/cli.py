@@ -3040,7 +3040,7 @@ class _Steps:
         from . import model as resource_model, sizing
         out = {"chunk": 500000, "resumes": True,
                "pieces": not capabilities.unavailable(self.hop.engine,
-                                                      "resume")}
+                                                      "table-copy")}
         try:
             m = resource_model.for_move(self.hop, self.eng, db)
             p = sizing.estimate(self.hop, self.eng, db, model=m)

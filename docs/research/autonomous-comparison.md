@@ -30,21 +30,25 @@ and every key once on the target), recovered (recoveries whose
 postcondition held, of all), retry waste (recoveries that failed again),
 seconds. `autonomous.comparison` fills this table from those lines. The
 inputs are the arguments of the first command (`migrate --hop t --goal copy
---go`: 6), the same for every scenario, so they are written; no run exists
-yet, so every other cell is "to be measured"; a
+--go`: 6), the same for every scenario, so they are written; the cells below are
+written from the run of 2026-10-16 (docker sandbox: mysql-rowmeta pair,
+mysql 8.4.11; pg pair, postgres 16): no copy completed on either engine -
+board notes W15J-PG16 and W15J-MYBULK, strict xfails in the harness -
+so a row's "no" is that run's measured outcome; a row no run reached says
+"to be measured"; a
 managed service column needs the same scenario on equal scope and
 resources and is not claimed.
 
 | Scenario | Engine | Inputs | Interventions | Completed | Recovered | Retry waste | Seconds | Managed service |
 |---|---|---|---|---|---|---|---|---|
-| healthy | MySQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
+| healthy | MySQL | 6 | 0 | no | 0% | 1 | 7.58 | to be measured |
 | healthy | PostgreSQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| fault mid-copy, recovered in the run | MySQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
+| fault mid-copy, recovered in the run | MySQL | 6 | 0 | no | 0% | 1 | 7.15 | to be measured |
 | fault mid-copy, recovered in the run | PostgreSQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| crash mid-copy, run again | MySQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
+| crash mid-copy, run again | MySQL | 6 | 1 | no | 0% | 2 | 10.47 | to be measured |
 | crash mid-copy, run again | PostgreSQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| refused target (unrecoverable) | MySQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| refused target (unrecoverable) | PostgreSQL | 6 | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
+| refused target (unrecoverable) | MySQL | 6 | 0 | no | none needed | 0 | 3.95 | to be measured |
+| refused target (unrecoverable) | PostgreSQL | 6 | 0 | no | none needed | 0 | 62.64 | to be measured |
 
 The recovery choices themselves are proved on fakes in
 `tests/test_autonomous_workflow.py`: reconcile before a repeat, a write

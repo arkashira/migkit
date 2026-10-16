@@ -407,6 +407,13 @@ PROFILES = {p.key: p for p in (
                  ("MSSQL_TELEMETRY_ENABLED", "false")),
             vm=True, platform="" if "azure-sql-edge" in MSSQL_IMAGE
             else "linux/amd64", user="sa", password=STRONG, start_s=480),
+    # a target capped below its source (P0-VALIDATE.unattended.proof's
+    # asymmetric capacity): one server, 1 CPU and 512 MiB by docker's own
+    # limits, set beside the `pg` pair's source
+    Profile("pg-capped", "postgres", "postgres:16", 5432, 35,
+            roles=("one",), mb=512, args=("-c", "wal_level=logical"),
+            env=_PG_ENV, options=("--cpus", "1", "--memory", "512m"),
+            user="postgres", start_s=120),
     Profile("qdrant", "qdrant", "qdrant/qdrant:v1.12.4", 6333, 36, mb=200,
             start_s=90),
     Profile("neo4j", "neo4j", "neo4j:5.26-enterprise", 7474, 38, mb=1200,
