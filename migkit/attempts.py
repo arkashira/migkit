@@ -267,6 +267,31 @@ def side_mark(hop, side):
                            digest_size=4).hexdigest()
 
 
+class Spanning(ValueError):
+    """A unit asked to cover the effect of a second statement: a unit is
+    one statement's effect, so a replay of it repeats that statement and
+    no other."""
+
+
+def keepalive_seconds(transport):
+    """Seconds a connection whose peer went silent is kept before its own
+    keepalives end it, read off the socket (`transport`): the idle time
+    before the first probe and every probe's interval after it. None where
+    keepalives are off or were not read - nothing then says how long idle
+    is too long."""
+    t = transport or {}
+    if not t.get("keepalive") or t.get("idle") is None:
+        return None
+    return float(t["idle"]) + float(t.get("interval") or 0) * float(
+        t.get("count") or 0)
+
+
+def monitor_of(eng):
+    """`eng`'s attempts (`Monitor`), or None where it keeps none."""
+    fn = getattr(eng, "attempts", None)
+    return fn() if callable(fn) else None
+
+
 def reconcile_units(eng, kind=None):
     """The units an earlier run of `eng` left open - in flight when it
     stopped - closed now as cut off (`Ledger.reconcile_open`), before the
@@ -523,6 +548,75 @@ class Ledger:
                      reason="" if ok else (reason or "failed"))
         self.flush()
 
+    def unit_record(self, name):
+        """What is kept of unit `name`: {} where it was never opened."""
+        with self._lock:
+            return dict(self.records.get(name) or {})
+
+    def unit_statement(self, name, statement, side="", session=None):
+        """Bind open unit `name` to the one statement whose effect it
+        covers, and the server session that statement runs on. The same
+        statement again - its retry, on a new session - adds the session;
+        a second statement is refused (`Spanning`): a unit replayed from
+        its checkpoint repeats exactly one statement's effect. Nothing
+        where `name` was never opened."""
+        with self._lock:
+            r = self.records.get(name)
+            if r is None:
+                return
+            was = r.get("statement")
+            if was and was != statement:
+                raise Spanning(f"the unit {name} covers the effect of one"
+                               " statement; a second was asked of it")
+            r["statement"] = statement
+            if session is not None:
+                ss = r.setdefault("sessions", [])
+                if [side, str(session)] not in ss:
+                    ss.append([side, str(session)])
+        self.flush()
+
+    def unit_stalled(self, name, why):
+        """Unit `name` told as stalled (`Monitor.unit_health`): counted on
+        its record with the decision's reason, so its estimate and its
+        report read the stall."""
+        with self._lock:
+            r = self.records.get(name)
+            if r is None:
+                return
+            r["stalls"] = int(r.get("stalls") or 0) + 1
+            r["stalled"] = why
+        self.flush()
+
+    def parts_as_units(self, parent, kind="move", now=None):
+        """The units opened as parts of `parent` (its ranges), each one
+        as the estimate reads it (`util.Unit`): done with the seconds it
+        took from its last opening to its close, failed and owed again,
+        running - idle since it opened where it was told stalled - or not
+        yet opened. A move's remaining time read from these comes from the
+        ranges it ran, not from the table's size."""
+        from .util import Unit
+        now = time.time() if now is None else float(now)
+        with self._lock:
+            recs = {n: dict(r) for n, r in self.records.items()
+                    if r.get("parent") == parent and r.get("kind") == kind}
+        out = []
+        for n, r in sorted(recs.items()):
+            opens = int(r.get("opens") or 1)
+            if r.get("state") == "done":
+                began, ended = float(r.get("started") or 0.0), float(
+                    r.get("ended") or 0.0)
+                out.append(Unit(n, kind, state="done", attempts=opens,
+                                seconds=max(0.0, ended - began) or None,
+                                ended=ended))
+            elif r.get("state") == "open" and r.get("run") == self.run:
+                out.append(Unit(n, kind, state="running", attempts=opens,
+                                idle=max(0.0, now - float(
+                                    r.get("started") or now))
+                                if r.get("stalls") else None))
+            else:
+                out.append(Unit(n, kind, state="failed", attempts=opens))
+        return out
+
     def range_units(self, table):
         """{after: the unit's record} of every shared range of `table` this
         ledger has a unit for, in any state - the ranges a restart or a
@@ -657,6 +751,49 @@ class Monitor:
             raise
         finally:
             self.ledger.unit_closed(name, ok, why, at=self.wall())
+
+    def unit_health(self, name, keepalive=None):
+        """Move health of unit `name`, read from the server: the last
+        session recorded for it (`Ledger.unit_statement`) as its server
+        lists it (`Engine.session_view`), and what is done decided by
+        `decide.range_stall` from what was read - idle seconds against the
+        keepalive observed on a connection (`keepalive_seconds`), whether
+        the server still lists the session, whose it is. A session the
+        server no longer lists is a stall: the unit is replayed from its
+        checkpoint. One idle past the keepalive is closed - exactly that
+        session (`Engine.close_session`), never another - and replayed.
+        Else it is waited on. A stall is said and kept on the unit's
+        record; the `Choice` is returned, None where no session was
+        recorded for the unit."""
+        from .decide import range_stall
+        rec = self.ledger.unit_record(name)
+        if not rec.get("sessions"):
+            return None
+        side, session = rec["sessions"][-1]
+        try:
+            view = self.engine.session_view(side, session)
+        except Exception as e:  # noqa: BLE001 - said as unavailable
+            view = View(session, error=str(e).splitlines()[0][:120]
+                        if str(e) else type(e).__name__)
+        listed = None if view.error else bool(view.present)
+        got = range_stall({
+            "listed": listed, "state": view.state,
+            "idle_seconds": float(view.seconds or 0.0),
+            "keepalive": keepalive, "open": rec.get("state") == "open",
+            "owned": bool(listed and self.engine.owns_session(side, view))})
+        if got.path == "close" and not self.engine.close_session(
+                side, session, view):
+            return got
+        if got.path == "close":
+            self.closed.append((side, session))
+        if got.path in ("close", "replay"):
+            self.ledger.unit_stalled(name, got.reason)
+            where = "source" if side == "src" else "target"
+            self.say(f"{name}: stalled on the {where}'s session {session}"
+                     f" ({got.reason}); "
+                     + ("closed that session only, " if got.path == "close"
+                        else "") + "replayed from its checkpoint")
+        return got
 
     def answered(self, a):
         a.answered = a.progress = self.clock()

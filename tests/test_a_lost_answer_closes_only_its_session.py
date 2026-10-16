@@ -419,3 +419,76 @@ def test_an_engine_without_a_session_view_declares_it():
     assert attempts.classify(v, attempts.Attempt("src", "op")) \
         == attempts.UNAVAILABLE
     assert eng.close_session("src", 1, v) is False
+
+
+# --- range units: one statement each, and move health from the server ------
+
+def _range_unit(ledger, name="public.t r:10000", parts=3):
+    ledger.unit_opened(name, "move", "range", "public.t", parts)
+    return name
+
+
+def test_a_unit_spanning_two_statements_is_refused():
+    led = Ledger()
+    name = _range_unit(led)
+    led.unit_statement(name, "load a1", "dst", 101)
+    # its retry is the same statement on a new session: kept, not refused
+    led.unit_statement(name, "load a1", "dst", 102)
+    assert led.unit_record(name)["sessions"] == [["dst", "101"],
+                                                 ["dst", "102"]]
+    with pytest.raises(attempts.Spanning):
+        led.unit_statement(name, "load b2", "dst", 103)
+    assert led.unit_record(name)["statement"] == "load a1"
+
+
+def test_a_range_whose_session_is_gone_is_replayed_and_nothing_closed():
+    eng = FakeEngine({"101": View("101", present=False)})
+    mon, _, said = _monitor(eng)
+    name = _range_unit(mon.ledger)
+    mon.ledger.unit_statement(name, "load a1", "dst", 101)
+    got = mon.unit_health(name, keepalive=60.0)
+    assert got.path == "replay"
+    assert "no longer lists" in got.reason and "idle 0.0s" in got.reason
+    assert eng.closed == [] and mon.closed == []
+    rec = mon.ledger.unit_record(name)
+    assert rec["stalls"] == 1 and "no longer lists" in rec["stalled"]
+    assert any("stalled" in s and "replayed" in s for s in said)
+
+
+def test_only_the_range_idle_past_the_observed_keepalive_is_closed():
+    eng = FakeEngine({
+        "101": View("101", "miguser", "idle", 75.0),
+        "202": View("202", "miguser", "idle", 75.0)})
+    mon, _, _ = _monitor(eng)
+    a, b = _range_unit(mon.ledger), _range_unit(mon.ledger, "public.t r:20000")
+    mon.ledger.unit_statement(a, "load a1", "dst", 101)
+    mon.ledger.unit_statement(b, "load b2", "dst", 202)
+    keep = attempts.keepalive_seconds(
+        {"keepalive": True, "idle": 30, "interval": 10, "count": 3})
+    assert keep == 60.0
+    got = mon.unit_health(a, keepalive=keep)
+    assert got.path == "close"
+    assert "idle 75.0s" in got.reason and "lists the session" in got.reason
+    assert "60.0s keepalive" in got.reason
+    # exactly that session: the other range's stays
+    assert eng.closed == [("dst", "101")] and "202" in eng.views
+    assert mon.ledger.unit_record(b).get("stalls") is None
+
+
+def test_a_range_idle_within_the_keepalive_or_unobserved_waits():
+    eng = FakeEngine({"101": View("101", "miguser", "idle", 20.0)})
+    mon, _, said = _monitor(eng)
+    name = _range_unit(mon.ledger)
+    mon.ledger.unit_statement(name, "load a1", "dst", 101)
+    got = mon.unit_health(name, keepalive=60.0)
+    assert got.path == "wait" and "idle 20.0s" in got.reason
+    assert "lists the session" in got.reason
+    got = mon.unit_health(name, keepalive=None)
+    assert got.path == "wait" and "no keepalive observed" in got.reason
+    # a session the hop's account does not own is never closed
+    eng.views["101"] = View("101", "someone", "idle", 500.0)
+    got = mon.unit_health(name, keepalive=60.0)
+    assert got.path == "wait" and eng.closed == [] and said == []
+    assert decide.range_stall({"listed": True, "state": "idle",
+                               "idle_seconds": 500.0, "keepalive": 60.0,
+                               "owned": True, "open": False}).path == "wait"

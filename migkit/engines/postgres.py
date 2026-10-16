@@ -12824,6 +12824,27 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 f' from {_ident(sch)}.{_ident(tbl)} t'
                 + (f" where {where}" if where else ""))
 
+    def _load_session(self, unit, statement, tag, proc):
+        """Bind the range's `unit` to its load (`Ledger.unit_statement`)
+        and the target session the server lists under `tag`, read while
+        `proc` runs - until it ends or its connection's own time to connect
+        is past; a session never seen is not guessed at."""
+        from ..attempts import monitor_of
+        mon = monitor_of(self)
+        if mon is None:
+            return
+        mon.ledger.unit_statement(unit, statement)
+        deadline = time.monotonic() + CONNECT_SECONDS
+        while proc.poll() is None and time.monotonic() < deadline:
+            pid = self._psql("dst", "postgres",
+                             "select pid from pg_stat_activity where"
+                             f" application_name = {_literal(tag)}"
+                             " limit 1").strip()
+            if pid:
+                mon.ledger.unit_statement(unit, statement, "dst", int(pid))
+                return
+            time.sleep(0.05)
+
     def _copy_pipe(self, db, select_sql, qt, pre_sql="", columns=None):
         """Stream rows from source to target through a COPY pipe.
 
@@ -12858,9 +12879,26 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                                  "ON_ERROR_STOP=1", "-1", *cmds, "-c",
                                  f"\\copy {qt}{collist} from stdin",
                                  options=self._load_options(db, qt))
+        from ..attempts import monitor_of
+        unit = (self.unit_now() or ("", "", ""))[1]
+        mon = monitor_of(self) if unit else None
+        tag = None
+        if mon is not None and mon.ledger.unit_record(unit).get(
+                "level") == "range":
+            # the load's server session found by a name of its own, so the
+            # range's unit records exactly its session (`_load_session`)
+            tag = "migkit-" + os.urandom(6).hex()
+            env = dict(env, PGAPPNAME=tag)
         inp = subprocess.Popen(argv, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, env=tool_env(env))
+        if tag:
+            import hashlib
+            # the one statement the range's unit covers, named by a digest:
+            # the ledger keeps no statement's text
+            self._load_session(unit, "load " + hashlib.blake2b(
+                f"{qt}|{select_sql}".encode(), digest_size=6).hexdigest(),
+                tag, inp)
         # passed on through here, and tallied on the way: what the target
         # is read back against once it has committed (`_copy_checked`)
         from ..stall import Guard
@@ -12892,6 +12930,9 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         err_i = inp.stderr.read()
         inp.stdout.read()
         inp.wait()
+        if tag and inp.returncode:
+            # the range's load failed: its session read for move health
+            mon.unit_health(unit)
         err_o = out.stderr.read()
         out.wait()
         guard.stop()
@@ -14128,19 +14169,25 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             # the rows it moved, for the move's pace
             return self._copy_checked(db, qt, cols, pred, pre, what, log,
                                       way=way, proved=proved)
-        self._each_range(slots, todo, one, ways)
+        self._each_range(slots, todo, one, ways, key, st, log)
         sweep()
         st["done"] = True
         ck.save()
         return True
 
-    @staticmethod
-    def _each_range(slots, todo, one, ways):
-        """`one` of every range in `todo` on the copy's slots; the ranges
-        copied before a failure are kept once proved, then it is raised."""
+    def _each_range(self, slots, todo, one, ways, key=None, st=None,
+                    log=None):
+        """`one` of every range in `todo` on the copy's slots, each a unit
+        of the attempt ledger (`ranges.each_owned`) where the table `key`
+        and its checkpoint `st` are given; the ranges copied before a
+        failure are kept once proved, then it is raised."""
+        from .. import ranges
         failed = None
         try:
-            slots.each(todo, one)
+            if key is not None and st is not None:
+                ranges.each_owned(slots, self, key, st, todo, one, log=log)
+            else:
+                slots.each(todo, one)
         except BaseException as e:  # noqa: BLE001 - raised once all is kept
             failed = e
         if ways is not None:
@@ -14217,7 +14264,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     pre = f"truncate {qt}"
             return self._copy_checked(db, qt, cols, pred, pre, what, log,
                                       way=way, proved=proved)
-        self._each_range(slots, todo, one, ways)
+        self._each_range(slots, todo, one, ways, key, st, log)
         st["done"] = True
         ck.save()
         return True

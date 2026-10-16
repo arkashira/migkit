@@ -11029,7 +11029,7 @@ Acceptance: inventory every execution entry point and work unit with its resume 
 
 ## P0-ETA-ALL: calibrated remaining-time estimates across every engine and task
 
-Owner request, 2026-10-14. Status: PARTLY (2026-10-16). Current verification estimates elapsed
+Owner request, 2026-10-14. Status: PARTLY (2026-10-16; W15A: every range the PostgreSQL copier runs is a ledger unit (`ranges.each_owned`), closed only once its checkpoint holds it, and the table's time left is said from the ranges run (`Ledger.parts_as_units`), proved on fakes; left: the docker proof on a server, MySQL's copier calling `ranges.each_owned`, SQL Server/hetero copiers). Current verification estimates elapsed
 time against completed phase counts, which do not represent remaining work on
 large or skewed tables. Reuse the shared decision engine, durable work ledger
 and resource telemetry; do not add a separate estimator/controller.
@@ -11121,7 +11121,7 @@ sides are the same engine shares one inner ledger file name.
 
 ## P0-CONNECTION-PROGRESS: detect and reconcile client/server progress mismatch
 
-Owner request, 2026-10-14. Status: PARTLY (2026-10-16). Priority: first incident-recovery work
+Owner request, 2026-10-14. Status: PARTLY (2026-10-16; W15A: a range unit is bound to one statement (`Ledger.unit_statement`, a second refused) and its target session; move health `Monitor.unit_health` decides replay / close that session only / wait through `decide.range_stall` from idle seconds, the observed keepalive and the server's listing, proved on fakes; left: the server proof of a dropped range session and of a stop mid-range, the statement boundary on engines other than PostgreSQL). Priority: first incident-recovery work
 alongside P0-VALIDATE.mysql-query-lifecycle, before feature expansion. Applies
 to every engine, adapter and external worker where observations are available.
 

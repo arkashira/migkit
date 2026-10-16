@@ -456,3 +456,86 @@ def test_a_sick_side_widens_the_move_estimate_and_says_why():
     assert sick.confidence < calm.confidence
     assert any("the source's sessions" in e and "range opened" in e
                for e in sick.evidence)
+
+
+# --- a range copier's ranges are units, and its time left comes from them ---
+
+def _owned_engine():
+    import contextlib
+    mon = attempts.Monitor(None, attempts.Ledger(), thread=False,
+                           say=lambda line: None)
+    return SimpleNamespace(attempts=lambda: mon,
+                           attempt_unit=lambda *a: contextlib.nullcontext())
+
+
+def test_each_range_is_a_unit_closed_after_its_checkpoint_and_timed():
+    from migkit import ranges
+    eng, said, seen = _owned_engine(), [], {}
+    led = eng.attempts().ledger
+    st = {"ranges": [[0, 10], [10, 20], [20, 30]], "ranges_done": []}
+    save = lambda: None  # noqa: E731
+
+    def one(rng):
+        time.sleep(0.05 * (1 + (rng[0] == 0)))
+        name = ranges.unit_of("public.t", rng[0])
+        # open while it reads and loads: its checkpoint does not hold it yet
+        seen[rng[0]] = led.unit_record(name)["state"]
+        ranges.finished(st, rng[0], save)
+        return 10
+    ranges.each_owned(ranges.Slots(1), eng, "public.t", st,
+                      [tuple(r) for r in st["ranges"]], one, log=said.append)
+    assert seen == {0: "open", 10: "open", 20: "open"}
+    units = led.parts_as_units("public.t")
+    assert [u.state for u in units] == ["done"] * 3
+    first = led.unit_record("public.t r:0")
+    t1 = first["ended"] - first["started"]
+    line = next(s for s in said if "1 of 3 ranges done" in s)
+    left = float(line.split("about ")[1].split("s left")[0])
+    lo, hi = (float(x.rstrip("s")) for x in
+              line.split("left (")[1].split(")")[0].split(" to "))
+    # one range measured: the two left take its time each, its spread
+    # as wide as what was measured
+    assert left == pytest.approx(2 * t1, rel=0.1, abs=0.02)
+    assert lo <= left <= hi
+    assert "2 of 3 ranges done" in " ".join(said)
+
+
+def test_a_range_proved_beside_the_next_closes_when_its_checkpoint_holds_it():
+    from migkit import ranges
+    eng = _owned_engine()
+    led = eng.attempts().ledger
+    st = {"ranges": [[0, 10], [10, 20]], "ranges_done": []}
+    save, states = (lambda: None), []
+
+    def one(rng):
+        if rng[0] == 10:
+            # the first range is proved only now, beside this one's load
+            states.append(led.unit_record("public.t r:0")["state"])
+            ranges.finished(st, 0, save)
+            states.append(led.unit_record("public.t r:0")["state"])
+            ranges.finished(st, 10, save)
+        return 10
+    ranges.each_owned(ranges.Slots(1), eng, "public.t", st,
+                      [(0, 10), (10, 20)], one)
+    assert states == ["open", "done"]
+    assert led.unit_record("public.t r:10")["state"] == "done"
+
+
+def test_a_range_that_fails_or_is_never_proved_is_owed_again():
+    from migkit import ranges
+    eng = _owned_engine()
+    led = eng.attempts().ledger
+    st = {"ranges": [[0, 10], [10, 20]], "ranges_done": []}
+
+    def one(rng):
+        if rng[0] == 10:
+            raise OSError("the link went")
+        return 10  # returned, and its checkpoint never held it
+    with pytest.raises(OSError):
+        ranges.each_owned(ranges.Slots(1), eng, "public.t", st,
+                          [(0, 10), (10, 20)], one)
+    r0, r1 = led.unit_record("public.t r:0"), led.unit_record("public.t r:10")
+    assert (r0["state"], r0["reason"]) == ("failed", "not proved")
+    assert (r1["state"], r1["reason"]) == ("failed", "OSError")
+    # a keyed range's open first end has a name of its own
+    assert ranges.unit_of("public.t", None) != ranges.unit_of("public.t", 0)

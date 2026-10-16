@@ -680,6 +680,117 @@ def _reach(st, after):
     return rs[i - 1][1] if i else None
 
 
+#: (id of a table's checkpoint, a range's start) -> what closes the range's
+#: unit once the checkpoint holds the range done (`each_owned`, `finished`)
+_LANDING = {}
+
+
+def unit_of(table, after):
+    """The attempt ledger's name for the range of `table` after `after`:
+    `fleet.unit_name` where the key is a whole number, so a mover taking
+    the hop over reads it; the start as the checkpoint writes it
+    (`ident`) for a text key or the open first end."""
+    from . import fleet
+    if isinstance(after, int) and not isinstance(after, bool):
+        return fleet.unit_name(table, after)
+    return f"{table} k:{ident(after)}"
+
+
+def each_owned(slots, eng, table, st, todo, one, log=None):
+    """`slots.each(todo, one)` with every range a unit of `eng`'s attempt
+    ledger (backlog P0-ETA-ALL, P0-CONNECTION-PROGRESS): opened before the
+    statement that reads it, closed done only once its checkpoint holds it
+    (`finished`) - a range proved beside the next one's load closes then,
+    not when `one` returns - and failed, owed again, where it raised; a
+    failed range's recorded session is read for move health
+    (`attempts.Monitor.unit_health`). After each range the table's
+    remaining time is said from the ranges it ran
+    (`attempts.Ledger.parts_as_units`, `util.forecast`). A range whose
+    checkpoint never held it once all are through is closed failed.
+    Without a ledger, `slots.each(todo, one)` as it is."""
+    import threading
+    from . import attempts
+    from .util import TASK_KINDS
+    mon = attempts.monitor_of(eng)
+    if mon is None:
+        return slots.each(todo, one)
+    led = mon.ledger
+    parts = len(st.get("ranges") or ()) or None
+    left = {}
+    gate = threading.Lock()
+
+    def landed(name):
+        def close():
+            with gate:
+                if left.pop(name, None) is None:
+                    return
+            led.unit_closed(name, True, at=mon.wall())
+            _said_left(led, table, slots, log)
+        return close
+
+    def owned(rng):
+        after = rng[0]
+        name = unit_of(table, after)
+        led.unit_opened(name, "move", "range", table, parts, at=mon.wall())
+        with gate:
+            left[name] = after
+        _LANDING[(id(st), ident(after))] = landed(name)
+        try:
+            with eng.attempt_unit(TASK_KINDS.get("move", "move"), name,
+                                  after):
+                got = one(rng)
+        except BaseException as e:
+            _LANDING.pop((id(st), ident(after)), None)
+            with gate:
+                left.pop(name, None)
+            try:
+                if not led.unit_record(name).get("stalls"):
+                    mon.unit_health(name)
+            except Exception:  # noqa: BLE001 - the failure is what is raised
+                pass
+            led.unit_closed(name, False, type(e).__name__, at=mon.wall())
+            raise
+        if after in (st.get("ranges_done") or ()):
+            landed(name)()
+        return got
+    try:
+        return slots.each(todo, owned)
+    finally:
+        with gate:
+            cut = list(left)
+            left.clear()
+        for name in cut:
+            # `one` returned and the checkpoint never held the range: owed
+            led.unit_closed(name, False, "not proved", at=mon.wall())
+
+
+def _said_left(led, table, slots, log):
+    """The time `table`'s ranges not yet done take, from the ranges it
+    ran: said once a range closes, with how it was reached."""
+    if log is None:
+        return
+    from .util import forecast
+    from .util import Unit
+    units = led.parts_as_units(table)
+    done = sum(1 for u in units if u.state == "done")
+    parts = int(led.unit_record(units[0].name).get("parts") or 0) \
+        if units else 0
+    parts = max(parts, len(units))
+    owed = parts - done
+    if not owed:
+        return
+    # the ranges not yet opened are owed like the rest
+    units += [Unit(f"{table} owed {i}", "move")
+              for i in range(parts - len(units))]
+    eta = forecast(units, scope=f"{table}'s ranges",
+                   workers=min(slots.workers, owed), warmup=1)
+    if eta.seconds is None:
+        return
+    log(f"{table}: {done} of {parts} ranges done, about {eta.seconds:.2f}s"
+        f" left ({eta.lower_bound:.2f}s to {eta.upper_bound:.2f}s), timed"
+        " from the ranges run")
+
+
 def finished(st, after, save, rows=None):
     """A range copied: marked, and `last` moved to how far every range
     from the start is done - under the checkpoint's lock, where ranges of
@@ -715,6 +826,10 @@ def finished(st, after, save, rows=None):
                                                "last": st.get("last")})
     if not journaled:
         _saved(save, owner, gen)
+    # the range's unit closes once its checkpoint holds it (`each_owned`)
+    landed = _LANDING.pop((id(st), ident(after)), None)
+    if landed is not None:
+        landed()
     failpoint.hit("range.saved")
 
 
