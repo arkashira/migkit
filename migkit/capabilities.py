@@ -2715,13 +2715,11 @@ for _item, _gaps in _CLOUD_NATIVE_GAPS.items():
 #: item: the engines, each waiting on its area's backlog row (`AREAS`).
 #: Such a cell is "not yet": a way is one only once a test proves it
 UNPROVED = {
-    "scope.listings": "ase",
-    "scope.deep": "db2i db2zos ase hetero redshift snowflake",
-    "scope.copy": "ase",
+    "scope.deep": "db2i db2zos hetero redshift snowflake",
     "scope.repair": "cockroachdb dsql couchbase",
     "scope.ops": "db2i kinesis pubsub iceberg delta cockroachdb dsql couchbase sapodp saas",
-    "scope.row-filter": "parquet dynamodb db2 db2i db2zos ase cassandra snowflake copybook iceberg delta couchbase cosmosdb mssql",
-    "scope.names": "sqlite parquet db2 db2i db2zos ase redshift snowflake duckdb copybook iceberg delta cockroachdb dsql couchbase mssql",
+    "scope.row-filter": "parquet dynamodb db2i db2zos cassandra snowflake copybook iceberg delta couchbase cosmosdb mssql",
+    "scope.names": "sqlite parquet db2i db2zos redshift snowflake duckdb copybook iceberg delta cockroachdb dsql couchbase mssql",
     "verify.value.type-drift": "kafka",
     # `rolesInfo` (the privileges of the roles made in a database) and a
     # `$regex` count of U+FFFD have not been run against a server
@@ -2737,14 +2735,14 @@ UNPROVED = {
     "verify.value.rendering": "clickhouse mssql oracle",
     "verify.repair": "cockroachdb dsql couchbase clickhouse opensearch cassandra redshift snowflake",
     "verify.repair-undo": "cockroachdb dsql couchbase clickhouse opensearch cassandra redshift snowflake",
-    "verify.table": "parquet db2 db2i db2zos ase redshift snowflake copybook iceberg delta cockroachdb dsql couchbase sapodp saas hetero",
+    "verify.table": "parquet db2i db2zos redshift snowflake copybook iceberg delta cockroachdb dsql couchbase sapodp saas hetero",
     "tail.follows": "db2i",
     "tail.table-states": "mssql oracle db2i dsql couchbase sapodp saas hetero",
     "assess.versions": "clickhouse mssql oracle cassandra",
     "verify.structure.partitions": "mssql oracle clickhouse teradata",
     # db2's, Parquet's and the MySQL-wire services' own partition reads have
     # run against no server of theirs
-    "move.partitioned": "mssql oracle teradata db2 db2i db2zos parquet "
+    "move.partitioned": "mssql oracle teradata db2i db2zos parquet "
                         "oceanbase polardbx dcdb",
     "assess.engine-checks": "db2i sapodp clickhouse opensearch mssql cassandra",
     "schema.create": "db2i db2zos kafka",
@@ -2768,7 +2766,7 @@ UNPROVED = {
     "move.sized": "oracle db2i db2zos teradata redshift snowflake cockroachdb dsql cassandra",
     "move.load-window": "clickhouse mssql cassandra mongodb teradata",
     "cutover.rollback": "mongodb copybook",
-    "cutover.freeze": "oracle db2 ase couchbase hetero",
+    "cutover.freeze": "oracle couchbase hetero",
     "cutover.read-only-target": "db2i db2zos dsql hetero",
     "cutover.drain": "db2i saas",
     # `SHOW CREATE TABLE`'s TiDB comments (placement, TTL, shard bits)
@@ -3395,22 +3393,36 @@ def _gap(engine, item):
 
 
 def _unproved(engine, item):
-    """The backlog row a way's missing test waits on, or None."""
+    """(the backlog row a way's missing test waits on, why it is unproved)
+    or None: the why is the engine module's own `UNPROVED_ON` where it
+    declared the cell, and "" where the cell is only a test not written."""
     if engine in UNPROVED.get(item, "").split():
-        return AREAS[item.split(".", 1)[0]][1]
+        return (AREAS[item.split(".", 1)[0]][1],
+                UNPROVED_WHY.get(engine, ""))
     return None
+
+
+def depth_why(engine, item):
+    """Why a way the code has is not yet one: what the engine's module says
+    of the server it was not run on ("built; not run on a real <server>"),
+    or "" where the cell is a test merely not written (`UNPROVED`)."""
+    got = _unproved(engine, item)
+    return got[1] if got else ""
 
 
 def depth_cell(engine, item):
     """(state, why): "yes" where the code has the way and a test proves it
     on this engine; the gap declared - a way whose test is not written yet
-    (`UNPROVED`) is not yet one; or what the test fails on: "untested" (a
+    (`UNPROVED`) is not yet one, and its why is the backlog row - the words
+    for a module's own reason are `depth_why`; or what the test fails on:
+    "untested" (a
     way no test proves and nobody declared), "undeclared" (no way, no
     declaration), "stale" (a declaration the code or a test has since
     closed), "claimed" (a proof of a way the code does not show)."""
     has = depth_has(engine, item)
     tested = (item, engine) in proofs()
     gap, waits = _gap(engine, item), _unproved(engine, item)
+    waits = waits[0] if waits else None
     if has:
         if gap is not None:
             return ("stale", f"declared {gap[0]}, and the code has it")
@@ -3472,4 +3484,98 @@ def depth_failing():
                            if item not in DEPTH or n not in NAMES]
     out["unknown"] += [(eng, item, "proved") for item, eng in proofs()
                        if item not in DEPTH or eng not in NAMES]
+    out["unknown"] += list(_BAD_DECLARATIONS)
     return out
+
+
+# --- what an engine module says of the cells it was not run for -------------
+#
+# A way built for an engine no sandbox here can run is not a test merely
+# unwritten: it is "built, unproved", and the matrix says on which server it
+# was not run. The engine's module says it, at module level, read literally
+# (never imported by this read) like a test's `PROVES`:
+#
+#     UNPROVED_ON = "built; not run on a real Db2 LUW server"
+#     UNPROVED_ITEMS = "scope.listings verify.table"
+#
+# `UNPROVED_ITEMS` is the engine's whole list of such cells: an engine that
+# declares `UNPROVED_ON` is read from its module alone, so the lists above
+# never add it. A module that serves several engines names a cell as
+# `engine:item` for one of them; a bare item is every engine it serves.
+
+#: {engine: the reason its module gives}, for the engines that declare one
+UNPROVED_WHY = {}
+#: (engine, item, what) of a declaration naming an engine the module does
+#: not serve; `depth_failing` lists them as unknown
+_BAD_DECLARATIONS = []
+
+
+@functools.lru_cache(maxsize=None)
+def _engine_modules():
+    """{engine: the file of the module that defines its class}, read off
+    `engines._class_for` and `engines.CLOUD` in the source: this runs while
+    `capabilities` is imported, when no engine module can be."""
+    from pathlib import Path
+    home = Path(__file__).resolve().parent / "engines"
+    tree = ast.parse((home / "__init__.py").read_text())
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "_class_for":
+            for branch in node.body:
+                if not isinstance(branch, ast.If):
+                    continue
+                name = ast.literal_eval(branch.test.comparators[0])
+                for stmt in branch.body:
+                    if isinstance(stmt, ast.ImportFrom):
+                        out[name] = home / f"{stmt.module}.py"
+        elif isinstance(node, ast.Assign) and any(
+                getattr(t, "id", "") == "CLOUD" for t in node.targets):
+            for name, (mod, _) in ast.literal_eval(node.value).items():
+                out[name] = home / f"{mod}.py"
+    return out
+
+
+def _engine_source(engine):
+    """The source file of the module that defines this engine's class."""
+    return _engine_modules().get(engine)
+
+
+def _module_declares(path):
+    """(`UNPROVED_ON`, `UNPROVED_ITEMS`) read from a module's source: the
+    module-level string literals, "" where it has none."""
+    got = {"UNPROVED_ON": "", "UNPROVED_ITEMS": ""}
+    from pathlib import Path
+    for node in ast.parse(Path(path).read_text()).body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id in got:
+                    got[t.id] = ast.literal_eval(node.value)
+    return got["UNPROVED_ON"], got["UNPROVED_ITEMS"]
+
+
+def _merge_declared():
+    """Fold every engine module's declaration into `UNPROVED` and
+    `UNPROVED_WHY`: an engine that declares `UNPROVED_ON` leaves every
+    central line and holds exactly the cells its module lists."""
+    by_path = {}
+    for engine in NAMES:
+        path = _engine_source(engine)
+        if path:
+            by_path.setdefault(str(path), []).append(engine)
+    for path, served in by_path.items():
+        reason, items = _module_declares(path)
+        if not reason:
+            continue
+        for engine in served:
+            UNPROVED_WHY[engine] = " ".join(reason.split())
+            _proved(engine, " ".join(UNPROVED))
+        for token in items.split():
+            who, _, item = token.rpartition(":")
+            if who and who not in served:
+                _BAD_DECLARATIONS.append((who, item, "not served here"))
+                continue
+            for engine in [who] if who else served:
+                _owed(engine, item)
+
+
+_merge_declared()

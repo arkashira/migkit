@@ -16,6 +16,13 @@ from . import hooks
 from .base import Engine
 from .dbapi import MARK, DbapiRows
 
+#: the ways built here and run against no server (the matrix reads these
+#: two names from this source: `capabilities`)
+UNPROVED_ON = "built; not run on a real SAP ASE server"
+UNPROVED_ITEMS = (
+    "cutover.freeze scope.copy scope.deep scope.listings "
+    "scope.names scope.row-filter verify.table")
+
 #: where FreeTDS's ODBC driver is installed by Homebrew and by apt
 DRIVERS = ("/opt/homebrew/lib/libtdsodbc.so", "/usr/local/lib/libtdsodbc.so",
            "/usr/lib/x86_64-linux-gnu/odbc/libtdsodbc.so",

@@ -195,3 +195,119 @@ def test_the_registry_is_read_without_importing_the_tests(tmp_path):
                                                 "test_two.py"],
                    ("verify.delta", "mysql"): ["test_one.py"],
                    ("verify.delta", "tidb"): ["test_one.py"]}
+
+
+# ---- built, unproved: an engine module says which server it was not run on
+
+def _declaring(monkeypatch, tmp_path, source, served=("postgres",)):
+    """The engines in `served` are defined in a module with `source`; the
+    merge of the declarations is run on an empty `UNPROVED`."""
+    path = tmp_path / "engine_module.py"
+    path.write_text(source)
+    monkeypatch.setattr(caps, "proofs", lambda: {})
+    monkeypatch.setattr(caps, "UNPROVED", {})
+    monkeypatch.setattr(caps, "UNPROVED_WHY", {})
+    monkeypatch.setattr(caps, "_BAD_DECLARATIONS", [])
+    monkeypatch.setattr(caps, "_engine_source",
+                        lambda n: str(path) if n in served else None)
+    caps._merge_declared()
+
+
+def test_a_cell_a_module_declares_is_built_unproved_and_says_why(
+        monkeypatch, tmp_path):
+    _declaring(monkeypatch, tmp_path,
+               'raise RuntimeError("imported")\n'
+               'UNPROVED_ON = "built; not run on a real Example server"\n'
+               'UNPROVED_ITEMS = ("scope.deep "\n"verify.delta")\n')
+    assert caps.depth_cell("postgres", "scope.deep") == (
+        caps.NOT_YET, "P0-PARITY.scope")
+    assert caps.depth_why("postgres", "scope.deep") == \
+        "built; not run on a real Example server"
+    assert caps.depth_cell("postgres", "verify.delta")[0] == caps.NOT_YET
+    # a cell the module does not list is not borrowed from its neighbours
+    assert caps.depth_cell("postgres", "scope.copy")[0] == "untested"
+    assert caps.depth_why("postgres", "scope.copy") == ""
+
+
+def test_a_cell_with_no_declaration_stays_a_test_owed(monkeypatch, tmp_path):
+    """Only `UNPROVED_ITEMS`, no `UNPROVED_ON`: the module is not read, the
+    cell has no reason - it is a test merely not written, and the central
+    line is what owes it."""
+    _declaring(monkeypatch, tmp_path, 'UNPROVED_ITEMS = "scope.deep"\n')
+    assert caps.depth_cell("postgres", "scope.deep")[0] == "untested"
+    monkeypatch.setattr(caps, "UNPROVED", {"scope.deep": "postgres"})
+    assert caps.depth_cell("postgres", "scope.deep") == (
+        caps.NOT_YET, "P0-PARITY.scope")
+    assert caps.depth_why("postgres", "scope.deep") == ""
+
+
+def test_a_declaring_engine_is_read_from_its_module_alone(
+        monkeypatch, tmp_path):
+    """The central lines never add an engine whose module declares."""
+    _declaring(monkeypatch, tmp_path,
+               'UNPROVED_ON = "built; not run on a real Example server"\n'
+               'UNPROVED_ITEMS = "scope.deep"\n')
+    monkeypatch.setattr(caps, "UNPROVED", {
+        "scope.deep": "postgres mysql", "scope.copy": "postgres"})
+    caps._merge_declared()
+    assert caps.UNPROVED["scope.deep"].split() == ["mysql", "postgres"]
+    assert "postgres" not in caps.UNPROVED["scope.copy"].split()
+
+
+def test_a_declared_cell_whose_test_now_exists_is_stale(
+        monkeypatch, tmp_path):
+    _declaring(monkeypatch, tmp_path,
+               'UNPROVED_ON = "built; not run on a real Example server"\n'
+               'UNPROVED_ITEMS = "scope.deep"\n')
+    monkeypatch.setattr(caps, "proofs", lambda: {
+        ("scope.deep", "postgres"): ["test_x.py"]})
+    assert caps.depth_cell("postgres", "scope.deep")[0] == "stale"
+
+
+def test_a_module_serving_several_engines_names_a_cell_per_engine(
+        monkeypatch, tmp_path):
+    _declaring(monkeypatch, tmp_path,
+               'UNPROVED_ON = "built; not run on a real Example server"\n'
+               'UNPROVED_ITEMS = "scope.deep mysql:scope.copy other:x"\n',
+               served=("postgres", "mysql"))
+    assert caps.UNPROVED["scope.deep"].split() == ["postgres", "mysql"]
+    assert caps.UNPROVED["scope.copy"].split() == ["mysql"]
+    assert caps._BAD_DECLARATIONS == [("other", "x", "not served here")]
+
+
+def test_every_declared_reason_is_one_line_in_the_owners_words(failing):
+    """Strict for the engines that declare: the reason is one line and says
+    what was not done on which server (`built; not run on a real <server>`),
+    and the declaration lists a cell - one that names nothing is a mistake."""
+    assert failing["unknown"] == []
+    assert caps.UNPROVED_WHY, "no engine module declares UNPROVED_ON yet"
+    for engine, why in caps.UNPROVED_WHY.items():
+        assert why.startswith("built; not run on a real "), (engine, why)
+        assert "\n" not in why and len(why.split()) >= 7, (engine, why)
+        assert any(caps.depth_why(engine, i) for i in caps.DEPTH), engine
+
+
+def test_an_engine_with_no_sandbox_says_which_server_it_was_not_run_on():
+    """An engine with no profile in `tests/servers.PROFILES` and a cell that
+    is "test owed" should declare `UNPROVED_ON` in its module. A warning
+    line, not a red test, until each family ticket lands its declaration
+    (wave 17 B-I); strict for the engines that declare (the test above) -
+    wave 18 makes this strict once every such engine declares."""
+    import warnings
+    from tests.servers import PROFILES
+    # a profile names its server's family ("mongo"); the engine is "mongodb"
+    with_server = {{"mongo": "mongodb"}.get(p.engine, p.engine)
+                   for p in PROFILES.values()}
+    owed = {}
+    for item, engines in caps.UNPROVED.items():
+        for n in engines.split():
+            if n in NAMES and n not in with_server \
+                    and n not in caps.UNPROVED_WHY \
+                    and caps.depth_cell(n, item)[0] == caps.NOT_YET:
+                owed.setdefault(n, []).append(item)
+    if owed:
+        warnings.warn(
+            "engines with no sandbox and a test-owed cell, and no"
+            " UNPROVED_ON in their module: "
+            + ", ".join(f"{n} ({len(v)})" for n, v in sorted(owed.items())),
+            stacklevel=1)

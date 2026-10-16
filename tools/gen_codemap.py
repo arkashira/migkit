@@ -299,7 +299,8 @@ def _depth(capabilities):
     def state(n, i):
         s = got[n][i]
         if s == caps.NOT_YET and (i, n) in owed:
-            return "test owed"
+            return "built, unproved" if n in caps.UNPROVED_WHY \
+                else "test owed"
         return {"yes": "yes", caps.NOT_APPLICABLE: "n/a",
                 caps.NOT_YET: "not yet"}.get(s, s)
     areas = list(caps.AREAS)
@@ -326,12 +327,19 @@ def _depth(capabilities):
         out.append(f"| {n} | " + " | ".join(
             f"{yes[a]}/{apply[a]}" if apply[a] else "-" for a in areas)
             + f" | {sum(yes.values())}/{sum(apply.values())} |")
+    out += ["", "Built, unproved - a way the code has on an engine no sandbox"
+            " here can run; the engine's module says which server it was"
+            " not run on (`UNPROVED_ON`):", ""]
+    for n in sorted(caps.UNPROVED_WHY):
+        cells = sum(1 for i in caps.DEPTH if state(n, i) == "built, unproved")
+        out.append(f"- {n}: {caps.UNPROVED_WHY[n]} ({cells} cells)")
     out += ["", "Per item: the engines in each state - \"test owed\" is a way"
             " in the code whose test on that engine is not written"
-            " (`UNPROVED`).", "",
-            "| item | yes | test owed | not yet | n/a |",
-            "|---|---|---|---|---|"]
-    kinds = ("yes", "test owed", "not yet", "n/a")
+            " (`UNPROVED`); \"built, unproved\" is one whose engine module"
+            " declares it was not run on a real server.", "",
+            "| item | yes | test owed | built, unproved | not yet | n/a |",
+            "|---|---|---|---|---|---|"]
+    kinds = ("yes", "test owed", "built, unproved", "not yet", "n/a")
     for i in caps.DEPTH:
         groups = {k: sorted(n for n in got if state(n, i) == k)
                   for k in kinds}
