@@ -2389,9 +2389,9 @@ DEPTH_GAPS = {
     },
     "operations.fencing": {
         **_each(NOT_YET, "P0-PARITY.all",
-                "mongodb mssql redis kafka sqlite parquet clickhouse "
-                "dynamodb oracle db2 db2i db2zos ase teradata opensearch "
-                "cassandra redshift snowflake bigquery kinesis pubsub "
+                "mssql sqlite parquet "
+                "dynamodb db2 db2i db2zos ase teradata opensearch "
+                "redshift snowflake bigquery kinesis pubsub "
                 "duckdb copybook iceberg delta cockroachdb dsql couchbase "
                 "cosmosdb"),
         **_as("table-copy", "sapodp saas"),
@@ -2752,7 +2752,9 @@ _CLOUD_NATIVE_GAPS = {
     "operations.fencing": _each(NOT_YET, "P0-PARITY.all",
                                 _but("oceanbase", "polardbx", "dcdb",
                                      "mongodb", "redis", "cassandra",
-                                     "clickhouse", "oracle", "kafka")),
+                                     "clickhouse", "oracle", "kafka",
+                                     "keyspaces", "geminidb-cassandra",
+                                     "geminidb-mongo", "geminidb-redis")),
 }
 for _item, _gaps in _CLOUD_NATIVE_GAPS.items():
     DEPTH_GAPS.setdefault(_item, {}).update(_gaps)

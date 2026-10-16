@@ -533,7 +533,7 @@ _BY_NAME = {
                 " scenarios legs sizing changedepth lacks sourcechange"
                 " bulkways ready cloud_readiness dba handwork rehearsal"
                 " faults model"
-                " machine topology waysaid workload advisors estate",
+                " machine topology waysaid workload advisors",
     "engines": "catalog pgslot binlog_marks binlog_payload logddl standby",
     "integrations": "tools tooluse toolversion cloudapi cloudseed"
                     " huawei_sdk imports integrations workflow_exporter"
@@ -546,7 +546,7 @@ _BY_NAME = {
                  " archive editions tableengine twoway barriers marks"
                  " drainmark applyway replicasum rules leaves unchanged"
                  " streamout changetopic fleet second_reader",
-    "cli": "cli guide ui",
+    "cli": "cli guide ui estate",
 }
 #: a subpackage, whole
 _BY_PREFIX = {"engines": "engines", "storedcode": "conversion",
@@ -1334,6 +1334,14 @@ KNOWN_UPWARD = {
     ("a column is hidden by the way `decide.hide_column` picks from its "
      "facts; the rung moves below conversion"): (
         "migkit/transforms.py migkit.decide",
+    ),
+    ("the fence's way and place are rungs (`decide.fence_way`, "
+     "`decide.fence_place`) on the account's rights the engine reads; a "
+     "finished range is named a ledger unit through the freeze's writer; "
+     "a broker's transaction start is bounded by the lease's own term"): (
+        "migkit/fencing.py migkit.decide",
+        "migkit/claims.py migkit.freeze",
+        "migkit/engines/kafka.py migkit.ha",
     ),
     ("the anchor's interval is a rung (`decide.anchor_interval`) on the "
      "measured entry rate; the anchor hands the rate in as a fact"): (

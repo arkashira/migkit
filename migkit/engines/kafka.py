@@ -105,7 +105,8 @@ def msk_presign(region, access_key, secret_key, session_token=None,
 #: producer-epoch fence is refused there with its reason (`fencing`)
 UNPROVED_ON = ("built; not run on a real broker that takes transactional"
                " producers")
-UNPROVED_ITEMS = "operations.fencing"
+UNPROVED_ITEMS = ("operations.fencing verify.value.type-drift schema.create"
+                  " assess.capacity assess.writers move.create-missing")
 
 class MskToken:
     """Amazon MSK's IAM sign-in token for one side, minted through the
