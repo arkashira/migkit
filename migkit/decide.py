@@ -4008,3 +4008,48 @@ def settle_way(facts):
              because="the server resamples by itself what a small load"
                      " changed"))
     return climb("the statistics of a loaded graph refreshed", rungs, facts)
+
+
+
+
+# ---- how long the tail waits once its read's link is lost (backlog
+# ---- P0-RESILIENCE-ALL) ------------------------------------------------------
+
+def lost_link_wait(reconnects, down=0.0):
+    """(seconds, `Choice`): how long the tail waits, once its read's link
+    was lost past the read's own tries (`faults.retried`), before it reads
+    again from the saved position. No number is written here: the longest
+    time a lost link of this loop took to answer again (`reconnects`, each
+    measured from the loss to the next read that answered), less what this
+    loss has lasted (`down`); where none was measured or this loss has
+    outlasted them all, as long again as it has lasted - so the wait grows
+    from what was observed, with no fixed ceiling - and a loss that has
+    not lasted at all is read again at once."""
+    d = tuple(sorted(float(x) for x in reconnects or ()
+                     if x is not None and x >= 0))
+    down = max(0.0, float(down or 0.0))
+    said = ((f"reconnects measured here took "
+             + ", ".join(f"{x:.1f}s" for x in d)) if d
+            else "no reconnect measured here") + (
+        f"; this loss has lasted {down:.1f}s")
+    rungs = (
+        Rung("measured", "wait out the longest reconnect measured here",
+             needs=(Need("a reconnect measured",
+                         lambda f: bool(f.get("reconnects")),
+                         "no lost link of this loop has come back yet"),
+                    Need("a loss not past it",
+                         lambda f: f.get("down") < f.get("reconnects")[-1],
+                         "this loss has outlasted every reconnect"
+                         " measured")),
+             because=said),
+        Rung("as long again", "wait as long again as the link has been"
+             " down", needs=(Need("a loss that has lasted",
+                                  lambda f: f.get("down") > 0,
+                                  "the link was lost just now"),),
+             because=said),
+        Rung("at once", "read again now", because=said))
+    got = climb("a lost link of the tail", rungs,
+                Facts({"reconnects": d, "down": down}))
+    seconds = {"measured": (d[-1] - down) if d else 0.0,
+               "as long again": down}.get(got.path, 0.0)
+    return max(0.0, seconds), got

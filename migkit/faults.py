@@ -230,6 +230,23 @@ CATALOGUE = {f.name: f for f in (
        words=("no such file or directory", "command not found",
               "service unavailable", "bad gateway"),
        proof=_T + "test_a_missing_program_replans"),
+    _f("lock", "the work waited on another's lock past the"
+       " server's limit, or was chosen to break a deadlock", True,
+       "the other work's lock released, after a backoff", "the unit",
+       # transient for the unit, not the side: a unit that keeps meeting
+       # the same lock once its side's breaker is open is set aside so
+       # the rest goes on, never tried on that side again
+       ("retry", "isolate", "stop"),
+       codes=(1205, 1213, 1222, "40P01", "55P03"),
+       phrases=("lock wait timeout exceeded", "deadlock found",
+                "deadlock detected", "chosen as the deadlock victim",
+                "lock request time out period exceeded"),
+       words=("deadlock",),
+       # the server rolled back the statement that waited, or the victim's
+       # whole transaction: nothing of the failed work is left
+       rolled_back=True,
+       proof="tests/test_a_copier_reconciles_and_retunes.py::"
+             "test_an_open_breaker_isolates_a_unit_held_by_a_lock"),
     _f("external_impact", "the work slows what else runs on a server", True,
        "the workload's own latency back under its limit", "the side",
        ("throttle", "pause"), facts=("workload_slowed",),
@@ -685,7 +702,12 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
 
 def _facts(told, check, renew, reconciled, left, breaker):
     f = told.fault
-    return {"class": f.name, "admits": f.admits, "transient": f.transient,
+    # an open breaker is the side saying the same work fails there however
+    # often it goes: retrying on it is withheld, so a class the unit holds
+    # (`contains`) is set aside, paused or stopped as it admits
+    admits = (f.admits if breaker != "open"
+              else tuple(a for a in f.admits if a != "retry"))
+    return {"class": f.name, "admits": admits, "transient": f.transient,
             "uncertain": told.uncertain, "can_check": check is not None,
             "renewable": renew is not None, "reconciled": reconciled,
             "tries_left": left, "breaker": breaker, "phase": told.phase}

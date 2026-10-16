@@ -515,3 +515,169 @@ def test_an_open_breaker_that_stops_names_it_on_the_raised_error(
     assert e.value.fault == "connectivity"
     paths = [d["path"] for d in ledger.owned(owned.key)["decided"]]
     assert paths == ["retry", "isolate"]
+
+
+def test_a_lock_is_told_by_its_code_and_its_words():
+    for err in (Exception(1205, "Lock wait timeout exceeded; try"
+                                " restarting transaction"),
+                Exception(1213, "Deadlock found when trying to get lock"),
+                RuntimeError("ERROR: deadlock detected"),
+                RuntimeError("Transaction (Process ID 61) was deadlocked"
+                             " on lock resources with another process and"
+                             " has been chosen as the deadlock victim")):
+        assert faults.classify(err).fault.name == "lock", err
+    assert "isolate" in faults.CATALOGUE["lock"].admits
+    assert faults.CATALOGUE["lock"].transient
+
+
+def test_an_open_breaker_isolates_a_unit_held_by_a_lock(tmp_path):
+    ledger = attempts.Ledger(str(tmp_path / "attempts.json"))
+    breaker = faults.Breaker()
+    breaker.failed("dst", 0)    # the side failed past what one op may try
+    calls = []
+
+    def write():
+        calls.append(1)
+        raise faults.Injected("lock")
+    owned = faults.Owned("dst", "copy batch", "t", "0..10@None")
+    with pytest.raises(faults.Injected) as got:
+        faults.retried(write, tries=3, side="dst", writes=True,
+                       atomic=True, ledger=ledger, owned=owned,
+                       breaker=breaker, wait=lambda s: None,
+                       backoff=lambda i: 5.0)
+    rec = ledger.owned(owned.key)
+    paths = [(d["path"], d["breaker"]) for d in rec["decided"]]
+    # retried while the side answered; once its breaker is open the same
+    # lock is not met again on it: the unit is set aside, the rest go on
+    assert paths == [("retry", "closed"), ("isolate", "open")], paths
+    assert got.value.recovery == "isolate" and got.value.fault == "lock"
+    assert len(calls) == 1
+
+
+def test_an_open_breaker_withholds_only_the_retry():
+    told = faults.classify(faults.Injected("connectivity"))
+    shut = faults._facts(told, None, None, None, 2, "closed")
+    shown = faults._facts(told, None, None, None, 2, "open")
+    assert "retry" in shut["admits"] and "retry" not in shown["admits"]
+    assert decide.recovery(shown).path == "pause"
+
+
+def test_the_tails_lost_link_wait_is_costed_from_measured_reconnects():
+    s, got = decide.lost_link_wait([2.5, 4.0], down=1.0)
+    # the longest reconnect measured, less what this loss has waited
+    assert got.path == "measured" and s == pytest.approx(3.0)
+    assert "2.5s, 4.0s" in got.reason and "1.0s" in got.reason
+    # outlasted every one measured, or none measured: as long again
+    s, got = decide.lost_link_wait([2.0], down=3.0)
+    assert got.path == "as long again" and s == pytest.approx(3.0)
+    s, got = decide.lost_link_wait([], down=1.5)
+    assert got.path == "as long again" and s == pytest.approx(1.5)
+    # the facts it was costed on are the measured times and this loss's
+    assert got.asked == ("reconnects", "down")
+    s, got = decide.lost_link_wait((), down=0.0)
+    assert got.path == "at once" and s == 0.0
+
+
+def test_a_tail_waits_what_the_decision_chose_never_a_constant(
+        tmp_path, monkeypatch):
+    from migkit import tailctl
+    from tests.test_every_tail_goes_round_one_loop import _hop, _Looks
+    naps, asked = [], []
+    real = decide.lost_link_wait
+
+    def spy(reconnects, down=0.0):
+        got = real(reconnects, down)
+        asked.append((tuple(reconnects), down, got[0]))
+        return got
+    monkeypatch.setattr(decide, "lost_link_wait", spy)
+    monkeypatch.setattr(tailctl, "_nap", lambda where, s, *a: naps.append(s))
+    looks = _Looks(tmp_path, last=1,
+                   raise_at={k: "connection refused" for k in range(1, 5)})
+    tailctl.run_loop(tmp_path, "d", looks, lambda s: None, "changes",
+                     hop=_hop(tmp_path, follow_until="caught_up"),
+                     token=0, save=lambda a: None)
+    assert len(asked) == 1 and naps[-1] == asked[0][2]
+    # nothing came back yet: the wait is this loss's own length, measured
+    assert asked[0][0] == () and asked[0][2] == pytest.approx(asked[0][1])
+
+
+def test_a_pairs_inner_engines_say_their_side():
+    from migkit.config import Endpoint, Hop
+    from migkit.engines.hetero import HeteroEngine
+    ep = Endpoint(host="10.0.0.5", port=1, user="u", password="CHANGE_ME")
+    e = HeteroEngine(Hop(name="p", engine="hetero", source=ep, target=ep,
+                         options={"source_engine": "mssql",
+                                  "target_engine": "mssql"}))
+    # one engine both sides: the options alone would name both "src"
+    assert attempts.pair_side(e.src_engine) == "src"
+    assert attempts.pair_side(e.dst_engine) == "dst"
+
+
+def test_the_sql_server_row_text_check_keeps_its_ranges(tmp_path,
+                                                        monkeypatch):
+    from types import SimpleNamespace
+
+    from migkit import scanplan
+    from migkit.engines.mssql import MSSQLEngine
+    eng = MSSQLEngine.__new__(MSSQLEngine)
+    eng.hop = SimpleNamespace(report_dir=lambda s: tmp_path)
+
+    def cmd(side, db, sql):
+        if sql == "cq":
+            raise RuntimeError("the server cannot fold its rows")
+        return [["1 a"], ["2 b"]]
+    eng._cmd = cmd
+    eng.scan_cuts = lambda db, t, most: [""]
+    eng._qualified = lambda side, db, t: t
+    monkeypatch.setattr(scanplan, "plan_most", lambda e, db: 1)
+    seen = {}
+    real = scanplan.row_text
+
+    def spy(read, preds, **kw):
+        seen.update(kw)
+        return real(read, preds, key_width=kw["key_width"], most=1)
+    monkeypatch.setattr(scanplan, "row_text", spy)
+    got = eng._row_parity("db", "dbo.t", "row", "cq", "")
+    assert got[0] == got[1]
+    assert seen["table"] == "db.dbo.t" and seen["eng"] is eng
+    assert isinstance(seen["kept"], scanplan.RangeTexts)
+    assert seen["kept"].path == tmp_path / "row-text-ranges.json"
+
+
+def test_a_sql_server_statement_refused_for_its_size_is_retuned(
+        monkeypatch):
+    import contextlib
+
+    from migkit import failpoint
+    from migkit.engines.mssql import MSSQLEngine
+    failpoint.reset()
+    monkeypatch.setenv("MIGKIT_FAILPOINT", "mssql.rows:2:fault=packet")
+    eng = MSSQLEngine.__new__(MSSQLEngine)
+    eng.hop = None
+    units, written = [], []
+
+    def unit(kind, name, level, parent, parts):
+        units.append(name)
+        return contextlib.nullcontext()
+    eng.work_unit = unit
+    real = tuning.Retune.__init__
+    kept = {}
+
+    def small(self, work, *a, **kw):
+        kw["nbytes"] = 40_000
+        real(self, work, *a, **kw)
+        kept["r"] = self
+    monkeypatch.setattr(tuning.Retune, "__init__", small)
+    rows = [[i, "x" * 300] for i in range(1, 201)]
+    got = eng._statements_sized("dst", "db", "dbo.t", [], rows,
+                                lambda s, d, t, c, part: written.extend(
+                                    r[0] for r in part))
+    assert got == 200 and written == list(range(1, 201))
+    r = kept["r"]
+    assert len(r.history) == 1
+    assert r.history[0].after["bytes"] < r.history[0].before["bytes"]
+    # the part committed before the refusal is kept; the rest went again
+    # from there, in smaller parts, each a unit of the ledger
+    first = int(units[0].split("..")[1])
+    assert units[1].startswith(f"dbo.t rows {first + 1}..")
+    assert int(units[2].split("..")[1]) - first < first

@@ -1369,13 +1369,28 @@ class MSSQLEngine(DbapiRows, Engine):
                                  f" {self._qualified('src', db, t)} t"
                                  + (f" where {where}" if where else "")
                                  + " order by 1")
-            got = scanplan.row_text(read, cuts, key_width=0, most=most)
+            # each range a unit of the ledger, and kept as it is proved:
+            # a check stopped half way goes on from the ranges it owes
+            got = scanplan.row_text(read, cuts, key_width=0, most=most,
+                                    eng=self, table=f"{db}.{t}",
+                                    scope=pred or "",
+                                    kept=self._range_texts())
             return tuple((got.rows[s], scanplan.fold_digests(got, s))
                          for s in ("src", "dst"))
         return decide.row_parity(
             f"{db}.{t}: its rows alike", run, decide.Facts({
                 "server digest": True, "key": None,
                 "rows read here": True}))[1]
+
+    def _range_texts(self):
+        """The row text ranges this hop's deep checks proved
+        (`scanplan.RangeTexts`), one file beside its reports, read once."""
+        from .. import scanplan
+        got = self.__dict__.get("_texts_kept")
+        if got is None:
+            got = self.__dict__["_texts_kept"] = scanplan.RangeTexts(
+                self.hop.report_dir("") / "row-text-ranges.json")
+        return got
 
     def _deep_charset(self, db, scans=None):
         """A text column downgraded to a narrower character set on the
@@ -3851,7 +3866,8 @@ class MSSQLEngine(DbapiRows, Engine):
             if choice.path == "bulk load":
                 self._bulk_write(side, db, table, columns, rows)
             else:
-                by_statements(side, db, table, columns, rows)
+                self._statements_sized(side, db, table, columns, rows,
+                                       by_statements)
             if costs is not None:
                 # timed where the way was chosen by what it cost
                 self._took(key, choice.path, time.monotonic() - began,
@@ -3863,6 +3879,53 @@ class MSSQLEngine(DbapiRows, Engine):
         self._attempt(str(table), self.WRITE_WAYS, run, facts, costs=costs,
                       undo=undo, switch=decide.only_blocked)
         return len(rows)
+
+    def _statements_sized(self, side, db, table, columns, rows, write):
+        """`rows` written by statements in parts cut at the table's sizes
+        (`tuning.Retune`, `tuning.sized`), each part its own transaction
+        replacing by key and a unit of the attempt ledger
+        (`attempts.work_unit`). A part the server refused for its size - a
+        packet, a statement timeout, memory, a lock, as `tuning.cause_of`
+        says - was rolled back whole by the server: what the target holds
+        of the batch is the parts committed before it (`reconcile`), and
+        the rest goes again from there at the size the retune chose for
+        that cause, never at the one that failed. Any other failure is the
+        caller's (`faults.retried` under each statement)."""
+        from .. import attempts, failpoint, pieces, tuning
+        retunes = self.__dict__.setdefault("_retunes", {})
+        work = f"{db}.{table}"
+        retune = retunes.get((side, work))
+        if retune is None:
+            retune = retunes[(side, work)] = tuning.Retune(
+                work, hop=self.hop, engine="sqlserver")
+        done = [0]
+        unit = f"{table} rows"
+
+        def parts():
+            s = retune.settings()
+            most = (max(1, s["rows"] // s["parts"])
+                    if s.get("way", "whole") == "whole" else 1)
+            for part in pieces.by_bytes(rows[done[0]:], s["bytes"], most,
+                                        pieces.row_bytes):
+                part = list(part)
+                at = done[0]
+                with attempts.work_unit(
+                        self, "move", f"{unit} {at + 1}..{at + len(part)}",
+                        level="range", parent=str(table)):
+                    failpoint.hit("mssql.rows")
+                    write(side, db, table, columns, part)
+                done[0] += len(part)
+            return len(rows)
+        began = time.monotonic()
+        # the batch is the retune's unit: the parts it holds are what the
+        # reconcile counts, and the size halves from the one in force
+        got = tuning.sized(retune, unit, parts, lambda s: None,
+                           rows=lambda: len(rows),
+                           reconcile=lambda u: done[0])
+        retune.succeeded(unit, len(rows),
+                         sum(pieces.row_bytes(r) for r in rows),
+                         time.monotonic() - began)
+        return got
 
     def _bulk_write(self, side, db, table, columns, rows):
         """One batch through the bulk load, staged and promoted. What stops

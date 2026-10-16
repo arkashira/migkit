@@ -317,6 +317,11 @@ class HeteroEngine(Engine):
         # read as the target is to hold it, where the hop masks columns
         self.src_engine = masking(engine_named(self.src_name, hop), hop)
         self.dst_engine = engine_named(self.dst_name, hop)
+        # each inner engine says which side it is (`attempts.pair_side`):
+        # a pair of one engine names both sides alike in the options
+        for side, inner in (("src", self.src_engine),
+                            ("dst", self.dst_engine)):
+            inner.pair_side = side
         # the mover, the DDL conversion and the binlog tail below are still
         # written for this one pair; they are reached through these names and
         # refuse anything else rather than pretending

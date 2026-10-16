@@ -10626,6 +10626,22 @@ P0-WORKFLOW-DEPTH.recover and P0-AUTO-RESOURCES. This is a platform-wide hard
 requirement, not a claim of current resilience coverage.
 
 Status 2026-10-16: PARTLY.
+- W16D proved on the sandbox: MySQL into PostgreSQL through the table
+  copier, a read lost mid-copy read again (class connectivity, path retry,
+  2 tries), a write whose outcome was lost counted on the target first
+  (class uncertain_commit, path reconcile, found committed, not written
+  again) and a refused size retuned smaller - each with 60 of 60 rows once
+  and both servers' sums equal (0.76s, 0.86s, 0.53s a run,
+  `tests/test_a_fault_in_each_copier_is_recovered_on_a_server.py`). The
+  catalogue holds a transient class held to the unit (`lock`: a lock wait
+  past the server's limit or a deadlock victim) that admits isolate; an
+  open breaker withholds retry, so a unit that keeps meeting it is set
+  aside (`test_an_open_breaker_isolates_a_unit_held_by_a_lock`). The tail's
+  wait after a lost link is `decide.lost_link_wait`, costed from the
+  reconnects measured in the loop and how long the loss has lasted - the
+  `min(60, 2 ** n)` is gone. Left: compound fault + crash + resume runs,
+  the tail's read loop with a PostgreSQL source on the sandbox, the
+  workers-pinned-to-1 baseline beside the tuned run (not measured).
 - Done: `migkit/faults.py` `CATALOGUE` holds 24 classes (the list above plus
   `unknown`), each with detection by engine code (MySQL number, SQLSTATE) and
   by effect (`classify`: a transient failure after a write was sent that the
@@ -10802,6 +10818,15 @@ the cause. Reported example: unreasonable LOB sizing causes failure rather
 than automatic adjustment. This is operational feedback, not a claim that
 all competitor versions behave identically. migkit must discover, diagnose,
 tune and verify every applicable aspect of the task through shared decisions.
+W16D: SQL Server's statement copier writes a batch in parts cut at the
+table's `tuning.Retune` sizes (`tuning.sized`), each part its own
+transaction and a unit of the attempt ledger; a part refused for its size
+is retuned from the cause and the rest goes again after the parts that
+committed (`tests/test_sqlserver_copier_units_are_sized_on_a_server.py`;
+fake proof `test_a_sql_server_statement_refused_for_its_size_is_retuned`).
+Left: the PostgreSQL range-pipe size dimension, `payload_way` before
+large-value tables, the hetero range copier's processes as ledger units
+(`ranges.each_owned` drives threads, not processes), baselines.
 
 Acceptance criteria:
 

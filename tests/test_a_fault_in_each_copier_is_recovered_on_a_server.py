@@ -58,6 +58,9 @@ def eng(pair, tmp_path, monkeypatch):
     monkeypatch.setattr(tuning.Retune, "__init__", keep)
     e.kept = kept
     yield e, monkeypatch, crossmove
+    # the kept connections let go, so the next test's fresh database drops
+    for inner in (e.src_engine, e.dst_engine):
+        getattr(inner, "release_kept", lambda: None)()
     os.environ.pop("MIGKIT_FAILPOINT", None)
     faults.reset()
 
@@ -65,8 +68,9 @@ def eng(pair, tmp_path, monkeypatch):
 def _equal(eng):
     my = xp.ok(xp.my_sql("select count(*), count(distinct id),"
                          " sum(length(v)) from t")).split()
+    # the PostgreSQL client says a row's columns apart with a bar
     pg = xp.ok(xp.pg_sql("select count(*), count(distinct id),"
-                         " sum(length(v)) from t")).split()
+                         " sum(length(v)) from t")).replace("|", " ").split()
     assert my == pg and my[0] == "60", (my, pg)
 
 
@@ -91,7 +95,7 @@ def test_a_read_lost_mid_copy_is_read_again_and_kept(eng):
 
 def test_a_write_lost_after_it_was_sent_is_counted_not_written_again(eng):
     e, mp, _ = eng
-    mp.setenv("MIGKIT_FAILPOINT", "batch.written:1:fault=connectivity")
+    mp.setenv("MIGKIT_FAILPOINT", "batch.written:1:fault=uncertain_commit")
     moved, _, fell = e.copy_range("cx", "t", "public.t", 0, 60, "copier")
     assert moved == 60 and fell is None
     _equal(e)

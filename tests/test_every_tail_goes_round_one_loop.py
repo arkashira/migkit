@@ -146,9 +146,11 @@ def test_a_link_lost_past_the_recovery_is_waited_out_and_read_again(
                                      tmp_path, follow_until="caught_up"),
                                  token=0, save=lambda a: None)
     assert why == "caught up"
-    assert any("lost a connection" in s and "trying again in 2s" in s
+    # the outer wait is the decision's (`decide.lost_link_wait`): nothing
+    # came back yet, so as long again as this loss lasted - no constant
+    assert any("lost a connection" in s and "trying again in" in s
                for s in said), said
-    assert naps[-1] == 2 and len(naps) == 4, naps
+    assert naps[-1] < 1 and len(naps) == 4, naps
     assert looks.calls[:5] == [0, 0, 0, 0, 0], looks.calls
 
 

@@ -573,6 +573,9 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
         until_ = until(hop, scheduled=slot_ends is not None) \
             if hop is not None else "stopped"
     seen, caught_up, failures = 0, time.time(), 0
+    # how long each lost link took to answer again, and when this one was
+    # lost: the outer wait is costed from these (`decide.lost_link_wait`)
+    reconnects, lost_at = [], None
     wait = idle[0]
     pace = Pace(*idle)
     ended = "asked"
@@ -619,6 +622,7 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
                         f" {noun}; the position is saved for the next")
                     ended = "slot"
                     break
+                asked = time.monotonic()
                 try:
                     token, (after, n, settled) = looked()
                 except Exception as e:  # noqa: BLE001 - classified here
@@ -630,17 +634,24 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
                     # so it is read again from there - which the appliers
                     # are idempotent for, or the target's mark settles
                     failures += 1
-                    pause_s = min(60, 2 ** min(failures, 6))
+                    if lost_at is None:
+                        lost_at = asked
+                    from . import decide
+                    pause_s, _ = decide.lost_link_wait(
+                        reconnects, time.monotonic() - lost_at)
                     said = (str(e).strip().splitlines() or [""])[0]
                     for secret in secrets:
                         said = without_secret(said, secret)
                     log(f"lost a connection ({said[:100]}); trying again in"
-                        f" {pause_s}s from the last saved position")
+                        f" {pause_s:.1f}s from the last saved position")
                     beat_now(force=True)
                     _nap(where, pause_s)
                     if lost is not None:
                         token = lost(e, token)
                     continue
+                if lost_at is not None:
+                    reconnects.append(time.monotonic() - lost_at)
+                    lost_at = None
                 failures = 0
                 if n:
                     # a batch carried: said at once, whatever the last beat
