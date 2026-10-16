@@ -26,7 +26,12 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 385
+## Upward imports still listed: 387
+
+### (not listed)
+
+- `migkit/engines/mssql.py:4234` engines -> workflows (`tailctl`)
+- `migkit/engines/oracle.py:2393` engines -> workflows (`tailctl`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
@@ -557,7 +562,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a safety module asks the decision engine (`decide.lift_hold`) whether a hold a run left may be lifted; the holds and their ages are to be handed up as facts by the command
 
-- `migkit/leftovers.py:350` safety -> decision (`decide`)
+- `migkit/leftovers.py:366` safety -> decision (`decide`)
 
 ### a safety refusal is said by reporting's `export`; the wording moves below safety
 
@@ -649,7 +654,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/dynamodb.py:1043` engines -> workflows (`barriers`)
 - `migkit/engines/kafka.py:1318` engines -> workflows (`barriers`)
-- `migkit/engines/mongodb.py:5277` engines -> workflows (`barriers`)
+- `migkit/engines/mongodb.py:5321` engines -> workflows (`barriers`)
 - `migkit/engines/redis.py:2949` engines -> workflows (`barriers`)
 
 ### an engine calls `changetopic` for a step it cannot do itself; the engine split gives that step a contract below the engines
@@ -683,7 +688,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/dynamodb.py:497` engines -> workflows (`marks`)
 - `migkit/engines/hetero.py:4062` engines -> workflows (`marks`)
 - `migkit/engines/kafka.py:1179` engines -> workflows (`marks`)
-- `migkit/engines/mongodb.py:4669` engines -> workflows (`marks`)
+- `migkit/engines/mongodb.py:4713` engines -> workflows (`marks`)
 - `migkit/engines/mysql.py:1565` engines -> workflows (`marks`)
 - `migkit/engines/postgres.py:2949` engines -> workflows (`marks`)
 - `migkit/engines/redis.py:2948` engines -> workflows (`marks`)

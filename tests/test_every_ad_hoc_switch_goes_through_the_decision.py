@@ -246,6 +246,8 @@ def _clickhouse(monkeypatch, tmp_path, pull):
                                      "address": "10.0.0.5:9000",
                                      "timeout_ms": 1000}),
             ("prepare_target", lambda self, db: None),
+            # the load's views held off read the target (`load_window`)
+            ("_fed_views", lambda self, db, tables: []),
             ("_pull_table", pull)):
         monkeypatch.setattr(ClickHouseEngine, name, fn)
     copied = []

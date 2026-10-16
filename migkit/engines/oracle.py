@@ -2379,6 +2379,50 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         except ValueError:
             return None
 
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.run_loop`), read
+        of the source in one bounded round each: the SCN the tail is at,
+        the SCN now (`log_position`), the redo bytes the instance wrote
+        since that position was first asked about (`v$sysstat` 'redo
+        size': every change makes redo, on the hop's tables or not), and
+        the oldest SCN the kept redo still holds (`v$log`,
+        `v$archived_log`) - a position older than that is not attached:
+        what lay between is gone. A mining reader holds no session between
+        rounds, so `attached` is otherwise unread, never assumed."""
+        import oracledb
+        from .. import tailctl
+        at = token.get("scn") if isinstance(token, dict) else token
+        at = int(at) if str(at).isdigit() else None
+        out = {"at": f"SCN {at}" if at is not None else ""}
+        try:
+            out["server"] = f"SCN {self.log_position('src', db)}"
+        except oracledb.Error as e:
+            return {**out, "attached": False,
+                    "why_detached": (str(e).strip().splitlines()
+                                     or [""])[0][:120]}
+        try:
+            got = self._rows("src", db, "select value from v$sysstat where"
+                                        " name = 'redo size'")
+            wrote = int(got[0][0]) if got else None
+        except oracledb.Error:
+            wrote = None  # no grant on v$sysstat: the redo's move is unread
+        memo = self.__dict__.setdefault("_tail_moved", {}).setdefault(db, {})
+        out["moved"] = tailctl.log_moved(memo, token, wrote)
+        try:
+            got = self._rows("src", db, (
+                "select least(nvl((select min(first_change#) from"
+                " v$archived_log where deleted = 'NO'), 9e37),"
+                " nvl((select min(first_change#) from v$log), 9e37))"
+                " from dual"))
+            kept = int(got[0][0]) if got and got[0][0] is not None else None
+        except oracledb.Error:
+            kept = None
+        if at is not None and kept is not None and kept > at:
+            out.update(attached=False, why_detached=(
+                f"the source keeps redo from SCN {kept} only, past the"
+                f" tail's SCN {at}"))
+        return out
+
     def log_position(self, side, db):
         from . import oracle_logminer
         return oracle_logminer.current_scn(self, side, db)

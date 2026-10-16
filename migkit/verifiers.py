@@ -434,11 +434,18 @@ for _name, _spec in _ACCOUNTS.items():
 # code that builds their command lines, and every other is given what
 # migkit does instead.
 
-_DUMP_FILES = ("movers.py::pgdump_move", "movers.py::_pg_schema",
-               "movers.py::_pg_load_schema",
-               "engines/postgres.py::_dump_schema_native",
-               "engines/postgres.py::rehearse",
-               "engines/postgres.py::_client", "leftovers.py::pg_dump_args")
+#: each program's own command builders: an option found where only the
+#: other's line is built is not counted as used by this one. A function
+#: that builds both lines (`pgdump_move`, `_pg_schema`, `rehearse`) is read
+#: for both - the reader's grain is a function, so there the two still
+#: share tokens until those builders are split
+_SHARED = ("movers.py::pgdump_move", "movers.py::_pg_schema",
+           "engines/postgres.py::rehearse", "engines/postgres.py::_client")
+_DUMP_FILES = {
+    "pg_dump": _SHARED + ("engines/postgres.py::_dump_schema_native",
+                          "leftovers.py::pg_dump_args"),
+    "pg_restore": _SHARED + ("movers.py::_pg_load_schema",),
+}
 
 _TEXT_FORM = ("migkit's data goes in the archive's copy form and its schema"
               " in the archive, restored by the restore program; a text"
@@ -628,7 +635,7 @@ for _name, _spec in _DUMPS.items():
     tooluse.register(
         _name, release=_spec["version"],
         declared={"": frozenset({*_spec["features"], *_spec["unused"]})},
-        reads=(_DUMP_FILES, {("", f): token for f, token in
+        reads=(_DUMP_FILES[_name], {("", f): token for f, token in
                              _spec["features"].items()}),
         options={("", f): (UNUSED, why)
                  for f, why in _spec["unused"].items()})

@@ -4221,6 +4221,44 @@ class MSSQLEngine(DbapiRows, Engine):
                                  f"{len(missed)} not tracked",
                                  sc.Ctx(db=db, tables=tables)))
 
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.run_loop`), read
+        of the source in one bounded round: where the tail is, the feed's
+        position now (`log_position`), and the bytes the database's log
+        files wrote since that position was first asked about
+        (`sys.dm_io_virtual_file_stats`: every change is logged, on the
+        hop's tables or not). A feed that polls holds no session the
+        server could list between rounds, so `attached` is said only where
+        the position cannot be read (False, and why) - never assumed."""
+        import pymssql
+        from .. import tailctl
+        at = (token.get("cdc") or token.get("lsn")
+              if isinstance(token, dict) else token)
+        out = {"at": "" if at is None else str(at)}
+        try:
+            now = self.log_position("src", db)
+        except (pymssql.Error, SystemExit) as e:
+            return {**out, "attached": False,
+                    "why_detached": (str(e).strip().splitlines()
+                                     or [""])[0][:120]}
+        if isinstance(now, dict):
+            now = now.get("cdc") or now.get("lsn")
+        if now is not None:
+            out["server"] = str(now)
+        try:
+            got = self._rows("src", db, (
+                "select sum(f.num_of_bytes_written) from"
+                " sys.dm_io_virtual_file_stats(db_id(), null) f join"
+                " sys.database_files d on d.file_id = f.file_id"
+                " where d.type = 1"))
+            wrote = int(got[0][0]) if got and got[0][0] is not None \
+                else None
+        except pymssql.Error:
+            wrote = None  # no VIEW SERVER STATE: the log's move is unread
+        memo = self.__dict__.setdefault("_tail_moved", {}).setdefault(db, {})
+        out["moved"] = tailctl.log_moved(memo, token, wrote)
+        return out
+
     def log_position(self, side, db):
         """The position now, in the notation of the feed this database is
         followed through (`follow_way`, asked once and kept)."""

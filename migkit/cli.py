@@ -509,6 +509,23 @@ def _tables_to_copy(hop, eng, d, table=""):
         return None
 
 
+def _not_your_data(eng, dbs):
+    """The one place the tables the scope leaves out as a provider's own
+    are listed (`leftovers.not_your_data`), of the target's listing of
+    each database; a listing the target refuses is said, not skipped."""
+    from . import leftovers
+    names, out = [], []
+    fn = getattr(eng, "neutral_tables", None)
+    for d in dbs or ():
+        try:
+            names += list(fn("dst", d)) if callable(fn) else []
+        except Exception as e:  # noqa: BLE001 - said, the check goes on
+            out.append(f"{d}: the target's tables could not be listed"
+                       f" ({(str(e).strip().splitlines() or [''])[0][:80]}),"
+                       " so a provider's own tables there are not named")
+    return leftovers.not_your_data(names) + out if names or out else []
+
+
 def _keep_out(hop, eng, d, tables, go, whole=False):
     """The interlock's word on a copy of `d` (`interlock.before_copy`):
     the tables whose rows the hop keeps as they are are left out of it.
@@ -2607,6 +2624,13 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
         coverage["exclude"] = coverage.get("exclude", []) + [
             p for p in hop.run_exclude if p not in coverage.get("exclude",
                                                                 [])]
+    # a provider's own tables on the target, left out as bookkeeping: said
+    # by name, here and in the report (`leftovers.not_your_data`)
+    theirs = _not_your_data(eng, dbs)
+    if theirs:
+        coverage["not your data"] = theirs
+        for line in theirs:
+            console.print(f"  {_esc(line)}")
     # a check under a scope narrower than the one the move took is not a
     # whole check of what was moved (`_narrower_than_moved`)
     narrower = _narrower_than_moved(hop, dbs)

@@ -36,6 +36,28 @@ def test_the_listing_names_the_provider():
 
 
 def test_the_line_says_whose_it_is_and_what_is_left_out():
+    from migkit import cli
+
+    class Target:
+        def neutral_tables(self, side, db):
+            assert side == "dst"
+            return ["orders", "__dst__tencentdb__sync_6fve1pd0",
+                    "awsdms_apply_exceptions"]
+    said = cli._not_your_data(Target(), ["shop"])
+    assert said[0] == ("__dst__tencentdb__sync_6fve1pd0: the provider's"
+                       " sync-back table (Tencent DTS), not your data: left"
+                       " out of scope, counts and the check")
+    for p in leftovers.PROVIDERS_UNVERIFIED:
+        assert f"a sync-back or control table of {p}: not checked for {p}" \
+            in said
+    assert not any(line.startswith("orders") for line in said)
+
+    class Refusing:
+        def neutral_tables(self, side, db):
+            raise RuntimeError("permission denied")
+    (line,) = [x for x in cli._not_your_data(Refusing(), ["shop"])
+               if x.startswith("shop:")]
+    assert "could not be listed (permission denied)" in line
     lines = leftovers.provider_tables(["orders", SYNC,
                                        "awsdms_apply_exceptions"])
     assert lines == [

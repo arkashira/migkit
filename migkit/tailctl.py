@@ -765,8 +765,9 @@ def quiet_line(db, state, facts, applied, since):
                  f" events ({facts.get('moved'):,} bytes of its log)"
                  " elsewhere, none on your tables")
     elif state == "elsewhere":
-        head += (f" - quiet: the source wrote {facts.get('moved'):,} bytes"
-                 " of its log elsewhere, none on your tables")
+        head += (f" - quiet: the source wrote {facts.get('moved'):,}"
+                 f" {facts.get('moved_unit') or 'bytes of its log'}"
+                 " elsewhere, none on your tables")
     elif state == "idle":
         head += " - quiet: the source wrote nothing"
     if facts.get("sync_back"):
@@ -954,6 +955,24 @@ def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):
              secrets=(eng.hop.source.password, eng.hop.target.password),
              idle=(min(every, IDLE_MOST) / 8, every),
              where_now=_where_now(eng, db))
+
+
+def log_moved(memo, token, wrote):
+    """How far a counter the source keeps of its own log (bytes written,
+    entries appended) moved since `token` was first asked about - the
+    `moved` of a `tail_where` whose position cannot itself be measured in
+    the log's bytes. `memo` is the engine's own dict for that database;
+    a new token starts it again. None where the counter went back (the
+    server restarted): what it wrote since then is not known."""
+    import json
+    key = json.dumps(token, sort_keys=True, default=str)
+    if memo.get("token") != key or wrote is None:
+        memo.update(token=key, base=wrote)
+        return 0 if wrote is not None else None
+    if wrote < memo["base"]:
+        memo.update(base=wrote)
+        return None
+    return wrote - memo["base"]
 
 
 def _where_now(eng, db):

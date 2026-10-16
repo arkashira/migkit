@@ -4543,6 +4543,50 @@ class MongoEngine(Engine):
         return (((hello.get("lastWrite") or {}).get("majorityOpTime") or {})
                 .get("ts"))
 
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.run_loop`), read
+        of the source in one bounded round: the oplog time the tail is at,
+        the oplog's newest and oldest entries, and the writes the server
+        counted since that position was first asked about (`serverStatus`
+        opcounters: every write, on the hop's collections or not). A
+        position older than the oldest entry kept is not attached: what
+        lay between is gone. A change stream polled between rounds holds
+        no cursor the server could list, so `attached` is otherwise
+        unread, never assumed."""
+        from pymongo.errors import PyMongoError
+
+        from .. import tailctl
+        ts = oplog_ts(token)
+        out = {"at": f"{ts.time}:{ts.inc}" if ts is not None else ""}
+        try:
+            oplog = self._client("src").local["oplog.rs"]
+            newest = next(iter(oplog.find({}, {"ts": 1}).sort(
+                "$natural", -1).limit(1)), None)
+            oldest = next(iter(oplog.find({}, {"ts": 1}).sort(
+                "$natural", 1).limit(1)), None)
+        except PyMongoError as e:
+            return {**out, "attached": False,
+                    "why_detached": (str(e).strip().splitlines()
+                                     or [""])[0][:120]}
+        if newest:
+            out["server"] = f"{newest['ts'].time}:{newest['ts'].inc}"
+        try:
+            ops = self._client("src").admin.command("serverStatus")[
+                "opcounters"]
+            wrote = sum(int(ops.get(k) or 0)
+                        for k in ("insert", "update", "delete"))
+        except (PyMongoError, KeyError):
+            wrote = None
+        memo = self.__dict__.setdefault("_tail_moved", {}).setdefault(db, {})
+        out.update(moved=tailctl.log_moved(memo, token, wrote),
+                   moved_unit="writes")
+        if ts is not None and oldest and oldest["ts"] > ts:
+            out.update(attached=False, why_detached=(
+                "the oplog keeps entries from"
+                f" {oldest['ts'].time}:{oldest['ts'].inc} only, past the"
+                " tail's position"))
+        return out
+
     def _oplog(self, side, flt, limit=0, sort=1, projection=None,
                stored=False):
         """The entries of the server's oplog matching `flt`, oldest first

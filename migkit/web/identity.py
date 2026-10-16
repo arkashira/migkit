@@ -313,8 +313,12 @@ class Oidc:
                 "Authorization": f"Bearer {access_token}"})
             got.raise_for_status()
             info = got.json()
+        except Refused:
+            # the egress gate refused: signing in without the groups the
+            # provider would have given would grant less, silently
+            raise
         except Exception:  # noqa: BLE001 - the ID token's claims stand
-            return {}  # (a gate that refused, too: said once, by the gate)
+            return {}
         if str(info.get("sub")) != str(sub):
             raise Refused("the identity provider's user information names"
                           " another person than its ID token")
@@ -426,6 +430,12 @@ NS["xenc11"] = XENC11
 #: the content ciphers an encrypted assertion may use, by key bytes
 GCM = {XENC11 + "aes128-gcm": 16, XENC11 + "aes192-gcm": 24,
        XENC11 + "aes256-gcm": 32}
+def _cipher(enc):
+    """The content cipher an EncryptedAssertion names, or None."""
+    method = enc.find("xenc:EncryptedData/xenc:EncryptionMethod", NS)
+    return method.get("Algorithm") if method is not None else None
+
+
 CBC = {XENC + "aes128-cbc": 16, XENC + "aes192-cbc": 24,
        XENC + "aes256-cbc": 32}
 DIGESTS = {"http://www.w3.org/2000/09/xmldsig#sha1": "SHA1",
@@ -792,6 +802,15 @@ class Saml:
         # a signature on the response covers the ciphertext; one on the
         # assertion is inside it, and is read once the assertion is open
         if enc and doc.find("ds:Signature", NS) is None:
+            # CBC content is not authenticated: opened before any signature
+            # held, its padding errors answer whoever sent it (a padding
+            # oracle), so it is opened only under a signed response
+            if _cipher(enc[0]) in CBC:
+                raise Refused("the answer is not signed and its assertion is"
+                              " encrypted with AES-CBC, which is opened only"
+                              " under a signature that held first - have the"
+                              " identity provider sign the response, or"
+                              " encrypt with AES-GCM")
             enc[0].getparent().replace(enc[0], self._open(enc[0]))
             raw = etree.tostring(doc)
         taken = frozenset(m for m in SignatureMethod

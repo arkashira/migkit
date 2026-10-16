@@ -664,7 +664,7 @@ class RedisEngine(Engine):
         except redis.RedisError:
             claim = ""
         v = tuple(int(x) for x in re.findall(r"\d+", claim)[:2])
-        return {"expiry": expiry,
+        return {"db": db, "expiry": expiry,
                 "history": "freq" if pol in self.LFU else "idletime",
                 "abs": v >= (5, 0)}
 
@@ -879,7 +879,7 @@ class RedisEngine(Engine):
             # a writer that lost its hold is refused by the target first
             # (`fencing`)
             from .. import fencing
-            fencing.hold(self, "dst", str(dst.connection_pool.connection_kwargs.get("db", 0)), None)
+            fencing.hold(self, "dst", how.get("db", label), None)
             write = dst.pipeline(transaction=mark)
             if mark:
                 write.execute_command(*self._mark_command())

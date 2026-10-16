@@ -118,6 +118,12 @@ PROVIDER_TABLES = [
     ("AWS DMS", Named("awsdms_history"), "control table"),
     ("AWS DMS", Named("awsdms_validation_failures_v1"), "control table"),
 ]
+#: managed transfer services whose own tables on the target are not
+#: known here from their documentation (the shapes could not be read
+#: from it when this was written): never guessed, so a table of theirs is
+#: compared as data, and the check says it did not look (`not_checked`)
+PROVIDERS_UNVERIFIED = ("Alibaba Cloud DTS", "Huawei Cloud DRS",
+                        "Google Database Migration Service")
 NOT_DATA_TABLES = [(mover, pat) for mover, pat, _ in PROVIDER_TABLES] + [
     ("gh-ost", ("_", "_ghc")), ("gh-ost", ("_", "_ghk")),
     ("dlt", Named("_dlt_loads")), ("dlt", Named("_dlt_pipeline_state")),
@@ -256,6 +262,16 @@ def provider_tables(names):
     in name order."""
     return [got for got in (provider_table(n) for n in sorted(names or ()))
             if got]
+
+
+def not_your_data(names):
+    """What the scope listing, the check and the report say of a target
+    holding `names`: the provider's tables among them (`provider_tables`),
+    then each provider whose tables are not known here
+    (`PROVIDERS_UNVERIFIED`) as not checked."""
+    return provider_tables(names) + [
+        f"a sync-back or control table of {p}: not checked for {p}"
+        for p in PROVIDERS_UNVERIFIED]
 
 
 def is_replication_artifact(name, schema=None):

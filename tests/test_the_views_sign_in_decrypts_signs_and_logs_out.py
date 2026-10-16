@@ -72,7 +72,7 @@ def _sign_in(app, idp, **kw):
 
 @pytest.mark.parametrize("how,cipher,whole", [
     ("oaep-sha1", "gcm", False),      # signed inside the ciphertext
-    ("oaep-sha256", "cbc", False),
+    ("oaep-sha256", "cbc", True),     # CBC only under a signed response
     ("oaep-sha1", "gcm", True),       # the response signed over the cipher
 ])
 def test_an_encrypted_assertion_is_opened_with_the_views_key(
@@ -89,6 +89,32 @@ def test_an_encrypted_assertion_is_opened_with_the_views_key(
     status, me = _me(c)
     assert status == 200 and me["id"] == "ann@example.com"
     assert me["groups"] == ["change-board"] and me["via"] == "saml"
+
+
+def test_cbc_content_under_an_unsigned_response_is_refused_unopened(
+        saml, monkeypatch):
+    """Verify, then decrypt: CBC content is not authenticated, so opening
+    it before any signature held would answer its sender's padding guesses
+    - refused in words, and the view's key never touches it."""
+    from migkit.web import identity
+    app, idp = saml
+    opened = []
+    real = identity.Saml._open
+    monkeypatch.setattr(identity.Saml, "_open", lambda self, enc: (
+        opened.append(1), real(self, enc))[1])
+    c = browser(app)
+    where = _start(c)
+    r = _post(c, *idp.answer(where, encrypt_to=app.saml.cert_pem,
+                             how="oaep-sha256", cipher="cbc", sign=True,
+                             sign_response=False))
+    assert r.status_code == 403 and b"AES-CBC" in r.data
+    assert opened == []
+    # GCM under the same unsigned response is opened (authenticated)
+    where = _start(c)
+    r = _post(c, *idp.answer(where, encrypt_to=app.saml.cert_pem,
+                             how="oaep-sha256", cipher="gcm", sign=True,
+                             sign_response=False))
+    assert r.status_code == 303 and opened == [1]
 
 
 @pytest.mark.parametrize("kw,words", [
