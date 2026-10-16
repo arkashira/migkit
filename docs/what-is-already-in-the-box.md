@@ -408,15 +408,18 @@ Cheapest first, where "cheap" means no new dependency:
    binary, the target emptied by migkit after the dump rather than by a
    loader flag that no longer exists, and `hop.exclude` honoured by the
    dump and the emptying alike. `test_the_mysql_bulk_path_runs.py`. Still
-   open beside it: the index window drops indexes on excluded tables too,
-   and the pg_dump path still empties the target before it has a dump.
-3. mydumper `--regex` / `--where`, pgcopydb `--filters`, `pg_dump -t/-T`,
-   Debezium `table.include.list` - the mover half of plan item 17, all of it
-   already installed.
+   open beside it: the pg_dump path still empties the target before it has
+   a dump. The index window no longer drops indexes on excluded tables
+   (`_outside_exclusion`).
+3. `pg_dump -t/-T`, Debezium `table.include.list` - the mover half of plan
+   item 17, both already installed. mydumper `--regex` and pgcopydb
+   `--filters` are used now (`movers.py`); mydumper `--where` stays unused,
+   since it takes one predicate for every table and a hop's filter is per
+   table.
 4. ~~pgcopydb `snapshot`, `follow`, `compare data`~~ **done** - a shared
    snapshot for the consistent pass, a CDC path driven from here for a
    target that cannot dial the source, and an independent verifier to check
-   migkit's own against. `compare schema` is still unopened.
+   migkit's own against. `compare schema` is passed both sides from the hop.
 5. `GenericEngine` - **schema comparison and the key battery done**;
    discovery still open. `HeteroEngine` now has a schema check too (D9c) -
    it had none, and reported a column the target does not have as a

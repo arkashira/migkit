@@ -11390,3 +11390,11 @@ W13M (10-16): `capabilities._states` reads every state set through one protocol 
 ### W13H (2026-10-16) hop keys declared for everything read by name
 Done: `keys: prefix` and every `consolidate:` sub-key held to its own words (`hopkeys.sub_choice`); `versions:` declared for the warehouses and read as `Hop.versions`; `nodes:` (key spaces, conflict rule, routing, marks) declared and read by `scenarios.topology_settings`, used by `consolidate.topology_decision`; the side and hop options other waves read by name declared, `config.py` reading `mask_on_write`, `mask_key` and the hetero engines through `hopkeys.opt`; `scenarios.storage_copy_way` and `topology_decision` called from `scenarios.copy_lines` in the move's plan.
 Not done: the move's copy-way choice itself (`physical.choose`, unowned this wave) does not yet ask `scenarios.storage_copy_way`; the plan only says and records it. `nodes:` marks and key spaces are the operator's words, not read from the servers.
+
+## W14H - docs prose and the redpanda registry: not done
+
+* The broker's options are in the whole-use registry (`movers.py`, `_redpanda_account`). Its unused options are not written: the pinned release's option list is not available offline, so none is declared.
+* `docs/what-is-already-in-the-box.md` names wrapped tools through its whole text; only its stale to-do items were corrected. Rewrite it without tool names.
+* Read, no change needed on the read: `docs/cutover.md` (its claims were not each checked against the code).
+* Not read in this pass: `docs/problems-and-what-ends-them.md`, `docs/case-study-what-a-consistent-report-does-not-cover.md`, `docs/research-other-tools.md`, `docs/behavior-critical-params.md`, `docs/threat-model.md`, `docs/web.md`, `docs/goals-and-modes.md` prose, `docs/what-a-migration-actually-costs.md`, `docs/scale.md`, and the rows of `docs/backlog.md` (owned by the backlog).
+* Unverified: Debezium `table.include.list` and `pg_dump -t/-T` in the box page's item 3.

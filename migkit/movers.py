@@ -8156,10 +8156,38 @@ tooluse.register(
               "jdbc-sink": frozenset(_SINK + _CONNECT),
               "signals": frozenset(_SIGNALS)},
     families=_DEBEZIUM_FAMILIES)
+def _redpanda_account():
+    o = {}
+
+    def put(command, option, state, why):
+        o[(command, option)] = (state, why)
+    put("start", "--overprovisioned", tooluse.USED, "a container on a machine"
+        " shared with the source's own tools: the broker skips the hardware"
+        " checks and tuning a dedicated broker needs")
+    put("start", "--smp", tooluse.USED, "one core: the pipeline carries one"
+        " hop's changes, not a cluster's load")
+    put("start", "--memory", tooluse.USED, "1 GB, the whole share the compose"
+        " file gives the broker")
+    put("start", "--node-id", tooluse.USED, "0: a single broker, the only"
+        " node the pipeline starts")
+    put("start", "--kafka-addr", tooluse.USED, "the pipeline's own network"
+        " only: no port is published, the broker is asked through its"
+        " compose file")
+    put("start", "--advertise-kafka-addr", tooluse.USED, "the service's own"
+        " name, so the connector and the sink reach it on that network")
+    put("topic produce", "-f", tooluse.USED, "the key and the value of one"
+        " signal per line, tab-separated: a signal is one message")
+    put("topic consume", "--offset", tooluse.USED, ":end, so only the"
+        " messages that arrive after the read starts are heard")
+    put("topic consume", "--format", tooluse.USED, "the value alone, one"
+        " message per line")
+    return o
+
+
 # the broker the generated pipeline pulls: source-available, its terms
 # accepted where every closed program's are (`tools.TERMS`, `doctor
 # --install`), and the pipeline not started until they are (`stream_ways`)
-tooluse.register("redpanda", options={})
+tooluse.register("redpanda", options=_redpanda_account())
 
 
 def _connect_api(method, path, body=None, port=8083, timeout=15):
