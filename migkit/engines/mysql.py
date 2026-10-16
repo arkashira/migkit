@@ -734,37 +734,76 @@ class MySQLEngine(Engine):
         return (f"select {cols} from `{self._d(side, db)}`.`{table}`"
                 f"{where}{order}{cap}", args or None, key, names)
 
+    #: `pieces` quotes a name by this: MySQL's `_q` is its query
+    NAME_QUOTE = "_quote_ident"
+
+    def _run(self, cur, sql, args=None):
+        """A statement `pieces` writes, its places `dbapi.MARK`."""
+        from .dbapi import MARK
+        if args:
+            cur.execute(sql.replace("%", "%%").replace(MARK, "%s"),
+                        tuple(args))
+        else:
+            cur.execute(sql)
+
+    def piece_limits(self, side, db):
+        """What one statement and one result row may hold on this side,
+        read off the server (`pieces.Sizing`): its `max_allowed_packet`,
+        which bounds a statement sent and a row returned alike."""
+        got = self._q(side, "select @@global.max_allowed_packet")
+        packet = pieces.setting_bytes(got[0][0]) if got else None
+        if not packet:
+            return []
+        return [pieces.Limit("max_allowed_packet", packet, "sent"),
+                pieces.Limit("max_allowed_packet", packet, "returned")]
+
+    def _read_plan(self, side, db, table, columns):
+        """The select list of a read: a byte or text value past what a row
+        carries whole (`pieces.Sizing.inline`) left out and read in
+        pieces by the row's key, or hashed where it lies inside a digest
+        folded here (`pieces.ReadPlan`, `pieces.DigestPlan`)."""
+        from .. import canon
+        wide = {}
+        for n, c in columns:
+            got = canon.read_expr("mysql", self._quote_ident(n), c)
+            if got != self._quote_ident(n):
+                wide[n] = got
+        plan = (pieces.DigestPlan if pieces.is_hashing(self)
+                else pieces.ReadPlan)
+        return plan(self, side, db, table, columns, wide)
+
     def neutral_batches(self, side, db, table, columns, size=1000,
                         where=None):
-        """The whole table in one pass, `size` rows at a time, for a table
-        with no key to resume from - read through a cursor the server keeps,
-        so no more than a batch is ever held here."""
+        """The whole table in one pass, `size` rows at a time or
+        `pieces.BATCH_BYTES`, for a table with no key to resume from -
+        read through a cursor the server keeps, so no more than a batch is
+        ever held here, a large value read in pieces (`_read_plan`)."""
         import pymysql
+        plan = self._read_plan(side, db, table, columns)
         sql, args, _, _ = self._read_query(side, db, table, columns, None,
-                                           None, where)
+                                           None, where, plan.select)
         conn = self._conn(side)
         try:
             with conn.cursor(pymysql.cursors.SSCursor) as cur:
                 cur.execute(sql, args)
-                while True:
-                    rows = cur.fetchmany(size)
-                    if not rows:
-                        break
-                    yield [list(r) for r in rows]
+                for rows in pieces.batches(cur, size, plan.size):
+                    yield plan.finish(rows)
         finally:
             conn.close()
 
     def neutral_read(self, side, db, table, columns, after=None, limit=1000,
                      where=None):
-        sql, args, key, names = self._read_query(side, db, table, columns,
-                                                 after, limit, where)
+        plan = self._read_plan(side, db, table, columns)
+        sql, args, key, names = self._read_query(
+            side, db, table, columns, after, limit, where, plan.select)
         held = self._moment_source(db) if side == "src" else None
         if held is not None:
             with held.cursor() as cur:
                 cur.execute(sql, args)
-                rows = [list(r) for r in cur.fetchall()]
+                raw = cur.fetchall()
         else:
-            rows = [list(r) for r in self._q(side, sql, args)]
+            raw = self._q(side, sql, args)
+        rows = plan.finish(raw)
         if not rows or not key:
             return (rows, None)
         idx = [names.index(k) for k in key if k in names]
@@ -798,9 +837,17 @@ class MySQLEngine(Engine):
         return out
 
     def neutral_write(self, side, db, table, columns, rows):
+        """Rows upserted by key. A row holding a value past what one
+        statement takes (`pieces.Sizing.inline`) is written first: its
+        first piece by the same upsert, the rest added a piece a
+        statement, in one transaction held by the fence
+        (`pieces.written_in_pieces`); the other rows as one batch."""
         if not rows:
             return 0
         from .. import canon
+        sz = pieces.sizing(self, side, db)
+        if pieces.wider_than(rows, sz.inline, sz.char_bytes):
+            return self._write_wide(side, db, table, columns, rows)
         names = [n for n, _ in columns]
         cols = ", ".join(f"`{n}`" for n in names)
         key = set(self.neutral_key(side, db, table))
@@ -838,6 +885,34 @@ class MySQLEngine(Engine):
             conn.commit()
         finally:
             conn.close()
+        return len(rows)
+
+    def _write_wide(self, side, db, table, columns, rows):
+        """The rows of `neutral_write` of which some hold a value past
+        `pieces.Sizing.inline`: those written in pieces, then the rest."""
+        from .dbapi import MARK
+        self._target_only(side, "write rows")
+        names = [n for n, _ in columns]
+        key = self.neutral_key(side, db, table)
+        sets = ", ".join(f"{self._quote_ident(n)} = values("
+                         f"{self._quote_ident(n)})" for n in names
+                         if n not in key)
+        insert = (f"insert into {self._qualified(side, db, table)} ("
+                  + ", ".join(self._quote_ident(n) for n in names)
+                  + ") values (" + ", ".join([MARK] * len(names)) + ")"
+                  + (f" on duplicate key update {sets}" if sets else ""))
+        conn = self._conn(side)
+        try:
+            with conn.cursor() as cur:
+                rest = pieces.written_in_pieces(self, cur, side, db, table,
+                                                columns, key, list(rows),
+                                                insert=insert)
+                fencing.hold(self, side, db, cur)
+            conn.commit()
+        finally:
+            conn.close()
+        if rest:
+            self.neutral_write(side, db, table, columns, rest)
         return len(rows)
 
     def neutral_empty(self, side, db, table, where=None):
@@ -2774,8 +2849,9 @@ class MySQLEngine(Engine):
         from .. import canon
 
         def folded():
-            return canon.fold_batches(columns, self.neutral_batches(
-                side, db, table, columns, 5000, where=where), way)
+            with pieces.hashing(self):
+                return canon.fold_batches(columns, self.neutral_batches(
+                    side, db, table, columns, 5000, where=where), way)
         jsons = self._json_in_sql(side, db, table, columns)
         if jsons is None:
             return folded()
@@ -3733,6 +3809,30 @@ class MySQLEngine(Engine):
         got = self._own_check_data(db, table, stream, with_counts)
         return got if table else got + self._mapped_data(db, stream)
 
+    def _change_markers(self, side, db):
+        """({table: marker}, why not): every table's marker on this side
+        from its modification counters (`unchanged.MySqlCounters`), in two
+        statements; no marker and the reason where a measured fact says the
+        counters are not to be believed, or the server will not say."""
+        from .. import unchanged
+        entry = unchanged.COUNTERS["mysql"]
+        try:
+            facts = self._q(side, entry.FACTS_SQL, fresh=True)
+            if not facts:
+                return {}, "the server did not say how it keeps its counters"
+            started, instrument, read_only = facts[0]
+            why = entry.refusal({"started": started, "instrument": instrument,
+                                 "read_only": read_only}, side)
+            if why:
+                return {}, why
+            rows = self._q(side, entry.ROWS_SQL, fresh=True)
+        except Exception as e:  # noqa: BLE001 - no counters, no skipping
+            return {}, f"the server did not give its counters: {e}"
+        mine = self._d(side, db)
+        return {str(t): unchanged.marker(
+            [None if v == "NULL" else v for v in [started, *rest]])
+            for schema, t, *rest in rows if str(schema) == mine}, ""
+
     def _own_check_data(self, db, table=None, stream=None, with_counts=False):
         if not table:
             # pass D: the leaves the tail keeps, where the hop keeps them
@@ -3756,9 +3856,42 @@ class MySQLEngine(Engine):
             with gate.unit():
                 return self._diff_table(d, tbl)
 
+        # What was proved equal last time and the counters it carried, read
+        # before any table is. A table named, or a row count taken from this
+        # pass, is read whole: a repair's check and the counts need every
+        # row, and what they do not need is the saving
+        from .. import unchanged
+        proved = unchanged.Proof(self.hop.report_dir(db) / "proof.json")
+        marked, refused = {"src": {}, "dst": {}}, ""
+        if not table:
+            for side in marked:
+                marked[side], why = self._change_markers(side, db)
+                refused = refused or why
+        may_skip = not table and not with_counts
+        # the proof that goes into a cutover, or one taken while the source
+        # is held for one, passes no table over (`_held_for_cutover`)
+        held = self._held_for_cutover(db) if may_skip else ""
+        skipped = []
+        for t in tables if may_skip else ():
+            judged = unchanged.Judgement(False, held) if held else \
+                unchanged.judge("mysql", proved.get(t), marked["src"].get(t),
+                                marked["dst"].get(t))
+            if judged.skip:
+                skipped.append(t)
+                res.append(Result(
+                    "data", f"{db}.{t}", "ok",
+                    f"unchanged since it was last proved equal"
+                    f" ({judged.why}); no rows read this run"))
+                res[-1].tables = {str(t): "ok"}
+                if stream:
+                    stream(f"{t}: unchanged since it was last proved equal"
+                           f" ({judged.why}); no rows read this run")
+            elif stream and proved.get(t):
+                stream(f"{t}: read again - {judged.why}")
         per = {}
         with self._read_pool(db, self.hop.workers) as pool:
-            futs = {pool.submit(guarded, db, t): t for t in tables}
+            futs = {pool.submit(guarded, db, t): t for t in tables
+                    if t not in skipped}
             for fu in as_completed(futs):
                 r, ra, rb = fu.result()
                 if stream:
@@ -3795,6 +3928,24 @@ class MySQLEngine(Engine):
             rows_b += rb
             if ra != rb:
                 bad_counts.append(f"{t} src={ra} dst={rb}")
+        if not table:
+            # the counters read before the scan, so never newer than the
+            # evidence they stand for; a table that came out different keeps
+            # none, since a proof of the wrong thing would let the next run
+            # skip it
+            for t in tables:
+                if t in skipped:
+                    continue
+                if t in per and per[t][0].status == "ok":
+                    proved.set(t, marked["src"].get(t), marked["dst"].get(t))
+                else:
+                    proved.drop(t)
+            try:
+                proved.save()
+            except Exception:  # noqa: BLE001 - the next run reads it all
+                pass
+            if stream and refused:
+                stream(f"# every table is read: {refused}")
         res = sorted(res, key=lambda r: r.scope)
         self._last_throttle = gate.summary()
         note = gate.line()

@@ -2723,7 +2723,7 @@ UNPROVED = {
     # server (`_deep_triggers`, `_deep_render`, `_deep_table_options`)
     "verify.structure.triggers": "mysql oracle cassandra teradata cosmosdb",
     "verify.structure.collection-options": "mysql clickhouse oracle cassandra tidb redshift snowflake",
-    "verify.value.rendering": "mysql clickhouse mssql oracle",
+    "verify.value.rendering": "clickhouse mssql oracle",
     "verify.repair": "cockroachdb dsql couchbase clickhouse opensearch cassandra redshift snowflake",
     "verify.repair-undo": "cockroachdb dsql couchbase clickhouse opensearch cassandra redshift snowflake",
     "verify.table": "parquet db2 db2i db2zos ase redshift snowflake copybook iceberg delta cockroachdb dsql couchbase sapodp saas hetero",

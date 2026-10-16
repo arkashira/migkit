@@ -203,8 +203,9 @@ class MySqlCounters(Counters):
     counter row, a server whose instrument is off, or a source held
     read-only has no marker.
 
-    Not measured on a server: the statements are written from the
-    server's documentation (stub tests only)."""
+    Measured on MySQL 8.4 (`tests/test_mysql_counters_hold_on_a_server.py`):
+    each of an insert, an update, a delete, a truncate and an alter moves
+    a piece of the marker, and a table left alone keeps it."""
     kind = family = "mysql"
     pieces = ("started", "inserts", "updates", "deletes", "created",
               "table_id", "columns")

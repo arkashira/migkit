@@ -8747,7 +8747,7 @@ range digest, the fenced re-check, exact batches or the final proof.
 11. **Only what changed since the last proof:** tables and leaves
     untouched since they were last proved (modification counters,
     the tail's own record of keys touched) are not read again.
-    Not done (R20.11): `unchanged.COUNTERS` reads PostgreSQL and SQL
+    MySQL's counters read and proved on a server (`MySQLEngine._change_markers`, `tests/test_mysql_counters_hold_on_a_server.py`; the hop's scope is not yet in its marker, a restart is not made on the shared pair). Not done (R20.11): `unchanged.COUNTERS` reads PostgreSQL and SQL
     Server; MySQL and CockroachDB are declared in `unchanged.UNPROVED`
     (their files are other tickets'); the two SQL Server counter
     statements have not run on a server (stub tests only); postgres.py
@@ -11286,7 +11286,7 @@ What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs
 - `P0-DE.2` (row 4): OPEN (review 2026-10-16: `doctor.py` was reached from nothing and is deleted (a5ddd41); `migkit doctor` says tools, hops and connectivity, not the rung each side and leg stands on or its footprint
 - `P0-DE.4` (row 6): not yet as not applicable with reasons no server measured - large values on the newer engines and services, partitions on GaussDB, ASE, Iceberg, Delta and pairs; put back to not yet with their rows; db2, Parquet and the MySQL-wire services' partition reads owed a test
 - `P0-DEPTH.calibrate` (row 111): missing: the calibration on the final run
-- `P0-DEPTH.json` (row 113): UNPROVED`). Not done: MySQL's JSON in SQL (declared unproved); `PostgresEngine._json_text_sql` is still its own copy of canon's; a JSON key column is read parsed; the server tests written, not run
+- `P0-DEPTH.json` (row 113): UNPROVED`). MySQL's JSON in SQL is proved on a server (`tests/test_mysql_json_is_digested_in_sql_on_a_server.py`; `JSON_UNPROVED["mysql"]` stays as the reason for a server before 8.0.4 or MariaDB). Not done: `PostgresEngine._json_text_sql` is still its own copy of canon's; a JSON key column is read parsed; the server tests written, not run
 - `P0-DEPTH.triggers` (row 114): OPEN (review 2026-10-16: the range copy's load options set session_replication_role on the source export connection too, a superuser-only setting; the load side already owns it, superuser-gated
 - `P0-DEPTH.rank` (row 115): still a list of names, not a rung's own field everywhere
 - `P0-AUDIT` (row 117): open
