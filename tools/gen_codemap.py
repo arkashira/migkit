@@ -1408,6 +1408,14 @@ KNOWN_UPWARD = {
      "reports its own state down"): (
         "migkit/freeze.py migkit.barriers",
     ),
+    ("an engine calls `barriers` for the origin mark its atomic unit "
+     "carries; the engine split gives the mark a contract below the "
+     "engines"): (
+        "migkit/engines/dynamodb.py migkit.barriers",
+        "migkit/engines/kafka.py migkit.barriers",
+        "migkit/engines/mongodb.py migkit.barriers",
+        "migkit/engines/redis.py migkit.barriers",
+    ),
     ("a safety check reads `cutover` for the step it guards; the step "
      "reports its own state down"): (
         "migkit/approvals.py migkit.cutover",
@@ -1638,6 +1646,7 @@ KNOWN_UPWARD = {
     ("an engine calls `unchanged` for a step it cannot do itself; the "
      "engine split gives that step a contract below the engines"): (
         "migkit/engines/mssql.py migkit.unchanged",
+        "migkit/engines/mysql.py migkit.unchanged",
         "migkit/engines/postgres.py migkit.unchanged",
     ),
     ("an engine calls `upgrade` for a step it cannot do itself; the "
@@ -1716,6 +1725,7 @@ KNOWN_UPWARD = {
     ("an executor calls `fleet` for a workflow step; the step is "
      "passed in as a hook"): (
         "migkit/attempts.py migkit.fleet",
+        "migkit/ranges.py migkit.fleet",
     ),
     ("an executor calls `leaves` for a workflow step; the step is "
      "passed in as a hook"): (

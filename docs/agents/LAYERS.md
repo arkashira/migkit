@@ -28,15 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 406
 
-### (not listed)
-
-- `migkit/engines/dynamodb.py:1011` engines -> workflows (`barriers`)
-- `migkit/engines/kafka.py:1051` engines -> workflows (`barriers`)
-- `migkit/engines/mongodb.py:4973` engines -> workflows (`barriers`)
-- `migkit/engines/mysql.py:3817` engines -> workflows (`unchanged`)
-- `migkit/engines/redis.py:2863` engines -> workflows (`barriers`)
-- `migkit/ranges.py:693` execution -> workflows (`fleet`)
-
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
 
 - `migkit/charsets.py:1245` conversion -> decision (`decide`)
@@ -633,6 +624,13 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/mysql.py:3237` engines -> workflows (`appversions`)
 - `migkit/engines/postgres.py:4955` engines -> workflows (`appversions`)
 
+### an engine calls `barriers` for the origin mark its atomic unit carries; the engine split gives the mark a contract below the engines
+
+- `migkit/engines/dynamodb.py:1011` engines -> workflows (`barriers`)
+- `migkit/engines/kafka.py:1051` engines -> workflows (`barriers`)
+- `migkit/engines/mongodb.py:4973` engines -> workflows (`barriers`)
+- `migkit/engines/redis.py:2863` engines -> workflows (`barriers`)
+
 ### an engine calls `changetopic` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/bigtable.py:682` engines -> workflows (`changetopic`)
@@ -763,6 +761,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an engine calls `unchanged` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/mssql.py:747` engines -> workflows (`unchanged`)
+- `migkit/engines/mysql.py:3817` engines -> workflows (`unchanged`)
 - `migkit/engines/postgres.py:6164` engines -> workflows (`unchanged`)
 
 ### an engine calls `upgrade` for a step it cannot do itself; the engine split gives that step a contract below the engines
@@ -841,6 +840,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an executor calls `fleet` for a workflow step; the step is passed in as a hook
 
 - `migkit/attempts.py:316` execution -> workflows (`fleet`)
+- `migkit/ranges.py:693` execution -> workflows (`fleet`)
 
 ### an executor calls `leaves` for a workflow step; the step is passed in as a hook
 
