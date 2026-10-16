@@ -308,12 +308,14 @@ class _Live:
         return self.eng._rows(self.side, self.db, sql, args)
 
 
-def neutral_changes(eng, side, db, token=None, limit=1000, standby=None):
+def neutral_changes(eng, side, db, token=None, limit=None, standby=None):
     """(changes, token): the row changes of whole transactions committed
     after `token`, from the live log or, where the way is the log
     backups, from each backup restored onto `standby` (an object whose
     `_rows(sql, args)` asks the server migkit owns, its database in
     standby), in order."""
+    from .. import decide
+    limit = decide.page_given(limit)
     from .. import canon
     if token is None:
         return [], change_point(eng, side, db)

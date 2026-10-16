@@ -335,7 +335,7 @@ class DsqlEngine(PgWireEngine):
     def log_position(self, side, db):
         return {"fence": self._now_ns(side, db)}
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each row DSQL's stream says changed, in commit order once the
         stream has published everything before it."""
         if token is None:

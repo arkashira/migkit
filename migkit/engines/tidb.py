@@ -202,7 +202,7 @@ class TiDBEngine(MySQLEngine):
                 wide[n] = got
         return pieces.ReadPlan(self, side, db, table, columns, wide)
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, ending at `limit` rows or at the row that brings
         the read to `pieces.BATCH_BYTES`, its large values read in pieces
@@ -564,7 +564,7 @@ class TiDBEngine(MySQLEngine):
         Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each row TiCDC says changed, in commit order, as TiDB holds it
         at the watermark its batch ends on."""
         if token is None:

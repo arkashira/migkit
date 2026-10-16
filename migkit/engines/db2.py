@@ -996,7 +996,7 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
         (`neutral_changes`) and keeping each table in its own state."""
         return self._as_pair().tail_apply(db, go, token_path, log)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """The row changes of whole transactions committed after `token`,
         read from the source's log (`engines.db2_log`); a position is
         handed back that a stopped tail resumes from, leaving what was

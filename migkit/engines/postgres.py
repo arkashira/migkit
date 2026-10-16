@@ -2212,7 +2212,7 @@ select json_build_object(
                         break
                     yield [list(r) for r in rows]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         sql, args, key, names = self._read_query(side, db, table, columns,
                                                  after, limit, where)
@@ -3776,7 +3776,7 @@ select json_build_object(
                     " synchronous_standby_names, and move again.")
             time.sleep(0.2)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Row changes out of a logical slot, as neutral records.
 
         **Peeked, not consumed.** `pg_logical_slot_get_changes` advances the

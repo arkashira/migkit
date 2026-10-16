@@ -644,7 +644,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
                + (f" limit {int(limit)}" if limit else ""))
         return sql, params, types, key, names
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         sql, params, types, key, names = self._read_sql(
             side, db, table, columns, after, limit, where)
@@ -1444,7 +1444,7 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each row the change stream says changed, in commit-timestamp
         order, as Spanner held it at the fence its batch ends on."""
         if token is None:

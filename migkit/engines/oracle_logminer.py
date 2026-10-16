@@ -1213,13 +1213,15 @@ class Miner:
     #: rows of one transaction held before it is handed back in parts
     LARGEST_HELD = 20000
 
-    def read(self, token, limit=1000, ddl=None):
+    def read(self, token, limit=None, ddl=None):
         """(changes, token): whole transactions until about `limit`
         changes, in commit order; a transaction larger than the reader
         holds is handed back in parts, the part said in the token so a
         read that starts over leaves out what went. `ddl(db, text,
         commit)` turns a DDL statement of the redo into the changes that
         carry it."""
+        from .. import decide
+        limit = decide.page_given(limit)
         self.ddl = ddl
         lost_why = lost(self.eng, self.side, self.db, token)
         if lost_why:

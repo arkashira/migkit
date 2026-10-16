@@ -1671,7 +1671,7 @@ class TableSet:
                 if reached:
                     break
                 changes, after = reader.neutral_changes(
-                    "src", self.db, token, limit=16000)
+                    "src", self.db, token)
                 mine = [c for c in changes if self.key(c["table"]) == leaf]
                 if any(canon.is_ddl(c) for c in mine):
                     self.log(f"{leaf}: its shape changed while it was out"

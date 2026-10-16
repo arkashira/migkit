@@ -446,7 +446,7 @@ class NeptuneEngine(NeutralCopier, Engine):
         if batch:
             yield batch
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
@@ -1007,7 +1007,7 @@ class NeptuneEngine(NeutralCopier, Engine):
         Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each element or quad the stream says changed, in the order it
         was committed."""
         if token is None:

@@ -189,7 +189,7 @@ class TimestreamEngine(NeutralCopier, Engine):
         for i in range(0, len(rows), size):
             yield rows[i:i + size]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,

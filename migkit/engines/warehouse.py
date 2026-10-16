@@ -3609,7 +3609,7 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
                         r[i] = Decimal(r[i]).quantize(step)
         return rows
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         rows, last = super().neutral_read(side, db, table, columns, after,
                                           limit, where)

@@ -742,7 +742,7 @@ class Db2iEngine(Db2Engine):
                               for n, *rest in known[at].cols]
         return known[at]
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """The committed changes after `token`, transaction by transaction
         in commit order, and the position to ask from next: before the
         oldest transaction still open, with the ones committed after it

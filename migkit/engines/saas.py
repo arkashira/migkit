@@ -1079,7 +1079,7 @@ class SaasEngine(Engine):
             for i in range(0, len(batch), max(1, int(size))):
                 yield batch[i:i + size]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, which a program does not keep: the stream read
         whole and sorted, for the few callers that ask for a row or two."""
@@ -1229,7 +1229,7 @@ class SaasEngine(Engine):
         (`lend_log`)."""
         (self.__dict__.get("_lent_log") or print)(message)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """The changes since `token`: the program run from its state over
         every stream, what it hands over held to the hashes of what the
         target was given (`Seen`); Salesforce's own events where the

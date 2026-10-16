@@ -397,7 +397,7 @@ class CockroachEngine(PgWireEngine):
     def log_position(self, side, db):
         return {"fence": self._now(side, db)}
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each row the changefeed says changed, in commit order, as the
         cluster held it at the resolved timestamp its batch ends on."""
         if token is None:

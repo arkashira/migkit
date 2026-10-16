@@ -417,7 +417,7 @@ class CosmosEngine(NeutralCopier, Engine):
              for item in self._items(side, db, table, rng)),
             most_rows=int(size))
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
@@ -1310,7 +1310,7 @@ class CosmosEngine(NeutralCopier, Engine):
     #: comes back with its changes since
     REREADS_FROM_A_POSITION = True
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each item the change feed says was created, replaced or
         deleted, in its range's order - and a container dropped, or made
         since the tail began (one the saved position has no range of), as

@@ -1048,8 +1048,10 @@ class Follower:
                          (token.get("seen") or {}).items()},
                 "held": [], "ids": set(), "moved": time.monotonic()}
 
-    def changes(self, token, limit=1000):
+    def changes(self, token, limit=None):
         """(canon change records, the position after them)."""
+        from . import decide
+        limit = decide.page_given(limit)
         from . import canon
         st = self._state
         if st is None or st["key"] != json.dumps(token, sort_keys=True,

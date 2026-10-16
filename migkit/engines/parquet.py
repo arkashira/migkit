@@ -329,7 +329,7 @@ class ParquetEngine(NeutralCopier, Engine):
         yield from self._batches(side, db, table, [n for n, _ in columns],
                                  size, where)
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, which files do not keep: the whole table is read
         and sorted. The copier reads a Parquet table in one pass instead

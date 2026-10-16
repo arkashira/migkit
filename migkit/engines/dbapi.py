@@ -222,7 +222,7 @@ class DbapiRows(NeutralCopier):
 
     # ---- the neutral contract -------------------------------------------
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, ending at `limit` rows or at the row that brings
         the read to `pieces.BATCH_BYTES`, whichever is first: the next read
@@ -608,7 +608,7 @@ class FoldsToCapitals:
                 r[i] = f(r[i])
         return rows
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         rows, last = super().neutral_read(side, db, table, columns, after,
                                           limit, where)

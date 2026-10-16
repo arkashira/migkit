@@ -306,7 +306,7 @@ class CassandraEngine(NeutralCopier, Engine):
         yield from pieces.by_bytes(([self._value(v) for v in row]
                                     for row in result), most_rows=int(size))
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """Rows come back by token, not by key: the copier reads a
         Cassandra table in one pass (`RESUMES_BY_KEY`). This serves the
@@ -2815,7 +2815,7 @@ class CassandraEngine(NeutralCopier, Engine):
             tailctl.follow(self, db, go, token_path, log, "changes", look,
                            behind, 1.0)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """The source's changes after `token` as the records any pair
         applies: every row the log touched as the source holds it now, or
         its delete where the source no longer holds it; a partition deleted

@@ -127,7 +127,7 @@ class _Lake(NeutralCopier, Engine):
         yield from pieces.by_bytes((r for rows in self._rows(reader, names)
                                     for r in rows), most_rows=int(size))
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, which files do not keep: the table is read and
         sorted, as a Parquet table is. The copier reads a lake table in one

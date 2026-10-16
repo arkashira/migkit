@@ -390,7 +390,7 @@ class _Documents(NeutralCopier, Engine):
         return self._ident_from_text(table, desc.key_text(
             dict(cols), key, dict(zip(key, key_values))))
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         if where:
             raise SystemExit(f"{table}: a row filter is SQL, and a"
@@ -969,7 +969,7 @@ class FirestoreEngine(_Documents):
                 return False
         return True
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each document the listeners say was added, changed or removed,
         in the order of their snapshots."""
         if token is None:

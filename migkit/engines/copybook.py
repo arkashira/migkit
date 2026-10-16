@@ -443,7 +443,7 @@ class CopybookEngine(NeutralCopier, Engine):
         if batch:
             yield batch
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, which files do not keep: the table is read whole
         and sorted, for the few callers that ask for a row or two - the

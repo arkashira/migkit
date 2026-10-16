@@ -6844,3 +6844,155 @@ def seed_carrier(facts, costs=None):
     return climb("the seed's carrier", rungs, f,
                  costs=dict(costs if costs is not None else measured) or None,
                  prove=False)
+
+
+# --- the rows one page of a keyed read asks for (DEC.page) ------------------
+
+#: the seconds one page of a keyed read may take: between two pages is where
+#: the read is sized again, a pause or a cancel is honoured and the last key
+#: is the point it resumes from, so a longer page holds all three back
+PAGE_SECONDS = 2.0
+#: the share of the free memory one reader's page may hold: the rest is the
+#: writer's batch, the driver's buffers and the other readers' pages
+PAGE_MEMORY_SHARE = 16
+#: how many times the last page the next may be: a rate measured on a small
+#: page does not yet say how a large one goes, so a page grows by steps
+PAGE_GROWTH = 2
+#: rows a page asks for where nothing was measured yet: the lowest rung,
+#: said as such, never a ceiling on a reader whose rate was measured
+PAGE_UNMEASURED = 1000
+
+
+def _positive(v):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x > 0 else None
+
+
+def page_rows(facts):
+    """(rows, the `Choice`) one page of a keyed read asks for - asked again
+    before every page, so the page follows the reader as its rate moves.
+    `facts`: `rate` (rows a second the last page went at), `width` (bytes
+    of the widest row of the last page), `free` (bytes of memory this
+    process may still take; None where unread), `readers` (pages held at
+    once), `seconds` (what a page may take, `PAGE_SECONDS` where the caller
+    names none) and `last` (rows the last page asked for).
+
+    Measured: as many rows as the rate reads in the seconds, no more than
+    the free memory's share holds at the width, and no more than
+    `PAGE_GROWTH` times the last page - a slow reader's page shrinks at
+    once, a fast one's grows by steps. The width alone: what the memory
+    holds, never more than the unmeasured page. Nothing measured:
+    `PAGE_UNMEASURED` rows, and the reason says so."""
+    from . import pieces
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    for k in ("rate", "width", "free", "readers", "seconds", "last"):
+        f.setdefault(k, None)
+    rungs = (
+        Rung("measured", "a page as long as the measured rate reads in its"
+             " seconds, held to the free memory",
+             needs=(Need("the reader's rate measured",
+                         lambda x: _positive(x.get("rate")) is not None,
+                         "no page of this read has been timed"),
+                    Need("its rows' width measured",
+                         lambda x: _positive(x.get("width")) is not None,
+                         "no row of this read has been measured")),
+             because="the rate and the width of this read were measured"),
+        Rung("by width", "a page the free memory holds at the measured"
+             " width, no longer than an unmeasured one",
+             needs=(Need("its rows' width measured",
+                         lambda x: _positive(x.get("width")) is not None,
+                         "no row of this read has been measured"),),
+             because="the rows were measured but no page was timed"),
+        Rung("unmeasured", f"{PAGE_UNMEASURED:,} rows a page",
+             because="nothing measured yet: neither a page's time nor its"
+                     " rows' width"))
+    choice = climb("the rows of a keyed read's page", rungs, f, prove=False)
+    free = _positive(f.get("free"))
+    readers = max(1, _count(f.get("readers")) or 1)
+    held = (free // (PAGE_MEMORY_SHARE * readers) if free
+            else pieces.BATCH_BYTES)
+    width = _positive(f.get("width"))
+    by_memory = max(1, int(held // width)) if width else None
+    if choice.path == "measured":
+        seconds = _positive(f.get("seconds")) or PAGE_SECONDS
+        rows = max(1, int(_positive(f["rate"]) * seconds))
+        rows = min(rows, by_memory)
+        last = _count(f.get("last"))
+        if last:
+            rows = min(rows, last * PAGE_GROWTH)
+    elif choice.path == "by width":
+        rows = min(PAGE_UNMEASURED, by_memory)
+    else:
+        rows = PAGE_UNMEASURED
+    return max(1, rows), choice
+
+
+def _measure(v, depth=0):
+    """Bytes one row or change record takes as carried (`pieces.row_bytes`),
+    a mapping's and a nested row's values counted in."""
+    from . import pieces
+    if isinstance(v, dict) and depth < 3:
+        return 1 + sum(_measure(x, depth + 1) for x in v.values())
+    if isinstance(v, (list, tuple)) and depth < 3:
+        return pieces.row_bytes([x for x in v
+                                 if not isinstance(x, (dict, list, tuple))]
+                                ) + sum(_measure(x, depth + 1) for x in v
+                                        if isinstance(x, (dict, list, tuple)))
+    return pieces.row_bytes([v]) - 1
+
+
+class Pages:
+    """What one keyed read measured of its pages, and the size of the next
+    (`page_rows`): each page's rows and seconds give the rate, its widest
+    row the width, and the free memory is read again at most every
+    `sizing.FRESH` seconds. `ask` is the decision (a test's fake);
+    `memory` reads the free bytes."""
+
+    def __init__(self, readers=1, seconds=None, ask=None, memory=None,
+                 clock=None):
+        self.readers, self.seconds = readers, seconds
+        self.ask, self.memory = ask or page_rows, memory
+        self.clock = clock or time.monotonic
+        self.rate = self.width = self.last = None
+        self.choice, self._free, self._read_at = None, None, None
+
+    def free(self):
+        from . import sizing
+        now = self.clock()
+        if self._read_at is None or now - self._read_at >= sizing.FRESH:
+            read = self.memory or (lambda: sizing.host().get("memory"))
+            try:
+                self._free = read()
+            except Exception:  # noqa: BLE001 - unread is a fact: None
+                self._free = None
+            self._read_at = now
+        return self._free
+
+    def size(self):
+        """Rows the next page asks for - the decision asked anew."""
+        rows, self.choice = self.ask({
+            "rate": self.rate, "width": self.width, "free": self.free(),
+            "readers": self.readers, "seconds": self.seconds,
+            "last": self.last})
+        self.last = rows
+        return rows
+
+    def measured(self, rows, seconds):
+        """One page read: `rows` (its rows or records) in `seconds`. A page
+        that came back empty or untimed leaves what was measured as it
+        was."""
+        rows = list(rows or ())
+        if rows:
+            self.width = max(_measure(r) for r in rows) or self.width
+            if seconds and seconds > 0:
+                self.rate = len(rows) / seconds
+
+
+def page_given(limit):
+    """`limit` where a caller named one; else the page the decision gives a
+    read nothing has measured (`page_rows`) - for a reader below an
+    engine's own, whose engine sizes its pages and hands the size down."""
+    return limit if limit is not None else page_rows({})[0]

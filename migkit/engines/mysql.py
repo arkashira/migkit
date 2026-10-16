@@ -820,7 +820,7 @@ class MySQLEngine(Engine):
         finally:
             conn.close()
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         plan = self._read_plan(side, db, table, columns)
         sql, args, key, names = self._read_query(
@@ -1978,6 +1978,8 @@ class MySQLEngine(Engine):
         token, why, seen = start, None, []
         try:
             for _ in range(1000):
+                # page: a page shorter than the one asked is how the probe
+                # knows the log is read to its end, so it names its size
                 out, token = reader.neutral_changes(side, db, token,
                                                     limit=10_000)
                 seen += reader._marks_seen
@@ -2126,7 +2128,7 @@ class MySQLEngine(Engine):
                 "binlog_row_image": var("global.binlog_row_image"),
                 "gtid_mode": var("global.gtid_mode")}
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Row changes out of the binlog, as neutral records.
 
         Non-blocking on purpose: this returns what is there now and a token

@@ -201,6 +201,46 @@ def _ident(key, text):
     return tuple(sorted((n, text(v)) for n, v in key.items()))
 
 
+#: the page readers (`Engine.neutral_read`, `Engine.neutral_changes`) and
+#: where each takes its `limit` among its arguments after `self`: a call
+#: that names no limit has its page sized by the decision (`decide.Pages`)
+PAGED = {"neutral_read": 5, "neutral_changes": 3}
+_PAGES_LOCK = threading.Lock()
+
+
+def _paged(fn, at):
+    """`fn`, a page reader, whose call with no `limit` asks the decision
+    for its page (`decide.page_rows`) and times what it read, so the next
+    page of the same read is sized from it - asked again at every page,
+    the safe boundary of a keyed read. A limit the caller names is its
+    own and passes as it is."""
+    import functools
+
+    @functools.wraps(fn)
+    def read(self, *args, **kw):
+        given = args[at] if len(args) > at else kw.get("limit")
+        if given is not None:
+            return fn(self, *args, **kw)
+        names = ("side", "db", "table") if at == 5 else ("side", "db")
+        key = tuple(args[i] if len(args) > i else kw.get(n)
+                    for i, n in enumerate(names))
+        pages, _ = self._pages((fn.__name__,) + key)
+        rows = pages.size()
+        if len(args) > at:
+            args = args[:at] + (rows,) + args[at + 1:]
+        else:
+            kw["limit"] = rows
+        began = time.monotonic()
+        try:
+            got = fn(self, *args, **kw)
+        finally:
+            self._paging(-1)
+        pages.measured(got[0] if got else (), time.monotonic() - began)
+        return got
+    read.paged = True
+    return read
+
+
 class Engine:
     checks = ("schema", "counts", "autoinc", "data")
     counts_from_data = False
@@ -214,6 +254,34 @@ class Engine:
 
     def __init__(self, hop):
         self.hop = hop
+
+    def __init_subclass__(cls, **kw):
+        """A page reader an engine defines or mixes in is sized by the one
+        decision when its caller names no page (`_paged`)."""
+        super().__init_subclass__(**kw)
+        for name, at in PAGED.items():
+            fn = getattr(cls, name, None)
+            if fn is not None and not getattr(fn, "paged", False):
+                setattr(cls, name, _paged(fn, at))
+
+    def _pages(self, key):
+        """(`decide.Pages` of the read `key` names, None): its measures
+        kept on this engine, the reads running at once counted in."""
+        from .. import decide
+        with _PAGES_LOCK:
+            kept = self.__dict__.setdefault("_page_reads", {})
+            self.__dict__["_page_running"] = running = \
+                self.__dict__.get("_page_running", 0) + 1
+            pages = kept.get(key)
+            if pages is None:
+                pages = kept[key] = decide.Pages()
+            pages.readers = running
+        return pages, None
+
+    def _paging(self, n):
+        with _PAGES_LOCK:
+            self.__dict__["_page_running"] = max(
+                0, self.__dict__.get("_page_running", 0) + n)
 
     def _held_for_cutover(self, db):
         """Why this check reads every table of `db`, or '': its proof goes
@@ -1947,8 +2015,7 @@ class Engine:
         cols = [(c, types.get(c, "")) for c in columns]
         out, after = [], None
         while True:
-            rows, after = self.neutral_read(side, db, ref, cols, after=after,
-                                            limit=1000)
+            rows, after = self.neutral_read(side, db, ref, cols, after=after)
             out += [tuple(r) for r in rows]
             if after is None or not rows:
                 break
@@ -4012,7 +4079,7 @@ class Engine:
         """
         raise self._no_canon("find a key")
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """(rows, last_key) - values as Python objects, in key order.
 
@@ -6083,7 +6150,7 @@ class Engine:
         """
         raise self._no_canon("create a table")
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """(changes, token) from this engine's own change log.
 
         `token` is opaque and belongs to the engine that made it - a binlog
@@ -7495,6 +7562,14 @@ class Engine:
 def tuning_blocked():
     from ..decide import Blocked
     return Blocked
+
+
+
+# Engine's own page readers are the ones every engine that has none
+# inherits: paged once here, so a subclass that defines none holds them as
+# they are rather than a copy of its own
+for _name, _at in PAGED.items():
+    setattr(Engine, _name, _paged(getattr(Engine, _name), _at))
 
 
 class TableHold:

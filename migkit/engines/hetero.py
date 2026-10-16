@@ -3887,6 +3887,7 @@ class HeteroEngine(Engine):
         cols = eng.neutral_columns(side, db, table)[:1]
         if not cols:
             return False
+        # page: one row answers whether there is any
         return bool(eng.neutral_read(
             side, db, table,
             [(cols[0][0], canon.comparable(eng.CANON_ENGINE, cols[0][1])[0])],

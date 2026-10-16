@@ -919,7 +919,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
                              order, limit if key else None),
                 args, key, names, finish)
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         sql, args, key, names, finish = self._read_query(
             side, db, table, columns, after, limit, where)
@@ -2318,7 +2318,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         from . import oracle_logminer
         return oracle_logminer.change_point(self, side, db)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         if token is None:
             return [], self.change_point(side, db)
         return self._reader(side, db).read(token, limit, self._ddl_of)

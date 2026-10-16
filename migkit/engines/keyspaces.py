@@ -337,7 +337,7 @@ class KeyspacesEngine(CassandraEngine):
         return all(float((p or {}).get("caught") or 0) >= float(want["time"])
                    for p in at.values())
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each row the CDC stream says changed, shard by shard in its
         order, as the stream's image gives it or as the table holds it."""
         if token is None:

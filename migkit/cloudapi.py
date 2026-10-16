@@ -41,6 +41,19 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+#: the providers' own services read here and never run against a real
+#: account: declared through the seam (`capabilities.DECLARING`) into the
+#: state's "built, unproved" block, the cells each adapter's
+#: `UNPROVED_ITEMS` names read from these
+UNPROVED_ON = {
+    "aws": "built; not run against a real AWS account",
+    "gcp": "built; not run against a real Google Cloud account",
+}
+UNPROVED_ITEMS = {
+    "aws": "free.provider-metric",
+    "gcp": "free.provider-metric",
+}
+
 #: seconds between two looks at something the provider is making, and the
 #: most a make is waited for
 POLL, WAIT = 20, 6 * 3600
@@ -855,7 +868,7 @@ class Aws(Adapter):
     # what the product is --------------------------------------------------
 
     #: free storage read from the metric service, on fakes only
-    UNPROVED_ITEMS = {"free": "free.provider-metric"}
+    UNPROVED_ITEMS = {"free": UNPROVED_ITEMS["aws"]}
 
     def free_bytes(self):
         """RDS's free storage as its metric service has it: an instance's
@@ -1819,7 +1832,7 @@ class Gcp(Adapter):
         return self._api
 
     #: free storage read from the metric service, on fakes only
-    UNPROVED_ITEMS = {"free": "free.provider-metric"}
+    UNPROVED_ITEMS = {"free": UNPROVED_ITEMS["gcp"]}
 
     def _monitoring(self):
         from googleapiclient import discovery

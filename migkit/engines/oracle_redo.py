@@ -529,11 +529,13 @@ class RedoFileReader:
                     " needs may be gone, or the account lacks its grants")
         raise SystemExit("the redo-file reader never began streaming")
 
-    def read(self, token, limit=1000, ddl=None):
+    def read(self, token, limit=None, ddl=None):
         """(changes, token): whole transactions until about `limit`
         changes, or until the writer has been quiet `IDLE` seconds. A
         transaction still open when a read ends is held here, with the
         messages of it already received, and finished by the next."""
+        from .. import decide
+        limit = decide.page_given(limit)
         token = dict(token)
         if self.stream is None:
             self.txn = []

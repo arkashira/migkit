@@ -661,7 +661,7 @@ class OpenSearchEngine(NeutralCopier, Engine):
                 self._call(side, "DELETE", "/_search/scroll",
                            {"scroll_id": scroll}, missing_ok=True)
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """Documents come back in no order: the copier reads an index in
         one pass (`RESUMES_BY_KEY`). This serves the callers that ask

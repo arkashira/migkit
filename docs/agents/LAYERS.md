@@ -637,12 +637,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `applyway` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:7027` engines -> workflows (`applyway`)
+- `migkit/engines/base.py:7094` engines -> workflows (`applyway`)
 
 ### an engine calls `appversions` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:1931` engines -> workflows (`appversions`)
-- `migkit/engines/mysql.py:3664` engines -> workflows (`appversions`)
+- `migkit/engines/base.py:1999` engines -> workflows (`appversions`)
+- `migkit/engines/mysql.py:3666` engines -> workflows (`appversions`)
 - `migkit/engines/postgres.py:5152` engines -> workflows (`appversions`)
 
 ### an engine calls `barriers` for the origin mark its atomic unit carries; the engine split gives the mark a contract below the engines
@@ -662,9 +662,9 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `drift` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/hetero.py:4427` engines -> workflows (`drift`)
+- `migkit/engines/hetero.py:4428` engines -> workflows (`drift`)
 - `migkit/engines/mssql.py:396` engines -> workflows (`drift`)
-- `migkit/engines/mysql.py:3748` engines -> workflows (`drift`)
+- `migkit/engines/mysql.py:3750` engines -> workflows (`drift`)
 - `migkit/engines/postgres.py:1289` engines -> workflows (`drift`)
 
 ### an engine calls `indexes` for a step it cannot do itself; the engine split gives that step a contract below the engines
@@ -673,7 +673,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `leaves` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:4429` engines -> workflows (`leaves`)
+- `migkit/engines/base.py:4496` engines -> workflows (`leaves`)
 - `migkit/engines/hetero.py:780` engines -> workflows (`leaves`)
 - `migkit/engines/mongodb.py:241` engines -> workflows (`leaves`)
 
@@ -681,7 +681,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/cassandra.py:2614` engines -> workflows (`marks`)
 - `migkit/engines/dynamodb.py:497` engines -> workflows (`marks`)
-- `migkit/engines/hetero.py:4062` engines -> workflows (`marks`)
+- `migkit/engines/hetero.py:4063` engines -> workflows (`marks`)
 - `migkit/engines/kafka.py:1179` engines -> workflows (`marks`)
 - `migkit/engines/mongodb.py:4726` engines -> workflows (`marks`)
 - `migkit/engines/mysql.py:1565` engines -> workflows (`marks`)
@@ -690,12 +690,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `movers` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:1964` engines -> workflows (`movers`)
+- `migkit/engines/base.py:2031` engines -> workflows (`movers`)
 - `migkit/engines/cassandra.py:1922` engines -> workflows (`movers`)
 - `migkit/engines/generic.py:2051` engines -> workflows (`movers`)
 - `migkit/engines/hetero.py:223` engines -> workflows (`movers`)
 - `migkit/engines/mongodb.py:891` engines -> workflows (`movers`)
-- `migkit/engines/mysql.py:2790` engines -> workflows (`movers`)
+- `migkit/engines/mysql.py:2792` engines -> workflows (`movers`)
 - `migkit/engines/pg_pass.py:448` engines -> workflows (`movers`)
 - `migkit/engines/postgres.py:1810` engines -> workflows (`movers`)
 
@@ -705,17 +705,17 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `replicasum` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/mysql.py:6160` engines -> workflows (`replicasum`)
+- `migkit/engines/mysql.py:6162` engines -> workflows (`replicasum`)
 
 ### an engine calls `rules` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2453` engines -> workflows (`rules`)
+- `migkit/engines/base.py:2520` engines -> workflows (`rules`)
 
 ### an engine calls `second_reader` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2454` engines -> workflows (`second_reader`)
+- `migkit/engines/base.py:2521` engines -> workflows (`second_reader`)
 - `migkit/engines/hetero.py:3398` engines -> workflows (`second_reader`)
-- `migkit/engines/mysql.py:11326` engines -> workflows (`second_reader`)
+- `migkit/engines/mysql.py:11328` engines -> workflows (`second_reader`)
 - `migkit/engines/postgres.py:7301` engines -> workflows (`second_reader`)
 
 ### an engine calls `streamout` for a step it cannot do itself; the engine split gives that step a contract below the engines
@@ -724,20 +724,20 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `tableengine` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2404` engines -> workflows (`tableengine`)
+- `migkit/engines/base.py:2471` engines -> workflows (`tableengine`)
 - `migkit/engines/mysql.py:511` engines -> workflows (`tableengine`)
 - `migkit/engines/postgres.py:1196` engines -> workflows (`tableengine`)
 
 ### an engine calls `tailctl` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2245` engines -> workflows (`tailctl`)
+- `migkit/engines/base.py:2312` engines -> workflows (`tailctl`)
 - `migkit/engines/cassandra.py:2777` engines -> workflows (`tailctl`)
 - `migkit/engines/generic.py:2348` engines -> workflows (`tailctl`)
 - `migkit/engines/hetero.py:3417` engines -> workflows (`tailctl`)
 - `migkit/engines/kafka.py:1150` engines -> workflows (`tailctl`)
 - `migkit/engines/mongodb.py:2745` engines -> workflows (`tailctl`)
 - `migkit/engines/mssql.py:4234` engines -> workflows (`tailctl`)
-- `migkit/engines/mysql.py:2215` engines -> workflows (`tailctl`)
+- `migkit/engines/mysql.py:2217` engines -> workflows (`tailctl`)
 - `migkit/engines/neo4j.py:960` engines -> workflows (`tailctl`)
 - `migkit/engines/oracle.py:2417` engines -> workflows (`tailctl`)
 - `migkit/engines/postgres.py:3543` engines -> workflows (`tailctl`)
@@ -755,16 +755,16 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `twoway` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:6592` engines -> workflows (`twoway`)
+- `migkit/engines/base.py:6659` engines -> workflows (`twoway`)
 - `migkit/engines/dynamodb.py:923` engines -> workflows (`twoway`)
-- `migkit/engines/hetero.py:4029` engines -> workflows (`twoway`)
+- `migkit/engines/hetero.py:4030` engines -> workflows (`twoway`)
 - `migkit/engines/mysql.py:1565` engines -> workflows (`twoway`)
 - `migkit/engines/postgres.py:2949` engines -> workflows (`twoway`)
 
 ### an engine calls `unchanged` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
 - `migkit/engines/mssql.py:772` engines -> workflows (`unchanged`)
-- `migkit/engines/mysql.py:4245` engines -> workflows (`unchanged`)
+- `migkit/engines/mysql.py:4247` engines -> workflows (`unchanged`)
 - `migkit/engines/postgres.py:6358` engines -> workflows (`unchanged`)
 
 ### an engine calls `upgrade` for a step it cannot do itself; the engine split gives that step a contract below the engines
@@ -778,7 +778,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/kafka.py:2137` engines -> workflows (`users`)
 - `migkit/engines/mongodb.py:3698` engines -> workflows (`users`)
 - `migkit/engines/mssql.py:2154` engines -> workflows (`users`)
-- `migkit/engines/mysql.py:7516` engines -> workflows (`users`)
+- `migkit/engines/mysql.py:7518` engines -> workflows (`users`)
 - `migkit/engines/postgres.py:9796` engines -> workflows (`users`)
 - `migkit/engines/redis.py:274` engines -> workflows (`users`)
 
@@ -789,9 +789,9 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/dynamodb.py:541` engines -> workflows (`verifiers`)
 - `migkit/engines/firestore.py:517` engines -> workflows (`verifiers`)
 - `migkit/engines/generic.py:150` engines -> workflows (`verifiers`)
-- `migkit/engines/hetero.py:5029` engines -> workflows (`verifiers`)
+- `migkit/engines/hetero.py:5030` engines -> workflows (`verifiers`)
 - `migkit/engines/kafka.py:2385` engines -> workflows (`verifiers`)
-- `migkit/engines/mysql.py:4508` engines -> workflows (`verifiers`)
+- `migkit/engines/mysql.py:4510` engines -> workflows (`verifiers`)
 - `migkit/engines/oceanbase.py:237` engines -> workflows (`verifiers`)
 
 ### an executor asks the decision engine (`decide`) how many or how fast; the call becomes a fact handed down
@@ -892,7 +892,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### engines reaches `cli` (cli); the shared piece moves below both, or the call is inverted
 
-- `migkit/engines/base.py:7800` engines -> cli (`cli`)
+- `migkit/engines/base.py:7875` engines -> cli (`cli`)
 - `migkit/engines/oracle_pump.py:227` engines -> cli (`cli`)
 
 ### every provider call waits on the egress gate (`cloudapi.gate`, `egress.decide`) before its client is made; the gate moves to a contract below persistence

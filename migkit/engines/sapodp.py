@@ -474,7 +474,7 @@ class SapOdpEngine(Engine):
             for i in range(0, len(rows), max(1, int(size))):
                 yield rows[i:i + size]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, which the service does not keep: the entity set
         read whole and sorted, for the few callers that ask for a row or
@@ -736,7 +736,7 @@ class SapOdpEngine(Engine):
         return canon.change("insert" if mode == "C" else "update", table, k,
                             values)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """The changes of each entity set's deltas after `token`, read by
         the queue's own tokens: a page at a time, the position carrying the
         page to read next until its delta is read whole, then that delta's

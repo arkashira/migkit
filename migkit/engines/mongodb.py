@@ -1660,7 +1660,7 @@ class MongoEngine(Engine):
                       f" {len(shards)} shards",
                       [(s, table) for s in shards], owners)
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """Documents as rows, with a missing field marked rather than nulled.
 
@@ -2022,7 +2022,7 @@ class MongoEngine(Engine):
                 " before the copy")
         return token
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Row changes out of a change stream, as neutral records.
 
         Opened over the whole database rather than per collection, so one

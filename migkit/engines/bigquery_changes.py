@@ -286,7 +286,7 @@ class BigQueryChanges:
 
     # ---- the changes ----------------------------------------------------------------
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """(changes, position): the net state, at the end of each window
         read, of every row that changed in it - windows following one
         another until `limit` changes are held or the newest window that

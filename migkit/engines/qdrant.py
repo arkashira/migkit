@@ -170,7 +170,7 @@ class QdrantEngine(NeutralCopier, Engine):
             if offset is None:
                 return
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,

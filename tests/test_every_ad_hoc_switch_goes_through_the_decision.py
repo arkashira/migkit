@@ -939,3 +939,67 @@ def test_a_dynamodb_endpoint_without_tags_keeps_the_table_described_here(
     kept = json.loads(eng._kept_here("dst").read_text())
     assert kept[arn + "u"] == {"columns": [["id", "integer"]], "key": ["id"]}
     assert len(said) == 1
+
+
+# --- a keyed read's page is the decision's, never a literal (DEC.page) -----
+
+def _fixed_pages(tree, lines):
+    """[(line, what)] of a page reader whose `limit` defaults to a number,
+    and of a call to one that names a literal page with no `# page:` reason
+    on its lines or in the comment just above them."""
+    import ast
+    from migkit.engines.base import PAGED
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = node.args
+            names = [x.arg for x in a.args]
+            if "limit" not in names or not (node.name in PAGED or (
+                    "token" in names and node.name in ("read", "changes"))):
+                continue
+            at = names.index("limit") - (len(names) - len(a.defaults))
+            default = a.defaults[at] if at >= 0 else None
+            if isinstance(default, ast.Constant) and isinstance(
+                    default.value, int):
+                out.append((node.lineno, f"{node.name} limit="
+                                         f"{default.value}"))
+        elif isinstance(node, ast.Call) and getattr(
+                node.func, "attr", None) in PAGED:
+            for k in node.keywords:
+                if k.arg == "limit" and isinstance(k.value, ast.Constant) \
+                        and isinstance(k.value.value, int):
+                    top = node.lineno - 1
+                    while top > 0 and lines[top - 1].strip().startswith("#"):
+                        top -= 1
+                    said = "\n".join(lines[top:node.end_lineno])
+                    if "# page:" not in said:
+                        out.append((node.lineno, f"{node.func.attr}"
+                                                 f" limit={k.value.value}"))
+    return out
+
+
+def test_a_fixed_page_outside_the_decision_is_refused():
+    import ast
+    from pathlib import Path
+    import migkit
+    home = Path(migkit.__file__).resolve().parent
+    found = []
+    for path in sorted(home.rglob("*.py")):
+        text = path.read_text()
+        if "limit" not in text:
+            continue
+        for line, what in _fixed_pages(ast.parse(text), text.split("\n")):
+            found.append(f"{path.relative_to(home)}:{line} {what}")
+    assert found == []
+
+
+def test_the_page_guard_sees_a_fixed_page():
+    import ast
+    src = ("def neutral_read(self, side, db, table, columns, after=None,"
+           " limit=500):\n    pass\n"
+           "x.neutral_changes('src', db, t, limit=200)\n"
+           "# page: the server's own cap on a fetch\n"
+           "x.neutral_changes('src', db, t, limit=300)\n")
+    got = _fixed_pages(ast.parse(src), src.split("\n"))
+    assert got == [(1, "neutral_read limit=500"),
+                   (3, "neutral_changes limit=200")]

@@ -290,12 +290,14 @@ def _by_rid(eng, side, db, table, cols, rid):
     return dict(zip([c[0] for c in cols], got[0])) if got else None
 
 
-def neutral_changes(eng, side, db, token=None, limit=1000, reader=None,
+def neutral_changes(eng, side, db, token=None, limit=None, reader=None,
                     size=1 << 20):
     """(changes, token): the row changes of whole transactions committed
     after `token`, read from the log until about `limit` changes or the
     end of the log; each transaction's last change marked as its end
     (`canon.ended`) at the position a read goes on from."""
+    from .. import decide
+    limit = decide.page_given(limit)
     from .. import canon
     reader = reader or api()
     way(eng, side, db)

@@ -4557,7 +4557,7 @@ class MSSQLEngine(DbapiRows, Engine):
                 f" {', '.join(gone[:6])} after {token['cdc']}: its retention"
                 " has cleaned them up, or the capture instance is gone")
 
-    def _cdc_changes(self, side, db, token, limit=1000):
+    def _cdc_changes(self, side, db, token, limit=None):
         """Each change committed after the token's position, whole
         transactions in commit order; the position to go on from."""
         from .. import canon
@@ -4623,7 +4623,7 @@ class MSSQLEngine(DbapiRows, Engine):
             raise SystemExit(lost)
         return out, {"cdc": top if len(out) < limit else last}
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each row changed since `token`, as it is now: a delete where it
         is gone. Read through `_ct_read`, which stops rather than hand on
         a read the retention has cut short."""

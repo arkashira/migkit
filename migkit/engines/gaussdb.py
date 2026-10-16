@@ -654,7 +654,7 @@ class GaussEngine(ProvedDigest, PgWireEngine):
                     "set timezone = 'UTC'", "set datestyle = 'ISO'"):
             cur.execute(sql)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Whole transactions out of the slot, in commit order: what the
         tail applied (the position it hands back) consumed first, then a
         batch peeked - which a stopped tail reads again."""

@@ -551,7 +551,7 @@ class TdsqlEngine(OnMySQLWire):
                 return ok
         return True
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each set's changes after its own position, set after set - a
         row's changes are all in its one set, in their order."""
         if token is None:

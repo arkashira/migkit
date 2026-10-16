@@ -349,7 +349,7 @@ class DynamoDBEngine(NeutralCopier, Engine):
               for n in names] for item in self._scan(side, db, table, names)),
             most_rows=int(size))
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """Items come back in no order: the copier reads a DynamoDB table
         in one pass (`RESUMES_BY_KEY`). This serves the callers that ask
@@ -865,7 +865,7 @@ class DynamoDBEngine(NeutralCopier, Engine):
                     return False
         return True
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each write after `token`, per table in its stream's order - a
         shard read only once its parent is finished - as the item is now:
         the image the stream carries, or the item itself read where the

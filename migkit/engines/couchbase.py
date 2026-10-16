@@ -313,7 +313,7 @@ class CouchbaseEngine(NeutralCopier, Engine):
             (self._row(names, classes, got.id, got.content_as[dict])
              for got in self._scan(side, db, table)), most_rows=size)
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """Documents come back in no order: a collection is read in one
         pass (`RESUMES_BY_KEY`). This serves the callers that ask whether
@@ -635,7 +635,7 @@ class CouchbaseEngine(NeutralCopier, Engine):
         Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each change the connector published, in its vBucket's order."""
         if token is None:
             return [], self.change_point(side, db)

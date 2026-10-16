@@ -263,7 +263,7 @@ class Neo4jEngine(NeutralCopier, Engine):
         for rows in self._all(side, db, table, size or BATCH):
             yield [[dict(zip(at, r)).get(n) for n in names] for r in rows]
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         rows = []
         for batch in self.neutral_batches(side, db, table, columns,
@@ -903,7 +903,7 @@ class Neo4jEngine(NeutralCopier, Engine):
                                                default=str)}
         return canon.change(op, table, key, values, txn=ev.get("txId"))
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each node and relationship the log says changed after `token`,
         in commit order, and the change id to go on from."""
         if token is None:

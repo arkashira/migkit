@@ -3682,7 +3682,8 @@ _BAD_DECLARATIONS = []
 #: open-source engine's module, or a machine no sandbox here is (Windows,
 #: `tools`). Each declares `UNPROVED_ON` and
 #: `UNPROVED_ITEMS` as {who: words}, read literally as an engine's are
-DECLARING = ("cloud_readiness.py", "variants.py", "tools.py", "blockseed.py")
+DECLARING = ("cloud_readiness.py", "variants.py", "tools.py", "blockseed.py",
+             "cloudapi.py")
 #: {who: (the reason its module gives, its cells)} of those modules, for
 #: the state's "built, unproved" block (`tools/gen_codemap.py`)
 UNPROVED_ELSEWHERE = {}
@@ -3770,8 +3771,14 @@ def _merge_declared():
             cells = items.get(who, "")
             if not isinstance(cells, str):
                 cells = " ".join(cells)
-            UNPROVED_ELSEWHERE[who] = (" ".join(why.split()),
-                                       tuple(cells.split()))
+            why, cells = " ".join(why.split()), tuple(cells.split())
+            # two modules declaring one provider: its cells joined, its
+            # reasons each said once
+            had_why, had = UNPROVED_ELSEWHERE.get(who, ("", ()))
+            if had_why and had_why != why:
+                why = f"{had_why}; {why}"
+            UNPROVED_ELSEWHERE[who] = (
+                why or had_why, had + tuple(c for c in cells if c not in had))
 
 
 _merge_declared()

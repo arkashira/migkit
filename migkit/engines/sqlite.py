@@ -285,7 +285,7 @@ class SQLiteEngine(NeutralCopier, Engine):
         finally:
             conn.close()
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, ending at `limit` rows or at the row that brings
         the read to `pieces.BATCH_BYTES`: the next read goes on from its

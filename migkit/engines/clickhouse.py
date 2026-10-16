@@ -328,7 +328,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
         return pieces.rows_for(pieces.widest(self, side, db, table),
                                max(int(most or 1000), 1))
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         """In key order, in blocks sized by the table's widest row, ending
         at `limit` rows or at the row that brings the read to

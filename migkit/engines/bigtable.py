@@ -199,7 +199,7 @@ class BigtableEngine(NeutralCopier, Engine):
         for row in self._table(side, db, table).read_rows(**kw):
             yield self._row(names, classes, described, row)
 
-    def neutral_read(self, side, db, table, columns, after=None, limit=1000,
+    def neutral_read(self, side, db, table, columns, after=None, limit=None,
                      where=None):
         from google.cloud.bigtable.row_set import RowSet
         if where:
@@ -740,7 +740,7 @@ class BigtableEngine(NeutralCopier, Engine):
         Follower = hooks.ask("changetopic", "Follower")
         return Follower.reached(have, want)
 
-    def neutral_changes(self, side, db, token=None, limit=1000):
+    def neutral_changes(self, side, db, token=None, limit=None):
         """Each row the change stream says changed, in commit order across
         its partitions, as the table holds it when the change is read."""
         if token is None:
