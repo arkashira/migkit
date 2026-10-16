@@ -699,7 +699,7 @@ def unit_of(table, after):
     return f"{table} k:{ident(after)}"
 
 
-def each_owned(slots, eng, table, st, todo, one, log=None):
+def each_owned(slots, eng, table, st, todo, one, log=None, settle=None):
     """`slots.each(todo, one)` with every range a unit of `eng`'s attempt
     ledger (backlog P0-ETA-ALL, P0-CONNECTION-PROGRESS): opened before the
     statement that reads it, closed done only once its checkpoint holds it
@@ -709,8 +709,12 @@ def each_owned(slots, eng, table, st, todo, one, log=None):
     (`attempts.Monitor.unit_health`). After each range the table's
     remaining time is said from the ranges it ran
     (`attempts.Ledger.parts_as_units`, `util.forecast`). A range whose
-    checkpoint never held it once all are through is closed failed.
-    Without a ledger, `slots.each(todo, one)` as it is."""
+    checkpoint never held it once all are through is closed failed -
+    after `settle()`, where given: the proofs still running beside the
+    loads (the last range's, or those cut short by a stop) land first, so
+    a range its checkpoint holds is never told owed. A failure of
+    `settle` is its caller's to raise (it waits on it again). Without a
+    ledger, `slots.each(todo, one)` as it is."""
     import threading
     from . import attempts
     from .util import TASK_KINDS
@@ -762,6 +766,11 @@ def each_owned(slots, eng, table, st, todo, one, log=None):
     try:
         return slots.each(todo, owned)
     finally:
+        if settle is not None:
+            try:
+                settle()
+            except BaseException:  # noqa: BLE001 - raised by its caller
+                pass
         with gate:
             cut = list(left)
             left.clear()

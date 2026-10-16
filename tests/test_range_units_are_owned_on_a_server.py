@@ -19,6 +19,9 @@ from tests.conftest import _pg_container, needs_docker, psql
 
 
 ROOT = Path(__file__).resolve().parent.parent
+# a copy by ranges of its key, each range owned, replayed alone where its
+# session is lost and gone on from where a stopped move left it
+PROVES = [("move.table-copy", "postgres")]
 Q = ("select count(*) || ':' || md5(string_agg(id || '|' || payload, ','"
      " order by id)) from public.t")
 DDL = "create table public.t (id bigint primary key, payload text)"
@@ -62,10 +65,20 @@ def _setup(pg, tmp):
 def _hold(pg):
     """A session on the target holding key 15000 until it is ended."""
     return subprocess.Popen(
-        ["docker", "exec", "-i", "-e", "PGPASSWORD=test",
-         _pg_container(pg["dst"]), "psql", "-U", "postgres", "-At"],
+        ["docker", "exec", "-i", "-e", "PGPASSWORD=test", "-e",
+         "PGAPPNAME=range-holder", _pg_container(pg["dst"]), "psql", "-U",
+         "postgres", "-At"],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, text=True)
+
+
+def _release(pg, holder):
+    """The hold ended on the server: the client killed here leaves its
+    session asleep in the container, holding the key."""
+    holder.kill()
+    holder.wait()
+    psql(pg["dst"], "select pg_terminate_backend(pid) from pg_stat_activity"
+                    " where application_name = 'range-holder'")
 
 
 def _lock(holder):
@@ -127,8 +140,7 @@ def test_a_dropped_range_session_is_told_stalled_and_replayed_alone(
         got = psql(pg_pair["dst"], f"select pg_terminate_backend({pid})")
         assert got.stdout.strip() == "t", got.stderr
     finally:
-        holder.kill()
-        holder.wait()
+        _release(pg_pair, holder)
     out, _ = move.communicate(timeout=600)
     assert move.returncode == 0, out[-3000:]
     units = _ranges(tmp_path)
@@ -172,8 +184,7 @@ def test_a_move_stopped_mid_range_copies_no_range_twice(pg_pair, tmp_path):
         move.communicate(timeout=120)
         assert move.returncode != 0
     finally:
-        holder.kill()
-        holder.wait()
+        _release(pg_pair, holder)
     cut = _ranges(tmp_path)
     assert cut[after]["state"] in ("open", "failed"), cut[after]
     done_before = {a for a, r in cut.items() if r["state"] == "done"}
@@ -219,3 +230,40 @@ def test_the_deep_check_keeps_each_range_it_proves(tmp_path, monkeypatch):
     assert seen["kept"].path == eng.hop.report_dir("d") / "row-texts.json"
     assert seen["table"] == "d.public.t" and seen["eng"] is eng
     assert seen["scope"] == eng.row_text_scope(None, [""])
+
+
+def test_the_last_ranges_proof_lands_before_an_unproved_range_is_owed():
+    """A range proved beside the next one's load - the last one's proof,
+    or one cut short by a stop, still running once every range returned -
+    is closed done once `settle` lets it land, never told owed while its
+    checkpoint holds it; a range `settle` does not prove is owed, and a
+    failure of `settle` is left to its caller."""
+    import contextlib
+    from types import SimpleNamespace
+
+    from migkit import attempts, ranges
+    mon = attempts.Monitor(None, attempts.Ledger(), thread=False,
+                           say=lambda line: None)
+    eng = SimpleNamespace(attempts=lambda: mon,
+                          attempt_unit=lambda *a: contextlib.nullcontext())
+    led = mon.ledger
+    st = {"ranges": [[0, 10], [10, 20], [20, 30]], "ranges_done": []}
+    save, pending = (lambda: None), []
+
+    def one(rng):
+        # each range proved later, beside the next load
+        pending.append(rng[0])
+        return 10
+
+    def settle():
+        for after in pending[:2]:
+            ranges.finished(st, after, save)
+        raise RuntimeError("the third range's proof failed")
+    ranges.each_owned(ranges.Slots(1), eng, "public.t", st,
+                      [(0, 10), (10, 20), (20, 30)], one, settle=settle)
+    got = {a: led.unit_record(ranges.unit_of("public.t", a))
+           for a in (0, 10, 20)}
+    assert [got[a]["state"] for a in (0, 10)] == ["done", "done"]
+    assert got[20]["state"] == "failed"
+    assert got[20]["reason"] == "not proved"
+    assert st["ranges_done"] == [0, 10]

@@ -12853,6 +12853,51 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 return
             time.sleep(0.05)
 
+    def _range_unit(self):
+        """(monitor, unit) of the range unit this thread is inside, so its
+        load's session is recorded on it - (None, "") outside one, or with
+        no attempt ledger running."""
+        from ..attempts import monitor_of
+        unit = (self.unit_now() or ("", "", ""))[1]
+        mon = monitor_of(self) if unit else None
+        if mon is None or mon.ledger.unit_record(unit).get(
+                "level") != "range":
+            return None, ""
+        return mon, unit
+
+    @staticmethod
+    def _load_statement(qt, select_sql):
+        """The one statement a range's unit covers, named by a digest of
+        the table and the rows it selects - the same whichever way loads
+        it, so a range passed server to server and then copied as text is
+        one statement on two sessions. The ledger keeps no statement's
+        text."""
+        import hashlib
+        return "load " + hashlib.blake2b(f"{qt}|{select_sql}".encode(),
+                                         digest_size=6).hexdigest()
+
+    def _pass_session(self, ctx, qt, cols, where):
+        """The range's unit bound to the pass-through's load: the same
+        statement as the text pipe's (`_load_statement`), on the target
+        session the pass-through loads it through (its own connection,
+        whose server process is known without a look). Returns the read
+        of the range's move health to run where that load fails
+        (`Monitor.unit_health`), or None outside a range unit. A session
+        that cannot be read is not guessed at: the unit then records the
+        statement alone."""
+        mon, unit = self._range_unit()
+        if mon is None:
+            return None
+        statement = self._load_statement(qt, self._copy_select(qt, cols,
+                                                               where))
+        try:
+            pid = ctx._target().info.backend_pid
+        except Exception:  # noqa: BLE001 - the load's own end decides
+            pid = None
+        mon.ledger.unit_statement(unit, statement, "dst" if pid else "",
+                                  pid)
+        return lambda: mon.unit_health(unit)
+
     def _copy_pipe(self, db, select_sql, qt, pre_sql="", columns=None):
         """Stream rows from source to target through a COPY pipe.
 
@@ -12887,12 +12932,9 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                                  "ON_ERROR_STOP=1", "-1", *cmds, "-c",
                                  f"\\copy {qt}{collist} from stdin",
                                  options=self._load_options(db, qt))
-        from ..attempts import monitor_of
-        unit = (self.unit_now() or ("", "", ""))[1]
-        mon = monitor_of(self) if unit else None
+        mon, unit = self._range_unit()
         tag = None
-        if mon is not None and mon.ledger.unit_record(unit).get(
-                "level") == "range":
+        if mon is not None:
             # the load's server session found by a name of its own, so the
             # range's unit records exactly its session (`_load_session`)
             tag = "migkit-" + os.urandom(6).hex()
@@ -12901,12 +12943,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                                stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, env=tool_env(env))
         if tag:
-            import hashlib
-            # the one statement the range's unit covers, named by a digest:
-            # the ledger keeps no statement's text
-            self._load_session(unit, "load " + hashlib.blake2b(
-                f"{qt}|{select_sql}".encode(), digest_size=6).hexdigest(),
-                tag, inp, db)
+            self._load_session(unit, self._load_statement(qt, select_sql),
+                               tag, inp, db)
         # passed on through here, and tallied on the way: what the target
         # is read back against once it has committed (`_copy_checked`)
         from ..stall import Guard
@@ -13186,6 +13224,10 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         def run(choice):
             if choice.path != way.name:
                 return None
+            # the range's unit owns the pass-through's session too: a load
+            # the server dropped is told stalled before the range goes on
+            # as text (`_pass_session`)
+            health = self._pass_session(ctx, qt, cols, where)
             try:
                 return ctx.copy(
                     way.export, where, pre_sql, what,
@@ -13197,6 +13239,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 return pg_pass.SnapshotLost
             except Exception as e:
                 ctx.snapshot.release(way.export)
+                if health is not None:
+                    health()
                 stop = movers.refusal(e)
                 if stop is not None:
                     raise stop from e
@@ -14193,7 +14237,10 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         failed = None
         try:
             if key is not None and st is not None:
-                ranges.each_owned(slots, self, key, st, todo, one, log=log)
+                # a range proved beside the next one's load (`_passed`)
+                # is closed done once its proof lands, the last one's too
+                ranges.each_owned(slots, self, key, st, todo, one, log=log,
+                                  settle=None if ways is None else ways.wait)
             else:
                 slots.each(todo, one)
         except BaseException as e:  # noqa: BLE001 - raised once all is kept

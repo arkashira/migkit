@@ -23,6 +23,9 @@ from migkit.durable import read_state
 from tests.conftest import needs_docker
 
 ROOT = Path(__file__).resolve().parent.parent
+# a copy by ranges of its key, each range owned, replayed alone where its
+# session is lost
+PROVES = [("move.table-copy", "mysql")]
 DDL = "create table mk.t (id bigint primary key, payload text)"
 Q = ("select concat(count(*), ':', md5(group_concat(concat(id, '|',"
      " payload) order by id separator ','))) from mk.t")
@@ -50,9 +53,16 @@ def test_a_killed_range_connection_is_told_stalled_and_replayed(tmp_path):
             my(side, "set session group_concat_max_len = 4294967295;"
                      " drop database if exists mk; create database mk;"
                      f" {DDL};")
-        my("src", "insert into mk.t with recursive g(n) as (select 1 union"
-                  " all select n + 1 from g where n < 30000) select n,"
-                  " concat('row-', n) from g")
+        rows = ("set session cte_max_recursion_depth = 30000;"
+                " insert into mk.t with recursive g(n) as (select 1 union"
+                " all select n + 1 from g where n < 30000) select n,"
+                " concat('{}-', n) from g")
+        my("src", rows.format("row"))
+        # the target holds every key, committed: a range's clear of its span
+        # then stops at the next key past it, so the key below held by
+        # another session - its row only, no gap - holds the range whose
+        # span has it, and no other one
+        my("dst", rows.format("old"))
         (tmp_path / "hops.yaml").write_text(
             "hops:\n  owned:\n    engine: mysql\n"
             f"    source: {{host: 127.0.0.1, port: {src.port},"
@@ -65,8 +75,8 @@ def test_a_killed_range_connection_is_told_stalled_and_replayed(tmp_path):
             ["docker", "exec", "-i", dst.container, "mysql", "-uroot",
              "-ptest", "mk"], stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
-        holder.stdin.write("begin; insert into t values (15000, 'held');"
-                           " select sleep(600);\n")
+        holder.stdin.write("begin; update t set payload = 'held' where"
+                           " id = 15000; select sleep(600);\n")
         holder.stdin.flush()
         time.sleep(1)
         env = dict(os.environ, MIGKIT_CONF=str(tmp_path / "hops.yaml"),
@@ -92,8 +102,14 @@ def test_a_killed_range_connection_is_told_stalled_and_replayed(tmp_path):
             assert side == "dst"
             my("dst", f"kill connection {int(conn)}")
         finally:
+            # the client killed here leaves its session asleep in the
+            # container, holding the key: it is ended on the server
             holder.kill()
             holder.wait()
+            for pid in my("dst", "select id from information_schema"
+                                 ".processlist where info like"
+                                 " 'select sleep(600)%'").split():
+                my("dst", f"kill connection {int(pid)}")
         out, _ = move.communicate(timeout=600)
         assert move.returncode == 0, out[-3000:]
         units = _ranges(tmp_path)

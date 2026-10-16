@@ -9914,6 +9914,11 @@ class MySQLEngine(Engine):
 
         def there():
             got = Tally()
+            # read back on a live session: the one the range's write lost
+            # is gone with it (a server that killed it, measured), and a
+            # read-back that cannot run leaves the write not known - the
+            # copy stopped on a range its own transaction rolled back
+            dconn.ping(reconnect=True)
             with dconn.cursor(pymysql.cursors.SSCursor) as cur:
                 cur.execute(f"select {collist} from `{ddb}`.`{t}`" + where,
                             args or None)
