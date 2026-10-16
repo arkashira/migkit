@@ -662,8 +662,318 @@ class GenericEngine(Engine):
                         str(e).split(":", 1)[-1].strip()[:160], "",
                         "the key has to be readable on both sides before"
                         " any verdict about the rows means anything"))
+            try:
+                res += self._structure_results(scope, t)
+                res.append(self._null_empty_result(scope, t))
+            except SystemExit as e:
+                res.append(Result(
+                    "deep", f"{scope} structure", "error",
+                    str(e).split(":", 1)[-1].strip()[:160]))
+        res.append(self._objects_result(db))
         self._close()
         return res
+
+    #: each catalogue question in the spellings tried on a side until one
+    #: answers - the standard catalogue first, then the dialects that keep
+    #: their own; the one that answered is asked first for every other
+    #: table on that side (`_spelled`)
+    KEYS_SQL = (
+        "SELECT tc.constraint_type, tc.constraint_name, kcu.column_name,"
+        " kcu.ordinal_position FROM information_schema.table_constraints tc"
+        " JOIN information_schema.key_column_usage kcu"
+        " ON kcu.constraint_name = tc.constraint_name"
+        " AND kcu.table_schema = tc.table_schema"
+        " AND kcu.table_name = tc.table_name"
+        " WHERE tc.table_schema = {schema} AND tc.table_name = {table}"
+        " AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')",
+        "SELECT c.constraint_type, c.constraint_name, k.column_name,"
+        " k.position FROM all_constraints c JOIN all_cons_columns k"
+        " ON k.owner = c.owner AND k.constraint_name = c.constraint_name"
+        " WHERE c.owner = {schema} AND c.table_name = {table}"
+        " AND c.constraint_type IN ('P', 'U', 'R')")
+    KEY_KINDS = {"P": "PRIMARY KEY", "U": "UNIQUE", "R": "FOREIGN KEY"}
+    INDEXES_SQL = (
+        "SELECT index_name, CASE WHEN non_unique = 0 THEN 1 ELSE 0 END,"
+        " column_name, seq_in_index FROM information_schema.statistics"
+        " WHERE table_schema = {schema} AND table_name = {table}"
+        " AND index_name <> 'PRIMARY'",
+        "SELECT i.relname, ix.indisunique, a.attname, k.n FROM pg_index ix"
+        " JOIN pg_class i ON i.oid = ix.indexrelid"
+        " JOIN pg_class t ON t.oid = ix.indrelid"
+        " JOIN pg_namespace s ON s.oid = t.relnamespace"
+        " CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY k(attnum, n)"
+        " JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum"
+        " WHERE s.nspname = {schema} AND t.relname = {table}"
+        " AND NOT ix.indisprimary",
+        "SELECT i.name, i.is_unique, c.name, ic.key_ordinal FROM sys.indexes i"
+        " JOIN sys.index_columns ic ON ic.object_id = i.object_id"
+        " AND ic.index_id = i.index_id"
+        " JOIN sys.columns c ON c.object_id = ic.object_id"
+        " AND c.column_id = ic.column_id"
+        " JOIN sys.tables t ON t.object_id = i.object_id"
+        " JOIN sys.schemas s ON s.schema_id = t.schema_id"
+        " WHERE s.name = {schema} AND t.name = {table}"
+        " AND i.is_primary_key = 0 AND ic.is_included_column = 0",
+        "SELECT c.index_name, CASE WHEN i.uniqueness = 'UNIQUE' THEN 1"
+        " ELSE 0 END, c.column_name, c.column_position FROM all_ind_columns c"
+        " JOIN all_indexes i ON i.owner = c.index_owner"
+        " AND i.index_name = c.index_name"
+        " WHERE c.table_owner = {schema} AND c.table_name = {table}")
+    CHECKS_SQL = (
+        "SELECT constraint_name FROM information_schema.table_constraints"
+        " WHERE table_schema = {schema} AND table_name = {table}"
+        " AND constraint_type = 'CHECK'"
+        " AND constraint_name NOT LIKE '%\\_not\\_null' ESCAPE '\\'",
+        "SELECT constraint_name FROM all_constraints"
+        " WHERE owner = {schema} AND table_name = {table}"
+        " AND constraint_type = 'C'"
+        " AND search_condition_vc NOT LIKE '% IS NOT NULL'")
+    VIEWS_SQL = ("SELECT table_schema, table_name FROM information_schema.views",
+                 "SELECT owner, view_name FROM all_views")
+    #: a declared type whose values can be an empty text
+    TEXT_TYPE = re.compile(r"char|text|string|clob", re.I)
+
+    def _spelled(self, which, kind, ladder, **names):
+        """The rows the first spelling of `ladder` this side's catalogue
+        answers, or None where none does. Until one has answered on a side,
+        a spelling that fails is not asked there again; once one has, it is
+        asked first, and a failure of it is the table's, not the side's."""
+        conn = self._connect(which)
+        lits = {k: "'" + str(v).replace("'", "''") + "'"
+                for k, v in names.items()}
+        held = self.__dict__.setdefault("_spellings", {}).setdefault(
+            (which, kind), {"first": None, "failed": set()})
+        first = held["first"]
+        order = ([first] if first is not None else []) + [
+            i for i in range(len(ladder))
+            if i != first and i not in held["failed"]]
+        for i in order:
+            try:
+                rows = conn.query(ladder[i].format(**lits), list)
+            except Exception:  # noqa: BLE001 - this side spells it otherwise
+                if held["first"] is None:
+                    held["failed"].add(i)
+                continue
+            held["first"] = i
+            return list(rows)
+        return None
+
+    def _named(self, which, table):
+        """(schema, table) of a table as this side's catalogue names it."""
+        conn = self._connect(which)
+        parts = tuple(self._path(conn, table))
+        return (parts[-2] if len(parts) > 1 else
+                (getattr(conn, "default_schema", None) or "")), parts[-1]
+
+    def _structure(self, which, table):
+        """{"keys": {kind: Counter of column tuples}, "indexes": Counter of
+        (unique, column tuple) beyond the keys, "checks": how many} of one
+        side; a part None where no spelling of its catalogue answered."""
+        import collections
+        schema, name = self._named(which, table)
+        out = {"keys": None, "indexes": None, "checks": None}
+        rows = self._spelled(which, "keys", self.KEYS_SQL, schema=schema,
+                             table=name)
+        held = set()
+        if rows is not None:
+            grouped = collections.defaultdict(list)
+            for kind, cname, column, pos in rows:
+                kind = self.KEY_KINDS.get(str(kind), str(kind)).upper()
+                grouped[(kind, str(cname))].append((int(pos or 0),
+                                                    str(column).lower()))
+            out["keys"] = {k: collections.Counter() for k in
+                           ("PRIMARY KEY", "UNIQUE", "FOREIGN KEY")}
+            for (kind, _), cols in grouped.items():
+                shape = tuple(c for _, c in sorted(cols))
+                out["keys"].setdefault(kind, collections.Counter())[shape] += 1
+                if kind != "FOREIGN KEY":
+                    held.add(shape)
+        rows = self._spelled(which, "indexes", self.INDEXES_SQL,
+                             schema=schema, table=name)
+        if rows is not None:
+            grouped = collections.defaultdict(list)
+            uniq = {}
+            for iname, unique, column, pos in rows:
+                grouped[str(iname)].append((int(pos or 0), str(column).lower()))
+                uniq[str(iname)] = str(unique).strip().lower() in (
+                    "1", "true", "t", "yes")
+            out["indexes"] = collections.Counter(
+                (uniq[i], tuple(c for _, c in sorted(cols)))
+                for i, cols in grouped.items()
+                # an index a key is held by is that key, read once
+                if not (uniq[i] and tuple(c for _, c in sorted(cols)) in held))
+        rows = self._spelled(which, "checks", self.CHECKS_SQL, schema=schema,
+                             table=name)
+        if rows is not None:
+            out["checks"] = len(rows)
+        return out
+
+    @staticmethod
+    def _shapes(counter):
+        return ", ".join("(" + ", ".join(s) + ")" for s in sorted(counter))
+
+    def _structure_results(self, scope, t):
+        """The keys, foreign keys, checks and indexes of a table, each side
+        read from its own catalogue and compared by shape - the columns in
+        order, never the names, which each engine makes its own."""
+        a = self._structure("src", t)
+        b = self._structure("dst", self._on("dst", t))
+        res = []
+        if a["keys"] is None or b["keys"] is None:
+            side = "source" if a["keys"] is None else "target"
+            res.append(Result("deep", f"{scope} keys", "skip",
+                              f"the {side}'s catalogue answered no question"
+                              " about keys in any spelling migkit knows", "",
+                              "compare its keys by hand before cutover"))
+        else:
+            ka, kb = a["keys"], b["keys"]
+            lost = (ka["PRIMARY KEY"] - kb["PRIMARY KEY"]) + (
+                ka["UNIQUE"] - kb["UNIQUE"])
+            more = (kb["PRIMARY KEY"] - ka["PRIMARY KEY"]) + (
+                kb["UNIQUE"] - ka["UNIQUE"])
+            if lost:
+                res.append(Result(
+                    "deep", f"{scope} keys", "diff",
+                    "the target does not hold unique what the source does: "
+                    + self._shapes(lost), "",
+                    "make the key on the target before writes reach it: a"
+                    " row written twice is not refused there"))
+            elif more:
+                res.append(Result(
+                    "deep", f"{scope} keys", "warn",
+                    "the target holds unique what the source does not: "
+                    + self._shapes(more), "",
+                    "a write the source takes the target refuses; drop the"
+                    " extra key or confirm the source never repeats it"))
+            else:
+                res.append(Result("deep", f"{scope} keys", "ok",
+                                  "the same primary and unique keys on both"
+                                  " sides"))
+            fa, fb = ka["FOREIGN KEY"], kb["FOREIGN KEY"]
+            if fa - fb:
+                res.append(Result(
+                    "deep", f"{scope} fk", "diff",
+                    "foreign keys of the source not on the target: "
+                    + self._shapes(fa - fb), "",
+                    "make them on the target after the load: without them"
+                    " it keeps rows whose parent is gone"))
+            elif fb - fa:
+                res.append(Result(
+                    "deep", f"{scope} fk", "warn",
+                    "foreign keys on the target only: "
+                    + self._shapes(fb - fa), "",
+                    "a load in another order is refused by them"))
+            else:
+                res.append(Result("deep", f"{scope} fk", "ok",
+                                  f"{sum(fa.values())} foreign keys on both"
+                                  " sides"))
+        if a["checks"] is not None and b["checks"] is not None:
+            res.append(Result(
+                "deep", f"{scope} check-constraints",
+                "ok" if a["checks"] == b["checks"] else "warn",
+                f"{a['checks']} check constraints on the source,"
+                f" {b['checks']} on the target", "",
+                "" if a["checks"] == b["checks"] else
+                "their conditions are each engine's own text: compare them"
+                " by hand"))
+        if a["indexes"] is None or b["indexes"] is None:
+            res.append(Result("deep", f"{scope} indexes", "skip",
+                              "a side's catalogue says nothing of indexes in"
+                              " any spelling migkit knows"))
+        else:
+            gone, extra = a["indexes"] - b["indexes"], b["indexes"] - a["indexes"]
+            res.append(Result(
+                "deep", f"{scope} indexes", "warn" if gone else "ok",
+                ("indexes of the source not on the target: "
+                 + self._shapes([c for _, c in gone])) if gone else
+                (f"{sum(a['indexes'].values())} indexes on both sides"
+                 + (f", and {sum(extra.values())} on the target only"
+                    if extra else "")), "",
+                "make them on the target before cutover: the reads they"
+                " serve scan the table without them" if gone else ""))
+        return res
+
+    def _null_empty(self, which, table, columns):
+        """{column: (NULLs, empty texts)} of one side in one statement,
+        the hop's row filter held."""
+        conn = self._connect(which)
+        on = table if which == "src" else self._on("dst", table)
+        parts = []
+        for c, text in columns:
+            q = conn.dialect.quote(c)
+            parts.append(f"SUM(CASE WHEN {q} IS NULL THEN 1 ELSE 0 END)")
+            parts.append(f"SUM(CASE WHEN {q} = '' THEN 1 ELSE 0 END)"
+                         if text else "0")
+        pred = self._filter(table)
+        try:
+            row = conn.query(f"SELECT {', '.join(parts)} FROM"
+                             f" {self._from(conn, on)}"
+                             + (f" WHERE {pred}" if pred else ""), list)[0]
+        except Exception as e:  # noqa: BLE001 - said as the table's error
+            self._grant_refused(which, "reading rows", on, e)
+            raise SystemExit(f"cannot count the NULLs of {table}:"
+                             f" {str(e).splitlines()[-1][:160]}")
+        return {c: (int(row[2 * i] or 0), int(row[2 * i + 1] or 0))
+                for i, (c, _) in enumerate(columns)}
+
+    def _null_empty_result(self, scope, t):
+        """NULLs and empty texts counted column by column on both sides:
+        a value the target holds as the other of the two passes a row
+        count and reads differently to the application. A column the hop
+        writes transformed is left out, and said."""
+        a = self._declared_types("src", t)
+        b = self._declared_types("dst", self._on("dst", t))
+        masked = {c.lower() for c in self._masks(t)}
+        columns = [(c, bool(self.TEXT_TYPE.search(a[c]))) for c in a
+                   if c in b and c.lower() not in masked]
+        if not columns:
+            return Result("deep", f"{scope} nullempty", "skip",
+                          "no column on both sides is written as read")
+        src = self._null_empty("src", t, columns)
+        dst = self._null_empty("dst", t, columns)
+        off = [c for c, _ in columns if src[c] != dst[c]]
+        left = f"; {len(masked)} transformed columns left out" \
+            if masked else ""
+        if not off:
+            return Result("deep", f"{scope} nullempty", "ok",
+                          f"{len(columns)} columns hold as many NULLs and"
+                          f" empty texts on both sides{left}")
+        said = "; ".join(
+            f"{c}: {src[c][0]} NULL/{src[c][1]} empty on the source,"
+            f" {dst[c][0]}/{dst[c][1]} on the target"
+            + (" - an empty text turned NULL or back"
+               if sum(src[c]) == sum(dst[c]) else "") for c in off[:5])
+        return Result("deep", f"{scope} nullempty", "diff", said + left, "",
+                      "rewrite the column on the target as the source holds"
+                      " it: the application tells NULL from empty")
+
+    def _objects_result(self, db):
+        """The views of the source the hop's `objects` take, held to the
+        target's: one the target lacks is said, and one left out by the
+        hop is said as left out, never as passed."""
+        def listed(which):
+            rows = self._spelled(which, "views", self.VIEWS_SQL)
+            if rows is None:
+                return None
+            return {(str(s), str(n)) for s, n in rows
+                    if str(s).lower() not in self.SYSTEM_SCHEMAS}
+        src, dst = listed("src"), listed("dst")
+        if src is None or dst is None:
+            return Result("deep", f"{db} objects", "skip",
+                          "a side's catalogue lists no views in any spelling"
+                          " migkit knows")
+        taken = {v for v in src if self.hop.takes_object("view", *v)}
+        held = {n.lower() for _, n in dst}
+        lost = sorted(f"{s}.{n}" for s, n in taken if n.lower() not in held)
+        out = len(src) - len(taken)
+        left = f"; {out} left out by the hop's objects" if out else ""
+        if lost:
+            return Result("deep", f"{db} objects", "diff",
+                          f"views not on the target: {', '.join(lost[:10])}"
+                          + left, "", "make them on the target: what reads"
+                          " them fails after cutover")
+        return Result("deep", f"{db} objects", "ok",
+                      f"{len(taken)} views on both sides{left}")
 
     def _deep_key(self, scope, side, which, t, key):
         from sqeleton.queries import code, or_, table, this
@@ -914,8 +1224,10 @@ class GenericEngine(Engine):
         pred = self._filter(table)
         on = self._on(which, table)
         try:
-            return conn.query(f"SELECT {cols} FROM {self._from(conn, on)}"
+            rows = conn.query(f"SELECT {cols} FROM {self._from(conn, on)}"
                               + (f" WHERE {pred}" if pred else ""), list)
+            return self._masked(table, list(columns), rows) \
+                if which == "src" else rows
         except Exception as e:  # noqa: BLE001 - said as the table's error
             self._grant_refused(which, "reading rows", on, e)
             raise SystemExit(f"cannot read {table} on the"
@@ -1030,7 +1342,10 @@ class GenericEngine(Engine):
         way, facts = self.compare_way(t)
         parity = decide.Facts(
             {"key": None},
-            **{"server digest": lambda: way.path == "key-ranges",
+            # the servers' digests read the source as stored: a table the
+            # hop writes transformed is proved by its rows read here
+            **{"server digest": lambda: way.path == "key-ranges"
+               and not self._masks(t),
                "rows read here": lambda: way.path == "row-digests"
                or self._fits(facts)})
 
@@ -1661,7 +1976,13 @@ class GenericEngine(Engine):
                              lambda f: f["unique"] is not False,
                              "the source's catalogue does not hold the key"
                              " unique, so the last key copied does not"
-                             " say which rows are done")),
+                             " say which rows are done"),
+                        Need("the key written as read",
+                             lambda f: not f.get("key_masked"),
+                             lambda f: "the hop transforms the key ("
+                             + ", ".join(f["key_masked"]) + "), so the"
+                             " target's last key does not say the"
+                             " source's")),
                  because="a cut-off copy goes on from the last committed"
                          " key"),
             Rung("whole-table", "the table copied whole, emptied and"
@@ -1672,11 +1993,47 @@ class GenericEngine(Engine):
     def copy_way(self, table, columns):
         from .. import decide
         absent = [k for k in self._key() if k not in columns]
+        masked = {c.lower() for c in self._masks(table)}
         facts = decide.Facts({"key_absent": absent,
+                              "key_masked": [k for k in self._key()
+                                             if k.lower() in masked],
                               "unique": False if absent
                               else self._unique(table)})
         return decide.climb(f"copy {table}", self.copy_rungs(), facts,
                             need=("copied",))
+
+    def masked_on_the_way(self, db, tables):
+        """The tables of `tables` the hop writes transformed, which this
+        engine's copy, follow and row check transform themselves
+        (`_masked`)."""
+        from ..movers import mask_rules
+        return set(mask_rules(self.hop, db, tables))
+
+    def _masks(self, table):
+        """{column: rule} the hop writes `table`'s columns by."""
+        from ..movers import mask_rules
+        return mask_rules(self.hop, "-", [table]).get(table, {})
+
+    def _masked(self, table, columns, rows):
+        """`rows` as the target holds them: each column the hop masks
+        written through its transform, the rest as read."""
+        from .. import transforms
+        rules = self._masks(table)
+        if not rules:
+            return rows
+        lower = {str(c).lower(): r for c, r in rules.items()}
+        at = [(i, lower[c.lower()]) for i, c in enumerate(columns)
+              if c.lower() in lower]
+        if not at:
+            return rows
+        key = self.hop.mask_key()
+        out = []
+        for r in rows:
+            r = list(r)
+            for i, rule in at:
+                r[i] = transforms.apply(rule, r[i], key)
+            out.append(r)
+        return out
 
     def _copy_columns(self, table):
         src = self._side_columns("src", table)
@@ -1784,7 +2141,8 @@ class GenericEngine(Engine):
                 rows = src_call(lambda c: cursor.fetchmany(size))
                 if not rows:
                     break
-                batch = [self._marks(dst_style, list(r))[1] for r in rows]
+                batch = [self._marks(dst_style, list(r))[1]
+                         for r in self._masked(table, columns, rows)]
 
                 def write(c, batch=batch):
                     cur = c.cursor()
@@ -1986,6 +2344,23 @@ class GenericEngine(Engine):
             call(lambda c: c.commit())
         return columns, rows
 
+    def _carried_ops(self, table, columns, rows):
+        """The rows of `rows` whose change the hop carries
+        (`Hop.carries`): one the target holds by its key is an update, one
+        it lacks an insert. A table carrying both is written whole, and a
+        row's change the hop leaves is left on the source."""
+        ops = self.hop.carries("-", table)
+        if not rows or {"insert", "update"} <= set(ops):
+            return rows
+        if not ({"insert", "update"} & set(ops)):
+            return []
+        at = [columns.index(k) for k in self._key()]
+        held = self._rows_by_keys("dst", self._on("dst", table), columns,
+                                  [tuple(r[i] for i in at) for r in rows])
+        keep = "update" in ops
+        return [r for r in rows
+                if (tuple(self._text(r[i]) for i in at) in held) == keep]
+
     def _upsert(self, table, columns, rows):
         """Each row put on the target by its key: the target's row deleted
         and the source's inserted in one transaction, so no reader sees the
@@ -2039,7 +2414,8 @@ class GenericEngine(Engine):
             was = self._uncarried(at)
             went += sum(1 for r in rows if r[c] is not None
                         and (was is None or r[c] > was))
-            self._upsert(t, columns, rows)
+            self._upsert(t, columns, self._carried_ops(
+                t, columns, self._masked(t, columns, rows)))
             top = max((r[c] for r in rows if r[c] is not None),
                       default=None)
             tables[t] = {"column": column,

@@ -1689,6 +1689,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * this engine needs a comparison component that is not installed on this machine: migkit doctor --install puts it in place, and migkit doctor says what is missing
 
+* cannot count the NULLs of <...>: <...>
+
 * cannot read the key of <...>: <...>
 
 * cannot read <...> on the <...>: <...>
