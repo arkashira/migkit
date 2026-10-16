@@ -909,28 +909,8 @@ def prove(hop, eng, db):
         for s in mine:
             offsets = {t.table: offset_of(hop, eng, s, group_, [t.table])
                        for t in plans}
-            from collections import Counter
-            where = pair.src_engine.row_filter(db, *hop.parts_of(p.table))
-            # by key; a table without one as a multiset of rows, so a row
-            # there twice on one side is not one row
-            a, b = ({}, {}) if key else (Counter(), Counter())
-            for rows in src._every_row("src", db, p.table, sc, where):
-                for r in rows:
-                    texts = pair._row_text(sc, _shift(r, names, p, offsets,
-                                                           s.value))
-                    if key:
-                        a[tuple(texts[i] for i in at)] = _hash(texts)
-                    else:
-                        a[_hash(texts)] += 1
-            for rows in dst._every_row("dst", db, p.target, dc,
-                                       tenant_where(dst, got["column"],
-                                                    s.value)):
-                for r in rows:
-                    texts = pair._row_text(dc, list(r))
-                    if key:
-                        b[tuple(texts[i] for i in at)] = _hash(texts)
-                    else:
-                        b[_hash(texts)] += 1
+            a, b = _slice(pair, hop, db, p, s, offsets, (sc, dc, at, key),
+                          got["column"])
             if key:
                 missing = [k for k in a if k not in b]
                 extra = [k for k in b if k not in a]
@@ -967,6 +947,215 @@ def prove(hop, eng, db):
         out.append(_strangers(dst, db, p, got["column"], values))
     out += _counters(dst, db)
     return out
+
+
+def _slice(pair, hop, db, p, s, offsets, shape, column):
+    """(source's, target's) rows of one source's slice of `p`: the
+    source's rows shifted as they were written, the target's under its
+    value - by key {key: digest}; a table without one as a multiset of
+    row digests, so a row there twice on one side is not one row."""
+    from collections import Counter
+    sc, dc, at, key = shape
+    names = [n for n, _ in sc]
+    src, dst = pair.src_engine, pair.dst_engine
+    where = src.row_filter(db, *hop.parts_of(p.table))
+    a, b = ({}, {}) if key else (Counter(), Counter())
+    for rows in src._every_row("src", db, p.table, sc, where):
+        for r in rows:
+            texts = pair._row_text(sc, _shift(r, names, p, offsets, s.value))
+            if key:
+                a[tuple(texts[i] for i in at)] = _hash(texts)
+            else:
+                a[_hash(texts)] += 1
+    for rows in dst._every_row("dst", db, p.target, dc,
+                               tenant_where(dst, column, s.value)):
+        for r in rows:
+            texts = pair._row_text(dc, list(r))
+            if key:
+                b[tuple(texts[i] for i in at)] = _hash(texts)
+            else:
+                b[_hash(texts)] += 1
+    return a, b
+
+
+def _differences(a, b, key):
+    """{key: (source's digest, target's digest)} of the rows a slice and
+    its source do not hold alike; a keyless table's by its row digest,
+    with the counts each side holds of it."""
+    if key:
+        return {k: (a.get(k), b.get(k)) for k in set(a) | set(b)
+                if a.get(k) != b.get(k)}
+    return {k: (a.get(k, 0), b.get(k, 0)) for k in set(a) | set(b)
+            if a.get(k, 0) != b.get(k, 0)}
+
+
+def positions(hop, db, group_):
+    """{source's name: the change position its follow kept} of the
+    group's sources (`reshard`'s kept tokens: what the target holds of
+    each), None for a source whose follow kept none."""
+    from . import reshard, tailctl
+    try:
+        g = reshard.group(hop, db)
+    except (Exception, SystemExit):  # noqa: BLE001 - no group to follow
+        return {s.name: None for s in group_}
+    kept = {}
+    for i, side in enumerate(g.sources):
+        try:
+            kept[side.name] = tailctl.saved(reshard._token_path(g, i))
+        except Exception:  # noqa: BLE001 - a position not read is none
+            kept[side.name] = None
+    return {s.name: kept.get(s.name) for s in group_}
+
+
+def _records(results):
+    """The answers as the verdict reads them: one mapping each."""
+    from dataclasses import asdict
+    return [asdict(r) for r in results]
+
+
+@dataclass
+class SliceVerdict:
+    """A consolidation verified source by source: each source's Results
+    and its own verdict, the position each was compared at, the rounds
+    compared, and the one verdict of the whole (`verdict.decide`)."""
+    results: list
+    per_source: dict
+    whole: object
+    positions: dict
+    rounds: int
+    why: str = ""
+
+
+def slice_verify(hop, eng, db, catch_up=None):
+    """Every source of the consolidation into `db`'s target held to its
+    slice of the target - its rows by its value (tenant, prefix or its
+    offset's keys) - by key, at the position its follow kept, the target
+    holding what the follow applied to it by then.
+
+    A difference read while the follow was behind its source is compared
+    again after `catch_up` (a callable running the follow until it holds
+    every source's position at the call) - as long as `decide.slice_recheck`
+    holds: a difference is a finding once two rounds with a caught-up
+    follow between read the same row on both sides. A row of one source
+    found under another's value is named by key in the verdict of the
+    source it is of. One verdict per source, one for the whole."""
+    from . import decide, verdict
+    from .engines.base import Result
+    got = settings(hop)
+    try:
+        group_ = group(hop, eng, db)
+        plans, wrong = table_plans(hop, eng, db, group_)
+    except SystemExit as e:
+        wrong = [str(e)]
+        group_, plans = [], []
+    if wrong:
+        out = [Result("consolidate", db, "error", "; ".join(wrong))]
+        return SliceVerdict(out, {}, verdict.decide(_records(out), hop), {}, 0)
+    column = got["column"]
+    shapes, unread = {}, []
+    for s in group_:
+        pair = _pair(_engine(s, eng))
+        for p in plans:
+            try:
+                sc, dc, _ = pair._comparable_columns(
+                    s.db, pair.src_engine, p.table, pair.dst_engine,
+                    p.target)
+            except Exception as e:  # noqa: BLE001 - said as its error
+                unread.append(Result(
+                    "consolidate", f"{s.db}.{p.table} {column}={s.value}",
+                    "error", f"could not be read: {_last(e)}"))
+                continue
+            names = [n for n, _ in sc]
+            key = [k for k in p.key if k in names]
+            shapes[(s.name, p.table)] = (pair, (sc, dc, [names.index(k)
+                                                         for k in key], key))
+
+    def compare():
+        found, rows = {}, {}
+        for s in group_:
+            offsets = {t.table: offset_of(s.hop, _engine(s, eng), s, group_,
+                                          [t.table]) for t in plans}
+            for p in plans:
+                if (s.name, p.table) not in shapes:
+                    continue
+                pair, shape = shapes[(s.name, p.table)]
+                a, b = _slice(pair, s.hop, s.db, p, s, offsets, shape, column)
+                rows[(s.name, p.table)] = (len(a) if shape[3]
+                                           else sum(a.values()))
+                for k, d in _differences(a, b, shape[3]).items():
+                    found[(s.name, p.table, k)] = d
+        return found, rows
+
+    seen, before, rounds = {}, None, 0
+    while True:
+        at = positions(hop, db, group_)
+        found, rows = compare()
+        rounds += 1
+        unsettled = [x for x in found if seen.get(x) != found[x]]
+        step = decide.slice_recheck({"unsettled": len(unsettled),
+                                     "catch_up": callable(catch_up),
+                                     "before": before})
+        if step.path != "recheck":
+            break
+        seen, before = found, len(unsettled)
+        catch_up()
+    out = list(unread)
+    per = {}
+    for s in group_:
+        mine = []
+        for p in plans:
+            if (s.name, p.table) not in shapes:
+                continue
+            key = shapes[(s.name, p.table)][1][3]
+            diffs = {k: d for (n, t, k), d in found.items()
+                     if n == s.name and t == p.table}
+            said = []
+            missing = [k for k, (x, y) in diffs.items()
+                       if (y is None if key else x > y)]
+            extra = [k for k, (x, y) in diffs.items()
+                     if (x is None if key else y > x)]
+            changed = [k for k, (x, y) in diffs.items()
+                       if key and x is not None and y is not None]
+            elsewhere = {}
+            for k in missing if key else ():
+                for o in group_:
+                    if o.name != s.name and found.get(
+                            (o.name, p.table, k), (0, 0))[1] == diffs[k][0]:
+                        elsewhere[k] = o.value
+            lost = [k for k in missing if k not in elsewhere]
+            if lost:
+                said.append(f"{len(lost):,} rows missing"
+                            + (f" ({_keys(lost)})" if key else ""))
+            for k, v in list(elsewhere.items())[:EXAMPLES]:
+                said.append(f"({', '.join(map(str, k))}) is on the target"
+                            f" under {column} = {v!r}, not {s.value!r}")
+            if extra:
+                said.append(f"{len(extra):,} rows the source does not have"
+                            + (f" ({_keys(extra)})" if key else ""))
+            if changed:
+                said.append(f"{len(changed):,} rows differ ({_keys(changed)})")
+            pos = at.get(s.name)
+            scope = f"{s.db}.{p.table} {column}={s.value}"
+            when = (f" at its follow's position {str(pos)[:60]}"
+                    if pos is not None else
+                    " with no follow position kept: as the rows stand")
+            if said:
+                mine.append(Result("consolidate", scope, "diff",
+                                   "; ".join(said) + when, "",
+                                   f"migkit move {s.hop.name} --mode full"
+                                   " --go"))
+            else:
+                mine.append(Result("consolidate", scope, "ok",
+                                   f"{rows.get((s.name, p.table), 0):,} rows"
+                                   " as the source's" + when))
+        per[s.name] = verdict.decide(_records(mine), hop) if mine else None
+        out += mine
+    for p in plans:
+        out.append(_strangers(_pair(eng).dst_engine, db, p, column,
+                              [s.value for s in group_]))
+    return SliceVerdict(out, per, verdict.decide(_records(out), hop), at,
+                        rounds,
+                        step.reason)
 
 
 def _without(notes, column):

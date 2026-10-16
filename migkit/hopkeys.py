@@ -2149,6 +2149,7 @@ def check(data, path=None):
     for name, raw in hops.items():
         out += check_hop(str(name), raw)
     out += _two_way_pairs(hops)
+    out += _prefixes_apart(hops)
     if path is not None:
         out += _file(path, out)
     return sorted(out, key=lambda p: p.level != "error")
@@ -2944,6 +2945,8 @@ def _scenario_settings(where, opts, goal):
                 "keys: offset shifts each source's keys by its own offset,"
                 " and none is given - offsets: {<value>: <number>}, or"
                 " keys: remap for migkit to work them out"))
+        elif str(got.get("keys") or "") == "prefix":
+            out += _prefix_values(where, got)
     got = opts.get("archive")
     if goal == "archive" and isinstance(got, dict) and got.get("remove"):
         answers = opts.get("source_changes")
@@ -2955,6 +2958,71 @@ def _scenario_settings(where, opts, goal):
                 " answer by its name, and the hop gives none ahead - a"
                 " terminal asks it under --go; without one they stay"
                 " (source_changes: {archived_rows: yes})"))
+    return out
+
+
+def _prefix_values(where, got):
+    """`keys: prefix` held to what the copy makes of it: every value this
+    hop names leads its text keys with the separator after it, so a value
+    holding the separator could make two sources' keys one (`a:` + `b:c`
+    is `a:b` + `c`), and one longer than the room the schema step widens
+    a led key column by (`consolidate._led_wider`) would not fit it."""
+    from . import consolidate
+    sep = consolidate.PREFIX_SEP
+    room = consolidate._tenant_column("")[1][0]
+    named = ([got["value"]] if got.get("value") is not None else []) + list(
+        (got.get("values") or {}).values())
+    out = []
+    for v in named:
+        text = str(v)
+        if sep in text:
+            out.append(Problem(
+                "error", f"{where}.options.consolidate",
+                f"keys: prefix leads each text key with its value and"
+                f" {sep!r}, and {text!r} holds {sep!r} - its keys could be"
+                " another source's; name a value without it"))
+        elif len(text) > room:
+            out.append(Problem(
+                "error", f"{where}.options.consolidate",
+                f"keys: prefix widens a led key column by {room} characters"
+                f" and the separator, and {text!r} is {len(text)} long -"
+                " name a shorter value"))
+    return out
+
+
+def _prefixes_apart(hops):
+    """[Problem] of the sources leading their keys by a prefix into one
+    target database whose prefixes meet (`topology.overlaps`): one value
+    named twice, or by two hops, makes both sources' keys one."""
+    from . import consolidate, topology
+    spaces, where = {}, {}
+    for name, raw in (hops or {}).items():
+        if not isinstance(raw, dict) or raw.get("goal") != "consolidate":
+            continue
+        got = (raw.get("options") or {}).get("consolidate")
+        if not isinstance(got, dict) or str(got.get("keys") or "") \
+                != "prefix":
+            continue
+        dbs = [str(d) for d in raw.get("databases") or []] or [""]
+        values = {str(k): v for k, v in (got.get("values") or {}).items()}
+        for db in dbs:
+            value = values.get(db, got.get("value"))
+            if value is None:
+                continue
+            target = (repr(raw.get("target")),
+                      str((raw.get("db_map") or {}).get(db, db)))
+            source = f"{name}.{db}" if db else str(name)
+            spaces.setdefault(target, {})[source] = {
+                "*": {"prefix": f"{value}{consolidate.PREFIX_SEP}"}}
+            where[source] = f"hops.{name}.options.consolidate"
+    out = []
+    for target, of in spaces.items():
+        for _, a, b, key in topology.overlaps(of):
+            out.append(Problem(
+                "error", where[b],
+                f"keys: prefix - {a} and {b} write {target[1] or 'one'}"
+                f" target database with keys led by {key!r}: their keys"
+                " would be one; give each source a value of its own"))
     return out
 
 

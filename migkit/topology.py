@@ -23,27 +23,32 @@ from .reshard import hash_place
 class KeySpace:
     """The keys a source writes of one table: a closed range `lo`..`hi`
     (None unbounded), the numbers `offset` modulo `step` in it (an
-    auto-increment's offset and increment; step 1 every number), or the
-    listed `values` only."""
+    auto-increment's offset and increment; step 1 every number), the
+    listed `values` only, or the text keys led by `prefix` (a
+    consolidation's `keys: prefix`: its source's value and the
+    separator)."""
     lo: object = None
     hi: object = None
     offset: int = 0
     step: int = 1
     values: frozenset = None
+    prefix: str = None
 
     @classmethod
     def of(cls, spec):
         """A key space from the hop's words: {"range": [lo, hi]},
-        {"stride": [offset, step]}, {"values": [...]}, any of them
-        together, or a KeySpace already."""
+        {"stride": [offset, step]}, {"values": [...]}, {"prefix": text},
+        any of them together, or a KeySpace already."""
         if isinstance(spec, cls):
             return spec
         spec = dict(spec or {})
         lo, hi = (list(spec.get("range") or ()) + [None, None])[:2]
         offset, step = (list(spec.get("stride") or ()) + [0, 1])[:2]
         values = spec.get("values")
+        prefix = spec.get("prefix")
         return cls(lo, hi, int(offset), max(int(step), 1),
-                   frozenset(values) if values is not None else None)
+                   frozenset(values) if values is not None else None,
+                   str(prefix) if prefix is not None else None)
 
     def _in_range(self, v):
         return ((self.lo is None or v >= self.lo)
@@ -52,6 +57,8 @@ class KeySpace:
     def holds(self, v):
         """Whether the key `v` is in the space."""
         if self.values is not None and v not in self.values:
+            return False
+        if self.prefix is not None and not str(v).startswith(self.prefix):
             return False
         if not self._in_range(v):
             return False
@@ -82,6 +89,8 @@ def common(a, b):
     the strides' common progression (`_crt`) has its first member at or
     above both lows checked against both highs."""
     a, b = KeySpace.of(a), KeySpace.of(b)
+    if a.prefix is not None or b.prefix is not None:
+        return _common_prefix(a, b)
     if a.values is not None or b.values is not None:
         listed, other = (a, b) if a.values is not None else (b, a)
         for v in sorted(listed.values, key=repr):
@@ -106,6 +115,33 @@ def common(a, b):
     if lo is None and hi is not None and v > hi:
         v -= -(-(v - int(hi)) // period) * period
     return v if hi is None or v <= hi else None
+
+
+def _common_prefix(a, b):
+    """A text key two spaces hold where one leads its keys by a prefix:
+    two prefixes meet only where one begins the other (the longer is then
+    a key of both); a listed value is tried as it is; a range is tried at
+    the prefix itself and at its bounds that begin with it - a key past
+    the prefix and below a bound that does not begin with it sorts with
+    the prefix."""
+    led, other = (a, b) if a.prefix is not None else (b, a)
+    if other.prefix is not None:
+        longer = max(led.prefix, other.prefix, key=len)
+        tries = [longer] if longer.startswith(min(
+            led.prefix, other.prefix, key=len)) else []
+    elif other.values is not None:
+        tries = sorted(other.values, key=repr)
+    else:
+        tries = [led.prefix] + [x for x in (other.lo, other.hi)
+                                if x is not None
+                                and str(x).startswith(led.prefix)]
+    for v in tries:
+        try:
+            if led.holds(v) and other.holds(v):
+                return v
+        except TypeError:   # a whole-number range is no text key's
+            continue
+    return None
 
 
 def overlaps(spaces, tables=()):

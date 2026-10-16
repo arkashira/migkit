@@ -233,6 +233,81 @@
 #     https://docs.teradata.com/r/Enterprise_IntelliFlex_VMware/Database-Administration/Databases-and-Users-in-Teradata-All-DBAs/As-A-Service-System-Users
 #     https://docs.teradata.com/r/Lake-Getting-Started-with-VantageCloud-Lake/First-Sign-On-by-Organization-Admin-Create-an-Environment/Step-2-Set-the-Environment-Connection-Type
 version: 1
+# The providers' own operations (`cloudapi.OPERATIONS` by name): what their
+# documentation says makes one eligible beyond the facts migkit reads off
+# the API (`preconditions`, said in the plan, never checked by guess) and
+# how long it takes (`duration`): `startup` - seconds [low, high] beside the
+# data's size, `per_tib` - seconds [low, high] for each TiB placed, `said` -
+# the documentation's own words. A part the documentation states no number
+# for is null: that operation's duration is then measured runs only, and
+# without one the plan says not yet. Read by migkit.scenarios.
+#   https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/blue-green-deployments-overview.html
+#   https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/blue-green-deployments-considerations.html
+#   https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_UpgradeDBInstance.Upgrading.html
+#   https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraMySQL.Migrating.RDSMySQL.Replica.html
+#   https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraPostgreSQL.Migrating.html
+#   https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html
+#   https://learn.microsoft.com/en-us/azure/postgresql/migrate/migration-service/overview-migration-service-postgresql
+#   https://cloud.google.com/sql/docs/postgres/upgrade-major-db-version-inplace
+operations:
+  aws-blue-green:
+    preconditions:
+      - "RDS for MySQL 5.7 and later, MariaDB 10.2 and later, or PostgreSQL 11.21, 12.16, 13.12, 14.9, 15.4 and later"
+      - "MySQL and MariaDB: binary logging on (automated backups kept)"
+      - "PostgreSQL: rds.logical_replication = 1 in the source's parameter group, and the source's tables carried by logical replication"
+      - "the source is no cross-Region read replica and no member of a cluster"
+    duration:
+      startup: null
+      per_tib: null
+      switchover: [0, 300]
+      said: "the green environment is made from a snapshot and kept in step by replication - no duration is documented for it; the switchover typically takes under a minute and times out by default after 300 seconds"
+  aws-major-upgrade:
+    preconditions:
+      - "the target version among the source's valid upgrade targets"
+      - "PostgreSQL: no prepared transactions open, and no unsupported data types (reg* types) in user tables"
+    duration:
+      startup: null
+      per_tib: null
+      said: "the instance is unavailable while it upgrades; the documentation gives no duration, which depends on the number of objects"
+  aws-aurora-replica:
+    preconditions:
+      - "the source's engine version among those the Aurora read replica migration takes"
+      - "MySQL: binary logging on; PostgreSQL: the source's major version kept"
+    duration:
+      startup: null
+      per_tib: [3600, 21600]
+      said: "the migration can take several hours per tebibyte (TiB) of data - read as one to six hours a TiB"
+  aws-aurora-snapshot:
+    preconditions:
+      - "a manual or automated snapshot of the source in the same Region"
+    duration:
+      startup: null
+      per_tib: null
+      said: "restoring the snapshot into Aurora takes time growing with the data; no rate is documented"
+  aws-class-restore:
+    preconditions:
+      - "automated backups on the source, and the latest restorable time within its retention"
+    duration:
+      startup: null
+      per_tib: null
+      said: "a point-in-time restore makes a new instance; no duration is documented"
+  azure-single-to-flexible:
+    preconditions:
+      - "a Single Server source on PostgreSQL 11 and later, the target a Flexible Server of the same or a later major version"
+      - "the target's networking reaching the source"
+    duration:
+      startup: null
+      per_tib: null
+      said: "the migration's duration depends on the data's size and the servers' compute; no rate is documented"
+  gcp-major-upgrade:
+    preconditions:
+      - "the target version among the instance's available major versions"
+      - "PostgreSQL: no unsupported extensions and no logical replication slots in use"
+    duration:
+      startup: null
+      per_tib: null
+      said: "the instance is unavailable while it upgrades; no duration is documented"
+
 providers:
   aws:     {label: AWS, api: aws, console: the AWS console, cli: aws}
   gcp:     {label: Google Cloud, api: gcp, console: the Google Cloud console, cli: gcloud}

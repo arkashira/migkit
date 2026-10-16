@@ -130,10 +130,40 @@ def provider_needs(offer):
                     f"{NOT_YET}: " + (offer.get("why_not") or
                                       f"no execution owner runs"
                                       f" {offer['said']}")),
-        decide.Need("a duration from the documented startup and a measured"
-                    " rate", lambda f: duration(offer, f.get("size_bytes"))
+        decide.Need("a duration measured on runs or documented by the"
+                    " provider", lambda f: duration(offer, f.get("size_bytes"))
                     is not None,
                     lambda f: duration_why(offer, f.get("size_bytes"))))
+
+
+TIB = 1024 ** 4
+
+
+def operation_rows():
+    """{operation name: its catalogue row} - the documented preconditions
+    and duration band of each provider operation (`data/managed.yaml`
+    `operations`)."""
+    from . import managed
+    got = managed.catalogue().get("operations") or {}
+    return got if isinstance(got, dict) else {}
+
+
+def documented(offer, size):
+    """The operation's `costmodel.Estimate` for `size` bytes from the
+    band its documentation states (`startup` and `per_tib` [low, high]),
+    or None where it states no size-dependent part - a switchover's
+    downtime alone is not the operation's duration."""
+    from .costmodel import Estimate
+    band = (offer.get("documented") or {}).get("duration") or {}
+    rate = band.get("per_tib")
+    if size is None or not rate:
+        return None
+    start = band.get("startup") or (0, 0)
+    lo = float(start[0]) + float(rate[0]) * size / TIB
+    hi = float(start[1]) + float(rate[1]) * size / TIB
+    return Estimate((lo + hi) / 2, (hi - lo) / 4, truth="documented",
+                    source="the provider's documentation: "
+                           + str(band.get("said") or ""), n=0)
 
 
 def operation_runs(hop, name):
@@ -192,8 +222,10 @@ def duration(offer, size):
     from . import rehearsal
     from .costmodel import Estimate
     runs = _usable(offer.get("runs"))
-    if size is None or size < 0 or not runs:
+    if size is None or size < 0:
         return None
+    if not runs:
+        return documented(offer, size)
     start = offer.get("startup_seconds")
     if start is not None:
         seen = [start + size * (t - start) / b for b, t in runs if t > start]
@@ -227,8 +259,12 @@ def duration_why(offer, size):
     if size is None:
         return _not_yet("the measured size of the data to place")
     if not _usable(offer.get("runs")):
+        said = ((offer.get("documented") or {}).get("duration") or {}).get(
+            "said")
         return (f"{NOT_YET}: no rehearsal or other hop has run"
-                f" {offer['said']} to measure its rate")
+                f" {offer['said']} to measure its rate, and its"
+                " documentation states none"
+                + (f" ({said})" if said else ""))
     return (f"the runs of {offer['said']} give no rate past its documented"
             " startup")
 
@@ -242,6 +278,7 @@ def provider_offers(hop, source_adapter, target_adapter=None):
     if not callable(ops):
         return ()
     out = []
+    rows = operation_rows()
     for op in ops():
         runs, whose, truth = operation_runs(hop, op.name)
         out.append({"name": op.name, "said": op.said, "checks": op.checks,
@@ -249,18 +286,22 @@ def provider_offers(hop, source_adapter, target_adapter=None):
                     "why_not": op.why_not, "startup_seconds": op.startup,
                     "new_instance": op.new_instance,
                     "startup_source": op.startup_source, "runs": runs,
-                    "duration_source": whose, "truth": truth})
+                    "duration_source": whose, "truth": truth,
+                    "documented": rows.get(op.name) or {}})
     return tuple(out)
 
 
-def managed_facts(hop, eng, source_api, target_api, offers, size_bytes):
+def managed_facts(hop, eng, source_api, target_api, offers, size_bytes,
+                  forecast=None):
     """Read provider instances without changing either side: reachability,
     class, version, status, storage, replicas, upgrade targets and
     maintenance window as the provider's API states them. An API that
     does not answer is a fact (`api_reachable`), not an exception.
 
     Offers are the provider's operations on the source's product
-    (`offers`), each held to its eligibility on these facts."""
+    (`offers`), each held to its eligibility on these facts; `forecast`
+    migkit's own move's `costmodel.Estimate` for the data, which each
+    operation is ranked against."""
     from . import clouds
     src = dst = None
     error = ""
@@ -274,6 +315,7 @@ def managed_facts(hop, eng, source_api, target_api, offers, size_bytes):
         "locations": (clouds.of(eng, "src", hop.source),
                       clouds.of(eng, "dst", hop.target)),
         "offers": tuple(offers), "size_bytes": size_bytes,
+        "forecast": forecast,
     })
 
 
@@ -299,15 +341,49 @@ def managed_case(facts, verified=None):
         took = duration(offer, size)
         if took is not None:
             costs[name] = took
+    own = facts.get("forecast")
+    if own is not None:
+        costs[decide.MANAGED_OWN_MOVE] = own
     choice = decide.climb("the managed service path", rungs, facts,
                           need=("managed path", "full verify"), costs=costs)
+    own = facts.get("forecast")
+    if own is not None:
+        costs[decide.MANAGED_OWN_MOVE] = own
+    against = decide.managed_against_own(choice, costs)
     details = ["provider completion is followed by migkit's full verify"]
+    details += _ranked_words(facts, costs, choice)
+    details.append(f"{against.said}: {against.reason}")
     target = facts.get("target")
     if target is not None and target.maintenance:
         details.append(f"the target's maintenance window: {target.maintenance}")
     if not rungs:
-        details.append("no eligible provider operation was read; consider the existing logical move")
+        details.append("no eligible provider operation was read; consider"
+                       " the existing logical move")
     return ScenarioDecision("managed service change", choice, tuple(details))
+
+
+def _ranked_words(facts, costs, choice):
+    """The plan's words of each operation's duration beside migkit's own
+    forecast - the band its documentation states or its measured runs -
+    and the preconditions its documentation states that no API fact
+    answers, for the operation chosen."""
+    out = []
+    own = costs.get(decide.MANAGED_OWN_MOVE)
+    if own is None and facts.get("offers"):
+        out.append(f"{NOT_YET}: migkit's own move has no forecast for the"
+                   " measured data - an operation is ranked on its own"
+                   " duration only")
+    for offer in facts.get("offers", ()):
+        took = costs.get(offer["name"])
+        if took is not None:
+            out.append(f"{offer['said']}: {took.said()} by {took.source}"
+                       + (f", against migkit's own move {own.said()}"
+                          if own is not None else ""))
+        if choice.path == offer["name"]:
+            out += [f"before it runs, as the provider documents: {p}"
+                    for p in (offer.get("documented") or {}).get(
+                        "preconditions") or ()]
+    return out
 
 
 def architecture_facts(eng, db, platform_reader):

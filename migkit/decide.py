@@ -5118,3 +5118,74 @@ def provider_asked(facts):
                          " let calls to the provider's own API out")),
              because="a fact the provider holds of the side, stronger than"
                      " any sign the server gives"),), f)
+
+def slice_recheck(facts):
+    """Whether a consolidation's slice verify (`consolidate.slice_verify`)
+    compares its sources' slices again: only where a difference is not yet
+    agreed by two rounds a caught-up follow stands between, a follow is
+    there to catch the target up, and the round before left fewer of them
+    than the one before it - differences that do not fall are writes
+    outrunning the follow, said as found, never compared without end.
+    Else the slices' verdict stands as compared."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("a slice verify's next round", (
+        Rung("recheck", "the slices compared again past a caught-up follow",
+             needs=(
+                 Need("a difference two rounds have not agreed on",
+                      lambda x: x["unsettled"] > 0,
+                      "every difference found was found alike past a"
+                      " caught-up follow"),
+                 Need("a follow to catch the target up",
+                      lambda x: x["catch_up"] is True,
+                      "no follow is there to catch the target up: the"
+                      " differences stand as found at the positions read"),
+                 Need("differences falling round by round",
+                      lambda x: x["before"] is None
+                      or x["unsettled"] < x["before"],
+                      lambda x: f"{x['unsettled']:,} differences after a"
+                                f" round that left {x['before']:,}: writes"
+                                " outrun the follow, said as found")),
+             because="a difference read while the follow was behind its"
+                     " source is compared again once it has caught up"),
+        Rung("settle", "the slices' verdict as compared",
+             because="every difference is agreed past a caught-up follow")),
+        f)
+
+
+
+#: the rung of migkit's own move among the providers' operations
+MANAGED_OWN_MOVE = "migkit-move"
+
+
+def managed_against_own(choice, costs):
+    """The provider operation `choice` (`scenarios.managed_case`) ranked
+    against migkit's own move and its full verify by their durations in
+    `costs` ({name: costmodel.Estimate}: the operation's measured or
+    documented, migkit's forecast under `MANAGED_OWN_MOVE`). The operation
+    stands only where one is eligible and both durations are known and it
+    is not the slower; migkit's own move holds wherever it does not."""
+    op, mine = costs.get(choice.path), costs.get(MANAGED_OWN_MOVE)
+    return climb("a provider operation or migkit's own move", (
+        Rung(choice.path or "provider-operation",
+             choice.rung.said if choice.rung else "a provider operation",
+             needs=(
+                 Need("an eligible provider operation",
+                      lambda f: f["path"] is not None,
+                      "no provider operation is eligible on the facts read"),
+                 Need("migkit's own move forecast for the data",
+                      lambda f: f["mine"] is not None,
+                      "migkit's own move has no forecast for the data, so"
+                      " no operation is ranked above it"),
+                 Need("the operation's duration no longer than migkit's"
+                      " forecast",
+                      lambda f: f["op"] is not None and f["mine"] is not None
+                      and f["op"].mean <= f["mine"].mean,
+                      lambda f: f"the operation's {f['op'].said()} is longer"
+                                f" than migkit's own {f['mine'].said()}"
+                      if f["op"] is not None and f["mine"] is not None
+                      else "the operation's duration is not known")),
+             because="the provider's operation is eligible and no slower"
+                     " than migkit's own move by the durations read"),
+        Rung(MANAGED_OWN_MOVE, "migkit's own move and its full verify",
+             because="the first way that holds")),
+        Facts({"path": choice.path, "op": op, "mine": mine}))

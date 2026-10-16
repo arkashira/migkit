@@ -26,7 +26,11 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 377
+## Upward imports still listed: 378
+
+### (not listed)
+
+- `migkit/hopkeys.py:2997` configuration -> decision (`topology`)
 
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
@@ -191,7 +195,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop is checked against the engines (`engines.base`) it names; ends when the engine registry is read through a contract
 
-- `migkit/hopkeys.py:2378` configuration -> engines (`engines.base`)
+- `migkit/hopkeys.py:2379` configuration -> engines (`engines.base`)
 
 ### a hop is checked against the engines (`engines.saas`) it names; ends when the engine registry is read through a contract
 
@@ -207,7 +211,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop is checked by safety's `egress`; the check moves to the key table
 
-- `migkit/hopkeys.py:2348` configuration -> safety (`egress`)
+- `migkit/hopkeys.py:2349` configuration -> safety (`egress`)
 
 ### a hop is checked by safety's `freeze`; the check moves to the key table
 
@@ -216,7 +220,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop is checked by safety's `interlock`; the check moves to the key table
 
-- `migkit/hopkeys.py:2828` configuration -> safety (`interlock`)
+- `migkit/hopkeys.py:2829` configuration -> safety (`interlock`)
 
 ### a hop is checked by safety's `leftovers`; the check moves to the key table
 
@@ -228,11 +232,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop key's check or default asks `archive` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2917` configuration -> workflows (`archive`)
+- `migkit/hopkeys.py:2918` configuration -> workflows (`archive`)
 
 ### a hop key's check or default asks `consolidate` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2917` configuration -> workflows (`consolidate`)
+- `migkit/hopkeys.py:2918` configuration -> workflows (`consolidate`)
 
 ### a hop key's check or default asks `cutover` what it accepts; ends when the key table is read from the owner
 
@@ -240,31 +244,31 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop key's check or default asks `physical` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2309` configuration -> workflows (`physical`)
+- `migkit/hopkeys.py:2310` configuration -> workflows (`physical`)
 
 ### a hop key's check or default asks `reshard` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2917` configuration -> workflows (`reshard`)
+- `migkit/hopkeys.py:2918` configuration -> workflows (`reshard`)
 
 ### a hop key's check or default asks `split` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2917` configuration -> workflows (`split`)
+- `migkit/hopkeys.py:2918` configuration -> workflows (`split`)
 
 ### a hop key's check or default asks `subset` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2299` configuration -> workflows (`subset`)
+- `migkit/hopkeys.py:2300` configuration -> workflows (`subset`)
 
 ### a hop key's check or default asks `tableengine` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2917` configuration -> workflows (`tableengine`)
+- `migkit/hopkeys.py:2918` configuration -> workflows (`tableengine`)
 
 ### a hop key's check or default asks `tailtables` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2393` configuration -> workflows (`tailtables`)
+- `migkit/hopkeys.py:2394` configuration -> workflows (`tailtables`)
 
 ### a hop key's check or default asks `twoway` what it accepts; ends when the key table is read from the owner
 
-- `migkit/hopkeys.py:2364` configuration -> workflows (`twoway`)
+- `migkit/hopkeys.py:2365` configuration -> workflows (`twoway`)
 
 ### a hop option is explained by the decision engine (`dba`); the explanation moves to the key table
 
@@ -277,7 +281,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop option is explained by the decision engine (`machine`); the explanation moves to the key table
 
-- `migkit/hopkeys.py:2966` configuration -> decision (`machine`)
+- `migkit/hopkeys.py:3034` configuration -> decision (`machine`)
 
 ### a hop option is explained by the decision engine (`ready`); the explanation moves to the key table
 
@@ -285,11 +289,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop option is explained by the decision engine (`scenarios`); the explanation moves to the key table
 
-- `migkit/hopkeys.py:2917` configuration -> decision (`scenarios`)
+- `migkit/hopkeys.py:2918` configuration -> decision (`scenarios`)
 
 ### a hop option is explained by the decision engine (`sourcechange`); the explanation moves to the key table
 
-- `migkit/hopkeys.py:3015` configuration -> decision (`sourcechange`)
+- `migkit/hopkeys.py:3083` configuration -> decision (`sourcechange`)
 
 ### a record is rendered by conversion's `canon`; the rendering moves below persistence
 
@@ -447,7 +451,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `consolidate` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/scenarios.py:1225` decision -> workflows (`consolidate`)
+- `migkit/scenarios.py:1301` decision -> workflows (`consolidate`)
 
 ### a rung or plan reads `cutover` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -488,7 +492,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `reshard` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/scenarios.py:657` decision -> workflows (`reshard`)
+- `migkit/scenarios.py:733` decision -> workflows (`reshard`)
 - `migkit/topology.py:19` decision -> workflows (`reshard`)
 
 ### a rung or plan reads `subset` for what the workflow can do; ends when the workflow publishes its abilities below decision
@@ -497,7 +501,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `tableengine` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/scenarios.py:1140` decision -> workflows (`tableengine`)
+- `migkit/scenarios.py:1216` decision -> workflows (`tableengine`)
 
 ### a rung or plan reads `topicstates` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -837,11 +841,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### configuration reaches `carriers` (integrations); the shared piece moves below both, or the call is inverted
 
-- `migkit/hopkeys.py:2966` configuration -> integrations (`carriers`)
+- `migkit/hopkeys.py:3034` configuration -> integrations (`carriers`)
 
 ### configuration reaches `charsets` (conversion); the shared piece moves below both, or the call is inverted
 
-- `migkit/hopkeys.py:2917` configuration -> conversion (`charsets`)
+- `migkit/hopkeys.py:2918` configuration -> conversion (`charsets`)
 
 ### configuration reaches `cloudapi` (integrations); the shared piece moves below both, or the call is inverted
 
@@ -861,12 +865,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### configuration reaches `rowfilter` (scope); the shared piece moves below both, or the call is inverted
 
-- `migkit/hopkeys.py:2519` configuration -> scope (`rowfilter`)
+- `migkit/hopkeys.py:2520` configuration -> scope (`rowfilter`)
 
 ### configuration reaches `transforms` (conversion); the shared piece moves below both, or the call is inverted
 
 - `migkit/config.py:1678` configuration -> conversion (`transforms`)
-- `migkit/hopkeys.py:2580` configuration -> conversion (`transforms`)
+- `migkit/hopkeys.py:2581` configuration -> conversion (`transforms`)
 
 ### configuration reaches `util` (execution); the shared piece moves below both, or the call is inverted
 
@@ -979,7 +983,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/capabilities.py:34` decision -> engines (`engines.base`)
 - `migkit/decide.py:2734` decision -> engines (`engines.base`)
 - `migkit/model.py:1110` decision -> engines (`engines.base`)
-- `migkit/scenarios.py:399` decision -> engines (`engines.base`)
+- `migkit/scenarios.py:475` decision -> engines (`engines.base`)
 - `migkit/workload.py:133` decision -> engines (`engines.base`)
 
 ### the decision engine asks an engine (`engines.dbapi`) what it can do; ends when the engine contract is a package below decision
