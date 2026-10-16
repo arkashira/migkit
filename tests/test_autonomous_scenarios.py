@@ -52,12 +52,10 @@ PG16 = ("W15J-PG16: the bulk copy on the PostgreSQL 16 pair stops on a"
 MYBULK = ("W15J-MYBULK: the MySQL bulk copy's one trial on the rowmeta pair"
           " stops with 'a failure no class here describes' and the copy"
           " is held - no fallback to migkit's own copier in the run")
-D0 = ("W15J-D0: a copy, which reads no changes, is held back where the"
-      " source's change reading is D0 (changedepth.py:105, the assess gate)")
 
-# MySQL is measured on the profile whose source keeps full row images, so
-# a copy is not held back by W15J-D0 (`test_a_copy_needs_no_change_reading`
-# keeps that bug in view on the default profile)
+# MySQL is measured on the profile whose source keeps full row images; a
+# copy on the default profile, whose changes cannot be read (D0), is
+# `test_a_copy_needs_no_change_reading`
 rowmeta = servers.fixture("mysql-rowmeta")
 capped = servers.fixture("pg-capped")
 
@@ -464,7 +462,8 @@ def test_a_target_capped_below_its_source_is_sized_to_it(pg_pair, capped,
     _gate(m)
 
 
-@pytest.mark.xfail(strict=True, reason=D0)
+@pytest.mark.xfail(strict=True, reason=MYBULK + " (the default profile,"
+                   " past the assessment W15J-D0 no longer holds)")
 def test_a_copy_needs_no_change_reading(my_pair, tmp_path):  # noqa: F811
     from tests import mysql_pair
     side = Side("mysql", mysql_pair._side("src"), mysql_pair._side("dst"))

@@ -4012,44 +4012,43 @@ def settle_way(facts):
 
 
 
-# ---- how long the tail waits once its read's link is lost (backlog
-# ---- P0-RESILIENCE-ALL) ------------------------------------------------------
+#: the level `assess` gives each rung of `change_depth_level`
+CHANGE_DEPTH_LEVELS = {"whole": "pass", "unread": "pass", "partial": "warn",
+                       "none": "fail"}
 
-def lost_link_wait(reconnects, down=0.0):
-    """(seconds, `Choice`): how long the tail waits, once its read's link
-    was lost past the read's own tries (`faults.retried`), before it reads
-    again from the saved position. No number is written here: the longest
-    time a lost link of this loop took to answer again (`reconnects`, each
-    measured from the loss to the next read that answered), less what this
-    loss has lasted (`down`); where none was measured or this loss has
-    outlasted them all, as long again as it has lasted - so the wait grows
-    from what was observed, with no fixed ceiling - and a loss that has
-    not lasted at all is read again at once."""
-    d = tuple(sorted(float(x) for x in reconnects or ()
-                     if x is not None and x >= 0))
-    down = max(0.0, float(down or 0.0))
-    said = ((f"reconnects measured here took "
-             + ", ".join(f"{x:.1f}s" for x in d)) if d
-            else "no reconnect measured here") + (
-        f"; this loss has lasted {down:.1f}s")
-    rungs = (
-        Rung("measured", "wait out the longest reconnect measured here",
-             needs=(Need("a reconnect measured",
-                         lambda f: bool(f.get("reconnects")),
-                         "no lost link of this loop has come back yet"),
-                    Need("a loss not past it",
-                         lambda f: f.get("down") < f.get("reconnects")[-1],
-                         "this loss has outlasted every reconnect"
-                         " measured")),
-             because=said),
-        Rung("as long again", "wait as long again as the link has been"
-             " down", needs=(Need("a loss that has lasted",
-                                  lambda f: f.get("down") > 0,
-                                  "the link was lost just now"),),
-             because=said),
-        Rung("at once", "read again now", because=said))
-    got = climb("a lost link of the tail", rungs,
-                Facts({"reconnects": d, "down": down}))
-    seconds = {"measured": (d[-1] - down) if d else 0.0,
-               "as long again": down}.get(got.path, 0.0)
-    return max(0.0, seconds), got
+
+def change_depth_level(facts):
+    """The `Choice` of the level a table's change-reading depth earns
+    (`changedepth.SCALE`), from the goal and the depth read (W15J-D0):
+    every change whole (D4) passes; a goal that reads no changes (a copy,
+    a proof, a one-shot move with the writes stopped) passes at any depth,
+    the depth said as a note - its check compares every row once; a goal
+    that follows the source's changes warns on a partial depth (D1-D3) and
+    fails on none (D0), with the statement that raises it. `facts`:
+    `depth` (D0-D4), `goal` (the hop's goal word), `follows` (True where
+    the step or goal follows the source's changes, False where it does
+    not, None where not said - read as following, the stricter level)."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    depth, goal = f.get("depth"), f.get("goal") or "not said"
+    said = f"change reading {depth} on goal {goal}"
+    return climb("the level of a change-reading depth", (
+        Rung("whole", "every change read whole", needs=(
+            Need("every change with its images", lambda f: f.get("depth")
+                 == "D4", f"{said}, not every change whole (D4)"),),
+             because=f"{said} reads every change whole"),
+        Rung("unread", "not needed by the goal", needs=(
+            Need("a goal that reads no changes",
+                 lambda f: f.get("follows") is False,
+                 lambda f: f"{said}: the goal follows the source's changes"
+                 if f.get("follows") else f"{said}: whether the goal"
+                 " follows the source's changes was not said"),),
+             because=f"{said}: the goal reads no changes, so its check"
+                     " compares every row once"),
+        Rung("partial", "a partial change reading", needs=(
+            Need("some change reading", lambda f: f.get("depth") in (
+                "D1", "D2", "D3"), f"{said} reads no changes at all"),),
+             because=f"{said} reads part of each change"),
+        Rung("none", "no change reading for a goal that follows changes",
+             footprint=1,
+             because=f"{said} reads no changes, and the goal follows"
+                     " them")), f)

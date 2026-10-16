@@ -513,18 +513,19 @@ def by_hand(hop, eng=None):
 
 # --- in one place ------------------------------------------------------------
 
-def depth(hop, eng):
+def depth(hop, eng, mode=None):
     """How deep an assessment goes, chosen from what the servers answer:
     (quick, assessed, why). The full one asks the engine's own assessment
-    once (bounded by the engine's connect timeout); where the servers do
-    not answer it, the assessment stands on the hop's configuration alone
-    and says so - never a clean bill from what was not asked."""
+    once (bounded by the engine's connect timeout), for the goal and the
+    step's `mode` (`_assessed`); where the servers do not answer it, the
+    assessment stands on the hop's configuration alone and says so - never
+    a clean bill from what was not asked."""
     from . import decide
     box = {}
 
     def answers(_facts):
         try:
-            box["rows"] = list(eng.assess())
+            box["rows"] = _assessed(hop, eng, mode)
             return True
         except Exception as e:  # noqa: BLE001 - the rung below says it
             box["error"] = _last(e)
@@ -541,6 +542,15 @@ def depth(hop, eng):
     return got.path == "quick", box.get("rows"), got.reason
 
 
+def _assessed(hop, eng, mode):
+    """The engine's own assessment rows, asked under the hop's goal and
+    whether the step follows the source's changes (`_streams`): the level
+    a change-reading depth earns is the goal's (`changedepth.for_goal`)."""
+    from . import changedepth
+    with changedepth.for_goal(_goal(hop), _streams(hop, mode)):
+        return list(eng.assess())
+
+
 def items(hop, eng, dbs=None, mode=None, quick=False, assessed=None):
     """Every `Item` of the hop's goal: with `quick`, only what a step's
     gate needs (no engine assess, no probe, no statement compared).
@@ -549,7 +559,8 @@ def items(hop, eng, dbs=None, mode=None, quick=False, assessed=None):
     out = []
     if not quick:
         try:
-            for r in (assessed if assessed is not None else eng.assess()):
+            for r in (assessed if assessed is not None
+                      else _assessed(hop, eng, mode)):
                 detail, _, fix = str(r.get("detail", "")).partition(
                     "  [fix] ")
                 out.append(Item(r["level"], r.get("scope") or BEFORE,

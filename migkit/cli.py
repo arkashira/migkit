@@ -3153,9 +3153,10 @@ class _Steps:
     def assess(self):
         """What fails for the whole hop, then what fails for one database
         alone - which holds that one apart."""
-        from . import ready, rehearsal
+        from . import autonomous, ready, rehearsal
         rehearsal.mark(self.hop)
-        quick, assessed, _ = ready.depth(self.hop, self.eng)
+        quick, assessed, _ = ready.depth(self.hop, self.eng,
+                                         autonomous.MOVE_MODE[self.goal])
         whole = self._fails(quick=quick, assessed=assessed)
         if whole:
             return [("", w) for w in whole]

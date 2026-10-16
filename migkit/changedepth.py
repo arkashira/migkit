@@ -8,8 +8,17 @@ ranged digest diff of those), D0 nothing (a digest diff of everything,
 exact only with writes stopped). Said from the settings the source
 reports and each table's key; what a deeper depth would cost is the
 statement's own words. Reading a setting is not choosing a method: the
-method is `decide`'s.
+method is `decide`'s, and so is the level a depth earns: from the goal
+(`decide.change_depth_level`), given here by `goal` or by the readiness
+check around the engine's own assessment (`for_goal`).
 """
+
+import contextlib
+import contextvars
+
+#: (goal, follows) of the readiness check asking: what `lines` reads where
+#: its caller - an engine's own assessment - does not say the goal
+_GOAL = contextvars.ContextVar("changedepth_goal", default=(None, None))
 
 SCALE = {
     "D4": "every change with its before and after image",
@@ -92,21 +101,44 @@ def mongodb(replica_set, pre_images, way=None, why=""):
     return "D3", _PRE_IMAGES
 
 
-def lines(table_depths, shown=5):
+@contextlib.contextmanager
+def for_goal(goal, follows):
+    """The goal (`goal` its word, `follows` whether the step follows the
+    source's changes) every `lines` below reads where its caller does not
+    say one."""
+    token = _GOAL.set((goal, follows))
+    try:
+        yield
+    finally:
+        _GOAL.reset(token)
+
+
+def lines(table_depths, shown=5, goal=None, follows=None):
     """Assess rows, one per depth reached, from {table: (depth, raise)}:
     (level, item, detail) - the tables named up to `shown`, and the one
-    statement that raises each depth."""
+    statement that raises each depth. The level is `decide`'s, from the
+    depth and the goal (`goal`, `follows`; the readiness check's where not
+    given - `for_goal`): a depth the goal does not need is a note, its
+    statement kept for a later goal that follows changes."""
+    from . import decide
+    if goal is None and follows is None:
+        goal, follows = _GOAL.get()
     by = {}
     for table, (depth, fix) in sorted(table_depths.items()):
         by.setdefault((depth, fix), []).append(table)
     out = []
     for (depth, fix), names in sorted(by.items(), reverse=True):
         more = f" and {len(names) - shown} more" if len(names) > shown else ""
-        level = "pass" if depth == "D4" else "warn" if depth in (
-            "D3", "D2") else "fail" if depth == "D0" else "warn"
+        got = decide.change_depth_level(
+            {"depth": depth, "goal": goal, "follows": follows})
+        unread = got.path == "unread"
         out.append((
-            level, f"change reading {depth} ({SCALE[depth]}):"
+            decide.CHANGE_DEPTH_LEVELS[got.path],
+            f"change reading {depth} ({SCALE[depth]}):"
             f" {len(names)} table{'s' if len(names) != 1 else ''}",
             ", ".join(names[:shown]) + more
-            + (f" - to raise it: {fix}" if fix else "")))
+            + (f" - a note: goal {goal} reads no changes, so its check"
+               " compares every row once" if unread else "")
+            + (f" - to follow changes later: {fix}" if fix and unread
+               else f" - to raise it: {fix}" if fix else "")))
     return out
