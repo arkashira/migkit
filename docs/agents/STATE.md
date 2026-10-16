@@ -51,7 +51,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | polardbx | 15/16 | 11/12 | bulk-move, large values |
 | postgres | 16/16 | 12/12 | - |
 | pubsub | 16/16 | 12/12 | - |
-| qdrant | 12/16 | 5/12 | params, bulk-move, statistics, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
+| qdrant | 13/16 | 5/12 | params, bulk-move, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
 | redis | 16/16 | 12/12 | - |
 | redshift | 6/16 | 12/12 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
 | saas | 16/16 | 12/12 | - |
