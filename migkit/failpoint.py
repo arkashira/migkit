@@ -11,7 +11,7 @@ way a crash, a kill or a lost machine would:
 does); `raise` raises; `hang` stops for good; `fault=<class>` raises a
 failure of that class of `faults.CATALOGUE` as its driver would. `N+`
 fires the Nth time and every time after. Several are separated by
-commas. Counted in each process: a range copied in a process of its own
+commas, one place's reaches counted once whatever entries name it. Counted in each process: a range copied in a process of its own
 counts its own. Only the tests set it.
 """
 import os
@@ -33,16 +33,19 @@ def hit(name):
     spec = os.environ.get("MIGKIT_FAILPOINT")
     if not spec:
         return
-    for one in spec.split(","):
-        parts = one.strip().split(":")
-        if parts[0] != name:
-            continue
+    mine = [one.strip().split(":") for one in spec.split(",")]
+    mine = [parts for parts in mine if parts[0] == name]
+    if not mine:
+        return
+    # counted once a reach, however many entries name the place: the
+    # place's 1st and 3rd reach may each fail on its own entry
+    with _lock:
+        n = _counts[name] = _counts.get(name, 0) + 1
+    for parts in mine:
         raw = parts[1] if len(parts) > 1 and parts[1] else "1"
         onward = raw.endswith("+")
         at = int(raw.rstrip("+"))
         what = parts[2] if len(parts) > 2 else "exit"
-        with _lock:
-            n = _counts[name] = _counts.get(name, 0) + 1
         if n != at and not (onward and n > at):
             continue
         if what.startswith("fault="):

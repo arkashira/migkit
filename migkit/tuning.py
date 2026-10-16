@@ -717,6 +717,7 @@ class Retune:
         self.ceiling = {}
         self.calm, self.steady = 0, self.STEADY
         self.history, self.open, self.verified = [], {}, []
+        self.bounds = []
         self.rate = None
         self.units = {}
 
@@ -967,6 +968,28 @@ class Retune:
         (`util.Unit`s): a retuned unit counted with its attempts."""
         from .util import forecast
         return forecast(list(self.units.values()) + list(pending), **kw)
+
+    def tries_paid(self, unit, rows, left, width=1):
+        """The tries one unit of `rows` may make, every recovery counted,
+        as the forecast pays for: the `left` rows of its work (`width`
+        bytes a row) at the bytes a second the copy measured, over what
+        one try of the unit takes at that rate - recovery never spends more time than the work it saves is
+        worth; the try and one recovery always fit. Unmeasured, the
+        catalogue's own default (`faults.retried`). Each bound is kept in
+        `bounds` with the forecast it came from."""
+        import inspect
+        import math
+        from . import faults
+        if not self.rate or not rows:
+            got, eta, took = inspect.signature(faults.retried).parameters[
+                "tries"].default, None, None
+        else:
+            eta = float(left) * width / self.rate
+            took = float(rows) * width / self.rate
+            got = max(2, 1 + math.ceil(eta / max(took, 1e-9)))
+        self.bounds.append({"unit": unit, "tries": got, "eta": eta,
+                            "took": took, "rate": self.rate})
+        return got
 
 
 def sized(retune, unit, fn, apply, reconcile=None, sent=None, rows=None,

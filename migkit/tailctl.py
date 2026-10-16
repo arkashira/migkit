@@ -508,7 +508,7 @@ def resume(where):
 def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
              save=None, reached=None, lost=None, beat_with=None,
              idle=(IDLE_LEAST, IDLE_MOST), secrets=(), until_=None,
-             on_start=None, on_end=None):
+             on_start=None, on_end=None, ledger=None):
     """The one follow loop (audit ST14, K14). Returns (how many `noun` it
     carried, why it ended: "asked", "slot", "caught up" or "interrupted").
 
@@ -522,6 +522,14 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
     compared - it then ends on an empty read. `lost(e, token)` is where to
     go on from after a lost connection (the last saved position where
     None). `beat_with(caught_up, seen)` replaces the plain beat.
+    `ledger` (`attempts.Ledger`) keeps each read as an owned operation.
+
+    Each read runs under the catalogue's recovery (`faults.retried`), as
+    every copier's does: a link lost is read again where `lost` says,
+    each try and the path chosen kept in `ledger` under the position it
+    reads from; nothing a read carries is saved before it ends, so a read
+    run again converges. Past what the recovery may try, a lost link is
+    waited out here and read again from the last saved position.
 
     Around every batch, the same for each engine: the lease still held
     (`Running.check`), a pause held, a stop or the schedule's slot end
@@ -530,9 +538,31 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
     written, and an idle wait that grows from 20 ms to `idle[1]` and is
     back at 20 ms at the next change. A run with `go` False writes
     nothing: no lease, no position, no beat."""
-    from . import failpoint, notify, schedule
+    from . import failpoint, faults, notify, schedule
     from .util import is_transient, without_secret
     slot_ends = schedule.slot_end()
+    at = [token]
+
+    def read():
+        try:
+            failpoint.hit("tail.read")
+            return look(at[0])
+        except Exception as e:  # noqa: BLE001 - classified by the recovery
+            if is_transient(e) and lost is not None:
+                # the next try goes on from where the engine says a lost
+                # link resumes, as the wait below does
+                at[0] = lost(e, at[0])
+            raise
+
+    def looked():
+        at[0] = token
+        owned = faults.Owned("src", "tail read", str(db),
+                             json.dumps(token, sort_keys=True, default=str))
+        got = faults.retried(read, side="src", operation="tail read",
+                             label=f"{db}: the tail's read", log=log,
+                             ledger=ledger,
+                             owned=owned if ledger is not None else None)
+        return at[0], got
     if until_ is None:
         until_ = until(hop, scheduled=slot_ends is not None) \
             if hop is not None else "stopped"
@@ -584,7 +614,7 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
                     ended = "slot"
                     break
                 try:
-                    after, n, settled = look(token)
+                    token, (after, n, settled) = looked()
                 except Exception as e:  # noqa: BLE001 - classified here
                     if not is_transient(e):
                         raise
@@ -818,7 +848,9 @@ def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):
 
     def save(after):
         env[0] = moved(token_path, env[0], after)
+    fn = getattr(eng, "attempts", None)
     run_loop(token_path.parent, db, looking, log, noun, hop=eng.hop, go=go,
              token=token, save=save,
+             ledger=getattr(fn(), "ledger", None) if callable(fn) else None,
              secrets=(eng.hop.source.password, eng.hop.target.password),
              idle=(min(every, IDLE_MOST) / 8, every))

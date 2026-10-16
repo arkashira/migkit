@@ -2487,7 +2487,7 @@ class HeteroEngine(Engine):
         that is one of `crossmove`'s, and proved by the digest on both
         servers; otherwise - or where that did not prove itself - its span
         emptied on the target, then copied and read back batch by batch."""
-        from .. import crossmove
+        from .. import crossmove, faults
         src, dst = self.src_engine, self.dst_engine
         src_cols, dst_cols, _ = self._move_columns(src_t, dst_t, db)
         (k,) = src.neutral_key("src", db, src_t)
@@ -2518,24 +2518,56 @@ class HeteroEngine(Engine):
                     retune.settings()["rows"])
         point, moved = None, 0
         unit = f"{label} {after}..{upto}"
+        # the read and the write each an owned operation of the run's
+        # ledger, under the catalogue's recovery: a read whose link dropped
+        # is read again from the same key; a write lost after it was sent
+        # is counted on the target first (`faults.landed`) and never run
+        # on a guess; tries bounded by what the range's forecast pays for
+        ledger = self.attempts().ledger
+        span = scope(dst, dst_k, dst_where)
+        keyed = [c for c in dst_cols if c[0] == dst_k][:1]
+        width = self._row_width(db, src_t) or 1
+
+        def held():
+            return int(dst.neutral_digest("dst", db, dst_t, keyed,
+                                          where=span)[0])
+
         while True:
+            def read(at=point):
+                from .. import failpoint
+                failpoint.hit("hetero.read")
+                return src.neutral_read("src", db, src_t, src_cols, at,
+                                        chunk, where=where)
+            left = max(1, int(upto) - int(after) - moved)
             try:
-                rows, last = src.neutral_read("src", db, src_t, src_cols,
-                                              point, chunk, where=where)
+                rows, last = faults.retried(
+                    read, tries=retune.tries_paid(unit, chunk, left, width),
+                    side="src", operation="read range", label=unit,
+                    backoff=lambda i: 0.2 * (i + 1), ledger=ledger,
+                    owned=faults.Owned("src", "read range",
+                                       f"{db}.{src_t}",
+                                       f"{after}..{upto}@{point}"))
             except Exception as e:
                 self._refused("src", "reading rows", db, src_t, "SELECT", e)
                 raise
             if not rows:
                 break
             rows, _ = self._flatten_absent(rows)
+            began = time.monotonic()
             try:
-                self._write_sized(db, label, dst_t, dst_cols, plan, [k], rows,
-                                  retune, unit)
+                self._write_sized(
+                    db, label, dst_t, dst_cols, plan, [k], rows, retune, unit,
+                    ledger=ledger, held=held, before=moved,
+                    owned=faults.Owned("dst", "copy batch", f"{db}.{dst_t}",
+                                       f"{after}..{upto}@{point}"),
+                    tries=retune.tries_paid(unit, len(rows), left, width))
             except Exception as e:
                 self._refused("dst", "copying rows in", db, dst_t,
                               "INSERT, UPDATE, DELETE, SELECT", e)
                 raise
             dst.named_write(db, dst_t, "copy", unit, len(rows))
+            retune.succeeded(unit, len(rows), len(rows) * width,
+                             time.monotonic() - began)
             moved += len(rows)
             if last is None:
                 break
@@ -2570,12 +2602,20 @@ class HeteroEngine(Engine):
         return None
 
     def _write_sized(self, db, key, dst_t, dst_cols, plan, resumable, rows,
-                     retune, unit):
+                     retune, unit, ledger=None, held=None, before=0,
+                     owned=None, tries=None):
         """A read's rows written at `retune`'s sizes (`tuning.sized`): a
         failure a size answers goes again at the new size, each batch
         replaced by its key so a part written before the failure is not
-        doubled."""
-        from .. import pieces, tuning
+        doubled. Where `held()` counts the rows the unit's span holds on
+        the target (`before` of them before this read), each try is an
+        owned operation of `ledger` under the catalogue's recovery
+        (`faults.retried`): a write whose outcome is not known is counted
+        there first (`faults.landed`) - all of it there is read back by
+        its keys, not written again; less is written again whole, which
+        replacing by key converges on - and a size the server refused
+        retunes from the rows that count says landed."""
+        from .. import faults, pieces, tuning
 
         def write():
             s = retune.settings()
@@ -2588,8 +2628,30 @@ class HeteroEngine(Engine):
                                         pieces.row_bytes):
                 self._write_checked(db, key, dst_t, dst_cols, plan,
                                     resumable, list(part), lambda m: None)
-        return tuning.sized(retune, unit, write, lambda s: None,
-                            rows=lambda: len(rows))
+        if held is None:
+            return tuning.sized(retune, unit, write, lambda s: None,
+                                rows=lambda: len(rows))
+
+        def owned_write():
+            got = faults.retried(
+                lambda: write() or "written", tries=tries or 4, side="dst",
+                operation="copy batch", writes=True, label=unit,
+                backoff=lambda i: 0.2 * (i + 1), ledger=ledger, owned=owned,
+                check=faults.landed(lambda: before + len(rows), held,
+                                    idempotent=True,
+                                    value=lambda w: "landed"))
+            if got == "landed" and plan is not None:
+                # counted whole, then held to what was read: a batch the
+                # count found is read back by its keys like any other
+                missing, changed, _ = self._verify_batch(
+                    db, dst_t, plan, resumable, rows)
+                if missing or changed:
+                    self._write_checked(db, key, dst_t, dst_cols, plan,
+                                        resumable, rows, lambda m: None)
+            return got
+        return tuning.sized(retune, unit, owned_write, lambda s: None,
+                            rows=lambda: len(rows),
+                            reconcile=lambda u: max(0, held() - before))
 
     def _write_checked(self, db, key, dst_t, dst_cols, plan, resumable,
                        rows, log):
@@ -5066,7 +5128,8 @@ class HeteroEngine(Engine):
             token=token, lost=lost, reached=reached, beat_with=beat_with,
             until_=until if go else "stopped", on_start=started,
             on_end=ended, secrets=(self.hop.source.password,
-                                   self.hop.target.password))
+                                   self.hop.target.password),
+            ledger=self.attempts().ledger if go else None)
 
     #: source engines whose change log carries every DDL, as it happened
     #: (`LOG_CARRIES_DDL`): a MySQL binlog logs each statement, and the

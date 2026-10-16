@@ -316,3 +316,116 @@ def test_nothing_answers_a_one_row_packet_on_a_target_without_pieces():
     with pytest.raises(decide.Blocked):
         tuning.sized(retune, "range 1", write, lambda s: None,
                      sent=lambda: 1024, rows=lambda: 1)
+
+
+def test_a_kept_statement_failed_on_purpose_is_read_again(monkeypatch):
+    from migkit import failpoint
+    failpoint.reset()
+    monkeypatch.setenv("MIGKIT_FAILPOINT", "mssql.statement:1:fault=connectivity")
+    eng, ran, forgot = _mssql(fail_first=False)
+    assert eng._kept_rows("src", "db", "select a from t") == [[1], [2]]
+    # the first try never reached the server; the second read it
+    assert len(ran) == 1 and forgot == ["src"]
+
+
+def test_one_place_reached_is_counted_once_whatever_names_it(monkeypatch):
+    from migkit import failpoint
+    failpoint.reset()
+    monkeypatch.setenv("MIGKIT_FAILPOINT", "x:1:raise,x:3:raise")
+    got = []
+    for _ in range(4):
+        try:
+            failpoint.hit("x")
+            got.append("ok")
+        except RuntimeError:
+            got.append("failed")
+    assert got == ["failed", "ok", "failed", "ok"]
+
+
+def test_an_open_breaker_asks_the_recovery_again_and_keeps_the_path(
+        tmp_path):
+    ledger = attempts.Ledger(str(tmp_path / "attempts.json"))
+    breaker = faults.Breaker()
+    breaker.failed("src", 0)    # the side failed past what one op may try
+    calls = []
+
+    def read():
+        calls.append(1)
+        raise faults.Injected("connectivity")
+    owned = faults.Owned("src", "read range", "t", "0..10@None")
+    with pytest.raises(faults.Injected):
+        faults.retried(read, tries=3, side="src", ledger=ledger,
+                       owned=owned, breaker=breaker, wait=lambda s: None,
+                       backoff=lambda i: 5.0)
+    rec = ledger.owned(owned.key)
+    paths = [(d["path"], d["breaker"]) for d in rec["decided"]]
+    # retried while closed; with the breaker open the next choice is a
+    # different path, named, and the side is not tried again in a loop
+    assert paths[0] == ("retry", "closed")
+    assert paths[1:] and all(p == ("pause", "open") for p in paths[1:])
+    assert len(calls) == 1 and rec["decided"][1]["class"] == "connectivity"
+
+
+def test_the_tries_a_unit_may_make_are_what_its_forecast_pays_for():
+    import inspect
+    r = tuning.Retune("t", rows=100, nbytes=10 ** 6)
+    unmeasured = r.tries_paid("u", 100, 1000)
+    assert unmeasured == inspect.signature(
+        faults.retried).parameters["tries"].default
+    r.succeeded("a", 100, 100 * 50, 0.5)
+    assert r.tries_paid("u", 100, 1000, width=50) == 11
+    assert r.tries_paid("u", 100, 50, width=50) == 2   # one try + one more
+    eta, took = r.bounds[1]["eta"], r.bounds[1]["took"]
+    assert r.bounds[1]["tries"] == 1 + round(eta / took) and r.bounds[1][
+        "rate"] == r.rate
+
+
+def test_a_write_that_left_nothing_after_a_refused_size_is_retuned(
+        tmp_path):
+    ledger = attempts.Ledger(str(tmp_path / "attempts.json"))
+    r = tuning.Retune("t", rows=1000, nbytes=10 ** 6)
+    target, sizes = [], []
+
+    def write():
+        s = r.settings()
+        sizes.append(s["bytes"])
+        if len(sizes) == 1:
+            raise faults.Injected("packet")
+        target.extend(range(10))
+        return "written"
+    owned = faults.Owned("dst", "copy batch", "t", "0")
+    got = tuning.sized(r, "u", lambda: faults.retried(
+        write, writes=True, side="dst", ledger=ledger, owned=owned,
+        wait=lambda s: None, check=faults.landed(lambda: 10,
+                                                 lambda: len(target),
+                                                 idempotent=True)),
+        lambda s: None, rows=lambda: 10,
+        reconcile=lambda u: len(target))
+    assert got == "written" and len(target) == 10
+    # the size that failed was never sent again
+    assert sizes[1] < sizes[0] and len(sizes) == 2
+    assert [d["path"] for d in ledger.owned(owned.key)["decided"]][0] \
+        in ("replan", "stop", "reconcile")
+
+
+def test_the_tails_read_is_an_owned_operation_read_again_where_lost_says(
+        tmp_path):
+    from migkit import tailctl
+    ledger = attempts.Ledger(str(tmp_path / "attempts.json"))
+    asked = []
+
+    def look(token):
+        asked.append(token)
+        if len(asked) == 1:
+            raise ConnectionResetError("connection reset by peer")
+        return token + 1, 1, True
+    seen, ended = tailctl.run_loop(
+        tmp_path, "db", look, lambda m: None, "changes", go=False,
+        token=0, lost=lambda e, t: t + 100, reached=lambda t: True,
+        until_="caught_up", ledger=ledger)
+    assert (seen, ended) == (1, "caught up")
+    # read again from where a lost link resumes, not the stale token
+    assert asked == [0, 100]
+    rec = ledger.owned(faults.Owned("src", "tail read", "db", "0").key)
+    assert rec["state"] == "done" and rec["tries"] == 2
+    assert rec["decided"][0]["path"] == "retry"

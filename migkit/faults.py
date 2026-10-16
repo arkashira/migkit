@@ -565,13 +565,31 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
                 break
         if i and told is not None and breaker.admit(
                 side, breaker.cooldown(side, backoff, ceiling)) == "open":
-            got = decide.recovery(_facts(told, check, renew, reconciled,
-                                         tries - i, "open"))
+            # the side, not the operation, keeps failing: the recovery is
+            # asked again with the breaker open, and the path it takes now
+            # is kept with its facts
+            facts = _facts(told, check, renew, reconciled, tries - i, "open")
+            got = decide.recovery(facts)
+            _decided(ledger, owned, got, facts)
             if got.path == "pause":
                 _say(log, f"{name}: {side} keeps failing; waiting its"
                           " cooldown before one probe")
                 wait(breaker.cooldown(side, backoff, ceiling))
                 continue
+            if got.path == "throttle":
+                _say(log, f"{name}: {side} keeps failing; backing off"
+                          " longer with less at once")
+                wait(2 * breaker.cooldown(side, backoff, ceiling))
+                continue
+            # replan, isolate, probe or stop: not tried again on a side
+            # whose breaker is open - the caller takes the path named
+            try:
+                last.recovery = got.path
+            except (AttributeError, TypeError):
+                pass
+            _say(log, f"{name}: {side} keeps failing; {got.path}")
+            _recovered(hurt, "failed")
+            raise last
         if keep:
             ledger.own(owned.key, state="began", tries=spent + i + 1,
                        side=owned.side, operation=owned.operation,
@@ -586,8 +604,10 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
             if keep:
                 ledger.own(owned.key, fault=told.fault.name,
                            state="unknown" if told.uncertain else "failed")
-            got = decide.recovery(_facts(told, check, renew, reconciled,
-                                         tries - i - 1, "closed"))
+            facts = _facts(told, check, renew, reconciled, tries - i - 1,
+                           "closed")
+            got = decide.recovery(facts)
+            _decided(ledger, owned, got, facts)
             try:
                 e.fault, e.recovery = told.fault.name, got.path
             except (AttributeError, TypeError):
@@ -600,12 +620,31 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
                           f" {told.fault.said}; reconciled:"
                           f" {state or 'not known'}")
                 if keep:
-                    ledger.own(owned.key, state=state or "unknown")
+                    ledger.own(owned.key, state=state or "unknown",
+                               reconciled=state or "unknown")
                 if state == COMMITTED:
                     breaker.ok(side)
                     _recovered(hurt, "recovered")
                     return value
-                if state in (RUNNING, NOTHING) and i < tries - 1:
+                if state == NOTHING and i < tries - 1:
+                    # nothing of it landed: asked again, now that the
+                    # effect is known - a size the server refused goes to
+                    # the caller's retune, never again as it was
+                    facts = _facts(told, check, renew, NOTHING,
+                                   tries - i - 1, "closed")
+                    again = decide.recovery(facts)
+                    _decided(ledger, owned, again, facts)
+                    if again.path != "replan":
+                        wait(backoff(i) * (2 if again.path == "throttle"
+                                           else 1))
+                        continue
+                    try:
+                        e.recovery = again.path
+                    except (AttributeError, TypeError):
+                        pass
+                    _recovered(hurt, "failed")
+                    raise
+                if state == RUNNING and i < tries - 1:
                     wait(backoff(i))
                     continue
                 _recovered(hurt, "failed")
@@ -641,6 +680,22 @@ def _facts(told, check, renew, reconciled, left, breaker):
             "uncertain": told.uncertain, "can_check": check is not None,
             "renewable": renew is not None, "reconciled": reconciled,
             "tries_left": left, "breaker": breaker, "phase": told.phase}
+
+
+def _decided(ledger, owned, got, facts):
+    """The recovery chosen after a failure kept in the operation's record
+    with the facts it was chosen on, so the run's evidence names the path
+    and why - every one, in order."""
+    if ledger is None or owned is None:
+        return
+    rec = ledger.owned(owned.key) or {}
+    kept = list(rec.get("decided") or ())
+    kept.append({"path": got.path, "class": facts["class"],
+                 "breaker": facts["breaker"],
+                 "tries_left": facts["tries_left"],
+                 "reconciled": facts["reconciled"],
+                 "uncertain": facts["uncertain"]})
+    ledger.own(owned.key, decided=kept)
 
 
 def _reconcile_restart(check, ledger, owned, log, name):

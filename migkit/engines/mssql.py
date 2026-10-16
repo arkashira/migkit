@@ -140,7 +140,7 @@ class MSSQLEngine(DbapiRows, Engine):
         new one; a statement that writes, lost after it was sent, has an
         outcome no count here can read, so it stops rather than run
         twice."""
-        from .. import faults
+        from .. import failpoint, faults
         where = "source" if side == "src" else "target"
         writes = not re.match(r"\s*(select|with|set\s+nocount)\b", sql,
                               re.I)
@@ -149,6 +149,7 @@ class MSSQLEngine(DbapiRows, Engine):
             conn = self._kept(side, db)
             try:
                 cur = conn.cursor()
+                failpoint.hit("mssql.statement")
                 self._run(cur, sql, args)
                 return [list(r) for r in cur.fetchall()] \
                     if cur.description else []
