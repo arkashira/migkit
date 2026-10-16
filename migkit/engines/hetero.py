@@ -2408,8 +2408,8 @@ class HeteroEngine(Engine):
             return ranges.cut(
                 lambda sql: src.run_rule("src", db, sql),
                 ranges.kind_of(src), src._quote_ident, table, k, rows,
-                every, where=src_where, names=(db, src_t), log=log,
-                label=key)
+                every, where=src_where, names=(db, src_t), into=st,
+                log=log, label=key)
 
         def outside():
             # a target row outside the source's whole range was in none of

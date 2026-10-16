@@ -205,7 +205,8 @@ class Slots:
         raised."""
         import concurrent.futures as cf
         import time
-        items = list(items)
+        take = items.take if isinstance(items, Pending) else None
+        items = [] if take else list(items)
 
         def one(item):
             lease = self._take()
@@ -225,6 +226,8 @@ class Slots:
                     self._give(lease)
                     if self.pace is not None:
                         self.pace.done(weight, time.monotonic() - began)
+        if take is not None:
+            return self._each_taken(take, one)
         if self.workers < 2 or len(items) < 2:
             for item in items:
                 one(item)
@@ -245,6 +248,39 @@ class Slots:
         if failed is not None:
             raise failed
 
+
+    def _each_taken(self, take, one):
+        """`each` over a plan's ranges taken one at a time (`Pending`): no
+        more handed out than there are slots, so a range not yet taken is
+        still the plan's to cut again (`refine`) as the copy measures it."""
+        import concurrent.futures as cf
+        if self.workers < 2:
+            while (item := take()) is not None:
+                one(item)
+            return
+        failed, running = None, set()
+        pool = cf.ThreadPoolExecutor(self.workers)
+
+        def more():
+            while failed is None and len(running) < self.workers:
+                item = take()
+                if item is None:
+                    return
+                running.add(pool.submit(contextvars.copy_context().run, one,
+                                        item))
+        try:
+            more()
+            while running:
+                ended, _ = cf.wait(running, return_when=cf.FIRST_COMPLETED)
+                for f in ended:
+                    running.discard(f)
+                    if f.exception() is not None and failed is None:
+                        failed = f.exception()
+                more()
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+        if failed is not None:
+            raise failed
 
     def each_process(self, items, fn, done, begin=None):
         """fn(item) in a process of its own for every item, as many at once
@@ -508,10 +544,89 @@ def _plan_whole(st, lo, hi, edges_fn, save, table=None):
     if rs and lo - 1 < rs[0][0]:
         rs.insert(0, [lo - 1, rs[0][0]])
     done = {_h(x) for x in st["ranges_done"]}
-    return [tuple(r) for r in rs if _h(r[0]) not in done]
+    return Pending(st, [tuple(r) for r in rs if _h(r[0]) not in done],
+                   _owner(save))
 
 
-#: {id(entry): (entry, its done ranges' starts, how many ranges from the
+class Pending(list):
+    """The ranges `plan` left to copy. Handed to `Slots.each`, they are
+    taken one at a time (`take`), each read off the entry's plan as it is
+    taken, so the ranges `finished` cut again while the copy runs
+    (`refine`) are copied as they now stand; a range once taken is never
+    cut again. Read whole as a list, the plan is fixed from then on: what
+    was read is what is copied."""
+
+    def __init__(self, st, rows, owner=None):
+        super().__init__(rows)
+        self.st, self.frozen = st, False
+        self.lock = owner._lock if owner is not None else threading.RLock()
+        self.taken, self._done, self._dn, self._n = set(), set(), None, 0
+        self._rs, self._i = None, 0
+        _WEIGHED.pop(id(st), None)
+        if len(_PENDING) > 10000:
+            _PENDING.clear()
+        _PENDING[id(st)] = self
+
+    def __iter__(self):
+        with self.lock:
+            self.frozen = True
+            done = {_h(x) for x in self.st["ranges_done"]}
+            return iter([tuple(r) for r in self.st["ranges"]
+                         if _h(r[0]) not in done])
+
+    def take(self):
+        """The next range neither done nor taken, now marked taken; None
+        where none is left."""
+        with self.lock:
+            rs, dn = self.st["ranges"], self.st["ranges_done"]
+            if dn is not self._dn:
+                self._dn, self._done, self._n = dn, set(), 0
+            while self._n < len(dn):
+                self._done.add(_h(dn[self._n]))
+                self._n += 1
+            if rs is not self._rs:
+                self._rs, self._i = rs, 0
+            while self._i < len(rs):
+                r = rs[self._i]
+                self._i += 1
+                h = _h(r[0])
+                if h not in self._done and h not in self.taken:
+                    self.taken.add(h)
+                    return tuple(r)
+            return None
+
+
+#: {id(entry): its `Pending`} - the ranges a copy has taken, which
+#: `finished` leaves as they are when it cuts the rest again
+_PENDING = {}
+
+#: how far from the planned rows a range the finished ranges hold on
+#: average before the ranges not yet taken are cut again, and the factor a
+#: pending range's measured rows must pass to be split (`refine`)
+OFF_BY = 2
+
+#: {id(entry): finished ranges counted when the plan was last weighed}:
+#: weighed again once that count doubled, so a plan of n ranges is
+#: weighed about log2(n) times
+_WEIGHED = {}
+
+
+def _weigh(st):
+    """Whether the finished ranges' rows say the plan is off by more than
+    `OFF_BY`, checked once the count of measured ranges doubled since the
+    last check."""
+    held, every = st.get("ranges_rows") or {}, int(st.get("every") or 0)
+    n = len(held)
+    if every < 1 or n < 1 or n < 2 * _WEIGHED.get(id(st), 0.5):
+        return False
+    if len(_WEIGHED) > 10000:
+        _WEIGHED.clear()
+    _WEIGHED[id(st)] = n
+    mean = sum(held.values()) / n
+    return mean > OFF_BY * every or mean * OFF_BY < every
+
+
+#: {id(entry, its done ranges' starts, how many ranges from the
 #: first are done, its ranges)} - where `finished` goes on from
 _DONE = {}
 
@@ -573,7 +688,11 @@ def finished(st, after, save, rows=None):
     from . import failpoint
     failpoint.hit("range.committed")
     owner = _owner(save)
-    with owner._lock if owner is not None else _NOLOCK:
+    plan = _PENDING.get(id(st))
+    plan = plan if plan is not None and plan.st is st else None
+    lock = owner._lock if owner is not None else (
+        plan.lock if plan is not None else _NOLOCK)
+    with lock:
         st["ranges_done"].append(after)
         if rows is not None:
             measured(st, after, rows)
@@ -581,10 +700,19 @@ def finished(st, after, save, rows=None):
         if reach is not None:
             st["last"] = reach
         gen = owner.changed() if owner is not None else None
-        # a line of the checkpoint's journal, not the whole file again
-        # (`cli._Checkpoint.journal`, audit ST17)
-        journaled = _journaled(owner, st, {"done": after,
-                                           "last": st.get("last")})
+        # the ranges not yet taken cut again where the measured rows say
+        # the plan is off, and the new plan saved whole before any of them
+        # is taken: a journal line of a range the saved plan does not have
+        # would read, after a stop, as the old range done
+        if plan is not None and not plan.frozen and _weigh(st) \
+                and refine(st, keep=plan.taken):
+            save()
+            journaled = True
+        else:
+            # a line of the checkpoint's journal, not the whole file again
+            # (`cli._Checkpoint.journal`, audit ST17)
+            journaled = _journaled(owner, st, {"done": after,
+                                               "last": st.get("last")})
     if not journaled:
         _saved(save, owner, gen)
     failpoint.hit("range.saved")
@@ -1544,13 +1672,14 @@ def measured(st, after, rows):
     st.setdefault("ranges_rows", {})[ident(after)] = n
 
 
-def refine(st):
+def refine(st, keep=()):
     """The ranges not yet begun cut again from what the finished ones held:
-    a pending range the finished ranges' density says holds more than two
-    shares is split into shares, and neighbours whose rows add to no more
-    than one share are merged. Only integer ranges, and only ones neither
-    done nor begun, so no row is read twice or left out - an edge is where
-    one range ends and the next begins. True where the plan changed."""
+    a pending range the finished ranges' density says holds more than
+    `OFF_BY` shares is split into shares, and neighbours whose rows add to
+    no more than one share are merged. Only integer ranges, and only ones
+    neither done, begun nor taken by a copy running now (`keep`, their
+    starts), so no row is read twice or left out - an edge is where one
+    range ends and the next begins. True where the plan changed."""
     rs, every = st.get("ranges"), int(st.get("every") or 0)
     held = st.get("ranges_rows") or {}
     if not rs or every < 1 or not held:
@@ -1567,12 +1696,13 @@ def refine(st):
     begun = set((st.get("ranges_seen") or {}).keys())
 
     def pending(r):
-        return r[0] not in done and str(r[0]) not in begun
+        return (r[0] not in done and str(r[0]) not in begun
+                and _h(r[0]) not in keep)
 
     out = []
     for r in rs:
         guess = (r[1] - r[0]) * density
-        if pending(r) and guess > 2 * every:
+        if pending(r) and guess > OFF_BY * every:
             shares = min(-(-int(guess) // every), r[1] - r[0])
             edges = [r[0] + (r[1] - r[0]) * i // shares
                      for i in range(1, shares)]

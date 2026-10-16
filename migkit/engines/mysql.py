@@ -1842,6 +1842,100 @@ class MySQLEngine(Engine):
             conn.close()
         return twoway.seen_of(got[0] if got else None)
 
+    #: what a binlog read asks of the user: the log itself, and where it
+    #: ends (`change_point`)
+    STREAM_PRIVILEGES = ("REPLICATION SLAVE", "REPLICATION CLIENT")
+
+    def _change_read(self, side, db):
+        """`decide.change_read` for the side's log, asked once a run from
+        what was measured and kept with the run's probes
+        (`diagnostics.accumulator`): whether this machine's reader can hold
+        the log open with the server's heartbeat, the replication grants
+        the user holds (SHOW GRANTS, through its active roles where roles
+        give them), and the server's version, binlog_format,
+        binlog_row_image and gtid_mode beside them. Where the grants are
+        not established the log is read to its end each batch, and the
+        statement that gives them is named."""
+        held = self.__dict__.setdefault("_change_reads", {})
+        if (side, db) not in held:
+            from .. import decide, diagnostics
+            facts = dict(diagnostics.accumulator(self.hop).read(
+                "change-read", f"{side}:{self._d(side, db)}",
+                lambda: self._stream_facts(side)) or {})
+            privs = facts.get("privileges")
+            missing = [p for p in self.STREAM_PRIVILEGES
+                       if privs is None or p not in privs]
+            run = self.grant_statement(side, ", ".join(missing), "*.*")
+            facts["stream granted"] = not missing
+            facts["stream why"] = (
+                ("the source user's replication grants could not be read"
+                 if privs is None else
+                 f"the source's user lacks {', '.join(missing)}")
+                + ", so its log is read to its end each batch instead of"
+                f" streamed - run: {run}")
+            facts.setdefault("stream client", False)
+            held[(side, db)] = decide.change_read(facts)
+        return held[(side, db)]
+
+    def _stream_facts(self, side):
+        """What decides how the side's binlog is read (`_change_read`):
+        {"stream client", "privileges" (None where they cannot be read),
+        "version", "binlog_format", "binlog_row_image", "gtid_mode"}."""
+        import inspect
+        import re
+
+        import pymysql
+        try:
+            from pymysqlreplication import BinLogStreamReader
+            from pymysqlreplication.event import HeartbeatLogEvent  # noqa: F401
+            client = "slave_heartbeat" in inspect.signature(
+                BinLogStreamReader.__init__).parameters
+        except ImportError:
+            client = False
+
+        def var(name):
+            try:
+                got = self._q(side, f"select @@{name}")
+            except pymysql.err.MySQLError:
+                return None
+            return got[0][0] if got else None
+
+        def privileges(lines):
+            out, roles = set(), False
+            for (line,) in lines:
+                m = re.match(r"GRANT (.+?) ON (\S+) TO ", str(line))
+                if not m:
+                    roles = True
+                    continue
+                if m.group(2).replace("`", "") == "*.*":
+                    out |= {p.strip().upper().replace(
+                        "REPLICATION REPLICA", "REPLICATION SLAVE")
+                        for p in m.group(1).split(",")}
+            if "ALL PRIVILEGES" in out:
+                out |= set(self.STREAM_PRIVILEGES)
+            return out, roles
+        privs, roles = privileges(self._q(side, "show grants"))
+        if roles and not set(self.STREAM_PRIVILEGES) <= privs:
+            # a role's privileges are not in the user's own lines: read
+            # through the roles active in this session, where the server
+            # can say them
+            try:
+                got = self._q(side, "select current_role()")
+                active = str(got[0][0] if got else "").strip()
+                privs = None
+                if active and active.upper() != "NONE":
+                    privs = privileges(self._q(
+                        side, f"show grants for current_user() using"
+                              f" {active}"))[0]
+            except pymysql.err.MySQLError:
+                privs = None
+        return {"stream client": client,
+                "privileges": sorted(privs) if privs is not None else None,
+                "version": var("version"),
+                "binlog_format": var("global.binlog_format"),
+                "binlog_row_image": var("global.binlog_row_image"),
+                "gtid_mode": var("global.gtid_mode")}
+
     def neutral_changes(self, side, db, token=None, limit=1000):
         """Row changes out of the binlog, as neutral records.
 
@@ -1928,9 +2022,8 @@ class MySQLEngine(Engine):
         # server when it has nothing to send, where it was decided
         # (`decide.change_read`); else the log read to its end each batch
         from pymysqlreplication.event import HeartbeatLogEvent
-        from .. import decide, tailctl
-        choice = self.__dict__.setdefault("_change_read", decide.change_read(
-            {"stream client": True, "stream granted": True}))
+        from .. import tailctl
+        choice = self._change_read(side, db)
         streamed = choice.path == "stream"
         beat = tailctl.IDLE_MOST
         heartbeat = (HeartbeatLogEvent,) if streamed else ()
@@ -8831,7 +8924,7 @@ class MySQLEngine(Engine):
                     + (f" and ({rf})" if rf else ""),
                     f"({rng_sql}) and ({rf})" if rf else rng_sql,
                     f"{key} {intpk} {after + 1:,} to {upto:,}", log)
-                ranges.finished(st, after, ck.save)
+                ranges.finished(st, after, ck.save, rows=sent)
                 log(f"{key}: {intpk} {after + 1:,} to {upto:,} copied"
                     f" ({len(st['ranges_done'])} of {len(st['ranges'])}"
                     " ranges)")
@@ -8869,7 +8962,7 @@ class MySQLEngine(Engine):
                         for m in said:
                             log(m)
                         after, upto = item[4], item[5]
-                        ranges.finished(st, after, ck.save)
+                        ranges.finished(st, after, ck.save, rows=moved)
                         log(f"{key}: {intpk} {after + 1:,} to {upto:,}"
                             f" copied ({len(st['ranges_done'])} of"
                             f" {len(st['ranges'])} ranges)")
