@@ -594,17 +594,70 @@ def _term_as_interrupt():
         yield
         return
 
+    from . import runner
+
     def stop(signum, frame):
+        _arm_stop_bound()
         raise KeyboardInterrupt
     try:
         before = signal.signal(signal.SIGTERM, stop)
     except ValueError:
         yield
         return
+    runner.ON_STOP.append(_arm_stop_bound)
     try:
         yield
     finally:
         signal.signal(signal.SIGTERM, before)
+        runner.ON_STOP.remove(_arm_stop_bound)
+        _disarm_stop_bound()
+
+
+_STOP_BOUND = {"armed": None, "over": None}
+
+
+def _disarm_stop_bound():
+    """The bound comes off once the cleanup is over and nothing the exit
+    waits for is left: a thread still running that is not a daemon holds
+    the process at its exit, so the bound stays on for it."""
+    held = [t for t in threading.enumerate() if t.is_alive()
+            and not t.daemon and t is not threading.main_thread()]
+    if _STOP_BOUND["armed"] is not None and not held:
+        _STOP_BOUND["over"].set()
+        _STOP_BOUND["armed"] = _STOP_BOUND["over"] = None
+
+
+def _arm_stop_bound():
+    """A stop's cleanup is bounded (`decide.stop_grace`): a `finally` that
+    waits on a thread which never ends held the command past every stop,
+    SIGTERM taken and the process still there. Past the bound it ends as a
+    crash would, said on stderr, code 130; a second stop ends it at once.
+    Every checkpoint is written only after its effect, so the next run
+    reconciles what this one leaves."""
+    import os
+    import sys
+    from . import decide, runner
+    if _STOP_BOUND["armed"] is not None:
+        if threading.current_thread() is threading.main_thread():
+            sys.stderr.write("stopped again: ended now; the next run"
+                             " reconciles what this one left\n")
+            sys.stderr.flush()
+            os._exit(130)
+        return
+    secs, why = decide.stop_grace({"programs": runner.running(),
+                                   "grace": runner.GRACE})
+    _STOP_BOUND["armed"] = time.monotonic() + secs
+    over = _STOP_BOUND["over"] = threading.Event()
+
+    def end():
+        if over.wait(secs):
+            return
+        sys.stderr.write(f"the stop's cleanup did not end in {secs:.0f}s"
+                         f" ({why.path}): ended now; what was saved is"
+                         " kept and the next run reconciles the rest\n")
+        sys.stderr.flush()
+        os._exit(130)
+    threading.Thread(target=end, name="stop-bound", daemon=True).start()
 
 
 def _scheduled_hop(ctx):

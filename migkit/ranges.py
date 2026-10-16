@@ -36,10 +36,19 @@ def current_coordinator():
 
 
 class _Lease:
+    """A slot held by one unit of work. `borrowed`: it rides on the slot
+    of the unit that started it and waits for it (`parent_lease`), so it
+    takes none of its own; `lent`: its own slot is ridden on by such a
+    unit now. The two were one flag: a borrowed lease read as already
+    lent, so the third level down - a check of a table inside the check
+    of a database inside its unit - waited for a slot its own caller held,
+    and with one worker the command waited on itself for good."""
+
     def __init__(self, slots, borrowed=False, parent_lease=None):
         self.slots = slots
         self.root = slots.root
         self.borrowed = borrowed
+        self.lent = False
         self.parent_lease = parent_lease
 
 
@@ -165,14 +174,17 @@ class Slots:
 
         with self._cv:
             while True:
+                # the caller waits on this unit holding its slot: the unit
+                # runs on it, at any depth, before a slot of its own is
+                # counted - asked first, so a full count never makes a
+                # unit wait for the slot its own caller holds
+                if parent_lease is not None and not parent_lease.lent:
+                    parent_lease.lent = True
+                    return _Lease(self, borrowed=True, parent_lease=parent_lease)
+
                 if self._busy >= self.workers:
                     self._cv.wait(0.1)
                     continue
-
-                if parent_lease is not None and not parent_lease.borrowed:
-                    parent_lease.borrowed = True
-                    self._busy += 1
-                    return _Lease(self, borrowed=True, parent_lease=parent_lease)
 
                 root = self.root
                 root_limit = (min(root.workers, root.pace.limit)
@@ -190,9 +202,8 @@ class Slots:
     def _give(self, lease=None):
         with self._cv:
             if lease is not None and lease.borrowed:
-                self._busy -= 1
                 if lease.parent_lease is not None:
-                    lease.parent_lease.borrowed = False
+                    lease.parent_lease.lent = False
             else:
                 self._busy -= 1
                 if self is not self.root:

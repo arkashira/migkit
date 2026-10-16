@@ -171,11 +171,6 @@ def _minimal(conf):
 #: run that waits on itself fails its case instead of holding the harness
 #: (the slowest whole case measured took under a minute)
 HANG = 600
-BASELINE_HANGS = ("W16N-BASELINE: with the workers pinned to 1 the copy"
-                  " lands, then the check of the rows (the key-range digest"
-                  " on PostgreSQL, the row text on MySQL) never ends - every"
-                  " connection idle on both servers, the command waiting on"
-                  " itself (seen at 8 min on both, not traced further)")
 CUT = ("W16N-CUT: the run is not cut where MIGKIT_FAILPOINT says: the copy"
        " goes by the bulk way, which passes no range.committed, table.done"
        " or checkpoint.written point, so the first run ends whole (MySQL:"
@@ -183,8 +178,12 @@ CUT = ("W16N-CUT: the run is not cut where MIGKIT_FAILPOINT says: the copy"
        " case fails at the same step)")
 DEFECTS = ("W16N-DEFECTS: the copy before the defects are injected does not"
            " complete when the source also holds a sequence, a role and its"
-           " grant, on both engines (the case stops at its first command;"
-           " the cause not read)")
+           " grant. PostgreSQL: the structural schema check (engines/"
+           "postgres.py check_structural_diff) errors 'keys must be str, int,"
+           " float, bool or None, not tuple' with privileges compared, so the"
+           " proof is held - raised before the diff's record is taken, the"
+           " exact call not yet traced. MySQL: the proof ends 'w9c is"
+           " different after its repair' (the differing finding not read)")
 LOB_MYSQL = ("W16N-LOB: on MySQL the 8 MiB value does not arrive whole on a"
              " target holding a 4 MiB packet (the run exits non-zero in 23 s)")
 
@@ -378,7 +377,6 @@ def test_a_healthy_copy_completes_in_one_command(side, tmp_path):
     _gate(m)
 
 
-@pytest.mark.xfail(strict=True, reason=BASELINE_HANGS)
 def test_the_baseline_is_the_same_copy_pinned_to_one_worker(side, tmp_path):
     """No switch to fixed defaults exists: the baseline pins the workers
     to 1 through the expert override, the one hop key it adds."""

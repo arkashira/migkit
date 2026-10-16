@@ -330,10 +330,22 @@ def _same(pid, rec):
 # ---- SIGTERM as ctrl-c while programs run -------------------------------------
 
 _TERM = {"depth": 0, "before": None}
+#: told of every stop taken as ctrl-c, before it is raised: the command's
+#: bound on its cleanup is armed here (`cli._term_as_interrupt`)
+ON_STOP = []
+#: what one program's stop is given before it is made to end (`stop`)
+GRACE = 15
 
 
 def _as_interrupt(signum, frame):
+    for told in list(ON_STOP):
+        told()
     raise KeyboardInterrupt
+
+
+def running():
+    """How many programs run now under `stopping`."""
+    return _TERM["depth"]
 
 
 @contextmanager
@@ -411,7 +423,7 @@ class Proc:
     def returncode(self):
         return self.popen.returncode
 
-    def stop(self, grace=15):
+    def stop(self, grace=GRACE):
         """Ask the program's whole group to end, then make it: SIGTERM,
         `grace` seconds, SIGKILL. A container is removed as well - its
         client's end does not end it."""

@@ -4453,3 +4453,33 @@ def cloud_forwarder(facts):
         way("ssm", "the cloud's own session forwarder", 2),
         way("iap", "the cloud's identity-aware tunnel", 2),
         way("bastion", "the cloud's own bastion tunnel", 2)), f)
+
+
+# ---- how long a stopped command's cleanup is given (W16N-BASELINE) --------
+
+def stop_grace(facts):
+    """(seconds a command's cleanup is given after SIGTERM before it ends
+    as a crash would, `Choice`). A stop runs every `finally`: the
+    programs migkit started are asked to end and given the runner's grace
+    twice over (its SIGTERM, then its SIGKILL); with none running, the one
+    statement in flight is given that grace once to answer its cancel. A
+    cleanup still waiting past it waits on something that will not end:
+    what a crash leaves, every checkpoint written only after its effect,
+    the next run reconciles. `facts`: {"programs": programs running now,
+    "grace": the runner's grace for one program's stop, "slowest": the
+    longest one statement has taken here, where measured}."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    grace = max(1.0, float(f.get("grace") or 1.0))
+    slow = max(0.0, float(f.get("slowest") or 0.0))
+    said = (f"{int(f.get('programs') or 0)} programs running; a program's"
+            f" stop is given {grace:.0f}s; the slowest statement took"
+            f" {slow:.1f}s")
+    got = climb("how long a stopped command's cleanup is given", (
+        Rung("programs", "the programs it started stopped by their own"
+             " ladder, SIGTERM then SIGKILL", needs=(Need(
+                 "a program running", lambda x: (x.get("programs") or 0) > 0,
+                 "no program is running"),), because=said),
+        Rung("statement", "the statement in flight given its cancel",
+             because=said)), f)
+    secs = 2 * grace if got.path == "programs" else grace
+    return max(secs, 2 * slow), got
