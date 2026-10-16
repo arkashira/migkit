@@ -6660,49 +6660,83 @@ def _monitor(hop_name, db, interval, only, cycles):
     """`watch --verify`: the check's own run (`run_checks`) each cycle -
     its answers kept under names of its own, where it wrote a partial
     cycle over the check's `report.html` while `verdict.json` described
-    the last whole check. Returns the last cycle's `verdict.Decision`."""
+    the last whole check. Which checks a cycle runs is decided
+    (`decide.monitor_checks`): the ones `--only` names, else every check
+    until a cycle has timed them, then those the measured times fit in
+    the interval - and a watch whose counts alone outlast it stops, saying
+    why. Each cycle's line is said in the verdicts' words and kept in the
+    run's log (`runlog`); its answers are written whole or not at all
+    (`durable`). Returns the last cycle's `verdict.Decision`."""
+    from . import decide, durable, runlog
     from . import verdict as _verdict
     hop = get_hop(hop_name)
     _require_configured(hop)
     eng = get_engine(hop)
-    checks, allowed = _checks_for(eng, only)
+    asked, allowed = _checks_for(eng, only)
+    asked = asked if only else []
     dbs = [db] if db else eng.databases()
-    n, got = 0, None
+    words = {s: _verdict.VERDICTS[v] for s, v in
+             (("error", "error"), ("diff", "different"), ("ok", "same"))}
+    n, got, took = 0, None, {}
+
+    def say(line, plain, level="info", **kw):
+        console.print(line)
+        runlog.event("watch.cycle", plain, level=level, **kw)
     while True:
         n += 1
         if n > 1:
             # each cycle checks what the hop takes now (`_hop_again`)
             hop, eng, dbs, moved = _hop_again(hop_name, hop, eng, db, dbs)
             if moved:
-                checks, allowed = _checks_for(eng, only)
+                asked, allowed = _checks_for(eng, only)
+                asked = asked if only else []
+                took = {c: s for c, s in took.items() if c in allowed}
+        checks, how = decide.monitor_checks({
+            "asked": asked, "checks": allowed, "took": took,
+            "lanes": min(max(1, int(hop.workers or 1)), max(1, len(dbs))),
+            "interval": interval})
+        if how.path == "refused":
+            stop = f"watch --verify stops: {how.rung.because}"
+            say(f"[red]{_esc(stop)}[/red]", stop, level="error", cycle=n)
+            raise SystemExit(stop)
         stamp = time.strftime("%H:%M:%S")
-        all_results, _ = run_checks(hop, eng, dbs, checks,
-                                    workers=hop.workers, whole=False)
+        all_results, timings = run_checks(hop, eng, dbs, checks,
+                                          workers=hop.workers, whole=False)
+        # each check's measured time a cycle, the databases summed, kept
+        # for the checks the next cycle leaves out
+        for c in checks:
+            spent = [float((timings.get(d) or {}).get(c) or 0) for d in dbs]
+            if any(spent):
+                took[c] = sum(spent)
         for d in dbs:
-            statuses = []
+            statuses, plain = [], []
             for c in checks:
                 rs = [r for r in all_results if r.get("check") == c
                       and _verdict.db_of(r.get("scope", "")) == d]
                 bad = [r for r in rs if r.get("status") == "error"]
                 odd = [r for r in rs if r.get("status") not in
                        ("ok", "skip", "error") and not r.get("kept_by_hop")]
-                if bad:
-                    statuses.append(f"[red]{c}:ERR[/red]"
-                                    f" {_esc(str(bad[0].get('detail'))[:60])}")
-                elif odd:
-                    statuses.append(f"[yellow]{c}:DIFF[/yellow]"
-                                    f" {_esc(str(odd[0].get('detail'))[:60])}")
-                elif rs:
-                    statuses.append(f"[green]{c}:ok[/green]")
-            console.print(f"{stamp} cycle {n} {_esc(d)}: "
-                          + "  ".join(statuses))
-        # counts alone, as the watch asks by default, are not a check of
-        # the rows: a narrowed run is said as narrowed, never `same`
+                hit = (("error", bad[0]) if bad else ("diff", odd[0]) if odd
+                       else ("ok", None) if rs else None)
+                if hit is None:
+                    continue
+                w = words[hit[0]]
+                tail = (f" {str(hit[1].get('detail'))[:60]}"
+                        if hit[1] is not None else "")
+                statuses.append(f"[{w.colour}]{c}: {w.word}[/{w.colour}]"
+                                f"{_esc(tail)}")
+                plain.append(f"{c}: {w.word}{tail}")
+            say(f"{stamp} cycle {n} {_esc(d)}: " + "  ".join(statuses),
+                f"cycle {n} {d}: " + "  ".join(plain), db=d, cycle=n,
+                checks=checks, decided=how.path)
+        # counts alone, as a watch fitted to its interval may take, are
+        # not a check of the rows: a narrowed run is said as narrowed,
+        # never `same`
         got = _verdict.decide(all_results, hop, {"checks": sorted(checks)}
                               if set(checks) < set(allowed) else None)
         try:
-            (hop.report_dir() / WATCH_SUMMARY).write_text(
-                json.dumps(all_results, indent=1, default=str))
+            durable.write_json(hop.report_dir() / WATCH_SUMMARY, all_results,
+                               indent=1)
             from .report import write_report
             write_report(hop, all_results,
                          hop.report_dir() / WATCH_REPORT, decided=got)
@@ -6865,9 +6899,10 @@ def _catch_up(hop, eng, d):
 @click.option("--verify", is_flag=True,
               help="re-run read-only checks each cycle instead of sampling"
                    " row counts (continuous validation)")
-@click.option("--only", default="counts,autoinc",
-              help="with --verify: checks per cycle, add data for full"
-                   " checksum each cycle")
+@click.option("--only", default="",
+              help="with --verify: the checks each cycle runs (decided from"
+                   " their measured time against the interval when not"
+                   " named)")
 @click.option("--delta", is_flag=True,
               help="with --verify: O(changes) mode - each cycle re-verifies"
                    " only the rows touched since the last verified point"
@@ -7418,7 +7453,7 @@ def state_cmd(ctx, hop_name, db, show_ts):
 @click.argument("hop_name")
 @click.option("--db", default="")
 @click.option("--interval", default=300)
-@click.option("--only", default="counts,autoinc")
+@click.option("--only", default="")
 @click.option("--cycles", default=0)
 def monitor(hop_name, db, interval, only, cycles):
     """(alias) Now: migkit watch HOP --verify."""

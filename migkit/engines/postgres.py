@@ -121,18 +121,60 @@ select 'extension|'||extname from pg_extension
 SEQUENCE_MARGIN = contextvars.ContextVar("sequence_margin", default=None)
 
 
+#: the writers' restart gap a cutover measured (its own switch time, or
+#: the last run's recorded one), set for the thread that plans its
+#: counters as `SEQUENCE_MARGIN` is
+RESTART_GAP = contextvars.ContextVar("restart_gap", default=None)
+
+
+def _seq_rates(first, second, secs):
+    """{counter: inserts a second} each counter advanced by between two
+    reads of the source's counters `secs` apart, the ones that moved;
+    {} where no time was measured between them."""
+    if not secs or secs <= 0:
+        return {}
+    out = {}
+    for name, v in second.items():
+        try:
+            step = int(v or 0) - int(first.get(name) or 0)
+        except (TypeError, ValueError):
+            continue
+        if name in first and step > 0:
+            out[name] = step / secs
+    return out
+
+
+def _measured_rates(eng, db, first, began, again):
+    """{counter: inserts a second} of `db`'s source, measured: between
+    the plan's two reads (`first` from `began`, `again` now), and between
+    the engine's last plan of `db` and now where it made one - a cutover's
+    gate before the freeze and its counters after it span the writes up to
+    the freeze. The larger of the two each counter: too high costs a gap
+    in the id space, too low a key the writers hand out twice."""
+    now = time.monotonic()
+    rates = _seq_rates(first, again, now - began)
+    seen = eng.__dict__.setdefault("_seq_seen", {})
+    was = seen.get(db)
+    if was is not None:
+        for name, r in _seq_rates(was[1], again, now - was[0]).items():
+            rates[name] = max(r, rates.get(name, 0.0))
+    seen[db] = (now, dict(again))
+    return rates
+
+
 def _seq_buffer(rate=None, gap=None):
     """Head-room to add above the highest known id, decided
     (`decide.sequence_headroom`): the run's own margin (`SEQUENCE_MARGIN`),
     else the rows the source's measured insert `rate` lands in the
-    restart `gap`, else none - exactly the highest id in use, correct when
-    the source is quiet. Anything above zero trades a gap in the id space
-    for tolerance of rows that arrive a moment later."""
+    restart `gap` (the cutover's measured switch time, `RESTART_GAP`,
+    where none is passed), else none - exactly the highest id in use,
+    correct when the source is quiet. Anything above zero trades a gap in
+    the id space for tolerance of rows that arrive a moment later."""
     from .. import decide
-    n, _ = decide.sequence_headroom({"margin": SEQUENCE_MARGIN.get(),
-                                     "rate": rate, "gap": gap})
+    n, _ = decide.sequence_headroom({
+        "margin": SEQUENCE_MARGIN.get(), "rate": rate,
+        "gap": RESTART_GAP.get() if gap is None else gap})
     return n
-
 
 
 def _copy_text(rows):
@@ -10643,6 +10685,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                  " from pg_sequences"
                  " where schemaname not like '\\_\\_%'"
                  f" and sequencename not in {OWN_SQL}")
+            began = time.monotonic()
             src = dict(l.rsplit("|", 1) for l in
                        self._psql("src", db, q).splitlines() if l)
             dst = dict(l.rsplit("|", 1) for l in
@@ -10652,6 +10695,14 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             # The same column max on the source: a target sitting above its own
             # sequence is only suspicious when the source does not do it too.
             smax = self._seq_col_max("src", db, owned)
+            # the source's counters read again, the reads between them
+            # timed: what each advanced by is its measured insert rate,
+            # and the later value is the one the target clears
+            again = dict(l.rsplit("|", 1) for l in
+                         self._psql("src", db, q).splitlines() if l)
+            rates = _measured_rates(self, db, src, began, again)
+            src = {n: max(v, again.get(n, v), key=lambda x: int(x or 0))
+                   for n, v in src.items()}
             noise = self._noise()
             # a sequence of a table the hop leaves out is that table's
             # writer's: neither read against the source nor set
@@ -10688,7 +10739,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 # hide the fact that the leg was not actually quiet - so it is
                 # off unless asked for, and the reason is written into the
                 # statement rather than left for someone to work out later.
-                buf = _seq_buffer()
+                buf = _seq_buffer(rates.get(name))
                 if target and buf:
                     target += buf
                 if target == 0 or (cur is not None and int(cur) == target):

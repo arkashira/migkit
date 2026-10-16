@@ -7540,3 +7540,63 @@ def system_principals(facts):
              because="nothing on this server tells its own principals from"
                      " the others; the list is what each server and"
                      " provider is known to make (`users.SYSTEM`)")), f)
+
+
+def monitor_checks(facts):
+    """([checks], `Choice`) a `watch --verify` cycle runs (audit AUD-Z,
+    the fixed `--only counts,autoinc`): "asked" - the checks the operator
+    named; "unmeasured" - every check, where no cycle has measured them
+    yet; "fit" - the counts first, then each check in the engine's order
+    while the measured cycle time stays within the interval (a check no
+    cycle has timed is taken, and the cycle times it); else "refused" -
+    even the counts take longer than the interval, a blocker the operator
+    reads. `facts`: {"asked": [checks named], "checks": [every check, in
+    the engine's order], "took": {check: seconds a cycle measured}, "lanes":
+    databases checked at once, "interval": seconds}. A fixed pair stood
+    here, the same on a database of ten rows and one of ten billion."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    every = list(f.get("checks") or ())
+    first = ["counts"] if "counts" in every else every[:1]
+    order = first + [c for c in every if c not in first]
+    took = dict(f.get("took") or {})
+    lanes = max(1, int(f.get("lanes") or 1))
+    room = float(f.get("interval") or 0)
+
+    def secs(c):
+        return float(took.get(c) or 0) / lanes
+    fitted, spent = [], 0.0
+    for c in order:
+        if c in took and spent + secs(c) > room and fitted:
+            continue
+        fitted.append(c)
+        spent += secs(c) if c in took else 0
+    lead = sum(secs(c) for c in first if c in took)
+    said = (f"the {', '.join(first) or 'first check'} alone took {lead:.1f}s"
+            f" of a {room:g}s interval: a longer --interval, or checks named"
+            " with --only, lets a cycle end before the next begins")
+    got = climb("the checks a watching cycle runs", (
+        Rung("asked", "the checks the operator named", because="the"
+             " operator said which checks each cycle takes", needs=(
+                 Need("checks the operator named",
+                      lambda x: bool(x.get("asked")),
+                      "no checks were named"),)),
+        Rung("unmeasured", "every check of the engine", because="no cycle"
+             " has measured the checks yet; this one times each", needs=(
+                 Need("no check measured yet",
+                      lambda x: not x.get("took"),
+                      "an earlier cycle measured the checks"),)),
+        Rung("fit", "the counts, then each check the interval leaves room"
+             " for", because="the checks' measured cycle times against the"
+             " interval", needs=(
+                 Need("the counts fit the interval",
+                      lambda x: lead <= room,
+                      said),)),
+        Rung("refused", "no check: a cycle outlasts the interval",
+             because=said)), f)
+    if got.path == "asked":
+        return list(dict.fromkeys(f.get("asked"))), got
+    if got.path == "unmeasured":
+        return order, got
+    if got.path == "fit":
+        return fitted, got
+    return [], got

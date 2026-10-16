@@ -2178,16 +2178,32 @@ def _has_delta(hop, eng, d):
         "delta-pos.json", "delta-token.json", "pair-delta-token.json"))
 
 
+def _restart_gap(hop, rec):
+    """Seconds the writers are off between the two sides, measured: the
+    larger of this run's write outage so far (from the freeze to now) and
+    the last flipped or undone run's recorded one; None where neither was
+    measured."""
+    began = (rec.get("clock") or {}).get("began")
+    now = time.time() - began if began else None
+    last = (last_run(hop) or {}).get("outage")
+    got = [float(x) for x in (now, last) if x]
+    return max(got) if got else None
+
+
 def _counters(hop, eng, d, conf, rec, say):
     """The target's counters past the source's, with the undo written
     first; `keys: apart` adds its margin (`SEQUENCE_MARGIN`, which both
-    counters' plans read), for this thread's plan only."""
-    from .engines.postgres import SEQUENCE_MARGIN
+    counters' plans read), else the plans' measured insert rate over the
+    writers' measured restart gap (`RESTART_GAP`, `_restart_gap`), for
+    this thread's plan only."""
+    from .engines.postgres import RESTART_GAP, SEQUENCE_MARGIN
     gap = margin(conf)
     token = SEQUENCE_MARGIN.set(gap) if gap else None
+    restart = RESTART_GAP.set(_restart_gap(hop, rec))
     try:
         plan = eng.repair_plan(d, "sequences")
     finally:
+        RESTART_GAP.reset(restart)
         if token is not None:
             SEQUENCE_MARGIN.reset(token)
     for a in plan:

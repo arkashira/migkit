@@ -20,6 +20,7 @@ class _Hop:
     service = ""
     options = {}
     databases = ["a", "b"]
+    workers = 1
 
     def __init__(self, tmp):
         self.tmp = tmp

@@ -7946,13 +7946,21 @@ class MySQLEngine(Engine):
         actions = []
         if kind in ("sequences", "all"):
             ddb = self._d("dst", db)
+            began = time.monotonic()
             src, dst = self._counters(db)
+            # the source's counters read again, the read between them
+            # timed: what each advanced by is its measured insert rate,
+            # and the later value is the one the target is raised to
+            again, _ = self._counters(db)
+            from .postgres import _measured_rates, _seq_buffer
+            rates = _measured_rates(self, db, src, began, again)
+            src = {t: max(v, again.get(t, v)) for t, v in src.items()}
             stmts, undo, refuse = [], [], []
-            # head-room above the source's counter where it is asked for
-            # (the cutover's `keys: apart`), read as PostgreSQL's is
-            from .postgres import _seq_buffer
-            buf = _seq_buffer()
             for tbl, sv in sorted(src.items()):
+                # head-room above the source's counter (`_seq_buffer`): the
+                # cutover's `keys: apart`, else this counter's measured
+                # rate over the writers' measured restart gap
+                buf = _seq_buffer(rates.get(tbl))
                 dv = dst.get(tbl)
                 if dv == sv + buf:
                     continue
