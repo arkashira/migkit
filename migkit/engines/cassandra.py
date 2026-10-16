@@ -347,8 +347,10 @@ class CassandraEngine(NeutralCopier, Engine):
                     CassandraEngine._value(x) for k, x in v.items()}
         return v
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         from cassandra.query import SimpleStatement
         if where:
             raise SystemExit(f"{table} moves under a row filter, which is"

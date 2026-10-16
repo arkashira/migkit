@@ -3616,8 +3616,9 @@ class BigQueryEngine(BigQueryChanges, BigQueryChecks, _Warehouse):
                                           limit, where)
         return self._fix_read(side, db, table, columns, rows), last
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        size = decide.cursor_rows(size)
         for batch in super().neutral_batches(side, db, table, columns, size,
                                              where):
             yield self._fix_read(side, db, table, columns, batch)

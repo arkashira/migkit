@@ -1063,11 +1063,13 @@ class SaasEngine(Engine):
         entry = (got.get("streams") or {}).get(str(table)) or {}
         return bool(got.get("asked")) and not entry.get("read")
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """The stream read whole. The first read of a stream a follow
         asked a start for (`copy_point`) is the copy it starts from: its
         state and its rows' hashes are kept."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         if where:
             raise SystemExit("a row filter is SQL, and a program source"
                              " takes none")

@@ -1729,6 +1729,26 @@ def _pg_pattern(name):
     return ".".join('"' + p.replace('"', '""') + '"' for p in (sch, tbl))
 
 
+#: what a schema read off a PostgreSQL side leaves to the target: the
+#: owners and grants, which name the source's roles and are carried as
+#: accounts of their own (`accounts`), never with the objects
+PG_UNOWNED = ("--no-owner", "--no-privileges")
+
+
+def pg_schema_args(program, archive=False, section=None):
+    """The option lines of the dump programs for one intent, the one place
+    they are said (movers' schema step, the engine's schema read, its
+    undo rehearsal and its snapshot all ask here). `program` is the dump
+    (`pg_dump`) or the restore (`pg_restore`). A dump read as text drops
+    the owners and grants itself; an `archive` keeps them for its restore,
+    which drops them; `section` is the one section of the schema taken."""
+    part = [f"--section={section}"] if section else []
+    if program == "pg_restore":
+        return [*part, *PG_UNOWNED]
+    return ["--schema-only", *(["-Fc"] if archive else []), *part,
+            *([] if archive else PG_UNOWNED)]
+
+
 def _pg_missing_tables(hop, db):
     """The tables in scope the target does not have, and whether it has
     no tables at all."""
@@ -1816,12 +1836,12 @@ def _pg_schema(hop, db, section, tables, whole, log=None, workers=1):
     out = hop.report_dir(db) / f"schema-{section}.dump"
     listed = out.with_suffix(".list")
     dump = ["pg_dump", "-h", s.host, "-p", str(s.port), "-U", s.user,
-            "-d", db, "-Fc", "--schema-only", f"--section={section}",
+            "-d", db, *pg_schema_args("pg_dump", True, section),
             *pick, *(leftovers.pg_dump_args() if whole else []),
             "-f", str(out)]
     load = ["pg_restore", "-h", t.host, "-p", str(t.port), "-U", t.user,
-            "-d", hop.target_db(db), f"--section={section}", "--no-owner",
-            "--no-privileges",
+            "-d", hop.target_db(db), *pg_schema_args("pg_restore",
+                                                     section=section),
             *(["-j", str(int(workers))] if section == "post-data"
               and int(workers or 1) > 1 else []), str(out)]
     env_s = {**s.libpq_env(), "PGPASSWORD": s.password,

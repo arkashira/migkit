@@ -269,12 +269,14 @@ class SQLiteEngine(NeutralCopier, Engine):
         return (f'select {cols} from "{table}"{where}{order}{cap}', key,
                 names)
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """The whole table in one pass, `size` rows or
         `pieces.BATCH_BYTES` at a time, for a table with no key to resume
         from - read through a cursor the server keeps, so no more than a
         batch is ever held here."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         sql, _, _ = self._read_query(side, db, table, columns, None, None,
                                      where)
         conn = self._reader(side)

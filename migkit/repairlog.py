@@ -388,10 +388,6 @@ def canon_rows(columns, rows):
             for r in rows]
 
 
-#: rows of a snapshot put back into a table at once
-SNAPSHOT_BATCH = 5000
-
-
 def snapshot_name(path):
     """The file a table's snapshot is kept in, beside `path` (a record's
     own name, so the two go together)."""
@@ -474,14 +470,19 @@ class TableIO:
                              f" copied again were kept in {path}, which is"
                              " gone - nothing was put back")
         self.eng.neutral_empty("dst", self.db, self.table)
-        batch = []
+        batch, most = [], None
         with path.open("r") as f:
             for line in f:
                 if not line.strip():
                     continue
                 batch.append([value(c, t) for (_, c), t in
                               zip(self.columns, json.loads(line))])
-                if len(batch) >= SNAPSHOT_BATCH:
+                if most is None:
+                    # rows put back at once: the decision's write, asked
+                    # once from the first row's width (`decide.batch_rows`)
+                    most = self.eng.batch_size(
+                        "write", len(self.columns), batch)
+                if len(batch) >= most:
                     self.eng.neutral_write("dst", self.db, self.table,
                                            self.columns, batch)
                     batch = []

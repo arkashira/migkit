@@ -426,11 +426,13 @@ class CopybookEngine(NeutralCopier, Engine):
         at = self._starts(side, db, table, rows_per)
         return [[a, spelled(a, b)] for a, b in zip(at, at[1:] + [None])]
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """The records in the range, a batch at a time, read as they are
         handed on: the copier writes one range while nothing else of the
         file is held."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         start, end = byte_range(where)
         d = self._table(side, db, table)
         picked = d.index_of([n for n, _ in columns])

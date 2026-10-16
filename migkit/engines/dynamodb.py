@@ -342,8 +342,10 @@ class DynamoDBEngine(NeutralCopier, Engine):
     def _declared(self, side, db, table):
         return dict(self.neutral_columns(side, db, table))
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         if where:
             raise SystemExit(f"{table} moves under a row filter, which is"
                              " SQL, and DynamoDB takes none")

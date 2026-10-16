@@ -157,8 +157,10 @@ class QdrantEngine(NeutralCopier, Engine):
             raise SystemExit(f"{table}: a row filter is SQL, and a collection"
                              " takes none")
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         self._rowfilter(table, where)
         names = [n for n, _ in columns]
         at = [n for n, _ in COLUMNS]

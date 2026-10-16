@@ -226,8 +226,10 @@ class BigtableEngine(NeutralCopier, Engine):
             return rows, None
         return rows, tuple(rows[-1][names.index(k)] for k in key)
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         if where:
             raise SystemExit(f"{table}: a row filter is SQL, and a Bigtable"
                              " table takes none")

@@ -801,12 +801,14 @@ class MySQLEngine(Engine):
                 else pieces.ReadPlan)
         return plan(self, side, db, table, columns, wide)
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """The whole table in one pass, `size` rows at a time or
         `pieces.BATCH_BYTES`, for a table with no key to resume from -
         read through a cursor the server keeps, so no more than a batch is
         ever held here, a large value read in pieces (`_read_plan`)."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         import pymysql
         plan = self._read_plan(side, db, table, columns)
         sql, args, _, _ = self._read_query(side, db, table, columns, None,

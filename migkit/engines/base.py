@@ -4164,6 +4164,23 @@ class Engine:
 
     #: how many rows a drilldown walks per side before it stops and says so
     DRILL_CAP = 20000
+    #: values one statement of this engine may carry - its server's or its
+    #: driver's limit to a statement's parameters or listed values; None
+    #: where it says none, so the decision reads no limit (`batch_rows`)
+    STATEMENT_VALUES = None
+
+    def batch_size(self, kind, params=1, rows=(), page=None, rate=None):
+        """Rows of one list by key, one write or one cursor's batch on this
+        engine: the decision's (`decide.batch_rows`), from the statement's
+        limit it reports, `params` values a row takes of it, the widest of
+        `rows` (those in hand), the `page` the read was given and the
+        `rate` its last write measured - asked once as the list, the write
+        or the cursor is opened."""
+        from .. import decide
+        width = max((decide._measure(r) for r in rows), default=None)
+        return decide.batch_rows({
+            "kind": kind, "limit": self.STATEMENT_VALUES, "params": params,
+            "width": width, "page": page, "rate": rate})[0]
 
     def _row_text(self, columns, row):
         from .. import canon

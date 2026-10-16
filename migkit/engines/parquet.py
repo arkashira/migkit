@@ -324,8 +324,10 @@ class ParquetEngine(NeutralCopier, Engine):
                                                  columns=list(names)):
                         yield from pieces.arrow_rows(batch, list(names))
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         yield from self._batches(side, db, table, [n for n, _ in columns],
                                  size, where)
 

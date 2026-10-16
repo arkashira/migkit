@@ -2195,11 +2195,13 @@ select json_build_object(
         return (f"select {cols} from {_ident(sch)}.{_ident(tbl)}{where}"
                 f"{order}{cap}", args, key, names)
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None, as_text=()):
         """The whole table in one pass, `size` rows at a time, for a table
         with no key to resume from - read through a cursor the server keeps,
         so no more than a batch is ever held here."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         sql, args, _, _ = self._read_query(side, db, table, columns, None,
                                            None, where, as_text)
         with self._connect(side, db) as conn:
@@ -5120,15 +5122,15 @@ select json_build_object(
 
     def _dump_schema_native(self, side, db, physical=None):
         from .. import leftovers as _lo
-        from ..movers import _pg_pattern
+        from ..movers import _pg_pattern, pg_schema_args
         # the views, materialized views and sequences the hop leaves out
         # with the tables: the dump's table switch takes every relation
         left = [a for sch, tbl in sorted(self._left_out_of_schema(db, side)
                                          | self._objects_not_taken(side, db))
                 for a in ("--exclude-table", _pg_pattern(f"{sch}.{tbl}"))]
         argv, env = self._client(
-            side, db, "pg_dump", "--schema-only", "--no-owner",
-            "--no-privileges", "--no-security-labels", "--no-tablespaces",
+            side, db, "pg_dump", *pg_schema_args("pg_dump"),
+            "--no-security-labels", "--no-tablespaces",
             "--exclude-schema", self.hop.options.get("exclude_schema", "__*"),
             "--exclude-table", "*.migkit_changelog*", *left,
             *_lo.pg_dump_args(), physical=physical)
@@ -10878,12 +10880,13 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                           " could not be made on the target ("
                           + str(e).strip().splitlines()[-1][:100] + ")")
         try:
-            argv, env = self._client("dst", db, "pg_dump", "--schema-only",
-                                     "-Fc", "-f", str(dump))
+            argv, env = self._client("dst", db, "pg_dump",
+                                     *movers.pg_schema_args("pg_dump", True),
+                                     "-f", str(dump))
             run(argv, env=env)
-            argv, env = self._client("dst", db, "pg_restore", "--no-owner",
-                                     "--no-privileges", str(dump),
-                                     physical=scratch)
+            argv, env = self._client("dst", db, "pg_restore",
+                                     *movers.pg_schema_args("pg_restore"),
+                                     str(dump), physical=scratch)
             movers._restore(argv, env, None, "the rehearsal copy",
                             existing_ok=True)
             before = self._dump_schema_native("dst", db, physical=scratch)
@@ -11400,8 +11403,9 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         # databases and buys nothing here.
         if kind == "sequences":
             return
-        argv, env = self._client("dst", db, "pg_dump", "--schema-only",
-                                 "--no-owner", "--no-privileges")
+        from ..movers import pg_schema_args
+        argv, env = self._client("dst", db, "pg_dump",
+                                 *pg_schema_args("pg_dump"))
         write_atomic(state_dir / "dst-schema.sql", run(argv, env=env).stdout)
 
     #: how `assess` reads the login roles of both sides

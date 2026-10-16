@@ -7196,3 +7196,104 @@ def fetch_width(facts):
     if free:
         n = min(n, max(1, int(free // sizing.WORKER_MEMORY)))
     return max(1, min(n, jobs, probe_width(jobs, per_item=2))), choice
+
+
+# --- a by-key list, a write chunk and a cursor's batch (READ.batch-literals) -
+
+#: the kinds of batch `batch_rows` sizes: values asked of a side by key in
+#: one statement, rows written to one at once, and the rows a cursor the
+#: server keeps hands on at a time
+BY_KEY, WRITE, CURSOR = "by key", "write", "cursor"
+
+
+def batch_rows(facts):
+    """(rows, the `Choice`) of one batch that is not a keyed read's page -
+    asked once as the list, the write or the cursor is opened, and not
+    again between its batches (a cursor's batch is fixed once it is open;
+    a list is cut before its first statement).
+
+    `facts`: `kind` (`BY_KEY`, `WRITE` or `CURSOR`), `limit` (values one
+    statement of the engine may carry, as it reports or was measured;
+    None where it says none), `params` (values each row takes of that
+    limit: the key's columns for a list by key, the columns for a write),
+    `rate` (rows a second the side's last write took them at), `width`
+    (bytes of the widest row measured), `free` (bytes of memory this
+    process may still take), `readers` (batches held at once), `seconds`
+    (what a batch may take, `PAGE_SECONDS` where none is named) and `page`
+    (the rows of the page the read was given).
+
+    A list by key is as long as the statement's limit holds at its
+    values a row; a write as long as the measured rate writes in the
+    seconds; else the page the read was given; else the unmeasured page's
+    rows (`PAGE_UNMEASURED`), the reason saying nothing was measured.
+    Every answer is held to the statement's limit and to the free memory's
+    share at the measured width; never below one row."""
+    from . import pieces
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    for k in ("kind", "limit", "params", "rate", "width", "free",
+              "readers", "seconds", "page"):
+        f.setdefault(k, None)
+    kind = f.get("kind")
+    rungs = (
+        Rung("the statement's limit", "a list as long as one statement of"
+             " the engine carries",
+             needs=(Need("a list asked by key",
+                         lambda x: x.get("kind") == BY_KEY,
+                         "not a list asked by key"),
+                    Need("the statement's limit known",
+                         lambda x: bool(_count(x.get("limit"))),
+                         "the engine says no limit to a statement's"
+                         " values")),
+             because="the engine's limit to a statement's values is known"),
+        Rung("measured writes", "a chunk as long as the measured write rate"
+             " takes in its seconds",
+             needs=(Need("rows written",
+                         lambda x: x.get("kind") == WRITE,
+                         "not a write"),
+                    Need("the write rate measured",
+                         lambda x: _positive(x.get("rate")) is not None,
+                         "no write of this side has been timed"),
+                    Need("its rows' width measured",
+                         lambda x: _positive(x.get("width")) is not None,
+                         "no row of this write has been measured")),
+             because="the side's write rate and the rows' width were"
+                     " measured"),
+        Rung("the read's page", "the rows of the page the read was given",
+             needs=(Need("a page given",
+                         lambda x: bool(_count(x.get("page"))),
+                         "the read was given no page"),),
+             because="the read was given its page"),
+        Rung("unmeasured", f"{PAGE_UNMEASURED:,} rows a batch",
+             because="nothing measured yet: neither the statement's limit,"
+                     " a write's rate nor a page given"))
+    choice = climb(f"the rows of a batch ({kind or CURSOR})", rungs, f,
+                   prove=False)
+    params = max(1, _count(f.get("params")) or 1)
+    limit = _count(f.get("limit"))
+    by_limit = max(1, limit // params) if limit else None
+    if choice.path == "the statement's limit":
+        rows = by_limit
+    elif choice.path == "measured writes":
+        seconds = _positive(f.get("seconds")) or PAGE_SECONDS
+        rows = max(1, int(_positive(f["rate"]) * seconds))
+    elif choice.path == "the read's page":
+        rows = _count(f.get("page"))
+    else:
+        rows = PAGE_UNMEASURED
+    if by_limit:
+        rows = min(rows, by_limit)
+    width = _positive(f.get("width"))
+    if width:
+        free = _positive(f.get("free"))
+        readers = max(1, _count(f.get("readers")) or 1)
+        held = (free // (PAGE_MEMORY_SHARE * readers) if free
+                else pieces.BATCH_BYTES)
+        rows = min(rows, max(1, int(held // width)))
+    return max(1, int(rows)), choice
+
+
+def cursor_rows(size):
+    """The rows a cursor the server keeps hands on a batch at a time:
+    `size` where the read was given one, else the decision's
+    (`batch_rows`) - asked once as the cursor opens."""
+    return batch_rows({"kind": CURSOR, "page": size})[0]

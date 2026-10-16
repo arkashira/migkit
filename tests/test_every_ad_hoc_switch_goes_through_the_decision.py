@@ -1075,3 +1075,93 @@ def test_the_page_guard_sees_a_page_passed_by_place_or_by_a_constant():
                    (7, "neutral_read limit=MOST"),
                    (8, "neutral_read limit=1000"),
                    (16, "neutral_changes limit=200")]
+
+
+# --- a list by key, a write chunk and a cursor's batch are the decision's,
+# never a literal (READ.batch-literals) --------------------------------------
+
+#: the calls a list by key or a write chunk is passed to: name -> (the
+#: place its list takes, the keyword it goes by). A cursor's batch is read
+#: at its reader's default; the numbers callers still pass a cursor are
+#: owed (backlog READ.batch-literals, its remainder)
+CHUNKED = {"neutral_rows_by_key": (5, "keys"), "neutral_write": (4, "rows")}
+
+
+def _reasoned(lines, node):
+    top = node.lineno - 1
+    while top > 0 and lines[top - 1].strip().startswith("#"):
+        top -= 1
+    return "# page:" in "\n".join(lines[top:node.end_lineno])
+
+
+def _fixed_batches(tree, lines):
+    """[(line, what)] of a cursor reader whose `size` defaults to a number,
+    and of a list by key or a write cut by a fixed slice - each with no
+    `# page:` reason on its lines or in the comment just above them."""
+    import ast
+    constants = _number_constants(tree)
+    out = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        a = fn.args
+        names = [x.arg for x in a.args]
+        if fn.name == "neutral_batches" and "size" in names:
+            at = names.index("size") - (len(names) - len(a.defaults))
+            d = a.defaults[at] if at >= 0 else None
+            if isinstance(d, ast.Constant) and isinstance(d.value, int):
+                out.append((fn.lineno, f"neutral_batches size={d.value}"))
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                 and getattr(n.func, "attr", None) in CHUNKED]
+        for call in calls:
+            place, kw = CHUNKED[call.func.attr]
+            given = [k.value for k in call.keywords if k.arg == kw]
+            if len(call.args) > place:
+                given.append(call.args[place])
+            for v in given:
+                if not (isinstance(v, ast.Subscript)
+                        and isinstance(v.slice, ast.Slice)):
+                    continue
+                v = v.slice.upper
+                what = v is not None and _fixed(v, constants)
+                if what and not _reasoned(lines, call):
+                    out.append((call.lineno, f"{call.func.attr}"
+                                             f" {kw}={what}"))
+    return sorted(set(out))
+
+
+def test_a_fixed_list_by_key_write_or_cursor_batch_is_refused():
+    import ast
+    from pathlib import Path
+    import migkit
+    home = Path(migkit.__file__).resolve().parent
+    found = []
+    for path in sorted(home.rglob("*.py")):
+        text = path.read_text()
+        if not any(name in text for name in (*CHUNKED, "neutral_batches")):
+            continue
+        for line, what in _fixed_batches(ast.parse(text), text.split("\n")):
+            found.append(f"{path.relative_to(home)}:{line} {what}")
+    assert found == []
+
+
+def test_the_batch_guard_sees_a_fixed_list_write_and_cursor():
+    """The literals READ.batch-literals took out - a constant slicing a list
+    by key or a write, a cursor's number default - are each seen again;
+    the decision's size and a reasoned number are not."""
+    import ast
+    src = ("BATCH = 1000\n"
+           "class E:\n"
+           "    def neutral_batches(self, side, db, t, c, size=1000):\n"
+           "        pass\n"
+           "    def f(self, x, keys, rows, n):\n"
+           "        x.neutral_rows_by_key('s', db, t, c, k, keys[i:i + BATCH])\n"
+           "        x.neutral_write('d', db, t, c, rows[i:i + 5000])\n"
+           "        x.neutral_write('d', db, t, c, rows[i:i + n])\n"
+           "        x.neutral_rows_by_key('s', db, t, c, k, keys[i:i + n])\n"
+           "        # page: one row answers whether any exists\n"
+           "        x.neutral_write('d', db, t, c, rows[i:i + 1])\n")
+    got = _fixed_batches(ast.parse(src), src.split("\n"))
+    assert got == [(3, "neutral_batches size=1000"),
+                   (6, "neutral_rows_by_key keys=BATCH"),
+                   (7, "neutral_write rows=5000")]

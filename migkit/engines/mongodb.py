@@ -4811,7 +4811,7 @@ class MongoEngine(Engine):
         from bson.raw_bson import RawBSONDocument
         from pymongo import DeleteOne, ReplaceOne
 
-        from .. import leaves
+        from .. import decide, leaves
         rows = self._rows_of(db, name)
         sc = self._client("src")[db][name]
         tc = self._client("dst")[self._d("dst", db)][self._there(db, name)]
@@ -4842,10 +4842,11 @@ class MongoEngine(Engine):
                 rows or {}, {"_id": 1})]
             keys = [k for k in keys if id_bucket(spec, k) in changed]
             out = {}
-            for i in range(0, len(keys), leaves.IN_LIST):
+            n = self.batch_size(decide.BY_KEY)
+            for i in range(0, len(keys), n):
                 for d in self._raw(coll).find(
                         {"_id": {"$in": [id_of(k) for k in
-                                         keys[i:i + leaves.IN_LIST]]}}):
+                                         keys[i:i + n]]}}):
                     out[id_element(d.raw)] = d.raw
             return out
         writes, deletes = bucket_writes(read(sc), read(tc),
@@ -4854,8 +4855,10 @@ class MongoEngine(Engine):
             ops = ([ReplaceOne({"_id": id_of(k)}, RawBSONDocument(raw),
                                upsert=True) for k, raw in writes]
                    + [DeleteOne({"_id": id_of(k)}) for k in deletes])
-            for i in range(0, len(ops), leaves.IN_LIST):
-                tc.bulk_write(ops[i:i + leaves.IN_LIST], ordered=True)
+            n = self.batch_size(decide.WRITE, rows=[raw for _, raw in
+                                                    writes])
+            for i in range(0, len(ops), n):
+                tc.bulk_write(ops[i:i + n], ordered=True)
         return len(writes) + len(deletes), size
 
     def _sweep_round(self, db, apply, log):

@@ -1586,9 +1586,10 @@ def _rewrite(hop, dst, db, target, key, columns, found):
     names = [n for n, _ in columns]
     keys = [r[:len(key)] for r, _ in found]
     now = {}
-    for i in range(0, len(keys), BATCH):
+    n = dst.batch_size("by key", len(key))
+    for i in range(0, len(keys), n):
         now.update(dst.neutral_rows_by_key("dst", db, target, columns, key,
-                                           keys[i:i + BATCH]))
+                                           keys[i:i + n]))
     write, left = [], 0
     path = _undo_path(hop, db)
     with path.open("a") as undo:

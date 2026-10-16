@@ -914,8 +914,10 @@ class TeradataEngine(DbapiRows, Engine):
     def _fastexport_sql(sql):
         return TRY_FASTEXPORT + sql
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         sql, args, key, names = self._read_query(side, db, table, columns,
                                                  None, None, where)
         conn, cur = self._export(side, db, table, sql, args, names)

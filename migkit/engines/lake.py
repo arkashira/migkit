@@ -118,8 +118,10 @@ class _Lake(NeutralCopier, Engine):
         return con.execute(f"select {cols} from migkit_rows where"
                            f" ({where})").fetch_record_batch()
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         names = [n for n, _ in columns]
         reader = self._where(self._reader(side, db, table, names), names,
                              where)

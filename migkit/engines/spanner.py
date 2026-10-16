@@ -661,8 +661,10 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
             return rows, None
         return rows, tuple(rows[-1][names.index(k)] for k in key)
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         sql, params, types, _, _ = self._read_sql(side, db, table, columns,
                                                   None, None, where)
         database = self._database(side, db)

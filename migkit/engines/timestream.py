@@ -182,8 +182,10 @@ class TimestreamEngine(NeutralCopier, Engine):
                 f" {self._qualified(side, db, table)}"
                 + (f" where {where}" if where else "") + " order by time")
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         _, rows = self._query(side, self._select(side, db, table, columns,
                                                  where or ""))
         for i in range(0, len(rows), size):

@@ -108,8 +108,6 @@ HELD = 500_000
 #: to differ in too many places to name, and re-copying those ranges is
 #: cheaper than reading them back (backlog R18.4)
 MOST_ROWS = 2_000_000
-#: keys a statement asks for at once
-IN_LIST = 1000
 #: a cell is `(count, key sum, hash sum, square sum)`
 K = 3
 _SLICE = 20
@@ -716,11 +714,22 @@ def scan_marked(s, spec, buckets=None, marked=True, outside=None):
     return tree, lo, s.eng.snapshot_mark(s.side, s.db) if marked else None
 
 
+def in_list(eng, params=1):
+    """Leaves or keys one statement of `eng` names at once, `params`
+    values each: the decision's list by key (`decide.batch_rows`), from
+    the statement's limit the engine reports (`STATEMENT_VALUES`) - asked
+    once for a scan, not again between its statements."""
+    return decide.batch_rows({
+        "kind": decide.BY_KEY, "params": params,
+        "limit": getattr(eng, "STATEMENT_VALUES", None)})[0]
+
+
 def _scan_sqls(s, spec, want):
     """The statements for these leaves: one pass for the whole table, or
     for a hash leaf set small enough to name; the key's ranges, some
     hundreds a statement, for range leaves."""
-    if want is None or (spec.kind != "range" and len(want) > IN_LIST):
+    if want is None or (spec.kind != "range"
+                        and len(want) > in_list(s.eng)):
         return [_scan_sql(s, spec)]
     if not want:
         return []
@@ -778,8 +787,9 @@ def leaf_rows(s, spec, buckets):
                 if b in want:
                     _keep(out, s, key, rh, kh, b)
         return out
-    for i in range(0, len(order), IN_LIST):
-        part = ", ".join(str(b) for b in order[i:i + IN_LIST])
+    n = in_list(s.eng)
+    for i in range(0, len(order), n):
+        part = ", ".join(str(b) for b in order[i:i + n])
         if s.key:
             names = ", ".join(f"k{j}" for j in range(len(s.key)))
             sql = (f"select rh, kh, {names} from"
@@ -1082,11 +1092,16 @@ class Said(str):
     rows_src = rows_dst = None
 
 
-def confirm(pair_side_a, pair_side_b, found, most=5000):
+def confirm(pair_side_a, pair_side_b, found, most=None):
     """The changed rows read by key on both sides and compared value by
     value: {key text: [columns that differ]} for those that still differ,
-    and how many read equal a moment later."""
+    and how many read equal a moment later. `most` rows are read, one
+    list by key a side: where no caller names it, the decision's list on
+    the side that carries fewer (`decide.batch_rows`), asked once."""
     a, b = pair_side_a, pair_side_b
+    if most is None and found.changed and a.key:
+        most = min(in_list(a.eng, len(a.key)),
+                   in_list(b.eng, len(b.key or a.key)))
     keys = found.changed[:most]
     if not keys or not a.key:
         return {}, 0
@@ -1326,8 +1341,9 @@ def _by_hash(s, spec, hashes):
         return out
     order = sorted(hashes)
     names = ", ".join(f"k{j}" for j in range(len(s.key)))
-    for i in range(0, len(order), IN_LIST):
-        part = ", ".join(str(x) for x in order[i:i + IN_LIST])
+    n = in_list(s.eng)
+    for i in range(0, len(order), n):
+        part = ", ".join(str(x) for x in order[i:i + n])
         sql = (f"select kh, {names} from"
                f" {_fenced(s, _inner(s, spec, keys=True))} x"
                f" where kh in ({part})")
@@ -1899,10 +1915,11 @@ def digest_with(eng, side, db, table, columns, way="md5", **kw):
 def gather_plan(pair, db, a, b, leaves):
     """The `sizing.Plan` a side's range leaves are read by: as many
     statements at once as this machine and both servers carry, never
-    more than there are runs of `IN_LIST` leaves to read."""
+    more than there are runs of `in_list` leaves to read."""
     from . import sizing
     return sizing.estimate(
-        pair.hop, a.eng, db, units=max(1, -(-int(leaves) // IN_LIST)),
+        pair.hop, a.eng, db,
+        units=max(1, -(-int(leaves) // in_list(a.eng))),
         sides={"src": sizing.capacity(a.eng, "src", db),
                "dst": sizing.capacity(b.eng, "dst", db)})
 

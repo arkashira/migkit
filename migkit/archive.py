@@ -250,10 +250,11 @@ def _there(pair, db, tb, key_rows):
     at = tb.at()
     keys = [tuple(r[i] for i in at) for r in key_rows]
     got = {}
-    for i in range(0, len(keys), BATCH):
+    n = pair.dst_engine.batch_size("by key", len(_dst_key(tb)))
+    for i in range(0, len(keys), n):
         got.update(pair.dst_engine.neutral_rows_by_key(
             "dst", db, tb.target, tb.dst_cols, _dst_key(tb),
-            keys[i:i + BATCH]))
+            keys[i:i + n]))
     return {k: (_hash(_texts(pair, tb.dst_cols, r)), r)
             for k, r in got.items()}
 
@@ -548,10 +549,11 @@ def restore(hop, eng, db, go, log, ask=None):
             keys = [tuple(canon.from_text(cls[c], v)
                           for c, v in zip(tb.key, k)) for k in e["keys"]]
             got = {}
-            for i in range(0, len(keys), BATCH):
+            n = pair.dst_engine.batch_size("by key", len(_dst_key(tb)))
+            for i in range(0, len(keys), n):
                 got.update(pair.dst_engine.neutral_rows_by_key(
                     "dst", db, tb.target, tb.dst_cols, _dst_key(tb),
-                    keys[i:i + BATCH]))
+                    keys[i:i + n]))
             if len(got) != len(keys):
                 raise SystemExit(f"{t}: the archive holds {len(got):,} of"
                                  f" the {len(keys):,} rows to put back")

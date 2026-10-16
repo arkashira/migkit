@@ -225,11 +225,13 @@ class TiDBEngine(MySQLEngine):
             return (rows, None)
         return (rows, tuple(rows[-1][names.index(k)] for k in key))
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """The whole table in one pass through a cursor the server keeps,
         in batches of `size` rows or `pieces.BATCH_BYTES`, large values read
         in pieces (`_read_plan`)."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         import pymysql
 
         from .. import pieces

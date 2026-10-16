@@ -375,11 +375,13 @@ class ClickHouseEngine(NeutralCopier, Engine):
             return rows, None
         return rows, tuple(rows[-1][names.index(k)] for k in key)
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """The whole table in one pass, in batches of `size` rows or
         `pieces.BATCH_BYTES`; inside a digest folded here, each value wider
         than `canon.WIDE` read as its length and md5 (`pieces.hashing`)."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         wide = self._wide_times(side, db, table)
         plan = (pieces.DigestPlan(self, side, db, table, columns, wide)
                 if pieces.is_hashing(self) else None)

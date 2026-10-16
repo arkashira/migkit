@@ -461,11 +461,13 @@ class SapOdpEngine(Engine):
         entry = self._initial(db).get(str(table)) or {}
         return bool(entry.get("asked")) and not entry.get("token")
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """Page by page. The first read of an entity set a follow asked a
         start for (`copy_point`) is its delta initialisation; every other
         read tracks nothing."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         if where:
             raise SystemExit("a row filter is SQL, and an SAP service takes"
                              " none")

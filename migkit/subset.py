@@ -56,12 +56,11 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from . import decide
+
 GOAL = "subset"
 #: rows a subset holds at most where the hop does not say
 MOST = 1_000_000
-#: values asked of a side by key, and rows written to one, at once - not a
-#: keyed read's page, which the decision sizes (`decide.page_rows`)
-BATCH = 1000
 #: the share rule's buckets: a key hashing below share x SHARE_OF is taken
 SHARE_OF = 1_000_000
 
@@ -156,6 +155,9 @@ class Plan:
     rows: dict = field(default_factory=dict)
     edges: list = field(default_factory=list)
     why: dict = field(default_factory=dict)
+    #: rows a second this subset's last table was written at, which sizes
+    #: the next table's writes (`decide.batch_rows`)
+    write_rate: float = None
 
     def total(self):
         return sum(len(r) for r in self.rows.values())
@@ -349,10 +351,13 @@ def plan(hop, eng, db, log=None):
                 ask = [raw for v, raw in want.items() if v not in seen]
                 seen.update(want)
                 got_rows = []
-                for i in range(0, len(ask), BATCH):
+                # values a statement asks by key: the decision's, asked
+                # once for this list (`decide.batch_rows`)
+                n = src.batch_size(decide.BY_KEY, len(pc))
+                for i in range(0, len(ask), n):
                     got_rows += list(src.neutral_rows_by_key(
                         "src", db, pt, p.columns[pt], pc,
-                        ask[i:i + BATCH]).values())
+                        ask[i:i + n]).values())
                 added = _add(p, pt, got_rows, most)
                 if added:
                     p.why.setdefault(pt, []).append(f"referred to by {c}")
@@ -517,10 +522,22 @@ def _write(pair, db, src_t, dst_t, p, rules, log):
     names = [n for n, _ in p.columns[src_t]]
     at = [names.index(n) for n, _ in src_cols]
     rows = [[r[i] for i in at] for r in p.rows[src_t].values()]
-    done = 0
-    for i in range(0, len(rows), BATCH * 5):
-        done += pair.dst_engine.neutral_write("dst", db, dst_t, dst_cols,
-                                              rows[i:i + BATCH * 5]) or 0
+    if not rows:
+        log(f"{src_t}: 0 rows written")
+        return 0
+    # rows a write takes at once: the decision's, asked once for the table
+    # from the rows' width and the rate the copy's last table was written
+    # at (`decide.batch_rows`)
+    eng = pair.dst_engine
+    n = eng.batch_size(decide.WRITE, len(dst_cols), rows,
+                       rate=p.write_rate)
+    began, done = time.monotonic(), 0
+    for i in range(0, len(rows), n):
+        done += eng.neutral_write("dst", db, dst_t, dst_cols,
+                                  rows[i:i + n]) or 0
+    took = time.monotonic() - began
+    if took > 0:
+        p.write_rate = len(rows) / took
     log(f"{src_t}: {len(rows):,} rows written")
     return len(rows)
 
@@ -669,14 +686,16 @@ def prove(hop, eng, db, p=None):
                     a[pair._key_of(sc, key, row)] = row
             else:
                 a = {}
-                for i in range(0, len(kept), BATCH):
+                n = src.batch_size(decide.BY_KEY, len(key))
+                for i in range(0, len(kept), n):
                     a.update(src.neutral_rows_by_key(
-                        "src", db, t, sc, key, kept[i:i + BATCH]))
+                        "src", db, t, sc, key, kept[i:i + n]))
             b = {}
-            for i in range(0, len(kept), BATCH):
+            n = dst.batch_size(decide.BY_KEY, len(key))
+            for i in range(0, len(kept), n):
                 b.update(dst.neutral_rows_by_key(
                     "dst", db, dst_t, dc, [to_dst[k] for k in key],
-                    kept[i:i + BATCH]))
+                    kept[i:i + n]))
             missing, extra, changed = pair._rows_differ(sc, dc, a, b)
             gone = len(kept) - len(a)
             held[t] = list(b.values())

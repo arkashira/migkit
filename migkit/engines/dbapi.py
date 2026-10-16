@@ -239,10 +239,12 @@ class DbapiRows(NeutralCopier):
             return (rows, None)
         return (rows, tuple(rows[-1][names.index(k)] for k in key))
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """The whole table in one pass, in batches of `size` rows or
         `pieces.BATCH_BYTES` (`pieces.batches`)."""
+        from .. import decide
+        size = decide.cursor_rows(size)
         from .. import pieces
         sql, args, key, names = self._read_query(side, db, table, columns,
                                                  None, None, where)
@@ -614,8 +616,10 @@ class FoldsToCapitals:
                                           limit, where)
         return self._unpad(side, db, table, columns, rows), last
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         for batch in super().neutral_batches(side, db, table, columns, size,
                                              where):
             yield self._unpad(side, db, table, columns, batch)

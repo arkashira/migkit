@@ -408,8 +408,10 @@ class CosmosEngine(NeutralCopier, Engine):
             out.append(CouchbaseEngine._from_json(classes.get(n), v))
         return out
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         if where:
             raise SystemExit(f"{table} moves under a row filter, which is"
                              " SQL, and a container is read whole")

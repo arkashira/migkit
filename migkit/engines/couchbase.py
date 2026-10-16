@@ -309,8 +309,10 @@ class CouchbaseEngine(NeutralCopier, Engine):
         return [doc_id if n == KEY and n not in body else
                 self._from_json(classes.get(n), body.get(n)) for n in names]
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
+        from .. import decide
+        size = decide.cursor_rows(size)
         if where:
             raise SystemExit(f"{table} moves under a row filter, which is"
                              " SQL, and a collection is read by its keys")
