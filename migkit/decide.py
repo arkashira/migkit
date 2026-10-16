@@ -3630,7 +3630,6 @@ def two_site_rule(facts):
              " both wrote held and logged", footprint=1)), f)
 
 
-<<<<<<< HEAD
 # --- a tail batch applied as typed columns or as change records (R19.9) ----
 
 _TAIL_HOLDS = {"consistent": "as of one moment", "idempotent": "converges",
@@ -3686,8 +3685,6 @@ def column_write(facts, costs=None):
     nothing, so each is tried once before the forecasts decide."""
     return climb("writing a batch's columns", COLUMN_WRITES, facts,
                  costs=costs)
-||||||| 8581f2a4
-=======
 #: what a cell can say that is work still owed, of any of the three tables
 _OWED = (NOT_YET, "undeclared", "stale", "untested", "claimed")
 
@@ -3724,4 +3721,3 @@ def orphan_ways():
     from .engines import NAMES
     return [(s, e) for s, ways in WAYS.items() for e in ways
             if s not in SHAPES or (e != "*" and e not in NAMES)]
->>>>>>> w13m
