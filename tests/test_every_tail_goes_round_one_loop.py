@@ -117,15 +117,39 @@ def test_a_lost_connection_is_read_again_from_the_saved_position(
     assert why == "caught up"
     # the look after the lost one began from where `lost` said
     assert looks.calls[:3] == [0, 1, 1], looks.calls
-    assert naps and naps[0] == 2
-    line = next(s for s in said if "lost a connection" in s)
-    assert "CHANGE_ME" not in line
+    # the first loss is read again inside the read's own recovery, its
+    # backoff slept through the loop's nap (a stop ends it at once) and
+    # its words kept free of the secret
+    assert naps == [0.8], naps
+    line = next(s for s in said if "retry 1/3" in s)
+    assert "the tail's read" in line and "CHANGE_ME" not in line
+    assert not any("CHANGE_ME" in s for s in said)
     # anything else stops the follow
     with pytest.raises(ValueError):
         tailctl.run_loop(tmp_path, "d",
                          lambda at: (_ for _ in ()).throw(ValueError("x")),
                          print, "changes", hop=_hop(tmp_path), token=0)
     assert tailctl.stopped(tmp_path)["kind"] == "ValueError"
+
+
+def test_a_link_lost_past_the_recovery_is_waited_out_and_read_again(
+        tmp_path, monkeypatch):
+    naps = []
+    monkeypatch.setattr(tailctl, "_nap", lambda where, s, *a: naps.append(s))
+    # every try of the first read's recovery fails: the loop waits the
+    # link out itself and reads again from the saved position
+    looks = _Looks(tmp_path, last=1,
+                   raise_at={k: "connection refused" for k in range(1, 5)})
+    said = []
+    seen, why = tailctl.run_loop(tmp_path, "d", looks, said.append,
+                                 "changes", hop=_hop(
+                                     tmp_path, follow_until="caught_up"),
+                                 token=0, save=lambda a: None)
+    assert why == "caught up"
+    assert any("lost a connection" in s and "trying again in 2s" in s
+               for s in said), said
+    assert naps[-1] == 2 and len(naps) == 4, naps
+    assert looks.calls[:5] == [0, 0, 0, 0, 0], looks.calls
 
 
 def test_a_lease_taken_over_stops_the_writing_between_batches(tmp_path):

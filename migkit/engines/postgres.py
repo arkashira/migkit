@@ -3453,7 +3453,8 @@ select json_build_object(
             except ImportError:
                 client = False
             granted = diagnostics.probed(
-                self.hop, "grant", diagnostics.where(db, side, "replication"),
+                getattr(self, "hop", None), "grant",
+                diagnostics.where(db, side, "replication"),
                 lambda: self._slot_rows(
                     side, db, "select r.rolreplication or exists (select 1"
                     " from pg_roles g where g.rolname = 'rds_replication' and"

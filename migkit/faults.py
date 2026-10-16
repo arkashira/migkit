@@ -305,8 +305,11 @@ def _bare_timeout(text):
     rest = text
     for w in sorted(BARE_TIMEOUT, key=len, reverse=True):
         rest = rest.replace(w, " ")
+    # the link named in the timeout's own words ("connection timed out")
+    # is the link's, whatever phase it was met in
     link = [w for w in CATALOGUE["connectivity"].words
-            if w not in BARE_TIMEOUT and w != "operationalerror"]
+            if w not in BARE_TIMEOUT and w != "operationalerror"] + [
+                "connection", "network", "socket"]
     return not any(w in rest for w in link) and not any(
         p in text for p in CONNECTING)
 
@@ -541,7 +544,11 @@ def retried(fn, tries=4, side="", operation="", writes=False, atomic=False,
     rec = ledger.owned(owned.key) if keep else {}
     spent = int(rec.get("tries") or 0)
     reconciled = None
-    if keep and writes and rec.get("state") in ("began", "unknown", RUNNING):
+    # a record that ended committed is read again too, where a way to ask
+    # exists: the same work in a later run is counted, not written twice
+    if keep and writes and (rec.get("state") in ("began", "unknown", RUNNING)
+                            or (rec.get("state") == COMMITTED
+                                and check is not None)):
         state, value = _reconcile_restart(check, ledger, owned, log, name)
         if state == COMMITTED:
             return value

@@ -37,7 +37,10 @@ def test_every_class_names_a_test_here_or_is_unproved():
         assert f.admits and set(f.admits) <= set(faults.ACTIONS), f.name
         assert f.proof, f.name
         if not f.proof.startswith("UNPROVED"):
-            assert f"def {f.proof.split('::')[1]}(" in here, f.name
+            path, name = f.proof.split("::")
+            body = here if path == "tests/" + pathlib.Path(__file__).name \
+                else (pathlib.Path(__file__).parents[1] / path).read_text()
+            assert f"def {name}(" in body, f.name
 
 
 def test_a_dropped_connection_is_retried_and_then_proceeds(monkeypatch):

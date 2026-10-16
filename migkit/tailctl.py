@@ -554,13 +554,19 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
                 at[0] = lost(e, at[0])
             raise
 
+    def told(text):
+        # what the recovery says quotes the error, which may hold a secret
+        for secret in secrets:
+            text = without_secret(text, secret)
+        log(text)
+
     def looked():
         at[0] = token
         owned = faults.Owned("src", "tail read", str(db),
                              json.dumps(token, sort_keys=True, default=str))
         got = faults.retried(read, side="src", operation="tail read",
-                             label=f"{db}: the tail's read", log=log,
-                             ledger=ledger,
+                             label=f"{db}: the tail's read", log=told,
+                             wait=lambda s: _nap(where, s), ledger=ledger,
                              owned=owned if ledger is not None else None)
         return at[0], got
     if until_ is None:
@@ -666,7 +672,7 @@ def run_loop(where, db, look, log, noun, *, hop=None, go=True, token=None,
                     _nap(where, wait)
                 else:
                     time.sleep(wait)
-                wait = pace.wait()
+                wait = pace.next(wait)
         finally:
             if on_end is not None:
                 on_end()
@@ -712,6 +718,16 @@ class Pace:
         if self.rate <= 0:
             return self.most
         return min(self.most, max(self.least, self.batch / self.rate))
+
+    def next(self, last):
+        """The wait after `last` found nothing new: the measured rate's
+        (`wait`) where changes have arrived, and where none has, `last`
+        doubled - a quiet source is asked again soon at first and
+        seldom later, up to `most`, back at `least` once a batch lands
+        (the loop starts again from its floor)."""
+        if self.rate > 0:
+            return self.wait()
+        return min(self.most, max(self.least, 2 * float(last)))
 
     def heartbeat(self):
         """How often a stream says it is alive and where it stands: the

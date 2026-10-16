@@ -360,7 +360,8 @@ def test_mysql_read_resumes_after_its_idle_session_is_closed(monkeypatch):
         def close(self):
             pass
     data = [Data(101), Data(102)]
-    eng._conn = lambda side, retry=True: data.pop(0) if retry else control()
+    eng._conn = lambda side, retry=True: data.pop(0) if retry \
+        else control(side, retry)
     with eng.attempt_unit("a verify read", "shop.orders", "d1"):
         assert eng._q("src", "select count(*) from t") == [(3, 99)]
     assert killed == ["KILL CONNECTION 101"]

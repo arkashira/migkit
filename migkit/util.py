@@ -1086,7 +1086,11 @@ class EstimateHistory:
             plo, phi = prev.get("lower_bound"), prev.get("upper_bound")
             if eta.seconds is not None and plo is not None:
                 end = now + eta.seconds
-                if end < then + plo or (phi is not None and end > then + phi):
+                # a shift under the second the line is said in is not a
+                # revision: a range as wide as one reading would
+                # otherwise "revise" itself with every tick of the clock
+                if end < then + plo - 1.0 or (
+                        phi is not None and end > then + phi + 1.0):
                     was = then + (prev.get("seconds") or plo)
                     revised = (f"revised {'later' if end > was else 'sooner'}"
                                f" by {human_secs(abs(end - was))}, out of the"
