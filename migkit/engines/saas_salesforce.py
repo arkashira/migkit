@@ -413,6 +413,7 @@ class Salesforce(Program):
     def rows_by_key(self, stream, keys):
         out = []
         ids = [str(k[0]) for k in keys]
+        # page: Salesforce SOQL character and URL length limit (IDS_A_QUERY=200)
         for i in range(0, len(ids), IDS_A_QUERY):
             part = ", ".join("'" + x.replace("'", "\\'") + "'"
                              for x in ids[i:i + IDS_A_QUERY])

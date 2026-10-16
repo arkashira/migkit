@@ -856,13 +856,16 @@ def _enforce_copier_rank(ordered, priced, costs=None, trial=()):
     return earned + [ordered[copier_idx]] + unearned + ordered[copier_idx + 1:]
 
 
-def _ranked(rungs, priced, explore=True, costs=None, trial=()):
+def _ranked(rungs, priced, explore=True, costs=None, trial=(),
+            enforce_copier=True):
     entries = [(priced.get(r.name), r.footprint, i, r)
                for i, r in enumerate(rungs)]
     if any(hasattr(e[0], "mean") for e in entries):
         ordered = _order_estimates(entries, explore)
     else:
         ordered = _order(entries)
+    if not enforce_copier:
+        return ordered
     return _enforce_copier_rank(ordered, priced, costs, trial)
 
 
@@ -1243,7 +1246,8 @@ def _told(fn):
 
 @_told
 def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
-          prove=True, unit=None, explore=True, trial=None):
+          prove=True, unit=None, explore=True, trial=None,
+          enforce_copier=True):
     """The `Choice` for one unit of work from its `rungs`.
 
     `need` is what the work must have (capabilities); `facts` what the
@@ -1275,7 +1279,8 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
     # several names: the programs owed a trial, the first that holds goes
     on_trial = (() if not trial else tuple(trial[0])
                 if isinstance(trial[0], (tuple, list)) else (trial[0],))
-    ranked = _ranked(kept, priced, explore, costs, on_trial)
+    ranked = _ranked(kept, priced, explore, costs, on_trial,
+                     enforce_copier=enforce_copier)
     order, passed = list(ranked), []
     if keep:
         held = [r for r in ranked if r.name == keep]
@@ -2330,6 +2335,10 @@ WAYS = {
         "redis": (NOT_APPLICABLE, "every value is under its key"),
         "kafka": (NOT_APPLICABLE, "a message is addressed by its partition"
                                   " and offset, never by a key"),
+        "qdrant": (NOT_APPLICABLE, "every vector point carries an id"),
+        "neo4j": (NOT_APPLICABLE, "every node and relationship carries an id"),
+        **{n: (NOT_YET, "DIALECTS.seven") for n in
+           ("netezza", "saphana", "informix", "progress", "vertica", "exasol", "databricks")},
     },
     "wide key": {
         **_NONE,
@@ -2376,6 +2385,10 @@ WAYS = {
                                   " cursor"),
         "kafka": (NOT_APPLICABLE, "a message's key is carried, never"
                                   " resumed by"),
+        "qdrant": (NOT_APPLICABLE, _BY_KEY_ORDER.format("point id scan")),
+        "neo4j": (NOT_APPLICABLE, _BY_KEY_ORDER.format("elementId scan")),
+        **{n: (NOT_YET, "DIALECTS.seven") for n in
+           ("netezza", "saphana", "informix", "progress", "vertica", "exasol", "databricks")},
     },
     "too large": {
         **_NONE,
@@ -2587,7 +2600,7 @@ WAYS = {
         **{n: ("yes", f"freeze.{c}") for n, c in _HELD_AS
            + (("lindorm", "LindormHold"),)},
         **{n: (NOT_APPLICABLE, _CLOUD_POLICIES) for n in _BY_POLICY},
-        "*": (NOT_YET, "F2.freeze"),
+        "*": (NOT_YET, "F2.freeze.rest"),
     },
     "slow link": {
         **_NONE,
@@ -2661,7 +2674,7 @@ WAYS = {
                                     " so a source's writes are stopped by"
                                     " its operator (freeze: operator) and"
                                     " proved by migkit"),
-        "*": (NOT_YET, "F2.freeze"),
+        "*": (NOT_YET, "F2.freeze.rest"),
     },
 }
 # the copier reads a table whose only index is not unique as one with no

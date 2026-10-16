@@ -312,15 +312,18 @@ class BigtableEngine(NeutralCopier, Engine):
     def neutral_rows_by_key(self, side, db, table, columns, key, keys,
                             where=None):
         from google.cloud.bigtable.row_set import RowSet
+
+        from .. import decide
         if not key or not keys:
             return {}
         if list(key) != self.neutral_key(side, db, table):
             raise SystemExit(f"{table} is read by its row key alone")
         found = []
         keys = list(keys)
-        for i in range(0, len(keys), 1000):
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(keys), at_once):
             rs = RowSet()
-            for k in keys[i:i + 1000]:
+            for k in keys[i:i + at_once]:
                 rs.add_row_key(self._row_key(side, db, table, list(k)))
             found += list(self._rows(side, db, table, columns, rs))
         return self._by_key_map(columns, key, found)

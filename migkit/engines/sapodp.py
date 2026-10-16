@@ -532,6 +532,7 @@ class SapOdpEngine(Engine):
         def run(choice):
             out = []
             if choice.rung.name == "by key":
+                # page: SAP Gateway Web Dispatcher URL length limit is 8 KB (KEYS_A_FILTER=40)
                 for i in range(0, len(keys), KEYS_A_FILTER):
                     part = keys[i:i + KEYS_A_FILTER]
                     cond = " or ".join(

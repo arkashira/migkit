@@ -1911,6 +1911,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         check says which partitions were compared by count only."""
         names = list(parts)
         out = {}
+        # page: Oracle statement union limit for partition counts (PARTITIONS_PER_READ=100)
         for at in range(0, len(names), self.PARTITIONS_PER_READ):
             reads = []
             for i, name in enumerate(names[at:at + self.PARTITIONS_PER_READ],

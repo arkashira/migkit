@@ -692,9 +692,11 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         key = self.neutral_key(side, db, table)
         database = self._database(side, db)
         out = []
-        for i in range(0, len(keys), KEYS):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(keys), at_once):
             part = [[self._to_spanner(declared.get(k), v)
-                     for k, v in zip(key, one)] for one in keys[i:i + KEYS]]
+                     for k, v in zip(key, one)] for one in keys[i:i + at_once]]
             snap = (database.snapshot(read_timestamp=at_ns(at))
                     if at is not None else database.snapshot())
             with snap as s:
@@ -726,9 +728,11 @@ class SpannerEngine(DigestsInSQL, _Folded, NeutralCopier, Engine):
         names = [n for n, _ in columns]
         found = []
         values = list(values)
-        for i in range(0, len(values), 200):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(match))
+        for i in range(0, len(values), at_once):
             params, types, ors = {}, {}, []
-            for one in values[i:i + 200]:
+            for one in values[i:i + at_once]:
                 ands = []
                 for k, v in zip(match, one):
                     at = len(params) + 1

@@ -968,9 +968,11 @@ def _fixed(expr, constants):
     for a page that is a variable, an expression of variables and a
     decision's answer."""
     import ast
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.USub):
+        return None
     for n in ast.walk(expr):
         if isinstance(n, ast.Constant) and isinstance(n.value, int) \
-                and not isinstance(n.value, bool):
+                and not isinstance(n.value, bool) and n.value > 0:
             return str(n.value)
         name = n.id if isinstance(n, ast.Name) else (
             n.attr if isinstance(n, ast.Attribute) else None)
@@ -1104,13 +1106,33 @@ def _reasoned(lines, node):
 
 def _sends(body):
     """Whether a loop's body hands a server what it cuts: it names a call
-    that makes a statement or a write (`BATCHING`)."""
+    that makes a statement or a write (`BATCHING`), or hands a slice by the
+    step to a call of the module's own (`_name`)."""
     import ast
-    for n in (x for b in body for x in ast.walk(b)):
-        name = getattr(n, "attr", None) or (
-            n.id if isinstance(n, ast.Name) else "")
-        if any(str(name).startswith(b) for b in BATCHING):
-            return True
+    has_slice = any(isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Slice)
+                    for b in body for n in ast.walk(b))
+    for b in body:
+        for n in ast.walk(b):
+            name = getattr(n, "attr", None) or (
+                n.id if isinstance(n, ast.Name) else "")
+            if any(str(name).startswith(b) for b in BATCHING):
+                return True
+            if isinstance(n, ast.Call):
+                func = n.func
+                names = []
+                if isinstance(func, ast.Name):
+                    names.append(func.id)
+                elif isinstance(func, ast.Attribute):
+                    names.append(func.attr)
+                elif isinstance(func, ast.IfExp):
+                    for arm in (func.body, func.orelse):
+                        if isinstance(arm, ast.Name):
+                            names.append(arm.id)
+                        elif isinstance(arm, ast.Attribute):
+                            names.append(arm.attr)
+                for fn_name in names:
+                    if fn_name.startswith("_") and not fn_name.startswith("__") and has_slice:
+                        return True
     return False
 
 
@@ -1229,6 +1251,8 @@ def test_the_batch_guard_sees_a_fixed_list_write_and_cursor():
            "            cur.execute('select', keys[i:i + n])\n"
            "        for i in range(0, len(text), 2):\n"
            "            out.append(text[i:i + 2])\n"
+           "        for i in range(0, len(keys), 50):\n"
+           "            x._send(keys[i:i + 50])\n"
            "        # page: the protocol takes 25 items a call\n"
            "        for i in range(0, len(keys), 25):\n"
            "            x._send(keys[i:i + 25])\n"
@@ -1242,4 +1266,5 @@ def test_the_batch_guard_sees_a_fixed_list_write_and_cursor():
                    (15, "fetchmany size=1000"),
                    (16, "arraysize=2000"),
                    (18, "a chunk loop step=500"),
-                   (27, "a chunk loop step=BATCH")]
+                   (24, "a chunk loop step=50"),
+                   (29, "a chunk loop step=BATCH")]

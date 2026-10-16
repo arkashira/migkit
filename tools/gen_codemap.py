@@ -561,11 +561,11 @@ _BY_NAME = {
                  " failpoint tunnel locks",
     "conversion": "canon rowtext render transforms nanotime intervals geo"
                   " vectors bsontype charsets commercial zones copybook"
-                  " pieces ddl loadtext schemaformats described tally",
+                  " pieces ddl schema loadtext schemaformats described tally",
     "reporting": "verdict report wording diagnostics export"
                  " troubleshooting telemetry traces notify servicecheck",
     "decision": "decide costmodel jointplan factbook guarantees scanplan"
-                " tuning capabilities planner tableway repairways userways"
+                " tuning tune capabilities planner tableway repairways userways"
                 " scenarios legs sizing changedepth lacks sourcechange"
                 " bulkways ready cloud_readiness dba handwork rehearsal"
                 " faults model"
@@ -577,12 +577,12 @@ _BY_NAME = {
                     " assist mirror redisshake dsbulk ddbexport"
                     " fromsnapshot kafkaclient registry avrostream"
                     " seedtools carriers ship backupseed blockseed",
-    "workflows": "movers cutover tailtables topicstates tailctl verifiers"
+    "workflows": "movers cutover flight_simulator tailtables topicstates tailctl verifiers"
                  " autonomous upgrade indexes appversions drift crossmove"
                  " physical ha jobs users split consolidate reshard subset"
                  " archive editions tableengine twoway barriers marks"
                  " drainmark applyway replicasum rules leaves unchanged"
-                 " streamout changetopic fleet second_reader",
+                 " streamout changetopic fleet second_reader proxy",
     "cli": "cli guide ui estate",
 }
 #: a subpackage, whole
@@ -912,7 +912,7 @@ def inventory():
             inn = sorted(_short(i) for i in importers.get(mod, ()))
             reach = {}
             for t, _l, _z in graph.get(mod, ()):
-                q = package_of(by_mod[t])
+                q = package_of(by_mod[t]) or "unassigned"
                 reach[q] = reach.get(q, 0) + 1
             out = ", ".join(f"{q} {c}" for q, c in sorted(reach.items())
                             ) or "-"

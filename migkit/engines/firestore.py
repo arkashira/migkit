@@ -1264,6 +1264,7 @@ class DatastoreEngine(_Documents):
     def _get(self, side, db, table, idents):
         client = self._client(side, db)
         idents = list(idents)
+        # page: Google Cloud Datastore lookup API limit is 1000 keys per call
         for i in range(0, len(idents), 1000):
             for e in client.get_multi([self._key(side, db, x)
                                        for x in idents[i:i + 1000]]):
@@ -1314,6 +1315,7 @@ class DatastoreEngine(_Documents):
     def _remove(self, side, db, table, idents):
         client = self._client(side, db)
         idents = list(idents)
+        # page: Google Cloud Datastore commit API limit is 500 mutations per call
         for i in range(0, len(idents), PUT):
             client.delete_multi([self._key(side, db, x)
                                  for x in idents[i:i + PUT]])

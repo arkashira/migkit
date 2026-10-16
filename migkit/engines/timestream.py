@@ -349,6 +349,7 @@ class TimestreamEngine(NeutralCopier, Engine):
         parts = self._parts(side, db, table, columns)
         records = [self._record(parts, table, names, r) for r in rows]
         client = self._client(side, "write")
+        # page: Amazon Timestream WriteRecords API limit is 100 records per call
         for i in range(0, len(records), RECORDS):
             try:
                 client.write_records(DatabaseName=self._d(side, db),

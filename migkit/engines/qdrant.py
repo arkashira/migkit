@@ -191,9 +191,11 @@ class QdrantEngine(NeutralCopier, Engine):
         ids = [point_id(k[0] if isinstance(k, (list, tuple)) else k)
                for k in keys]
         found = []
-        for i in range(0, len(ids), BATCH):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(ids), at_once):
             got = self._call(side, "POST", f"/collections/{table}/points", {
-                "ids": ids[i:i + BATCH], "with_payload": True,
+                "ids": ids[i:i + at_once], "with_payload": True,
                 "with_vector": True}) or []
             found += [[dict(zip(at, self._row(p))).get(n) for n in names]
                       for p in got]
@@ -250,12 +252,14 @@ class QdrantEngine(NeutralCopier, Engine):
     # ---- writing --------------------------------------------------------------
 
     def _write(self, table, rows):
-        for i in range(0, len(rows), BATCH):
+        from .. import decide
+        at_once = self.batch_size(decide.WRITE, len(COLUMNS), rows=rows)
+        for i in range(0, len(rows), at_once):
             self._call("dst", "PUT", f"/collections/{table}/points?wait=true",
                        {"points": [{"id": point_id(r[0]),
                                     "vector": json.loads(r[1]),
                                     "payload": json.loads(r[2] or "{}")}
-                                   for r in rows[i:i + BATCH]]})
+                                   for r in rows[i:i + at_once]]})
 
     def neutral_write(self, side, db, table, columns, rows):
         self._target_only(side, "write rows")
@@ -277,10 +281,12 @@ class QdrantEngine(NeutralCopier, Engine):
 
     def _apply_deletes(self, side, db, table, keys):
         ids = [point_id(k["id"]) for k in keys]
-        for i in range(0, len(ids), BATCH):
+        from .. import decide
+        at_once = self.batch_size(decide.WRITE, 1)
+        for i in range(0, len(ids), at_once):
             self._call("dst", "POST",
                        f"/collections/{table}/points/delete?wait=true",
-                       {"points": ids[i:i + BATCH]})
+                       {"points": ids[i:i + at_once]})
 
     def _apply_delete(self, side, db, table, key):
         self._apply_deletes(side, db, table, [key])

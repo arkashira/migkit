@@ -323,7 +323,7 @@ def fitted(hop, engine, via):
     ladder = _ladder()
     at = [r.name for r in ladder].index(via)
     got = climb(hop.name, (dataclasses.replace(ladder[at], needs=_FITS[via]),)
-                + ladder[at + 1:], facts)
+                + ladder[at + 1:], facts, enforce_copier=False)
     if got.path == via:
         return via, None
     return got.path, next(why for r, why in got.passed if r.name == via)

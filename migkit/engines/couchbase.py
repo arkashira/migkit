@@ -351,11 +351,13 @@ class CouchbaseEngine(NeutralCopier, Engine):
             values = dict(zip(key, k))
             ids[values[KEY] if key == [KEY] else
                 self._doc_id(key, classes, values)] = k
+        from .. import decide
         found = []
         coll = self._collection(side, db, table)
         items = list(ids)
-        for i in range(0, len(items), WRITE_BATCH):
-            got = coll.get_multi(items[i:i + WRITE_BATCH],
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(items), at_once):
+            got = coll.get_multi(items[i:i + at_once],
                                  return_exceptions=True)
             for doc_id, res in got.results.items():
                 found.append(self._row(names, classes, doc_id,

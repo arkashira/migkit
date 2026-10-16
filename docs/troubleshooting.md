@@ -641,7 +641,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * cutover: budget and start_below are seconds
 
-* cutover: pooler is {kind: pgbouncer or pgcat, host, port, user, password, databases}
+* cutover: pooler is {kind: pgbouncer, pgcat, proxysql or envoy, host, port, user, password, databases}
 
 * cutover: keys <...> - exact, or apart:<a whole number above 0>
 

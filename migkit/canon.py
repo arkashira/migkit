@@ -79,6 +79,19 @@ CLASSES = ("integer", "decimal", "float", "boolean", "text", "bytes",
            "xml", "uuid", "inet", "json on one engine", "interval",
            "vector", "geometry", "bson", "variant", "timestamp with offset")
 
+NEUTRAL_TO_CANON = {
+    "int": "integer", "bigint": "integer", "smallint": "integer",
+    "tinyint": "integer", "mediumint": "integer", "integer": "integer",
+    "int2": "integer", "int4": "integer", "int8": "integer", "int64": "integer",
+    "varchar": "text", "char": "text", "string": "text", "text": "text",
+    "double": "float", "real": "float", "float": "float",
+    "float4": "float", "float8": "float", "float64": "float",
+    "numeric": "decimal", "decimal": "decimal",
+    "bool": "boolean", "boolean": "boolean",
+    "bytea": "bytes", "blob": "bytes", "bytes": "bytes",
+    "json": "json", "jsonb": "json",
+}
+
 #: A duration as months, days and nanoseconds kept apart (`intervals`):
 #: PostgreSQL's and DuckDB's `interval`, Cassandra's `duration`, Oracle's
 #: two. MySQL, SQL Server and MongoDB have no such type.
@@ -1393,9 +1406,13 @@ def fold_class(engine, declared, name=None):
     else the class `engine` maps it to. A declared type with neither is
     refused by name: folding it as some other class would hash a
     rendering nobody checked the other side agrees with."""
-    if declared in CLASSES or folded_here(declared) or engine is None:
+    if declared in CLASSES or folded_here(declared):
         return declared
+    if engine is None:
+        return NEUTRAL_TO_CANON.get(declared, declared)
     got = type_class(engine, declared)
+    if got is None:
+        got = NEUTRAL_TO_CANON.get(declared)
     if got is None:
         raise ValueError(f"{engine} column {name or ''} of type"
                          f" {declared!r} has no class to compare it by")
@@ -1537,6 +1554,7 @@ def render_value(cls, value):
     """
     if value is None:
         return None
+    cls = NEUTRAL_TO_CANON.get(cls, cls)
     if cls == "integer":
         if isinstance(value, (bytes, bytearray, memoryview)):
             # a MySQL BIT, as the driver hands it back
@@ -2904,6 +2922,7 @@ def from_text(cls, text):
     """
     if text is None:
         return None
+    cls = NEUTRAL_TO_CANON.get(cls, cls)
     if isinstance(cls, str) and cls.startswith(bsontype_prefixes()):
         # `long` and 5: MongoDB's value by its type, or the other side's
         # column's value as it holds that type

@@ -1678,6 +1678,7 @@ class KafkaEngine(Engine):
         try:
             admin = self._admin(side)
             try:
+                # page: Kafka AdminClient describe_configs limit is 20 topics per request
                 for i in range(0, len(topics), 20):
                     got = self._described(admin.describe_configs(
                         [ConfigResource(ConfigResourceType.TOPIC, t)

@@ -385,6 +385,7 @@ class DynamoDBEngine(NeutralCopier, Engine):
         names = [n for n, _ in columns]
         found = []
         keys = list(keys)
+        # page: DynamoDB BatchGetItem service limit is 100 keys per call
         for i in range(0, len(keys), 100):
             want = {name: {"Keys": [
                 {k: self._to_attr(declared.get(k, ""), v)

@@ -698,9 +698,11 @@ class OpenSearchEngine(NeutralCopier, Engine):
             for kk in keys]
         found = []
         index = self._index(side, db, table)
-        for i in range(0, len(ids), 500):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(ids), at_once):
             got = self._call(side, "POST", f"/{index}/_mget",
-                             {"ids": ids[i:i + 500]})
+                             {"ids": ids[i:i + at_once]})
             found += [self._row(declared, names, d)
                       for d in got.get("docs", []) if d.get("found")]
         return self._by_key_map(columns, key, found)
@@ -2094,9 +2096,11 @@ class OpenSearchEngine(NeutralCopier, Engine):
         between two OpenSearch clusters a document is compared as it is
         held, not through a rendering."""
         index, out, ids = self._index(side, db, table), {}, sorted(ids)
-        for i in range(0, len(ids), 500):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, 1)
+        for i in range(0, len(ids), at_once):
             got = self._call(side, "POST", f"/{index}/_mget",
-                             {"ids": ids[i:i + 500]})
+                             {"ids": ids[i:i + at_once]})
             out.update({d["_id"]: json.dumps(d.get("_source"),
                                              sort_keys=True)
                         for d in got.get("docs", []) if d.get("found")})
@@ -2457,24 +2461,26 @@ class OpenSearchEngine(NeutralCopier, Engine):
         there = self._ids("dst", db, table)
         held = self._ids("src", db, table)
         gone = sorted(there - held) if deletes else []
-        dst = self._index("dst", db, table)
         from .. import freeze
-        for at in range(0, len(gone), 500):
+        from .. import decide
+        at_once = self.batch_size(decide.WRITE, 1)
+        for at in range(0, len(gone), at_once):
             got = self._call("dst", "POST", f"/{dst}/_delete_by_query"
                                             "?refresh=true&conflicts=proceed",
                              {"query": {"ids": {"values":
-                                                gone[at:at + 500]}}})
+                                                gone[at:at + at_once]}}})
             # a delete each, numbered: migkit's own
             freeze.counted(self.hop, {dst: int((got or {}).get("deleted",
                                                                0))})
         lacking = sorted(held - there) if inserts else []
         src = self._index("src", db, table)
         refused = 0
-        for at in range(0, len(lacking), 500):
+        at_read = self.batch_size(decide.BY_KEY, 1)
+        for at in range(0, len(lacking), at_read):
             got = self._call("src", "POST", f"/{src}/_search",
-                             {"size": 500, "seq_no_primary_term": True,
+                             {"size": at_read, "seq_no_primary_term": True,
                               "query": {"ids": {
-                                  "values": lacking[at:at + 500]}}})
+                                  "values": lacking[at:at + at_read]}}})
             refused += self._bulk("dst", (
                 self._versioned(h, dst)
                 for h in (got.get("hits") or {}).get("hits", [])))[1]
@@ -2713,9 +2719,11 @@ class OpenSearchEngine(NeutralCopier, Engine):
             return []
         have = set()
         ids = [h["_id"] for h in hits]
-        for at in range(0, len(ids), 500):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, 1)
+        for at in range(0, len(ids), at_once):
             got = self._call("dst", "POST", f"/{dst}/_mget",
-                             {"ids": ids[at:at + 500]})
+                             {"ids": ids[at:at + at_once]})
             have.update(d["_id"] for d in got.get("docs", [])
                         if d.get("found"))
         kind = {i: "update" if i in have else "insert" for i in ids}

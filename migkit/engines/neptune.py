@@ -474,8 +474,10 @@ class NeptuneEngine(NeutralCopier, Engine):
         at = [n for n, _ in COLUMNS[table]]
         found = []
         keys = list(keys)
-        for i in range(0, len(keys), 1000):
-            for row in self._rows(side, db, table, keys[i:i + 1000]):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
+        for i in range(0, len(keys), at_once):
+            for row in self._rows(side, db, table, keys[i:i + at_once]):
                 values = dict(zip(at, row))
                 found.append([values.get(n) for n in names])
         return self._by_key_map(columns, key, found)
@@ -553,17 +555,21 @@ class NeptuneEngine(NeutralCopier, Engine):
         t.iterate()
 
     def _write(self, side, db, table, rows):
+        from .. import decide
         if table == "quads":
-            for i in range(0, len(rows), 1000):
+            at_once = self.batch_size(decide.WRITE, len(KEYS["quads"]), rows=rows)
+            for i in range(0, len(rows), at_once):
                 self._sparql(side, "insert data { " + self._quad_data(
-                    rows[i:i + 1000]) + " }", update=True)
+                    rows[i:i + at_once]) + " }", update=True)
             return
         if self._api(side) != "gremlin":
             raise SystemExit("a property graph is written through Gremlin:"
                              " give the target graph_api: gremlin")
-        for i in range(0, len(rows), BATCH):
+        at = [n for n, _ in COLUMNS[table]]
+        at_once = self.batch_size(decide.WRITE, len(at), rows=rows)
+        for i in range(0, len(rows), at_once):
             (self._write_vertices if table == "vertices"
-             else self._write_edges)(side, rows[i:i + BATCH])
+             else self._write_edges)(side, rows[i:i + at_once])
 
     def neutral_write(self, side, db, table, columns, rows):
         self._target_only(side, "write rows")
@@ -588,10 +594,12 @@ class NeptuneEngine(NeutralCopier, Engine):
         if not keys:
             return
         if table == "quads":
+            from .. import decide
+            at_once = self.batch_size(decide.WRITE, len(KEYS["quads"]))
             rows = [[k[c] for c in KEYS["quads"]] for k in keys]
-            for i in range(0, len(rows), 1000):
+            for i in range(0, len(rows), at_once):
                 self._sparql(side, "delete data { " + self._quad_data(
-                    rows[i:i + 1000]) + " }", update=True)
+                    rows[i:i + at_once]) + " }", update=True)
             return
         g = self._g(side)
         ids = [k["id"] for k in keys]

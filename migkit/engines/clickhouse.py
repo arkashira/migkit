@@ -532,6 +532,7 @@ class ClickHouseEngine(NeutralCopier, Engine):
             rows = self._wall_clock(client, rows)
             at = [names.index(k) for k in key]
             q = self._qualified(side, db, table)
+            # page: ClickHouse HTTP query parameter limit is 1000 keys per statement
             for start in range(0, len(rows) if key else 0,
                                self.KEYS_A_STATEMENT):
                 params, tuples = {}, []

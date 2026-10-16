@@ -649,6 +649,7 @@ class MySQLEngine(Engine):
         from decimal import Decimal
         out = set()
         numbers = list(numbers)
+        # page: MySQL JSON cast query size limit for number formatting (500 numbers a statement)
         for i in range(0, len(numbers), 500):
             part = numbers[i:i + 500]
             got = self._q(side, "select cast(cast(%s as json) as char)",
@@ -866,10 +867,12 @@ class MySQLEngine(Engine):
         if not match or not values:
             return []
         values, out = list(values), []
-        for i in range(0, len(values), 1000):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(match))
+        for i in range(0, len(values), at_once):
             sql, args = self._by_key_query(
                 f"`{self._d(side, db)}`.`{table}`", columns, list(match),
-                values[i:i + 1000], lambda n: f"`{n}`", "%s", None, "mysql")
+                values[i:i + at_once], lambda n: f"`{n}`", "%s", None, "mysql")
             out += [list(r) for r in self._q(side, sql, args)]
         return out
 
@@ -5038,8 +5041,10 @@ class MySQLEngine(Engine):
         def fetch(side):
             out = {}
             klist = sorted(keys)
-            for i in range(0, len(klist), 500):
-                chunk = klist[i:i + 500]
+            from .. import decide
+            at_once = self.batch_size(decide.BY_KEY, len(pks))
+            for i in range(0, len(klist), at_once):
+                chunk = klist[i:i + at_once]
                 if len(pks) == 1:
                     where = (f"cast(`{pks[0]}` as char) in ("
                              + ", ".join(["%s"] * len(chunk)) + ")")
@@ -6750,6 +6755,7 @@ class MySQLEngine(Engine):
         def maxes(side):
             out = {}
             sdb = self._d(side, db)
+            # page: MySQL statement union limit for auto-increment maxes (200 tables a query)
             for i in range(0, len(both), 200):
                 q = " union all ".join(
                     f"select '{t}', coalesce(max(`{c}`), 0)"
@@ -6986,6 +6992,7 @@ class MySQLEngine(Engine):
         t = there or t
         names = list(parts)
         out = {}
+        # page: MySQL statement union limit for partition reads (PARTITIONS_PER_READ=200)
         for at in range(0, len(names), self.PARTITIONS_PER_READ):
             reads = []
             for i, name in enumerate(names[at:at + self.PARTITIONS_PER_READ],

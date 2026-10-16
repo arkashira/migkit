@@ -193,6 +193,7 @@ off for a hop where the time matters more.
 | `sync` | Make target equal to source, or run a whole migration flow. |
 | `migrate` | Two addresses and a goal in; the whole migration run to a verified outcome: the assessment, the copy, the catch-up, the proof and the cutover's readiness, every way chosen by migkit, a database that fails held apart while the others go on, and asked only what migkit cannot find out (`autonomous.QUESTIONS`). |
 | `move` | Move data for this hop. |
+| `cutover` | The cutover: live switch with --go, or rehearse with --dry-run. |
 | `watch` | Watch a running migration load: row counts, rate, ETA, replication state. |
 | `report` | Render the HTML report from the last check run and export the hop's evidence (what moved, every verdict with both sides' counts and digests and how to take them again, decisions, approvals, repairs, outages - HTML, Markdown, JSON, CSV), or --serve the web view: every hop's outcomes, progress, approvals, offers and evidence for the people each hop names, the REST API, and a Prometheus /metrics endpoint (`migkit.web`). |
 | `history` | Audit trail: saved rollback states and every write migkit made, read from the local changelog and state journals. |

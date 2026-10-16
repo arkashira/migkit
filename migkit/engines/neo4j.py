@@ -291,9 +291,11 @@ class Neo4jEngine(NeutralCopier, Engine):
         names = [n for n, _ in columns]
         at = [n for n, _ in COLUMNS[table]]
         keys = [k[0] if isinstance(k, (list, tuple)) else k for k in keys]
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(key))
         found = []
-        for i in range(0, len(keys), BATCH):
-            for r in self._by_ids(side, db, table, keys[i:i + BATCH]):
+        for i in range(0, len(keys), at_once):
+            for r in self._by_ids(side, db, table, keys[i:i + at_once]):
                 found.append([dict(zip(at, r)).get(n) for n in names])
         return self._by_key_map(columns, key, found)
 
@@ -372,9 +374,12 @@ class Neo4jEngine(NeutralCopier, Engine):
                     time.sleep(2)
 
     def _write(self, side, db, table, rows):
-        for i in range(0, len(rows), BATCH):
+        from .. import decide
+        at = [n for n, _ in COLUMNS[table]]
+        at_once = self.batch_size(decide.WRITE, len(at), rows=rows)
+        for i in range(0, len(rows), at_once):
             (self._write_nodes if table == "nodes"
-             else self._write_relationships)(side, db, rows[i:i + BATCH])
+             else self._write_relationships)(side, db, rows[i:i + at_once])
 
     def neutral_write(self, side, db, table, columns, rows):
         self._target_only(side, "write rows")

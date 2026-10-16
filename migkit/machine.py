@@ -625,6 +625,7 @@ def refresh(region="us-east-1", session=None, names=None):
     names = list(names or (catalog()["types"].get("aws") or {}))
     ec2 = session.client("ec2", region_name=region)
     got = {}
+    # page: AWS EC2 DescribeInstanceTypes API limit is 100 instance types per call
     for i in range(0, len(names), 100):
         chunk = names[i:i + 100]
         try:

@@ -452,8 +452,10 @@ def _method(tables):
            "again": ("`migkit check` on the hop takes every number again,"
                      " with a new salt")}
     if digests.NEUTRAL in used:
-        classes = sorted({c for t in tables for side in ("src", "dst")
-                          for _, c in (t.get(side) or {}).get("columns", [])})
+        classes = sorted({str(c) for t in tables for side in ("src", "dst")
+                          for col in (t.get(side) or {}).get("columns", [])
+                          for c in ([col[1]] if isinstance(col, (list, tuple)) and len(col) > 1 else [col])
+                          if c is not None})
         rendering = {}
         for cls in classes:
             per = {}
@@ -521,8 +523,16 @@ def _positions(root):
 def _decisions(hop, session):
     from .session import DECISIONS
     seen = {}
+
+    def _keyable(v):
+        if isinstance(v, list):
+            return tuple(_keyable(x) for x in v)
+        if isinstance(v, dict):
+            return tuple(sorted((k, _keyable(val)) for k, val in v.items()))
+        return v
+
     for d in _history(hop, session, DECISIONS):
-        key = (d.get("work"), d.get("way"), d.get("reason"))
+        key = (_keyable(d.get("work")), _keyable(d.get("way")), _keyable(d.get("reason")))
         got = seen.setdefault(key, {
             "work": words(d.get("work")), "way": words(d.get("way")),
             "reason": words(d.get("reason")),

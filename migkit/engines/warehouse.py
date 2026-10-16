@@ -843,8 +843,10 @@ class _Warehouse(warehouse_sql.DigestsInSQL, DbapiRows, Engine):
         held = {}
         target = self._qualified(side, db, table)
         quoted, cv = [self._q(n) for n in names], self._q(col)
-        for i in range(0, len(keyed), 500):
-            part = keyed[i:i + 500]
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(names))
+        for i in range(0, len(keyed), at_once):
+            part = keyed[i:i + at_once]
             where = " or ".join(
                 "(" + " and ".join(f"{q} = {MARK}" for q in quoted) + ")"
                 for _ in part)

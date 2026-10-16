@@ -2638,11 +2638,13 @@ class MongoEngine(Engine):
         src = self._raw(self._client("src")[db][table])
         dst = self._raw(self._client("dst")[self._d("dst", db)]
                         [self._there(db, table)])
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, 1)
 
         def read(coll):
             out = {}
-            for i in range(0, len(ids), 1000):
-                for doc in coll.find({"_id": {"$in": ids[i:i + 1000]}}):
+            for i in range(0, len(ids), at_once):
+                for doc in coll.find({"_id": {"$in": ids[i:i + at_once]}}):
                     out[dumps(self._plain_id(doc))] = doc.raw
             return out
         a, b = read(src), read(dst)

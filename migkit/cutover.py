@@ -110,7 +110,7 @@ DEFAULTS = {"budget": 30, "start_below": 1, "freeze": "auto",
 RESTORE_SIDES = ("source", "target")
 
 FREEZES = ("auto", "server", "database", "operator")
-POOLERS = ("pgbouncer", "pgcat")
+POOLERS = ("pgbouncer", "pgcat", "proxysql", "envoy")
 NO_RETURNS = ("later", "at_flip")
 #: the approval step the point of no return waits for
 NO_RETURN_STEP = "point-of-no-return"
@@ -160,7 +160,7 @@ def settings(hop):
     if pooler is not None:
         if not isinstance(pooler, dict) or \
                 str(pooler.get("kind", "")).lower() not in POOLERS:
-            raise SystemExit("cutover: pooler is {kind: pgbouncer or pgcat,"
+            raise SystemExit("cutover: pooler is {kind: pgbouncer, pgcat, proxysql or envoy,"
                              " host, port, user, password, databases}")
     return got
 
@@ -424,6 +424,16 @@ def _pooler(conf, command, dbs, timeout):
     would hold the cutover past its budget. A PAUSE that did not return is
     left to the undo's RESUME on a console of its own, never issued beside
     it on the same one."""
+    kind = str((conf.get("pooler") or {}).get("kind", "")).lower()
+    if kind in ("proxysql", "envoy", "envoy_xds", "xds"):
+        from . import proxy
+        coord = proxy.get_proxy_coordinator(conf["pooler"])
+        if command == "PAUSE":
+            return coord.pause(dbs, timeout)
+        elif command == "RESUME":
+            return coord.resume(dbs, timeout)
+        elif command == "RECONNECT":
+            return coord.reconnect(dbs, timeout)
     conn = _pooler_conn(conf)
     try:
         for name in _pooler_dbs(conf, dbs):
@@ -457,6 +467,12 @@ def _pooler(conf, command, dbs, timeout):
 
 def pooler_ready(conf):
     """"" where the pooler's console answers, or why not."""
+    kind = str((conf.get("pooler") or {}).get("kind", "")).lower()
+    if kind in ("proxysql", "envoy", "envoy_xds", "xds"):
+        from . import proxy
+        coord = proxy.get_proxy_coordinator(conf["pooler"])
+        ok, why = coord.ready()
+        return "" if ok else why
     try:
         conn = _pooler_conn(conf)
         conn.cursor().execute("show version")
@@ -1598,6 +1614,16 @@ def _phased(hop, eng, dbs, leg, conf, say, approvers, drain=None,
             if not ok:
                 raise _Undo(f"the flip command failed: {why}")
         if conf.get("pooler"):
+            from . import proxy
+            target = getattr(hop, "target", None)
+            t_host = getattr(target, "host", None)
+            t_port = getattr(target, "port", None)
+            if t_host:
+                try:
+                    coord = proxy.get_proxy_coordinator(conf["pooler"])
+                    coord.repoint(t_host, int(t_port or 5432), dbs, max(1.0, left()))
+                except Exception:
+                    pass
             for command in ("RECONNECT", "RESUME"):
                 ok, why = _pooler(conf, command, dbs, max(1.0, left()))
                 if not ok:
@@ -2558,3 +2584,9 @@ def said_by_doctor(hop):
                    f" return (`migkit move {hop.name} --mode cdc --drop"
                    " --go` again)")
     return out
+
+
+def flight_simulator(hop, eng=None, db="", leg=None, options=None, say=None):
+    from .flight_simulator import ShadowCutoverFlightSimulator
+    return ShadowCutoverFlightSimulator(hop, eng, db=db, leg=leg, options=options, say=say)
+

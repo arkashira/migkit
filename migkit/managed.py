@@ -1110,3 +1110,14 @@ def _fix(side_, family, name, value):
                 + ("" if not s.managed else f" ({s.console})"))
     stmts, lines = got
     return "; ".join(stmts + lines)
+
+
+def bulk_profile(eng, db, **kw):
+    from .tune import bulk_profile as _bp
+    return _bp(eng, db, **kw)
+
+
+def runtime_profile(eng, db, **kw):
+    from .tune import runtime_profile as _rp
+    return _rp(eng, db, **kw)
+

@@ -251,10 +251,15 @@ def replay(entries, lines):
         if "done" in e:
             have = st.setdefault("ranges_done", [])
             got = done.get(e["k"])
+
+            def _hashable(x):
+                return tuple(_hashable(i) for i in x) if isinstance(x, list) else x
+
             if got is None:
-                got = done[e["k"]] = set(have)
-            if e["done"] not in got:
-                got.add(e["done"])
+                got = done[e["k"]] = {_hashable(x) for x in have}
+            h_done = _hashable(e["done"])
+            if h_done not in got:
+                got.add(h_done)
                 have.append(e["done"])
             if e.get("last") is not None:
                 st["last"] = e["last"]

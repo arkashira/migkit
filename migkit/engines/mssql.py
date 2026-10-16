@@ -1083,9 +1083,11 @@ class MSSQLEngine(DbapiRows, Engine):
         row, _ = self._row_json(db, table)
         keys = sorted(keys)
         got = {"src": {}, "dst": {}}
-        for i in range(0, len(keys), 500):
+        from .. import decide
+        at_once = self.batch_size(decide.BY_KEY, len(pks))
+        for i in range(0, len(keys), at_once):
             part = ", ".join("'" + k.replace("'", "''") + "'"
-                             for k in keys[i:i + 500])
+                             for k in keys[i:i + at_once])
             q = (f"select {pkexpr}, convert(varchar(64), hashbytes("
                  f"'SHA2_256', {row}), 2)"
                  f" from {self._qualified('src', db, table)} t where"

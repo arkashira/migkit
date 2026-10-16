@@ -261,7 +261,8 @@ def test_every_shape_has_a_way_or_an_honest_gap_on_every_engine():
     from migkit.engines import NAMES
     assert set(cov) == set(NAMES)
     assert cov["postgres"]["keyless"] == "yes"
-    assert cov["generic"]["keyless"] == d.NOT_YET
+    assert cov["generic"]["keyless"] == "yes"
+    assert cov["netezza"]["keyless"] == d.NOT_YET
     assert cov["mongodb"]["keyless"] == d.NOT_APPLICABLE
 
 

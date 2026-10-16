@@ -6135,6 +6135,29 @@ def _cutover(hop, eng, db, go, engine):
     return got
 
 
+@main.command()
+@click.argument("hop_name")
+@click.option("--db", default="", help="one database of the hop")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="run shadow cutover flight simulator")
+@click.option("--go", is_flag=True, default=False,
+              help="execute live cutover")
+def cutover(hop_name, db, dry_run, go):
+    """The cutover: live switch with --go, or rehearse with --dry-run."""
+    hop = get_hop(hop_name)
+    _require_configured(hop)
+    eng = get_engine(hop)
+    from .engines import ALIASES
+    if dry_run or not go:
+        from .flight_simulator import ShadowCutoverFlightSimulator
+        sim = ShadowCutoverFlightSimulator(hop, eng, db=db, say=console.print)
+        cert = sim.run()
+        sim.display(cert)
+        return cert
+    return _cutover(hop, eng, db, go, ALIASES.get(hop.engine, hop.engine))
+
+
+
 def _stream_leg(hop, eng, db, dbs, engine):
     """What carries this hop's changes now, as the cutover drains it,
     tears it down and puts it back (`cutover.Leg`); `manual` is the

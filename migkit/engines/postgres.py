@@ -3876,8 +3876,8 @@ select json_build_object(
         elif token:
             # the caller applied everything up to this LSN, so the server may
             # stop keeping it
-            self._slot_rows(side, db, "select pg_replication_slot_advance("
-                                      "%s, %s)", (name, token))
+            self._slot_rows_waited(side, db, "select pg_replication_slot_advance("
+                                             "%s, %s)", (name, token), wait=5.0)
         # a two-way tail's own transactions are left out whole, or they go
         # back where they came from (`twoway`, `marks`)
         two_way = bool((self.hop.options or {}).get("two_way"))
@@ -11264,10 +11264,12 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             with conn.transaction(), conn.cursor() as cur:
                 tup = ", ".join(f"t.{_ident(k)}::text" for k in pks)
-                for i in range(0, len(keys), self.REPAIR_KEYS):
+                from .. import decide
+                at_once = self.batch_size(decide.BY_KEY, len(pks))
+                for i in range(0, len(keys), at_once):
                     values = ", ".join(
                         "(" + ", ".join(_literal(v) for v in k) + ")"
-                        for k in keys[i:i + self.REPAIR_KEYS])
+                        for k in keys[i:i + at_once])
                     with cur.copy(f"copy (select t.* from {qt} t where"
                                   f" ({tup}) in (values {values}))"
                                   " to stdout") as cp:
