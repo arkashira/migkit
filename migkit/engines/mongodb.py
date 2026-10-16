@@ -1138,10 +1138,14 @@ class MongoEngine(Engine):
                 counted(len(docs))
                 ck.save()
         else:
-            from .. import ranges
+            from .. import lease, ranges
             slots = ranges.active
             n = total if total is not None else src.count_documents(
                 rows or {})
+            # who copied the entry last, read before the plan names this
+            # process: a mover taken over from left ranges begun after the
+            # record this machine read of it
+            was = dict(st.get("copying") or {})
 
             def edges():
                 every = ranges.step(n, chunk, slots.workers)
@@ -1149,15 +1153,21 @@ class MongoEngine(Engine):
                     return []
                 return self._move_edges(src, rows, n, every, st, log, key)
             todo = ranges.plan_keyed(st, edges, ck.save, table=key)
-            seen = st.get("ranges_seen") or {}
+            seen = ranges.begun_ranges(st, was, lease.taken_from())
+            owed = len(seen - ranges.begun_ranges(st))
+            if owed:
+                log(f"{key}: taken over from {was.get('host')}; {owed:,}"
+                    " ranges it may have begun are emptied within the"
+                    " hop's filter before they are copied again")
 
             def one(rng):
                 lo, hi = (None if e is None else _loads_key(e) for e in rng)
                 bound = self._within(self._span(lo, hi, one_type), rows)
                 if ranges.ident(rng[0]) in seen:
-                    # begun before a stop: what it wrote then is taken out
-                    # and the range copied whole again - only what the
-                    # hop's row filter takes, as the reads are bounded
+                    # begun before a stop or by the mover taken over from:
+                    # what it wrote then is taken out and the range copied
+                    # whole again - only what the hop's row filter takes,
+                    # as the reads are bounded
                     dst.delete_many(bound)
                 ranges.started(st, rng[0], None, ck.save)
                 got, after = 0, lo
@@ -2536,8 +2546,9 @@ class MongoEngine(Engine):
         and last range. `_coverage_ok` then checks the plan actually accounts
         for every document before it is trusted.
         """
-        from .. import checkpoint as _cp
-        want = max(1, min(512, -(-docs // DRILL_RANGE_DOCS)))
+        from .. import checkpoint as _cp, ranges
+        # as many ranges as a copy of these documents is cut into
+        want = ranges.wanted(docs, DRILL_RANGE_DOCS, ranges.active.workers)
         if want < 2:
             return [(None, None, None)]
         try:

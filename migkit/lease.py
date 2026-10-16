@@ -196,6 +196,15 @@ def check_held():
         lease.check()
 
 
+def taken_from():
+    """The movers (`fleet.mover_of`) whose leases the ones this process
+    holds now were taken over from: whose work this process goes on with,
+    from a record that can trail what they wrote."""
+    from .fleet import mover_of
+    with _HOLDING_LOCK:
+        held = list(_HOLDING)
+    return {m for m in (mover_of(lease.took_over) for lease in held) if m}
+
 def _pid_alive(pid):
     """Whether a process of this machine's is there: True, False, or None
     where there is no process number to ask. One that is there under

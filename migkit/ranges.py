@@ -735,6 +735,31 @@ def started(st, after, mark, save):
         _saved(save, owner, gen)
 
 
+def begun_ranges(st, was=None, gone=()):
+    """The ranges of the entry `st` (their `ident`s) whose writes may be
+    on the target, so a copy empties each before it copies it again: the
+    ones `started` saw begin, and - where `was` (the entry's `copying` as
+    it was read, before this run's plan named this process) is a mover of
+    another machine or one this process took the hop over from (`gone`,
+    `lease.taken_from`) - every range not done. A taker reads the entry
+    from the machines' store, which trails the departed mover by its last
+    push: a range begun after it holds documents on the target and is not
+    in `ranges_seen`. A begin the checkpoint's journal gave back
+    (`checkpoint.read_move`, which names it by its text) is the range's
+    `ident` here."""
+    import socket
+    have = set((st.get("ranges_seen") or {}).keys())
+    seen = have | {ident(r[0]) for r in st.get("ranges") or ()
+                   if str(r[0]) in have}
+    if not isinstance(was, dict) or not was.get("host"):
+        return seen
+    who = f"{was['host']}:{was.get('pid')}"
+    if was["host"] == socket.gethostname() and who not in set(gone or ()):
+        return seen
+    done = {_h(x) for x in st.get("ranges_done") or ()}
+    return seen | {ident(r[0]) for r in st.get("ranges") or ()
+                   if _h(r[0]) not in done}
+
 def already_read(st, values, covers, ahead=False, place=None):
     """Whether a change to the rows keyed `values` is in what the table
     copier read of the table whose checkpoint entry is `st`, or will be -
@@ -1139,6 +1164,13 @@ def step(rows, chunk, workers):
     share = -(-rows // max(workers * 2, 1)) if rows else chunk
     return max(min(chunk, max(share, LEAST)), 1)
 
+
+def wanted(rows, chunk, workers):
+    """How many ranges `rows` rows are cut into at `step(rows, chunk,
+    workers)` rows each: the count a copy cuts and a check that reads the
+    same rows by ranges asks, so the two cut alike."""
+    rows = max(int(rows or 0), 0)
+    return max(1, -(-rows // step(rows, chunk, workers)))
 
 def bounds_sql(quote, table, key, every, where=None):
     """The statement answering the key at every `every`-th row in key
