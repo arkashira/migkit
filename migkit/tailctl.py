@@ -752,6 +752,10 @@ def quiet_line(db, state, facts, applied, since):
     when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since))
     at = (f"attached at {facts.get('at')}" if facts.get("at")
           else "attached")
+    if facts.get("attached") is None and facts.get("attached_unread"):
+        # a source that keeps no reader to list: attached is not claimed
+        at = (f"at {facts.get('at') or 'unknown'}"
+              f" ({facts['attached_unread']})")
     head = (f"{db}: {at}, the source at {facts.get('server', 'unread')};"
             f" {applied:,} changes on your tables applied, the last"
             f" since {when}")

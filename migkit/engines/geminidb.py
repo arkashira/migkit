@@ -35,6 +35,7 @@ UNPROVED_ON = "built; not run on a real GeminiDB instance"
 #: the ways built here and run against no such server: the whole
 #: list, the matrix reads it from this source (`capabilities`)
 UNPROVED_ITEMS = (
+    "geminidb-mongo:tail.quiet "
     "geminidb-cassandra:operations.fencing geminidb-redis:operations.fencing "
     "geminidb-mongo:operations.fencing "
     "geminidb-cassandra:assess.brands geminidb-cassandra:assess.capacity "

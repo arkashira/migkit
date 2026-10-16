@@ -43,6 +43,30 @@ from .dbapi import MARK, DbapiRows, FoldsToCapitals
 from .oracle_catalog import OracleCatalog
 from .oracle_deep import OracleDeep
 
+#: the cells below are built and run here only on fakes or stand-ins, not
+#: on an Oracle server: the quiet tail's read of the redo (`tail_where`)
+#: among them (`capabilities.UNPROVED_WHY`); a cell the sandbox's server
+#: could run whose lane test is not written yet is owed that test
+UNPROVED_ON = ("built; not run on a real Oracle server, only on fakes and "
+               "stand-ins; a cell whose lane test is not written yet is owed "
+               "that test")
+UNPROVED_ITEMS = (
+    "assess.brands assess.capacity assess.handwork assess.preflight "
+    "assess.versions assess.writers cutover.freeze cutover.jobs "
+    "move.partitioned move.sized schema.defaults schema.indexes "
+    "security.tls tail.ddl tail.quiet tail.renames tail.table-states "
+    "verify.access.object-ownership verify.access.sequence-grants "
+    "verify.access.table-grants verify.movement.target-ahead "
+    "verify.structure.collection-options verify.structure.columns "
+    "verify.structure.deferrable verify.structure.foreign-keys "
+    "verify.structure.indexes verify.structure.keys "
+    "verify.structure.materialized-views verify.structure.partitions "
+    "verify.structure.row-security verify.structure.triggers "
+    "verify.value.collation verify.value.generated "
+    "verify.value.narrowing verify.value.null-empty "
+    "verify.value.precision verify.value.rendering "
+    "verify.value.timezone")
+
 #: the declared type, with the numbers a counterpart needs
 DECLARED = ("case when data_type like '%WITH LOCAL TIME ZONE' then"
             " 'timestamp with local time zone'"

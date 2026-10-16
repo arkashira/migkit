@@ -3807,12 +3807,13 @@ select json_build_object(
         name = self._slot_ready(side, db, resuming_from=token, ask=ask,
                                 below=True)
         if name is None:
-            return self._wal_changes(side, db, token, limit,
-                                     self.follow_way(db, side))
+            return self._tail_marked(side, db, self._wal_changes(
+                side, db, token, limit, self.follow_way(db, side)))
         standby = bool((self.hop.options or {}).get("standby"))
         if not standby and self._change_read(
                 side, db, name, token).path == "stream":
-            return self._streamed(side, db, name, token, limit, ask)
+            return self._tail_marked(side, db, self._streamed(
+                side, db, name, token, limit, ask))
         rows_of = self._slot_rows_waited if standby else self._slot_rows
         if token and standby:
             # a machine that took the tail over goes on from the position
@@ -3853,7 +3854,18 @@ select json_build_object(
         if len(rows) < int(limit) and upto and (
                 last is None or self.position_reached(upto, last)):
             last = upto
-        return out, last
+        return self._tail_marked(side, db, (out, last))
+
+    def _tail_marked(self, side, db, got):
+        """`got` ((changes, position) of a batch) handed back, its position
+        kept as the tail's mark where the batch carried a change on the
+        hop's tables: what `tail_where` measures the WAL moved since, so a
+        quiet read to the log's end does not hide the writes it read past
+        elsewhere."""
+        if got and got[0] and got[1]:
+            self.__dict__.setdefault("_tail_marks", {})[(side, db)] = \
+                str(got[1])
+        return got
 
     #: how a source's changes are followed: its logical slot where the
     #: WAL carries rows; else, at wal_level replica, the WAL's physical
@@ -4795,6 +4807,92 @@ select json_build_object(
         if self._in_recovery(side, db):
             return None
         return self.wal_position(side, db)
+
+    #: what `tail_where` asks, in one statement: the end a batch reads to
+    #: (`_log_end`: the flushed end, the replayed one on a standby), the
+    #: WAL bytes from the tail's LSN to it, and the tail's slot as the
+    #: server lists it - `wal_status` read off the row as JSON, since a
+    #: server before 13 has no such column
+    TAIL_WHERE_SQL = (
+        "select e.lsn::text, case when %s::pg_lsn is null then null else"
+        " pg_wal_lsn_diff(e.lsn, %s::pg_lsn) end, s.slot_name is not null,"
+        " coalesce(s.active, false), s.active_pid,"
+        " to_jsonb(s) ->> 'wal_status', pg_backend_pid()"
+        " from (select case when pg_is_in_recovery() then"
+        " pg_last_wal_replay_lsn() else pg_current_wal_flush_lsn() end"
+        " as lsn) e left join pg_replication_slots s on s.slot_name = %s")
+
+    def tail_where(self, db, token):
+        """What the tail's quiet line stands on (`tailctl.run_loop`), read
+        of the source in one bounded statement (`TAIL_WHERE_SQL`) on the
+        tail's own kept connection: the LSN the tail is at, the source's
+        end now - the flushed end, the one a batch reads to and moves the
+        tail's position to (`_log_end`), so a write not yet flushed is not
+        counted as read past - how many bytes of WAL that end lies past the
+        batch that last carried a change on the hop's tables (`moved`, the
+        server's own difference of the two LSNs, exact; read past since by
+        a quiet tail, those bytes are writes elsewhere), and
+        whether the tail's slot is still the tail's: gone, its WAL lost, or
+        held by a session that is none of the tail's (named by its pid) is
+        not attached. A slot nobody holds is attached where the tail peeks
+        it a batch at a time (it holds the slot only while it reads), and
+        not where the tail's stream should be holding it. A tail that
+        follows the WAL's records and not a slot (`follow_way`) leaves the
+        source no reader to list: `attached` is not read, and
+        `attached_unread` says so rather than assume it."""
+        import re
+
+        import psycopg2
+        at = str(token or "")
+        lsn = at if re.fullmatch(r"[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}",
+                                 at) else None
+        out = {"at": at} if at else {}
+        name = self.slot_name()
+        # the WAL moved since the batch that last carried a change on the
+        # hop's tables (`_tail_marked`), or since the tail first asked
+        marks = self.__dict__.setdefault("_tail_marks", {})
+        if marks.get(("src", db)) is None:
+            marks[("src", db)] = lsn
+        since = marks[("src", db)]
+        try:
+            got = self._slot_rows("src", db, self.TAIL_WHERE_SQL,
+                                  (since, since, name))
+        except (psycopg2.Error, OSError) as e:
+            return {**out, "attached": False,
+                    "why_detached": str(e).strip().splitlines()[0][:120]}
+        server, moved, kept, active, pid, status, mine = got[0]
+        if server:
+            out["server"] = server
+        if moved is not None:
+            # a tail past the end (a standby replaying behind the primary
+            # it was read from) has nothing written after it to read
+            out["moved"] = max(int(moved), 0)
+        way = self.__dict__.get("_follow_ways", {}).get(("src", db))
+        if way is not None and way.path != "logical slot":
+            out["attached_unread"] = (
+                f"followed by its WAL ({way.path}), not a slot: the source"
+                " lists no reader of the tail's to ask")
+            return out
+        stream = self.__dict__.get("_slot_streams", {}).get(("src", db))
+        ours = {mine} | ({self.session_of(stream.conn)} if stream else set())
+        if not kept:
+            out.update(attached=False, why_detached=(
+                f"the source has no slot {name}: it was dropped, and the"
+                f" changes after {lsn or 'the tail position'} with it"))
+        elif status == "lost":
+            out.update(attached=False, why_detached=(
+                f"the slot {name} lost its WAL (past"
+                " max_slot_wal_keep_size): the changes after"
+                f" {lsn or 'the tail position'} are gone"))
+        elif active and pid not in ours:
+            out.update(attached=False, why_detached=(
+                f"the slot {name} is held by another session, pid {pid}"))
+        elif not active and stream is not None:
+            out.update(attached=False, why_detached=(
+                f"the tail's stream no longer holds the slot {name}"))
+        else:
+            out["attached"] = True
+        return out
 
     #: The position a fence waits for: every commit the server has
     #: acknowledged, which is the WAL *insert* position, not the written

@@ -11,6 +11,8 @@ from bson.timestamp import Timestamp
 from migkit import decide, tailctl
 from tests.test_every_ad_hoc_switch_goes_through_the_decision import _hop
 
+PROVES = [("tail.quiet", "mysql"), ("tail.quiet", "postgres")]
+
 
 def test_the_logs_counter_moves_from_the_first_ask_of_a_position():
     memo = {}
@@ -123,11 +125,13 @@ def test_mongodb_says_its_writes_and_an_oplog_past_the_tail(monkeypatch):
         facts["why_detached"]
 
 
-@pytest.mark.parametrize("engine", ["mssql", "oracle", "mongodb"])
+@pytest.mark.parametrize("engine", ["mssql", "oracle", "mongodb",
+                                    "postgres"])
 def test_every_source_named_here_has_a_where(engine):
-    from migkit.engines import mongodb, mssql, oracle
+    from migkit.engines import mongodb, mssql, oracle, postgres
     cls = {"mssql": mssql.MSSQLEngine, "oracle": oracle.OracleEngine,
-           "mongodb": mongodb.MongoEngine}[engine]
+           "mongodb": mongodb.MongoEngine,
+           "postgres": postgres.PostgresEngine}[engine]
     assert tailctl._where_now(cls(_hop(engine)), "db") is not None
 
 
@@ -140,3 +144,83 @@ def test_a_refused_egress_stops_the_sign_in_not_its_groups(monkeypatch):
     with pytest.raises(identity.Refused, match="may not reach"):
         identity.Oidc._userinfo(object.__new__(identity.Oidc),
                                 "https://idp.example.com/userinfo", "t", "s")
+
+
+def _pg(monkeypatch, row, way=None):
+    from types import SimpleNamespace
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(_hop("postgres"))
+    asked = []
+
+    def rows(self, side, db, sql, args=None):
+        asked.append(args)
+        return [row]
+    monkeypatch.setattr(PostgresEngine, "_slot_rows", rows)
+    if way:
+        eng.__dict__["_follow_ways"] = {
+            ("src", "shop"): SimpleNamespace(path=way)}
+    return eng, asked
+
+
+def test_postgres_slot_held_by_the_tail_is_attached_and_still(monkeypatch):
+    eng, asked = _pg(monkeypatch, ("0/3000", 0, True, True, 42, "reserved",
+                                   42))
+    states, facts = _states(eng, "shop", "0/3000", 1)
+    assert states == ["idle"] and facts["attached"] is True
+    assert facts["moved"] == 0 and facts["server"] == "0/3000"
+    assert asked[0][2] == eng.slot_name()
+
+
+def test_postgres_measures_the_wal_from_the_last_carried_change(
+        monkeypatch):
+    eng, asked = _pg(monkeypatch, ("0/5000", 8192, True, False, None,
+                                   "reserved", 42))
+    eng._tail_marked("src", "shop", ([{"op": "i"}], "0/3000"))
+    # a quiet read moved the tail to the end: the mark stays where the
+    # hop's last change was, so the writes read past are still said
+    eng._tail_marked("src", "shop", ([], "0/5000"))
+    states, facts = _states(eng, "shop", "0/5000", 1)
+    assert asked[0][:2] == ("0/3000", "0/3000")
+    assert states == ["elsewhere"] and facts["moved"] == 8192
+    assert "8,192 bytes of its log elsewhere" in tailctl.quiet_line(
+        "shop", "elsewhere", facts, 0, 0)
+
+
+def test_postgres_slot_held_by_another_session_is_detached(monkeypatch):
+    eng, _ = _pg(monkeypatch, ("0/3000", 0, True, True, 77, "reserved", 42))
+    facts = eng.tail_where("shop", "0/3000")
+    assert facts["attached"] is False and "pid 77" in facts["why_detached"]
+    assert decide.tail_state({**facts, "quiet_for": 9}).path == "detached"
+
+
+@pytest.mark.parametrize("kept,status,said", [
+    (False, None, "has no slot"), (True, "lost", "lost its WAL")])
+def test_postgres_slot_gone_or_lost_is_detached(monkeypatch, kept, status,
+                                                said):
+    eng, _ = _pg(monkeypatch, ("0/3000", 0, kept, False, None, status, 42))
+    facts = eng.tail_where("shop", "0/3000")
+    assert facts["attached"] is False and said in facts["why_detached"]
+
+
+def test_postgres_followed_by_its_wal_leaves_attached_unread(monkeypatch):
+    eng, _ = _pg(monkeypatch, ("0/3000", 0, False, False, None, None, 42),
+                 way="wal inspect")
+    facts = eng.tail_where("shop", "0/3000")
+    assert "attached" not in facts and "wal inspect" in \
+        facts["attached_unread"]
+    line = tailctl.quiet_line("shop", "idle", facts, 0, 0)
+    assert line.startswith("shop: at 0/3000 (followed by its WAL")
+    assert "attached at" not in line
+
+
+def test_postgres_that_cannot_be_read_is_detached_in_words(monkeypatch):
+    import psycopg2
+    from migkit.engines.postgres import PostgresEngine
+    eng = PostgresEngine(_hop("postgres"))
+
+    def refuse(self, side, db, sql, args=None):
+        raise psycopg2.OperationalError("connection refused\nmore")
+    monkeypatch.setattr(PostgresEngine, "_slot_rows", refuse)
+    facts = eng.tail_where("shop", "0/3000")
+    assert facts == {"at": "0/3000", "attached": False,
+                     "why_detached": "connection refused"}

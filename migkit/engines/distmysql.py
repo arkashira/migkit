@@ -41,6 +41,7 @@ UNPROVED_ON = "built; not run on a real PolarDB-X or TDSQL instance"
 #: the ways built here and run against no such server: the whole
 #: list, the matrix reads it from this source (`capabilities`)
 UNPROVED_ITEMS = (
+    "polardbx:tail.quiet dcdb:tail.quiet "
     "polardbx:assess.brands polardbx:assess.capacity "
     "polardbx:assess.engine-checks polardbx:assess.preflight "
     "polardbx:cutover.drain polardbx:cutover.freeze "

@@ -37,6 +37,7 @@ UNPROVED_ON = "built; not run on a real OceanBase tenant"
 #: the ways built here and run against no such server: the whole
 #: list, the matrix reads it from this source (`capabilities`)
 UNPROVED_ITEMS = (
+    "oceanbase:tail.quiet "
     "oceanbase:assess.brands oceanbase:assess.capacity "
     "oceanbase:assess.engine-checks oceanbase:assess.preflight "
     "oceanbase:cutover.counters oceanbase:cutover.drain "

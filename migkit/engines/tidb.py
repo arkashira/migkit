@@ -48,6 +48,7 @@ UNPROVED_ON = ("built; not run on a real TiDB cluster, only on its"
                " bulk load, the snapshot's mark and TiCDC's open-protocol"
                " and Avro messages")
 UNPROVED_ITEMS = (
+    "tidb:tail.quiet "
     "verify.value.one-plan verify.structure.collection-options "
     "assess.handwork operations.fencing verify.users move.bulk "
     "cutover.rollback")

@@ -9,6 +9,19 @@ from ..decide import Need, Rung
 from .base import Engine, RepairAction, Result, clauses, rows_counted
 from ..verdict import difference_kind_from_counts
 
+#: the cells below are built and run here only on fakes, not on a MongoDB
+#: replica set: the quiet tail's read of the oplog and the server's write
+#: counters (`tail_where`) among them (`capabilities.UNPROVED_WHY`); a
+#: cell the sandbox's server could run whose lane test is not written yet
+#: is owed that test
+UNPROVED_ON = ("built; not run on a real MongoDB replica set, only on"
+               " fakes; a cell whose lane test is not written yet is owed"
+               " that test")
+UNPROVED_ITEMS = (
+    "assess.writers cutover.rollback move.load-window move.spread "
+    "schema.routines schema.views tail.added tail.quiet tail.readded "
+    "verify.access.table-grants verify.value.charset")
+
 SKIP_DBS = {"admin", "local", "config"}
 # Target documents per comparison range. Ranges keep the memory
 # cost proportional to the range rather than to the collection.

@@ -23,6 +23,7 @@ from .distmysql import OnMySQLWire
 UNPROVED_ON = "built; not run on a real SingleStore workspace"
 #: the cells built here and run against no such service
 UNPROVED_ITEMS = (
+    "singlestore:tail.quiet "
     "assess.brands assess.capacity assess.engine-checks "
     "assess.preflight cutover.counters cutover.drain cutover.freeze "
     "cutover.read-only-target cutover.rollback "

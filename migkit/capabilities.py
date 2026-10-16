@@ -1402,6 +1402,11 @@ def _items():
         "tail.renames": ("a table renamed or swapped while followed is told"
                          " apart", lambda n, c: _states(n, c) and (
                              _own(c, "table_oids") or _ddl("to")(n, c))),
+        "tail.quiet": ("a quiet tail says why: where it is, the source's"
+                       " now, how far its log moved past the hop's last"
+                       " change and whether its reader is still attached"
+                       " (`tail_where`)",
+                       lambda n, c: _own(c, "tail_where")),
         "assess.versions": ("both servers' versions read and held to each"
                             " other", lambda n, c:
                             _own(c, "_server_versions") or (
@@ -2159,6 +2164,10 @@ DEPTH_GAPS = {
                 "kafka dynamodb cassandra couchbase cosmosdb"),
         **_as("stream", "sqlite parquet db2zos teradata duckdb copybook"),
         **_as("schema", "kinesis pubsub"),
+        **_each(NOT_APPLICABLE, _PAIR, "hetero"),
+        **_each(NOT_YET, "P0-PARITY.small", "generic"),
+    },
+    "tail.quiet": {
         **_each(NOT_APPLICABLE, _PAIR, "hetero"),
         **_each(NOT_YET, "P0-PARITY.small", "generic"),
     },
@@ -3628,6 +3637,24 @@ for _item, _ways in DEPTH_GAPS.items():
 for _name in _DIALECTS:
     DEPTH_GAPS.setdefault("verify.repair-undo", {})[_name] = (NOT_YET, "W5")
 del _item, _ways, _name
+
+#: the engines whose class answers no `tail_where` (FIELD1): one that
+#: follows nothing says so as its follow's own gap, read here once every
+#: engine's gaps are built; one that follows waits on the row that gives
+#: its quiet line the facts it stands on
+for _engine in (
+        "redis kafka clickhouse dynamodb db2 db2i opensearch cassandra"
+        " snowflake bigquery cockroachdb dsql couchbase cosmosdb spanner"
+        " bigtable firestore gaussdb keyspaces neptune geminidb-redis neo4j"
+        " analyticdb-postgres yugabytedb netezza saphana informix progress"
+        " vertica exasol databricks sqlite parquet db2zos ase teradata"
+        " redshift kinesis pubsub duckdb copybook iceberg delta datastore"
+        " oceanbase-oracle timestream lindorm geminidb-cassandra qdrant"
+        " synapse sapodp saas").split():
+    DEPTH_GAPS["tail.quiet"][_engine] = GAPS.get(_engine, {}).get(
+        "stream", (NOT_YET, "FIELD1.tail-more"))
+del _engine
+
 
 # --- what an engine module says of the cells it was not run for -------------
 #
