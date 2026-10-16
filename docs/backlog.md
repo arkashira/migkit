@@ -3967,6 +3967,9 @@ running work merges.
   string (generated from the registry), no verdict word outside `VERDICTS`,
   every URL or argv naming a host carrying the TLS keys (SEC2, SEC4, W3,
   LG11).
+* Every decide rung held and refused by a test (AUD-Z.rungs, DONE W19F:
+  `tests/test_every_decide_rung_is_reached.py`; the owed rungs are
+  AUD-Z.rungs-owed, those built outside decide.py AUD-Z.rungs-outside).
 
 Done when every ID in the research document is fixed with its test or
 struck with the owner's reason, the lint tests hold, and the final suite
