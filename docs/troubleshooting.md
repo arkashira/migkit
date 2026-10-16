@@ -1637,6 +1637,22 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: the change log no longer holds <...>: <...>
 
+## AnalyticDB for MySQL and AnalyticDB for PostgreSQL
+
+* <...>: no way to follow <...> holds: <...>
+
+## Azure Synapse (dedicated SQL pool)
+
+* <...>: no way to follow <...> holds: <...>
+
+## YugabyteDB
+
+* <...>: no way to follow <...> holds: <...>
+
+## SingleStore
+
+* <...>: no way to follow <...> holds: <...>
+
 ## SAP application data (ODP)
 
 * sap_licence: <...> - full-use or runtime

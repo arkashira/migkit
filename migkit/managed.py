@@ -68,7 +68,11 @@ KINDS = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
          "timestream": "Timestream", "lindorm": "Lindorm",
          "geminidb-cassandra": "GeminiDB's Cassandra API",
          "geminidb-redis": "GeminiDB's Redis API",
-         "geminidb-mongo": "GeminiDB's MongoDB API"}
+         "geminidb-mongo": "GeminiDB's MongoDB API",
+         "analyticdb-mysql": "AnalyticDB for MySQL",
+         "analyticdb-postgres": "AnalyticDB for PostgreSQL",
+         "synapse": "Synapse dedicated SQL pool",
+         "yugabytedb": "YugabyteDB", "singlestore": "SingleStore"}
 
 #: what `clouds` calls an endpoint of a service, and the service it is
 ENDPOINTS = {"aurora-reader": "aurora", "rds-proxy": "rds"}

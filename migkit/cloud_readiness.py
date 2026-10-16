@@ -32,6 +32,16 @@ UNPROVED_ON = {
     "aws": "built; not run against a real AWS account",
     "gcp": "built; not run against a real Google Cloud account",
     "azure": "built; not run against a real Azure account",
+    # the analytic and distributed services' engines (P0-CLOUDS.more):
+    # their sides are read as their wire's, the catalogue's row each
+    "alibaba-analyticdb-mysql": "built; not run on a real AnalyticDB for"
+                                " MySQL cluster",
+    "alibaba-analyticdb-postgres": "built; not run on a real AnalyticDB for"
+                                   " PostgreSQL instance",
+    "azure-synapse": "built; not run on a real Synapse dedicated SQL pool",
+    "yugabyte-aeon": "built; not run on a real YugabyteDB Aeon cluster",
+    "singlestore-helios": "built; not run on a real SingleStore Helios"
+                          " workspace",
 }
 UNPROVED_ITEMS = {
     "aws": "managed.sign-in managed.forwarder managed.readiness"
@@ -40,6 +50,11 @@ UNPROVED_ITEMS = {
            " managed.egress-gate",
     "azure": "managed.sign-in managed.forwarder managed.readiness"
              " managed.egress-gate",
+    "alibaba-analyticdb-mysql": "managed.readiness managed.brand-api",
+    "alibaba-analyticdb-postgres": "managed.readiness managed.brand-api",
+    "azure-synapse": "managed.readiness managed.brand-api",
+    "yugabyte-aeon": "managed.readiness managed.brand-api",
+    "singlestore-helios": "managed.readiness managed.brand-api",
 }
 
 

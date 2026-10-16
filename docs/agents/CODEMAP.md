@@ -201,9 +201,10 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/workload.py` - Whether the target answers the source's own queries as well as the source does (backlog 24, problems file G1; R23, 4).
 - `migkit/zones.py` - The time zone the data is written in, against the one the server declares (backlog 23).
 
-## `migkit/engines/` (68 modules)
+## `migkit/engines/` (72 modules)
 
 - `migkit/engines/__init__.py` - (no docstring)
+- `migkit/engines/analyticdb.py` - Alibaba AnalyticDB as a side of a pair (backlog P0-CLOUDS.more): its MySQL flavour on the MySQL wire, its PostgreSQL flavour - a descendant  Classes: LandsRows, AnalyticDBMySQLEngine, AnalyticDBPostgresEngine.
 - `migkit/engines/ase.py` - SAP ASE (Sybase) as one side of a pair (backlog 34). Classes: AseEngine.
 - `migkit/engines/base.py` - (no docstring) Classes: Result, RepairAction, Spread, Engine, TableHold, Enough.
 - `migkit/engines/bigquery_changes.py` - BigQuery followed as a source: the rows that changed in a dataset, read from its tables' change history (`CHANGES()`) and handed on as the n Classes: BigQueryChanges.
@@ -263,14 +264,17 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/saas.py` - SaaS applications as sources, read by programs (backlog ER7): one adapter for every kind of connector, feeding migkit's own writers and its  Classes: Stream, Program, Singer, Airbyte, Dlt, Seen.
 - `migkit/engines/saas_salesforce.py` - Salesforce as a program source (backlog ER7): objects read through its REST API, and followed through its own change events. Classes: Salesforce.
 - `migkit/engines/sapodp.py` - SAP application data through ODP over OData (backlog ER6): the extractors and CDS views an SAP system (ECC, S/4HANA, BW) publishes for extra Classes: Refused, SapOdpEngine.
+- `migkit/engines/singlestore.py` - SingleStore (formerly MemSQL) as a side of a pair (backlog P0-CLOUDS.more): a distributed SQL database of its own on MySQL's wire. Classes: SingleStoreEngine.
 - `migkit/engines/spanner.py` - Google Cloud Spanner as a side of a pair (backlog P0-CLOUDS), both of its dialects - GoogleSQL and PostgreSQL - through its Python SDK. Classes: SpannerEngine, SpannerLanes.
 - `migkit/engines/sqlcatalog.py` - The deep checks a SQL engine's own catalogue answers, one way for the engines whose catalogue migkit reads with its own SQL: Db2 on each of  Classes: Behind, CatalogChecks.
 - `migkit/engines/sqlite.py` - (no docstring) Classes: SQLiteEngine.
+- `migkit/engines/synapse.py` - Azure Synapse Analytics' dedicated SQL pool as a side of a pair (backlog P0-CLOUDS.more): a massively parallel warehouse answering T-SQL, no Classes: SynapseEngine.
 - `migkit/engines/teradata.py` - Teradata as one side of a pair (backlog ER3), through Teradata's own driver for Python. Its licence is Teradata's (free to use, not open sou Classes: TeradataEngine.
 - `migkit/engines/tidb.py` - TiDB as a side of a pair (backlog ER4), over MySQL's wire. Classes: TiDBEngine.
 - `migkit/engines/timestream.py` - Amazon Timestream for LiveAnalytics as a side of a pair (backlog P0-CLOUDS), through its query and write APIs. Classes: TimestreamEngine.
 - `migkit/engines/warehouse.py` - Warehouses as one side of a pair (backlog 33): Amazon Redshift, Snowflake and Google BigQuery. Classes: RedshiftEngine, SnowflakeEngine, BigQueryEngine.
 - `migkit/engines/warehouse_sql.py` - The canonical text of a row, and the digest over it, in a warehouse's own SQL: BigQuery, Snowflake, Redshift, and DuckDB - a DuckDB file's o Classes: Dialect, DigestsInSQL.
+- `migkit/engines/yugabyte.py` - YugabyteDB's YSQL as a side of a pair (backlog P0-CLOUDS.more): a distributed SQL database on PostgreSQL's wire. Classes: YugabyteEngine.
 
 ## `migkit/runners/` (2 modules)
 

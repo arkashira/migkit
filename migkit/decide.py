@@ -5859,3 +5859,160 @@ def warehouse_snapshot_way(facts):
              because="a table keeps no time travel: the rows are counted,"
                      " and a rollback has nothing to clone back from")),
         f, prove=False)
+
+# ---- the analytic and distributed services' own ways (P0-CLOUDS.more) ------
+
+def mpp_spread(facts, costs=None):
+    """How a table made on a service that spreads rows over its nodes is
+    spread (AnalyticDB for PostgreSQL's `DISTRIBUTED`, AnalyticDB for
+    MySQL's `DISTRIBUTED BY HASH`, a dedicated SQL pool's `DISTRIBUTION`,
+    SingleStore's `SHARD KEY`). `facts`: `key` (the table's key columns,
+    as the source says them), `rows` (the source's row count, as its
+    catalogue or a count says it; None: not read), `nodes` (the target's
+    data nodes or segments, as its catalogue says; None: not read),
+    `replicated` (the service makes a table whose every node keeps all of
+    it), `small` (the rows under which a whole copy on every node is the
+    service's own advice; None: it gives none).
+
+    A key spreads by its hash, so a lookup and a join by it stay on one
+    node; a table the service advises keeping whole on every node is
+    kept so only where both its size and that bound are read; a table
+    with no key goes round the nodes evenly. None of them is taken
+    without its facts."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("how a table is spread over the service's nodes", (
+        Rung("replicate", "a whole copy on every node",
+             needs=(Need("the service keeping a table whole on every node",
+                         lambda x: bool(x.get("replicated")),
+                         "the service keeps no table whole on every node"),
+                    Need("the table's rows read and under the service's"
+                         " bound for it",
+                         lambda x: x.get("rows") is not None
+                         and x.get("small") is not None
+                         and x.get("rows") < x.get("small"),
+                         lambda x: "the table's rows are not read" if
+                         x.get("rows") is None else
+                         "the service gives no bound for a table kept whole"
+                         if x.get("small") is None else
+                         f"{x.get('rows')} rows are over the"
+                         f" {x.get('small')} the service advises")),
+             because="a small table every node keeps whole joins with no"
+                     " rows moved between nodes"),
+        Rung("hash", "spread by the hash of its key",
+             needs=(Need("a key", lambda x: bool(x.get("key")),
+                         "the table has no key to spread it by"),),
+             because="rows with one key land on one node, so a lookup or a"
+                     " repair by key touches one node"),
+        Rung("even", "spread round the nodes evenly", footprint=1,
+             because="the table has no key: no column spreads it better"
+                     " than an even spread")),
+        f, costs=costs or None, prove=False)
+
+
+def landing_load(facts, costs=None):
+    """Whether a table is loaded through the target's own loader from a
+    landing store (a dedicated SQL pool's `COPY INTO`, a SingleStore
+    pipeline, an AnalyticDB external table over object storage) or by the
+    table copier. `facts`: `landing` (the side names its landing store),
+    `writer` (this machine can write that store's scheme), `may` (the
+    target's account may run the loader: a pipeline, an external table,
+    bulk operations - as the target's grants say; None: not read), `rows`
+    (the table's rows; None: not read), `empty` (the target table holds
+    no rows, so a repeat of an interrupted load cannot double them) and the two ways' costs where they
+    were measured (`costs`). The loader is never assumed: each need is a
+    fact the hop or the target answered, and where one does not hold the
+    table copier takes the table and says why."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("how a table is loaded into the target", (
+        Rung("landing", "the target's own loader from the landing store",
+             needs=(Need("a landing store named",
+                         lambda x: bool(x.get("landing")),
+                         "no landing store is named for the target"
+                         " (`stage:`)"),
+                    Need("a writer for the landing store here",
+                         lambda x: bool(x.get("writer")),
+                         lambda x: f"nothing here writes {x.get('landing')}"),
+                    Need("the target's account allowed the loader",
+                         lambda x: x.get("may") is True,
+                         lambda x: "the target's grants were not read" if
+                         x.get("may") is None else "the target's account"
+                         " may not run the service's loader"),
+                    Need("rows to load", lambda x: (x.get("rows") or 0) > 0,
+                         "the table holds no rows to land"),
+                    Need("the target table empty",
+                         lambda x: x.get("empty") is True,
+                         "the target table holds rows already: a load"
+                         " could write them twice, so they are reconciled"
+                         " by key")),
+             because="the service's nodes read the landed files in"
+                     " parallel, where the table copier writes through one"
+                     " front end"),
+        Rung("copier", "the table copier, by key ranges, resumably",
+             footprint=1, because="the first way that holds")),
+        f, costs=costs or None, prove=False)
+
+
+def service_follow(facts, costs=None):
+    """How a source on one of these services is followed, or that no way
+    holds and why. `facts`: `engine` (its name), `logical` (the service
+    serves logical replication to a client: YugabyteDB from 2024.1.1 with
+    its replication commands on), `slots` (replication slots still free;
+    None: not read), `binlog` (AnalyticDB for MySQL: of the `tables` in
+    scope, how many keep a binary log), `tables`. A service that keeps no
+    change log a client reads has no rung: the hop is refused as a
+    following source and said why, never followed by a guess."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    scope = f"{f.get('tables') or 0} tables in scope"
+    return climb(f"how a {f.get('engine') or 'service'} source is followed", (
+        Rung("logical", "the service's logical replication, from a slot",
+             needs=(Need("logical replication served",
+                         lambda x: bool(x.get("logical")),
+                         lambda x: x.get("logical_why") or "the service"
+                         " serves no logical replication to a client"),
+                    Need("a replication slot free",
+                         lambda x: (x.get("slots") or 0) > 0,
+                         lambda x: "the free replication slots were not"
+                         " read" if x.get("slots") is None else
+                         "no replication slot is free")),
+             because="the stream carries every committed change in commit"
+                     " order, deletes too"),
+        Rung("binlog", "each table's own binary log", footprint=1,
+             needs=(Need("every table in scope keeping a binary log",
+                         lambda x: (x.get("tables") or 0) > 0
+                         and (x.get("binlog") or 0) >= x.get("tables"),
+                         lambda x: f"only {x.get('binlog') or 0} of the"
+                         f" {scope} keep a binary log (alter table ..."
+                         " binlog=true)"),),
+             because=scope + ": each table's binary log carries its rows'"
+                     " changes in order")),
+        f, costs=costs or None, prove=False)
+
+
+# the five services' cells of the shapes, as their wire's contract has them
+# (`distmysql.OnMySQLWire`, `pgwire.PgWireEngine`, the warehouse's): a way
+# is copied only where it resolves on the service's own class
+_SERVICE_MODEL = {"analyticdb-mysql": "polardbx", "singlestore": "polardbx",
+                  "analyticdb-postgres": "gaussdb", "yugabytedb": "gaussdb",
+                  "synapse": None}
+for _shape, _ways in WAYS.items():
+    for _engine, _model in _SERVICE_MODEL.items():
+        if _engine in _ways:
+            continue
+        _got = _ways.get(_model) if _model else None
+        if _got and _got[0] == "yes" and _got[1].startswith("@"):
+            _ways[_engine] = _got
+        elif _got and _got[0] == "yes" and _shape in ("read-only target",
+                                                      "writes held"):
+            _ways[_engine] = _got
+        elif _shape in ("keyless", "no unique index", "wide key"):
+            _ways[_engine] = ("yes", "@neutral_batches" if _shape != "wide key"
+                              else "@neutral_read")
+# what the wire's contract has and these services were not read for yet
+for _engine, _shapes in {
+        "analyticdb-postgres": ("large values", "partitioned"),
+        "yugabytedb": ("large values", "partitioned"),
+        "synapse": ("large values", "partitioned", "read-only target",
+                    "writes held")}.items():
+    for _shape in _shapes:
+        WAYS[_shape][_engine] = (NOT_YET, "P0-CLOUDS.more")
+del _shape, _ways, _engine, _model, _got, _shapes

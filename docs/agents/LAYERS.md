@@ -213,7 +213,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/config.py:9` configuration -> engines (`engines`)
 - `migkit/engineat.py:393` configuration -> engines (`engines`)
 - `migkit/hopkeys.py:1949` configuration -> engines (`engines`)
-- `migkit/managed.py:186` configuration -> engines (`engines`)
+- `migkit/managed.py:190` configuration -> engines (`engines`)
 
 ### a hop is checked by safety's `egress`; the check moves to the key table
 
@@ -222,7 +222,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a hop is checked by safety's `freeze`; the check moves to the key table
 
 - `migkit/hopkeys.py:1912` configuration -> safety (`freeze`)
-- `migkit/managed.py:504` configuration -> safety (`freeze`)
+- `migkit/managed.py:508` configuration -> safety (`freeze`)
 
 ### a hop is checked by safety's `interlock`; the check moves to the key table
 
@@ -246,7 +246,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop key's check or default asks `cutover` what it accepts; ends when the key table is read from the owner
 
-- `migkit/managed.py:963` configuration -> workflows (`cutover`)
+- `migkit/managed.py:967` configuration -> workflows (`cutover`)
 
 ### a hop key's check or default asks `physical` what it accepts; ends when the key table is read from the owner
 
@@ -278,12 +278,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop option is explained by the decision engine (`dba`); the explanation moves to the key table
 
-- `migkit/managed.py:956` configuration -> decision (`dba`)
+- `migkit/managed.py:960` configuration -> decision (`dba`)
 
 ### a hop option is explained by the decision engine (`decide`); the explanation moves to the key table
 
 - `migkit/engineat.py:453` configuration -> decision (`decide`)
-- `migkit/managed.py:437` configuration -> decision (`decide`)
+- `migkit/managed.py:441` configuration -> decision (`decide`)
 
 ### a hop option is explained by the decision engine (`machine`); the explanation moves to the key table
 
@@ -291,7 +291,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a hop option is explained by the decision engine (`ready`); the explanation moves to the key table
 
-- `migkit/managed.py:919` configuration -> decision (`ready`)
+- `migkit/managed.py:923` configuration -> decision (`ready`)
 
 ### a hop option is explained by the decision engine (`scenarios`); the explanation moves to the key table
 
@@ -468,7 +468,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `drainmark` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1170` decision -> workflows (`drainmark`)
+- `migkit/capabilities.py:1212` decision -> workflows (`drainmark`)
 
 ### a rung or plan reads `drift` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -476,7 +476,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `jobs` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1176` decision -> workflows (`jobs`)
+- `migkit/capabilities.py:1218` decision -> workflows (`jobs`)
 
 ### a rung or plan reads `leaves` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -485,7 +485,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a rung or plan reads `movers` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
 - `migkit/bulkways.py:73` decision -> workflows (`movers`)
-- `migkit/capabilities.py:588` decision -> workflows (`movers`)
+- `migkit/capabilities.py:630` decision -> workflows (`movers`)
 - `migkit/legs.py:182` decision -> workflows (`movers`)
 - `migkit/machine.py:466` decision -> workflows (`movers`)
 - `migkit/planner.py:64` decision -> workflows (`movers`)
@@ -511,7 +511,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `topicstates` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:1112` decision -> workflows (`topicstates`)
+- `migkit/capabilities.py:1154` decision -> workflows (`topicstates`)
 
 ### a rung or plan reads `unchanged` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
@@ -525,7 +525,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `users` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/capabilities.py:560` decision -> workflows (`users`)
+- `migkit/capabilities.py:602` decision -> workflows (`users`)
 
 ### a rung reads a wrapped tool's surface (`mirror`); the surface is a fact handed down
 
@@ -843,7 +843,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### configuration reaches `audit` (persistence); the shared piece moves below both, or the call is inverted
 
-- `migkit/managed.py:759` configuration -> persistence (`audit`)
+- `migkit/managed.py:763` configuration -> persistence (`audit`)
 
 ### configuration reaches `carriers` (integrations); the shared piece moves below both, or the call is inverted
 
@@ -855,7 +855,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### configuration reaches `cloudapi` (integrations); the shared piece moves below both, or the call is inverted
 
-- `migkit/managed.py:640` configuration -> integrations (`cloudapi`)
+- `migkit/managed.py:644` configuration -> integrations (`cloudapi`)
 
 ### configuration reaches `durable` (persistence); the shared piece moves below both, or the call is inverted
 
@@ -867,7 +867,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### configuration reaches `guide` (cli); the shared piece moves below both, or the call is inverted
 
-- `migkit/managed.py:268` configuration -> cli (`guide`)
+- `migkit/managed.py:272` configuration -> cli (`guide`)
 
 ### configuration reaches `rowfilter` (scope); the shared piece moves below both, or the call is inverted
 
@@ -1003,7 +1003,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### the decision engine asks an engine (`engines.hetero`) what it can do; ends when the engine contract is a package below decision
 
-- `migkit/capabilities.py:934` decision -> engines (`engines.hetero`)
+- `migkit/capabilities.py:976` decision -> engines (`engines.hetero`)
 
 ### the decision engine asks an engine (`engines.mysql`) what it can do; ends when the engine contract is a package below decision
 
@@ -1049,7 +1049,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### the hop's sign-in and the readiness audit ask the cloud provider's own API (`cloudapi`); the provider calls move to a contract below configuration and decision
 
-- `migkit/cloud_readiness.py:217` decision -> integrations (`cloudapi`)
+- `migkit/cloud_readiness.py:232` decision -> integrations (`cloudapi`)
 - `migkit/config.py:882` configuration -> integrations (`cloudapi`)
 
 ### workflows reaches `cli` (cli); the shared piece moves below both, or the call is inverted

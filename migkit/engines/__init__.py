@@ -9,6 +9,8 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "oceanbase", "oceanbase-oracle", "polardbx", "dcdb", "keyspaces",
          "neptune", "timestream", "lindorm", "geminidb-cassandra",
          "geminidb-redis", "geminidb-mongo", "qdrant", "neo4j",
+         "analyticdb-mysql", "analyticdb-postgres", "synapse",
+         "yugabytedb", "singlestore",
          "sapodp", "saas", "hetero", "generic")
 
 #: every other name an engine goes by - a brand on its wire (`mariadb`,
@@ -46,7 +48,12 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "tdsql-c": "mysql", "amazon-keyspaces": "keyspaces",
            "aws-keyspaces": "keyspaces", "amazon-neptune": "neptune",
            "amazon-timestream": "timestream",
-           "geminidb": "geminidb-cassandra", "neo4j-aura": "neo4j"}
+           "geminidb": "geminidb-cassandra", "neo4j-aura": "neo4j",
+           # the analytic and distributed services (P0-CLOUDS.more)
+           "adb-mysql": "analyticdb-mysql", "adb-pg": "analyticdb-postgres",
+           "analyticdb-pg": "analyticdb-postgres",
+           "azure-synapse": "synapse", "yugabyte": "yugabytedb",
+           "ysql": "yugabytedb", "memsql": "singlestore"}
 
 #: engines reached over another's wire protocol, whose values a driver
 #: hands over, a table is built and a value written as that one's are
@@ -57,7 +64,9 @@ WIRE = {"tidb": "mysql", "cockroachdb": "postgres", "dsql": "postgres",
         "gaussdb": "postgres", "oceanbase": "mysql",
         "oceanbase-oracle": "oracle", "polardbx": "mysql", "dcdb": "mysql",
         "keyspaces": "cassandra", "geminidb-cassandra": "cassandra",
-        "geminidb-redis": "redis", "geminidb-mongo": "mongodb"}
+        "geminidb-redis": "redis", "geminidb-mongo": "mongodb",
+        "analyticdb-mysql": "mysql", "analyticdb-postgres": "postgres",
+        "yugabytedb": "postgres", "singlestore": "mysql"}
 
 #: what an address's scheme says beyond the engine's name: the way it is
 #: reached (`mongodb+srv`, `rediss`, a place on S3, an SAP sandbox over
@@ -111,6 +120,8 @@ PORTS = {
     "polardbx": 3306, "dcdb": 3306, "keyspaces": 9142, "neptune": 8182,
     "lindorm": 33060, "geminidb-cassandra": 8635, "geminidb-redis": 6379,
     "geminidb-mongo": 8635, "qdrant": 6333, "neo4j": 7474,
+    "analyticdb-mysql": 3306, "analyticdb-postgres": 5432, "synapse": 1433,
+    "yugabytedb": 5433, "singlestore": 3306,
 }
 
 
@@ -258,7 +269,12 @@ CLOUD = {"spanner": ("spanner", "SpannerEngine"),
          "lindorm": ("lindorm", "LindormEngine"),
          "geminidb-cassandra": ("geminidb", "GeminiCassandraEngine"),
          "geminidb-redis": ("geminidb", "GeminiRedisEngine"),
-         "geminidb-mongo": ("geminidb", "GeminiMongoEngine")}
+         "geminidb-mongo": ("geminidb", "GeminiMongoEngine"),
+         "analyticdb-mysql": ("analyticdb", "AnalyticDBMySQLEngine"),
+         "analyticdb-postgres": ("analyticdb", "AnalyticDBPostgresEngine"),
+         "synapse": ("synapse", "SynapseEngine"),
+         "yugabytedb": ("yugabyte", "YugabyteEngine"),
+         "singlestore": ("singlestore", "SingleStoreEngine")}
 
 
 def _cloud_class(name):
@@ -316,6 +332,10 @@ TITLES = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
           "geminidb-redis": "GeminiDB (Redis API)",
           "geminidb-mongo": "GeminiDB (MongoDB API)",
           "qdrant": "Qdrant", "neo4j": "Neo4j",
+          "analyticdb-mysql": "AnalyticDB for MySQL",
+          "analyticdb-postgres": "AnalyticDB for PostgreSQL",
+          "synapse": "Azure Synapse (dedicated SQL pool)",
+          "yugabytedb": "YugabyteDB", "singlestore": "SingleStore",
           "sapodp": "SAP application data (ODP)",
           "saas": "SaaS applications, read by a connector program",
           "hetero": "Any pair of two engines",

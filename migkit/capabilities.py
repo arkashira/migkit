@@ -505,6 +505,48 @@ GAPS = {
     },
 }
 
+# the analytic and distributed services (P0-CLOUDS.more): each one's own
+# bulk loader is a rung of its table copy (`decide.landing_load`), not a
+# whole-database dump and load
+_OWN_LOADER = ("{} loads a whole table through its own loader from a"
+               " landing store, ranked against the table copier table by"
+               " table (`decide.landing_load`): no dump and load of a whole"
+               " database reaches it")
+GAPS.update({
+    "analyticdb-mysql": {
+        "bulk-move": (NOT_APPLICABLE, _OWN_LOADER.format("AnalyticDB for"
+                                                         " MySQL")),
+    },
+    "singlestore": {
+        "bulk-move": (NOT_APPLICABLE, _OWN_LOADER.format("SingleStore")),
+    },
+    "analyticdb-postgres": {
+        "bulk-move": (NOT_APPLICABLE, _OWN_LOADER.format("AnalyticDB for"
+                                                         " PostgreSQL")),
+        **{cap: (NOT_YET, "P0-CLOUDS.more")
+           for cap in ("params", "statistics", "snapshot")},
+    },
+    "yugabytedb": {
+        "bulk-move": (NOT_APPLICABLE, "YugabyteDB takes rows through"
+                      " PostgreSQL's COPY, which the table copier already"
+                      " writes by key in batches: no dump and load of its"
+                      " own reaches a client"),
+        **{cap: (NOT_YET, "P0-CLOUDS.more")
+           for cap in ("params", "statistics", "snapshot")},
+    },
+    "synapse": {
+        "bulk-move": (NOT_APPLICABLE, _OWN_LOADER.format("Synapse's"
+                                                         " dedicated SQL"
+                                                         " pool")),
+        **{cap: (NOT_APPLICABLE, "a dedicated SQL pool keeps no change data"
+                                 " capture or change tracking a client"
+                                 " reads, and is a pair's warehouse target")
+           for cap in ("stream", "fence", "confirm", "delta")},
+        **{cap: (NOT_YET, "P0-CLOUDS.more")
+           for cap in ("sequences", "params", "users", "statistics",
+                       "snapshot")},
+    },
+})
 
 
 
@@ -3497,6 +3539,68 @@ def depth_failing():
     out["unknown"] += list(_BAD_DECLARATIONS)
     return out
 
+
+# the five services' depth cells their contracts do not read yet
+# (P0-CLOUDS.more): each waits on that row, said per engine
+_SERVICES_NOT_YET = {
+    "managed.catalogued": "analyticdb-mysql analyticdb-postgres synapse"
+                          " yugabytedb singlestore",
+    "assess.capacity": "analyticdb-postgres synapse yugabytedb",
+    "assess.handwork": "analyticdb-mysql singlestore",
+    "assess.versions": "analyticdb-mysql singlestore",
+    "assess.writers": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+    "cutover.drain": "analyticdb-postgres synapse yugabytedb",
+    "cutover.jobs": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+    "cutover.pause-replication": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+    "cutover.two-way": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+    "move.load-window": "analyticdb-postgres synapse yugabytedb",
+    "operations.fencing": "synapse",
+    "schema.foreign-keys": "synapse",
+    "schema.indexes": "synapse",
+    "schema.routines": "analyticdb-postgres synapse yugabytedb",
+    "scope.counters": "synapse",
+    "scope.row-filter": "analyticdb-mysql analyticdb-postgres singlestore synapse",
+    "scope.transforms": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+    "security.tls": "synapse",
+    "tail.added": "analyticdb-postgres synapse yugabytedb",
+    "tail.ddl": "analyticdb-postgres synapse yugabytedb",
+    "tail.readded": "analyticdb-postgres synapse yugabytedb",
+    "tail.renames": "analyticdb-postgres synapse yugabytedb",
+    "tail.table-states": "synapse",
+    "verify.access.sequence-grants": "analyticdb-mysql singlestore synapse",
+    "verify.identity.sequence-collision": "synapse",
+    "verify.identity.sequence-parity": "synapse",
+    "verify.rows-apart": "analyticdb-mysql singlestore synapse",
+    "verify.structure.collection-options": "analyticdb-postgres yugabytedb",
+    "verify.structure.deferrable": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+    "verify.structure.extensions": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+    "verify.structure.foreign-keys": "analyticdb-postgres yugabytedb",
+    "verify.structure.indexes": "analyticdb-mysql singlestore synapse",
+    "verify.structure.materialized-views": "analyticdb-mysql analyticdb-postgres singlestore yugabytedb",
+    "verify.structure.objects": "analyticdb-mysql singlestore",
+    "verify.structure.partitions": "analyticdb-postgres synapse yugabytedb",
+    "verify.structure.row-security": "analyticdb-mysql analyticdb-postgres singlestore yugabytedb",
+    "verify.structure.schema-diff": "analyticdb-mysql singlestore synapse",
+    "verify.structure.sharding": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+    "verify.structure.triggers": "analyticdb-postgres synapse yugabytedb",
+    "verify.structure.unvalidated-constraints": "analyticdb-postgres synapse yugabytedb",
+    "verify.tables": "analyticdb-mysql analyticdb-postgres singlestore yugabytedb",
+    "verify.value.charset": "synapse",
+    "verify.value.collation": "synapse",
+    "verify.value.generated": "synapse",
+    "verify.value.narrowing": "synapse",
+    "verify.value.null-empty": "synapse",
+    "verify.value.one-plan": "analyticdb-postgres synapse yugabytedb",
+    "verify.value.precision": "synapse",
+    "verify.value.rendering": "synapse",
+    "verify.value.timezone": "synapse",
+    "verify.value.type-drift": "analyticdb-mysql analyticdb-postgres singlestore synapse yugabytedb",
+}
+for _item, _engines in _SERVICES_NOT_YET.items():
+    for _engine in _engines.split():
+        DEPTH_GAPS.setdefault(_item, {})[_engine] = (NOT_YET,
+                                                     "P0-CLOUDS.more")
+del _item, _engines, _engine
 
 # --- what an engine module says of the cells it was not run for -------------
 #

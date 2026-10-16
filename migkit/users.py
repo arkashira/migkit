@@ -57,7 +57,9 @@ SYSTEM = {
 ACCOUNTS_AS = {"oceanbase": "mysql", "polardbx": "mysql", "dcdb": "mysql",
                "oceanbase-oracle": "oracle",
                "geminidb-cassandra": "cassandra", "geminidb-redis": "redis",
-               "geminidb-mongo": "mongodb"}
+               "geminidb-mongo": "mongodb",
+               "analyticdb-mysql": "mysql", "singlestore": "mysql",
+               "analyticdb-postgres": "postgres", "yugabytedb": "postgres"}
 
 
 def _speaking(hop):

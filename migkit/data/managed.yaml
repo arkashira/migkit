@@ -2338,7 +2338,7 @@ services:
       names: {}
     cdc:
       - "a table's binary log is turned on per table (ALTER TABLE ... BINLOG=true) and kept binlog_ttl (6 hours by default)"
-    limits: {}
+    limits: {replicate_below_rows: 20000}
     defaults: {}
     notes: []
 
