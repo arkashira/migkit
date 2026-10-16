@@ -3606,6 +3606,29 @@ for _item, _engines in _SERVICES_NOT_YET.items():
                                                      "P0-CLOUDS.more")
 del _item, _engines, _engine
 
+# the other SQL sources (W5): Netezza, SAP HANA, Informix, Progress
+# OpenEdge, Vertica, Exasol and Databricks are dialects of the generic
+# engine (`engines.dbapi.DIALECTS`), so each reads the generic engine's cell
+# where the generic engine has a way or a gap, and its own bulk way is a
+# rung of its table copy (`decide.dialect_bulk`), not a whole-database dump
+_DIALECTS = ("netezza saphana informix progress vertica exasol"
+             " databricks").split()
+for _name in _DIALECTS:
+    GAPS[_name] = {**GAPS["generic"], "bulk-move": (
+        NOT_APPLICABLE, "a whole database moved in bulk is the server's own"
+        " dump and load, which a driver does not reach; a table goes in by"
+        " the dialect's own bulk way where the climb finds one that holds"
+        " (`decide.dialect_bulk`), table by table")}
+for _item, _ways in DEPTH_GAPS.items():
+    if "generic" in _ways:
+        for _name in _DIALECTS:
+            _ways.setdefault(_name, _ways["generic"])
+# a repair on them is refused with its reason (`dbapi.DialectEngine`), so
+# its undo has nothing to undo
+for _name in _DIALECTS:
+    DEPTH_GAPS.setdefault("verify.repair-undo", {})[_name] = (NOT_YET, "W5")
+del _item, _ways, _name
+
 # --- what an engine module says of the cells it was not run for -------------
 #
 # A way built for an engine no sandbox here can run is not a test merely

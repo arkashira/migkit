@@ -11,6 +11,8 @@ NAMES = ("postgres", "mysql", "mongodb", "mssql", "redis", "kafka", "sqlite",
          "geminidb-redis", "geminidb-mongo", "qdrant", "neo4j",
          "analyticdb-mysql", "analyticdb-postgres", "synapse",
          "yugabytedb", "singlestore",
+         "netezza", "saphana", "informix", "progress", "vertica", "exasol",
+         "databricks",
          "sapodp", "saas", "hetero", "generic")
 
 #: every other name an engine goes by - a brand on its wire (`mariadb`,
@@ -53,7 +55,11 @@ ALIASES = {"mariadb": "mysql", "percona": "mysql", "aurora-mysql": "mysql",
            "adb-mysql": "analyticdb-mysql", "adb-pg": "analyticdb-postgres",
            "analyticdb-pg": "analyticdb-postgres",
            "azure-synapse": "synapse", "yugabyte": "yugabytedb",
-           "ysql": "yugabytedb", "memsql": "singlestore"}
+           "ysql": "yugabytedb", "memsql": "singlestore",
+           # the other SQL sources, dialects of the generic engine
+           "hana": "saphana", "sap-hana": "saphana",
+           "openedge": "progress", "progress-openedge": "progress",
+           "databricks-sql": "databricks", "pure-data-netezza": "netezza"}
 
 #: engines reached over another's wire protocol, whose values a driver
 #: hands over, a table is built and a value written as that one's are
@@ -81,7 +87,7 @@ SCHEME_ONLY = {
     "couchbases": "couchbase",
     "dlt": "saas", "singer": "saas", "airbyte": "saas",
     "salesforce": "saas",
-    "trino": "generic", "presto": "generic", "vertica": "generic",
+    "trino": "generic", "presto": "generic",
 }
 
 #: engines an address names by a word of its own rather than the engine's
@@ -122,6 +128,8 @@ PORTS = {
     "geminidb-mongo": 8635, "qdrant": 6333, "neo4j": 7474,
     "analyticdb-mysql": 3306, "analyticdb-postgres": 5432, "synapse": 1433,
     "yugabytedb": 5433, "singlestore": 3306,
+    "netezza": 5480, "saphana": 30015, "informix": 9088, "progress": 20931,
+    "vertica": 5433, "exasol": 8563, "databricks": 443,
 }
 
 
@@ -274,7 +282,15 @@ CLOUD = {"spanner": ("spanner", "SpannerEngine"),
          "analyticdb-postgres": ("analyticdb", "AnalyticDBPostgresEngine"),
          "synapse": ("synapse", "SynapseEngine"),
          "yugabytedb": ("yugabyte", "YugabyteEngine"),
-         "singlestore": ("singlestore", "SingleStoreEngine")}
+         "singlestore": ("singlestore", "SingleStoreEngine"),
+         # the other SQL sources, dialects of the generic engine
+         "netezza": ("dbapi", "NetezzaEngine"),
+         "saphana": ("dbapi", "SapHanaEngine"),
+         "informix": ("dbapi", "InformixEngine"),
+         "progress": ("dbapi", "ProgressEngine"),
+         "vertica": ("dbapi", "VerticaEngine"),
+         "exasol": ("dbapi", "ExasolEngine"),
+         "databricks": ("dbapi", "DatabricksEngine")}
 
 
 def _cloud_class(name):
@@ -336,6 +352,9 @@ TITLES = {"postgres": "PostgreSQL", "mysql": "MySQL", "mongodb": "MongoDB",
           "analyticdb-postgres": "AnalyticDB for PostgreSQL",
           "synapse": "Azure Synapse (dedicated SQL pool)",
           "yugabytedb": "YugabyteDB", "singlestore": "SingleStore",
+          "netezza": "Netezza", "saphana": "SAP HANA", "informix": "Informix",
+          "progress": "Progress OpenEdge", "vertica": "Vertica",
+          "exasol": "Exasol", "databricks": "Databricks SQL",
           "sapodp": "SAP application data (ODP)",
           "saas": "SaaS applications, read by a connector program",
           "hetero": "Any pair of two engines",

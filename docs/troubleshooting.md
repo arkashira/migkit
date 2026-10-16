@@ -1655,6 +1655,20 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: no way to follow <...> holds: <...>
 
+## Netezza, SAP HANA, Informix, Progress OpenEdge, Vertica, Exasol and Databricks SQL
+
+* <...> already exists on the target - migkit will not alter or replace a table that is already there
+
+* <...> needs its Python driver, `<...>`, and it is not installed: pip install <...>. Nothing was read
+
+* cannot open the <...> <...> address: <...>
+
+* <...>: a repair of rows on <...> is not written yet: the rows that differ are reported, and nothing was changed
+
+* the bulk load failed: <...>
+
+* <...>: the bulk load left <...> rows on the target for <...> on the source; the table is not marked done and the next run reconciles it by key
+
 ## SAP application data (ODP)
 
 * sap_licence: <...> - full-use or runtime
@@ -1846,8 +1860,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: the target holds <...> rows and the source <...>: migkit will not replace a table that is already there
 
 * <...>: the copy job was refused: <...>
-
-* <...> already exists on the target - migkit will not alter or replace a table that is already there
 
 ## Elsewhere in migkit
 

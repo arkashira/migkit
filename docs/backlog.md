@@ -5986,6 +5986,15 @@ the gaps nothing above covers yet, now items of their own.
   application tables through its own extractors), Informix, Progress;
   and SaaS applications, where the open connectors are ELv2 or AGPL and
   cannot be wrapped - to be decided by what the next migration needs.
+  PARTLY (ext7): Netezza, SAP HANA, Informix, Progress OpenEdge, Vertica,
+  Exasol and Databricks SQL are dialects of the generic engine
+  (`engines.dbapi.DIALECTS`): names, folding, paging, types, the
+  catalogue for scope and a keyed read, a lazily imported driver named
+  when missing, and each one's bulk way a rung (`decide.dialect_bulk`:
+  client, landing or tool; Progress has none). Built, unproved on a real
+  server of any of the seven (`dbapi.UNPROVED_ON`); left: repair of rows
+  on them (refused with the reason), a run on a real server, the
+  structure ladders' own spellings of each catalogue.
 * **W6. Types only commercial engines have:** Oracle SDO_GEOMETRY,
   XMLType, object types and nested tables; SQL Server hierarchyid,
   sql_variant, FILESTREAM; Db2 DECFLOAT and GRAPHIC - mapped, carried,

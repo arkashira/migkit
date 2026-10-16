@@ -1173,6 +1173,16 @@ class GenericEngine(Engine):
     def _from(self, conn, table):
         return ".".join(conn.dialect.quote(p) for p in self._path(conn, table))
 
+    @staticmethod
+    def _paged(conn, select, limit):
+        """`select` limited to `limit` rows in the dialect's own way: a
+        trailing clause, or - for a dialect that limits in front - its
+        `page`."""
+        page = getattr(conn.dialect, "page", None)
+        if page is not None:
+            return page(select, None, limit)
+        return f"{select} " + conn.dialect.offset_limit(None, limit)
+
     def _held_bytes(self, table):
         """What the source's rows would take held in this machine: its
         count times the rendered width of a sample of its rows, times what
@@ -1182,9 +1192,8 @@ class GenericEngine(Engine):
             path = self._from(conn, table)
             rows = int(conn.query(f"SELECT count(*) FROM {path}",
                                   list)[0][0])
-            sample = conn.query(
-                f"SELECT * FROM {path} "
-                + conn.dialect.offset_limit(None, self.SAMPLE_ROWS), list)
+            sample = conn.query(self._paged(
+                conn, f"SELECT * FROM {path}", self.SAMPLE_ROWS), list)
         except (Exception, SystemExit):  # noqa: BLE001 - unread, said
             return None
         if not rows:

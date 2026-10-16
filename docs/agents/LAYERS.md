@@ -692,7 +692,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/base.py:1959` engines -> workflows (`movers`)
 - `migkit/engines/cassandra.py:1922` engines -> workflows (`movers`)
-- `migkit/engines/generic.py:2042` engines -> workflows (`movers`)
+- `migkit/engines/generic.py:2051` engines -> workflows (`movers`)
 - `migkit/engines/hetero.py:223` engines -> workflows (`movers`)
 - `migkit/engines/mongodb.py:878` engines -> workflows (`movers`)
 - `migkit/engines/mysql.py:2410` engines -> workflows (`movers`)
@@ -732,7 +732,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/engines/base.py:2240` engines -> workflows (`tailctl`)
 - `migkit/engines/cassandra.py:2777` engines -> workflows (`tailctl`)
-- `migkit/engines/generic.py:2339` engines -> workflows (`tailctl`)
+- `migkit/engines/generic.py:2348` engines -> workflows (`tailctl`)
 - `migkit/engines/hetero.py:3417` engines -> workflows (`tailctl`)
 - `migkit/engines/kafka.py:1152` engines -> workflows (`tailctl`)
 - `migkit/engines/mongodb.py:2732` engines -> workflows (`tailctl`)

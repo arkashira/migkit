@@ -7,7 +7,11 @@ every in-process engine shares. What differs between those engines is
 small and is what an engine sets here: how it quotes a name, how it marks
 a parameter, how it limits a read. Everything else is written once.
 """
+import re
+from dataclasses import dataclass
+
 from .base import NeutralCopier
+from .generic import GenericEngine
 
 #: where a parameter goes, before the driver's own mark replaces it
 MARK = "\x00?\x00"
@@ -629,3 +633,651 @@ class FoldsToCapitals:
         return self._unpad(side, db, table, columns, [
             list(r) for r in super().neutral_rows_matching(
                 side, db, table, columns, match, values)])
+
+
+# ---- the other SQL sources: dialects of the generic engine -----------------
+#
+# Netezza, SAP HANA, Informix, Progress OpenEdge, Vertica, Exasol and
+# Databricks SQL answer the standard driver interface and a catalogue of
+# their own. Each is a row of `DIALECTS` - how it quotes and folds a name,
+# pages a read, names its types, asks its catalogue, and loads a table in
+# bulk where a client reaches a way - read by the one connection and the one
+# engine below; the generic engine's copy, follow, fence, compare and scope
+# run on them unchanged. A driver is imported when a side is opened, and the
+# one missing is named.
+
+#: the declared types every dialect shares, by name without its size
+STANDARD_TYPES = {
+    "int": "integer", "integer": "integer", "smallint": "integer",
+    "bigint": "integer", "tinyint": "integer", "serial": "integer",
+    "numeric": "decimal", "decimal": "decimal", "dec": "decimal",
+    "number": "decimal", "money": "decimal",
+    "float": "float", "double": "float", "double precision": "float",
+    "real": "float", "smallfloat": "float",
+    "char": "text", "character": "text", "varchar": "text",
+    "nchar": "text", "nvarchar": "text", "varchar2": "text",
+    "text": "text", "string": "text", "clob": "text", "nclob": "text",
+    "long varchar": "text", "character varying": "text",
+    "boolean": "boolean", "bool": "boolean", "bit": "boolean",
+    "timestamp": "timestamp", "datetime": "timestamp",
+    "timestamp without time zone": "timestamp", "timestamp_ntz": "timestamp",
+    "timestamp with time zone": "timestamptz", "timestamptz": "timestamptz",
+    "timestamp_ltz": "timestamptz", "date": "date"}
+
+
+@dataclass(frozen=True)
+class Bulk:
+    """A dialect's bulk way: `kind` is `client`, `landing` or `tool`
+    (`decide.dialect_bulk`); `sql` the statement, over `{table}`,
+    `{columns}` and `{where}` - the file on this machine (`client`, `tool`)
+    or the landed object's address (`landing`)."""
+    kind: str
+    sql: str
+    tool: str = ""
+
+
+@dataclass(frozen=True)
+class Dialect:
+    name: str
+    title: str
+    #: the driver's module, and what installs it
+    driver: str
+    pip: str
+    port: int
+    #: opens the driver's connection: f(module, host, port, user, password,
+    #: database)
+    connect: object
+    #: how a name is written: its quote, and how an unquoted name folds
+    #: (`upper`, or "" where it is kept as written)
+    quote_mark: str = '"'
+    fold: str = ""
+    #: how a read is limited: `limit` (a trailing LIMIT n OFFSET m), `first`
+    #: (SELECT FIRST n) or `top` (SELECT TOP n)
+    paging: str = "limit"
+    types: tuple = ()
+    #: the catalogue's questions, `{schema}` and `{table}` as literals: the
+    #: base tables, a table's columns as (name, declared type, datetime
+    #: precision, numeric precision, numeric scale), the columns the table's
+    #: primary key holds, the session's schema, and whether the account may
+    #: run the bulk way (a count above zero)
+    tables_sql: str = ""
+    columns_sql: str = ""
+    unique_sql: str = ""
+    schema_sql: str = ""
+    schema_default: str = ""
+    may_sql: str = ""
+    system_schemas: tuple = ()
+    bulk: object = None
+    #: why a dialect has no bulk way a client reaches
+    no_bulk: str = ""
+
+    # ---- names, paging and types, as `conn.dialect` -----------------------
+
+    def stored(self, name):
+        """The name as the catalogue holds it: an unquoted lower-case name
+        folds to capitals where the dialect folds."""
+        name = str(name)
+        return name.upper() if self.fold == "upper" and \
+            name == name.lower() else name
+
+    def quote(self, name):
+        mark = self.quote_mark
+        return mark + self.stored(name).replace(mark, mark * 2) + mark
+
+    def offset_limit(self, offset=None, limit=None):
+        """The trailing clause of a read limited to `limit` rows after
+        `offset`; "" for a dialect that limits in front (`page`)."""
+        if self.paging != "limit":
+            return ""
+        return (f"LIMIT {int(limit)}" if limit is not None else "") + \
+            (f" OFFSET {int(offset)}" if offset else "")
+
+    def page(self, select, offset=None, limit=None):
+        """`select` ("SELECT cols FROM t ...") limited in this dialect's
+        way."""
+        if limit is None and not offset:
+            return select
+        if self.paging == "limit":
+            return f"{select} {self.offset_limit(offset, limit)}"
+        word = "FIRST" if self.paging == "first" else "TOP"
+        skip = f"SKIP {int(offset)} " if offset and self.paging == "first" \
+            else ""
+        head, _, rest = select.partition(" ")
+        return f"{head} {skip}{word} {int(limit)} {rest}"
+
+    def kind_of(self, declared):
+        table = {**STANDARD_TYPES, **dict(self.types)}
+        base = re.sub(r"\(.*", "", str(declared)).strip().lower()
+        return table.get(base)
+
+    def parse_type(self, path, name, declared, dt_prec=None, num_prec=None,
+                   num_scale=None):
+        """The column's type as the classes every dialect shares."""
+        from sqeleton.abcs import database_types as t
+        kind = self.kind_of(declared)
+        sized = re.search(r"\((\d+)(?:\s*,\s*(-?\d+))?\)", str(declared))
+        if sized:
+            num_prec = num_prec if num_prec is not None else int(sized[1])
+            if num_scale is None and sized[2] is not None:
+                num_scale = int(sized[2])
+        if kind == "integer":
+            return t.Integer()
+        if kind == "decimal":
+            return t.Decimal(precision=num_scale or 0)
+        if kind == "float":
+            return t.Float(precision=15)
+        if kind == "text":
+            return t.Text()
+        if kind == "boolean":
+            return t.Boolean()
+        if kind in ("timestamp", "timestamptz", "date"):
+            cls = {"timestamp": t.Timestamp, "timestamptz": t.TimestampTZ,
+                   "date": t.Date}[kind]
+            return cls(precision=dt_prec if dt_prec is not None else 6,
+                       rounds=False)
+        return t.UnknownColType(str(declared))
+
+    # ---- opening a side ----------------------------------------------------
+
+    def load_driver(self):
+        """The driver's module, or a stop naming the one missing."""
+        import importlib
+        try:
+            return importlib.import_module(self.driver)
+        except ImportError:
+            raise SystemExit(
+                f"{self.title} needs its Python driver, `{self.pip}`, and"
+                f" it is not installed: pip install {self.pip}. Nothing was"
+                " read") from None
+
+    def open(self, url, side):
+        """A `DialectConnection` on the address `url`."""
+        from urllib.parse import unquote, urlsplit
+        module = self.load_driver()
+        parts = urlsplit(url)
+        try:
+            raw = self.connect(module, parts.hostname or "",
+                               parts.port or self.port,
+                               unquote(parts.username or ""),
+                               unquote(parts.password or ""),
+                               (parts.path or "").lstrip("/"))
+        except Exception as e:  # noqa: BLE001 - said, not raised raw
+            raise SystemExit(
+                f"cannot open the {side} {self.title} address:"
+                f" {(str(e).splitlines() or [''])[-1][:160]}")
+        return DialectConnection(self, raw)
+
+
+def _literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+class DialectConnection:
+    """A driver's connection answering what the generic engine asks of one:
+    statements, the catalogue's tables and columns, a table's name, and the
+    dialect that writes a name, a type and a page."""
+
+    def __init__(self, dialect, raw):
+        self.dialect = dialect
+        self._conn = raw
+        self._schema = None
+
+    @property
+    def default_schema(self):
+        if self._schema is None:
+            self._schema = self.dialect.schema_default
+            if self.dialect.schema_sql:
+                try:
+                    got = self.query(self.dialect.schema_sql, list)
+                    self._schema = str(got[0][0]).strip() if got and \
+                        got[0][0] else self._schema
+                except Exception:  # noqa: BLE001 - the dialect's default
+                    pass
+        return self._schema or None
+
+    def parse_table_name(self, name):
+        return tuple(p.strip(self.dialect.quote_mark)
+                     for p in str(name).split("."))
+
+    def query(self, sql, kind=None):
+        """The statement's rows (`list`), or None for one that returns
+        none; a statement that writes is committed by `commit`."""
+        cur = self._conn.cursor()
+        try:
+            cur.execute(sql)
+            if kind is list or cur.description:
+                return [tuple(r) for r in cur.fetchall()]
+            return None
+        finally:
+            cur.close()
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+    def _names(self, path):
+        schema, table = (path if len(path) > 1 else (None, path[0]))[-2:]
+        return {"schema": _literal(self.dialect.stored(schema))
+                if schema else "NULL",
+                "table": _literal(self.dialect.stored(table))}
+
+    def select_table_schema(self, path):
+        return self.dialect.columns_sql.format(**self._names(path))
+
+    def query_table_schema(self, path):
+        """{column: (name, declared type, datetime precision, numeric
+        precision, numeric scale)}, in the table's column order."""
+        return {str(r[0]): tuple(r[:5]) for r in
+                self.query(self.select_table_schema(path), list)}
+
+    def _process_table_schema(self, path, raw):
+        return {row[0]: self.dialect.parse_type(path, *row)
+                for row in raw.values()}
+
+    def query_table_unique_columns(self, path):
+        if not self.dialect.unique_sql:
+            return []
+        return [str(r[0]) for r in self.query(
+            self.dialect.unique_sql.format(**self._names(path)), list)]
+
+
+def _hdb(m, host, port, user, password, db):
+    return m.connect(address=host, port=port, user=user, password=password)
+
+
+def _nz(m, host, port, user, password, db):
+    return m.connect(user=user, password=password, host=host, port=port,
+                     database=db)
+
+
+def _vertica(m, host, port, user, password, db):
+    return m.connect(host=host, port=port, user=user, password=password,
+                     database=db)
+
+
+def _exasol(m, host, port, user, password, db):
+    return m.connect(dsn=f"{host}:{port}", user=user, password=password,
+                     schema=db or "")
+
+
+def _informix(m, host, port, user, password, db):
+    return m.connect(f"SERVER={db.split('/')[0]};DATABASE="
+                     f"{db.split('/')[-1]};HOST={host};SERVICE={port};"
+                     f"UID={user};PWD={password};")
+
+
+def _openedge(m, host, port, user, password, db):
+    return m.connect(f"DRIVER={{Progress OpenEdge Wire Protocol}};HOST="
+                     f"{host};PORT={port};DB={db};UID={user};PWD={password}")
+
+
+def _databricks(m, host, port, user, password, db):
+    return m.connect(server_hostname=host, http_path="/" + db,
+                     access_token=password)
+
+
+#: the seven dialects, one row each
+DIALECTS = {d.name: d for d in (
+    Dialect(
+        "netezza", "Netezza", "nzpy", "nzpy", 5480, _nz, fold="upper",
+        types=(("byteint", "integer"), ("nvarchar", "text")),
+        tables_sql="SELECT schema, tablename FROM _V_TABLE WHERE objtype ="
+                   " 'TABLE'",
+        columns_sql="SELECT attname, format_type, NULL, NULL, NULL FROM"
+                    " _V_RELATION_COLUMN WHERE schema = {schema} AND name ="
+                    " {table} ORDER BY attnum",
+        unique_sql="SELECT attname FROM _V_RELATION_KEYDATA WHERE schema ="
+                   " {schema} AND relation = {table} AND contype = 'p'",
+        schema_sql="SELECT CURRENT_SCHEMA",
+        system_schemas=("definition_schema", "information_schema"),
+        bulk=Bulk("client", "INSERT INTO {table} ({columns}) SELECT * FROM"
+                            " EXTERNAL '{where}' USING (REMOTESOURCE"
+                            " 'python' DELIMITER ',' NULLVALUE '\\N'"
+                            " ESCAPECHAR '\\')")),
+    Dialect(
+        "saphana", "SAP HANA", "hdbcli.dbapi", "hdbcli", 30015, _hdb,
+        fold="upper", types=(("seconddate", "timestamp"),
+                             ("nvarchar", "text"), ("alphanum", "text")),
+        tables_sql="SELECT schema_name, table_name FROM SYS.TABLES WHERE"
+                   " is_user_defined_type = 'FALSE' AND is_temporary ="
+                   " 'FALSE'",
+        columns_sql="SELECT column_name, data_type_name, NULL, length, scale"
+                    " FROM SYS.TABLE_COLUMNS WHERE schema_name = {schema} AND"
+                    " table_name = {table} ORDER BY position",
+        unique_sql="SELECT column_name FROM SYS.CONSTRAINTS WHERE schema_name"
+                   " = {schema} AND table_name = {table} AND is_primary_key ="
+                   " 'TRUE'",
+        schema_sql="SELECT CURRENT_SCHEMA FROM DUMMY",
+        may_sql="SELECT COUNT(*) FROM SYS.EFFECTIVE_PRIVILEGES WHERE"
+                " user_name = CURRENT_USER AND privilege = 'IMPORT'",
+        system_schemas=("sys", "_sys_bi", "_sys_repo", "_sys_statistics",
+                        "_sys_xs", "hdb_catalog", "sap_hana_ems"),
+        bulk=Bulk("landing", "IMPORT FROM CSV FILE '{where}' INTO {table}"
+                             " WITH RECORD DELIMITED BY '\\n' FIELD"
+                             " DELIMITED BY ',' OPTIONALLY ENCLOSED BY '\"'"
+                             " ERROR LOG '{where}.err'")),
+    Dialect(
+        "informix", "Informix", "IfxPyDbi", "IfxPy", 9088, _informix,
+        paging="first",
+        types=(("0", "text"), ("1", "integer"), ("2", "integer"),
+               ("3", "float"), ("4", "float"), ("5", "decimal"),
+               ("6", "integer"), ("7", "date"), ("8", "decimal"),
+               ("10", "timestamp"), ("13", "text"), ("15", "text"),
+               ("16", "text"), ("17", "integer"), ("18", "integer"),
+               ("45", "boolean"), ("52", "integer"), ("53", "integer")),
+        tables_sql="SELECT TRIM(owner), tabname FROM systables WHERE tabtype"
+                   " = 'T' AND tabid >= 100",
+        columns_sql="SELECT c.colname, MOD(c.coltype, 256), NULL,"
+                    " c.collength, NULL FROM syscolumns c JOIN systables t ON"
+                    " t.tabid = c.tabid WHERE TRIM(t.owner) = {schema} AND"
+                    " t.tabname = {table} ORDER BY c.colno",
+        unique_sql="SELECT c.colname FROM sysconstraints k JOIN systables t"
+                   " ON t.tabid = k.tabid JOIN sysindexes i ON i.tabid ="
+                   " k.tabid AND i.idxname = k.idxname JOIN syscolumns c ON"
+                   " c.tabid = i.tabid AND c.colno = ABS(i.part1) WHERE"
+                   " k.constrtype = 'P' AND TRIM(t.owner) = {schema} AND"
+                   " t.tabname = {table}",
+        may_sql="SELECT COUNT(*) FROM sysusers WHERE usertype IN ('D', 'R')"
+                " AND username = USER",
+        system_schemas=("informix",),
+        bulk=Bulk("tool", "LOAD FROM '{where}' DELIMITER ',' INSERT INTO"
+                          " {table} ({columns})", tool="dbaccess")),
+    Dialect(
+        "progress", "Progress OpenEdge", "pyodbc", "pyodbc", 20931,
+        _openedge, fold="upper", paging="top", schema_default="PUB",
+        tables_sql="SELECT owner, tbl FROM sysprogress.systables WHERE"
+                   " tbltype = 'T'",
+        columns_sql="SELECT col, coltype, NULL, width, scale FROM"
+                    " sysprogress.syscolumns WHERE owner = {schema} AND tbl ="
+                    " {table} ORDER BY id",
+        system_schemas=("sysprogress",),
+        no_bulk="OpenEdge SQL has no bulk loader a client reaches"),
+    Dialect(
+        "vertica", "Vertica", "vertica_python", "vertica-python", 5433,
+        _vertica, types=(("long varchar", "text"), ("int8", "integer"),
+                         ("float8", "float"), ("numeric", "decimal")),
+        tables_sql="SELECT table_schema, table_name FROM v_catalog.tables",
+        columns_sql="SELECT column_name, data_type, datetime_precision,"
+                    " numeric_precision, numeric_scale FROM"
+                    " v_catalog.columns WHERE table_schema = {schema} AND"
+                    " table_name = {table} ORDER BY ordinal_position",
+        unique_sql="SELECT column_name FROM v_catalog.primary_keys WHERE"
+                   " table_schema = {schema} AND table_name = {table}",
+        schema_sql="SELECT CURRENT_SCHEMA()",
+        may_sql="SELECT COUNT(*) FROM v_catalog.table_privileges WHERE"
+                " grantee = CURRENT_USER() AND privileges_description LIKE"
+                " '%INSERT%'",
+        system_schemas=("v_catalog", "v_monitor", "v_internal"),
+        bulk=Bulk("client", "COPY {table} ({columns}) FROM LOCAL '{where}'"
+                            " DELIMITER ',' NULL '\\N' ENCLOSED BY '\"'"
+                            " REJECTMAX 0 ABORT ON ERROR")),
+    Dialect(
+        "exasol", "Exasol", "pyexasol.db2", "pyexasol", 8563, _exasol,
+        fold="upper", types=(("decimal", "decimal"),
+                             ("timestamp with local time zone",
+                              "timestamptz")),
+        tables_sql="SELECT table_schema, table_name FROM SYS.EXA_ALL_TABLES",
+        columns_sql="SELECT column_name, column_type, NULL, column_num_prec,"
+                    " column_num_scale FROM SYS.EXA_ALL_COLUMNS WHERE"
+                    " column_schema = {schema} AND column_table = {table}"
+                    " ORDER BY column_ordinal_position",
+        unique_sql="SELECT column_name FROM SYS.EXA_ALL_CONSTRAINT_COLUMNS"
+                   " WHERE constraint_schema = {schema} AND constraint_table"
+                   " = {table} AND constraint_type = 'PRIMARY KEY'",
+        schema_sql="SELECT CURRENT_SCHEMA",
+        may_sql="SELECT COUNT(*) FROM SYS.EXA_ALL_OBJ_PRIVS WHERE grantee ="
+                " CURRENT_USER AND privilege = 'INSERT'",
+        system_schemas=("sys", "exa_statistics"),
+        bulk=Bulk("landing", "IMPORT INTO {table} ({columns}) FROM CSV AT"
+                             " '{where}' COLUMN SEPARATOR = ',' COLUMN"
+                             " DELIMITER = '\"' NULL = '\\N' REJECT LIMIT 0")),
+    Dialect(
+        "databricks", "Databricks", "databricks.sql", "databricks-sql-connector",
+        443, _databricks, quote_mark="`",
+        types=(("tinyint", "integer"), ("timestamp_ntz", "timestamp"),
+               ("string", "text")),
+        tables_sql="SELECT table_schema, table_name FROM"
+                   " information_schema.tables WHERE table_type IN"
+                   " ('MANAGED', 'EXTERNAL', 'BASE TABLE')",
+        columns_sql="SELECT column_name, data_type, datetime_precision,"
+                    " numeric_precision, numeric_scale FROM"
+                    " information_schema.columns WHERE table_schema ="
+                    " {schema} AND table_name = {table} ORDER BY"
+                    " ordinal_position",
+        unique_sql="SELECT k.column_name FROM"
+                   " information_schema.key_column_usage k JOIN"
+                   " information_schema.table_constraints c ON"
+                   " c.constraint_name = k.constraint_name AND"
+                   " c.table_schema = k.table_schema AND c.table_name ="
+                   " k.table_name WHERE c.constraint_type = 'PRIMARY KEY' AND"
+                   " k.table_schema = {schema} AND k.table_name = {table}",
+        schema_sql="SELECT current_schema()",
+        may_sql="SELECT COUNT(*) FROM information_schema.table_privileges"
+                " WHERE grantee = current_user() AND privilege_type ="
+                " 'MODIFY'",
+        system_schemas=("information_schema",),
+        bulk=Bulk("landing", "COPY INTO {table} FROM '{where}' FILEFORMAT ="
+                             " CSV FORMAT_OPTIONS ('nullValue' = '\\\\N',"
+                             " 'quote' = '\"', 'escape' = '\"')")),
+)}
+
+
+#: why the dialects' ways are owed a run (P0-PARITY.small, W5): each is
+#: written from its vendor's documented catalogue and statements and run
+#: against a driver stand-in, never a real server
+UNPROVED_ON = ("built; not run on a real Netezza, SAP HANA, Informix,"
+               " OpenEdge, Vertica, Exasol or Databricks server")
+#: the cells built here and run against no such server
+UNPROVED_ITEMS = (
+    "assess.engine-checks",
+    "move.table-copy",
+    "scope.copy",
+    "scope.deep",
+    "scope.listings",
+    "scope.names",
+    "scope.objects",
+    "scope.ops",
+    "scope.repair",
+    "scope.row-filter",
+    "scope.transforms",
+    "tail.follows",
+    "verify.confirm",
+    "verify.delta",
+    "verify.fence",
+    "verify.repair",
+    "verify.structure.foreign-keys",
+    "verify.structure.indexes",
+    "verify.structure.keys",
+    "verify.structure.objects",
+    "verify.value.null-empty",
+)
+
+
+class DialectEngine(GenericEngine):
+    """A SQL source that is a dialect of the generic engine: its connection
+    is the driver's, its names, types, pages and catalogue are the row of
+    `DIALECTS` its subclass names, and a table goes in by its bulk way where
+    the climb (`decide.dialect_bulk`) finds one that holds."""
+    #: the dialect's row in `DIALECTS`
+    DIALECT = ""
+
+    def _dialect(self):
+        return DIALECTS[self.DIALECT]
+
+    @property
+    def CATALOGUE_TABLES(self):  # noqa: N802 - the generic engine's name
+        return self._dialect().tables_sql
+
+    @property
+    def SYSTEM_SCHEMAS(self):  # noqa: N802 - the generic engine's name
+        return GenericEngine.SYSTEM_SCHEMAS | frozenset(
+            self._dialect().system_schemas)
+
+    def _connect(self, side):
+        if not hasattr(self, "_conns"):
+            self._conns = {}
+        if side not in self._conns:
+            self._conns[side] = self._dialect().open(self._url(side), side)
+        return self._conns[side]
+
+    def _apply_rows_borrowed(self, db, action):
+        """A repair writes through the query builder of the library the
+        generic engine borrows its connection from, which a dialect's own
+        connection does not carry: refused with the reason, nothing
+        written, never half done."""
+        raise SystemExit(
+            f"{db}: a repair of rows on {self._dialect().title} is not"
+            " written yet: the rows that differ are reported, and nothing"
+            " was changed")
+
+    # ---- the bulk way ----------------------------------------------------
+
+    def _landing(self):
+        return (self.hop.target.options or {}).get("stage") or ""
+
+    def _count(self, side, table):
+        conn = self._connect(side)
+        return int(conn.query(f"SELECT count(*) FROM {self._from(conn, table)}",
+                              list)[0][0])
+
+    def _may_bulk(self):
+        """Whether the target's account may run the bulk way: True, False,
+        or None where the dialect's grants were not read."""
+        sql = self._dialect().may_sql
+        if not sql:
+            return None
+        try:
+            return bool(self._connect("dst").query(sql, list)[0][0])
+        except Exception:  # noqa: BLE001 - not read: said as not read
+            return None
+
+    def bulk_way(self, table, log=None):
+        """The `Choice` for loading `table`, every need a fact asked of the
+        hop, this machine and the servers."""
+        from .. import decide
+        from ..util import which
+        from . import analyticdb
+        row = self._dialect()
+        way = row.bulk.kind if row.bulk else None
+        land = self._landing() if way == "landing" else ""
+        facts = {"way": way, "none_why": row.no_bulk, "landing": land,
+                 "writer": bool(land) and analyticdb.landing_writer(land),
+                 "streams": way == "client",
+                 "tool": bool(row.bulk and row.bulk.tool
+                              and which(row.bulk.tool)),
+                 "may": None, "rows": None, "empty": None}
+        if way and (way != "landing" or facts["writer"]) and \
+                (way != "tool" or facts["tool"]):
+            facts["may"] = self._may_bulk()
+            if facts["may"]:
+                facts["rows"] = self._count("src", table)
+                facts["empty"] = not self._count("dst", self._on("dst", table))
+        choice = decide.dialect_bulk(facts)
+        decide.record(self.hop, choice, log, work=f"the load of {table}",
+                      way=choice.said, reason=choice.reason)
+        return choice
+
+    def _bulk_statement(self, table, columns, where):
+        conn = self._connect("dst")
+        return self._dialect().bulk.sql.format(
+            table=self._from(conn, self._on("dst", table)), where=where,
+            columns=", ".join(conn.dialect.quote(c) for c in columns))
+
+    def _land_source(self, table, columns, kind):
+        """The source's rows as one CSV: an object in the landing store
+        (`landing`: its address), a file on this machine otherwise."""
+        import csv
+        import tempfile
+
+        from . import analyticdb
+        rows = self._side_rows("src", table, columns)
+        if kind == "landing":
+            return analyticdb.land_csv(self._landing(), table.replace(
+                ".", "_"), rows, self.hop.target.options or {}), len(rows)
+        with tempfile.NamedTemporaryFile(
+                "w", newline="", suffix=".csv", delete=False) as fh:
+            out = csv.writer(fh, lineterminator="\n")
+            for r in rows:
+                out.writerow([analyticdb.landing_text(v) for v in r])
+        return fh.name, len(rows)
+
+    def _run_bulk(self, kind, statement):
+        conn = self._connect("dst")
+        if kind == "tool":
+            import subprocess
+            tool = self._dialect().bulk.tool
+            done = subprocess.run([tool, self._url("dst").rsplit("/", 1)[-1],
+                                   "-"], input=statement, text=True,
+                                  capture_output=True)
+            if done.returncode:
+                raise SystemExit("the bulk load failed:"
+                                 f" {(done.stderr or '').strip()[-160:]}")
+            return
+        conn.query(statement)
+        conn.commit()
+
+    def move_table(self, db, sch, tbl, chunk, ck, log):
+        """The table by the dialect's bulk way where the climb takes one,
+        the generic copier otherwise. The bulk way loads an empty table in
+        one statement and the rows landed are counted against the source's
+        before the table is marked done: a load cut off leaves the target
+        not empty, so the next run's copier reconciles it by key and never
+        loads the rows twice."""
+        import os
+        table = f"{sch}.{tbl}" if sch else tbl
+        choice = self.bulk_way(table, log)
+        if choice.path in (None, "copier"):
+            return super().move_table(db, sch, tbl, chunk, ck, log)
+        st = ck.setdefault(self.move_key(db, sch, tbl), {})
+        if st.get("done"):
+            return None
+        columns = self._copy_columns(table)
+        where, rows = self._land_source(table, columns, choice.path)
+        try:
+            self._run_bulk(choice.path, self._bulk_statement(
+                table, columns, where))
+            landed = self._count("dst", self._on("dst", table))
+        finally:
+            if choice.path != "landing":
+                os.unlink(where)
+            self._close()
+        if landed != rows:
+            raise SystemExit(f"{table}: the bulk load left {landed} rows on"
+                             f" the target for {rows} on the source; the"
+                             " table is not marked done and the next run"
+                             " reconciles it by key")
+        st["done"], st["rows"] = True, rows
+        ck.save()
+        if log:
+            log(f"{table}: {rows} rows loaded by the {choice.path} bulk way")
+        return None
+
+
+class NetezzaEngine(DialectEngine):
+    DIALECT = "netezza"
+
+
+class SapHanaEngine(DialectEngine):
+    DIALECT = "saphana"
+
+
+class InformixEngine(DialectEngine):
+    DIALECT = "informix"
+
+
+class ProgressEngine(DialectEngine):
+    DIALECT = "progress"
+
+
+class VerticaEngine(DialectEngine):
+    DIALECT = "vertica"
+
+
+class ExasolEngine(DialectEngine):
+    DIALECT = "exasol"
+
+
+class DatabricksEngine(DialectEngine):
+    DIALECT = "databricks"

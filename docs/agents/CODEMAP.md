@@ -220,7 +220,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/engines/db2_log.py` - A Db2 (LUW) source's changes read from its own log, through the log-read API the data server client documents (backlog LT.R6) - the reader ` Classes: Refused, Api, NotRead.
 - `migkit/engines/db2i.py` - Db2 for i (IBM i) as one side of a pair, and a source whose changes are followed through its journal (backlog 34, W5). Classes: Reread, Image, Db2iEngine.
 - `migkit/engines/db2zos.py` - Db2 for z/OS as one side of a pair (backlog 34, W5), through `ibm_db`. Classes: Db2ZosEngine.
-- `migkit/engines/dbapi.py` - Rows read and written through a DB-API driver, rendered in this process. Classes: DbapiRows, FoldsToCapitals.
+- `migkit/engines/dbapi.py` - Rows read and written through a DB-API driver, rendered in this process. Classes: DbapiRows, FoldsToCapitals, Bulk, Dialect, DialectConnection, DialectEngine.
 - `migkit/engines/distmysql.py` - Distributed databases on MySQL's wire as sides of a pair (backlog P0-CLOUDS): Alibaba PolarDB-X and Tencent TDSQL (distributed), and the bas Classes: OnMySQLWire, PolarDBXEngine, TdsqlEngine.
 - `migkit/engines/dsql.py` - Aurora DSQL as a side of a pair (backlog ER4), over PostgreSQL's wire. Classes: DsqlEngine.
 - `migkit/engines/duckdb.py` - DuckDB as one side of a pair (backlog R15), through its own library. Classes: DuckDBEngine.

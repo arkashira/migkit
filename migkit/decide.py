@@ -6366,3 +6366,76 @@ def quiet_way(facts):
                          "the user may not set session_replication_role"),),
              because="no change to any table")),
         f, prove=False)
+
+def dialect_bulk(facts, costs=None):
+    """How a table is loaded into a SQL source that is a dialect of the
+    generic engine (`engines.dbapi.DIALECTS`): by its own bulk way, or by
+    the table copier through its driver. `facts`: `way` (the kind of bulk
+    way the dialect has: `client` - a statement the driver runs over a file
+    on this machine, `landing` - a statement the server runs over an object
+    store it reads, `tool` - a statement its own command-line client runs;
+    None: it has none, `none_why` says so), `streams` (the driver is loaded
+    and takes the client way), `landing` and `writer` (the side names a
+    landing store and this machine can write it), `tool` (the client
+    program is on this machine), `may` (the target's account may run the
+    way; None: not read), `rows` (the table's rows; None: not read) and
+    `empty` (the target table holds no rows, so a repeat of an interrupted
+    load cannot double them). Every need is a fact the hop, the machine or
+    the server answered, never assumed: where one does not hold the table
+    copier takes the table and says why."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def only(kind):
+        return Need(f"the dialect's {kind} bulk way",
+                    lambda x, k=kind: x.get("way") == k,
+                    lambda x, k=kind: (x.get("none_why") or "the dialect"
+                                       " has no bulk way a client reaches")
+                    if not x.get("way") else f"the dialect's bulk way is"
+                    f" not a {k} one")
+
+    shared = (Need("the target's account allowed the way",
+                   lambda x: x.get("may") is True,
+                   lambda x: "the target's grants were not read" if
+                   x.get("may") is None else "the target's account may not"
+                   " run the dialect's bulk way"),
+              Need("rows to load", lambda x: (x.get("rows") or 0) > 0,
+                   "the table holds no rows to load"),
+              Need("the target table empty",
+                   lambda x: x.get("empty") is True,
+                   "the target table holds rows already: a load could"
+                   " write them twice, so they are reconciled by key"))
+    return climb("how a table is loaded into the dialect's target", (
+        Rung("client", "the dialect's bulk statement over a file the"
+             " driver sends from this machine",
+             needs=(only("client"),
+                    Need("a driver that takes the way",
+                         lambda x: bool(x.get("streams")),
+                         "the driver is not loaded")) + shared,
+             because="the server reads the rows in one statement, where the"
+                     " table copier sends them batch by batch"),
+        Rung("landing", "the dialect's bulk statement over the landing"
+             " store",
+             needs=(only("landing"),
+                    Need("a landing store named",
+                         lambda x: bool(x.get("landing")),
+                         "no landing store is named for the target"
+                         " (`stage:`)"),
+                    Need("a writer for the landing store here",
+                         lambda x: bool(x.get("writer")),
+                         lambda x: f"nothing here writes {x.get('landing')}"
+                         )) + shared,
+             because="the server's nodes read the landed file in parallel,"
+                     " where the table copier writes through one front"
+                     " end"),
+        Rung("tool", "the dialect's bulk statement run by its command-line"
+             " client over a file on this machine",
+             needs=(only("tool"),
+                    Need("the dialect's command-line client here",
+                         lambda x: bool(x.get("tool")),
+                         "its command-line client is not on this machine"))
+             + shared,
+             because="the client sends the file in one statement"),
+        Rung("copier", "the table copier through the driver, by key ranges,"
+             " resumably", footprint=1,
+             because="the first way that holds")),
+        f, costs=costs or None, prove=False)
