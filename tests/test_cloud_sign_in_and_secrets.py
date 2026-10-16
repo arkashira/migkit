@@ -57,7 +57,7 @@ def test_an_iam_endpoint_signs_a_token_and_makes_it_again(
 
 
 def test_an_auth_it_does_not_know_is_refused(tmp_path, monkeypatch):
-    with pytest.raises(SystemExit, match="password .the default. or aws_iam"):
+    with pytest.raises(SystemExit, match="password.*aws_iam.*cloudsql_iam"):
         _hop(tmp_path, monkeypatch,
              "{host: h, user: u, options: {auth: kerberos}}")
 

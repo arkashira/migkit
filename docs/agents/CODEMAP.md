@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (174 modules)
+## `migkit/` (175 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -54,6 +54,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/checkpoint.py` - Make a long verify restartable. Classes: Checkpoint, Rate.
 - `migkit/claims.py` - One table across machines: its ranges handed out through one record each machine writes only over the version it read (backlog W1; R5 looked Classes: Lost, Table.
 - `migkit/cli.py` - (no docstring)
+- `migkit/cloud_readiness.py` - The cloud side of readiness, audited before the move (backlog R25.2).
 - `migkit/cloudapi.py` - What a managed database's provider says and does about it, asked through that provider's own API (backlog P0-SCENARIOS): the facts of the in Classes: NotOffered, Param, Instance, RestorePoint, Adapter, Operation.
 - `migkit/clouds.py` - Which cloud runs a side, and how that cloud spells a change to it. Classes: Where.
 - `migkit/cloudseed.py` - What only a cloud's control plane can do, driven through its API (backlog R19 lever 1; the owner's "structural four", 2026-09-28): the targe Classes: Aws, Azure, Google, ByApi.

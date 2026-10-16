@@ -5768,3 +5768,412 @@ def _register():
 
 
 _register()
+
+
+# --- the cloud's own sign-in (backlog 38.real) ---------------------------------
+#
+# A side whose `auth` names the cloud's own sign-in (`config.IamEndpoint`)
+# is given a token minted the way its provider documents: the RDS signer's
+# presigned `connect` (15 minutes), an OAuth2 access token for the
+# `sqlservice.login` scope (Cloud SQL's IAM users; the token's own
+# `expires_in`), a managed identity's token for the database audience (the
+# answer's `expires_on`). Where it is minted from is `decide.cloud_sign_in`
+# on what this machine has; when it is minted again `decide.token_renew`.
+# Every mint asks the egress gate's `provider` kind first and is refused,
+# saying what to do instead, where the gate says no. A token is a secret:
+# it is in no repr, error or log (`Token`, `held_secrets`).
+
+#: each sign-in in an operator's words - no provider named
+SIGN_IN = {"aws_iam": "the token the cloud signs for the database user",
+           "cloudsql_iam": "the cloud's access token for the database user",
+           "azure_managed_identity": "the managed identity's token"}
+#: seconds an RDS token opens connections for, as documented
+RDS_LIFETIME = 900
+_GOOGLE_SCOPE = "https://www.googleapis.com/auth/sqlservice.login"
+_GOOGLE_METADATA = ("http://metadata.google.internal/computeMetadata/v1/"
+                    "instance/service-accounts/default/token")
+_AZURE_METADATA = "http://169.254.169.254/metadata/identity/oauth2/token"
+#: the audience a managed identity's token is asked for, by engine
+_AZURE_AUDIENCE = {"mssql": "https://database.windows.net/"}
+_AZURE_DATABASE = "https://ossrdbms-aad.database.windows.net"
+
+
+class Token:
+    """One minted token: its value, the time it ends, the rung it came
+    from and the seconds its mint took - the value in no repr."""
+    __slots__ = ("value", "expires", "way", "took", "lifetime")
+
+    def __init__(self, value, expires, way, took=0.0, lifetime=0.0):
+        self.value, self.expires, self.way = str(value), float(expires), way
+        self.took, self.lifetime = float(took), float(lifetime)
+
+    def __repr__(self):
+        return f"Token(way={self.way!r}, ends in {self.lifetime:.0f}s)"
+
+    __str__ = __repr__
+
+
+class SignInRefused(SystemExit):
+    """No token was minted, and why, with what to do instead."""
+
+
+#: seconds each mint of this process took, by sign-in: what
+#: `decide.token_renew` reads
+MINTS = {}
+
+
+def _clock():
+    return time.time()
+
+
+def _http(url, headers=None, timeout=None):
+    """The JSON an identity endpoint answers: the one place a sign-in
+    calls out over HTTP (a stand-in answers it in the tests). The wait is
+    the egress probe's own bound."""
+    import urllib.request
+    req = urllib.request.Request(url, headers=dict(headers or {}))
+    with urllib.request.urlopen(req, timeout=timeout or 5) as got:
+        return json.loads(got.read().decode())
+
+
+def _installed(module):
+    import importlib.util
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _metadata_answers(kind):
+    """Whether the instance metadata endpoint of the cloud `kind` belongs
+    to answers here: one bounded connect, nothing sent."""
+    import socket
+    host = ("metadata.google.internal" if kind == "cloudsql_iam" else
+            "169.254.169.254")
+    try:
+        socket.create_connection((host, 80), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+
+def sign_in_facts(kind, env=None):
+    """What `decide.cloud_sign_in` reads for `kind`, from this machine."""
+    env = os.environ if env is None else env
+    if kind == "aws_iam":
+        return {"kind": kind, "sdk": _installed("botocore"),
+                "credentials": True}
+    if kind == "cloudsql_iam":
+        adc = Path.home() / ".config/gcloud/application_default_credentials.json"
+        sdk = _installed("google.auth")
+        creds = bool(env.get("GOOGLE_APPLICATION_CREDENTIALS")) or adc.exists()
+        return {"kind": kind, "sdk": sdk, "credentials": creds,
+                "metadata": (not (sdk and creds)
+                             and _metadata_answers(kind))}
+    sdk = _installed("azure.identity")
+    endpoint = bool(env.get("IDENTITY_ENDPOINT") and env.get("IDENTITY_HEADER"))
+    creds = bool(env.get("AZURE_CLIENT_ID") and (
+        env.get("AZURE_FEDERATED_TOKEN_FILE") or env.get("AZURE_CLIENT_SECRET")))
+    return {"kind": kind, "sdk": sdk, "credentials": creds,
+            "identity endpoint": endpoint,
+            "metadata": (not endpoint and not (sdk and creds)
+                         and _metadata_answers(kind))}
+
+
+def _refusal(kind, why):
+    return SignInRefused(
+        f"{SIGN_IN.get(kind, 'the sign-in')} is not minted: {why}. Next:"
+        " let calls to the cloud provider's own API out (MIGKIT_EGRESS="
+        "provider, or `provider` in the hop's egress allow), or give the"
+        " side a password instead of the cloud's own sign-in")
+
+
+def _host_of(way, ep):
+    if way == "metadata":
+        return ("metadata.google.internal"
+                if ep.options.get("auth") == "cloudsql_iam"
+                else "169.254.169.254")
+    if way == "identity endpoint":
+        return _host(os.environ.get("IDENTITY_ENDPOINT", ""))
+    return None
+
+
+def sign_in(ep, hop=None, facts=None, log=None):
+    """A `Token` for the side `ep` (`config.IamEndpoint`), minted through
+    the rung `decide.cloud_sign_in` picks, after the egress gate let the
+    provider's API be called; `SignInRefused` where it did not, or where no
+    rung holds."""
+    from . import decide, egress
+    kind = str(ep.options.get("auth") or "")
+    if kind not in SIGN_IN:
+        raise SignInRefused(f"auth: {kind} is not the cloud's own sign-in")
+    ok, why = egress.decide(hop, "provider")
+    if not ok:
+        egress._refused(hop, "provider", why, log)
+        raise _refusal(kind, why)
+    choice = decide.cloud_sign_in(facts or sign_in_facts(kind))
+    if choice.rung is None:
+        raise SignInRefused(f"{SIGN_IN[kind]} cannot be minted here:"
+                            f" {choice.reason}. Next: install the"
+                            " provider's library or run where the cloud"
+                            " gives this machine an identity")
+    host = _host_of(choice.path, ep)
+    ok, why = egress.decide(hop, "provider", host=host)
+    if not ok:
+        egress._refused(hop, "provider", why, log)
+        raise _refusal(kind, why)
+    began = _clock()
+    try:
+        value, lifetime = _MINT[(kind, choice.path)](ep)
+    except SignInRefused:
+        raise
+    except Exception as e:  # noqa: BLE001 - said without what it held
+        raise SignInRefused(
+            f"{SIGN_IN[kind]} could not be minted through {choice.said}:"
+            f" {type(e).__name__}. Next: check the identity this machine"
+            " signs as is allowed to sign in as the side's user") from None
+    took = _clock() - began
+    MINTS.setdefault(kind, []).append(took)
+    now = _clock()
+    return Token(value, now + lifetime, choice.path, took, lifetime)
+
+
+def renew_due(tok):
+    """Whether `tok` is to be minted again before the next connect."""
+    from . import decide
+    margin, _ = decide.token_renew(tok.lifetime, MINTS.get(tok.way, ()))
+    return tok.expires - _clock() <= margin
+
+
+def _rds_token(ep):
+    from . import config
+    got = config._aws_client("rds", ep.options.get("aws_region"),
+                             ep.options.get("aws_role_arn"))
+    return got.generate_db_auth_token(
+        DBHostname=ep.host, Port=int(ep.port),
+        DBUsername=ep.user), RDS_LIFETIME
+
+
+def _google_chain(ep):
+    import google.auth
+    import google.auth.transport.requests
+    creds, _ = google.auth.default(scopes=[_GOOGLE_SCOPE])
+    creds.refresh(google.auth.transport.requests.Request())
+    end = getattr(creds, "expiry", None)
+    left = ((end.replace(tzinfo=datetime.timezone.utc).timestamp()
+             - _clock()) if end else 0.0)
+    return creds.token, left
+
+
+def _google_metadata(ep):
+    got = _http(f"{_GOOGLE_METADATA}?scopes={_GOOGLE_SCOPE}",
+                {"Metadata-Flavor": "Google"})
+    return got["access_token"], float(got["expires_in"])
+
+
+def _audience(ep):
+    return _AZURE_AUDIENCE.get(ep.__dict__.get("_engine"), _AZURE_DATABASE)
+
+
+def _azure_left(got):
+    if got.get("expires_on"):
+        return float(got["expires_on"]) - _clock()
+    return float(got.get("expires_in") or 0)
+
+
+def _azure_endpoint(ep):
+    from urllib.parse import quote
+    who = ep.options.get("azure_client_id")
+    got = _http(f"{os.environ['IDENTITY_ENDPOINT']}?api-version=2019-08-01"
+                f"&resource={quote(_audience(ep), safe='')}"
+                + (f"&client_id={quote(str(who))}" if who else ""),
+                {"X-IDENTITY-HEADER": os.environ["IDENTITY_HEADER"]})
+    return got["access_token"], _azure_left(got)
+
+
+def _azure_metadata(ep):
+    from urllib.parse import quote
+    who = ep.options.get("azure_client_id")
+    got = _http(f"{_AZURE_METADATA}?api-version=2018-02-01"
+                f"&resource={quote(_audience(ep), safe='')}"
+                + (f"&client_id={quote(str(who))}" if who else ""),
+                {"Metadata": "true"})
+    return got["access_token"], _azure_left(got)
+
+
+def _azure_chain(ep):
+    from azure.identity import DefaultAzureCredential
+    got = DefaultAzureCredential().get_token(
+        _audience(ep).rstrip("/") + "/.default")
+    return got.token, float(got.expires_on) - _clock()
+
+
+_MINT = {("aws_iam", "signer"): _rds_token,
+         ("cloudsql_iam", "chain"): _google_chain,
+         ("cloudsql_iam", "metadata"): _google_metadata,
+         ("azure_managed_identity", "chain"): _azure_chain,
+         ("azure_managed_identity", "identity endpoint"): _azure_endpoint,
+         ("azure_managed_identity", "metadata"): _azure_metadata}
+
+
+# --- the network a managed instance sits in (backlog R25.2) --------------------
+
+@dataclass
+class Network:
+    """What the provider's API says of where an instance sits and who may
+    reach it - what `cloud_readiness` audits. A list left None is one the
+    API was not read for (`unread` says why)."""
+    provider: str
+    id: str = ""
+    #: the network's own id and its address ranges
+    network: str = ""
+    cidrs: tuple = ()
+    #: {peer network id: its ranges} peered with it and active
+    peers: dict = field(default_factory=dict)
+    #: ((subnet id, free addresses), ...)
+    subnets: object = None
+    #: ((group, from range or "group:<id>", first port, last port), ...)
+    rules: object = None
+    port: object = None
+    #: ((what, when it applies: an ISO time or "" for the next window), ...)
+    pending: object = None
+    window: str = ""
+    restore_points: object = None
+    restore_kind: str = ""
+    unread: tuple = ()
+
+
+def network(a):
+    """The `Network` of the adapter's instance, through its provider's
+    API; `NotOffered` for a provider this does not read."""
+    got = _NETWORK.get(a.provider)
+    if got is None:
+        raise NotOffered(f"{a.WHO}'s network is not read here")
+    return got(a)
+
+
+def _aws_network(a):
+    if a.product != "rds":
+        raise NotOffered(f"{a.WHO}'s network is read for RDS and Aurora")
+    kind, it = a._rds()
+    inst = a._writer(it) if kind == "cluster" else it
+    group = inst.get("DBSubnetGroup") or {}
+    vpc = group.get("VpcId") or ""
+    out = Network("aws", a.id, network=vpc,
+                  port=(inst.get("Endpoint") or {}).get("Port")
+                  or it.get("Port"),
+                  window=str(inst.get("PreferredMaintenanceWindow") or ""),
+                  restore_kind="snapshot")
+    ec2, unread = a.client("ec2"), []
+    if vpc:
+        v = ec2.describe_vpcs(VpcIds=[vpc])["Vpcs"][0]
+        out.cidrs = tuple(dict.fromkeys(
+            [v.get("CidrBlock")] + [x.get("CidrBlock") for x in
+                                    v.get("CidrBlockAssociationSet") or ()
+                                    if x.get("CidrBlock")]))
+        for p in ec2.describe_vpc_peering_connections(Filters=[
+                {"Name": "status-code", "Values": ["active"]}]).get(
+                "VpcPeeringConnections") or ():
+            ends = (p.get("RequesterVpcInfo") or {},
+                    p.get("AccepterVpcInfo") or {})
+            for me, them in (ends, ends[::-1]):
+                if me.get("VpcId") == vpc and them.get("VpcId"):
+                    out.peers[them["VpcId"]] = tuple(
+                        [them.get("CidrBlock")] if them.get("CidrBlock")
+                        else ())
+    ids = [s.get("SubnetIdentifier") for s in group.get("Subnets") or ()]
+    if ids:
+        out.subnets = tuple(
+            (s["SubnetId"], int(s.get("AvailableIpAddressCount") or 0))
+            for s in ec2.describe_subnets(SubnetIds=ids)["Subnets"])
+    groups = [g["VpcSecurityGroupId"] for g in
+              inst.get("VpcSecurityGroups") or it.get("VpcSecurityGroups")
+              or () if g.get("Status", "active") == "active"]
+    if groups:
+        rules = []
+        for g in ec2.describe_security_groups(GroupIds=groups)[
+                "SecurityGroups"]:
+            for r in g.get("IpPermissions") or ():
+                every = r.get("IpProtocol") in ("-1", "all")
+                if not every and r.get("IpProtocol") not in ("tcp", "6"):
+                    continue
+                lo, hi = ((0, 65535) if every else
+                          (r.get("FromPort"), r.get("ToPort")))
+                for x in r.get("IpRanges") or ():
+                    rules.append((g["GroupId"], x["CidrIp"], lo, hi))
+                for x in r.get("UserIdGroupPairs") or ():
+                    rules.append((g["GroupId"], "group:" + x["GroupId"],
+                                  lo, hi))
+        out.rules = tuple(rules)
+    arn = inst.get("DBInstanceArn") or it.get("DBClusterArn")
+    try:
+        got = a.client().describe_pending_maintenance_actions(
+            ResourceIdentifier=arn).get("PendingMaintenanceActions") or ()
+        pend = []
+        for x in got:
+            for d in x.get("PendingMaintenanceActionDetails") or ():
+                when = d.get("CurrentApplyDate") or ""
+                pend.append((d.get("Action", ""), when.isoformat()
+                             if hasattr(when, "isoformat") else str(when)))
+        out.pending = tuple(pend)
+    except Exception as e:  # noqa: BLE001 - said as not read
+        unread.append(f"its pending maintenance ({type(e).__name__})")
+    out.restore_points = tuple(a.restore_points())
+    out.unread = tuple(unread)
+    return out
+
+
+def _gcp_network(a):
+    it = a._call("instances.get", project=a._project(), instance=a.id)
+    ip = (it.get("settings") or {}).get("ipConfiguration") or {}
+    mw = (it.get("settings") or {}).get("maintenanceWindow") or {}
+    out = Network("gcp", a.id, network=str(ip.get("privateNetwork") or ""),
+                  restore_kind="backup",
+                  window=(f"day {mw.get('day')} hour {mw.get('hour')}"
+                          if mw.get("day") else ""))
+    out.rules = (tuple(("authorized networks", n.get("value"), 0, 65535)
+                       for n in ip.get("authorizedNetworks") or ())
+                 if ip.get("ipv4Enabled") and not out.network else None)
+    sm = it.get("scheduledMaintenance") or {}
+    out.pending = ((("scheduled maintenance", sm["startTime"]),)
+                   if sm.get("startTime") else ())
+    out.restore_points = tuple(a.restore_points())
+    out.unread = (("the private network's ranges, free addresses and"
+                   " firewall rules belong to the network, not the"
+                   " instance"),) if out.network else ()
+    return out
+
+
+def _azure_network(a):
+    s = a._server()
+    net = getattr(s, "network", None)
+    mw = getattr(s, "maintenance_window", None)
+    out = Network("azure", a.id, restore_kind="point in time",
+                  network=str(getattr(net, "delegated_subnet_resource_id",
+                                      "") or ""),
+                  window=(f"day {mw.day_of_week} hour {mw.start_hour}"
+                          if mw is not None and getattr(
+                              mw, "custom_window", "") == "Enabled" else ""))
+    if not out.network:
+        rules = []
+        for r in a._op("firewall_rules.list_by_server", a._rg(), a.id):
+            rules += [("firewall", str(n), 0, 65535) for n in
+                      _ranges(r.start_ip_address, r.end_ip_address)]
+        out.rules = tuple(rules)
+    out.pending = None
+    out.restore_points = tuple(a.restore_points())
+    out.unread = ("its planned maintenance is the service health's, not"
+                  " the server's API",) + ((
+                      "the delegated subnet's free addresses and network"
+                      " rules belong to the network",) if out.network else ())
+    return out
+
+
+def _ranges(first, last):
+    import ipaddress
+    return list(ipaddress.summarize_address_range(
+        ipaddress.ip_address(first), ipaddress.ip_address(last)))
+
+
+_NETWORK = {"aws": _aws_network, "gcp": _gcp_network,
+            "azure": _azure_network}

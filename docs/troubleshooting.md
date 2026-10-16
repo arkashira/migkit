@@ -61,7 +61,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> is not YAML migkit can read, and nothing was run: <...>
 
-* auth: <...> - password (the default) or aws_iam
+* auth: <...> - password (the default), or the cloud's own sign-in: <...>
 
 * <...>: the source address names <...> and databases says <...> - say it once
 
@@ -770,6 +770,12 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * s3 state backend needs 'bucket' in hops.yaml
 
 * pip install boto3 for the s3 state backend
+
+* the <...> (<...>:<...>) cannot be reached: <...>. Next: install the client of the forwarder it names, or name a way it can be reached from here
+
+* no cloud forwarder <...>
+
+* the <...>'s forwarder is not opened: <...>. Next: let calls to the cloud provider's own API out, or reach the side another way
 
 * <...>: a tunnel says `ssh` or `command`; this one says neither (<...>)
 

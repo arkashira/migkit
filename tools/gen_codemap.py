@@ -528,7 +528,8 @@ _BY_NAME = {
     "decision": "decide costmodel jointplan factbook guarantees scanplan"
                 " tuning capabilities planner tableway repairways userways"
                 " scenarios legs sizing changedepth lacks sourcechange"
-                " bulkways ready dba handwork rehearsal faults model"
+                " bulkways ready cloud_readiness dba handwork rehearsal"
+                " faults model"
                 " machine topology waysaid workload advisors",
     "engines": "catalog pgslot binlog_marks binlog_payload logddl standby",
     "integrations": "tools tooluse toolversion cloudapi cloudseed"

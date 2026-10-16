@@ -862,39 +862,40 @@ class SideEndpoint(Endpoint):
 
 
 class IamEndpoint(SideEndpoint):
-    """An endpoint that signs in with a token the cloud signs instead of a
-    password (backlog 38): `auth: aws_iam` in its options, for RDS and
-    Aurora. A token is good for 15 minutes to open connections; it is
-    made again when it is 10 minutes old, so a run longer than a token
+    """An endpoint that signs in with a token the cloud mints instead of a
+    password (backlog 38, 38.real): `auth` names the cloud's own sign-in -
+    `aws_iam` (or `rds-iam`) for RDS and Aurora, `cloudsql_iam` for Cloud
+    SQL's IAM users, `azure_managed_identity` for a Flexible Server's or
+    SQL Database's managed identity - and `cloudapi.sign_in` mints it the
+    way the provider documents, through the egress gate's `provider` kind.
+    The engines read `password` at every connect, so a token is minted
+    again before it ends (`decide.token_renew`: a third of a 15-minute RDS
+    token left, the first at 10 minutes) and a run longer than a token
     does not start failing to connect halfway. The configured password,
     if any, is not used. The region comes from `aws_region`, or from the
-    AWS configuration of this machine. `aws_role_arn` signs as a role in
+    AWS configuration of this machine; `aws_role_arn` signs as a role in
     another account, assumed for each token - the cross-account pattern
     the managed services use."""
 
-    _made = 0.0
-    _token = ""
-
     @property
     def password(self):
-        import time
-        if not self._token or time.time() - self._made > 600:
-            self._token = _aws_client(
-                "rds", self.options.get("aws_region"),
-                self.options.get("aws_role_arn")).generate_db_auth_token(
-                    DBHostname=self.host, Port=int(self.port),
-                    DBUsername=self.user)
-            self._made = time.time()
-        return self._token
+        from . import cloudapi
+        tok = self.__dict__.get("_tok")
+        if tok is None or cloudapi.renew_due(tok):
+            tok = cloudapi.sign_in(self, hop=self.__dict__.get("_hop"))
+            self.__dict__["_tok"] = tok
+        return tok.value
 
     @password.setter
     def password(self, value):
         pass
 
     def held_secrets(self):
-        """The token made last, if one has been: a new one is not signed
+        """The token minted last, if one has been: a new one is not minted
         just to be hidden."""
-        return ([self._token] if self._token else []) + self._opened()
+        tok = self.__dict__.get("_tok")
+        return ([tok.value] if tok is not None and tok.value else []) \
+            + self._opened()
 
 
 #: the keychain entries migkit keeps passwords under: service `migkit`,
@@ -2276,6 +2277,10 @@ _NO_KEYCHAIN = ("sqlite", "duckdb", "parquet", "bigquery", "pubsub",
                 "generic", "saas")
 
 
+#: the `auth` words naming the cloud's own sign-in (`IamEndpoint`)
+TOKEN_SIGN_INS = ("aws_iam", "cloudsql_iam", "azure_managed_identity")
+
+
 def _endpoint(engine, raw, keychain="", where="", memo=None):
     """A side from its long-form mapping. `keychain` names the entry a
     side written as an address signs in with where it carries no password
@@ -2289,23 +2294,28 @@ def _endpoint(engine, raw, keychain="", where="", memo=None):
     if isinstance(nested, dict):
         extra.update(nested)
     extra = hopkeys.normalised(hopkeys.ENDPOINT_OPTIONS, extra)
-    auth = str(extra.get("auth", "") or "").lower()
-    if auth not in ("", "password", "aws_iam"):
-        raise SystemExit(f"auth: {auth} - password (the default) or"
-                         " aws_iam")
-    lazy = bool(keychain) and auth != "aws_iam" and not raw.get("password")
+    auth = str(extra.get("auth", "") or "").lower().replace("-", "_")
+    auth = "aws_iam" if auth == "rds_iam" else auth
+    if auth not in ("", "password") + TOKEN_SIGN_INS:
+        raise SystemExit(f"auth: {auth} - password (the default), or the"
+                         " cloud's own sign-in: "
+                         + ", ".join(TOKEN_SIGN_INS))
+    if auth:
+        extra["auth"] = auth
+    token = auth in TOKEN_SIGN_INS
+    lazy = bool(keychain) and not token and not raw.get("password")
     password = raw.get("password", "")
     if password is not None and not isinstance(password, str):
         password = str(password)
-    ep = (IamEndpoint if auth == "aws_iam" else
+    ep = (IamEndpoint if token else
           KeychainEndpoint if lazy else SideEndpoint)(
         host=raw.get("host", ""),
         port=int(raw.get("port") or PORTS.get(engine, 0)),
         user=raw.get("user", ""),
-        password="" if auth == "aws_iam" or lazy else (password or ""),
+        password="" if token or lazy else (password or ""),
         options=extra,
     )
-    ep.__dict__.update(_where=where, _memo=memo)
+    ep.__dict__.update(_where=where, _memo=memo, _engine=engine)
     if lazy:
         ep.keychain = keychain
     return ep
@@ -2385,6 +2395,10 @@ def build_hop(name, raw, memo=None):
         brand=hopkeys.brands(raw),
     )
     hopkeys.apply_goal(hop)
+    # the hop's egress gates a side's own sign-in (`cloudapi.sign_in`)
+    for ep in (hop.source, hop.target):
+        if isinstance(ep, IamEndpoint):
+            ep.__dict__["_hop"] = hop
     return hop
 
 

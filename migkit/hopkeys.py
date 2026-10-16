@@ -942,9 +942,14 @@ ENDPOINT_OPTIONS = {
     "api_key": Key("a reference to the key the service is signed in"
                    " with - env:, file:, vault:, keyring:", "secret",
                    ("qdrant",)),
-    "auth": Key("password, or aws_iam for a token the cloud signs", "str",
-                ("postgres", "mysql", "dsql", "keyspaces", "neptune"),
-                choices=("password", "aws_iam"), fold=True),
+    "auth": Key("password, or the cloud's own sign-in: aws_iam (rds-iam)"
+                " for a token the cloud signs, cloudsql_iam for the"
+                " cloud's access token, azure_managed_identity for the"
+                " managed identity's token", "str",
+                ("postgres", "mysql", "dsql", "keyspaces", "neptune",
+                 "mssql"),
+                choices=("password", "aws_iam", "rds_iam", "cloudsql_iam",
+                         "azure_managed_identity"), fold=True),
     "authSource": Key("the database the user is defined in", "str",
                       ("mongodb",)),
     "change_stream": Key("the change stream the tail reads, where not"

@@ -20,6 +20,21 @@ its `tunnel` option:
           AWS-StartPortForwardingSessionToRemoteHost --parameters
           host={host},portNumber={port},localPortNumber={local_port}
 
+The cloud's own forwarders are named by what they forward to, and the
+way is decided (`decide.cloud_forwarder`) from what the endpoint names,
+which client is installed here and whether the server answers directly -
+never a default (backlog R6.cloud):
+
+    tunnel: {ssm: i-0abc, region: ap-southeast-1}      # a session forwarder
+    tunnel: {iap: db-vm, zone: asia-southeast1-a}      # an identity-aware tunnel
+    tunnel: {cloudsql: project:region:instance}        # the service's connector
+    tunnel: {bastion: name, resource_group: rg, target: <vm resource id>}
+
+A server that answers from here is connected directly whatever it names;
+one no named way can reach stops before anything connects, saying what
+each way lacked. Opening one is a call to the provider's API: the egress
+gate's `provider` kind is asked first.
+
 `ssh` runs the machine's own ssh, so its configuration - jump hosts, keys
 in an agent, certificates - applies (`jump` adds hops); keys only, never a
 password. `command` runs any forwarder with `{local_port}`, `{host}` and
@@ -185,6 +200,8 @@ class Tunnel:
         if spec.get("command"):
             return shlex.split(str(spec["command"]).format(
                 local_port=self.forward, host=host, port=port))
+        if spec.get("cloud"):
+            return cloud_argv(spec, host, port, self.forward, self.ep)
         if spec.get("ssh"):
             argv = ["ssh", "-N", "-L",
                     f"127.0.0.1:{self.forward}:{host}:{port}",
@@ -383,6 +400,90 @@ def _ssh_url(url):
     return out
 
 
+#: the cloud's own forwarders: the key an endpoint names one by, and the
+#: programs its client is - asked of this machine, never said to an operator
+FORWARDERS = {"cloudsql": ("cloud-sql-proxy",),
+              "ssm": ("aws", "session-manager-plugin"),
+              "iap": ("gcloud",), "bastion": ("az",)}
+
+
+def _private(host):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return "." not in host or host.endswith((".internal", ".local"))
+
+
+def _direct(host, port):
+    """Whether the server's port answers from here: one bounded connect."""
+    try:
+        socket.create_connection((host, int(port)), timeout=2).close()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def forwarder_facts(ep, spec):
+    """What `decide.cloud_forwarder` reads of an endpoint and its spec."""
+    import shutil
+    named = [k for k in FORWARDERS if spec.get(k)]
+    return {"named": named,
+            "installed": {k: all(shutil.which(p) for p in FORWARDERS[k])
+                          for k in named},
+            "private": _private(str(ep.host)),
+            "answers": _direct(ep.host, ep.port)}
+
+
+def forwarder(ep, spec, side, facts=None):
+    """The way a side naming the cloud's own forwarder is reached: the
+    spec to open it with, or None where it is reached directly; a side no
+    named way reaches stops here, saying why."""
+    from . import decide
+    choice = decide.cloud_forwarder(facts or forwarder_facts(ep, spec))
+    if choice.path is None:
+        raise SystemExit(
+            f"the {side} ({ep.host}:{ep.port}) cannot be reached: "
+            f"{choice.reason}. Next: install the client of the forwarder it"
+            " names, or name a way it can be reached from here")
+    return None if choice.path == "direct" else {**spec, "cloud": choice.path}
+
+
+def cloud_argv(spec, host, port, local, ep=None):
+    """The documented command line of the cloud forwarder `spec["cloud"]`,
+    forwarding this machine's `local` port to the server."""
+    way = spec["cloud"]
+    where = (["--region", str(spec["region"])] if spec.get("region") else [])
+    if way == "ssm":
+        return (["aws", "ssm", "start-session", "--target", str(spec["ssm"]),
+                 "--document-name",
+                 "AWS-StartPortForwardingSessionToRemoteHost", "--parameters",
+                 f"host={host},portNumber={port},localPortNumber={local}"]
+                + where + (["--profile", str(spec["profile"])]
+                           if spec.get("profile") else []))
+    if way == "iap":
+        return (["gcloud", "compute", "start-iap-tunnel", str(spec["iap"]),
+                 str(port), f"--local-host-port=127.0.0.1:{local}"]
+                + ([f"--zone={spec['zone']}"] if spec.get("zone") else [])
+                + ([f"--project={spec['project']}"] if spec.get("project")
+                   else []))
+    if way == "cloudsql":
+        iam = (getattr(ep, "options", None) or {}).get("auth") \
+            == "cloudsql_iam"
+        return (["cloud-sql-proxy", "--address", "127.0.0.1", "--port",
+                 str(local)]
+                + (["--private-ip"] if _private(str(host)) else [])
+                + (["--auto-iam-authn"] if iam else [])
+                + [str(spec["cloudsql"])])
+    if way == "bastion":
+        return ["az", "network", "bastion", "tunnel", "--name",
+                str(spec["bastion"]), "--resource-group",
+                str(spec.get("resource_group") or ""),
+                "--target-resource-id", str(spec.get("target") or ""),
+                "--resource-port", str(port), "--port", str(local)]
+    raise SystemExit(f"no cloud forwarder {way!r}")
+
+
 def through(hop):
     """Every endpoint of the hop that names a tunnel, pointed at its open
     end; opened once a run, however many engines are made for the hop."""
@@ -390,6 +491,18 @@ def through(hop):
         spec = (getattr(ep, "options", None) or {}).get("tunnel")
         if not spec:
             continue
+        if isinstance(spec, dict) and any(spec.get(k) for k in FORWARDERS):
+            from . import egress
+            ok, why = egress.decide(hop, "provider")
+            if not ok:
+                egress._refused(hop, "provider", why, None)
+                raise SystemExit(
+                    f"the {side}'s forwarder is not opened: {why}. Next:"
+                    " let calls to the cloud provider's own API out, or"
+                    " reach the side another way")
+            spec = forwarder(ep, spec, side)
+            if spec is None:
+                continue
         with _LOCK:
             if id(ep) in _OPEN:
                 continue

@@ -184,6 +184,13 @@ def _managed(hop, eng, dbs, quick):
     return managed.items(hop, eng, dbs, quick)
 
 
+def _cloud_side(hop, eng):
+    """The cloud side of readiness: networks, subnets, security groups,
+    pending maintenance and the restore point (`cloud_readiness`)."""
+    from . import cloud_readiness
+    return cloud_readiness.items(hop, eng)
+
+
 def _target(hop, eng, dbs):
     """The interlock's word on the target, before anything is written."""
     from . import interlock
@@ -583,6 +590,7 @@ def items(hop, eng, dbs=None, mode=None, quick=False, assessed=None):
         out += _mapping(eng)
     for part in (lambda: _servers(hop, eng, mode),
                  lambda: _managed(hop, eng, dbs, quick),
+                 lambda: _cloud_side(hop, eng) if not quick else [],
                  lambda: _target(hop, eng, dbs),
                  lambda: _resources(hop, eng, dbs),
                  lambda: _change_reader(hop, eng, dbs, mode) if quick

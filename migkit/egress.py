@@ -55,6 +55,9 @@ KINDS = {
     "anchor": "the audit record's checkpoints in the anchor bucket",
     "telemetry": "product telemetry, kept locally until a destination is"
                  " chosen",
+    # a sign-in minted, a forwarder opened or a network read through the
+    # cloud provider's own API (backlog 38.real, R6.cloud, R25.2)
+    "provider": "calls to the cloud provider's own API",
 }
 
 NONE = ("none", "off", "false", "no", "0")

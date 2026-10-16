@@ -4341,3 +4341,115 @@ WAYS["writes held"]["neo4j"] = (
     NOT_APPLICABLE, "its writes are held by role only on its enterprise"
     " edition, through roles migkit does not change, so a source's writes"
     " are stopped by its operator (freeze: operator) and proved by migkit")
+
+# ---- where the cloud's own sign-in is minted, and when it is minted again
+# ---- (backlog 38.real) ------------------------------------------------------
+
+def cloud_sign_in(facts):
+    """`Choice` of where a side whose `auth` names the cloud's own sign-in
+    gets its token, from what this machine has (`cloudapi.sign_in_facts`):
+    the provider's own library and the credentials its chain finds, the
+    identity endpoint a hosting service puts in the environment, or the
+    instance's metadata endpoint where it answers. No rung holds: the
+    reason says what each way lacked, and nothing is minted."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    kind = f.get("kind")
+    said = (f"the sign-in is {kind}; library "
+            f"{'installed' if f.get('sdk') else 'not installed'}, its"
+            f" credentials {'found' if f.get('credentials') else 'not found'}")
+
+    def is_(*kinds):
+        return Need(f"a sign-in of {' or '.join(kinds)}",
+                    lambda x: x.get("kind") in kinds,
+                    f"the side's sign-in is {kind}")
+    return climb("where the cloud's own sign-in is minted", (
+        Rung("signer", "signed on this machine by the provider's own"
+             " library, from the credentials its chain finds",
+             needs=(is_("aws_iam"),
+                    Need("the provider's library", lambda x: x.get("sdk"),
+                         "the provider's library is not installed")),
+             because=said),
+        Rung("chain", "the access token of the credentials the provider's"
+             " own chain finds on this machine",
+             needs=(is_("cloudsql_iam", "azure_managed_identity"),
+                    Need("the provider's library", lambda x: x.get("sdk"),
+                         "the provider's library is not installed"),
+                    Need("credentials it finds",
+                         lambda x: x.get("credentials"),
+                         "its chain finds no credentials here")),
+             because=said),
+        Rung("identity endpoint", "the identity endpoint the hosting"
+             " service gives this process", footprint=1,
+             needs=(is_("azure_managed_identity"),
+                    Need("an identity endpoint in the environment",
+                         lambda x: x.get("identity endpoint"),
+                         "the environment names no identity endpoint")),
+             because=said),
+        Rung("metadata", "the token the instance's metadata endpoint"
+             " gives the machine's own identity", footprint=1,
+             needs=(is_("cloudsql_iam", "azure_managed_identity"),
+                    Need("a metadata endpoint that answers",
+                         lambda x: x.get("metadata"),
+                         "no metadata endpoint answers here: this machine"
+                         " is not one of the cloud's")),
+             because=said)), f)
+
+
+def token_renew(lifetime, mints=()):
+    """(seconds before its end a token is minted again, `Choice`): a third
+    of its lifetime where minting is quick next to that - the provider's
+    documented lifetime is what is read, no number is written - and twice
+    the longest mint measured here where that is longer, so a slow signer
+    never hands out a token that ends before its connection opens."""
+    life = max(0.0, float(lifetime or 0.0))
+    took = max((float(x) for x in mints or () if x is not None), default=0.0)
+    said = (f"the token lasts {life:.0f}s; the longest mint here took"
+            f" {took:.1f}s")
+    got = climb("when the cloud's own sign-in is minted again", (
+        Rung("measured", "minted again twice the longest mint before its"
+             " end", needs=(Need("a mint slower than a sixth of the"
+                                 " lifetime", lambda f: 2 * took > life / 3,
+                                 "minting is quick next to the lifetime"),),
+             because=said),
+        Rung("third", "minted again with a third of its lifetime left",
+             because=said)), Facts({"lifetime": life, "took": took}))
+    return (2 * took if got.path == "measured" else life / 3), got
+
+
+# ---- how a server only the cloud forwards into is reached (backlog
+# ---- R6.cloud) --------------------------------------------------------------
+
+def cloud_forwarder(facts):
+    """`Choice` of how a side is reached, from what the endpoint names, what
+    this machine has installed and which network answers: directly where
+    its port answers from here; else the cloud's own forwarder the
+    endpoint names whose client is installed - the database service's own
+    connector before a session into a machine of the network, which adds a
+    leg - and none where nothing holds, the reason saying what each way
+    lacked. `facts`: {"named": the ways the endpoint names, "installed":
+    {way: bool}, "answers": whether the port answered directly,
+    "private": whether its address is a private network's}."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    named = set(f.get("named") or ())
+    have = dict(f.get("installed") or {})
+    said = ("its address is "
+            + ("a private network's" if f.get("private") else "public")
+            + ("; it answers from here" if f.get("answers") else
+               "; it does not answer from here"))
+
+    def way(name, words, legs):
+        return Rung(name, words, footprint=legs, because=said, needs=(
+            Need(f"the endpoint names {words}", lambda x: name in named,
+                 f"the endpoint does not name {words}"),
+            Need(f"the client of {words} installed",
+                 lambda x: bool(have.get(name)),
+                 f"the client of {words} is not installed here")))
+    return climb("how the side is reached", (
+        Rung("direct", "connected directly: the server answers from here",
+             because=said, needs=(Need(
+                 "a port that answers from here", lambda x: x.get("answers"),
+                 "it does not answer from here"),)),
+        way("cloudsql", "the database service's own connector", 1),
+        way("ssm", "the cloud's own session forwarder", 2),
+        way("iap", "the cloud's identity-aware tunnel", 2),
+        way("bastion", "the cloud's own bastion tunnel", 2)), f)

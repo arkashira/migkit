@@ -264,18 +264,6 @@ until it is measured against the tool that leads that axis:
   "which batch did you last commit" and no batch lands twice - which is
   what counters, keyless rows and append-only targets need. A rung
   without it is never given such work.
-  *BAR-1 status (W16F2, 2026-10-16): PARTLY. MongoDB, Redis, Kafka,
-  Cassandra and DynamoDB tails write their changes marked in the engine's
-  atomic unit and leave out what the way back wrote, each proved on a
-  server in its own mark test; cosmosdb, couchbase, keyspaces and spanner
-  are unproved. Four limits stay: Redis MULTI/EXEC has no rollback, so a
-  command that fails at run time inside EXEC leaves the others applied
-  with the mark; Cassandra attributes by write time (no tombstone
-  carries a tag), so a cell the application writes at exactly a listed
-  microsecond is taken as migkit's; DynamoDB attributes a delete by the
-  list of origin keys migkit wrote; Kafka's produce is not transactional,
-  so a round that fails between two messages leaves the earlier ones
-  marked and sent.*
 * **Verified as it lands, to the row, on both sides of any pair.**
   Veridata and DVT verify after; DMS validates by partitions of rows
   with a lag re-check; pgcopydb compares after. migkit verifies each
@@ -6839,8 +6827,15 @@ stand-in credentials, and it names the host, the user, the action and
 the role's key. The secret store and the role answer through the SDK's
 own stub (`tests/test_cloud_sign_in_and_secrets.py`).
 
-Still to do against the real services: a sign-in to RDS with a token,
-Cloud SQL IAM, and managed identities.
+38.real - PARTLY (2026-10-16, built unproved): `auth: rds-iam` /
+`cloudsql_iam` / `azure_managed_identity` mint the provider's documented
+token through the rung `decide.cloud_sign_in` picks (the signer, the
+provider's credential chain, a hosting service's identity endpoint, the
+instance metadata endpoint), behind the egress gate's `provider` kind, and
+minted again by `decide.token_renew`
+(`tests/test_the_clouds_own_sign_in_is_minted_and_refreshed.py`, on
+recorded answers). Left: built; not run against a real AWS, Google Cloud
+or Azure account.
 
 **39. Converting schema and code between engines, wider.**
 
@@ -7579,7 +7574,11 @@ blocked on accounts. As planned:
 * A tunnel supervisor that ends every path in a local port: the system's
   ssh (`-L`, jump hosts and keys from the operator's own config), asyncssh
   where there is none, and the clouds' own forwarders (SSM port forwarding,
-  IAP, the Cloud SQL proxy, Azure Bastion) as programs it starts; up only
+  IAP, the Cloud SQL proxy, Azure Bastion) as programs it starts
+  (R6.cloud PARTLY 2026-10-16, built unproved: `tunnel: {ssm|iap|cloudsql|
+  bastion: ...}` reached by `decide.cloud_forwarder` from what the endpoint
+  names, the client installed and whether it answers directly; left: no
+  forwarder client installed here, none run against a real account); up only
   when a database-level ping answers; a pool of tunnels for many workers;
   restarted with backoff, and the copy retried a range at a time.
 * `doctor` tells "connects but bulk stalls" apart: a ladder of incompressible
@@ -9479,6 +9478,14 @@ databases. What is not yet anywhere:
    subnets, security groups, routes), maintenance windows and pending
    maintenance, instance classes on both sides, snapshots and restores
    through the provider's API, audited before the move and in `assess`.
+   R25.2 - PARTLY (2026-10-16, built unproved): `cloud_readiness.py` audits
+   network overlap and peering, subnet free addresses, the port admitted
+   from this machine, pending maintenance inside the move and the source's
+   restore point through `cloudapi.network`, each gap a blocker with its
+   next step in `assess`; AWS on the SDK's stand-in, Google and Azure on
+   recorded answers. Left: no real account; Google's and Azure's private
+   network ranges, firewalls and Azure's planned maintenance are not read;
+   the move's forecast end is not yet passed to the window check.
 3. **The organisation's own change sheet:** the plan's steps exported
    with ids that map onto a team's task sheet, and each step's progress
    and evidence written back, so the migration's tracking is not typed
@@ -11378,7 +11385,6 @@ What is still unproved per P0 item, taken from the PARTLY and OPEN rows of `docs
 - `P0-PARITY.verify` (row 440): OPEN (grep: `capabilities.depth()` at 9fd2442, its 39 verify items - the 30 deep-check categories, delta, fence, confirm, users, repair, exact undo, rows apart, tables, table: yes 124, test owed 74, not applicable 499, not yet 707; MySQL since: `verify.tables` and `verify.structure.schema-diff` proved on stubs, `verify.structure.triggers`, `verify.value.rendering` and `verify.structure.collection-options` built...
 - `P0-PARITY.tail` (row 441): OPEN (grep: `capabilities.depth()` at 9fd2442, its 6 tail items: yes 26, test owed 18, not applicable 59, not yet 113; the operation contract is `scope.ops`; Redis: NOT DONE, all five - it follows only through the server's own replica, which carries the whole server; a change reader of its own (the replica protocol's stream, parsed) is the missing piece; Kafka, 2026-10-11: states, a topic added at its seam, a...
 - `P0-PARITY.all` (row 443): missing: the ways - assess, schema, move, cutover, security, managed services and operations at {C}: yes 248, test owed 68, not applicable 261, not yet 539; MySQL since: `assess.preflight` and `cutover.rollback` proved on stubs, TiDB takes `assess.preflight` with it and owes its own test; evidence, observability and the forecast are one way for every engine, not read engine by engine); Redis (a real server):...
-  - W17A (10-16): a cell built for an engine no sandbox here can run is "built, unproved", apart from "test owed": the engine's module declares `UNPROVED_ON` (the server it was not run on) and `UNPROVED_ITEMS` (its cells), `capabilities.depth_why` gives the reason and STATE.md prints the block; ase and db2 declare first, every other engine family declares its own in wave 17 (B-I) and the guard turns strict in wave 18.
 - `P0-WORKFLOW-DEPTH.model` (row 456): OPEN (review 2026-10-16: `PhaseContract` does not exist; `planner.Phase` carries no prerequisites or required evidence contract
 - `P0-MINIMAL-INPUT.ownership` (row 463): PARTLY 2026-10-16 (W16C: `migrate`'s own steps (`cli._Steps`) offer `pair`, `order(db)` - the source's foreign keys, cycle, tables parents first, whether the target checks keys while it loads and whether the engine's schema way carries them, handed to `decide.phase_order` and kept with the order's decision - and on PostgreSQL a `schema` and a `constraints` phase apart from the copy (the engine's `create_missing`/`finish_created`, the copy carrying rows only); fakes proved. Left: the server proof (tests/test_the_commands_steps_offer_every_phase.py, strict xfail W16C-SCHEMA: the schema phase's dump of the source fails on the pg sandbox), the joint plan's barriers as order facts, phases apart on other engines, and the copy's chunk still a literal where the sizing estimate fails)
 - `P0-MINIMAL-INPUT.acceptance` (row 466): Not done: no live timing - the sandbox was stopped - so minimal effort and the guarantees are not yet proved together on a server; the 2026-10-15 claim of tests passing 100% is not backed by a run since the review 2026-10-16 (W15J, docker sandbox, pg pair postgres 16 + mysql-rowmeta 8.4.11): `tests/test_autonomous_scenarios.py` now runs for real through the installed command from a hop file asserted to hold only the connection fields and the scope, and measures operator actions, time, the source's connections and rows read a second from its own views, retry waste, units run twice and the forecast error at 25/50/75%; proved: a refused target stops safely in one command on both engines (MySQL 3.95 s, PostgreSQL 62.64 s, 0 retry waste); measured, not completed: healthy, fault and crash copies on MySQL stop (board note W15J-MYBULK), every PostgreSQL copy stops (W15J-PG16), a copy is held back by a D0 change reading (W15J-D0) - those cases, the baseline pinned to 1 worker, three interruptions, a value above the packet size, injected defects and the capped target are strict xfails until the notes are fixed; no forecast was stated in any run, so the forecast gate held nothing; left: concurrent writes with a tail, restricted CPU discovery (no cgroups on this host), replication artifacts beyond pg-replica, dependency incompatibility, the managed-service comparison.
