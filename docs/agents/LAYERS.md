@@ -28,10 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 378
 
-### (not listed)
-
-- `migkit/hopkeys.py:2997` configuration -> decision (`topology`)
-
 ### a brand's confidence is a rung (`decide.brand_confidence`) the configuration reads once the server's signs are in; the rung moves below configuration
 
 - `migkit/variants.py:397` configuration -> decision (`decide`)
@@ -1028,6 +1024,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/machine.py:927` decision -> engines (`engines`)
 - `migkit/tableway.py:132` decision -> engines (`engines`)
 - `migkit/waysaid.py:71` decision -> engines (`engines`)
+
+### the hop check refuses prefixes that meet through `topology.overlaps`; the key spaces move below configuration
+
+- `migkit/hopkeys.py:2997` configuration -> decision (`topology`)
 
 ### the hop's sign-in and the readiness audit ask the cloud provider's own API (`cloudapi`); the provider calls move to a contract below configuration and decision
 

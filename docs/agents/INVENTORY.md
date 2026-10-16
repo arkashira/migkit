@@ -23,7 +23,7 @@ None.
 | workflows | 10 | 36 | 47785 | a move's phases and what they do around the move: copy, follow, prove, repair, cut over, recover |
 | cli | 11 | 3 | 9582 | the command line and the guide that asks for two addresses |
 | web | 11 | 30 | 5966 | the web view and its API |
-| tools | - | 12 | 6960 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
+| tools | - | 12 | 6964 | the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them |
 | data | - | 5 | 10780 | the files migkit ships as resources |
 
 ## configuration (9 files)
@@ -414,7 +414,7 @@ None.
 | `tools/ease_measure.py` | - | 280 | 0 | configuration 1 | - | none |
 | `tools/final_suite.py` | - | 857 | 0 | configuration 6, integrations 1, tools 1 | - | none |
 | `tools/gen_changelog.py` | - | 120 | 1: tools.gen_docs | - | - | none |
-| `tools/gen_codemap.py` | - | 1995 | 1: tools.gen_docs | configuration 4, decision 2 | - | none |
+| `tools/gen_codemap.py` | - | 1999 | 1: tools.gen_docs | configuration 4, decision 2 | - | none |
 | `tools/gen_docs.py` | - | 1782 | 0 | cli 6, configuration 25, conversion 2, decision 8, engines 5, reporting 6, tools 2, web 4, workflows 1 | - | none |
 | `tools/measures_table.py` | - | 42 | 0 | workflows 1 | - | none |
 | `tools/pin_programs.py` | - | 239 | 0 | integrations 1 | - | none |

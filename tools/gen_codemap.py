@@ -1323,6 +1323,10 @@ KNOWN_UPWARD = {
         "migkit/variants.py migkit.cloudapi",
         "migkit/variants.py migkit.egress",
     ),
+    ("the hop check refuses prefixes that meet through `topology.overlaps`; "
+     "the key spaces move below configuration"): (
+        "migkit/hopkeys.py migkit.topology",
+    ),
     ("a brand's confidence is a rung (`decide.brand_confidence`) the "
      "configuration reads once the server's signs are in; the rung moves "
      "below configuration"): (
