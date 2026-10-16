@@ -19,7 +19,6 @@ from tests import servers
 from tests.conftest import needs_docker
 from tests.test_qdrant_and_neo4j_go_deeper import DeepQdrant
 
-PROVES = [("params", "qdrant")]
 
 pair = servers.fixture("qdrant")
 

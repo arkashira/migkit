@@ -28,10 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 359
 
-### (not listed)
-
-- `migkit/leftovers.py:315` safety -> decision (`decide`)
-
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
 
 - `migkit/charsets.py:1245` conversion -> decision (`decide`)
@@ -545,6 +541,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a safety check reads `users` for the step it guards; the step reports its own state down
 
 - `migkit/freeze.py:107` safety -> workflows (`users`)
+
+### a safety module asks the decision engine (`decide.lift_hold`) whether a hold a run left may be lifted; the holds and their ages are to be handed up as facts by the command
+
+- `migkit/leftovers.py:315` safety -> decision (`decide`)
 
 ### a safety refusal is said by reporting's `export`; the wording moves below safety
 

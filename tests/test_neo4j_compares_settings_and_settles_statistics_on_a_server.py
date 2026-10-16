@@ -17,7 +17,6 @@ from tests import servers
 from tests.conftest import needs_docker
 from tests.test_qdrant_and_neo4j_reach_the_depth_matrix import _neo4j
 
-PROVES = [("params", "neo4j"), ("statistics", "neo4j")]
 
 pair = servers.fixture("neo4j")
 cypher = servers._Neo4j.cypher

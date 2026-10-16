@@ -935,6 +935,11 @@ KNOWN_UPWARD = {
         "migkit/storedcode/collations.py migkit.decide",
         "migkit/storedcode/rungs.py migkit.decide",
     ),
+    ("a safety module asks the decision engine (`decide.lift_hold`) "
+     "whether a hold a run left may be lifted; the holds and their "
+     "ages are to be handed up as facts by the command"): (
+        "migkit/leftovers.py migkit.decide",
+    ),
     ("a conversion asks the decision engine (`tuning`) which way to "
      "take; the choice is handed in as a fact"): (
         "migkit/canon.py migkit.tuning",
