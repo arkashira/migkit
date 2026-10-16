@@ -5634,6 +5634,21 @@ Still open: bulk paths (container copy jobs), point-in-time snapshots.
   source's access history; the two-site rules read change records no
   reader yet produces from both streams; cluster sources fall to the
   sweep; tests written, not run.
+  *Built 2026-10-16 (W13B):* `RedisEngine.tail_apply` (and `tail_start`)
+  runs `follow_live` round `tailctl.run_loop`, the stream's connection
+  kept open between looks and its selected database saved; a full start
+  is filled from the snapshot the stream receives (`RdbReader`,
+  `dump_payload`, chosen by `decide.redis_seed` on measured dataset, disk,
+  memory and the hop's ops; the scan the fallback); sweep and refresh
+  reads under `CLIENT NO-TOUCH` where offered, the caveat said where not;
+  the tail applies only `Hop.carries`; `SiteChanges` /
+  `twoway.redis_two_site_live` make the two-site records off both sites'
+  streams; a cluster is followed one stream a shard (`_follow_shards`,
+  ledger by first slot). *Not done:* GeminiDB's Redis inherits the tail,
+  and `capabilities` still declares its `stream`/`scope.ops` not
+  applicable (the depth guard fails on it until the owner of
+  `capabilities` re-declares); hash field expiry types (Redis 7.4+) fall
+  to the scan; no server run (fakes only).
   *Built 2026-10-11, partly (LT.C2, LT.C3; no broker was reached):*
   `KafkaEngine` keeps a copied partition's offsets identical where they
   can be exact, and otherwise (with `offsets: map` and a client that runs

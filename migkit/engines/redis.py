@@ -1,3 +1,5 @@
+import os
+import struct
 import time
 
 from .. import pieces
@@ -11,9 +13,10 @@ class RedisEngine(Engine):
     checks = ("schema", "counts", "data")
     ENGINE_FAMILY = "redis"
 
-    def _client(self, side, db=0, decode=True):
+    def _client(self, side, db=0, decode=True, no_touch=False):
         """`decode=False` for DUMP payloads, which are binary: decoding one
-        as text is how a repair would corrupt what it copied."""
+        as text is how a repair would corrupt what it copied. `no_touch`:
+        every connection reads without touching keys (`_no_touch`)."""
         ep = self.hop.source if side == "src" else self.hop.target
         try:
             import redis
@@ -23,13 +26,13 @@ class RedisEngine(Engine):
         # comes back as it was sent, where strict decoding stopped the
         # check on the first key that was not UTF-8
         pool = redis.ConnectionPool(
-            connection_class=self._connection_class(side, decode),
+            connection_class=self._connection_class(side, decode, no_touch),
             host=ep.host, port=ep.port, password=ep.password or None,
             db=int(db), socket_timeout=15, decode_responses=decode,
             encoding_errors="surrogateescape")
         return redis.Redis(connection_pool=pool)
 
-    def _connection_class(self, side, decode):
+    def _connection_class(self, side, decode, no_touch=False):
         """What every connection to a side is made of, whichever client
         holds it: the side's TLS (`Endpoint.redis_tls`), and a key sent
         back byte for byte - by the client's own packer where hiredis is
@@ -46,6 +49,13 @@ class RedisEngine(Engine):
                 kw.update(tls)
                 kw["command_packer"] = PythonRespSerializer(6000, pack)
                 super().__init__(**kw)
+
+            def on_connect(self):
+                super().on_connect()
+                if no_touch:
+                    # the source's access history left as its clients made it
+                    self.send_command("CLIENT", "NO-TOUCH", "ON")
+                    self.read_response()
         return Connection
 
     def _cluster(self, side):
@@ -59,24 +69,25 @@ class RedisEngine(Engine):
                 seen[side] = False
         return seen[side]
 
-    def _keys(self, side, db=0, decode=True):
+    def _keys(self, side, db=0, decode=True, no_touch=False):
         """The client a key is read and written through. On a cluster, one
         that sends each key to the node serving its slot, and a pipeline
         to every node its keys are on: the side's own server answers only
         for its own slots (`MOVED` for the rest). Elsewhere, the side's
         own client."""
         if not self._cluster(side):
-            return self._client(side, db, decode)
+            return self._client(side, db, decode, no_touch)
         made = self.__dict__.setdefault("_clusters", {})
-        if (side, decode) not in made:
+        if (side, decode, no_touch) not in made:
             from redis.cluster import RedisCluster
             ep = self.hop.source if side == "src" else self.hop.target
-            made[(side, decode)] = RedisCluster.from_url(
+            made[(side, decode, no_touch)] = RedisCluster.from_url(
                 f"redis://{ep.host}:{int(ep.port)}",
                 password=ep.password or None, socket_timeout=15,
                 decode_responses=decode, encoding_errors="surrogateescape",
-                connection_class=self._connection_class(side, decode))
-        return made[(side, decode)]
+                connection_class=self._connection_class(side, decode,
+                                                        no_touch))
+        return made[(side, decode, no_touch)]
 
     def _nodes(self, side, db=0, decode=True):
         """[(name, client)] of the servers that hold a side's keys: every
@@ -2216,15 +2227,16 @@ class RedisEngine(Engine):
         return "-psync" not in said and any(
             w in said for w in ("+@all", "+psync", "+@admin"))
 
-    def live_facts(self):
+    def live_facts(self, client=None):
         """What choosing the live way reads off the source (`decide.
         redis_live`): the replica grant, whether it is a cluster, whether
         it keeps idle times, and the memory the replica's buffer may take
         against what is free. The buffer is bounded by its hard limit
         where one is set (the source drops a replica at it, which the
         stream sees); with none, by the write rate measured over the
-        source's last timed snapshot."""
-        src = self._client("src")
+        source's last timed snapshot. `client` is one shard's server of a
+        cluster, asked as one server."""
+        src = client or self._client("src")
         mem = src.info("memory")
         policy = str(mem.get("maxmemory_policy")
                      or self._config_one(src, "maxmemory-policy") or "")
@@ -2252,24 +2264,27 @@ class RedisEngine(Engine):
                 need = backlog + int((b - a) / (time.monotonic() - t0)
                                      * max(took, 1))
         return {"replica grant": self._replica_grant(src),
-                "cluster": self._cluster("src"),
+                "cluster": False if client is not None
+                else self._cluster("src"),
                 "idletime": "lfu" not in policy,
                 "headroom": max(0, most - used) if most else None,
                 "stream needs": need}
 
-    def live_way(self, facts=None):
+    def live_way(self, facts=None, client=None):
         """The `Choice` of the live way, from `live_facts` and anything
         measured since (`facts`)."""
         from .. import decide
-        got = self.live_facts()
+        got = self.live_facts(client) if client is not None else \
+            self.live_facts()
         got.update(facts or {})
         return decide.redis_live(got)
 
     def _key_spec(self, client):
         """`spec(argv) -> [keys]` from the source's own command table, each
         command asked once; a command whose keys move with its arguments is
-        asked with them (`COMMAND GETKEYS`)."""
-        seen = {}
+        asked with them (`COMMAND GETKEYS`). `spec.categories(name)` is
+        the command's categories, once it was asked."""
+        seen, cats = {}, {}
 
         def spec(argv):
             name = argv[0].lower()
@@ -2280,13 +2295,18 @@ class RedisEngine(Engine):
                 if isinstance(row, dict):
                     row = [name, row.get("arity"), row.get("flags") or (),
                            row.get("first_key_pos"), row.get("last_key_pos"),
-                           row.get("step_count")]
+                           row.get("step_count"),
+                           row.get("acl_categories") or ()]
                 if not row:
                     # a write the source cannot place: its keys unknown
                     seen[name] = None
                 else:
                     flags = {(f.decode() if isinstance(f, bytes) else str(f))
                              .lower() for f in (row[2] or ())}
+                    cats[name] = {(c.decode() if isinstance(c, bytes)
+                                   else str(c)).lower()
+                                  for c in (row[6] if len(row) > 6 else ())
+                                  or ()}
                     seen[name] = (int(row[3] or 0), int(row[4] or 0),
                                   int(row[5] or 0), "movablekeys" in flags)
             if seen[name] is None:
@@ -2299,6 +2319,7 @@ class RedisEngine(Engine):
                 return []
             end = len(argv) + last if last < 0 else last
             return list(argv[first:end + 1:step])
+        spec.categories = lambda name: cats.get(name, set())
         return spec
 
     def _refresh_keys(self, db, ops):
@@ -2313,8 +2334,8 @@ class RedisEngine(Engine):
         keys = self._raw_kept(db, list(ops))
         if not keys:
             return tally
-        src = self._client("src", db, decode=False)
-        dst = self._client("dst", db, decode=False)
+        src = self._keys("src", db, decode=False, no_touch=self._no_touch())
+        dst = self._keys("dst", db, decode=False)
 
         def types(client):
             p = client.pipeline(transaction=False)
@@ -2323,13 +2344,19 @@ class RedisEngine(Engine):
             return [t.decode() if isinstance(t, bytes) else t
                     for t in p.execute()]
         now, before = types(src), types(dst)
-        gone = [k for k, t in zip(keys, now) if t == "none"]
+        # only the changes the hop carries (`mapping.ops`): a kept delete
+        # leaves the key on the target, as the copy does
+        carried = self.hop.carries(f"db{db}")
+        applied = [(k, a, b) for k, a, b in zip(keys, before, now)
+                   if ("delete" if b == "none" else "insert" if a == "none"
+                       else "update") in carried]
+        gone = [k for k, a, b in applied if b == "none"]
         if gone:
             dst.delete(*gone)
-        here = [k for k, t in zip(keys, now) if t != "none"]
+        here = [k for k, a, b in applied if b != "none"]
         if here:
             self._carry(src, dst, here, self._carry_plan(db))
-        for k, a, b in zip(keys, before, now):
+        for k, a, b in applied:
             tally[key_event(ops[k], a, b)] += 1
         return tally
 
@@ -2340,19 +2367,33 @@ class RedisEngine(Engine):
         source refuses the stream, or cannot continue from the offset
         saved). `state` is the tail's saved state, `save()` writes it; the
         offset or the round's start moves only after the keys it covers
-        landed on the target."""
+        landed on the target. A cluster is followed one stream a shard
+        (`_follow_shards`)."""
+        if self._cluster("src"):
+            return self._follow_shards(db, state, save, log, stop, rounds)
+        return self._follow_one(db, state, save, log, stop, rounds)
+
+    def _follow_one(self, db, state, save, log, stop, rounds, node=None,
+                    guard=None):
+        client = self._node_client(node[1], node[2]) if node else None
         measured, failed_at = {}, None
         while not stop():
-            choice = self.live_way(measured)
+            choice = self.live_way(measured, client=client)
             if choice.rung is None:
                 raise SystemExit(f"db{db}: no live way holds - "
                                  f"{choice.reason}")
             log(f"db{db}: {choice.rung.said}")
             if choice.rung.name == "idle-time sweep":
+                if node is not None:
+                    raise SystemExit(
+                        f"the shard from slot {node[0]} can no longer be"
+                        f" followed as a replica ({choice.reason}); the"
+                        " tail stops with each shard's offset saved, and"
+                        " its next start sweeps the cluster whole")
                 return self._sweep_rounds(db, state, save, log, stop, rounds)
             try:
                 return self._stream_rounds(db, state, save, log, stop,
-                                           rounds)
+                                           rounds, node=node, guard=guard)
             except LiveRefused as e:
                 at = (state.get("keyspaces") or {}).get("offset")
                 if e.facts.get("continued", True) is not False \
@@ -2364,33 +2405,181 @@ class RedisEngine(Engine):
                 log(f"db{db}: {e}; choosing again")
                 measured.update(e.facts)
 
+    def _node_client(self, host, port, decode=True):
+        import redis
+        ep = self.hop.source
+        pool = redis.ConnectionPool(
+            connection_class=self._connection_class("src", decode),
+            host=host, port=int(port), password=ep.password or None,
+            socket_timeout=15, decode_responses=decode,
+            encoding_errors="surrogateescape")
+        return redis.Redis(connection_pool=pool)
+
+    def _shards(self):
+        """[(first slot, host, port, slots)] of the source's primaries. A
+        shard is named by the first slot it serves, which a failover keeps:
+        the promoted replica continues the stream from the offset saved."""
+        own = {}
+        cache = self._keys("src", 0).nodes_manager.slots_cache
+        for slot, nodes in cache.items():
+            if nodes:
+                own.setdefault((nodes[0].host, int(nodes[0].port)),
+                               set()).add(int(slot))
+        return sorted((str(min(s)), h, p, s) for (h, p), s in own.items())
+
+    def _follow_shards(self, db, state, save, log, stop, rounds):
+        """A cluster source followed one replica stream a shard, each at
+        its own offset in the ledger (`state["shards"]`, by first slot) and
+        resumed from it; the streams read side by side, every change to
+        the ledger and every save under one lock. Where any shard cannot
+        stream (`decide.redis_live` asked of that shard's own server), the
+        cluster is swept whole."""
+        import threading
+        ledger = state.setdefault("shards", {})
+        shards = self._shards()
+        weak = {}
+        for first, host, port, _ in shards:
+            choice = self.live_way({}, client=self._node_client(host, port))
+            if choice.rung is None or choice.rung.name != "replica stream":
+                weak[first] = choice
+        if weak:
+            for first, c in sorted(weak.items()):
+                log(f"the shard from slot {first}: "
+                    + (c.reason or c.rung.said))
+            log("the cluster is swept whole, since a shard cannot be"
+                " followed as a replica")
+            return self._sweep_rounds(db, state, save, log, stop, rounds)
+        for gone in sorted(set(ledger) - {s[0] for s in shards}):
+            log(f"no shard serves from slot {gone} now: its keys' writes"
+                " reach the streams of the shards serving them")
+            ledger.pop(gone)
+        lock = threading.RLock()
+        failed = []
+
+        def saved():
+            with lock:
+                save()
+
+        def one(first, host, port, slots):
+            try:
+                self._follow_one(db, ledger.setdefault(first, {}), saved,
+                                 lambda m: log(f"shard {first}: {m}"), stop,
+                                 rounds, node=(first, host, port, slots),
+                                 guard=lock)
+            except BaseException as e:  # noqa: BLE001 - raised below
+                failed.append(e)
+        runs = [threading.Thread(target=one, args=s, daemon=True)
+                for s in shards]
+        for t in runs:
+            t.start()
+        for t in runs:
+            t.join()
+        if failed:
+            raise failed[0]
+        return ledger
+
     def _copy_again(self, d, log):
         self.move_table(d, "", f"db{d}", None, _NoCheckpoint(), log)
 
-    def _stream_socket(self):
+    def _stream_socket(self, host=None, port=None, side="src"):
         import socket
-        ep = self.hop.source
-        sock = socket.create_connection((ep.host, ep.port), timeout=30)
+        ep = self.hop.source if side == "src" else self.hop.target
+        host, port = host or ep.host, port or ep.port
+        sock = socket.create_connection((host, port), timeout=30)
         if getattr(ep, "tls", None):
             import ssl
             sock = ssl.create_default_context().wrap_socket(
-                sock, server_hostname=ep.host)
+                sock, server_hostname=host)
         return sock
 
-    def _stream_rounds(self, db, state, save, log, stop, rounds=None):
+    def close_streams(self):
+        for stream, _, _ in self.__dict__.pop("_streams", {}).values():
+            stream.close()
+
+    def _stream_rounds(self, db, state, save, log, stop, rounds=None,
+                       node=None, guard=None):
+        """Rounds of the replica stream, over a connection kept open from
+        one call to the next while the saved state is the one it read. A
+        full start fills the key spaces it copies from the snapshot the
+        source sends (`_seed_from`, as `decide.redis_seed` chose), the scan
+        where that does not hold. `node` is a cluster's shard (first slot,
+        host, port, slots); `guard` the lock its ledger is changed under."""
+        import contextlib
         ep = self.hop.source
-        spaces = KeyspaceStates(state.setdefault("keyspaces", {}), log)
-        stream = ReplicaStream(self._stream_socket(),
-                               user=getattr(ep, "user", None),
-                               password=ep.password or None)
-        got = stream.begin(spaces.replid, spaces.offset)
+        guard = guard or contextlib.nullcontext()
+        streams = self.__dict__.setdefault("_streams", {})
+        where = node[0] if node else ""
+        held = streams.pop(where, None)
+        if held is not None and held[1].state is state.get("keyspaces"):
+            stream, spaces, spec = held
+        else:
+            if held is not None:
+                held[0].close()
+            spaces = KeyspaceStates(state.setdefault("keyspaces", {}), log)
+            stream = ReplicaStream(
+                self._stream_socket(*(node[1:3] if node else ())),
+                user=getattr(ep, "user", None), password=ep.password or None)
+            spool = self._spool(db, node)
+            try:
+                got = stream.begin(spaces.replid, spaces.offset,
+                                   sink=spool.write if spool else None)
+                with guard:
+                    self._started(db, state, spaces, got, spool, node, log)
+                    save()
+            except BaseException:
+                stream.close()
+                raise
+            finally:
+                if spool:
+                    spool.close()
+            spec = self._key_spec(self._client("src", decode=False))
+        done = 0
+        try:
+            for _ in stream.commands():
+                with guard:
+                    spaces.route(stream.offset, stream.argv, spec)
+                    if stream.buffered() or not spaces.ready():
+                        continue
+                    batch = spaces.take()
+                for d, ops in batch.items():
+                    tally = self._refresh_keys(d, ops)
+                    with guard:
+                        spaces.landed(d, tally)
+                with guard:
+                    for d in spaces.rejoin(stream.offset):
+                        self._copy_again(d, log)
+                        spaces.copied(d, {})
+                    spaces.reached(stream.offset)
+                    state["rounds"] = int(state.get("rounds") or 0) + 1
+                    save()
+                stream.ack(stream.offset)
+                done += 1
+                if stop() or (rounds is not None and done >= rounds):
+                    break
+        except BaseException:
+            stream.close()
+            raise
+        streams[where] = (stream, spaces, spec)
+        self.__dict__["_drained"] = not stream.buffered()
+        return spaces
+
+    def _started(self, db, state, spaces, got, spool, node, log):
+        """The key spaces at the stream's start: those that join filled
+        from the snapshot where it was kept and reads whole, by scan
+        otherwise; then what the stream changed meanwhile read again."""
         reseed = spaces.started(got)
         listing = {d: self._dbsize("src", d)
                    for d in sorted(self._keyspace("src"), key=int)
                    if str(d) == str(db) or db is None}
+        todo = spaces.boundary(listing, got["offset"]) + reseed
+        seeded = self._seed_from(spool, todo, node, log) \
+            if todo and spool is not None and got["kind"] == "full" else {}
         copied_at = state.get("copied_at")
-        for d in spaces.boundary(listing, got["offset"]) + reseed:
-            if d not in reseed and copied_at and got["kind"] == "full" \
+        for d in todo:
+            if d in seeded:
+                # the snapshot is the source at this offset exactly
+                spaces.copied(d, seeded[d])
+            elif d not in reseed and copied_at and got["kind"] == "full" \
                     and self.live_facts()["idletime"]:
                 # the move copied it already: only the keys written since
                 # its start, before this offset, are read again
@@ -2400,42 +2589,208 @@ class RedisEngine(Engine):
                 spaces.copied(d, self._refresh_keys(d, spaces.joined(d)))
         for d, ops in spaces.take().items():
             spaces.landed(d, self._refresh_keys(d, ops))
-        save()
-        spec = self._key_spec(self._client("src", decode=False))
-        done = 0
-        for _ in stream.commands():
-            spaces.route(stream.offset, stream.argv, spec)
-            if stream.buffered() or not spaces.ready():
-                continue
-            for d, ops in spaces.take().items():
-                spaces.landed(d, self._refresh_keys(d, ops))
-            for d in spaces.rejoin(stream.offset):
-                self._copy_again(d, log)
-                spaces.copied(d, {})
-            spaces.reached(stream.offset)
-            save()
-            stream.ack(stream.offset)
-            done += 1
-            if stop() or (rounds is not None and done >= rounds):
-                break
-        stream.close()
         log(spaces.said())
-        return spaces
+
+    def seed_way(self, db, node=None):
+        """The `Choice` of how a full start fills the target, from what was
+        measured: the source's dataset, the disk free where the snapshot
+        is kept, this machine's free memory against the batches written,
+        and a snapshot that did not read whole before (`decide.redis_seed`)."""
+        import shutil
+
+        from .. import decide
+        src = self._node_client(node[1], node[2]) if node else \
+            self._client("src")
+        mem = src.info("memory")
+        where = self.hop.report_dir(db if db is not None else "all")
+        where.mkdir(parents=True, exist_ok=True)
+        return decide.redis_seed({
+            "snapshot bytes": int(mem.get("used_memory_dataset")
+                                  or mem.get("used_memory") or 0),
+            "local free": shutil.disk_usage(where).free,
+            "local memory": local_memory(),
+            "memory needs": 2 * pieces.BATCH_BYTES,
+            "every change carried": all(
+                len(self.hop.carries(f"db{d}")) == 3
+                for d in ([db] if db is not None else self.databases())),
+            "unread": self.__dict__.get("_unread")}), where
+
+    def _spool(self, db, node):
+        choice, where = self.seed_way(db, node)
+        if choice.rung is None or choice.rung.name != "snapshot":
+            return None
+        mem = local_memory()
+        return _Spool(where, choice.facts.get("local free"),
+                      mem - pieces.BATCH_BYTES if mem else None)
+
+    def _seed_from(self, spool, todo, node, log):
+        """{db: what landed} of the key spaces `todo` filled from the kept
+        snapshot: the target's keys the hop does not leave out removed
+        first (on a shard, only those of its slots the snapshot lacks,
+        after), each key restored in the source's own serialised form with
+        its expiry and access history, in batches of `pieces.BATCH_BYTES`.
+        A snapshot not kept whole, of a kind the reader does not know, or
+        whose checksum does not match fills nothing: the scan does, and
+        the next full start is decided knowing it."""
+        if spool.why:
+            self.__dict__["_unread"] = spool.why
+            log(f"the source's snapshot was not kept ({spool.why}); the key"
+                " spaces are read from the source instead")
+            return {}
+        want = {str(d) for d in todo}
+        out = {d: dict.fromkeys(KEY_EVENTS, 0) for d in want}
+        how = self._carry_plan(int(sorted(want)[0]))
+        seen = set() if node else None
+        if node is None:
+            for d in sorted(want):
+                self.empty_target(d)
+        spool.f.seek(0)
+        reader = RdbReader(spool.f, most=spool.memory)
+        batch, size, cur = [], 0, None
+        try:
+            for e in reader.entries():
+                d = str(e["db"])
+                if d not in want or not self._raw_kept(d, [e["key"]]):
+                    continue
+                if batch and (d != cur or size >= pieces.BATCH_BYTES):
+                    self._land(cur, batch, how, reader.version, out)
+                    batch, size = [], 0
+                cur = d
+                batch.append(e)
+                size += len(e["raw"]) + len(e["key"])
+                if seen is not None:
+                    seen.add(e["key"])
+            if batch:
+                self._land(cur, batch, how, reader.version, out)
+        except RdbUnread as e:
+            self.__dict__["_unread"] = str(e)
+            log(f"the source's snapshot could not be read whole ({e}); the"
+                " key spaces are read from the source instead")
+            return {}
+        if node is not None:
+            for d in sorted(want):
+                out[d]["removed"] += self._shard_leftovers(d, seen, node[3])
+        log("filled from the source's snapshot: " + "; ".join(
+            f"db{d} {out[d]['added'] + out[d]['written']:,} keys"
+            for d in sorted(want)))
+        return out
+
+    def _land(self, d, batch, how, version, out):
+        """One batch of the snapshot's keys on the target. A target that
+        refuses the serialised form (another server's, or an older one) is
+        given each key by its type's own writes from then on."""
+        dst = self._keys("dst", d, decode=False)
+        now = int(time.time() * 1000)
+        if not self.__dict__.get("_plain_seed"):
+            p = dst.pipeline(transaction=False)
+            for e in batch:
+                exp = e["expire"]
+                if exp is not None and exp <= now:
+                    p.delete(e["key"])
+                    continue
+                ttl = exp if exp is not None and how["abs"] else \
+                    max(1, exp - now) if exp is not None else 0
+                args = [e["key"], ttl, dump_payload(e["raw"], version),
+                        "REPLACE"]
+                if how["abs"]:
+                    args += ["ABSTTL"] if exp is not None else []
+                    if e["freq"] is not None:
+                        args += ["FREQ", e["freq"]]
+                    elif e["idle"] is not None:
+                        args += ["IDLETIME", e["idle"]]
+                p.execute_command("RESTORE", *args)
+            got = p.execute(raise_on_error=False)
+            bad = [g for g in got if isinstance(g, Exception)]
+            if not bad:
+                out[d]["written" if self._cluster("src") else "added"] += \
+                    len(batch)
+                return
+            if not any("payload" in str(g).lower() for g in bad):
+                raise SystemExit(f"db{d}: the target refused a key of the"
+                                 f" snapshot: {str(bad[0])[:90]}")
+            self.__dict__["_plain_seed"] = True
+        self._land_plain(dst, batch, now)
+        out[d]["written" if self._cluster("src") else "added"] += len(batch)
+
+    @staticmethod
+    def _land_plain(dst, batch, now):
+        p = dst.pipeline(transaction=False)
+        for e in batch:
+            k, v, kind = e["key"], e["value"], e["kind"]
+            if e["expire"] is not None and e["expire"] <= now:
+                p.delete(k)
+                continue
+            if v is None:
+                raise RdbUnread(f"the target takes no serialised form, and"
+                                f" a {kind} is written only in it")
+            p.delete(k)
+            if kind == "string":
+                p.set(k, v)
+            elif kind == "list":
+                for part in pieces.by_bytes(v, size=len):
+                    p.rpush(k, *part)
+            elif kind == "set":
+                for part in pieces.by_bytes(v, size=len):
+                    p.sadd(k, *part)
+            elif kind == "zset":
+                for part in pieces.by_bytes(v, size=lambda m: len(m[0]) + 8):
+                    p.zadd(k, dict(part))
+            else:
+                for part in pieces.by_bytes(
+                        v, size=lambda m: len(m[0]) + len(m[1])):
+                    p.hset(k, mapping=dict(part))
+            if e["expire"] is not None:
+                p.pexpireat(k, e["expire"])
+        p.execute()
+
+    def _shard_leftovers(self, d, seen, slots):
+        """Keys the target holds in a shard's slots that its snapshot did
+        not: removed, as `empty_target` removes them on one server."""
+        from redis.crc import key_slot
+        dst = self._keys("dst", d, decode=False)
+        gone = 0
+        for keys, _ in self._walk("dst", d, False, self.COPY_BATCH):
+            for k in self._raw_kept(d, keys):
+                if k not in seen and key_slot(k) in slots:
+                    gone += int(dst.delete(k) or 0)
+        return gone
+
+    def _no_touch(self, side="src"):
+        """Whether a side reads keys without touching them (`CLIENT
+        NO-TOUCH`, 7.2 and later), asked once."""
+        seen = self.__dict__.setdefault("_untouched", {})
+        if side not in seen:
+            import redis
+            try:
+                self._client(side).execute_command("CLIENT", "NO-TOUCH",
+                                                   "OFF")
+                seen[side] = True
+            except redis.RedisError:
+                seen[side] = False
+        return seen[side]
 
     def _sweep_rounds(self, db, state, save, log, stop, rounds=None):
         """Rounds of the idle-time sweep: each takes the source's clock,
         reads again every key whose idle time is no older than the last
         round's start (a second more, the clock's grain), and removes on
         the target every key the source no longer has. The round's start
-        is saved only after both landed. A key restored with an older idle
-        time is not seen by it; the deep check that ends the tail is."""
+        is saved only after both landed. Its reads leave the source's
+        access history alone where the server offers that; where it does
+        not, it says so. A key restored with an older idle time is not
+        seen by it; the deep check that ends the tail is."""
         st = state.setdefault("sweep", {})
+        if not self._no_touch() and not self.__dict__.get("_caveat"):
+            self.__dict__["_caveat"] = True
+            log(f"db{db}: the source cannot read a key without counting it"
+                " as an access (no-touch reads came in 7.2), so each"
+                " round's own reads make the next round read those keys"
+                " again, and the source's idle times start from them")
         done = 0
         while not stop() and (rounds is None or done < rounds):
             started = int(self._client("src", db).time()[0])
-            tally = self._sweep_once(db, int(st.get(str(db), 0)) or None,
-                                     log)
+            self._sweep_once(db, int(st.get(str(db), 0)) or None, log)
             st[str(db)] = started
+            state["rounds"] = int(state.get("rounds") or 0) + 1
             save()
             done += 1
         return st
@@ -2445,10 +2800,14 @@ class RedisEngine(Engine):
         `since` read again (all where None), every key the target holds
         that the source has no longer removed; the tally of what changed.
         The batches are cut by bytes (`pieces.by_bytes`) as the copy's
-        are."""
-        src = self._client("src", db, decode=False)
-        window = int(src.time()[0]) - since + 1 if since else None
-        keys = self._raw_kept(db, self._keys("src", db, decode=False))
+        are, and read without touching where the source offers it."""
+        src = self._keys("src", db, decode=False,
+                         no_touch=self._no_touch())
+        window = int(self._client("src", db).time()[0]) - since + 1 \
+            if since else None
+        keys = [k for page, _ in self._walk("src", db, False,
+                                            self.COPY_BATCH)
+                for k in self._raw_kept(db, page)]
         touched = []
         for batch in pieces.by_bytes(keys, size=lambda k: len(k) + 16):
             p = src.pipeline(transaction=False)
@@ -2458,7 +2817,9 @@ class RedisEngine(Engine):
             touched += [k for k, i in zip(batch, idle)
                         if window is None or not isinstance(i, int)
                         or i <= window]
-        held = set(self._raw_kept(db, self._keys("dst", db, decode=False)))
+        held = {k for page, _ in self._walk("dst", db, False,
+                                            self.COPY_BATCH)
+                for k in self._raw_kept(db, page)}
         ops = {k: "write" for k in touched}
         ops.update({k: "write" for k in held - set(keys)})
         tally = self._refresh_keys(db, ops)
@@ -2466,6 +2827,137 @@ class RedisEngine(Engine):
             f" ({tally['added']:,} added, {tally['removed']:,} removed)")
         return tally
 
+    # --- the tail a run starts (`cli._tail`) -------------------------------
+
+    def tail_start(self, db, token_path):
+        """Before the copy: the source's clock kept as the tail's
+        `copied_at`, so a full start where no snapshot is kept reads again
+        only the keys touched since."""
+        from .. import tailctl
+        sec = int(self._client("src").time()[0])
+        tailctl.moved(token_path, tailctl.new_stream(self, None),
+                      {"copied_at": sec})
+        return False
+
+    def tail_apply(self, db, go, token_path, log):
+        """Follow the source past the copy (`follow_live`), round the loop
+        every tail goes round (`tailctl.run_loop`): each look hands back
+        within a beat, the stream's connection kept open between looks,
+        the state saved only after what it covers landed; a lost
+        connection goes on from the state last saved."""
+        import json
+
+        from .. import failpoint, tailctl
+        env = [tailctl.position(token_path)]
+        state = dict((env[0] or {}).get("token") or {})
+        log("following the source as its replica, ctrl-c to stop"
+            + ("" if go else " (count-only, add --go to copy)"))
+        if not go:
+            choice = self.live_way()
+            log(f"db{db}: " + (choice.rung.said if choice.rung
+                               else choice.reason))
+            return
+        last = [json.dumps(state, sort_keys=True, default=str)]
+
+        def save():
+            text = json.dumps(state, sort_keys=True, default=str)
+            if text == last[0]:
+                return
+            failpoint.hit("tail.applied")
+            env[0] = tailctl.moved(
+                token_path, env[0] or tailctl.new_stream(self, None),
+                json.loads(text))
+            last[0] = text
+            failpoint.hit("tail.saved")
+
+        def look(at):
+            before = _rounds_of(state)
+            ends = time.monotonic() + tailctl.BEAT_EVERY
+            self.follow_live(db, state, save, log,
+                             stop=lambda: time.monotonic() > ends, rounds=1
+                             if "sweep" in state else None)
+            went = _rounds_of(state) - before
+            return state, went, self.__dict__.pop("_drained", True)
+
+        def lost(e, at):
+            self.close_streams()
+            state.clear()
+            state.update((tailctl.position(token_path) or {}).get("token")
+                         or {})
+            return state
+        try:
+            tailctl.run_loop(token_path.parent, db, look, log, "rounds",
+                             hop=self.hop, go=go, token=state, lost=lost,
+                             secrets=(self.hop.source.password,
+                                      self.hop.target.password))
+        finally:
+            self.close_streams()
+
+    # --- two sites both written: each one's changes off its own stream ----
+
+    def site_changes(self, side, stop, log, rounds=None):
+        """The writes site `side` takes from now until `stop()` (or
+        `rounds` commands), read off its own replica stream continued from
+        its current offset, as the change records `twoway.redis_two_site`
+        reads: each with the site's clock at its arrival. A value's
+        record carries the key as the site holds it at the end, in its
+        serialised form; a key gone by then is a removal. Returns
+        (records, held: the writes no record can say, e.g. a flush)."""
+        client = self._client(side)
+        rep = client.info("replication")
+        sec, usec = client.time()
+        changes = SiteChanges(self._key_spec(self._client(side,
+                                                          decode=False)),
+                              int(sec) * 1000 + int(usec) // 1000,
+                              time.monotonic())
+        ep = self.hop.source if side == "src" else self.hop.target
+        stream = ReplicaStream(self._stream_socket(side=side),
+                               user=getattr(ep, "user", None),
+                               password=ep.password or None)
+        done = 0
+        try:
+            stream.begin(rep.get("master_replid"),
+                         int(rep.get("master_repl_offset") or 0))
+            for argv in stream.commands():
+                changes.route(stream.offset, argv)
+                if not stream.buffered():
+                    stream.ack(stream.offset)
+                done += 1
+                if stop() or (rounds is not None and done >= rounds):
+                    break
+        finally:
+            stream.close()
+        changes.valued(lambda d, keys: self._dumps(side, d, keys))
+        for h in changes.held:
+            log(f"{side} db{h['db']} at offset {h['offset']:,}: {h['why']};"
+                " the window cannot be made alike by key and is held")
+        return changes.records, changes.held
+
+    def _dumps(self, side, d, keys):
+        c = self._keys(side, d, decode=False, no_touch=self._no_touch(side))
+        p = c.pipeline(transaction=False)
+        for k in keys:
+            p.dump(k)
+        return dict(zip(keys, p.execute()))
+
+    def site_skew_ms(self, tries=3):
+        """The two sites' clocks apart, with the reading lag, in ms: the
+        least of `tries` readings, each the gap between the clocks at the
+        midpoint of their reads plus half of both round trips."""
+        best = None
+        for _ in range(tries):
+            seen = []
+            for side in ("src", "dst"):
+                c = self._client(side)
+                a = time.time()
+                sec, usec = c.time()
+                b = time.time()
+                seen.append((int(sec) * 1000 + int(usec) / 1000
+                             - (a + b) * 500, (b - a) * 1000))
+            (oa, ra), (ob, rb) = seen
+            got = abs(oa - ob) + (ra + rb) / 2
+            best = got if best is None else min(best, got)
+        return int(best) + 1
 
 #: what the tail counts a key's change as (`key_event`)
 KEY_EVENTS = ("added", "removed", "renamed", "ttl", "retyped", "written")
@@ -2674,7 +3166,9 @@ class KeyspaceStates:
         self.state = state
         self.log = log
         self.spaces = state.setdefault("spaces", {})
-        self.db = "0"
+        # the database the stream last selected: a stream continued from a
+        # saved offset does not say it again
+        self.db = state.get("db", "0")
         self.pending = {}
         self.multi = False
         self.held = state.setdefault("held", {})
@@ -2836,6 +3330,7 @@ class KeyspaceStates:
 
     def reached(self, at):
         self.state["offset"] = at
+        self.state["db"] = self.db
 
     def parked(self):
         return sorted(d for d, st in self.spaces.items()
@@ -2846,3 +3341,494 @@ class KeyspaceStates:
             f"db{d} {st['state']} from offset {st['seam']:,}: "
             + ", ".join(f"{n:,} {k}" for k, n in sorted(st["counts"].items())
                         if n) for d, st in sorted(self.spaces.items()))
+
+
+def _rounds_of(state):
+    return int(state.get("rounds") or 0) + sum(
+        int(s.get("rounds") or 0) for s in (state.get("shards") or {})
+        .values())
+
+
+def local_memory():
+    """Bytes of memory free on this machine, or None where it cannot be
+    read (a choice resting on it then does not hold)."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except ImportError:
+        pass
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+class _Spool:
+    """The snapshot the source sends, kept on disk as it arrives, up to the
+    room measured (`most`); past it, or on a write that fails, the rest is
+    let go and `why` says so - the stream still reads through it."""
+
+    def __init__(self, where, most, memory):
+        import tempfile
+        self.f = tempfile.TemporaryFile(dir=where)
+        self.most, self.memory = most, memory
+        self.size, self.why = 0, None
+
+    def write(self, chunk):
+        if self.why:
+            return
+        if self.most is not None and self.size + len(chunk) > self.most:
+            self.why = (f"it is past the {self.most:,} bytes free where it"
+                        " is kept")
+            return
+        try:
+            self.f.write(chunk)
+        except OSError as e:
+            self.why = f"keeping it failed: {e}"
+            return
+        self.size += len(chunk)
+
+    def close(self):
+        self.f.close()
+
+
+class RdbUnread(Exception):
+    """A snapshot the reader cannot read whole: the scan takes over."""
+
+
+def _crc64_table():
+    out = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (c >> 1) ^ 0x95AC9329AC4BC9B5 if c & 1 else c >> 1
+        out.append(c)
+    return out
+
+
+_CRC64 = _crc64_table()
+
+
+def crc64(data, crc=0):
+    """The checksum Redis ends a snapshot and a serialised key with (Jones,
+    reflected, no final xor)."""
+    t = _CRC64
+    for b in data:
+        crc = t[(crc ^ b) & 0xFF] ^ (crc >> 8)
+    return crc
+
+
+def dump_payload(raw, version):
+    """A key's serialised form, as `DUMP` gives it: its type and value as
+    the snapshot holds them, the snapshot's version, the checksum."""
+    body = raw + int(version).to_bytes(2, "little")
+    return body + crc64(body).to_bytes(8, "little")
+
+
+def lzf_decompress(data, size):
+    out = bytearray()
+    i, n = 0, len(data)
+    while i < n:
+        ctrl = data[i]
+        i += 1
+        if ctrl < 32:
+            out += data[i:i + ctrl + 1]
+            i += ctrl + 1
+            continue
+        length = ctrl >> 5
+        ref = len(out) - ((ctrl & 0x1F) << 8) - 1
+        if length == 7:
+            length += data[i]
+            i += 1
+        ref -= data[i]
+        i += 1
+        if ref < 0:
+            raise RdbUnread("a compressed value points before its start")
+        for _ in range(length + 2):
+            out.append(out[ref])
+            ref += 1
+    if len(out) != size:
+        raise RdbUnread(f"a compressed value came out {len(out):,} bytes,"
+                        f" not {size:,}")
+    return bytes(out)
+
+
+#: the snapshot's value types, by kind (a type not here is read by scan)
+_RDB_KINDS = {0: "string", 1: "list", 2: "set", 3: "zset", 4: "hash",
+              5: "zset", 7: "module", 10: "list", 11: "set", 12: "zset",
+              13: "hash", 14: "list", 15: "stream", 16: "hash", 17: "zset",
+              18: "list", 19: "stream", 20: "set", 21: "stream"}
+
+
+def _signed(v, bits):
+    return v - (1 << bits) if v >= 1 << (bits - 1) else v
+
+
+def _ziplist(blob):
+    out, i = [], 10
+    while blob[i] != 0xFF:
+        i += 5 if blob[i] == 0xFE else 1
+        e = blob[i]
+        top = e >> 6
+        if top < 3:
+            if top == 0:
+                n, i = e & 0x3F, i + 1
+            elif top == 1:
+                n, i = ((e & 0x3F) << 8) | blob[i + 1], i + 2
+            else:
+                n, i = int.from_bytes(blob[i + 1:i + 5], "big"), i + 5
+            out.append(bytes(blob[i:i + n]))
+            i += n
+            continue
+        width = {0xC0: 2, 0xD0: 4, 0xE0: 8, 0xF0: 3, 0xFE: 1}.get(e)
+        if width is None:
+            out.append(str((e & 0x0F) - 1).encode())
+            i += 1
+            continue
+        out.append(str(int.from_bytes(blob[i + 1:i + 1 + width], "little",
+                                      signed=True)).encode())
+        i += 1 + width
+    return out
+
+
+def _listpack(blob):
+    out, i = [], 6
+    while blob[i] != 0xFF:
+        e, start = blob[i], i
+        if e & 0x80 == 0:
+            out.append(str(e & 0x7F).encode())
+            i += 1
+        elif e & 0xC0 == 0x80:
+            n = e & 0x3F
+            out.append(bytes(blob[i + 1:i + 1 + n]))
+            i += 1 + n
+        elif e & 0xE0 == 0xC0:
+            out.append(str(_signed(((e & 0x1F) << 8) | blob[i + 1], 13))
+                       .encode())
+            i += 2
+        elif e & 0xF0 == 0xE0:
+            n = ((e & 0x0F) << 8) | blob[i + 1]
+            out.append(bytes(blob[i + 2:i + 2 + n]))
+            i += 2 + n
+        elif e == 0xF0:
+            n = int.from_bytes(blob[i + 1:i + 5], "little")
+            out.append(bytes(blob[i + 5:i + 5 + n]))
+            i += 5 + n
+        elif e in (0xF1, 0xF2, 0xF3, 0xF4):
+            w = {0xF1: 2, 0xF2: 3, 0xF3: 4, 0xF4: 8}[e]
+            out.append(str(int.from_bytes(blob[i + 1:i + 1 + w], "little",
+                                          signed=True)).encode())
+            i += 1 + w
+        else:
+            raise RdbUnread(f"a packed entry of an unknown kind {e:#x}")
+        n = i - start
+        i += 1 if n < 128 else 2 if n < 16384 else 3 if n < 2097152 \
+            else 4 if n < 268435456 else 5
+    return out
+
+
+def _intset(blob):
+    w = int.from_bytes(blob[:4], "little")
+    n = int.from_bytes(blob[4:8], "little")
+    return [str(int.from_bytes(blob[8 + j * w:8 + (j + 1) * w], "little",
+                               signed=True)).encode() for j in range(n)]
+
+
+def _pairs(flat):
+    return list(zip(flat[0::2], flat[1::2]))
+
+
+class RdbReader:
+    """The keys of a Redis snapshot, read in one pass from a file: each
+    {db, key, kind, expire (ms, or None), idle, freq, value, raw}. `raw`
+    is the key's type and value as the snapshot holds them (the body of
+    its serialised form, `dump_payload`); `value` the value itself for a
+    string, list, set, sorted set and hash ([(member, score)] and [(field,
+    value)] for the last two), None for a stream or a module's type,
+    which are carried only serialised. The checksum at the end is held to
+    what was read; a kind the reader does not know, a value past `most`
+    bytes (this machine's memory measured) or a checksum that does not
+    match is `RdbUnread`."""
+
+    def __init__(self, f, most=None):
+        self.f, self.most = f, most
+        self.crc, self.tape, self.version = 0, None, None
+
+    def _take(self, n):
+        if self.most is not None and n > self.most:
+            raise RdbUnread(f"a value of {n:,} bytes is past the"
+                            f" {self.most:,} this machine has free")
+        b = self.f.read(n)
+        if len(b) != n:
+            raise RdbUnread("the snapshot ends inside a value")
+        self.crc = crc64(b, self.crc)
+        if self.tape is not None:
+            self.tape += b
+            if self.most is not None and len(self.tape) > self.most:
+                raise RdbUnread(f"a value past the {self.most:,} bytes this"
+                                " machine has free")
+        return b
+
+    def _len(self):
+        b = self._take(1)[0]
+        kind = b >> 6
+        if kind == 0:
+            return b & 0x3F, False
+        if kind == 1:
+            return ((b & 0x3F) << 8) | self._take(1)[0], False
+        if kind == 2:
+            if b in (0x80, 0x81):
+                return int.from_bytes(self._take(4 if b == 0x80 else 8),
+                                      "big"), False
+            raise RdbUnread(f"a length of an unknown form {b:#x}")
+        return b & 0x3F, True
+
+    def length(self):
+        n, special = self._len()
+        if special:
+            raise RdbUnread("an encoded value where a length was due")
+        return n
+
+    def string(self):
+        n, special = self._len()
+        if not special:
+            return self._take(n)
+        if n in (0, 1, 2):
+            return str(int.from_bytes(self._take(1 << n), "little",
+                                      signed=True)).encode()
+        if n == 3:
+            packed, size = self.length(), self.length()
+            return lzf_decompress(self._take(packed), size)
+        raise RdbUnread(f"a string of an unknown form {n}")
+
+    def _score(self):
+        n = self._take(1)[0]
+        if n in (253, 254, 255):
+            return {253: float("nan"), 254: float("inf"),
+                    255: float("-inf")}[n]
+        return float(self._take(n))
+
+    def _value(self, t):
+        if t == 0:
+            return self.string()
+        if t in (1, 2):
+            return [self.string() for _ in range(self.length())]
+        if t == 3:
+            return [(self.string(), self._score())
+                    for _ in range(self.length())]
+        if t == 4:
+            return [(self.string(), self.string())
+                    for _ in range(self.length())]
+        if t == 5:
+            out = []
+            for _ in range(self.length()):
+                m = self.string()
+                out.append((m, struct.unpack("<d", self._take(8))[0]))
+            return out
+        if t == 7:
+            self.length()
+            self._module_ops()
+            return None
+        if t in (10, 12, 13):
+            flat = _ziplist(self.string())
+            return flat if t == 10 else _pairs(flat) if t == 13 else [
+                (m, float(s)) for m, s in _pairs(flat)]
+        if t == 11:
+            return _intset(self.string())
+        if t == 14:
+            return [x for _ in range(self.length())
+                    for x in _ziplist(self.string())]
+        if t == 18:
+            out = []
+            for _ in range(self.length()):
+                plain = self.length() == 1
+                blob = self.string()
+                out += [blob] if plain else _listpack(blob)
+            return out
+        if t in (16, 17, 20):
+            flat = _listpack(self.string())
+            return flat if t == 20 else _pairs(flat) if t == 16 else [
+                (m, float(s)) for m, s in _pairs(flat)]
+        if t in (15, 19, 21):
+            self._stream(t)
+            return None
+        raise RdbUnread(f"a value of type {t}, which this reader does not"
+                        " know")
+
+    def _module_ops(self):
+        while True:
+            op = self.length()
+            if op == 0:
+                return
+            if op in (1, 2):
+                self.length()
+            elif op in (3, 4):
+                self._take(4 if op == 3 else 8)
+            elif op == 5:
+                self.string()
+            else:
+                raise RdbUnread(f"a module's value of an unknown part {op}")
+
+    def _stream(self, t):
+        for _ in range(self.length()):
+            self.string()
+            self.string()
+        for _ in range(3 + (5 if t >= 19 else 0)):
+            self.length()
+        for _ in range(self.length()):
+            self.string()
+            self.length()
+            self.length()
+            if t >= 19:
+                self.length()
+            for _ in range(self.length()):
+                self._take(24)
+                self.length()
+            for _ in range(self.length()):
+                self.string()
+                self._take(16 if t >= 21 else 8)
+                for _ in range(self.length()):
+                    self._take(16)
+
+    def entries(self):
+        head = self._take(9)
+        if head[:5] != b"REDIS" or not head[5:].isdigit():
+            raise RdbUnread("it does not begin as a snapshot")
+        self.version = int(head[5:])
+        db, expire, idle, freq = 0, None, None, None
+        while True:
+            op = self._take(1)[0]
+            if op == 0xFF:
+                want = self.crc
+                got = int.from_bytes(self.f.read(8), "little") \
+                    if self.version >= 5 else 0
+                if got and got != want:
+                    raise RdbUnread("its checksum does not match what was"
+                                    " read")
+                return
+            if op == 0xFE:
+                db = self.length()
+            elif op == 0xFD:
+                expire = int.from_bytes(self._take(4), "little") * 1000
+            elif op == 0xFC:
+                expire = int.from_bytes(self._take(8), "little")
+            elif op == 0xFB:
+                self.length()
+                self.length()
+            elif op == 0xFA:
+                self.string()
+                self.string()
+            elif op == 0xF9:
+                freq = self._take(1)[0]
+            elif op == 0xF8:
+                idle = self.length()
+            elif op == 0xF7:
+                self.length()
+                self.length()
+                self.length()
+                self._module_ops()
+            elif op == 0xF5:
+                # the server's functions travel with it, not with keys
+                self.string()
+            elif op == 0xF4:
+                self.length()
+                self.length()
+                self.length()
+            elif op in _RDB_KINDS:
+                key = self.string()
+                self.tape = bytearray([op])
+                try:
+                    value = self._value(op)
+                    raw = bytes(self.tape)
+                finally:
+                    self.tape = None
+                yield {"db": db, "key": key, "kind": _RDB_KINDS[op],
+                       "expire": expire, "idle": idle, "freq": freq,
+                       "value": value, "raw": raw}
+                expire, idle, freq = None, None, None
+            else:
+                raise RdbUnread(f"a part of type {op}, which this reader"
+                                " does not know")
+
+
+#: a counter's writes and the sign of their step (`SiteChanges`)
+_COUNTER_STEPS = {b"incr": 1, b"decr": -1, b"incrby": 1, b"decrby": -1}
+
+
+class SiteChanges:
+    """One site's writes as the two-site rules read them (`twoway.
+    redis_two_site`): a counter's step, a set's members added and removed,
+    a removal, a list's or a stream's write (whose order no rule may
+    overrule, by the command's own category), any other write a value.
+    Each record has the site's offset and its clock at the write's
+    arrival (`base_ms` read at `t0`, moved on by this machine's clock). A
+    write whose keys the site does not name, or a flush, is `held`."""
+
+    def __init__(self, spec, base_ms, t0):
+        self.spec, self.base, self.t0 = spec, base_ms, t0
+        self.db, self.records, self.held = "0", [], []
+
+    def clock(self):
+        return self.base + int((time.monotonic() - self.t0) * 1000)
+
+    def route(self, at, argv):
+        name = argv[0].lower()
+        if name == b"select":
+            self.db = argv[1].decode()
+            return
+        if name in (b"multi", b"exec", b"ping", b"replconf"):
+            return
+        base = {"db": self.db, "offset": at, "time": self.clock()}
+        if name in (b"flushdb", b"flushall", b"swapdb"):
+            self.held.append(dict(base, why=f"{name.decode().upper()}"
+                                  " changes keys it does not name"))
+            return
+        keys = self.spec(argv)
+        if keys is None:
+            self.held.append(dict(base, why=f"{name.decode().upper()}"
+                                  " changes keys the site does not name"))
+            return
+        if name in _COUNTER_STEPS and len(keys) == 1:
+            try:
+                step = int(argv[2]) if len(argv) > 2 else 1
+            except ValueError:
+                step = None
+            if step is not None:
+                self.records.append(dict(base, key=keys[0], kind="counter",
+                                         delta=_COUNTER_STEPS[name] * step))
+                return
+        if name in (b"sadd", b"srem") and keys:
+            members = set(argv[2:])
+            self.records.append(dict(
+                base, key=keys[0], kind="set",
+                added=members if name == b"sadd" else set(),
+                gone=members if name == b"srem" else set()))
+            return
+        if name in (b"del", b"unlink"):
+            self.records += [dict(base, key=k, kind="removed") for k in keys]
+            return
+        cats = getattr(self.spec, "categories", lambda n: set())(name)
+        kind = "list" if "@list" in cats else "stream" \
+            if "@stream" in cats else "value"
+        self.records += [dict(base, key=k, kind=kind) for k in keys]
+
+    def valued(self, dumps):
+        """Each value's record given the key as the site holds it now
+        (`dumps(db, keys) -> {key: serialised form or None}`); a key gone
+        by then ends with a removal."""
+        want = {}
+        for r in self.records:
+            if r["kind"] in ("value", "list", "stream"):
+                want.setdefault(r["db"], set()).add(r["key"])
+        for d, keys in sorted(want.items()):
+            got = dumps(d, sorted(keys))
+            last = {}
+            for r in self.records:
+                if r["db"] == d and r["key"] in keys:
+                    r["value"] = got.get(r["key"])
+                    last[r["key"]] = r
+            for k, r in sorted(last.items()):
+                if got.get(k) is None:
+                    self.records.append(dict(db=d, key=k, kind="removed",
+                                             offset=r["offset"],
+                                             time=r["time"]))

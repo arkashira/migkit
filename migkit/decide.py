@@ -3630,6 +3630,7 @@ def two_site_rule(facts):
              " both wrote held and logged", footprint=1)), f)
 
 
+<<<<<<< HEAD
 # --- a tail batch applied as typed columns or as change records (R19.9) ----
 
 _TAIL_HOLDS = {"consistent": "as of one moment", "idempotent": "converges",
@@ -3721,3 +3722,45 @@ def orphan_ways():
     from .engines import NAMES
     return [(s, e) for s, ways in WAYS.items() for e in ways
             if s not in SHAPES or (e != "*" and e not in NAMES)]
+||||||| 8581f2a4
+=======
+def redis_seed(facts):
+    """The `Choice` of how a Redis tail's full start fills the target.
+
+    From the snapshot the source sends the replica stream: the source as
+    of the stream's first offset, so nothing between is read twice or
+    missed, and no key is read from the source. It needs room to keep the
+    snapshot here while it arrives (`local free` at least `snapshot
+    bytes`, the source's measured dataset) and memory for the batches it
+    writes (`local memory` at least `memory needs`); it proves itself by
+    reading whole - a kind the reader does not know, a value past the
+    memory measured or a checksum that does not match is `unread`, and
+    the next start knows it. Else every key read again from the source."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("the Redis tail's first fill", (
+        Rung("snapshot", "filled from the snapshot the source sent, at its"
+             " offset", needs=(
+                 Need("room to keep the snapshot",
+                      lambda f: _at_least(f.get("local free"),
+                                          f.get("snapshot bytes")),
+                      lambda f: f"the snapshot needs about"
+                      f" {f.get('snapshot bytes') or 0:,} bytes kept here,"
+                      f" and {f.get('local free') or 0:,} are free"),
+                 Need("memory for its batches",
+                      lambda f: _at_least(f.get("local memory"),
+                                          f.get("memory needs")),
+                      lambda f: "this machine's free memory was not read"
+                      if f.get("local memory") is None else
+                      f"its batches need {f.get('memory needs') or 0:,}"
+                      f" bytes of memory, and {f.get('local memory'):,}"
+                      " are free"),
+                 Need("every change carried",
+                      lambda f: f.get("every change carried", True),
+                      "the hop keeps some of the source's changes off the"
+                      " target, and a snapshot fill writes every key")),
+             prove=lambda f: f.get("unread") or None,
+             because="the snapshot is the source at the stream's first"
+                     " offset, and no key is read from the source"),
+        Rung("scan", "every key read again from the source and written",
+             footprint=1)), f)
+>>>>>>> w13b

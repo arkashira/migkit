@@ -1709,3 +1709,35 @@ def redis_two_site(a, b, skew_ms=None, log=print):
         log(f"db{k[0]} {k[1]}: a conflict - written on both sites ({why});"
             " left as each site has it for the operator")
     return out
+
+
+def redis_two_site_live(eng, stop, log=print, rounds=None):
+    """`redis_two_site` over one window read live: each site's writes off
+    its own replica stream (`RedisEngine.site_changes`), both read side by
+    side until `stop()`, the clocks' skew measured with the reading lag
+    (`site_skew_ms`). A write no record can say on either site (a flush)
+    holds the window: it is returned in `held`, and the rules' answer is
+    for the rest."""
+    import threading
+    got, failed = {}, []
+    skew = eng.site_skew_ms()
+
+    def read(side):
+        try:
+            got[side] = eng.site_changes(side, stop, log, rounds)
+        except BaseException as e:  # noqa: BLE001 - raised below
+            failed.append(e)
+    runs = [threading.Thread(target=read, args=(s,), daemon=True)
+            for s in ("src", "dst")]
+    for t in runs:
+        t.start()
+    for t in runs:
+        t.join()
+    if failed:
+        raise failed[0]
+    (a, held_a), (b, held_b) = got["src"], got["dst"]
+    out = redis_two_site(a, b, skew_ms=skew, log=log)
+    out["held"] = [dict(h, site="a") for h in held_a] + [
+        dict(h, site="b") for h in held_b]
+    out["skew_ms"] = skew
+    return out

@@ -969,7 +969,11 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * db<...>: no live way holds - <...>
 
+* the shard from slot <...> can no longer be followed as a replica (<...>); the tail stops with each shard's offset saved, and its next start sweeps the cluster whole
+
 * db<...>: the stream fails again at offset <...> - <...>; the tail stops there, its offset saved
+
+* db<...>: the target refused a key of the snapshot: <...>
 
 ## Kafka
 
