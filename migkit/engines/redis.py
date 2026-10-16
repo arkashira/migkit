@@ -32,6 +32,36 @@ class RedisEngine(Engine):
             encoding_errors="surrogateescape")
         return redis.Redis(connection_pool=pool)
 
+    # ---- the mover's number, held here (`fencing`, backlog W1) ------------
+
+    FENCE_WAYS = ("compared-key",)
+
+    def fence_facts(self, side, db):
+        """What `decide.fence_place` and `fence_way` read of this target:
+        whether the account may run a script and write migkit's own keys,
+        asked of the server's access lists without running either."""
+        from .. import fencing
+        ep = self.hop.source if side == "src" else self.hop.target
+        at = self.hop.target_db(db) if side == "dst" else db
+        c = self._client(side, int(at) if str(at).isdigit() else 0)
+        user = ep.user or "default"
+
+        def may(*cmd):
+            try:
+                return str(c.execute_command("ACL", "DRYRUN", user, *cmd)
+                           ).upper() == "OK"
+            except Exception as e:  # noqa: BLE001 - no access lists: open
+                return "unknown command" in str(e).lower()
+        key = f"{fencing.OWN}:probe"
+        return {"ways": self.FENCE_WAYS,
+                "scripts": may("EVAL", "return 1", "1", key),
+                "create_in": may("HSET", key, "n", "1"),
+                "grant_in": f"ACL SETUSER {user} ~{fencing.OWN}:* +eval"
+                            " +hset +hmget +del"}
+
+    def fence_home(self, side, db, place):
+        return self.hop.target_db(db) if side == "dst" else db
+
     def _connection_class(self, side, decode, no_touch=False):
         """What every connection to a side is made of, whichever client
         holds it: the side's TLS (`Endpoint.redis_tls`), and a key sent
@@ -846,6 +876,10 @@ class RedisEngine(Engine):
             # a tail that marks sends each batch as one MULTI / EXEC whose
             # first command is the mark: the keys of a batch land with it
             # or not at all
+            # a writer that lost its hold is refused by the target first
+            # (`fencing`)
+            from .. import fencing
+            fencing.hold(self, "dst", str(dst.connection_pool.connection_kwargs.get("db", 0)), None)
             write = dst.pipeline(transaction=mark)
             if mark:
                 write.execute_command(*self._mark_command())

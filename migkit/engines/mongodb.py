@@ -518,6 +518,46 @@ class MongoEngine(Engine):
         return MongoClient(uri, serverSelectionTimeoutMS=15000,
                            connectTimeoutMS=15000)
 
+    # ---- the mover's number, held here (`fencing`, backlog W1) ------------
+
+    #: how `fencing` can hold a mover's number here (`decide.fence_way`)
+    FENCE_WAYS = ("guarded-document",)
+
+    def fence_facts(self, side, db):
+        """What `decide.fence_place` and `fence_way` read of this target:
+        whether migkit's own collection is there, and where the account may
+        make and write it - its privileges, asked of the server (a server
+        that signs nobody in enforces none)."""
+        from .. import fencing
+        c = self._client(side)
+        try:
+            home = self._d(side, db)
+            st = c[home].command("connectionStatus", showPrivileges=True)
+            info = st.get("authInfo") or {}
+            privs = info.get("authenticatedUserPrivileges") or []
+            need = {"createCollection", "insert", "update", "find"}
+
+            def may(name):
+                return not info.get("authenticatedUsers") or any(
+                    need <= set(p.get("actions") or ())
+                    and ((p.get("resource") or {}).get("anyResource")
+                         or (p.get("resource") or {}).get("db") in (name, ""))
+                    for p in privs)
+            return {"ways": self.FENCE_WAYS,
+                    "kept_in": fencing.OWN in c[home].list_collection_names(),
+                    "create_in": may(home),
+                    "create_beside": may(fencing.BESIDE),
+                    "grant_in": "grant the account createCollection, find,"
+                                f" insert and update on database {home}",
+                    "grant_beside": "or the same on a database"
+                                    f" {fencing.BESIDE}"}
+        finally:
+            c.close()
+
+    def fence_home(self, side, db, place):
+        from .. import fencing
+        return self._d(side, db) if place == "in" else fencing.BESIDE
+
     def _d(self, side, db):
         """Physical db name: source as given, target through the hop's
         db_map (identity when unmapped) so a migration can land in a
@@ -1719,6 +1759,10 @@ class MongoEngine(Engine):
         from .. import canon
         if not rows:
             return 0
+        # a writer that lost its hold is refused by the target first
+        # (`fencing`)
+        from .. import fencing
+        fencing.hold(self, side, db, None)
         names = [n for n, _ in columns]
         if "_id" not in names:
             raise SystemExit(f"{table}: migkit will not write documents"

@@ -100,6 +100,13 @@ def msk_presign(region, access_key, secret_key, session_token=None,
     return token, at.timestamp() + int(lifetime)
 
 
+#: built, and run on no broker that takes a transactional producer: the
+#: sandbox's keeps its transaction log at more replicas than it has, so the
+#: producer-epoch fence is refused there with its reason (`fencing`)
+UNPROVED_ON = ("built; not run on a real broker that takes transactional"
+               " producers")
+UNPROVED_ITEMS = "operations.fencing"
+
 class MskToken:
     """Amazon MSK's IAM sign-in token for one side, minted through the
     egress gate (the `provider` kind: the provider's credentials are
@@ -672,6 +679,60 @@ class KafkaEngine(Engine):
         stream's four changes landed in a topic nobody read."""
         return True
 
+    # ---- the mover's number, held here (`fencing`, backlog W1) ------------
+
+    FENCE_WAYS = ("producer-epoch",)
+
+    def fence_facts(self, side, db):
+        """What `decide.fence_place` and `fence_way` read of this cluster:
+        whether migkit's own topic is there or may be made (made here,
+        compacted, where it may), and whether the broker takes a
+        transactional producer - a bounded start of one under a probe's id."""
+        import secrets
+
+        from kafka.admin import NewTopic
+
+        from .. import fencing
+        c = self._consumer(side)
+        try:
+            kept = fencing.OWN in (c.topics() or ())
+        finally:
+            c.close()
+        made = kept
+        if not kept:
+            admin = self._admin(side)
+            try:
+                admin.create_topics([NewTopic(
+                    fencing.OWN, num_partitions=1, replication_factor=1,
+                    topic_configs={"cleanup.policy": "compact"})])
+                made = True
+            except Exception as e:  # noqa: BLE001 - made by another, or refused
+                made = "TopicAlreadyExists" in type(e).__name__
+            finally:
+                admin.close()
+        try:
+            # bounded by the lease's own term: a broker that cannot keep a
+            # transaction's state answers no start at all
+            from .. import ha
+            wait = max(1, int(ha.term() / 3))
+            p = self._producer(
+                transactional_id=f"{fencing.OWN}:probe:{secrets.token_hex(4)}",
+                **({"max_block_ms": wait * 1000}
+                   if self._client_way() != "native" else {}))
+            if self._client_way() == "native":
+                p.init_transactions(timeout=wait)
+            else:
+                p.init_transactions()
+            p.close()
+            tx = True
+        except Exception:  # noqa: BLE001 - the broker refused one
+            tx = False
+        return {"ways": self.FENCE_WAYS, "kept_in": kept, "create_in": made,
+                "transactions": tx,
+                "grant_in": f"allow the account to create topic"
+                            f" {fencing.OWN} and to write under transactional"
+                            f" ids {fencing.OWN}:*"}
+
     def _consumer(self, side, **extra):
         """A consumer of a side, through the client chosen for it
         (`_client_way`): the compiled one answers the pure one's calls."""
@@ -951,6 +1012,10 @@ class KafkaEngine(Engine):
                 total = end - pst["next"]
                 done = 0
                 while pst["next"] < end:
+                    # a writer that lost its hold is refused by the target first
+                    # (`fencing`)
+                    from .. import fencing
+                    fencing.hold(self, "dst", self.CLUSTER, None)
                     batch = [m for msgs in src.poll(
                                  timeout_ms=5000,
                                  max_records=max(1, min(int(chunk), 5000))

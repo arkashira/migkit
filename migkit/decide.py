@@ -6097,3 +6097,84 @@ def account_carried(facts):
              needs=(carried, Need("a login", lambda x: bool(x.get("login")),
                                   "not a login"))),
         Rung("left", "left for the operator: the grant waits for it")), f)
+
+# ---- how a target holds a mover's number (`fencing`, backlog W1) ----------
+
+def fence_place(facts, costs=None):
+    """Where migkit's own fence record goes on a target without SQL: in
+    the target's own database (`in`), or in migkit's own beside it
+    (`beside`) where the account may make that but not the other. `facts`
+    (`Engine.fence_facts`): `kept_in` / `kept_beside` (the record is
+    already there), `create_in` / `create_beside` (the account may make
+    it there: read of its grants, never assumed), `grant_in` (the
+    statement an operator runs to let it). A target where neither holds
+    holds no number: a standby over it is refused with the statement."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("where a target keeps the mover's number", (
+        Rung("in", "migkit's own record in the target's own database",
+             needs=(Need("the record kept or makeable there",
+                         lambda x: bool(x.get("kept_in")
+                                        or x.get("create_in")),
+                         lambda x: "the account may not make migkit's own"
+                         " record in the target's database ("
+                         + (x.get("grant_in") or "grant it the right to")
+                         + ")"),),
+             because="the record beside the data it fences"),
+        Rung("beside", "migkit's own record in a database of its own"
+             " beside the target's", footprint=1,
+             needs=(Need("the record kept or makeable beside",
+                         lambda x: bool(x.get("kept_beside")
+                                        or x.get("create_beside")),
+                         lambda x: "nor may it make a database of"
+                         " migkit's own beside it ("
+                         + (x.get("grant_beside") or x.get("grant_in")
+                            or "grant it the right to") + ")"),),
+             because="the target's own database may not hold it")),
+        f, costs=costs or None, prove=False)
+
+
+def fence_way(facts, costs=None):
+    """The strongest way a target without SQL holds a writer to its
+    number (`fencing.WAY_CLASSES`), on `facts`: `ways` (what the target
+    speaks: `Engine.fence_facts`), `scripts` (a server-side script may
+    run), `transactions` (the broker takes a transactional producer).
+    Ranked by who refuses: every rung but the last is the target's own
+    atomic compare; `replacing-row` is this process reading the target's
+    highest number - weaker, and said."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def speaks(name):
+        return Need(f"the target speaks {name}",
+                    lambda x: name in (x.get("ways") or ()),
+                    f"the target has no {name}")
+    return climb("how a target holds the mover's number", (
+        Rung("guarded-document", "a document changed only where its number"
+             " still matches", needs=(speaks("guarded-document"),),
+             because="the server's single-document atomicity compares and"
+                     " refuses"),
+        Rung("compared-key", "a script comparing and setting in one step",
+             needs=(speaks("compared-key"),
+                    Need("server-side scripts allowed",
+                         lambda x: bool(x.get("scripts")),
+                         "the account may not run scripts (allow its"
+                         " script commands)")),
+             because="the server runs the script whole: nothing between"
+                     " the compare and the set"),
+        Rung("lightweight-transaction", "a conditional update the replicas"
+             " agree on", needs=(speaks("lightweight-transaction"),),
+             because="a conditional update is applied only where its"
+                     " condition holds at every replica it asks"),
+        Rung("producer-epoch", "the broker's producer epoch",
+             needs=(speaks("producer-epoch"),
+                    Need("transactional producers taken",
+                         lambda x: bool(x.get("transactions")),
+                         "the broker takes no transactional producer for"
+                         " the account (allow its transactional id)")),
+             because="a producer under a lower epoch is fenced by the"
+                     " broker"),
+        Rung("replacing-row", "the highest number read back before each"
+             " batch: a weaker hold, this process judges", footprint=2,
+             needs=(speaks("replacing-row"),),
+             because="no atomic compare here: the target keeps the highest"
+                     " number and every batch reads it first")),
+        f, costs=costs or None, prove=False)

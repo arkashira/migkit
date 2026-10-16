@@ -377,6 +377,11 @@ class Holding:
                     " write from a machine that lost the hop, and"
                     f" {db}'s does not prove it can - {why}. Nothing was"
                     " written; run one machine, without standby")
+            got = fencing.way(dst, "dst", db)
+            if isinstance(got, fencing.Way) and not got.target_refuses:
+                self.say(f"{db}: the target keeps the number but has no"
+                         " compare of its own - every batch reads it first,"
+                         " so a batch begun before a takeover can still land")
             _PROVED.add((hop.name, db))
         for _ in range(10):
             token = fencing.Token(hop_row(hop), self.lease.fence,

@@ -1204,8 +1204,8 @@ def _catalogued(n, c):
 
 def _fenced(n, c):
     from . import fencing
-    return getattr(c, "OWN_DIALECT", None) in fencing.SQL \
-        and _own(c, "own_table")
+    return (getattr(c, "OWN_DIALECT", None) in fencing.SQL
+            and _own(c, "own_table")) or _own(c, "fence_facts")
 
 
 def _drained(n, c):
@@ -2750,7 +2750,9 @@ _CLOUD_NATIVE_GAPS = {
                 "lindorm"),
     },
     "operations.fencing": _each(NOT_YET, "P0-PARITY.all",
-                                _but("oceanbase", "polardbx", "dcdb")),
+                                _but("oceanbase", "polardbx", "dcdb",
+                                     "mongodb", "redis", "cassandra",
+                                     "clickhouse", "oracle", "kafka")),
 }
 for _item, _gaps in _CLOUD_NATIVE_GAPS.items():
     DEPTH_GAPS.setdefault(_item, {}).update(_gaps)

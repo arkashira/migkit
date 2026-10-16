@@ -6018,6 +6018,21 @@ the gaps nothing above covers yet, now items of their own.
   *Not done:* a compiled collapse, render and write; the Arrow handoff
   was dropped, measured no gain; the ~100k changes a second ceiling is
   not measured on a server; tests are on fakes.
+  W18A: MongoDB (a guarded find-and-modify), Redis (a compare-and-set
+  script), Cassandra (a lightweight transaction) and Oracle (its own table
+  under a row locked for update) hold the number and refuse a stopped
+  mover's write themselves, proved on their lanes; ClickHouse keeps the
+  highest number in a replacing row read whole - a weaker hold, this
+  process judges, said where chosen; Kafka's producer-epoch way is built
+  and refused on the sandbox's broker (no transactional producer there):
+  built, unproved on a real broker. The way and its placement (in the
+  target's database, beside it, or refused with the grant) are
+  `decide.fence_way`/`fence_place` rungs. The bulk paths of
+  mongodb/redis/kafka/cassandra/clickhouse/oracle hold before each batch
+  (not inside the batch's unit: one batch begun before a raise can land).
+  SQL Server: built in `fencing.SQL`, its `own_table` hook owed (W17E2).
+  BAR-3: a range done is named as a ledger unit (`fleet.unit_name`) and
+  the fleet audit names a range lost, not the table.
 
 ## Where the paid tools and the clouds still lead (added 2026-09-24)
 

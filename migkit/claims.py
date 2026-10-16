@@ -539,6 +539,11 @@ def _copied(table, rec, key, src_t, k, ck, hi, units, most, allowed, resize, src
             failpoint.hit("range.committed")
             table.done(a, n, moved)
             failpoint.hit("range.saved")
+            # the range is a unit of the ledger of what migkit wrote: an
+            # audit tells a range lost from a table lost (`fleet.audit`)
+            from . import fleet, freeze
+            freeze.name_write(hop, db, key, "range", fleet.unit_name(key, a),
+                              moved)
             now = table.read() or rec
             log(f"{key}: {k} {a + 1:,} to {u:,} copied, {moved:,} rows"
                 f" ({units - left(now)} of {units} ranges done)")

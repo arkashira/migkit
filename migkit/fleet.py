@@ -303,9 +303,12 @@ def take_over(table, took_over, ledger=None, name=None):
                      now, back, ledger, name)
 
 
-def audit(rec):
+def audit(rec, named=None):
     """What in a table's record means a range was copied twice or lost;
-    [] where nothing does."""
+    [] where nothing does. `named`, where the hop names its writes
+    (`freeze.named`), is the ledger's units: a range done in the record
+    that no write names was lost - said by the range's own unit, so a
+    range lost is told from a table lost."""
     if not rec or rec.get("ranges") is None:
         return ["the table has no record of its ranges"]
     out = []
@@ -348,6 +351,11 @@ def audit(rec):
         if n > int(rec.get("numbers") or 0):
             out.append(f"the range after {a} is done under number {n},"
                        " above any the table handed out")
+        unit = unit_name(rec.get("key") or "", a)
+        if named is not None and not any(
+                w.get("unit") == unit for w in named):
+            out.append(f"{unit}: done in the record, but the ledger names no"
+                       " write of it - this range was lost, not the table")
     return out
 
 
@@ -400,7 +408,10 @@ def audit_hop(hop, store, dbs=None):
                               f" ({type(e).__name__}): the table is not"
                               " proved copied once"]
             continue
-        found = audit(rec)
+        from . import freeze
+        found = audit(rec, [w for w in freeze.named(hop, db)
+                            if w.get("table") == key]
+                      if freeze.names_writes(hop, db) else None)
         if found:
             out[(db, key)] = found
     return out

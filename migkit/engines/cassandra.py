@@ -76,6 +76,58 @@ class CassandraEngine(NeutralCopier, Engine):
         renames nothing."""
         return self.hop.target_table_in(db, table)
 
+    # ---- the mover's number, held here (`fencing`, backlog W1) ------------
+
+    FENCE_WAYS = ("lightweight-transaction",)
+
+    def fence_facts(self, side, db):
+        """What `decide.fence_place` and `fence_way` read of this target:
+        whether migkit's own table is there, and where the account may
+        make it - the server's authorizer and the role's permissions, read
+        from its own tables."""
+        from .. import fencing
+        s = self._session(side)
+        ep = self.hop.source if side == "src" else self.hop.target
+        ks = self.hop.target_db(db) if side == "dst" else db
+        kept = s.execute("select table_name from system_schema.tables where"
+                         " keyspace_name = %s and table_name = %s",
+                         (ks, fencing.OWN)).one() is not None
+        auth = s.execute("select value from system_views.settings where"
+                         " name = 'authorizer'").one()
+        open_ = not auth or "allowall" in str(auth[0]).lower()
+        perms = set()
+        if not open_:
+            for r in s.execute("select resource, permissions from"
+                               " system_auth.role_permissions where role ="
+                               " %s", (ep.user or "",)):
+                perms |= {(r[0], p) for p in r[1] or ()}
+
+        def may(resource):
+            return open_ or ("data", "CREATE") in perms or (
+                resource, "CREATE") in perms
+        return {"ways": self.FENCE_WAYS, "kept_in": kept,
+                "create_in": may(f"data/{ks}"),
+                "create_beside": may("data"),
+                "grant_in": f"grant create on keyspace {ks} to"
+                            f" {ep.user or 'the account'}",
+                "grant_beside": "or grant create on all keyspaces"}
+
+    def fence_home(self, side, db, place):
+        """The keyspace the record goes in; one of migkit's own beside the
+        target's made with the target's replication where it is not."""
+        from .. import fencing
+        ks = self.hop.target_db(db) if side == "dst" else db
+        if place == "in":
+            return ks
+        s = self._session(side)
+        rep = s.execute("select replication from system_schema.keyspaces"
+                        " where keyspace_name = %s", (ks,)).one()
+        spec = dict(rep[0]) if rep else {"class": "SimpleStrategy",
+                                         "replication_factor": "1"}
+        s.execute(f'create keyspace if not exists "{fencing.BESIDE}" with'
+                  f" replication = {spec!r}")
+        return fencing.BESIDE
+
     @staticmethod
     def _q(name):
         return '"' + str(name).replace('"', '""') + '"'
@@ -342,6 +394,10 @@ class CassandraEngine(NeutralCopier, Engine):
         if not rows:
             return 0
         session = self._session(side)
+        # a writer that lost its hold is refused by the target first
+        # (`fencing`)
+        from .. import fencing
+        fencing.hold(self, side, db, None)
         names = [n for n, _ in columns]
         stmt = session.prepare(
             f"insert into {self._qualified(side, db, table)}"

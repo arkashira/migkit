@@ -518,6 +518,34 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         oracledb.defaults.fetch_decimals = True
         return self._pool(side).acquire()
 
+    # ---- migkit's own row, where a mover's number is held (`fencing`) -----
+
+    OWN_DIALECT = "oracle"
+
+    def own_name(self, side, db):
+        return self._qualified(side, db, "MIGKIT_ORIGIN")
+
+    def own_table(self, side, db):
+        """(a connection of its own, migkit's own table's name), the table
+        made where it is not."""
+        conn = self._dedicated(side)
+        t = self.own_name(side, db)
+        made = self.__dict__.setdefault("_own_made", set())
+        if t in made:
+            return conn, t
+        cur = conn.cursor()
+        try:
+            cur.execute(f"create table {t} (origin varchar2(400) primary"
+                        " key, n number(19) not null, seen varchar2(4000))")
+        except Exception as e:  # noqa: BLE001 - ORA-00955: it is there
+            if "ORA-00955" not in str(e):
+                conn.close()
+                raise
+        finally:
+            cur.close()
+        made.add(t)
+        return conn, t
+
     def _dedicated(self, side, dsn=None, user=None, password=None):
         """A connection of its own, outside the pool: a LogMiner session,
         or a load whose session-private rows must not meet another
@@ -1236,6 +1264,10 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         big = any(b.lob and v is not None and len(v) > PIECE
                   for r in rows for b, v in zip(binds, r))
         way = self._write_way(db, table, len(rows), binds, big)
+        # a writer that lost its hold is refused by the target first
+        # (`fencing`)
+        from .. import fencing
+        fencing.hold(self, side, db, None)
         write = (self._staged if way == "direct" else self._arrayed)
         self._timed(db, table, way, len(rows), lambda: write(
             side, db, table, names, key, binds, rows))

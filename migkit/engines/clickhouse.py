@@ -90,6 +90,52 @@ class ClickHouseEngine(NeutralCopier, Engine):
             tz_source="server", query_limit=0, connect_timeout=15,
             **({"send_receive_timeout": int(wait)} if wait else {}))
 
+    # ---- the mover's number, held here (`fencing`, backlog W1) ------------
+
+    FENCE_WAYS = ("replacing-row",)
+
+    def fence_facts(self, side, db):
+        """What `decide.fence_place` and `fence_way` read of this target:
+        whether migkit's own table is there, and where the account may
+        make it - its grants, asked of the server."""
+        from .. import fencing
+        c = self._client(side)
+        try:
+            home = self._d(side, db)
+            kept = bool(c.query("select 1 from system.tables where database"
+                                " = {d:String} and name = {n:String}",
+                                parameters={"d": home, "n": fencing.OWN}
+                                ).result_rows)
+            grants = [str(r[0]) for r in c.query("show grants").result_rows]
+
+            def may(name):
+                for g in grants:
+                    what, _, on = g.partition(" ON ")
+                    rights = {w.strip() for w in what.removeprefix(
+                        "GRANT ").split(",")}
+                    if rights & {"ALL", "CREATE", "CREATE TABLE"} and \
+                            on.split(" ")[0] in ("*.*", f"{name}.*"):
+                        return True
+                return False
+            return {"ways": self.FENCE_WAYS, "kept_in": kept,
+                    "create_in": may(home), "create_beside": may(
+                        fencing.BESIDE) and may("*"),
+                    "grant_in": f"grant create table, insert, select, alter"
+                                f" delete on {home}.* to the account"}
+        finally:
+            c.close()
+
+    def fence_home(self, side, db, place):
+        from .. import fencing
+        if place == "in":
+            return self._d(side, db)
+        c = self._client(side)
+        try:
+            c.command(f"create database if not exists {fencing.BESIDE}")
+        finally:
+            c.close()
+        return fencing.BESIDE
+
     def _d(self, side, db):
         return self.hop.target_db(db) if side == "dst" else db
 
@@ -455,6 +501,10 @@ class ClickHouseEngine(NeutralCopier, Engine):
         names = [n for n, _ in columns]
         key = [k for k in self.neutral_key(side, db, table) if k in names]
         client = self._client(side, db)
+        # a writer that lost its hold is refused by the target first
+        # (`fencing`)
+        from .. import fencing
+        fencing.hold(self, side, db, None)
         try:
             # the key's values as they are, for the delete; the rows as
             # they are written, for the insert
