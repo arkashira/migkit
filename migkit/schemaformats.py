@@ -799,18 +799,29 @@ class NeutralTable:
     #: {(columns, ref table, ref columns)}
     fks: frozenset = frozenset()
     others: frozenset = frozenset()
+    #: {kind: value} of what a collection, a topic, a column family or a
+    #: table holds that no relational catalogue has: its partition key, its
+    #: time to live, its retention, its partition count. One engine's both
+    #: sides are held to each other kind by kind; two engines hold these
+    #: differently, so across them they are named in `unread`
+    traits: dict = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
 class Difference:
     table: str
     #: "table", "column", "type", "capacity", "null", "default", "extra",
-    #: "collation", "key", "index", "foreign key", "other"
+    #: "collation", "key", "index", "foreign key", "other", "setting"
     kind: str
     detail: str
     #: "diff" stops a cutover; "note" is said (a target with more than the
     #: source had)
     level: str = "diff"
+    #: for a "setting": the trait's kind, and its value on each side (None
+    #: where a side does not hold it), so a caller words it its own way
+    aspect: str = ""
+    src: object = None
+    dst: object = None
 
 
 @dataclasses.dataclass
@@ -835,9 +846,11 @@ def capacity(declared):
     return tuple(int(x) for x in got.groups() if x is not None) if got else ()
 
 
-def neutral(engine, catalog, takes=None):
+def neutral(engine, catalog, takes=None, traits=None):
     """{table: NeutralTable} from a `catalog.Catalog` read on `engine`
-    (`canon` name). `takes(table)` leaves out what the hop does not move."""
+    (`canon` name). `takes(table)` leaves out what the hop does not move;
+    `traits` is {table: {kind: value}} of what the engine holds of a
+    table beyond its columns (`NeutralTable.traits`)."""
     from . import canon
     out = {}
     for t in catalog.tables:
@@ -853,7 +866,9 @@ def neutral(engine, catalog, takes=None):
                       for i in catalog.indexes.get(t) or []),
             frozenset((tuple(f.columns), f.ref_table, tuple(f.ref_columns))
                       for f in catalog.fks.get(t) or []),
-            frozenset(str(o) for o in catalog.others.get(t) or []))
+            frozenset(str(o) for o in catalog.others.get(t) or []),
+            {str(k): str(v) for k, v in ((traits or {}).get(t) or {}).items()
+             if v is not None})
     return out
 
 
@@ -861,7 +876,7 @@ def _narrower(src, dst):
     return any(d < s for s, d in zip(src, dst))
 
 
-def compare(src, dst, same_engine, pairs=None, columns=None):
+def compare(src, dst, same_engine, pairs=None, columns=None, unread=None):
     """What differs between two `neutral` shapes, one `Difference` each.
 
     `same_engine`: one engine's both sides, compared as declared (type
@@ -869,24 +884,48 @@ def compare(src, dst, same_engine, pairs=None, columns=None):
     class and capacity, a default by being there, and what the two cannot
     be held to named in `unread`. `pairs` is [(source table, target table)]
     (else tables pair by lower-cased name); `columns` is {source table:
-    {source column: target column}} for a mapping that renames."""
+    {source column: target column}} for a mapping that renames. `unread` is
+    {"src": {table: why}, "dst": {table: why}} of tables a side listed and
+    would not describe: such a table, and the one it pairs with, is not
+    compared and not said missing - it is named in `Comparison.unread`."""
     out = Comparison()
     fold = (lambda x: x) if same_engine else str.lower
+    gone = {side: dict((unread or {}).get(side) or {})
+            for side in ("src", "dst")}
     if pairs is None:
-        by = {fold(t): t for t in dst}
-        pairs = [(t, by[fold(t)]) for t in src if fold(t) in by]
+        by = {fold(t): t for t in list(dst) + list(gone["dst"])}
+        pairs = [(t, by[fold(t)]) for t in list(src) + list(gone["src"])
+                 if fold(t) in by]
     names = dict(pairs)
     taken = set(names.values())
-    for t in src:
-        if t not in names:
-            out.differences.append(Difference(
-                t, "table", "on the source and not on the target"))
-    for t in dst:
-        if t not in taken:
-            out.differences.append(Difference(
-                t, "table", "on the target and not on the source", "note"))
+    held = set()
     for st, dt in pairs:
-        if st not in src or dt not in dst:
+        if st in gone["src"] or dt in gone["dst"]:
+            why = gone["src"].get(st) or gone["dst"].get(dt)
+            side = "source" if st in gone["src"] else "target"
+            out.unread.append((st, "table", f"could not be read on the"
+                                            f" {side} ({why})"))
+            held.update((st, dt))
+    for t in src:
+        if t not in names and t not in gone["src"]:
+            out.differences.append(Difference(
+                t, "table", "on the source and not on the target",
+                aspect="only on the source"))
+    for t in dst:
+        if t not in taken and t not in gone["dst"]:
+            out.differences.append(Difference(
+                t, "table", "on the target and not on the source", "note",
+                "only on the target"))
+    for t, why in gone["src"].items():
+        if t not in names:
+            out.unread.append((t, "table", f"could not be read on the"
+                                           f" source ({why})"))
+    for t, why in gone["dst"].items():
+        if t not in taken:
+            out.unread.append((t, "table", f"could not be read on the"
+                                           f" target ({why})"))
+    for st, dt in pairs:
+        if st in held or st not in src or dt not in dst:
             continue
         out.compared += 1
         _table(out, st, src[st], dst[dt], same_engine, fold,
@@ -927,6 +966,19 @@ def _table(out, t, a, b, same, fold, renamed, names):
             add("other", f"{o} is on the target and not on the source",
                 "note")
 
+    if same:
+        for kind in sorted(set(a.traits) | set(b.traits)):
+            x, y = a.traits.get(kind), b.traits.get(kind)
+            if x != y:
+                out.differences.append(Difference(
+                    t, "setting", f"{kind} is {_said_trait(x)} on the source"
+                                  f" and {_said_trait(y)} on the target",
+                    "diff", kind, x, y))
+    else:
+        for kind in sorted(set(a.traits) | set(b.traits)):
+            skip(kind, "the two engines hold it in ways that cannot be"
+                       " held to each other")
+
     def mapped(cols):
         return tuple(there(c) for c in cols)
 
@@ -960,6 +1012,10 @@ def _table(out, t, a, b, same, fold, renamed, names):
         add("foreign key", f"({', '.join(theirs_f[k][0])}) ->"
                            f" {theirs_f[k][1]} is on the target and not on"
                            " the source", "note")
+
+
+def _said_trait(value):
+    return "not set" if value is None else str(value)
 
 
 def _column(c, d, same, add, skip, table):

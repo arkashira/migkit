@@ -1987,25 +1987,38 @@ class KafkaEngine(Engine):
         return out
 
     def check_schema(self, db):
+        """Topics, their partition counts and their critical settings, held
+        to each other by the one comparer (`verifiers.compare_schema`): a
+        topic is a table, its partition count and each setting a trait."""
+        from .. import schemaformats, verifiers
         sc, dc = self._consumer("src"), self._consumer("dst")
-        src = {t: len(self._partitions(sc, t)) for t in self._topics(sc)}
-        dst = {t: len(self._partitions(dc, t)) for t in self._topics(dc)}
-        bad, apart, named = [], [], {}
-        for t in sorted(set(src) | set(dst)):
-            if t not in dst:
-                bad.append(f"missing topic {t}")
-                named[t] = "diff"
-            elif t not in src:
-                bad.append(f"extra topic {t}")
-                named[t] = "diff"
-            else:
-                named[t] = "ok"
-                if src[t] != dst[t]:
-                    apart.append(t)
+        traits = {side: {t: {"partitions": str(len(self._partitions(c, t)))}
+                         for t in sorted(self._topics(c))}
+                  for side, c in (("src", sc), ("dst", dc))}
+        src, dst = traits["src"], traits["dst"]
+        common = sorted(set(src) & set(dst))
+        ca = self._topic_configs("src", common)
+        cb = self._topic_configs("dst", common)
+        if ca is not None and cb is not None:
+            for side, conf in (("src", ca), ("dst", cb)):
+                for t in common:
+                    for k in self.CRITICAL_CONFIGS:
+                        v = conf.get(t, {}).get(k)
+                        if v is not None:
+                            traits[side][t][f"config {k}"] = v
+        got = verifiers.compare_schema(self, db, shapes=tuple(
+            {t: schemaformats.NeutralTable([], traits=v)
+             for t, v in traits[side].items()}
+            for side in ("src", "dst")), comparison=True)
+        alone = {d.table: "missing" if d.aspect == "only on the source"
+                 else "extra" for d in got.differences if d.kind == "table"}
+        named = {t: "diff" if t in alone else "ok"
+                 for t in sorted(src.keys() | dst.keys())}
         res = []
-        if bad:
+        if alone:
             res.append(Result("schema", "topics", "diff",
-                              "; ".join(bad[:10]), "",
+                              "; ".join(f"{alone[t]} topic {t}"
+                                        for t in sorted(alone)[:10]), "",
                               "create the missing topics on the target with"
                               " the source's partition counts before copying",
                               table=self._lone(
@@ -2016,23 +2029,23 @@ class KafkaEngine(Engine):
                               tables=named))
         # a partition count is what a key's partition is taken from, so it
         # is a finding of its own: the same keys, read by other consumers
-        common = sorted(set(src) & set(dst))
-        counts = {t: "diff" if t in apart else "ok" for t in common}
+        apart = [d for d in got.differences
+                 if d.kind == "setting" and d.aspect == "partitions"]
+        counts = {t: "diff" if t in {d.table for d in apart} else "ok"
+                  for t in common}
         if apart:
             res.append(Result(
                 "schema", "topics partitions", "diff",
-                "; ".join(f"{t} partitions src={src[t]} dst={dst[t]}"
-                          for t in apart[:10]), "",
+                "; ".join(f"{d.table} partitions src={d.src} dst={d.dst}"
+                          for d in apart[:10]), "",
                 "make the target's topic with the source's partition count"
                 " before copying - a key lands on another partition when the"
                 " count changes, and its messages are read out of order",
-                table=self._lone(apart), tables=counts))
+                table=self._lone(d.table for d in apart), tables=counts))
         else:
             res.append(Result("schema", "topics partitions", "ok",
                               f"partition counts equal on {len(common)}"
                               " topics", tables=counts))
-        ca = self._topic_configs("src", common)
-        cb = self._topic_configs("dst", common)
         if common and (ca is None or cb is None):
             # not a skip: a comparison that did not happen is said, or it
             # reads as one that found nothing
@@ -2042,18 +2055,19 @@ class KafkaEngine(Engine):
                               " - retention and cleanup were not compared",
                               category="structure.collection-options"))
         if ca is not None and cb is not None:
-            drift, differ = [], []
-            for t in common:
-                for k in self.CRITICAL_CONFIGS:
-                    a, b = ca.get(t, {}).get(k), cb.get(t, {}).get(k)
-                    if a != b:
-                        drift.append(f"{t} {k} src={a} dst={b}")
-                        if t not in differ:
-                            differ.append(t)
+            order = {k: i for i, k in enumerate(self.CRITICAL_CONFIGS)}
+            drifted = sorted(
+                (d for d in got.differences if d.kind == "setting"
+                 and d.aspect.startswith("config ")),
+                key=lambda d: (common.index(d.table),
+                               order[d.aspect[len("config "):]]))
+            differ = sorted({d.table for d in drifted})
             kept = {t: "diff" if t in differ else "ok" for t in common}
-            if drift:
+            if drifted:
                 res.append(Result("schema", "topic-configs", "diff",
-                                  "; ".join(drift[:8]), "",
+                                  "; ".join(f"{d.table} {d.aspect[7:]}"
+                                            f" src={d.src} dst={d.dst}"
+                                            for d in drifted[:8]), "",
                                   "kafka-configs --alter on target:"
                                   " cleanup.policy/retention drift changes"
                                   " topic semantics",

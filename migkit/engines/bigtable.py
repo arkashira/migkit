@@ -420,7 +420,15 @@ class BigtableEngine(NeutralCopier, Engine):
     # ---- the checks ----------------------------------------------------------
 
     def check_schema(self, db):
-        return self._as_pair().check_schema(db)
+        from .. import verifiers
+        pair = self._as_pair()
+        return verifiers.compare_schema(
+            pair, db, takes=lambda t: pair.hop.takes_table(db, t))
+
+    def neutral_traits(self, side, db, table):
+        """What each column family collects its cells by."""
+        return {f"column family {fam} gc rule": repr(f.gc_rule) for fam, f in
+                sorted(self._families(side, db, table).items())}
 
     def check_counts(self, db):
         return self._as_pair().check_counts(db)

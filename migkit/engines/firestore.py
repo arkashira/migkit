@@ -506,7 +506,23 @@ class _Documents(NeutralCopier, Engine):
         return len(idents)
 
     def check_schema(self, db):
-        return self._as_pair().check_schema(db)
+        from .. import verifiers
+        pair = self._as_pair()
+        return verifiers.compare_schema(
+            pair, db, takes=lambda t: pair.hop.takes_table(db, t))
+
+    def neutral_traits_all(self, side, db):
+        """{collection: {"ttl <field>": state}} of the fields a time-to-live
+        policy deletes documents by, from the one admin listing."""
+        names = sorted(map(str, self.neutral_tables(side, db)), key=len,
+                       reverse=True)
+        out = {}
+        for key, state in self._ttl_fields(side, db).items():
+            owner = next((t for t in names if key.startswith(f"{t}.")), None)
+            if owner:
+                out.setdefault(owner, {})[
+                    f"ttl {key[len(owner) + 1:]}"] = state
+        return out
 
     def check_counts(self, db):
         return self._as_pair().check_counts(db)

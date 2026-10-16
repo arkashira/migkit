@@ -844,13 +844,23 @@ def each_database(hop, eng, dbs, fn, workers=None):
 
 # --- one schema comparer for every engine (backlog AUD-H, SC1) ----------------
 
+def _named(table):
+    return ".".join(map(str, table)) if isinstance(table, (tuple, list)) \
+        else str(table)
+
+
+def _side_engine(eng, side):
+    return getattr(eng, "src_engine" if side == "src" else "dst_engine", eng)
+
+
 def side_catalog(eng, side, db, acc=None, max_age=0.0):
     """One side's `catalog.Catalog`, read through its engine's one-pass
     reader where it has one, else table by table from the neutral readers;
     kept in the run's probe accumulator, so a second reader of the same
     side in the run does not ask the server again and a stale one is
-    read afresh. A part the server would not give is left out and said by
-    the reading (`ProbeAccumulator.absorb`)."""
+    read afresh. A table the server would not describe is left out whole
+    - never half a table, which would read as columns the other side
+    lacks - and named in the `catalog-parts` reading (`unread_tables`)."""
     from . import diagnostics, drift
     from .catalog import Catalog, Column, Index
     from .util import Probes
@@ -862,62 +872,149 @@ def side_catalog(eng, side, db, acc=None, max_age=0.0):
             if hasattr(reader, "shape_catalog"):
                 return reader.shape_catalog(side, db)
             return drift.catalog_of(reader.column_catalog(side, db))
-        one = getattr(eng, "src_engine" if side == "src" else "dst_engine",
-                      eng)
+        one = _side_engine(eng, side)
         cat, seen = Catalog(), Probes("tables")
         for t in one.neutral_tables(side, db):
-            name = ".".join(map(str, t)) if isinstance(t, (tuple, list)) \
-                else str(t)
+            name = _named(t)
             with seen.reading(name):
-                cat.tables.append(name)
-                cat.columns[name] = [Column(str(n), str(ty)) for n, ty
-                                     in one.neutral_columns(side, db, t)]
-                cat.keys[name] = tuple(one.neutral_key(side, db, t) or ())
-                cat.indexes[name] = [
-                    Index(str(n), tuple(cols), bool(uniq), "" if plain
+                cols = [Column(str(n), str(ty)) for n, ty
+                        in one.neutral_columns(side, db, t)]
+                key = tuple(one.neutral_key(side, db, t) or ())
+                indexes = [
+                    Index(str(n), tuple(cols_), bool(uniq), "" if plain
                           else "(not carried)")
-                    for n, uniq, cols, plain
+                    for n, uniq, cols_, plain
                     in one.neutral_indexes(side, db, t) or []]
-        acc.absorb("catalog-parts", f"{side}:{db}", seen)
+                cat.tables.append(name)
+                cat.columns[name], cat.keys[name] = cols, key
+                cat.indexes[name] = indexes
+        acc.absorb("catalog-parts", f"{side}:{db}", seen, {
+            "read": len(seen.read), "planned": len(seen.planned),
+            "unread": seen.unread()})
         return cat
     return acc.read("catalog", f"{side}:{db}", measure, max_age)
 
 
-def compare_schema(eng, db, max_age=0.0):
+def unread_tables(eng, side, db, takes=None):
+    """{table: why} of the tables a side listed and would not describe in
+    its last catalogue read (`side_catalog`); `takes` keeps the ones the
+    hop moves."""
+    from . import diagnostics
+    got = diagnostics.accumulator(eng.hop).get("catalog-parts", f"{side}:{db}")
+    value = getattr(got, "value", None) or {}
+    return {t: why for t, why in (value.get("unread") or {}).items()
+            if takes is None or takes(t)}
+
+
+def side_traits(eng, side, db, tables, acc=None, max_age=0.0):
+    """({table: {kind: value}}, {table: why}) of what a side's engine holds
+    of each of `tables` beyond columns, keys and indexes - a partition key,
+    a time to live, a retention, a partition count, a column family's
+    collection rule (`NeutralTable.traits`) - read through its engine's
+    `neutral_traits(side, db, table)` (or, where one listing gives every
+    table's, `neutral_traits_all(side, db)`) where it has one, kept in the run's
+    probe accumulator like a catalogue. An engine without the reader has
+    none to compare, which is no claim that there are none; a table whose
+    settings could not be read is in the second dict, so the comparison
+    names it and does not say ok over it."""
+    from . import diagnostics
+    from .util import Probes
+    one = _side_engine(eng, side)
+    read = getattr(one, "neutral_traits", None)
+    bulk = getattr(one, "neutral_traits_all", None)
+    if read is None and bulk is None:
+        return {}, {}
+    acc = acc or diagnostics.accumulator(eng.hop)
+    wanted = list(tables)
+
+    def measure():
+        got, seen = {}, Probes("table settings")
+        if bulk is not None:
+            every = {_named(t): v for t, v in bulk(side, db).items()}
+            for name in wanted:
+                got[name] = dict(every.get(name) or {})
+                seen.done(name)
+        else:
+            ids = {_named(t): t for t in one.neutral_tables(side, db)}
+            for name in wanted:
+                with seen.reading(name):
+                    got[name] = dict(read(side, db, ids[name]) or {})
+        acc.absorb("traits-parts", f"{side}:{db}", seen)
+        return {"traits": got, "unread": seen.unread()}
+    got = acc.read("traits", f"{side}:{db}", measure, max_age)
+    if got is None:
+        why = acc.get("traits", f"{side}:{db}").why or "not read"
+        return {}, {t: why for t in wanted}
+    return got["traits"], got["unread"]
+
+
+def compare_schema(eng, db, max_age=0.0, shapes=None, comparison=False,
+                   takes=None):
     """`check_schema` for any engine or pair: both sides' catalogues read
     once into the neutral shape and compared by the one comparer
     (`schemaformats.compare`), so a difference is worded alike for every
     pair and a hetero pair is compared as converted. A side that cannot be
-    read is an "error" naming which, never an "ok"."""
+    read is an "error" naming which, never an "ok"; a table or a setting
+    one side would not give is named as not compared, so an ok is never
+    said over it.
+
+    An engine whose tables are not columns (topics, say) hands its two
+    sides' `schemaformats.neutral` shapes as `shapes` and gets the same
+    comparer; `comparison` answers the `schemaformats.Comparison` itself
+    for a caller that words the findings its own way. `takes(table)` is
+    the scope the engine asks (else the hop's)."""
     from . import diagnostics, drift, schemaformats
     from .engines.base import Result
     acc = diagnostics.accumulator(eng.hop)
-    cats = {side: side_catalog(eng, side, db, acc, max_age)
+    one = lambda side: _side_engine(eng, side)  # noqa: E731
+    name = {side: getattr(one(side), "CANON_ENGINE", "")
             for side in ("src", "dst")}
-    bad = [s for s, c in cats.items() if c is None]
-    if bad:
-        why = "; ".join(f"{s}: {acc.get('catalog', f'{s}:{db}').why}"
-                        for s in bad)
-        return [Result("schema", db, "error", f"cannot read the tables"
-                       f" ({why})", "", "both sides have to be readable"
-                       " before anything can be compared")]
-    one = lambda side: getattr(  # noqa: E731
-        eng, "src_engine" if side == "src" else "dst_engine", eng)
-    same = getattr(one("src"), "CANON_ENGINE", None) == getattr(
-        one("dst"), "CANON_ENGINE", None)
-    working = {side: drift.transient_among(cats[side].tables)
-               for side in cats}
-    takes = {side: (lambda t, side=side: t not in working[side]
-                    and eng.hop.takes_table(db, t)) for side in cats}
-    src = schemaformats.neutral(getattr(one("src"), "CANON_ENGINE", ""),
-                                cats["src"], takes["src"])
-    dst = schemaformats.neutral(getattr(one("dst"), "CANON_ENGINE", ""),
-                                cats["dst"], takes["dst"])
+    same = name["src"] == name["dst"]
+    held, loose = {"src": {}, "dst": {}}, []
+    if shapes is not None:
+        src, dst = shapes
+    else:
+        cats = {side: side_catalog(eng, side, db, acc, max_age)
+                for side in ("src", "dst")}
+        bad = [s for s, c in cats.items() if c is None]
+        if bad:
+            why = "; ".join(f"{s}: {acc.get('catalog', f'{s}:{db}').why}"
+                            for s in bad)
+            return [Result("schema", db, "error", f"cannot read the tables"
+                           f" ({why})", "", "both sides have to be readable"
+                           " before anything can be compared")]
+        working = {side: drift.transient_among(cats[side].tables)
+                   for side in cats}
+        scoped = takes or (lambda t: eng.hop.takes_table(db, t))
+        takes = {side: (lambda t, side=side: t not in working[side]
+                        and scoped(t)) for side in cats}
+        shape = {}
+        for side in cats:
+            traits, missed = side_traits(
+                eng, side, db, [t for t in cats[side].tables
+                                if takes[side](t)], acc, max_age)
+            loose += [(t, f"{side} settings", why)
+                      for t, why in missed.items()]
+            shape[side] = schemaformats.neutral(name[side], cats[side],
+                                                takes[side], traits)
+            held[side] = unread_tables(eng, side, db, takes[side])
+        src, dst = shape["src"], shape["dst"]
+        for t in {t for t, _, _ in loose}:
+            # settings read on one side only are no ground to compare on
+            for one_side in (src, dst):
+                if t in one_side:
+                    one_side[t].traits = {}
     pairs, renamed = None, {}
     if hasattr(eng, "match_tables") and hasattr(eng, "_renamer"):
-        pairs = eng.match_tables(list(src), list(dst), eng._renamer(db))[0]
-        pairs = [(a, b) for a, b in pairs if a in src and b in dst]
+        pairs = eng.match_tables(list(src) + list(held["src"]),
+                                 list(dst) + list(held["dst"]),
+                                 eng._renamer(db))[0]
+        pairs = [(a, b) for a, b in pairs
+                 if (a in src or a in held["src"])
+                 and (b in dst or b in held["dst"])]
         for a, b in pairs:
+            if a not in src or b not in dst:
+                continue
             try:
                 renamed[a] = {s: t for t, s in
                               eng._mapped_types(db, a, {
@@ -925,8 +1022,9 @@ def compare_schema(eng, db, max_age=0.0):
                               })[1].items() if s != t}
             except Exception:  # noqa: BLE001 - names stand as they are
                 renamed[a] = {}
-    return schemaformats.results(
-        schemaformats.compare(src, dst, same, pairs, renamed), db)
+    got = schemaformats.compare(src, dst, same, pairs, renamed, held)
+    got.unread.extend(loose)
+    return got if comparison else schemaformats.results(got, db)
 
 
 def engines_with_own_compare():

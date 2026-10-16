@@ -3797,6 +3797,21 @@ once (P0, L).** Files: `migkit/engines/base.py`, `migkit/engines/hetero.py`
   that never ran a check need one written; the engines' own readers (grants,
   versions, settings, sizes) still probe directly and do not yet record into
   the accumulator.
+* Done in wave 13 (W13D2): `check_schema` of bigtable, cassandra (and
+  keyspaces, geminidb-cassandra), clickhouse, cosmosdb, couchbase, dynamodb,
+  firestore (and datastore), lindorm, neptune, opensearch, parquet,
+  iceberg/delta, spanner, timestream, saas, sapodp and kafka goes through
+  `verifiers.compare_schema`; the neutral shape holds `traits` (partition
+  count, time to live, retention, column family rule) compared kind by kind
+  on one engine and named unread across two; a table or a setting a side
+  would not give is `unread`, never missing and never ok. Engines give
+  traits by `neutral_traits` / `neutral_traits_all` (bigtable, firestore
+  so far). Not done: the other engines' `neutral_traits` (dynamodb TTL,
+  cosmos TTL and partition key, cassandra table options, spanner TTL,
+  opensearch settings); bigquery (warehouse.py) is not in W13D2's files;
+  `capabilities._SCOPE` should name `compare_schema` so the engines need
+  not pass `takes`; a mapping that renames a table does not carry its
+  traits across the rename.
 
 **AUD-DOC. The manual and the site from the code (P1, M; R24).** Files:
 `tools/gen_docs.py` (new), `README.md`, `docs/index.html`,

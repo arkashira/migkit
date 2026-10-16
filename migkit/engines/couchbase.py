@@ -468,7 +468,10 @@ class CouchbaseEngine(NeutralCopier, Engine):
     # ---- the checks, through the pair ------------------------------------
 
     def check_schema(self, db):
-        return self._as_pair().check_schema(db)
+        from .. import verifiers
+        pair = self._as_pair()
+        return verifiers.compare_schema(
+            pair, db, takes=lambda t: pair.hop.takes_table(db, t))
 
     def check_counts(self, db):
         return self._as_pair().check_counts(db)
