@@ -542,9 +542,9 @@ GAPS.update({
                                  " capture or change tracking a client"
                                  " reads, and is a pair's warehouse target")
            for cap in ("stream", "fence", "confirm", "delta")},
-        **{cap: (NOT_YET, "P0-CLOUDS.more")
-           for cap in ("sequences", "params", "statistics",
-                       "snapshot")},
+        "sequences": (NOT_APPLICABLE, "a dedicated SQL pool has no sequences"
+                                      " to carry; identity columns are set"
+                                      " on table creation"),
     },
 })
 
@@ -3570,8 +3570,6 @@ def depth_failing():
 # the five services' depth cells their contracts do not read yet
 # (P0-CLOUDS.more): each waits on that row, said per engine
 _SERVICES_NOT_YET = {
-    "managed.catalogued": "analyticdb-mysql analyticdb-postgres synapse"
-                          " yugabytedb singlestore",
     "assess.capacity": "analyticdb-postgres synapse yugabytedb",
     "assess.handwork": "analyticdb-mysql singlestore",
     "assess.versions": "analyticdb-mysql singlestore",

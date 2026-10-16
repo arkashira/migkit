@@ -28,9 +28,8 @@ def test_the_catalogue_row_is_kept_for_the_engine():
 
 
 def test_its_accounts_are_read_as_its_wires():
-    from migkit import capabilities
-    assert capabilities.GAPS["synapse"]["users"][1] == "P0-CLOUDS.more"
-    assert users is not None
+    hop = types.SimpleNamespace(engine="synapse")
+    assert users._speaking(hop).engine == "mssql"
 
 
 def test_a_table_is_hashed_by_its_key_or_round_robin(eng):

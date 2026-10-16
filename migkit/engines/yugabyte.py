@@ -14,6 +14,7 @@ own hybrid-time LSN (`src_lsn`), never `pg_current_wal_lsn`.
 import re
 
 from .. import decide
+from .gaussdb import GaussEngine
 from .pgwire import PgWireEngine
 
 #: why the ways below are owed a run (P0-CLOUDS.more)
@@ -23,7 +24,8 @@ UNPROVED_ITEMS = (
     "yugabytedb:tail.quiet "
     "assess.brands assess.engine-checks assess.handwork "
     "assess.preflight assess.versions cutover.counters cutover.freeze "
-    "cutover.read-only-target move.create-missing "
+    "cutover.read-only-target move.create-missing move.large-values "
+    "move.partitioned "
     "move.sized move.table-copy operations.fencing schema.create "
     "schema.defaults schema.foreign-keys schema.indexes schema.views "
     "scope.copy scope.counters scope.deep scope.listings scope.names "
@@ -56,6 +58,8 @@ class YugabyteEngine(PgWireEngine):
     CANON_ENGINE = "yugabytedb"
     SAID = "YugabyteDB"
     DEFAULT_PORT = 5433
+    LARGE_VALUES = GaussEngine.LARGE_VALUES
+    _deep_partitions = GaussEngine._deep_partitions
 
     def follow_facts(self, db):
         """What the source says of its logical replication: its release,

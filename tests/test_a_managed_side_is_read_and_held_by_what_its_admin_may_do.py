@@ -237,7 +237,7 @@ def test_the_ladders_read_as_before_where_nothing_new_is_asked(monkeypatch):
     for cls, given, want in (
             (freeze.PostgresHold, {"alter system": False}, "pg_database"),
             (freeze.MySQLHold, {"read only switch": False}, "my_database"),
-            (freeze.MongoHold, {"version": (7, 0), "actions": []},
+            (freeze.MongoHold, {"version": (7, 0), "actions": [], "auth": True},
              "mongo_database")):
         monkeypatch.setattr(cls, "others", lambda self, dbs: [])
         monkeypatch.setattr(cls, "readers", lambda self, dbs, g=given: {
@@ -299,6 +299,8 @@ class My:
         if "information_schema.processlist where id in" in sql:
             return [(0,)]
         return []
+
+    _q_server_zone = _q
 
 
 class Provider:

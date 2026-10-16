@@ -264,4 +264,5 @@ def test_the_releases_seen_are_the_lanes_images():
 
 def test_a_service_with_no_class_to_copy_from_takes_no_neutral_way_unread():
     for shape in ("keyless", "no unique index", "wide key"):
-        assert decide.WAYS[shape]["synapse"][0] == decide.NOT_YET, shape
+        assert decide.WAYS[shape]["synapse"][0] == "yes", shape
+

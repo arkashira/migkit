@@ -858,7 +858,7 @@ def test_bigquery_makes_the_writers_readers_and_gives_back_exactly(
 
 # --- the way is the decision engine's, from the privilege read ---------------
 
-def _ch(granted):
+def _ch_target(granted):
     """A ClickHouse target whose answers say whether migkit's account has
     access management, and that the server holds the hop's database
     alone."""
@@ -875,12 +875,12 @@ def _ch(granted):
 def test_the_way_a_target_is_kept_is_the_decisions_from_the_privilege_read(
         tmp_path):
     hop = _hop(tmp_path, "clickhouse", protect_target=True)
-    got = freeze.keeping(hop, _ch(True), ["app"])
+    got = freeze.keeping(hop, _ch_target(True), ["app"])
     assert isinstance(got, decide.Choice) and got.rung.name == "ch_grants"
-    refused = freeze.keeping(hop, _ch(False), ["app"])
+    refused = freeze.keeping(hop, _ch_target(False), ["app"])
     assert refused.rung is None
     assert "may not manage the server's users and their rights" in \
         refused.reason, refused.reason
     # the same fact holds a source back from the way of rights
-    src = freeze.choose(hop, _ch(False), ["app"], "database", side="dst")
+    src = freeze.choose(hop, _ch_target(False), ["app"], "database", side="dst")
     assert src.rung is None and "manage access" in src.reason

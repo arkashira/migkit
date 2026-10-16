@@ -441,8 +441,10 @@ def stand_in(service):
     from .decide import IMPOSSIBLE, POSSIBLE, Stand
     a = service.admin or {}
     sup = bool(a.get("superuser"))
+    from . import freeze
     f = service.family
-    if f == "postgres":
+    hold_cls = freeze.HOLDS.get(f)
+    if hold_cls is freeze.PostgresHold:
         return {"others": [], "alter system": sup or bool(a.get(
                     "alter_system")),
                 "owner roles": True,
@@ -450,7 +452,7 @@ def stand_in(service):
                 "alter roles": sup or bool(a.get("createrole")),
                 "roles elsewhere": [],
                 "signal": sup or bool(a.get("signal_backend"))}
-    if f == "mysql":
+    if hold_cls is freeze.MySQLHold:
         ends = ("kill" if sup or a.get("super") or a.get("connection_admin")
                 or str(a.get("kill") or "").lower().startswith("kill")
                 else _procedure(a.get("kill")))
@@ -463,7 +465,7 @@ def stand_in(service):
                     service.product else
                     Stand(IMPOSSIBLE, "its read_only is not changed through"
                                       " an API migkit drives")}
-    if f == "mongodb":
+    if hold_cls is freeze.MongoHold:
         missing = set(a.get("commands_missing") or ())
         actions = [x for x in ("setUserWriteBlockMode", "fsync")
                    if x not in missing]
@@ -476,17 +478,18 @@ def stand_in(service):
                 "commands": sorted(set(MONGO_COMMANDS) - missing),
                 # a service checks who signs in, always
                 "auth": True}
-    if f == "redis":
+    if hold_cls is freeze.RedisHold:
         return {"others": [], "version": _version(a.get("version") or "0.0"),
                 "acl": bool(a.get("acl")), "stream back": False,
                 "one server": not a.get("cluster", False)}
-    if f == "mssql":
+    if hold_cls in (freeze.MSSQLHold, freeze.SynapseHold):
         return {"others": [], "alter": bool(a.get("alter")),
                 "alone in its group": not a.get("availability_group"),
-                "control": bool(a.get("control")), "kill": bool(a.get("kill"))}
-    if f == "kafka":
+                "control": bool(a.get("control")), "kill": bool(a.get("kill")),
+                "dm_exec_requests": bool(a.get("view_server_state", True))}
+    if hold_cls is freeze.KafkaHold:
         return {"others": [], "authorizer": bool(a.get("authorizer"))}
-    if f == "cassandra":
+    if hold_cls is freeze.CassandraHold:
         return {"others": [], "authorizer": bool(a.get("authorizer", True)),
                 "authorize": bool(a.get("authorize", True)), "cache": 2.0,
                 "budget": 30.0}

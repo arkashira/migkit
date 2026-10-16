@@ -360,6 +360,9 @@ HOP_OPTIONS = {
                    " and the directory on an encrypted or memory-backed"
                    " volume where the files a program writes lie"
                    " (scratch)", "dict", subs=("recipients", "scratch")),
+    "bastion": Key("bastion jump host configuration for SSH/SSM port forwarding",
+                   "dict|str"),
+    "tunnel": Key("alias for bastion configuration", "dict|str"),
     "atlas": Key("the structural schema reading, on or off", "bool",
                  ("postgres", "mysql"), knob="way",
                  named_for_a_program=True),
@@ -761,6 +764,8 @@ HOP_OPTIONS = {
                     ("mysql",), knob="way", named_for_a_program=True),
     "repair_window": Key("seconds a writer is paused for a repair",
                          "int", default=300, least=0),
+    "replica_server_ids": Key("server IDs of replicas known to the source MySQL server",
+                              "list", ("mysql",)),
     "replication_factor": Key("a created topic's replicas", "int",
                               ("kafka",)),
     "reverse": Key("at_cutover: a stream back starts at cutover", "str",
@@ -900,7 +905,7 @@ HOP_OPTIONS = {
                          " at cutover - or no", "str|bool",
                          ("dynamodb", "bigquery")),
     "target_engine": Key("the target's engine of a hetero hop", "str",
-                         ("hetero", "sapodp")),
+                         ("hetero", "sapodp", "mysql")),
     "target_has_replicas": Key("false: the target has no replicas and no"
                                " restore replays its binlog, so a load"
                                " may leave the binlog off", "bool",
@@ -1040,9 +1045,9 @@ ENDPOINT_OPTIONS = {
     "mgmt_port": Key("the cluster manager's port, where not 8091 (18091"
                      " with TLS)", "int", ("couchbase",)),
     "aws_region": Key("the region an aws_iam token is signed for", "str",
-                      ("postgres", "mysql")),
+                      ("postgres", "mysql", "kafka")),
     "aws_role_arn": Key("the role an aws_iam token is signed as", "str",
-                        ("postgres", "mysql")),
+                        ("postgres", "mysql", "kafka")),
     "rdf_default": Key("the graph a triple with none is put in", "str",
                        ("neptune",)),
     "retention": Key("how long Timestream keeps what is written:"
@@ -1303,6 +1308,24 @@ ENDPOINT_OPTIONS = {
     "tunnel": Key("reach the server through a tunnel", "str|dict"),
     "tunnel_to": Key("what carries the connection, for the report",
                      "str"),
+    "tunnel_by": Key("the mechanism establishing the tunnel", "str"),
+    "bastion": Key("bastion jump host configuration for SSH/SSM port forwarding",
+                   "dict|str"),
+    "admin": Key("the neo4j-admin command or path", "str|list", ("neo4j",)),
+    "azure_client_id": Key("the managed identity client ID on Azure", "str"),
+    "dump_dir": Key("a directory for neo4j database dumps", "str", ("neo4j",)),
+    "log_standby": Key("a SQL Server log standby directory or secondary database name",
+                       "str", ("mssql",)),
+    "recall_k": Key("the k nearest neighbours evaluated for vector recall",
+                    "int", ("qdrant",), default=10),
+    "stop_database": Key("whether neo4j-admin may stop a database for dump",
+                         "bool", ("neo4j",), fold=True),
+    "transactions": Key("whether DynamoDB uses TransactWriteItems or writes without",
+                        "bool", ("dynamodb",), default=True),
+    "_original_host": Key("internal recording of original endpoint host before bastion tunnel rebinding",
+                          "str"),
+    "_original_port": Key("internal recording of original endpoint port before bastion tunnel rebinding",
+                          "int"),
 }
 
 #: each goal: what it is, the options it stands for (the hop's own win),

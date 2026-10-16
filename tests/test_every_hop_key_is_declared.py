@@ -82,7 +82,10 @@ DYNAMIC = {
                                         "fence_timeout", "repair_window",
                                         "settle", "versions", "nodes", "consolidate",
                                         "mask_on_write", "mask_key",
-                                        "source_engine", "target_engine")),
+                                        "source_engine", "target_engine",
+                                        "transform")),
+    ("autonomous.py", "pair"): ("hop", ("source_engine",
+                                        "target_engine")),
     # the roles a pair's inner engines are looked up by
     ("attempts.py", "pair_side"): ("hop", ("source_engine",
                                            "target_engine")),

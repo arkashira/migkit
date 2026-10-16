@@ -630,7 +630,10 @@ def authorized(hop):
     (`transform: on_target: true`), holding the values as read there
     until the rewrite: what `place` asks before the target may take it."""
     from . import hopkeys
-    said = hopkeys.opt(hop, "transform") or {}
+    opts = hop.options or {} if hasattr(hop, "options") else (hop if isinstance(hop, dict) else {})
+    said = opts.get("transform")
+    if said is None:
+        said = hopkeys.opt(hop, "transform") or {}
     return isinstance(said, dict) and said.get("on_target") is True
 
 

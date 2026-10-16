@@ -6108,9 +6108,7 @@ def service_follow(facts, costs=None):
 # is copied only where it resolves on the service's own class
 _SERVICE_MODEL = {"analyticdb-mysql": "polardbx", "singlestore": "polardbx",
                   "analyticdb-postgres": "gaussdb", "yugabytedb": "gaussdb",
-                  "synapse": None}
-# a service with no class of its own to copy from (`_SERVICE_MODEL` None)
-# takes no neutral way unread: its cells stay not yet
+                  "synapse": "mssql"}
 for _shape, _ways in WAYS.items():
     for _engine, _model in _SERVICE_MODEL.items():
         if _engine in _ways:
@@ -6125,16 +6123,7 @@ for _shape, _ways in WAYS.items():
                                    "wide key"):
             _ways[_engine] = ("yes", "@neutral_batches" if _shape != "wide key"
                               else "@neutral_read")
-# what the wire's contract has and these services were not read for yet
-for _engine, _shapes in {
-        "analyticdb-postgres": ("large values", "partitioned"),
-        "yugabytedb": ("large values", "partitioned"),
-        "synapse": ("large values", "partitioned",
-                    "keyless", "no unique index",
-                    "wide key")}.items():
-    for _shape in _shapes:
-        WAYS[_shape][_engine] = (NOT_YET, "P0-CLOUDS.more")
-del _shape, _ways, _engine, _model, _got, _shapes
+del _shape, _ways, _engine, _model, _got
 
 # ---- a value wider than the target's packet, and the account a grant names
 # ---- (backlog W16N-LOB, W16N-DEFECTS) ---------------------------------------

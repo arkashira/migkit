@@ -30,6 +30,7 @@ import uuid
 
 from .. import decide
 from .distmysql import OnMySQLWire
+from .gaussdb import GaussEngine
 from .pgwire import PgWireEngine
 
 #: why the ways below are owed a run (P0-CLOUDS.more)
@@ -99,6 +100,8 @@ UNPROVED_ITEMS = (
     "analyticdb-postgres:cutover.read-only-target "
     ""
     "analyticdb-postgres:move.create-missing "
+    "analyticdb-postgres:move.large-values "
+    "analyticdb-postgres:move.partitioned "
     "analyticdb-postgres:move.sized analyticdb-postgres:move.table-copy "
     "analyticdb-postgres:operations.fencing "
     "analyticdb-postgres:schema.create "
@@ -426,6 +429,8 @@ class AnalyticDBPostgresEngine(LandsRows, PgWireEngine):
     SERVICE = "alibaba-analyticdb-postgres"
     SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "gp_toolkit",
                       "pg_aoseg", "pg_bitmapindex")
+    LARGE_VALUES = GaussEngine.LARGE_VALUES
+    _deep_partitions = GaussEngine._deep_partitions
 
     def _scalar_of(self, side, db, sql):
         return self._scalar(side, db, sql)

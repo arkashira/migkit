@@ -1321,8 +1321,8 @@ services:
     provider: azure
     where: synapse
     label: Azure Synapse Analytics (dedicated SQL pool)
-    family: none
-    distinct: "a massively parallel data warehouse answering T-SQL, not SQL Server's engine"
+    family: synapse
+    distinct: null
     hosts: ['\.sql\.azuresynapse\.net$']
     signs: {}
     api: {product: null, restore_point: backup, clone: true}
@@ -2323,8 +2323,8 @@ services:
     provider: alibaba
     where: analyticdb-mysql
     label: AnalyticDB for MySQL
-    family: none
-    distinct: "an analytic data warehouse of its own that speaks MySQL's protocol"
+    family: analyticdb-mysql
+    distinct: null
     hosts: ['\.ads\.aliyuncs\.com$']
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -2346,8 +2346,8 @@ services:
     provider: alibaba
     where: analyticdb-postgres
     label: AnalyticDB for PostgreSQL
-    family: none
-    distinct: "a massively parallel data warehouse built on Greenplum"
+    family: analyticdb-postgres
+    distinct: null
     hosts: ['\.gpdb\.rds\.aliyuncs\.com$']
     signs: {}
     api: {product: null, restore_point: "", clone: false}
@@ -3779,8 +3779,8 @@ services:
     provider: yugabyte-cloud
     where: yugabyte-cloud
     label: YugabyteDB Aeon
-    family: none
-    distinct: "a distributed SQL database that speaks PostgreSQL's wire protocol (YSQL) and Cassandra's (YCQL), with a logical replication of its own: its LSNs are not byte offsets, and pg_current_wal_lsn, pg_wal_lsn_diff and IDENTIFY_SYSTEM are refused"
+    family: yugabytedb
+    distinct: null
     hosts: ['\.yugabyte\.cloud$']
     signs: {}
     api: {product: null, restore_point: backup, clone: true}
@@ -3804,8 +3804,8 @@ services:
     provider: singlestore
     where: singlestore
     label: SingleStore Helios
-    family: none
-    distinct: "a distributed SQL database of its own (formerly MemSQL) that speaks MySQL's wire protocol"
+    family: singlestore
+    distinct: null
     hosts: ['\.svc\.singlestore\.com$']
     signs: {}
     api: {product: null, restore_point: "", clone: false}

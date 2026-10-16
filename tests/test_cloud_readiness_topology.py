@@ -8,6 +8,11 @@ from migkit.upgrade import (
 )
 from migkit.engines.mysql import managed_retention
 
+PROVES = [
+    ("managed.catalogued", ("analyticdb-mysql", "analyticdb-postgres",
+                            "synapse", "yugabytedb", "singlestore")),
+]
+
 
 # --- Item 317 (R3.topo): Multi-Node Topologies ---
 
@@ -222,3 +227,38 @@ def test_managed_retention_aurora_and_permission_denied():
     def mock_plain(sql):
         return []
     assert managed_retention(mock_plain, hinted=False) is None
+
+
+def test_the_five_catalogue_rows_have_setting_families_and_freeze_does_not_raise():
+    from migkit import cloud_readiness, freeze, managed
+    services = managed.services()
+    five = [
+        ("azure-synapse", "synapse"),
+        ("alibaba-analyticdb-mysql", "analyticdb-mysql"),
+        ("alibaba-analyticdb-postgres", "analyticdb-postgres"),
+        ("yugabyte-aeon", "yugabytedb"),
+        ("singlestore-helios", "singlestore"),
+    ]
+    for sid, want_fam in five:
+        svc = services[sid]
+        assert svc.family == want_fam
+        assert svc.distinct is None or svc.distinct == ""
+        way, why = managed.freeze_way(svc)
+        assert why or way is not None
+
+        class _Ep:
+            host = "127.0.0.1"
+            port = 5432
+            options = {"service": sid}
+
+        class _Hop:
+            source = _Ep()
+            target = _Ep()
+            options = {}
+
+        class _Eng:
+            pass
+
+        items = cloud_readiness.items(_Hop(), _Eng())
+        assert isinstance(items, list)
+
