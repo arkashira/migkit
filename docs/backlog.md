@@ -3971,6 +3971,8 @@ running work merges.
   `tests/test_every_decide_rung_is_reached.py`; the owed rungs are
   AUD-Z.rungs-owed, those built outside decide.py AUD-Z.rungs-outside).
 
+* AUD-Z.rungs-owed slice A (W20A) 2026-10-16: 59 rungs of 25 ladders - change reads, chunk edges, tail applies, column writes, admit, check sample, change depth, the seed carriers, the Db2/ASE/CockroachDB/Couchbase/Cosmos ways, cloud sign-in and forwarder, brand confidence, connector port, account carried - held and refused under `watched()` and out of `OWED`; `_priority_cost`'s rung stays owed: `rank_priority` prices it through `costed`/`_ranked` and never prunes it, so no recorder sees it.
+
 * AUD-Z.workers DONE 2026-10-16: no width is a literal outside `decide.py` - a driver's requests in flight are `decide.request_width` asked before every chunk, the installer's fetches `decide.fetch_width`; tests/test_a_drivers_requests_in_flight_are_decided.py, the lint test's `OWED` empty.
 
 Done when every ID in the research document is fixed with its test or

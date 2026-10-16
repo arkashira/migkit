@@ -306,7 +306,7 @@ Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 
 
 ## Backlog (550 items, `docs/backlog-index.md`)
 
-DONE 383 - PARTLY 84 - OPEN 63 - BLOCKED 11 - NOT PURSUED 9
+DONE 383 - PARTLY 84 - IN PROGRESS 1 - OPEN 62 - BLOCKED 11 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
@@ -318,7 +318,7 @@ DONE 383 - PARTLY 84 - OPEN 63 - BLOCKED 11 - NOT PURSUED 9
 | cutover | 19 | 1 | 0 | 1 | 0 | 0 |
 | ease of use | 35 | 6 | 0 | 1 | 1 | 1 |
 | engines | 37 | 13 | 0 | 10 | 3 | 1 |
-| maintainability | 1 | 2 | 0 | 7 | 0 | 0 |
+| maintainability | 1 | 2 | 1 | 6 | 0 | 0 |
 | move | 35 | 15 | 0 | 15 | 0 | 2 |
 | operations/scale | 47 | 15 | 0 | 9 | 4 | 3 |
 | operations/verify | 0 | 1 | 0 | 0 | 0 | 0 |
