@@ -2501,7 +2501,7 @@ _CLOUD_NATIVE_GAPS = {
                 "spanner bigtable firestore datastore keyspaces neptune "
                 "geminidb-cassandra geminidb-redis geminidb-mongo"),
         **_each(NOT_YET, "P0-PARITY.verify",
-                "gaussdb oceanbase-oracle polardbx timestream lindorm"),
+                "polardbx timestream lindorm"),
     },
     "verify.structure.row-security": {
         **_each(NOT_APPLICABLE, _NO_RLS,

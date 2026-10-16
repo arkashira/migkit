@@ -27,10 +27,31 @@ is done with it, and until then `stream_room` names what it holds.
 """
 import re
 
+from .. import pieces
 from .base import Result
 from .dbapi import MARK
 from .pgwire import PgWireEngine
 from .provedsql import ProvedDigest
+
+#: why the ways below are owed a run: its large types and partitions,
+#: settings, sequences, slot and decoded changes (P0-CLOUDS.native),
+#: proved on fakes and on the parent's sandbox only
+UNPROVED_ON = "built; not run on a real GaussDB instance"
+#: the ways built here and run against no such server: the whole
+#: list, the matrix reads it from this source (`capabilities`)
+UNPROVED_ITEMS = (
+    "assess.brands assess.engine-checks assess.handwork assess.preflight "
+    "assess.versions cutover.freeze cutover.read-only-target "
+    "move.create-missing move.sized operations.fencing schema.defaults "
+    "schema.foreign-keys schema.indexes schema.views scope.copy "
+    "scope.counters scope.deep scope.listings scope.names scope.objects "
+    "scope.ops scope.repair scope.row-filter tail.table-states "
+    "verify.confirm verify.delta verify.repair verify.repair-undo "
+    "verify.rows-apart verify.structure.schema-diff verify.table "
+    "move.large-values "
+    "move.partitioned "
+    "verify.structure.partitions")
+
 
 #: what a decoded batch is read with
 DECODE_OPTIONS = ("'include-xids', '1', 'skip-empty-xacts', '1'")
@@ -59,6 +80,22 @@ class GaussEngine(ProvedDigest, PgWireEngine):
                       "snapshot", "db4ai", "dbe_pldebugger", "dbe_pldeveloper",
                       "dbe_sql_util", "sqladvisor", "blockchain", "cstore",
                       "pkg_service", "pg_toast")
+    #: large values: sized by the server, read and written in pieces as on
+    #: PostgreSQL's wire, with GaussDB's own `clob` and `nvarchar2` among
+    #: the types that hold them
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server, read and written in pieces, wide values hashed where they lie",
+        length={"bytea": "octet_length({c})", "text": "octet_length({c})",
+                "clob": "octet_length({c})", "nvarchar2": "octet_length({c})",
+                "character varying": "octet_length({c})"},
+        types=("bytea", "text", "clob", "nvarchar2", "character varying"),
+        piece="substring({c} from {at} for {n})",
+        append="{c} = {c} || {v}",
+        appends=("bytea", "text", "clob"),
+        md5="md5({c})", md5_classes=("bytes", "text"))
+    #: a field's widest value, 1 GB, as GaussDB documents it for its byte
+    #: and text types: the service says it in no setting
+    FIELD_MOST = 2 ** 30
 
     # ---- the proved digest -------------------------------------------------
 
@@ -253,7 +290,98 @@ class GaussEngine(ProvedDigest, PgWireEngine):
                     f" {level}): its changes cannot be followed", "",
                     "wal_level = logical in the instance's parameters (the"
                     " instance restarts to take it)"))
+        out.append(self._deep_partitions(db))
         return out
+
+    def piece_limits(self, side, db):
+        """A field's widest value, the service's documented quota
+        (`pieces.Sizing`): a value past it is no value the side holds."""
+        return [pieces.Limit("a field's widest value", self.FIELD_MOST,
+                             "row", read=False)]
+
+    def _partition_way(self, side, db):
+        """The catalogue this side keeps its partitions in, read off the
+        catalogue itself (`decide.gauss_partition_catalogue`)."""
+        from .. import decide
+        have = {n for (n,) in self._rows(
+            side, db, "select c.relname from pg_class c join pg_namespace n"
+                      " on n.oid = c.relnamespace where n.nspname ="
+                      " 'pg_catalog' and c.relname in ('pg_partition',"
+                      " 'pg_partitioned_table')")}
+        return decide.gauss_partition_catalogue(
+            {"pg_partition": "pg_partition" in have,
+             "pg_partitioned_table": "pg_partitioned_table" in have})
+
+    def partition_scheme(self, side, db):
+        """{table: {"m": method, "p": {partition: its bounds}}} of every
+        partitioned table in scope, from the catalogue the side keeps them
+        in: GaussDB's own (a table's row and its partitions' rows in
+        `pg_partition`) or PostgreSQL's declarative one."""
+        way = self._partition_way(side, db).rung
+        if way is None:
+            return {}
+        if way.name == "own":
+            sql = ("select n.nspname || '.' || t.relname, (select"
+                   " r.partstrategy from pg_partition r where r.parentid ="
+                   " t.oid and r.parttype = 'r' limit 1), p.relname,"
+                   " coalesce(array_to_string(p.boundaries, ','), '')"
+                   " from pg_partition p join pg_class t on t.oid ="
+                   " p.parentid join pg_namespace n on n.oid ="
+                   " t.relnamespace where p.parttype = 'p' order by 1, 3")
+        else:
+            sql = ("select n.nspname || '.' || t.relname, pt.partstrat,"
+                   " c.relname, coalesce(pg_get_expr(c.relpartbound,"
+                   " c.oid), '') from pg_partitioned_table pt join pg_class"
+                   " t on t.oid = pt.partrelid join pg_namespace n on"
+                   " n.oid = t.relnamespace join pg_inherits i on"
+                   " i.inhparent = t.oid join pg_class c on c.oid ="
+                   " i.inhrelid order by 1, 3")
+        out = {}
+        for table, method, part, bound in self._rows(side, db, sql):
+            if not self.in_scope(db, table):
+                continue
+            e = out.setdefault(table, {"m": str(method or ""), "p": {},
+                                       "own": way.name == "own"})
+            e["p"][part] = bound
+        return out
+
+    def _partition_rows(self, side, db, table, part, own):
+        """The rows one partition holds: `PARTITION (p)` of GaussDB's own,
+        the child table of a declarative one."""
+        sch = table.split(".", 1)[0]
+        q = self._quote_ident
+        where = (f"{'.'.join(q(x) for x in table.split('.', 1))}"
+                 f" partition ({q(part)})" if own else f"{q(sch)}.{q(part)}")
+        return int(self._rows(side, db, f"select count(*) from {where}")[0][0])
+
+    def _deep_partitions(self, db):
+        """Every partitioned table's method on both sides, and each of its
+        partitions held to its own row count, read from the catalogue each
+        side keeps them in (`Engine._partitions_verdict`)."""
+        try:
+            src = self.partition_scheme("src", db)
+            dst = self.partition_scheme("dst", db)
+            scheme, tables = [], {}
+            for t in sorted(set(src) | set(dst)):
+                s, d = src.get(t), dst.get(t)
+                if not s or not d:
+                    scheme.append(f"{t}: partitioned on the"
+                                  f" {'source' if s else 'target'} only")
+                    continue
+                if s["m"] != d["m"]:
+                    scheme.append(f"{t}: partitioned by {s['m']} on the"
+                                  f" source, {d['m']} on the target")
+                tables[t] = tuple(
+                    {p: {"rows": self._partition_rows(side, db, t, p,
+                                                      e["own"]),
+                         "digest": None, "bound": e["p"][p]}
+                     for p in e["p"]}
+                    for side, e in (("src", s), ("dst", d)))
+            return self._partitions_verdict(db, tables, scheme, "default")
+        except Exception as e:  # noqa: BLE001 - said, and the rest runs
+            return Result("deep", f"{db} partitions", "error",
+                          "could not read the partitions:"
+                          f" {str(e).splitlines()[-1][:120] if str(e) else type(e).__name__}")
 
     def settle_target(self, db, from_source=True):
         """Every table the load wrote analysed, so the planner reads it as

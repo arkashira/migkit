@@ -19,6 +19,18 @@ from . import hooks
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows
 
+#: why the ways below are owed a run: its wide tables' catalogue,
+#: settings, indexes and writes (P0-CLOUDS.native), proved on fakes and on
+#: the parent's sandbox only
+UNPROVED_ON = "built; not run on a real Lindorm instance"
+#: the ways built here and run against no such server: the whole
+#: list, the matrix reads it from this source (`capabilities`)
+UNPROVED_ITEMS = (
+    "assess.engine-checks cutover.rollback move.sized move.table-copy "
+    "schema.create scope.copy scope.deep scope.listings scope.names "
+    "scope.repair scope.row-filter verify.repair verify.repair-undo "
+    "verify.table")
+
 
 class LindormEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "data")

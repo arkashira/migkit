@@ -24,9 +24,69 @@ only through OceanBase's own change-data library, which has no reader
 here. The community edition has no Oracle mode, so this side has not been
 run against a server: what it does is OceanBase's documented SQL.
 """
+from .. import pieces
 from .base import Engine, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 from .distmysql import OnMySQLWire
+
+#: why the ways below are owed a run: either mode's widest value by its
+#: version, the Oracle mode's catalogue, partitions, sequences and
+#: settings (P0-CLOUDS.native), proved on fakes and on the parent's
+#: sandbox only
+UNPROVED_ON = "built; not run on a real OceanBase tenant"
+#: the ways built here and run against no such server: the whole
+#: list, the matrix reads it from this source (`capabilities`)
+UNPROVED_ITEMS = (
+    "oceanbase:assess.brands oceanbase:assess.capacity "
+    "oceanbase:assess.engine-checks oceanbase:assess.preflight "
+    "oceanbase:cutover.counters oceanbase:cutover.drain "
+    "oceanbase:cutover.freeze oceanbase:cutover.read-only-target "
+    "oceanbase:cutover.rollback oceanbase:move.create-missing "
+    "oceanbase:move.load-window oceanbase:move.partitioned "
+    "oceanbase:move.sized oceanbase:operations.fencing "
+    "oceanbase:schema.defaults oceanbase:schema.foreign-keys "
+    "oceanbase:schema.indexes oceanbase:schema.routines "
+    "oceanbase:schema.views oceanbase:scope.copy oceanbase:scope.counters "
+    "oceanbase:scope.deep oceanbase:scope.listings oceanbase:scope.names "
+    "oceanbase:scope.objects oceanbase:scope.ops oceanbase:scope.repair "
+    "oceanbase:scope.row-filter oceanbase:tail.added oceanbase:tail.ddl "
+    "oceanbase:tail.follows oceanbase:tail.readded oceanbase:tail.renames "
+    "oceanbase:tail.table-states oceanbase:verify.access.object-ownership "
+    "oceanbase:verify.access.table-grants oceanbase:verify.confirm "
+    "oceanbase:verify.delta oceanbase:verify.fence "
+    "oceanbase:verify.identity.sequence-collision "
+    "oceanbase:verify.identity.sequence-parity "
+    "oceanbase:verify.movement.target-ahead oceanbase:verify.repair "
+    "oceanbase:verify.repair-undo "
+    "oceanbase:verify.structure.collection-options "
+    "oceanbase:verify.structure.columns "
+    "oceanbase:verify.structure.foreign-keys "
+    "oceanbase:verify.structure.keys "
+    "oceanbase:verify.structure.partitions "
+    "oceanbase:verify.structure.triggers "
+    "oceanbase:verify.structure.unvalidated-constraints "
+    "oceanbase:verify.table oceanbase:verify.value.charset "
+    "oceanbase:verify.value.collation oceanbase:verify.value.generated "
+    "oceanbase:verify.value.narrowing oceanbase:verify.value.null-empty "
+    "oceanbase:verify.value.one-plan oceanbase:verify.value.precision "
+    "oceanbase:verify.value.rendering oceanbase:verify.value.timezone "
+    "oceanbase-oracle:assess.engine-checks "
+    "oceanbase-oracle:cutover.freeze "
+    "oceanbase-oracle:cutover.read-only-target "
+    "oceanbase-oracle:move.sized oceanbase-oracle:move.table-copy "
+    "oceanbase-oracle:schema.create oceanbase-oracle:scope.copy "
+    "oceanbase-oracle:scope.counters oceanbase-oracle:scope.deep "
+    "oceanbase-oracle:scope.listings oceanbase-oracle:scope.names "
+    "oceanbase-oracle:scope.objects oceanbase-oracle:scope.repair "
+    "oceanbase-oracle:scope.row-filter "
+    "oceanbase-oracle:verify.identity.sequence-parity "
+    "oceanbase-oracle:verify.repair oceanbase-oracle:verify.repair-undo "
+    "oceanbase-oracle:verify.structure.objects "
+    "oceanbase-oracle:verify.table "
+    "oceanbase:move.large-values "
+    "oceanbase-oracle:move.large-values "
+    "oceanbase-oracle:move.partitioned "
+    "oceanbase-oracle:verify.structure.partitions")
 
 
 class OceanBaseEngine(OnMySQLWire):
@@ -36,6 +96,20 @@ class OceanBaseEngine(OnMySQLWire):
     #: its binlog service writes whole images; the names come from the
     #: catalogue
     BINLOG_FULL = ("binlog_row_image",)
+
+    def piece_limits(self, side, db):
+        """The packet read off the tenant, as on MySQL, and the widest
+        value the tenant's version stores (`decide.oceanbase_value_bound`):
+        OceanBase's large types hold less than MySQL's."""
+        from .. import decide
+        got = list(super().piece_limits(side, db))
+        rows = self._q(side, "select version()")
+        most = decide.oceanbase_value_most(decide.oceanbase_value_bound(
+            {"version": decide.ob_version(rows[0][0] if rows else "")}))
+        if most:
+            got.append(pieces.Limit("OceanBase's widest value", most, "row",
+                                    read=False))
+        return got
 
     def _identity_probes(self):
         return ("select value from oceanbase.GV$OB_PARAMETERS where name ="
@@ -81,6 +155,26 @@ class OceanBaseOracleEngine(FoldsToCapitals, DbapiRows, Engine):
     LIMIT = "fetch"
     PADDED = ("CHAR", "NCHAR")
     SCALED = ("NUMBER",)
+    #: large values: a LOB's length read by the server without reading
+    #: it - a character LOB's at the four bytes a character may take, never
+    #: less than it stores - and each value read whole, as the tenant's SQL
+    #: reads no part of a LOB wider than a string
+    LARGE_VALUES = pieces.Sql(
+        "sized by the server and read whole, under the widest value the tenant stores",
+        length={"blob": "dbms_lob.getlength({c})",
+                "clob": "4 * dbms_lob.getlength({c})",
+                "nclob": "4 * dbms_lob.getlength({c})"},
+        types=("blob", "clob", "nclob"))
+
+    def piece_limits(self, side, db):
+        """The widest value the tenant's version stores
+        (`decide.oceanbase_value_bound`), its documented quota."""
+        from .. import decide
+        got = self._rows(side, db, "select version() from dual")
+        most = decide.oceanbase_value_most(decide.oceanbase_value_bound(
+            {"version": decide.ob_version(got[0][0] if got else "")}))
+        return [pieces.Limit("OceanBase's widest value", most, "row",
+                             read=False)] if most else []
 
     def _connect(self, side, db):
         """A connection to the tenant (`user@tenant#cluster` through
@@ -264,7 +358,8 @@ class OceanBaseOracleEngine(FoldsToCapitals, DbapiRows, Engine):
             return [Result("deep", f"{db} target objects", "error",
                            "could not read the target's objects:"
                            f" {str(e).splitlines()[0][:90]}")]
-        return [Result("deep", f"{db} target objects",
+        return [self._deep_partitions(db),
+                Result("deep", f"{db} target objects",
                        "diff" if invalid else "ok",
                        f"{len(invalid)} invalid:"
                        f" {', '.join(r[0] for r in invalid[:6])}"
@@ -277,6 +372,56 @@ class OceanBaseOracleEngine(FoldsToCapitals, DbapiRows, Engine):
                        if loose else "every constraint enabled and validated",
                        "", "alter table ... enable validate constraint ..."
                        if loose else "")]
+
+    def partition_scheme(self, side, db):
+        """{table: {"m": method, "p": {partition: its high value}}} of the
+        schema's partitioned tables, from Oracle's catalogue views as the
+        tenant keeps them (`ALL_PART_TABLES`, `ALL_TAB_PARTITIONS`), the
+        partitions in their order."""
+        out = {}
+        for t, meth, part, high in self._rows(
+                side, db, "select p.table_name, k.partitioning_type,"
+                          " p.partition_name, p.high_value from"
+                          " all_tab_partitions p join all_part_tables k on"
+                          " k.owner = p.table_owner and k.table_name ="
+                          f" p.table_name where p.table_owner = {MARK}"
+                          " order by p.table_name, p.partition_position",
+                (self._owner(side, db),)):
+            name = self._said(t)
+            if self.in_scope(db, name):
+                out.setdefault(name, {"m": str(meth), "p": {}})["p"][
+                    str(part)] = str(high or "")
+        return out
+
+    def _deep_partitions(self, db):
+        """Each partitioned table's method on both sides, and each of its
+        partitions held to its own row count, read with `PARTITION (p)`
+        (`Engine._partitions_verdict`)."""
+        try:
+            src = self.partition_scheme("src", db)
+            dst = self.partition_scheme("dst", db)
+            scheme, tables = [], {}
+            for t in sorted(set(src) | set(dst)):
+                s, d = src.get(t), dst.get(t)
+                if not s or not d:
+                    scheme.append(f"{t}: partitioned on the"
+                                  f" {'source' if s else 'target'} only")
+                    continue
+                if s["m"] != d["m"]:
+                    scheme.append(f"{t}: partitioned by {s['m']} on the"
+                                  f" source, {d['m']} on the target")
+                tables[t] = tuple(
+                    {p: {"rows": int(self._rows(
+                        side, db, f"select count(*) from {self._q(t)}"
+                                  f" partition ({self._q(p)})")[0][0]),
+                         "digest": None, "bound": e["p"][p]}
+                     for p in e["p"]}
+                    for side, e in (("src", s), ("dst", d)))
+            return self._partitions_verdict(db, tables, scheme, "MAXVALUE")
+        except Exception as e:  # noqa: BLE001 - said, and the rest runs
+            return Result("deep", f"{db} partitions", "error",
+                          "could not read the partitions:"
+                          f" {str(e).splitlines()[-1][:120] if str(e) else type(e).__name__}")
 
     def settle_target(self, db, from_source=True):
         """Statistics gathered for the schema the load wrote, as the

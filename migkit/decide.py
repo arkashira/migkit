@@ -4752,3 +4752,97 @@ def ddl_follow(facts):
         Rung("snapshots", "the catalogue read again at every batch and held"
              " to the last read", footprint=1,
              because="every brand answers its catalogue")), f)
+
+# --- the services on another's wire: what they store, where they say it ----
+# (P0-CLOUDS.native, P0-DE.4). A service on MySQL's, PostgreSQL's or an
+# Oracle-compatible wire takes its parent's way with large values and
+# partitions where the wire is the same; what it changes - the widest value
+# its large types store, the catalogue its partitions are kept in - is a
+# fact read off the service at `assess`, and the way is the rung those
+# facts hold.
+
+#: OceanBase's widest large value (`LONGTEXT`, `LONGBLOB`, `CLOB`, `BLOB`),
+#: by its documentation: 48 MB before version 4, 512 MB from it, in both
+#: tenant modes
+OCEANBASE_LOB = ((4, 512 * 2 ** 20), (0, 48 * 2 ** 20))
+
+
+def ob_version(text):
+    """(major, minor) of OceanBase's own version in what the tenant says of
+    itself (`5.7.25-OceanBase-v4.2.1.0`, `OceanBase 3.2.4.0`), or None."""
+    import re as _re
+    got = _re.search(r"oceanbase[^0-9]*?v?(\d+)\.(\d+)", str(text or ""),
+                     _re.I)
+    return (int(got.group(1)), int(got.group(2))) if got else None
+
+
+def oceanbase_value_bound(facts):
+    """Which bound holds OceanBase's widest value, by the version the
+    tenant gave (`facts["version"]`, `ob_version`): the documented one of
+    that version, or none where the version was not read - the packet
+    read off the server then bounds a value alone, never a guessed one."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    have = f.get("version")
+    rungs = [Rung(f"v{since}", f"{most // 2 ** 20} MB a value, as OceanBase"
+                                f" {since}.x and later documents it" if since
+                  else f"{most // 2 ** 20} MB a value, as OceanBase before"
+                       " 4.x documents it",
+                  because=f"the tenant says it runs version {have}",
+                  needs=(Need(f"version {since} or later",
+                              lambda x, s=since: x.get("version") is not None
+                              and tuple(x["version"]) >= (s, 0),
+                              f"the tenant's version is before {since}"),))
+             for since, most in OCEANBASE_LOB]
+    rungs.append(Rung("unread", "no bound of the service's own: the packet"
+                                " read off the server bounds a value",
+                      because="the tenant's version was not read"))
+    return climb("OceanBase's widest value", tuple(rungs), f)
+
+
+def oceanbase_value_most(choice):
+    """The bytes of the bound `oceanbase_value_bound` stood on, or None."""
+    name = getattr(choice.rung, "name", "")
+    return dict((f"v{s}", m) for s, m in OCEANBASE_LOB).get(name)
+
+
+def gauss_partition_catalogue(facts):
+    """Where a GaussDB side keeps its partitions: its own `pg_partition`
+    (`PARTITION BY` as GaussDB and openGauss write it), PostgreSQL's
+    declarative one (`pg_partitioned_table`, `pg_inherits`) where the
+    server is built on a release that has it, read off the catalogue
+    itself (`facts["pg_partition"]`, `facts["pg_partitioned_table"]`);
+    none where neither is there."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    return climb("GaussDB's partition catalogue", (
+        Rung("own", "GaussDB's own partitions (pg_partition)",
+             because="the catalogue has pg_partition",
+             needs=(Need("pg_partition in the catalogue",
+                         lambda x: bool(x.get("pg_partition")),
+                         "the catalogue has no pg_partition"),)),
+        Rung("declarative", "PostgreSQL's declarative partitions"
+                            " (pg_partitioned_table)",
+             because="the catalogue has pg_partitioned_table",
+             needs=(Need("pg_partitioned_table in the catalogue",
+                         lambda x: bool(x.get("pg_partitioned_table")),
+                         "the catalogue has no pg_partitioned_table"),))), f)
+
+
+# the cells the services above now hold: large values by their parent's
+# adapter under the bound each service reads or documents, partitions read
+# from the service's own catalogue, and what a service's own quota makes
+# whole said as such; run on fakes only - the engine's module says on which
+# server it was not run (`UNPROVED_ON`)
+WAYS["large values"].update({
+    **{n: ("yes", "@LARGE_VALUES") for n in (
+        "oceanbase", "oceanbase-oracle", "polardbx", "dcdb", "gaussdb",
+        "geminidb-redis", "geminidb-mongo")},
+    "keyspaces": (NOT_APPLICABLE, "a row is 1 MB at most, Keyspaces' own"
+                                  " quota, written whole as one mutation"),
+    "geminidb-cassandra": (NOT_APPLICABLE, "a row is written as one"
+                                           " mutation, as on Cassandra's"
+                                           " wire, and read whole"),
+})
+WAYS["partitioned"].update({
+    "gaussdb": ("yes", "@_deep_partitions"),
+    "oceanbase-oracle": ("yes", "@_deep_partitions"),
+})

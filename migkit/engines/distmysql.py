@@ -34,6 +34,58 @@ from .base import Engine, NotHere, Result
 from .mysql import MySQLEngine
 from .provedsql import ProvedDigest
 
+#: why the ways below are owed a run: the MySQL wire's ways as these
+#: services answer them, their sequences, proxy and change log
+#: (P0-CLOUDS.native), proved on fakes and on the parent's sandbox only
+UNPROVED_ON = "built; not run on a real PolarDB-X or TDSQL instance"
+#: the ways built here and run against no such server: the whole
+#: list, the matrix reads it from this source (`capabilities`)
+UNPROVED_ITEMS = (
+    "polardbx:assess.brands polardbx:assess.capacity "
+    "polardbx:assess.engine-checks polardbx:assess.preflight "
+    "polardbx:cutover.drain polardbx:cutover.freeze "
+    "polardbx:cutover.read-only-target polardbx:cutover.rollback "
+    "polardbx:move.create-missing polardbx:move.load-window "
+    "polardbx:move.partitioned polardbx:move.sized "
+    "polardbx:move.table-copy polardbx:operations.fencing "
+    "polardbx:schema.create polardbx:schema.defaults "
+    "polardbx:schema.foreign-keys polardbx:schema.indexes "
+    "polardbx:schema.routines polardbx:schema.views polardbx:scope.copy "
+    "polardbx:scope.counters polardbx:scope.deep polardbx:scope.listings "
+    "polardbx:scope.names polardbx:scope.ops polardbx:scope.repair "
+    "polardbx:scope.row-filter polardbx:tail.added polardbx:tail.ddl "
+    "polardbx:tail.follows polardbx:tail.readded polardbx:tail.renames "
+    "polardbx:tail.table-states polardbx:verify.confirm "
+    "polardbx:verify.delta polardbx:verify.fence polardbx:verify.repair "
+    "polardbx:verify.repair-undo polardbx:verify.table "
+    "polardbx:verify.value.one-plan dcdb:assess.brands "
+    "dcdb:assess.capacity dcdb:assess.engine-checks dcdb:assess.preflight "
+    "dcdb:cutover.freeze dcdb:cutover.read-only-target "
+    "dcdb:move.create-missing dcdb:move.load-window dcdb:move.partitioned "
+    "dcdb:move.sized dcdb:move.table-copy dcdb:operations.fencing "
+    "dcdb:schema.defaults dcdb:schema.foreign-keys dcdb:schema.indexes "
+    "dcdb:schema.routines dcdb:schema.views dcdb:scope.copy "
+    "dcdb:scope.counters dcdb:scope.deep dcdb:scope.listings "
+    "dcdb:scope.names dcdb:scope.objects dcdb:scope.ops dcdb:scope.repair "
+    "dcdb:scope.row-filter dcdb:tail.table-states "
+    "dcdb:verify.access.object-ownership dcdb:verify.access.table-grants "
+    "dcdb:verify.confirm dcdb:verify.delta "
+    "dcdb:verify.identity.sequence-collision "
+    "dcdb:verify.identity.sequence-parity "
+    "dcdb:verify.movement.target-ahead dcdb:verify.repair "
+    "dcdb:verify.repair-undo dcdb:verify.structure.collection-options "
+    "dcdb:verify.structure.columns dcdb:verify.structure.foreign-keys "
+    "dcdb:verify.structure.keys dcdb:verify.structure.partitions "
+    "dcdb:verify.structure.triggers "
+    "dcdb:verify.structure.unvalidated-constraints dcdb:verify.table "
+    "dcdb:verify.value.charset dcdb:verify.value.collation "
+    "dcdb:verify.value.generated dcdb:verify.value.narrowing "
+    "dcdb:verify.value.null-empty dcdb:verify.value.one-plan "
+    "dcdb:verify.value.precision dcdb:verify.value.rendering "
+    "dcdb:verify.value.timezone "
+    "polardbx:move.large-values "
+    "dcdb:move.large-values")
+
 
 class OnMySQLWire(ProvedDigest, MySQLEngine):
     """What a distributed service on MySQL's wire keeps of the MySQL

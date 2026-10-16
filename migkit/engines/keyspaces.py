@@ -28,6 +28,29 @@ import time
 from . import hooks
 from .cassandra import CassandraEngine
 
+#: why the ways below are owed a run: its sessions, tables made active,
+#: its stream and the Cassandra wire's ways (P0-CLOUDS.native), proved on
+#: fakes and on the parent's sandbox only
+UNPROVED_ON = "built; not run on a real Amazon Keyspaces table"
+#: the ways built here and run against no such server: the whole
+#: list, the matrix reads it from this source (`capabilities`)
+UNPROVED_ITEMS = (
+    "assess.brands assess.capacity assess.engine-checks assess.preflight "
+    "assess.versions cutover.drain cutover.rollback cutover.two-way "
+    "move.bulk move.create-missing move.load-window move.sized "
+    "schema.indexes scope.copy scope.deep scope.listings scope.names "
+    "scope.objects scope.ops scope.repair scope.row-filter "
+    "tail.table-states verify.access.table-grants verify.confirm "
+    "verify.delta verify.fence verify.movement.target-ahead verify.repair "
+    "verify.repair-undo verify.rows-apart "
+    "verify.structure.collection-options verify.structure.columns "
+    "verify.structure.indexes verify.structure.materialized-views "
+    "verify.structure.objects verify.structure.schema-diff "
+    "verify.structure.triggers verify.table verify.tables "
+    "verify.value.charset verify.value.narrowing verify.value.null-empty "
+    "verify.value.precision verify.value.timezone")
+
+
 #: seconds the stream is taken to trail a write
 STREAM_LAG = 10
 
