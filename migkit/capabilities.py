@@ -180,38 +180,27 @@ GAPS = {
     # every commit has been read through, delta from the redo, users and
     # roles with their password hashes, the target's SCN and sequences
     "oracle": {},
+    # built on what IBM documents for each platform and proved on fakes
+    # answering its catalogue (R13-DB2): settings, the server's own load,
+    # accounts (LUW, z/OS), statistics, the rollback point; fence, confirm
+    # and delta on LUW through the pair and its row change timestamps -
+    # every one "built; not run on a real Db2 server" (`db2.UNPROVED_ON`).
+    # Sequences are the cutover's counters (popped below, `_GAINED`)
     "db2": {
-        "sequences": (NOT_YET, "34"),
-        "params": (NOT_YET, "34"),
-        "bulk-move": (NOT_YET, "34"),
-        "stream": (NOT_YET, "34"),
-        "fence": (NOT_YET, "34"),
-        "confirm": (NOT_YET, "34"),
-        "delta": (NOT_YET, "34"),
-        "users": (NOT_YET, "34"),
-        "statistics": (NOT_YET, "34"),
-        "snapshot": (NOT_YET, "34"),
+        # the log read without DATA CAPTURE CHANGES is LT.R6's
+        # (`Db2Engine.change_log`, the hook its reader fills)
+        "stream": (NOT_YET, "LT.R6"),
     },
     "db2i": {
-        "sequences": (NOT_YET, "34"),
-        "params": (NOT_YET, "34"),
-        "bulk-move": (NOT_YET, "34"),
         "statistics": (NOT_APPLICABLE, "IBM i's query engine gathers and"
                                        " keeps its own statistics as the"
                                        " tables change"),
-        "snapshot": (NOT_YET, "34"),
     },
     "db2zos": {
-        "sequences": (NOT_YET, "34"),
-        "params": (NOT_YET, "34"),
-        "bulk-move": (NOT_YET, "34"),
         "stream": (NOT_APPLICABLE, _ZOS_LOG),
         "fence": (NOT_APPLICABLE, _ZOS_LOG),
         "confirm": (NOT_APPLICABLE, _ZOS_LOG),
         "delta": (NOT_APPLICABLE, _ZOS_LOG),
-        "users": (NOT_YET, "34"),
-        "statistics": (NOT_YET, "34"),
-        "snapshot": (NOT_YET, "34"),
     },
     "teradata": {
         "sequences": (NOT_APPLICABLE, "Teradata has no sequences, and an"
@@ -3232,6 +3221,10 @@ _GAINED = {
     "sqlite": (
         "scope.objects"),
     "db2": (
+        # R13-DB2: built; not run on a real Db2 LUW server (the reason
+        # `db2.UNPROVED_ON` carries once the module read lands)
+        "verify.delta verify.fence verify.confirm verify.users move.bulk "
+        "cutover.rollback cutover.drain "
         "scope.listings scope.copy scope.repair scope.counters "
         "scope.objects verify.access.object-ownership "
         "verify.identity.sequence-collision "
@@ -3249,6 +3242,8 @@ _GAINED = {
         "verify.value.timezone verify.repair verify.repair-undo "
         "assess.preflight"),
     "db2i": (
+        # R13-DB2: built; not run on a real IBM i (`db2i.UNPROVED_ON`)
+        "move.bulk cutover.rollback "
         "scope.repair scope.counters scope.objects "
         "verify.access.object-ownership "
         "verify.identity.sequence-collision "
@@ -3266,6 +3261,8 @@ _GAINED = {
         "verify.value.timezone verify.repair verify.repair-undo "
         "assess.preflight"),
     "db2zos": (
+        # R13-DB2: built; not run on a real Db2 for z/OS subsystem
+        "verify.users move.bulk cutover.rollback "
         "scope.repair scope.counters scope.objects "
         "verify.access.object-ownership "
         "verify.identity.sequence-collision "

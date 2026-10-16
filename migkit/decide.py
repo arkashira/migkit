@@ -4134,3 +4134,182 @@ def lost_link_wait(reconnects, down=0.0):
     seconds = {"measured": (d[-1] - down) if d else 0.0,
                "as long again": down}.get(got.path, 0.0)
     return max(0.0, seconds), got
+
+
+# ---- Db2's own ways: a table loaded by the server, its statistics, the
+# ---- target's rollback point and the rows changed since a clean pass
+# ---- (backlog R13-DB2; built on the documentation, not run on a server) -----
+
+def db2_bulk_way(facts):
+    """How one table of a Db2 pair is carried: by the server's own load
+    reading the source through a cursor, or by the table copier.
+
+    `facts`: `platform` (luw, zos or i), `rows` (the catalogue's count of
+    the source table: SYSCAT.TABLES.CARD, SYSIBM.SYSTABLES.CARDF, or None
+    where statistics were never gathered), `width` (its average row in
+    bytes, None where not read), `empty` (the target table holds no row),
+    `mapped` (the hop renames or transforms its columns), `archived` (the
+    target archives its log, so a load not logged would leave its table
+    space waiting for a backup; None where not read), `alone` (z/OS: the
+    target's table space holds this table only), `same_place` (i: both
+    sides are one system), `copier_rate` (rows a second the copier was
+    measured at in this run, None before) and `load_start` (seconds a load
+    of this run took to start, None before). A load needs the rows it
+    replaces to be none and the table to be the hop's as it is; where the
+    two rates were measured it is taken only where the copier would take
+    longer than the load's start alone."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    plat = f.get("platform")
+    said = (f"{f.get('rows') if f.get('rows') is not None else 'unknown'}"
+            f" rows of about {f.get('width') or '?'} bytes")
+
+    def pays(f):
+        rate, start = f.get("copier_rate"), f.get("load_start")
+        if not rate or start is None:
+            return True
+        return f.get("rows") / rate > start
+    common = (
+        Need("a table the hop takes as it is",
+             lambda f: not f.get("mapped"),
+             "the hop renames or transforms its columns: the copier"
+             " carries what the server's load cannot"),
+        Need("a size the catalogue knows",
+             lambda f: (f.get("rows") or 0) > 0,
+             f"the catalogue says {said}: the copier sizes its own"
+             " ranges"),
+        Need("an empty target table", lambda f: bool(f.get("empty")),
+             "the target table holds rows, and a load only adds to them"),
+        Need("both sides on one server",
+             lambda f: bool(f.get("same_place")),
+             "the two sides are two servers: the server's own load reads"
+             " another only with that one's password written into the"
+             " command, which the statement history keeps"),
+        Need("a load that outruns the copier",
+             lambda f: pays(f),
+             lambda f: f"the copier at {f.get('copier_rate'):.0f} rows a"
+                       f" second finishes before a load starts"
+                       f" ({f.get('load_start'):.1f}s)"))
+    luw = Need("Db2 for Linux, UNIX and Windows",
+               lambda f: f.get("platform") == "luw", "not this platform")
+    zos = Need("Db2 for z/OS", lambda f: f.get("platform") == "zos",
+               "not this platform")
+    ibmi = Need("IBM i", lambda f: f.get("platform") == "i",
+                "not this platform")
+    rungs = (
+        Rung("load", "the server's own load, from a cursor on the source",
+             needs=(luw,) + common + (
+                 Need("a target whose log is not archived",
+                      lambda f: f.get("archived") is False,
+                      "the target archives its log (or it was not read):"
+                      " a load would leave its table space waiting for a"
+                      " backup"),),
+             because=f"{said}: the server writes its pages directly"),
+        Rung("cross-load", "the load utility reading a cursor (the"
+             " cross-loader), logged", needs=(zos,) + common + (
+                 Need("a table space holding this table only",
+                      lambda f: bool(f.get("alone")),
+                      "its table space holds other tables, which a load"
+                      " could hold or reset"),
+                 Need("no column the target always generates",
+                      lambda f: not f.get("always"),
+                      "a column is GENERATED ALWAYS: the utility would"
+                      " give it the target's value, not the source's"),),
+             because=f"{said}: the utility writes the pages, logged"),
+        Rung("copy-file", "the system's own copy of the file", needs=(
+            ibmi,) + common,
+             because=f"{said}: the system copies the members itself"),
+        Rung("copier", "the table copier", footprint=1,
+             because=f"{said} on {plat}: the copier reads and writes it"
+                     " by key ranges"))
+    return climb("a Db2 table carried", rungs, f)
+
+
+def db2_statistics(facts):
+    """How a Db2 table's statistics are refreshed after the move.
+
+    `facts`: `rows` (the rows counted now), `card` (what the catalogue
+    holds, None where never gathered), `indexes` (how many the table has)
+    and `ratio` (the share that can change before statistics stop being
+    trusted, `Engine.STALE_STATS_RATIO`). Statistics the catalogue holds
+    within that share are left; else a table with indexes is gathered with
+    its distribution and its indexes, so the optimiser chooses between
+    them on values as they are, and one without on its rows alone."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+
+    def stale(f):
+        card = f.get("card")
+        if card is None or card < 0:
+            return True
+        return abs(f.get("rows") - card) > f.get("ratio") * max(card, 1)
+    said = (f"{f.get('rows')} rows, the catalogue says"
+            f" {f.get('card') if f.get('card') is not None else 'none'},"
+            f" {f.get('indexes')} indexes")
+    old = Need("statistics older than the rows", stale,
+               f"{said}: the statistics are current")
+    return climb("a Db2 table's statistics", (
+        Rung("distribution", "statistics with the distribution of values,"
+             " and every index", needs=(old, Need(
+                 "an index to choose", lambda f: f.get("indexes") > 0,
+                 "the table has no index")), because=said),
+        Rung("table", "statistics of the table's rows", needs=(old,),
+             because=said),
+        Rung("current", "left as the catalogue holds them", footprint=1,
+             because=said)), f)
+
+
+def db2_snapshot_mark(facts):
+    """What a Db2 target's rollback point holds beside its counters.
+
+    `facts`: `log` (None where the server answered where its log is now,
+    else why not). The counters are read together in one unit of work
+    at repeatable read on every platform; where the log answers, its
+    position is kept with them, so a later read of the log starts where
+    the counters stood."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("a Db2 rollback point", (
+        Rung("log mark", "the counters read together, and the log's"
+             " position they stand at", needs=(Need(
+                 "a log that says where it is",
+                 lambda f: f.get("log") is None,
+                 lambda f: f"the log's position was not read:"
+                           f" {f.get('log')}"),),
+             because="the counters and the log's position are one"
+                     " moment"),
+        Rung("together", "the counters read together at repeatable read",
+             footprint=1,
+             because="the counters are one moment; no log position is"
+                     " kept")), f)
+
+
+def db2_delta_way(facts):
+    """How the rows a Db2 source changed since the last clean pass are
+    found.
+
+    `facts`: `log` (the source's change log can be read without moving it:
+    the reader `Db2Engine.change_log` names), `stamped` (the tables in
+    scope with a ROW CHANGE TIMESTAMP column), `tables` (those in scope)
+    and `same` (both sides are Db2, whose rows compare as the driver
+    hands them). The log names every change, a delete too; a row change
+    timestamp names the rows written since, never one deleted, so the
+    full check stays owed for deletes."""
+    f = facts if isinstance(facts, Facts) else Facts(facts)
+    return climb("the rows a Db2 source changed", (
+        Rung("log", "the keys the change log names", needs=(Need(
+            "a change log read without being moved",
+            lambda f: bool(f.get("log")),
+            "no reader of the source's log is installed"),),
+             because="the log names every change, deletes too"),
+        Rung("stamped", "the rows whose row change timestamp is past the"
+             " last clean pass", footprint=1, needs=(
+                 Need("a table with a row change timestamp",
+                      lambda f: f.get("stamped", 0) > 0,
+                      lambda f: f"none of the {f.get('tables')} tables has"
+                                " a row change timestamp"),
+                 Need("two Db2 sides", lambda f: bool(f.get("same")),
+                      "the target is another engine: its rows are"
+                      " compared by the full check")),
+             because="a row change timestamp names every row written"
+                     " since; deletes stay the full check's"),
+        Rung("none", "not verified by change", footprint=2,
+             because="nothing here names the rows changed: the full check"
+                     " compares every row")), f)

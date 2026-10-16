@@ -21,9 +21,15 @@ proves each by `check` (`reach_items` says so in `assess`).
 Written 2026-09-30 without a z/OS to run it against; IBM Z Xplore gives a
 free shared z/OS with Db2 for a manual proof.
 """
-from .base import Result
+from .base import Engine, Result
 from .db2 import Db2Engine, granted, large_values
 from .dbapi import MARK
+
+#: why the ways below are owed a run: settings, the utility's load,
+#: accounts, statistics and the rollback point (R13-DB2), proved on
+#: fakes only
+UNPROVED_ON = "built; not run on a real Db2 for z/OS subsystem"
+UNPROVED_ITEMS = ("verify.users", "move.bulk", "cutover.rollback")
 
 #: the declared type from `SYSIBM.SYSCOLUMNS`, with the numbers a
 #: counterpart needs; a character column `FOR BIT DATA` (FOREIGNKEY 'B')
@@ -180,6 +186,9 @@ CATALOGUE = {
 class Db2ZosEngine(Db2Engine):
     CANON_ENGINE = "db2zos"
     PLATFORM = "zos"
+    #: z/OS's own catalogue (`SYSIBM`): left unbound, every question was
+    #: asked of Linux, UNIX and Windows's `SYSCAT`, which z/OS lacks
+    CATALOGUE = CATALOGUE
     #: DRDA's own port, which z/OS subsystems listen on by default
     DRDA_PORT = 446
     FOLDED_BECAUSE = ("is rendered by migkit's own renderer rather than by"
@@ -287,3 +296,134 @@ class Db2ZosEngine(Db2Engine):
 
     def _assess_extra(self):
         return self.reach_items("src")
+
+    # ---- settings, accounts, statistics, the rollback point and the
+    # ---- utility's load (backlog R13-DB2), as IBM documents them for
+    # ---- z/OS; not run on a subsystem (`UNPROVED_ON`) -----------------------
+
+    #: the special registers and the subsystem's own variables a value's
+    #: meaning stands on (its system parameters are a utility's to read)
+    SETTINGS = " union all ".join(
+        f"select '{n}', cast({e} as varchar(128)) from sysibm.sysdummy1"
+        for n, e in (
+            ("encoding", "current application encoding scheme"),
+            ("decfloat_rounding", "current decfloat rounding mode"),
+            ("precision", "current precision"), ("rules", "current rules"),
+            ("locale", "current locale lc_ctype"),
+            ("version", "getvariable('SYSIBM.VERSION')"),
+            ("data_sharing", "getvariable('SYSIBM.DATA_SHARING_GROUP_NAME')"
+             )))
+    CRITICAL_PARAMS = ("encoding", "decfloat_rounding", "precision", "rules",
+                       "locale")
+    #: z/OS signs every account in through its security manager, and keeps
+    #: system privileges where Linux, UNIX and Windows keep database ones;
+    #: a role is a trusted context's, held by no grant a query reads
+    AUTHORITIES = " union all ".join(
+        f"select grantee, case granteetype when 'L' then 'R' else 'U' end,"
+        f" '{w}', '' from sysibm.sysuserauth where {c} in ('Y', 'G') and"
+        " granteetype in (' ', 'L')" for c, w in (
+            ("sysadmauth", "SYSADM"), ("sysctrlauth", "SYSCTRL"),
+            ("sysoprauth", "SYSOPR"), ("createdbaauth", "CREATEDBA"),
+            ("bindaddauth", "BINDADD"), ("createalauth", "CREATEALIAS")))
+    TABLE_GRANTS = " union all ".join(
+        f"select grantee, case granteetype when 'L' then 'R' else 'U' end,"
+        f" '{w}', ttname from sysibm.systabauth where tcreator = {{schema}}"
+        f" and {c} in ('Y', 'G') and granteetype in (' ', 'L')" for c, w in (
+            ("alterauth", "ALTER"), ("deleteauth", "DELETE"),
+            ("indexauth", "INDEX"), ("insertauth", "INSERT"),
+            ("referencesauth", "REFERENCES"), ("selectauth", "SELECT"),
+            ("triggerauth", "TRIGGER"), ("updateauth", "UPDATE")))
+    ROLES = "select name from sysibm.sysroles"
+    ROLES_HELD = None
+    LOGIN = None
+    DB_GRANT = "grant {priv} to {who}"
+    STATS_FACTS = ("select t.name, t.cardf, (select count(*) from"
+                   " sysibm.sysindexes i where i.tbcreator = t.creator and"
+                   " i.tbname = t.name), t.dbname, t.tsname from"
+                   f" sysibm.systables t where t.creator = {MARK} and"
+                   " t.type = 'T'")
+    #: the log's RBA or LRSN is no query's to read
+    LOG_POSITION = None
+    BULK_FACTS = ("select t.name, t.cardf, t.avgrowlen, s.ntables from"
+                  " sysibm.systables t join sysibm.systablespace s on"
+                  " s.dbname = t.dbname and s.name = t.tsname where"
+                  f" t.creator = {MARK} and t.type = 'T'")
+
+    def _grantee(self, kind, name):
+        return f"role {self._q(name)}" if kind == "role" else self._q(name)
+
+    def _runstats(self, cur, db, table, path, row):
+        """RUNSTATS through the utility's stored procedure, on the table
+        space the catalogue says holds the table: a return code past 4 (a
+        warning) stops it."""
+        how = " index(all keycard)" if path == "distribution" else ""
+        stmt = (f"runstats tablespace {str(row[3]).strip()}."
+                f"{str(row[4]).strip()} table("
+                f"{self._qualified('dst', db, table)}){how}")
+        self._utility(cur, stmt, table)
+
+    def _utility(self, cur, stmt, table):
+        import os
+        got = cur.callproc("SYSPROC.DSNUTILU",
+                           (f"MK{os.getpid() % 10 ** 8}", "NO", stmt, 0))
+        code = int((got or (0, 0, 0, 0))[3] or 0)
+        if code > 4:
+            raise SystemExit(f"{table}: the subsystem's utility ended with"
+                             f" return code {code}; its output is in the"
+                             " subsystem's utility messages")
+
+    def _bulk_facts(self, db):
+        return {self._said(str(t).strip()): {
+            "rows": None if c is None or float(c) < 0 else int(c),
+            "width": w, "alone": int(n or 0) == 1}
+            for t, c, w, n in self._rows("src", db, self.BULK_FACTS,
+                                         (self._owner("src", db),))}
+
+    def _bulk_extra(self, db, table):
+        always = self._rows("dst", db, "select 1 from sysibm.syscolumns"
+                            f" where tbcreator = {MARK} and tbname = {MARK}"
+                            " and default = 'I' fetch first 1 rows only",
+                            (self._owner("dst", db), self._q(table)[1:-1]))
+        return {"always": bool(always)}
+
+    def _load(self, db, table, path, extra, log):
+        """The cross-loader: the utility reading a cursor on the source's
+        table into the empty target table, logged and added to; the rows
+        then counted on both sides, a difference stopping the table."""
+        cols = ", ".join(self._q(n) for n, _ in self.neutral_columns(
+            "src", db, table))
+        stmt = (f"exec sql declare mkc cursor for select {cols} from"
+                f" {self._qualified('src', db, table)} endexec load data"
+                f" incursor(mkc) log yes resume yes into table"
+                f" {self._qualified('dst', db, table)}")
+        conn = self._connect("dst", db)
+        try:
+            self._utility(conn.cursor(), stmt, table)
+        finally:
+            conn.close()
+        moved = [int(self._rows(s, db, "select count_big(*) from"
+                                f" {self._qualified(s, db, table)}")[0][0])
+                 for s in ("src", "dst")]
+        if moved[0] != moved[1]:
+            raise SystemExit(f"{table}: the source holds {moved[0]} rows and"
+                             f" the utility loaded {moved[1]}. The table is"
+                             " not taken as moved; move it with the table"
+                             " copier")
+        if log:
+            log(f"{table}: {moved[1]} rows loaded by the subsystem's utility")
+
+    # z/OS hands its log to licensed code only (`capabilities._ZOS_LOG`):
+    # nothing to fence on, no change to verify by
+    def src_lsn(self, db):
+        return None
+
+    log_position = Engine.log_position
+    position_reached = Engine.__dict__["position_reached"]
+
+    def fence_wait(self, db, lsn, timeout=300):
+        return None
+
+    def delta_verify(self, db, limit=20000, log=None):
+        return [Result("delta", db, "skip", "not verified by change")]
+
+    _compare_pks = Engine._compare_pks

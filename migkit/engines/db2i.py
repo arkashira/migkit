@@ -50,9 +50,14 @@ import datetime
 import struct
 from decimal import Decimal
 
-from .base import Result
+from .base import Engine, Result
 from .db2 import Db2Engine, _twelve, db2_connect_licence, large_values
 from .dbapi import MARK
+
+#: why the ways below are owed a run: settings, the system's own copy
+#: and the rollback point (R13-DB2), proved on fakes only
+UNPROVED_ON = "built; not run on a real IBM i"
+UNPROVED_ITEMS = ("move.bulk", "cutover.rollback")
 
 #: the name IBM's ODBC driver for IBM i registers itself by
 ODBC_DRIVER = "IBM i Access ODBC Driver"
@@ -984,6 +989,86 @@ class Db2iEngine(Db2Engine):
 
     def _assess_extra(self):
         return self.reach_items("src")
+
+
+    # ---- settings, statistics, the rollback point and the system's own
+    # ---- copy (backlog R13-DB2), as IBM documents them for IBM i; not run
+    # ---- on a system (`UNPROVED_ON`) ----------------------------------------
+
+    #: every system value, as its text
+    SETTINGS = ("select system_value_name, coalesce(current_character_value,"
+                " varchar(current_numeric_value)) from"
+                " qsys2.system_value_info")
+    CRITICAL_PARAMS = ("QCCSID", "QDATFMT", "QDATSEP", "QTIMSEP", "QDECFMT",
+                       "QSRTSEQ", "QLANGID", "QCNTRYID", "QTIMZON")
+    #: the rows and their size the system keeps of each table, and the
+    #: library and file it names them by
+    BULK_FACTS = ("select table_name, number_rows, case when number_rows >"
+                  " 0 then data_size / number_rows end, system_table_schema,"
+                  " system_table_name from qsys2.systablestat where"
+                  f" table_schema = {MARK}")
+
+    def settle_target(self, db, from_source=True):
+        """IBM i's query engine gathers and keeps its own statistics as the
+        tables change (`capabilities.GAPS`)."""
+        return None
+
+    # IBM i's accounts are user profiles, read and made by `users` itself
+    accounts = Engine.accounts
+    account_steps = Engine.account_steps
+    account_run = Engine.account_run
+
+    def _counter_sql(self, db):
+        return [("select sequence_name, coalesce(last_assigned_value +"
+                 " increment, start) from qsys2.syssequences where"
+                 f" sequence_schema = {self._schema_literal('dst', db)}"
+                 " with rr", 1)]
+
+    def _same_place(self):
+        s, t = self.hop.source, self.hop.target
+        return (s.host, s.port) == (t.host, t.port)
+
+    def _archived(self):
+        return None
+
+    def _bulk_facts(self, db):
+        return {self._said(str(t).strip()): {
+            "rows": None if c is None or int(c) < 0 else int(c),
+            "width": w, "system": (str(lib).strip(), str(f).strip())}
+            for t, c, w, lib, f in self._rows(
+                "src", db, self.BULK_FACTS, (self._owner("src", db),))}
+
+    def _bulk_extra(self, db, table):
+        got = self._rows("dst", db, "select system_table_schema,"
+                         " system_table_name from qsys2.systables where"
+                         f" table_schema = {MARK} and table_name = {MARK}",
+                         (self._owner("dst", db), self._q(table)[1:-1]))
+        return {"to": tuple(str(v).strip() for v in got[0]) if got else None}
+
+    def _load(self, db, table, path, extra, log):
+        """The system's own copy of the file, member to member, its fields
+        mapped by name and added to the empty target; then both sides
+        counted, a difference stopping the table."""
+        (lib, f), to = extra["system"], extra.get("to")
+        if not to:
+            raise SystemExit(f"{table}: the target names no file for it")
+        cmd = (f"CPYF FROMFILE({lib}/{f}) TOFILE({to[0]}/{to[1]})"
+               " MBROPT(*ADD) FMTOPT(*MAP *DROP)")
+        conn = self._connect("dst", db)
+        try:
+            self._run(conn.cursor(), f"call qsys2.qcmdexc({MARK})", (cmd,))
+            conn.commit()
+        finally:
+            conn.close()
+        moved = [int(self._rows(s, db, "select count(*) from"
+                                f" {self._qualified(s, db, table)}")[0][0])
+                 for s in ("src", "dst")]
+        if moved[0] != moved[1]:
+            raise SystemExit(f"{table}: the source holds {moved[0]} rows and"
+                             f" the copy left {moved[1]}. The table is not"
+                             " taken as moved; move it with the table copier")
+        if log:
+            log(f"{table}: {moved[1]} rows copied by the system")
 
 
 # ---- what migkit asks of IBM's driver and of Mapepire (backlog 0f) --------

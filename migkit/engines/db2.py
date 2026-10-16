@@ -16,28 +16,13 @@ from .base import Engine, Result
 from .dbapi import MARK, DbapiRows, FoldsToCapitals
 from .sqlcatalog import CatalogChecks
 
-#: the ways built here and run against no server (the matrix reads these
-#: two names from this source: `capabilities`)
+#: why the ways below are owed a run: settings, the server's own load,
+#: accounts, statistics, the rollback point, fence, confirm and delta
+#: (R13-DB2), proved on fakes only
 UNPROVED_ON = "built; not run on a real Db2 LUW server"
-UNPROVED_ITEMS = (
-    "assess.preflight cutover.counters cutover.freeze "
-    "move.partitioned scope.copy scope.counters scope.listings "
-    "scope.names scope.objects scope.repair scope.row-filter "
-    "verify.access.object-ownership "
-    "verify.identity.sequence-collision "
-    "verify.identity.sequence-parity "
-    "verify.movement.target-ahead verify.repair verify.repair-undo "
-    "verify.structure.collection-options verify.structure.columns "
-    "verify.structure.foreign-keys verify.structure.indexes "
-    "verify.structure.keys verify.structure.materialized-views "
-    "verify.structure.objects verify.structure.partitions "
-    "verify.structure.row-security verify.structure.schema-diff "
-    "verify.structure.sharding verify.structure.triggers "
-    "verify.structure.unvalidated-constraints verify.table "
-    "verify.value.charset verify.value.collation "
-    "verify.value.generated verify.value.narrowing "
-    "verify.value.null-empty verify.value.precision "
-    "verify.value.rendering verify.value.timezone")
+UNPROVED_ITEMS = ("verify.delta", "verify.fence", "verify.confirm",
+                  "verify.users", "move.bulk", "cutover.rollback",
+                  "cutover.drain")
 
 #: a column's type: its own, or for a distinct type the built-in type it
 #: is made from (`syscat.datatypes`), whose values it holds - a distinct
@@ -529,3 +514,543 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
                            " checked")]
         return [Result("deep", f"{db} target tables", "ok",
                        "every table in normal state")]
+
+    # ---- settings, accounts, statistics, the rollback point, the server's
+    # ---- own load and the rows changed (backlog R13-DB2). Built on what
+    # ---- IBM documents, not run on a server (`UNPROVED_ON`) -----------------
+
+    #: the settings that change what a value is or how it compares: the
+    #: code page and territory, string units, rounding and the
+    #: compatibility switches that make '' NULL or a DATE a timestamp
+    CRITICAL_PARAMS = ("codepage", "codeset", "territory", "string_units",
+                       "decflt_rounding", "date_compat", "varchar2_compat",
+                       "number_compat", "dec_to_char_fmt", "dft_sqlmathwarn",
+                       "extended_row_sz", "alt_collate")
+    #: every setting of the database (on this member) and of its instance
+    SETTINGS = ("select name, value from sysibmadm.dbcfg where member ="
+                " current member union all select 'instance.' || name,"
+                " value from sysibmadm.dbmcfg")
+
+    def _db2_settings(self, side, db):
+        """{setting: value} of `side`, or what stopped the reading."""
+        try:
+            return {str(n).strip(): None if v is None else str(v).strip()
+                    for n, v in self._rows(side, db, self.SETTINGS)}
+        except Exception as e:  # noqa: BLE001 - said, as the reading's
+            return {self.UNREADABLE: str(e).splitlines()[0][:160]
+                    if str(e) else type(e).__name__}
+
+    def check_params(self, db):
+        """Both servers' settings through the report every engine's go
+        through: one that changes what a value is or how it compares
+        (`CRITICAL_PARAMS`) fails it. A target of another engine keeps no
+        Db2 settings: said, its values compared by check."""
+        from . import same_engine
+        if not same_engine(self):
+            return [Result("params", f"{db} params", "skip",
+                           "the target is another engine: its settings are"
+                           " not Db2's, and check compares the values")]
+        return self._param_result(
+            db, self._db2_settings("src", db), self._db2_settings("dst", db),
+            self.CRITICAL_PARAMS, "set the target database's configuration"
+            " as the source's (its code page and territory are fixed when"
+            " it is created)")
+
+    # accounts: Db2 keeps no passwords - an account signs in through the
+    # operating system or a directory - so what is carried is who holds
+    # which authority, role and grant
+    ACCOUNT_PASSWORDS = ("Db2 keeps no passwords: an account signs in"
+                         " through the operating system or a directory,"
+                         " where it is made; its authorities, roles and"
+                         " grants are carried")
+    #: (grantee, type, authority, '') the database grants
+    AUTHORITIES = " union all ".join(
+        f"select grantee, granteetype, '{w}', '' from syscat.dbauth where"
+        f" {c} = 'Y'" for c, w in (
+            ("connectauth", "CONNECT"), ("dbadmauth", "DBADM"),
+            ("dataaccessauth", "DATAACCESS"),
+            ("accessctrlauth", "ACCESSCTRL"), ("secadmauth", "SECADM"),
+            ("sqladmauth", "SQLADM"), ("loadauth", "LOAD"),
+            ("createtabauth", "CREATETAB"), ("bindaddauth", "BINDADD"),
+            ("implschemaauth", "IMPLICIT_SCHEMA")))
+    #: (grantee, type, privilege, table) of a schema's tables
+    TABLE_GRANTS = " union all ".join(
+        f"select grantee, granteetype, '{w}', tabname from syscat.tabauth"
+        f" where tabschema = {{schema}} and {c} in ('Y', 'G')" for c, w in (
+            ("controlauth", "CONTROL"), ("alterauth", "ALTER"),
+            ("deleteauth", "DELETE"), ("indexauth", "INDEX"),
+            ("insertauth", "INSERT"), ("refauth", "REFERENCES"),
+            ("selectauth", "SELECT"), ("updateauth", "UPDATE")))
+    #: (grantee, type, role) held, and every role
+    ROLES_HELD = "select grantee, granteetype, rolename from syscat.roleauth"
+    ROLES = "select rolename from syscat.roles"
+    #: the authority that lets an account sign in; None: every one can
+    LOGIN = "CONNECT"
+    #: a database-wide authority given
+    DB_GRANT = "grant {priv} on database to {who}"
+
+    @staticmethod
+    def _server_own(name):
+        name = str(name).strip().upper()
+        return name.startswith("SYS") or name == "PUBLIC"
+
+    def accounts(self, side):
+        """The accounts and roles of `side` in `Engine.accounts`' shape:
+        roles held, the database's authorities as `<AUTHORITY> ON *.*`,
+        the hop's tables' privileges; no password (`ACCOUNT_PASSWORDS`).
+        A group is the directory's, and is left to it."""
+        dbs = list(self.hop.databases or [])
+        if not dbs:
+            return {}
+        out = {}
+
+        def acct(kind, name):
+            key = f"{'role' if str(kind).strip() == 'R' else 'user'}:{name}"
+            return out.setdefault(key, {
+                "login": self.LOGIN is None and str(kind).strip() != "R",
+                "roles": [], "grants": [], "hash": None, "attrs": {}})
+        for (r,) in self._rows(side, dbs[0], self.ROLES) if self.ROLES \
+                else ():
+            if not self._server_own(r):
+                acct("R", str(r).strip())
+        rows = [(g, k, p, "", None) for g, k, p, _ in self._rows(
+            side, dbs[0], self.AUTHORITIES)]
+        for db in dbs:
+            rows += [(g, k, p, t, db) for g, k, p, t in self._rows(
+                side, db, self.TABLE_GRANTS.replace(
+                    "{schema}", self._schema_literal(side, db)))]
+        for g, kind, priv, table, db in rows:
+            if self._server_own(g) or str(kind).strip() == "G":
+                continue
+            a = acct(kind, str(g).strip())
+            if priv == self.LOGIN:
+                a["login"] = True
+            elif db is None:
+                a["grants"].append(f"{priv} ON *.*")
+            else:
+                a["grants"].append(
+                    f"{priv} ON {db}.{self._said(str(table).strip())}")
+        for g, kind, role in self._rows(side, dbs[0], self.ROLES_HELD) \
+                if self.ROLES_HELD else ():
+            if not self._server_own(g) and str(kind).strip() != "G":
+                acct(kind, str(g).strip())["roles"].append(str(role).strip())
+        for a in out.values():
+            a["roles"], a["grants"] = sorted(set(a["roles"])), sorted(
+                set(a["grants"]))
+        return out
+
+    def _grantee(self, kind, name):
+        return f"{'role' if kind == 'role' else 'user'} {self._q(name)}"
+
+    def account_steps(self, src, dst, passwords):
+        """What makes the target's roles, roles held and grants the
+        source's; an account the target lacks is the operating system's
+        or the directory's to make (skipped, said), its grants given all
+        the same - Db2 grants to a name it does not yet know."""
+        steps, skipped = [], []
+
+        def step(key, run, undo, made=False):
+            steps.append({"key": key, "shown": run, "run": run,
+                          "undo": undo, "made": made, "given": False})
+        for key, a in sorted(src.items()):
+            kind, _, name = key.partition(":")
+            have = dst.get(key) or {"roles": [], "grants": []}
+            who = self._grantee(kind, name)
+            if key not in dst:
+                if kind == "role":
+                    step(key, f"create role {self._q(name)}",
+                         f"drop role {self._q(name)}", made=True)
+                else:
+                    skipped.append((key, "Db2 keeps no passwords: make the"
+                                         " account where the target signs"
+                                         " its users in; its grants are"
+                                         " given here"))
+            for r in a.get("roles", []):
+                if r not in have["roles"]:
+                    step(key, f"grant role {self._q(r)} to {who}",
+                         f"revoke role {self._q(r)} from {who}")
+            for g in a.get("grants", []):
+                if g in have["grants"]:
+                    continue
+                priv, _, on = g.partition(" ON ")
+                where, _, table = on.partition(".")
+                if where == "*":
+                    run = self.DB_GRANT.format(priv=priv.lower(), who=who)
+                    undo = run.replace("grant ", "revoke ", 1).replace(
+                        " to ", " from ", 1)
+                else:
+                    obj = (f"{self._q(self._owner('dst', where))}."
+                           f"{self._q(table)}")
+                    run = f"grant {priv.lower()} on table {obj} to {who}"
+                    undo = f"revoke {priv.lower()} on table {obj} from {who}"
+                step(key, run, undo)
+        return steps, skipped
+
+    def account_run(self, what):
+        conn = self._connect("dst", (self.hop.databases or [""])[0])
+        try:
+            self._run(conn.cursor(), what)
+            conn.commit()
+        finally:
+            conn.close()
+
+    # statistics: the catalogue's count and indexes of each table, read on
+    # the target, decide each (`decide.db2_statistics`)
+    STATS_FACTS = ("select t.tabname, t.card, (select count(*) from"
+                   " syscat.indexes i where i.tabschema = t.tabschema and"
+                   " i.tabname = t.tabname) from syscat.tables t where"
+                   f" t.tabschema = {MARK} and t.type = 'T'")
+
+    def _runstats(self, cur, db, table, path, row):
+        """The server's own statistics of one table, at the depth chosen:
+        RUNSTATS through the administrative command."""
+        name = self._qualified("dst", db, table)
+        how = (" with distribution and detailed indexes all"
+               if path == "distribution" else "")
+        self._run(cur, f"call sysproc.admin_cmd({MARK})",
+                  (f"runstats on table {name}{how}",))
+
+    def settle_target(self, db, from_source=True):
+        """Each table the move wrote whose catalogue statistics stand
+        further from its rows than `STALE_STATS_RATIO` gathered again, with
+        its distribution and indexes where it has indexes (`decide.
+        db2_statistics`)."""
+        from .. import decide
+        tables = self.neutral_tables("dst", db)
+        if not tables:
+            return None
+        facts = {self._said(str(r[0]).strip()): r for r in self._rows(
+            "dst", db, self.STATS_FACTS, (self._owner("dst", db),))}
+        done = {}
+        conn = self._connect("dst", db)
+        try:
+            cur = conn.cursor()
+            for t in tables:
+                row = facts.get(t) or (t, None, 0)
+                self._run(cur, "select count_big(*) from"
+                               f" {self._qualified('dst', db, t)}")
+                got = decide.db2_statistics({
+                    "rows": int(cur.fetchall()[0][0]),
+                    "card": None if row[1] is None else int(row[1]),
+                    "indexes": int(row[2] or 0),
+                    "ratio": self.STALE_STATS_RATIO})
+                if got.path != "current":
+                    self._runstats(cur, db, t, got.path, row)
+                    done[got.path] = done.get(got.path, 0) + 1
+            conn.commit()
+        finally:
+            conn.close()
+        if not done:
+            return f"statistics current on {len(tables)} tables"
+        words = {"distribution": "with distribution and indexes",
+                 "table": "rows"}
+        return "statistics gathered on " + ", ".join(
+            f"{n} tables ({words[p]})" for p, n in sorted(done.items()))
+
+    # the rollback point: the target's counters read together at
+    # repeatable read, with the log's position where it says it
+    #: where the log is now, the highest of every member
+    LOG_POSITION = ("select max(current_lsn) from"
+                    " table(mon_get_transaction_log(-2)) as t")
+
+    def _counter_sql(self, db):
+        """(statement, columns naming a counter) of the target's sequences
+        and identity columns, each at repeatable read."""
+        return [(self._question("dst", db, q) + " with rr", n)
+                for q, n in (("sequences", 1), ("identity", 2))]
+
+    def log_position(self, side, db):
+        """The log sequence number the server is at, as an integer."""
+        if not self.LOG_POSITION:
+            return None
+        got = self._rows(side, db, self.LOG_POSITION)
+        value = got[0][0] if got else None
+        if value is None:
+            return None
+        text = str(value).strip()
+        return int(text) if text.isdigit() else int(text, 16)
+
+    @staticmethod
+    def position_reached(have, want):
+        def lsn(v):
+            v = v.get("lsn") if isinstance(v, dict) else v
+            return None if v is None else int(v)
+        have, want = lsn(have), lsn(want)
+        return None if have is None or want is None else have >= want
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """The target's sequences and identity columns where they stand,
+        read in one unit of work at repeatable read, which a rollback
+        sets back (`restore_sequences`), and the log's position kept with
+        them where the server says it (`decide.db2_snapshot_mark`); the
+        rows a repair writes are kept by the repair's own record."""
+        from .. import decide
+        conn = self._connect("dst", db)
+        try:
+            cur, lines = conn.cursor(), []
+            for sql, n in self._counter_sql(db):
+                self._run(cur, sql)
+                for r in cur.fetchall():
+                    name = ".".join(str(v).strip() for v in r[:n])
+                    lines.append(f"{name}|{int(r[n])}")
+            try:
+                pos, why = self.log_position("dst", db), None
+            except Exception as e:  # noqa: BLE001 - said in the mark
+                pos, why = None, str(e).splitlines()[0][:120] or "refused"
+            if pos is None and why is None:
+                why = "the server keeps no position of its log a query reads"
+            got = decide.db2_snapshot_mark({"log": why})
+            conn.commit()
+        finally:
+            conn.close()
+        (state_dir / "dst-db2-counters.txt").write_text(
+            "\n".join(sorted(lines)) + ("\n" if lines else ""))
+        (state_dir / "dst-db2-mark.txt").write_text(
+            f"{got.path}|{pos if got.path == 'log mark' else ''}|"
+            f"{got.reason}\n")
+
+    def restore_sequences(self, db, state_dir):
+        path = state_dir / "dst-db2-counters.txt"
+        if not path.exists():
+            return []
+        return [self._restart_sql(db, name, int(value)) + ";"
+                for name, _, value in (line.rpartition("|") for line in
+                                       path.read_text().splitlines() if line)]
+
+    # the server's own load (`decide.db2_bulk_way`), else the copier
+    #: (table, rows the catalogue counts, average row bytes) of a schema
+    BULK_FACTS = ("select tabname, card, avgrowsize from syscat.tables"
+                  f" where tabschema = {MARK} and type = 'T'")
+
+    def _bulk_facts(self, db):
+        """{table: {"rows", "width"}} of the source's schema, as the
+        catalogue counts them (None where statistics were never
+        gathered)."""
+        return {self._said(str(t).strip()): {
+            "rows": None if c is None or int(c) < 0 else int(c),
+            "width": w} for t, c, w in self._rows(
+                "src", db, self.BULK_FACTS, (self._owner("src", db),))}
+
+    def _same_place(self):
+        """Both sides are one server's (one database, subsystem or
+        system): its own load reads another's only with that one's
+        password written into the command, which its statement history
+        keeps."""
+        s, t = self.hop.source, self.hop.target
+        return ((s.host, s.port, s.options.get("database"))
+                == (t.host, t.port, t.options.get("database")))
+
+    def _archived(self):
+        """Whether the target archives its log (`logarchmeth1`), None where
+        it was not read."""
+        got = self._db2_settings("dst", (self.hop.databases or [""])[0])
+        if self.UNREADABLE in got or "logarchmeth1" not in got:
+            return None
+        return str(got["logarchmeth1"]).upper() != "OFF"
+
+    def _bulk_extra(self, db, table):
+        """What a load of `table` is told beyond its columns: a value the
+        target generates always kept as the source's."""
+        always = self._rows("dst", db, "select 1 from syscat.columns where"
+                            f" tabschema = {MARK} and tabname = {MARK} and"
+                            " generated = 'A' fetch first 1 rows only",
+                            (self._owner("dst", db), self._q(table)[1:-1]))
+        return {"modified": ["identityoverride", "generatedoverride"]
+                if always else [], "always": False}
+
+    def _load(self, db, table, path, extra, log):
+        """One table loaded by the server from a cursor on the source,
+        each count the load answers checked: a row it read and did not
+        load stops the move for the table, never taken as loaded; a table
+        it leaves pending its constraints is checked at once."""
+        cols = ", ".join(self._q(n) for n, _ in self.neutral_columns(
+            "src", db, table))
+        mods = " ".join(extra.get("modified") or ())
+        cmd = (f"load from (select {cols} from"
+               f" {self._qualified('src', db, table)}) of cursor"
+               + (f" modified by {mods}" if mods else "")
+               + f" messages on server insert into"
+               f" {self._qualified('dst', db, table)} ({cols})")
+        conn = self._connect("dst", db)
+        try:
+            cur = conn.cursor()
+            self._run(cur, f"call sysproc.admin_cmd({MARK})", (cmd,))
+            names = [d[0].lower() for d in cur.description or ()]
+            row = dict(zip(names, cur.fetchall()[0])) if names else {}
+            read, loaded = row.get("rows_read"), row.get("rows_loaded")
+            lost = sum(int(row.get(k) or 0) for k in ("rows_skipped",
+                                                      "rows_rejected"))
+            if read is None or loaded is None or lost or int(read) != \
+                    int(loaded):
+                raise SystemExit(
+                    f"{table}: the server's load read {read} rows and"
+                    f" loaded {loaded} ({lost} skipped or rejected). The"
+                    " table is not taken as moved: its messages are on the"
+                    " target; move it with the table copier")
+            self._run(cur, "select status from syscat.tables where"
+                           f" tabschema = {MARK} and tabname = {MARK}",
+                      (self._owner("dst", db), self._q(table)[1:-1]))
+            if str(cur.fetchall()[0][0]).strip() == "C":
+                self._run(cur, f"set integrity for"
+                               f" {self._qualified('dst', db, table)}"
+                               " immediate checked")
+            conn.commit()
+        finally:
+            conn.close()
+        if log:
+            log(f"{table}: {loaded} rows loaded by the server")
+
+    def _empty(self, db, table):
+        try:
+            return not self._rows("dst", db, "select 1 from"
+                                  f" {self._qualified('dst', db, table)}"
+                                  " fetch first 1 rows only")
+        except Exception:  # noqa: BLE001 - no table yet: the copier's
+            return False
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table carried by the server's own load where the decision
+        finds it pays and is safe (`decide.db2_bulk_way`, from the
+        catalogue's size of it, the target's log and table), else by the
+        table copier, which empties the table before it writes: one
+        server's tables, an empty target, columns as they are."""
+        from .. import decide
+        said = log or (lambda m: None)
+        facts = self._bulk_facts(db)
+        place, archived, steps, pair = self._same_place(), None, [], []
+        if self.PLATFORM == "luw":
+            archived = self._archived()
+        for t in list(tables):
+            r, extra = facts.get(t) or {}, self._bulk_extra(db, t)
+            got = decide.db2_bulk_way({
+                "platform": self.PLATFORM, "rows": r.get("rows"),
+                "width": r.get("width"), "empty": self._empty(db, t),
+                "mapped": bool(self.through_pair(db, t)),
+                "archived": archived, "same_place": place,
+                "alone": r.get("alone"), "always": extra.get("always"),
+                "copier_rate": None, "load_start": None})
+            steps.append(f"{t}: {got.rung.said} - {got.reason}")
+            if not go:
+                continue
+            if got.path == "copier":
+                said(f"{t}: copied table by table - {got.reason}")
+                if not pair:
+                    pair.append(self._as_pair())
+                from .mssql import _Unkept
+                sch, _, tbl = str(t).rpartition(".")
+                pair[0].move_table(db, sch, tbl, pair[0].READ_ROWS,
+                                   _Unkept(), said)
+            else:
+                self._load(db, t, got.path, dict(r, **extra), log)
+        return steps
+
+    # the rows changed since a clean pass (`decide.db2_delta_way`)
+    #: (table, column) of each row change timestamp of a schema
+    STAMPS = ("select tabname, colname from syscat.columns where tabschema"
+              f" = {MARK} and rowchangetimestamp = 'Y'")
+    NOW = "select current timestamp from sysibm.sysdummy1"
+
+    def change_log(self):
+        """The reader of the source's change log, where one is installed
+        (`engines.db2_log`, which fills `neutral_changes`, `copy_point`
+        and `CHANGE_POINT_READS_ONLY` for the pair's delta and tail): the
+        one hook it is reached by; None until then."""
+        import importlib
+        import importlib.util
+        if importlib.util.find_spec(f"{__package__}.db2_log") is None:
+            return None
+        return importlib.import_module(f"{__package__}.db2_log")
+
+    def src_lsn(self, db):
+        return self._as_pair().src_lsn(db)
+
+    def fence_wait(self, db, lsn, timeout=300):
+        """The pair's fence: the tail's saved position read until it has
+        reached `lsn` (`position_reached`); nothing to wait on with no
+        tail running."""
+        return self._as_pair().fence_wait(db, lsn, timeout)
+
+    def _compare_pks(self, db, table, keys):
+        return self._as_pair()._compare_pks(db, table, keys)
+
+    def delta_verify(self, db, limit=20000, log=None):
+        """Only the rows changed since the last clean pass, by the way the
+        decision finds (`decide.db2_delta_way`): the keys the change log
+        names, or the rows whose row change timestamp is past the pass,
+        each asked of both sides by key. A table's mark moves only when
+        it is clean; deletes are the full check's."""
+        from .. import decide, durable
+        from . import same_engine
+        tables = self.neutral_tables("src", db)
+        stamps = {self._said(str(t).strip()): str(c).strip() for t, c in
+                  self._rows("src", db, self.STAMPS,
+                             (self._owner("src", db),))}
+        stamps = {t: c for t, c in stamps.items() if t in tables}
+        reader = self.change_log()
+        got = decide.db2_delta_way({
+            "log": bool(reader and getattr(reader, "neutral_changes", None)),
+            "stamped": len(stamps), "tables": len(tables),
+            "same": same_engine(self)})
+        if got.path == "log":
+            return self._as_pair().delta_verify(db, limit, log)
+        if got.path == "none":
+            return [Result("delta", db, "skip",
+                           "not verified by change: " + got.reason)]
+        state = self.hop.report_dir(db) / "db2-delta.json"
+        held = durable.read_state(state, "position")
+        now, res = dict(held or {}), []
+        for t in [t for t in tables if t not in stamps]:
+            res.append(Result("delta", f"{db}.{t}", "skip",
+                              "not verified by change: no row change"
+                              " timestamp"))
+        for t, col in sorted(stamps.items()):
+            mark = str(self._rows("src", db, self.NOW)[0][0])
+            if held is None or t not in held:
+                now[t] = mark
+                res.append(Result("delta", f"{db}.{t}", "ok",
+                                  "baseline recorded, changes are tracked"
+                                  " from this point on"))
+                continue
+            res.append(self._stamped_pass(db, t, col, held[t], limit, now,
+                                          mark))
+        durable.write_json(state, now)
+        return res
+
+    def _stamped_pass(self, db, table, col, since, limit, now, mark):
+        """One table's rows stamped past `since`, compared by key."""
+        key = self.neutral_key("src", db, table)
+        if not key:
+            return Result("delta", f"{db}.{table}", "skip",
+                          "not verified by change: the table has no key")
+        cols = [n for n, _ in self.neutral_columns("src", db, table)]
+        sel = ", ".join(self._q(c) for c in cols)
+        src = self._rows("src", db, f"select {sel} from"
+                         f" {self._qualified('src', db, table)} where"
+                         f" {self._q(col)} > {MARK} order by"
+                         f" {', '.join(self._q(k) for k in key)} fetch first"
+                         f" {int(limit) + 1} rows only", (since,))
+        if len(src) > limit:
+            return Result("delta", f"{db}.{table}", "warn",
+                          f"more than {limit} rows changed since the last"
+                          " clean pass: run check, which compares them all")
+        at = [cols.index(k) for k in key]
+        where = " and ".join(f"{self._q(k)} = {MARK}" for k in key)
+        missing, changed = [], []
+        for row in src:
+            ks = [row[i] for i in at]
+            got = self._rows("dst", db, f"select {sel} from"
+                             f" {self._qualified('dst', db, table)} where"
+                             f" {where}", ks)
+            if not got:
+                missing.append(ks)
+            elif list(got[0]) != list(row):
+                changed.append(ks)
+        if missing or changed:
+            return Result("delta", f"{db}.{table}", "diff",
+                          f"{len(src)} changed rows: {len(missing)} missing"
+                          f" on the target, {len(changed)} different", "",
+                          "run check on the table, and repair")
+        now[table] = mark
+        return Result("delta", f"{db}.{table}", "ok",
+                      f"{len(src)} rows changed since the last clean pass,"
+                      " each the same on the target")

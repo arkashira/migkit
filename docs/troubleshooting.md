@@ -1131,6 +1131,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the <...> is <...> (<...>), and this hop names it <...>: name its engine <...>
 
+* <...>: the server's load read <...> rows and loaded <...> (<...> skipped or rejected). The table is not taken as moved: its messages are on the target; move it with the table copier
+
 ## Db2 for i
 
 * a journal entry's <...> is not a number: <...>
@@ -1150,6 +1152,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * the journal <...> holds a minimized entry (<...>) for <...>: CHGJRN JRN(<...>) MINENTDTA(*NONE), then start the tail again from a new copy
 
 * <...>: a key column cannot be read from its journal entries
+
+* <...>: the target names no file for it
+
+* <...>: the source holds <...> rows and the copy left <...>. The table is not taken as moved; move it with the table copier
+
+## Db2 for z/OS
+
+* <...>: the subsystem's utility ended with return code <...>; its output is in the subsystem's utility messages
+
+* <...>: the source holds <...> rows and the utility loaded <...>. The table is not taken as moved; move it with the table copier
 
 ## SAP ASE
 
