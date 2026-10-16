@@ -62,6 +62,18 @@ def doc_bytes(body):
         "utf-8", "surrogatepass"))
 
 
+#: built on fakes; owed a run on a Couchbase cluster (ER4)
+UNPROVED_ON = ("built; not run on a real Couchbase cluster, only on its"
+               " community container and on fakes: the accounts, the"
+               " bucket settings compared, the statistics refreshed, the"
+               " bulk importer and the snapshot's mark")
+UNPROVED_ITEMS = (
+    "scope.repair scope.ops scope.row-filter scope.names verify.delta "
+    "verify.confirm verify.repair verify.repair-undo verify.table "
+    "tail.table-states move.large-values cutover.freeze verify.users "
+    "move.bulk cutover.rollback")
+
+
 class CouchbaseEngine(NeutralCopier, Engine):
     checks = ("schema", "counts", "data")
     CANON_ENGINE = "couchbase"
@@ -128,10 +140,12 @@ class CouchbaseEngine(NeutralCopier, Engine):
         scope, _, coll = str(table).rpartition(".")
         return scope or "_default", coll
 
-    def _rest(self, side, path):
-        """The cluster manager's answer to GET `path`, as JSON."""
+    def _rest(self, side, path, method="GET", form=None):
+        """The cluster manager's answer to `method` `path` - `form` sent
+        as its fields - as JSON, None where it answers nothing."""
         import base64 as b64
         import ssl
+        import urllib.parse
         import urllib.request
         ep = self._ep(side)
         tls = bool(ep.options.get("tls"))
@@ -139,7 +153,11 @@ class CouchbaseEngine(NeutralCopier, Engine):
         req = urllib.request.Request(
             f"{'https' if tls else 'http'}://{ep.host}:{port}{path}",
             headers={"Authorization": "Basic " + b64.b64encode(
-                f"{ep.user}:{ep.password}".encode()).decode()})
+                f"{ep.user}:{ep.password}".encode()).decode(),
+                **({"Content-Type": "application/x-www-form-urlencoded"}
+                   if form is not None else {})},
+            method=method, data=(urllib.parse.urlencode(form).encode()
+                                 if form is not None else None))
         ctx = None
         if tls:
             ctx = ssl.create_default_context(
@@ -148,7 +166,8 @@ class CouchbaseEngine(NeutralCopier, Engine):
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
         with urllib.request.urlopen(req, timeout=15, context=ctx) as got:
-            return json.loads(got.read())
+            body = got.read()
+            return json.loads(body) if body.strip() else None
 
     def databases(self):
         if self.hop.databases:
@@ -658,6 +677,239 @@ class CouchbaseEngine(NeutralCopier, Engine):
         return self._as_pair().delta_verify(db, limit, log)
 
     # ---- the server ----------------------------------------------------------
+
+    # ---- the bucket's settings (`params`) and statistics ------------------
+
+    #: what a bucket keeps its documents under, compared side by side
+    BUCKET_SETTINGS = ("bucketType", "replicaNumber", "replicaIndex",
+                       "evictionPolicy", "conflictResolutionType", "maxTTL",
+                       "compressionMode", "durabilityMinLevel",
+                       "storageBackend", "historyRetentionSeconds")
+
+    def _bucket_settings(self, side, db):
+        got = self._rest(side, f"/pools/default/buckets/{self._d(side, db)}")
+        return {k: got.get(k) for k in self.BUCKET_SETTINGS if k in got}
+
+    def check_params(self, db):
+        """Each of `BUCKET_SETTINGS` as the target's bucket has it beside
+        the source's."""
+        src = self._bucket_settings("src", db)
+        dst = self._bucket_settings("dst", db)
+        out = [Result("params", f"{db} {k}", "warn",
+                      f"source {src.get(k)}, target {dst.get(k)}",
+                      fix_hint=f"set the target bucket's {k} as the"
+                               " source's (a conflict resolution only by"
+                               " making the bucket again)")
+               for k in sorted(set(src) | set(dst)) if src.get(k) != dst.get(k)]
+        return out or [Result("params", db, "ok",
+                              f"{len(src)} bucket settings alike")]
+
+    def settle_target(self, db, from_source=True):
+        """The cost-based optimiser's statistics of each collection the
+        move wrote (`UPDATE STATISTICS ... INDEX ALL`); one the query
+        service will not refresh is said, never taken as done."""
+        done, refused = 0, []
+        bucket = self._d("dst", db)
+        for t in self.neutral_tables("src", db):
+            if not self.in_scope(db, t):
+                continue
+            scope, coll = self._split(t)
+            try:
+                list(self._cluster("dst").query(
+                    f"UPDATE STATISTICS FOR `{bucket}`.`{scope}`.`{coll}`"
+                    " INDEX ALL").rows())
+                done += 1
+            except Exception as e:  # noqa: BLE001 - said, not taken as done
+                refused.append(f"{t} ({str(e).strip()[:80]})")
+        if refused:
+            return (f"statistics of {done} collections refreshed; not of"
+                    f" {', '.join(refused)}")
+        return f"statistics of {done} collections refreshed" if done else None
+
+    # ---- accounts (`users`) ----------------------------------------------
+
+    ACCOUNT_PASSWORDS = ("never read: the cluster gives no password back, so"
+                         " a user is made with the passwords file's")
+
+    def _grants(self, side, roles):
+        back = {self._d(side, d): d for d in self.hop.databases or []}
+        out = []
+        for r in roles:
+            if r.get("bucket_name") not in back:
+                continue
+            place = ".".join(x for x in (r.get("scope_name"),
+                                         r.get("collection_name"))
+                             if x and x != "*") or "*"
+            out.append(f"{r['role'].upper()} ON {back[r['bucket_name']]}"
+                       f".{place}")
+        return sorted(set(out))
+
+    def accounts(self, side):
+        """The local users and groups of `side` in `Engine.accounts`'
+        shape: a group a role, a user's groups its roles, and the roles
+        each holds on the hop's buckets its grants (a role of the whole
+        cluster is no bucket's, and is not carried)."""
+        out = {}
+        for g in self._rest(side, "/settings/rbac/groups") or []:
+            out[f"role:{g['id']}"] = {
+                "login": False, "roles": [], "hash": None, "attrs": {},
+                "grants": self._grants(side, g.get("roles", []))}
+        for u in self._rest(side, "/settings/rbac/users") or []:
+            if u.get("domain") != "local":
+                continue
+            own = [r for r in u.get("roles", []) if not r.get("origins")
+                   or any(o.get("type") == "user" for o in r["origins"])]
+            out[f"user:{u['id']}"] = {
+                "login": True, "roles": sorted(u.get("groups") or []),
+                "hash": None, "attrs": {}, "grants": self._grants(side, own)}
+        return out
+
+    def _role_list(self, grants):
+        out = []
+        for g in grants:
+            role, _, on = g.partition(" ON ")
+            db, _, place = on.partition(".")
+            at = [self._d("dst", db)] + [x for x in place.split(".")
+                                          if x and x != "*"]
+            out.append(f"{role.lower()}[{':'.join(at)}]")
+        return ",".join(out)
+
+    def account_steps(self, src, dst, passwords):
+        """Each group and user written whole, as the cluster manager takes
+        one (a PUT replaces it): a group with its roles, a user with the
+        passwords file's password, its groups and its roles; a user there
+        already keeps its password and is given what it lacks. A user with
+        no password given is skipped, said."""
+        steps, skipped = [], []
+        passwords = passwords or {}
+        for key, a in sorted(src.items(), key=lambda kv: (
+                kv[0].startswith("user:"), kv[0])):
+            kind, _, name = key.partition(":")
+            have = dst.get(key)
+            grants = sorted(set(a["grants"]) | set((have or {}).get(
+                "grants", [])))
+            roles = sorted(set(a["roles"]) | set((have or {}).get(
+                "roles", [])))
+            if have and grants == have["grants"] and roles == have["roles"]:
+                continue
+            path = (f"/settings/rbac/groups/{name}" if kind == "role"
+                    else f"/settings/rbac/users/local/{name}")
+            form = {"roles": self._role_list(grants)}
+            if kind == "user":
+                form["groups"] = ",".join(roles)
+                secret = passwords.get(name) or passwords.get(key)
+                if not have and not secret:
+                    skipped.append((key, "the cluster gives no password"
+                                         " back: give it in the passwords"
+                                         " file"))
+                    continue
+                if not have:
+                    form["password"] = str(secret)
+            undo = ({"method": "DELETE", "path": path} if not have else
+                    {"method": "PUT", "path": path, "form": {
+                        "roles": self._role_list(have["grants"]),
+                        **({"groups": ",".join(have["roles"])}
+                           if kind == "user" else {})}})
+            shown = {k: v for k, v in form.items() if k != "password"}
+            steps.append({"key": key, "shown": f"PUT {path} {shown}",
+                          "run": json.dumps({"method": "PUT", "path": path,
+                                             "form": form}),
+                          "undo": json.dumps(undo), "made": not have,
+                          "given": "password" in form})
+        return steps, skipped
+
+    def account_run(self, what):
+        got = json.loads(what)
+        self._rest("dst", got["path"], method=got["method"],
+                   form=got.get("form", {}))
+
+    # ---- the target's state before a repair or a cutover -----------------
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """Where the target's bucket stands - each vBucket's UUID and high
+        sequence number, the mark a follow of it starts from - and, unless
+        only counters are repaired, its settings and its scopes and
+        collections."""
+        (state_dir / "dst-mark.json").write_text(json.dumps(
+            self.seqnos("dst", db), sort_keys=True) + "\n")
+        if kind == "sequences":
+            return
+        (state_dir / "dst-schema.json").write_text(json.dumps({
+            "settings": self._bucket_settings("dst", db),
+            "scopes": self._rest("dst", "/pools/default/buckets/"
+                                        f"{self._d('dst', db)}/scopes")},
+            sort_keys=True, indent=1, default=str) + "\n")
+
+    # ---- the bulk way (`bulk-move`) --------------------------------------
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each collection by the way climbed for it
+        (`decide.couchbase_bulk_ways`): the server's own bulk importer from
+        the documents written as JSON lines where it is installed, else
+        the SDK's batched upserts by key ranges."""
+        steps = [f"{t}: loaded by the server's own bulk importer, or by"
+                 " batched upserts" for t in tables]
+        if not go:
+            return steps
+        import shutil
+
+        from .. import tableway
+        from ..decide import Facts, couchbase_bulk_ways
+        self._as_pair().create_missing(db, log)
+        held = []
+
+        def run(way, t):
+            if way == "loader":
+                return self._loaded(db, t, log)
+            return self.copy_by_copier(db, t, log, held)
+        tableway.each(self, db, tables, couchbase_bulk_ways(), lambda t: Facts(
+            loader=lambda: bool(shutil.which("cbimport"))), run, log)
+        return steps
+
+    def _loaded(self, db, table, log):
+        """One collection's documents written as JSON lines under the
+        scratch directory and sent by the server's own importer, the
+        document's key its `_key`, which is left out of the body; the file
+        is removed when it ends. The account's password goes by the
+        importer's environment, never its arguments."""
+        import os
+        import subprocess
+        import tempfile
+
+        from .. import evidence
+        cols = self.neutral_columns("src", db, table)
+        names = [c for c, _ in cols]
+        fd, path = tempfile.mkstemp(prefix="docs-", suffix=".jsonl",
+                                    dir=evidence.scratch_of(self.hop))
+        n = 0
+        try:
+            with os.fdopen(fd, "w") as f:
+                for rows in self.neutral_batches("src", db, table, cols):
+                    for doc_id, body in self._docs("dst", db, table, names,
+                                                   rows).items():
+                        f.write(json.dumps({**body, KEY: doc_id},
+                                           default=str) + "\n")
+                        n += 1
+            ep = self._ep("dst")
+            scope, coll = self._split(table)
+            got = subprocess.run(
+                ["cbimport", "json", "--format", "lines", "-c",
+                 ep.options.get("url") or f"couchbase://{ep.host}",
+                 "-b", self._d("dst", db), "--scope-collection-exp",
+                 f"{scope}.{coll}", "-d", f"file://{path}", "-g",
+                 f"%{KEY}%", "--ignore-fields", KEY, "-t",
+                 str(os.cpu_count() or 1)],
+                env={**os.environ, "CB_USERNAME": ep.user or "",
+                     "CB_PASSWORD": ep.password or ""},
+                capture_output=True, text=True)
+            if got.returncode:
+                tail = (got.stderr or got.stdout).strip().splitlines()
+                raise RuntimeError("the bulk importer stopped: "
+                                   + (tail[-1][:120] if tail else "no reason"))
+        finally:
+            os.unlink(path)
+        log(f"{table}: {n:,} documents loaded by the server's own importer")
+        return n
 
     def server_identity(self, side, db):
         pools = self._rest(side, "/pools")

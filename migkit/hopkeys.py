@@ -1184,7 +1184,7 @@ ENDPOINT_OPTIONS = {
     "write_endpoint": Key("the Storage Write API's host:port", "str",
                           ("bigquery",)),
     "stage": Key("an S3 prefix the cluster reads staged files from", "str",
-                 ("redshift",)),
+                 ("redshift", "cockroachdb")),
     "iam_role": Key("the role the cluster reads the stage as", "str",
                     ("redshift", "neptune")),
     "stage_region": Key("the stage bucket's region", "str", ("redshift",)),

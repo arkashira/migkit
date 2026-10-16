@@ -449,6 +449,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 ## Following changes, and two ways at once
 
+* a message of TiCDC's open protocol ends inside a frame: the topic holds something else
+
+* an Avro type migkit does not read: <...>
+
 * format: <...> - migkit reads <...>
 
 * the TiCDC changefeed's messages carry no commit timestamp, and without it no change can be put in the order it was committed: create the changefeed's sink with enable-tidb-extension=true
@@ -460,6 +464,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * a DSQL change to <...> came in pieces that do not add up to what it says it holds (CRC32C): nothing of it is applied
 
 * a delete from <...> names no key: DSQL sends a deleted row's key only for a table with a primary key, and without one the row cannot be found on the target
+
+* a message of TiCDC's open protocol names no version 1 in its key
+
+* TiCDC's Avro names its schemas by the registry's ids: say where the registry is in the source's changes (registry: http://host:8081)
+
+* an Avro message of TiCDC's is not in the schema registry's framing
+
+* the TiCDC changefeed's Avro carries no commit timestamp, and without it no change can be put in the order it was committed: create the changefeed's sink with enable-tidb-extension=true
+
+* the topic's first message is in no protocol of TiCDC's migkit reads: canal-json with the TiDB extension, simple, open protocol or Avro
 
 * changes: name the Kafka cluster the changes are published to (servers: host:9092)
 
@@ -1395,7 +1409,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * TiDB keeps no binlog: its changes are read from the Kafka topic TiCDC publishes them to. Say where in the source's options - changes: {servers: host:9092, topic: <topic>, format: canal-json} - with a changefeed made with enable-tidb-extension=true
 
-* format: <...> - TiCDC's changes are read as canal-json or simple
+* format: <...> - TiCDC's changes are read as canal-json, simple, open-protocol or avro
 
 * <...>: <...> <...> no primary key, and a change TiCDC publishes for such a table names its hidden row id, which no other server holds: give each a primary key, or leave it out of the hop and move it with a copy
 

@@ -90,6 +90,16 @@ def transactional_batches(bodies, most_ops=BATCH_OPS,
             yield [b for b, _ in got], []
 
 
+#: built on fakes; owed a run on a Cosmos DB account (ER5)
+UNPROVED_ON = ("built; not run on a real Cosmos DB account, only on its"
+               " emulator and on fakes: the bulk writes and the snapshot's"
+               " continuation per feed range")
+UNPROVED_ITEMS = (
+    "scope.objects scope.row-filter verify.structure.objects "
+    "verify.structure.triggers assess.capacity assess.writers "
+    "assess.handwork schema.indexes move.bulk cutover.rollback")
+
+
 class CosmosLanes:
     """A container's feed ranges, each read by its continuation. A range
     that splits goes on through its continuation, which the SDK carries
@@ -920,6 +930,63 @@ class CosmosEngine(NeutralCopier, Engine):
             out[f"{t} indexing"] = str((props.get("indexingPolicy") or {})
                                        .get("indexingMode"))
         return out
+
+    # ---- the target's state before a repair or a cutover -----------------
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """Each container's change feed continuation, a feed range each,
+        where the target stands (`CosmosLanes.ends`): the mark a follow of
+        it starts from, so nothing after is missed and nothing before read
+        twice; and, unless only counters are repaired, each container's
+        properties."""
+        marks, props = {}, {}
+        for t in self.neutral_tables("dst", db):
+            c = self._container("dst", db, t)
+            marks[t] = CosmosLanes(c, "LatestVersion").ends()
+            props[t] = {k: v for k, v in (c.read() or {}).items()
+                        if not str(k).startswith("_")}
+        (state_dir / "dst-mark.json").write_text(json.dumps(
+            marks, sort_keys=True) + "\n")
+        if kind != "sequences":
+            (state_dir / "dst-schema.json").write_text(json.dumps(
+                props, sort_keys=True, indent=1, default=str) + "\n")
+
+    # ---- the bulk way (`bulk-move`) --------------------------------------
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each container by the way climbed for it
+        (`decide.cosmos_bulk_ways`): the source read in pages cut by bytes,
+        each page written as the service's bulk writes, else by the table
+        copier."""
+        steps = [f"{t}: written by the service's bulk writes, or copied by"
+                 " key ranges" for t in tables]
+        if not go:
+            return steps
+        from .. import tableway
+        from ..decide import Facts, cosmos_bulk_ways
+        self._as_pair().create_missing(db, log)
+        held = []
+
+        def run(way, t):
+            if way == "bulk":
+                return self._bulk_written(db, t, log)
+            return self.copy_by_copier(db, t, log, held)
+        tableway.each(self, db, tables, cosmos_bulk_ways(), lambda t: Facts(
+            pk=lambda: self._pk_fields("dst", db, t)), run, log)
+        return steps
+
+    def _bulk_written(self, db, table, log):
+        """The source's items a page at a time, each page's items grouped
+        by partition key value into transactional batches and the rest
+        written side by side (`_upsert`): the items written."""
+        cols = self.neutral_columns("src", db, table)
+        names, n = [c for c, _ in cols], 0
+        for rows in self.neutral_batches("src", db, table, cols):
+            self._upsert("dst", db, table, self._bodies("dst", db, table,
+                                                        names, rows))
+            n += len(rows)
+        log(f"{table}: {n:,} items written in bulk")
+        return n
 
     def check_params(self, db):
         """Each container's partition key, time to live, unique keys and

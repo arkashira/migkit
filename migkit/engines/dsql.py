@@ -54,6 +54,20 @@ TS_INFINITE = (9223372036825200000, -9223372036832400000)
 EPOCH = datetime.datetime(1970, 1, 1)
 
 
+#: built on fakes; owed a run on an Aurora DSQL cluster (ER4)
+UNPROVED_ON = ("built; not run on a real Aurora DSQL cluster, only on a"
+               " PostgreSQL server and on fakes: the statistics refreshed,"
+               " the snapshot's mark and large values read in pieces")
+UNPROVED_ITEMS = (
+    "scope.deep scope.repair scope.counters scope.objects "
+    "verify.access.sequence-grants verify.access.table-grants "
+    "verify.identity.sequence-collision verify.identity.sequence-parity "
+    "verify.structure.objects verify.value.charset verify.delta "
+    "verify.confirm tail.table-states assess.brands assess.handwork "
+    "cutover.counters operations.fencing move.large-values "
+    "cutover.rollback")
+
+
 class DsqlEngine(PgWireEngine):
     CANON_ENGINE = "dsql"
     SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "sys")
@@ -397,6 +411,45 @@ class DsqlEngine(PgWireEngine):
         return out
 
     # ---- the server --------------------------------------------------------
+
+    def settle_target(self, db, from_source=True):
+        """Each table the move wrote analysed, so the planner has looked at
+        what it now holds; a table the cluster will not analyse is said,
+        never taken as done."""
+        done, refused = 0, []
+        for t in self.neutral_tables("src", db):
+            if not self.in_scope(db, t):
+                continue
+            conn = self._connect("dst", db)
+            try:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("analyze " + self._qualified("dst", db, t))
+                done += 1
+            except Exception as e:  # noqa: BLE001 - said, not taken as done
+                refused.append(f"{t} ({str(e).strip().splitlines()[0][:80]})")
+            finally:
+                conn.close()
+        if refused:
+            return (f"statistics of {done} tables refreshed; not of"
+                    f" {', '.join(refused)}: run ANALYZE on them")
+        return f"statistics of {done} tables refreshed" if done else None
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """The cluster's own transaction time the target stands at (DSQL
+        reads every transaction at one), and, unless only counters are
+        repaired, each table's columns and key as the catalogue gives
+        them."""
+        (state_dir / "dst-mark.txt").write_text(
+            f"{self._now_ns('dst', db)}\n")
+        if kind == "sequences":
+            return
+        import json
+        (state_dir / "dst-schema.json").write_text(json.dumps({
+            t: {"columns": [list(c) for c in self.neutral_columns(
+                "dst", db, t)], "key": list(self.neutral_key("dst", db, t))}
+            for t in self.neutral_tables("dst", db)}, indent=1,
+            default=str) + "\n")
 
     def server_identity(self, side, db):
         ep = self.hop.source if side == "src" else self.hop.target

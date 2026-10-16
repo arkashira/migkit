@@ -414,6 +414,270 @@ ENVELOPES = {e.name: e for e in (TicdcCanalJson, TicdcSimple,
                                  CosmosFeed)}
 
 
+# ---- TiCDC's other protocols (ER4) -----------------------------------------
+#
+# Built and run on fakes only (`tidb.UNPROVED_ON`): each decodes to the rows
+# canal-json does - a change's key, its commit timestamp, the partition's
+# watermark - and every row is read back from TiDB as it stood at the
+# watermark (`READ_BACK`), so a protocol's own rendering of a value is
+# never what is written.
+
+def _frames(raw):
+    """The frames of TiCDC's open protocol: 8 bytes of big-endian length
+    before each."""
+    raw, at, out = bytes(raw or b""), 0, []
+    while at + 8 <= len(raw):
+        n = int.from_bytes(raw[at:at + 8], "big")
+        out.append(raw[at + 8:at + 8 + n])
+        at += 8 + n
+    if at != len(raw):
+        raise SystemExit("a message of TiCDC's open protocol ends inside a"
+                         " frame: the topic holds something else")
+    return out
+
+
+class TicdcOpen(Envelope):
+    """TiCDC's open protocol: a message's key is the version (1, 8 bytes)
+    and its events' keys - `{"ts", "scm", "tbl", "t"}`, `t` 1 a row, 2 a
+    DDL, 3 a resolved timestamp - each framed by its length; its value the
+    events' values framed alike, `{"u": {column: {"t", "h", "v"}}}` for a
+    row written (`p` its columns before an update) and `{"d": ...}` for one
+    deleted. The columns marked `h` are the row's handle: its key."""
+    name = "open-protocol"
+    READ_BACK = True
+    LOSES = TicdcCanalJson.LOSES
+
+    @staticmethod
+    def sniff(key, value):
+        raw = bytes(key or b"")
+        return len(raw) >= 16 and int.from_bytes(raw[:8], "big") == 1
+
+    def decode(self, key, value, topic=None):
+        raw = bytes(key or b"")
+        if not self.sniff(key, value):
+            raise SystemExit("a message of TiCDC's open protocol names no"
+                             " version 1 in its key")
+        keys = [_json(k) for k in _frames(raw[8:])]
+        values = _frames(value) if value else []
+        values += [b""] * (len(keys) - len(values))
+        out = []
+        for k, v in zip(keys, values):
+            kind = int(k.get("t") or 0)
+            if kind == 3:
+                out.append(Mark(k["ts"]))
+                continue
+            if kind != 1:
+                continue
+            ts, body = int(k["ts"]), _json(v) or {}
+            cols = body.get("u") or body.get("d") or {}
+            names = [c for c, x in cols.items() if (x or {}).get("h")]
+
+            def key_of(of):
+                return ({c: (of.get(c) or {}).get("v") for c in names}
+                        or {c: (x or {}).get("v") for c, x in of.items()})
+            op = "delete" if "d" in body else "upsert"
+            out.append(Row(k.get("scm"), k.get("tbl"), op, key_of(cols),
+                           None, ts, txn=ts))
+            old = body.get("p")
+            if old and names and key_of(old) != out[-1].key:
+                out.append(Row(k.get("scm"), k.get("tbl"), "delete",
+                               key_of(old), None, ts, txn=ts))
+        return out
+
+
+def _avro_long(raw, at):
+    """Avro's zig-zag variable-length integer at `at`: (value, next)."""
+    n = shift = 0
+    while True:
+        b = raw[at]
+        at += 1
+        n |= (b & 0x7F) << shift
+        shift += 7
+        if not b & 0x80:
+            return (n >> 1) ^ -(n & 1), at
+
+
+def _avro_read(schema, raw, at):
+    """One value of `schema` from Avro's binary encoding at `at`: (value,
+    next). A decimal's bytes become the exact `Decimal`."""
+    import struct
+    if isinstance(schema, list):
+        i, at = _avro_long(raw, at)
+        return _avro_read(schema[i], raw, at)
+    if isinstance(schema, dict):
+        t = schema.get("type")
+        if t == "record":
+            out = {}
+            for f in schema["fields"]:
+                out[f["name"]], at = _avro_read(f["type"], raw, at)
+            return out, at
+        if t == "enum":
+            i, at = _avro_long(raw, at)
+            return schema["symbols"][i], at
+        if t == "fixed":
+            n = int(schema["size"])
+            return raw[at:at + n], at + n
+        if t in ("array", "map"):
+            out = [] if t == "array" else {}
+            while True:
+                n, at = _avro_long(raw, at)
+                if n == 0:
+                    return out, at
+                if n < 0:
+                    n = -n
+                    _, at = _avro_long(raw, at)
+                for _ in range(n):
+                    if t == "map":
+                        k, at = _avro_read("string", raw, at)
+                        out[k], at = _avro_read(schema["values"], raw, at)
+                    else:
+                        got, at = _avro_read(schema["items"], raw, at)
+                        out.append(got)
+        value, at = _avro_read(t, raw, at)
+        if schema.get("logicalType") == "decimal" and isinstance(value,
+                                                                 bytes):
+            value = Decimal(int.from_bytes(value, "big", signed=True)
+                            ).scaleb(-int(schema.get("scale", 0)))
+        return value, at
+    if schema == "null":
+        return None, at
+    if schema == "boolean":
+        return raw[at] == 1, at + 1
+    if schema in ("int", "long"):
+        return _avro_long(raw, at)
+    if schema in ("float", "double"):
+        n = 4 if schema == "float" else 8
+        return struct.unpack("<f" if n == 4 else "<d",
+                             raw[at:at + n])[0], at + n
+    if schema in ("bytes", "string"):
+        n, at = _avro_long(raw, at)
+        got = raw[at:at + n]
+        return (got.decode("utf-8") if schema == "string" else got), at + n
+    raise SystemExit(f"an Avro type migkit does not read: {schema}")
+
+
+class TicdcAvro(Envelope):
+    """TiCDC's Avro with `enable-tidb-extension=true`, in the schema
+    registry's framing - a zero byte, the schema's id in 4 bytes, the
+    record: the key the row's key, the value the row with `_tidb_op` and
+    `_tidb_commit_ts`. A delete is a tombstone (no value), which carries no
+    timestamp: it is a key changed at the last timestamp seen, and the row
+    is read back at the watermark that follows it, so its place in the
+    order is exact. A watermark (`avro-enable-watermark=true`) is a byte 3
+    and its timestamp in 8 big-endian bytes; a DDL event (a byte 1) is the
+    tail's shape check's. Each schema is asked of the registry once."""
+    name = "avro"
+    READ_BACK = True
+    LOSES = TicdcCanalJson.LOSES
+
+    def __init__(self, registry=None):
+        self.registry, self._schemas, self._last = registry, {}, 0
+
+    @staticmethod
+    def sniff(key, value):
+        v = bytes(value) if value is not None else None
+        if v is not None and v[:1] in (b"\x01", b"\x03"):
+            return True
+        raw = v if v is not None else bytes(key or b"")
+        return raw[:1] == b"\x00" and len(raw) >= 5
+
+    def _schema(self, sid):
+        if sid not in self._schemas:
+            got = self.registry
+            if callable(got):
+                got = got(sid)
+            elif isinstance(got, str) and got:
+                import urllib.request
+                with urllib.request.urlopen(
+                        f"{got.rstrip('/')}/schemas/ids/{sid}",
+                        timeout=15) as r:
+                    got = json.loads(r.read())["schema"]
+            else:
+                raise SystemExit(
+                    "TiCDC's Avro names its schemas by the registry's ids:"
+                    " say where the registry is in the source's changes"
+                    " (registry: http://host:8081)")
+            self._schemas[sid] = json.loads(got) if isinstance(got,
+                                                               str) else got
+        return self._schemas[sid]
+
+    def _record(self, raw):
+        raw = bytes(raw)
+        if raw[:1] != b"\x00" or len(raw) < 5:
+            raise SystemExit("an Avro message of TiCDC's is not in the"
+                             " schema registry's framing")
+        return _avro_read(self._schema(int.from_bytes(raw[1:5], "big")),
+                          raw, 5)[0]
+
+    def decode(self, key, value, topic=None):
+        v = bytes(value) if value is not None else None
+        if v is not None and v[:1] == b"\x03":
+            self._last = max(self._last, int.from_bytes(v[1:9], "big"))
+            return [Mark(int.from_bytes(v[1:9], "big"))]
+        if v is not None and v[:1] == b"\x01":
+            return []
+        ident = {k: x for k, x in (self._record(key) if key else {}).items()
+                 if not k.startswith("_tidb")}
+        db, _, table = str(topic or "").rpartition(".")
+        if v is None:
+            return [Row(db or None, table or topic, "changed", ident, None,
+                        self._last, txn=self._last)] if ident else []
+        rec = self._record(v)
+        if "_tidb_commit_ts" not in rec:
+            raise SystemExit(
+                "the TiCDC changefeed's Avro carries no commit timestamp,"
+                " and without it no change can be put in the order it was"
+                " committed: create the changefeed's sink with"
+                " enable-tidb-extension=true")
+        ts = int(rec["_tidb_commit_ts"])
+        self._last = max(self._last, ts)
+        body = {k: x for k, x in rec.items() if not k.startswith("_tidb")}
+        return [Row(db or None, table or topic, "upsert", ident or body,
+                    None, ts, txn=ts)]
+
+
+class TicdcAny(Envelope):
+    """TiCDC's changes in whichever protocol its changefeed was made with:
+    the topic's first message chooses (open protocol by its key's version,
+    Avro by the registry's framing, canal-json by its TiDB extension, the
+    simple protocol by its `commitTs`), and every later one is read by
+    that protocol - never chosen by a key of the hop."""
+    name = "ticdc"
+    READ_BACK = True
+    LOSES = TicdcCanalJson.LOSES
+
+    def __init__(self, registry=None):
+        self.registry, self.chosen = registry, None
+
+    def _choose(self, key, value):
+        if TicdcOpen.sniff(key, value):
+            return TicdcOpen()
+        if TicdcAvro.sniff(key, value):
+            return TicdcAvro(self.registry)
+        try:
+            msg = _json(value)
+        except ValueError:
+            msg = None
+        if isinstance(msg, dict) and ("_tidb" in msg or "pkNames" in msg
+                                      or "isDdl" in msg):
+            return TicdcCanalJson()
+        if isinstance(msg, dict) and "commitTs" in msg:
+            return TicdcSimple()
+        raise SystemExit("the topic's first message is in no protocol of"
+                         " TiCDC's migkit reads: canal-json with the TiDB"
+                         " extension, simple, open protocol or Avro")
+
+    def decode(self, key, value, topic=None):
+        if self.chosen is None:
+            if key is None and value is None:
+                return []
+            self.chosen = self._choose(key, value)
+        return self.chosen.decode(key, value, topic)
+
+
+ENVELOPES.update({e.name: e for e in (TicdcOpen, TicdcAvro, TicdcAny)})
+
+
 def envelope(name):
     try:
         return ENVELOPES[name]()

@@ -312,51 +312,38 @@ GAPS = {
         "snapshot": (NOT_YET, "33"),
     } for name in ("iceberg", "delta")},
     # the engines on another's wire and the document stores followed
-    # through their change feeds (ER4, ER5): their bulk paths, users and
-    # snapshots are their own tools', not yet wrapped
-    "tidb": {
-        "bulk-move": (NOT_YET, "ER4"),
-        "users": (NOT_YET, "ER4"),
-        "snapshot": (NOT_YET, "ER4"),
-    },
+    # through their change feeds (ER4, ER5): their bulk ways, accounts,
+    # settings, statistics and snapshots are built and run on fakes only
+    # (each module's `UNPROVED_ON`); what does not apply says why
+    "tidb": {},
     "cockroachdb": {
         "sequences": (NOT_YET, "ER4"),
-        "params": (NOT_YET, "ER4"),
-        "bulk-move": (NOT_YET, "ER4"),
-        "users": (NOT_YET, "ER4"),
         "statistics": (NOT_APPLICABLE, "CockroachDB collects its tables'"
                                        " statistics itself as they change"),
-        "snapshot": (NOT_YET, "ER4"),
     },
     "dsql": {
         "sequences": (NOT_YET, "ER4"),
         "params": (NOT_APPLICABLE, "a DSQL cluster keeps no settings of"
                                    " its operator's to compare"),
         "bulk-move": (NOT_APPLICABLE, "DSQL takes 3,000 rows a"
-                                      " transaction whatever writes them:"
-                                      " the table copier writes within it"),
-        "users": (NOT_YET, "ER4"),
-        "statistics": (NOT_YET, "ER4"),
-        "snapshot": (NOT_YET, "ER4"),
+                                      " transaction whatever writes them"
+                                      " and has no bulk load: the table"
+                                      " copier writes within it"),
+        "users": (NOT_APPLICABLE, "who may sign in to a DSQL cluster is"
+                                  " IAM's: a role is given by an IAM"
+                                  " policy, not made in the database"),
     },
     "couchbase": {
         "sequences": (NOT_APPLICABLE, "a bucket has no sequences or"
                                       " auto-increment to carry"),
-        "params": (NOT_YET, "ER4"),
-        "bulk-move": (NOT_YET, "ER4"),
-        "users": (NOT_YET, "ER4"),
-        "statistics": (NOT_YET, "ER4"),
-        "snapshot": (NOT_YET, "ER4"),
     },
     "cosmosdb": {
         "sequences": (NOT_APPLICABLE, "a container has no sequences or"
                                       " auto-increment to carry"),
-        "bulk-move": (NOT_YET, "ER5"),
         "users": (NOT_APPLICABLE, "who may read a container is the"
                                   " account's role assignments, not the"
                                   " container's"),
         "statistics": (NOT_APPLICABLE, _NO_PLANNER),
-        "snapshot": (NOT_YET, "ER5"),
     },
     # the cloud-native services (P0-CLOUDS part 2): the loaders of the
     # distributed MySQL-wire services (CN1) and the follows not built (CN4)

@@ -42,6 +42,17 @@ from .mysql import MySQLEngine
 GC_PASSED = (9006,)
 
 
+#: built on fakes; owed a run on a TiDB cluster and its change topics (ER4)
+UNPROVED_ON = ("built; not run on a real TiDB cluster, only on its"
+               " single-node container and on fakes: the accounts, the"
+               " bulk load, the snapshot's mark and TiCDC's open-protocol"
+               " and Avro messages")
+UNPROVED_ITEMS = (
+    "verify.value.one-plan verify.structure.collection-options "
+    "assess.handwork operations.fencing verify.users move.bulk "
+    "cutover.rollback")
+
+
 class TiDBEngine(MySQLEngine):
     CANON_ENGINE = "tidb"
     checks = ("schema", "counts", "autoinc", "data")
@@ -73,9 +84,6 @@ class TiDBEngine(MySQLEngine):
     mark_committed = NotHere()
     mark_prove = NotHere()
     mark_teardown = NotHere()
-    # a snapshot of MySQL's target is its dump program's schema, which is
-    # not TiDB's
-    snapshot_state = NotHere()
     native_replica_unsafe = Engine.native_replica_unsafe
     stream_writers = Engine.stream_writers
     pause_writer = Engine.pause_writer
@@ -271,6 +279,180 @@ class TiDBEngine(MySQLEngine):
             super().neutral_write(side, db, table, columns, rest)
         return len(rows)
 
+    # ---- accounts (`users`) ----------------------------------------------
+
+    ACCOUNT_PASSWORDS = ("read as the server keeps them (`mysql.user`) and"
+                         " set again as that hash, by its plugin")
+    #: the privileges a grant row's columns stand for (`mysql.db`)
+    DB_PRIVS = (("Select_priv", "SELECT"), ("Insert_priv", "INSERT"),
+                ("Update_priv", "UPDATE"), ("Delete_priv", "DELETE"))
+
+    @staticmethod
+    def _own_account(user):
+        return not user or user == "root" or user.startswith("mysql.")
+
+    def accounts(self, side):
+        """The accounts of `side` in `Engine.accounts`' shape, each
+        `user:<name>@<host>`: a role (`CREATE ROLE`: locked, no password)
+        and a user with its password's hash and plugin, the roles granted
+        it (`mysql.role_edges`) and its grants on the hop's databases and
+        tables."""
+        out = {}
+        for user, host, auth, plugin, locked in self._q(
+                side, "select User, Host, authentication_string, plugin,"
+                      " account_locked from mysql.user", fresh=True):
+            user, host = str(user), str(host)
+            if self._own_account(user):
+                continue
+            role = str(locked).upper() == "Y" and not auth
+            out[f"{'role' if role else 'user'}:{user}@{host}"] = {
+                "login": not role, "roles": [], "grants": [],
+                "hash": str(auth) if auth else None,
+                "attrs": {} if role else {"plugin": str(plugin)}}
+
+        def key_of(u, h):
+            return (f"user:{u}@{h}" if f"user:{u}@{h}" in out
+                    else f"role:{u}@{h}")
+        for fu, fh, tu, th in self._q(side, "select FROM_USER, FROM_HOST,"
+                                            " TO_USER, TO_HOST from"
+                                            " mysql.role_edges", fresh=True):
+            if key_of(tu, th) in out:
+                out[key_of(tu, th)]["roles"].append(f"{fu}@{fh}")
+        for db in self.hop.databases or []:
+            here = self._d(side, db)
+            for row in self._q(side, "select User, Host, "
+                               + ", ".join(c for c, _ in self.DB_PRIVS)
+                               + " from mysql.db where Db = %s", (here,),
+                               fresh=True):
+                if key_of(row[0], row[1]) in out:
+                    out[key_of(row[0], row[1])]["grants"] += [
+                        f"{p} ON {db}.*" for (_, p), v in zip(
+                            self.DB_PRIVS, row[2:]) if str(v).upper() == "Y"]
+            for u, h, table, privs in self._q(
+                    side, "select User, Host, Table_name, Table_priv from"
+                          " mysql.tables_priv where Db = %s", (here,),
+                    fresh=True):
+                if key_of(u, h) in out and self.in_scope(db, str(table)):
+                    out[key_of(u, h)]["grants"] += [
+                        f"{p.strip().upper()} ON {db}.{table}"
+                        for p in str(privs).split(",") if p.strip()]
+        for a in out.values():
+            a["roles"], a["grants"] = (sorted(set(a["roles"])),
+                                       sorted(set(a["grants"])))
+        return out
+
+    def account_steps(self, src, dst, passwords):
+        """A role made as one, a user with its password - the passwords
+        file's, else its hash by its plugin (`IDENTIFIED WITH ... AS`) -
+        the roles granted it and its grants; one with neither skipped."""
+        from .cockroachdb import account_steps_by
+
+        def who(name):
+            user, _, host = name.rpartition("@")
+            return "'{}'@'{}'".format(*(x.replace("'", "''")
+                                        for x in (user, host or "%")))
+
+        def make(name, a, secret):
+            if not a.get("login"):
+                return (f"create role {who(name)}", f"drop role {who(name)}",
+                        False, None)
+            if secret:
+                lit = str(secret).replace("'", "''")
+                return (f"create user {who(name)} identified by '{lit}'",
+                        f"drop user {who(name)}", True,
+                        f"create user {who(name)} identified by ***")
+            if not a.get("hash"):
+                return None
+            plugin = (a.get("attrs") or {}).get("plugin") or \
+                "mysql_native_password"
+            run = (f"create user {who(name)} identified with '{plugin}' as"
+                   f" '{a['hash']}'")
+            return (run, f"drop user {who(name)}", False,
+                    f"create user {who(name)} identified with '{plugin}'"
+                    " as ***")
+
+        def member(r, name):
+            return (f"grant {who(r)} to {who(name)}",
+                    f"revoke {who(r)} from {who(name)}")
+
+        def grant(priv, where, table, name):
+            obj = (f"{self._quote_ident(self._d('dst', where))}.*"
+                   if table == "*" else self._qualified("dst", where, table))
+            return (f"grant {priv.lower()} on {obj} to {who(name)}",
+                    f"revoke {priv.lower()} on {obj} from {who(name)}")
+        return account_steps_by(src, dst, passwords, make, member, grant,
+                                "it signs in, and its password is neither"
+                                " read nor in the passwords file")
+
+    def account_run(self, what):
+        conn = self._conn("dst")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(what)
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ---- the target's state before a repair or a cutover -----------------
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """The cluster's own timestamp the target stands at (its TSO: a
+        rollback reads it back as of that while the GC keeps it) and,
+        unless only counters are repaired, each table's definition as the
+        server gives it."""
+        (state_dir / "dst-mark.txt").write_text(f"{self._tso('dst')}\n")
+        if kind == "sequences":
+            return
+        defs = []
+        for t in self.neutral_tables("dst", db):
+            got = self._q("dst", "show create table "
+                          + self._qualified("dst", db, t), fresh=True)
+            defs.append(f"{got[0][-1]};" if got else f"-- {t}: not shown")
+        (state_dir / "dst-schema.sql").write_text("\n\n".join(defs) + "\n")
+
+    # ---- the bulk way (`bulk-move`) --------------------------------------
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table by the way climbed for it (`decide.tidb_bulk_ways`):
+        the source read in one pass into the server's own bulk load where
+        the target's table is empty, else by the table copier; a load that
+        fails is emptied before the copier writes the table again."""
+        steps = [f"{t}: loaded in one pass by the server's own bulk load,"
+                 " or copied by key ranges" for t in tables]
+        if not go:
+            return steps
+        from .. import tableway
+        from ..decide import Facts, tidb_bulk_ways
+        self._as_pair().create_missing(db, log)
+        held = []
+
+        def run(way, t):
+            if way == "load":
+                return self._loaded_whole(db, t, log)
+            return self.copy_by_copier(db, t, log, held)
+
+        def facts(t):
+            return Facts(table=t, empty=lambda: not self._q(
+                "dst", "select 1 from " + self._qualified("dst", db, t)
+                + " limit 1", fresh=True))
+        tableway.each(self, db, tables, tidb_bulk_ways(
+            cleanup=lambda f, e: self.neutral_empty("dst", db, f["table"])),
+            facts, run, log)
+        return steps
+
+    def _loaded_whole(self, db, table, log):
+        """The source's table read in one pass (`neutral_batches`) and each
+        batch written by the target's own write - the pinned bulk load
+        where measured cheaper (`_put_rows`): the rows written."""
+        from .. import canon
+        cols = [(n, canon.type_class(self.CANON_ENGINE, t))
+                for n, t in self.neutral_columns("src", db, table)]
+        n = 0
+        for rows in self.neutral_batches("src", db, table, cols):
+            n += self.neutral_write("dst", db, table, cols, rows)
+        log(f"{table}: {n:,} rows loaded")
+        return n
+
     def server_identity(self, side, db):
         name = self._d(side, db)
         got = self._q(side, "select @@hostname, version(), (select"
@@ -323,10 +505,16 @@ class TiDBEngine(MySQLEngine):
                     " source's options - changes: {servers: host:9092,"
                     " topic: <topic>, format: canal-json} - with a"
                     " changefeed made with enable-tidb-extension=true")
-            env = changetopic.envelope(spec.get("format", "canal-json"))
-            if env.name not in ("canal-json", "simple"):
+            # the protocol is the topic's first message's (`TicdcAny`)
+            # where the hop names none
+            env = changetopic.envelope(spec.get("format", "ticdc"))
+            if env.name not in ("canal-json", "simple", "open-protocol",
+                                "avro", "ticdc"):
                 raise SystemExit(f"format: {env.name} - TiCDC's changes are"
-                                 " read as canal-json or simple")
+                                 " read as canal-json, simple, open-protocol"
+                                 " or avro")
+            if hasattr(env, "registry"):
+                env.registry = spec.get("registry")
             # how each writes a binary key: canal-json a character a byte,
             # the simple protocol as JSON writes bytes (base64)
             self.__dict__["_binary"] = ("base64" if env.name == "simple"

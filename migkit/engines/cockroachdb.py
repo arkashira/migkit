@@ -42,6 +42,65 @@ DELETE_ROWS = 1000
 GC_PASSED = ("gc threshold", "gc_threshold", "must be after replica gc")
 
 
+#: built on fakes; owed a run on a CockroachDB cluster (ER4)
+UNPROVED_ON = ("built; not run on a real CockroachDB cluster, only on its"
+               " single-node container and on fakes: the accounts, the"
+               " cluster settings compared, the export and import through"
+               " a stage, the snapshot's mark and large values read in"
+               " pieces")
+UNPROVED_ITEMS = (
+    "scope.repair scope.counters scope.objects scope.names "
+    "verify.access.object-ownership verify.access.sequence-grants "
+    "verify.access.table-grants verify.identity.sequence-collision "
+    "verify.identity.sequence-parity verify.movement.target-ahead "
+    "verify.structure.foreign-keys verify.structure.indexes "
+    "verify.structure.materialized-views verify.structure.schema-diff "
+    "verify.structure.triggers verify.structure.unvalidated-constraints "
+    "verify.value.charset verify.value.collation verify.value.generated "
+    "verify.value.null-empty verify.value.precision verify.value.rendering "
+    "verify.value.timezone verify.delta verify.confirm verify.repair "
+    "verify.repair-undo verify.rows-apart verify.table assess.versions "
+    "assess.brands assess.preflight assess.handwork schema.foreign-keys "
+    "schema.views schema.routines move.sized move.create-missing "
+    "cutover.counters operations.fencing verify.users move.bulk "
+    "move.large-values cutover.rollback")
+
+
+def account_steps_by(src, dst, passwords, make, member, grant, said):
+    """(steps, skipped) of `Engine.account_steps` for an engine whose
+    accounts are made by statements: `make(name, account, secret)` gives
+    (run, undo, given, shown) or None where no password is known,
+    `member(role, name)` and `grant(privilege, database, table, name)`
+    (run, undo). Roles go before users, so a role is there when a user is
+    given it; `said` is why an account is skipped."""
+    steps, skipped = [], []
+    passwords = passwords or {}
+
+    def step(key, run, undo, made=False, given=False, shown=None):
+        steps.append({"key": key, "shown": shown or run, "run": run,
+                      "undo": undo, "made": made, "given": given})
+    for key, a in sorted(src.items(), key=lambda kv: (
+            kv[0].startswith("user:"), kv[0])):
+        name = key.partition(":")[2]
+        have = dst.get(key) or {"roles": [], "grants": []}
+        if key not in dst:
+            got = make(name, a, passwords.get(name) or passwords.get(key))
+            if got is None:
+                skipped.append((key, said))
+                continue
+            run, undo, given, shown = got
+            step(key, run, undo, made=True, given=given, shown=shown)
+        for r in a.get("roles", []):
+            if r not in have["roles"]:
+                step(key, *member(r, name))
+        for g in a.get("grants", []):
+            if g not in have["grants"]:
+                priv, _, on = g.partition(" ON ")
+                where, _, table = on.partition(".")
+                step(key, *grant(priv, where, table, name))
+    return steps, skipped
+
+
 class SinklessFeed:
     """A changefeed streamed to a query: one lane, whose position is a
     resolved timestamp - started again from one with `cursor`, the feed
@@ -515,6 +574,224 @@ class CockroachEngine(PgWireEngine):
         except Exception:  # noqa: BLE001 - not allowed to ask
             return None
         return str(got[0][0]).lower() in ("true", "t", "1")
+
+    def _alone(self, side, db, sql, args=None):
+        """One statement on its own connection, committed as it runs - an
+        export, an import or a role cannot run inside a transaction - and
+        its rows, where it gives any."""
+        conn = self._connect(side, db)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(sql, args)
+                return cur.fetchall() if cur.description else []
+        finally:
+            conn.close()
+
+    # ---- settings (`params`) ---------------------------------------------
+
+    #: the cluster settings that change what a statement does, what a write
+    #: may hold or what a changefeed reads, compared side by side; and the
+    #: database's zone (its replicas and how long old versions are kept)
+    PARAM_PREFIXES = ("sql.defaults.",)
+    PARAM_NAMES = ("kv.rangefeed.enabled", "kv.raft.command.max_size",
+                   "sql.guardrails.max_row_size_err",
+                   "sql.guardrails.max_row_size_log",
+                   "kv.closed_timestamp.target_duration",
+                   "sql.stats.automatic_collection.enabled",
+                   "sql.conn.max_read_buffer_message_size")
+
+    def _settings(self, side, db):
+        got = {str(n): str(v) for n, v in self._rows(
+            side, db, "select variable, value from [show all cluster"
+                      " settings]")
+            if str(n).startswith(self.PARAM_PREFIXES)
+            or str(n) in self.PARAM_NAMES}
+        try:
+            zone = self._rows(side, db, "show zone configuration from"
+                                        " database "
+                                        + self._q(self._d(side, db)))
+        except Exception:  # noqa: BLE001 - the account may not read zones
+            zone = None
+        if zone:
+            got["zone"] = " ".join(str(zone[0][-1]).replace(
+                self._d(side, db), "<db>").split())
+        return got
+
+    def check_params(self, db):
+        """Each of `PARAM_NAMES`, the `sql.defaults.` settings and the
+        database's zone as the target has it beside the source's."""
+        src, dst = self._settings("src", db), self._settings("dst", db)
+        out = [Result("params", f"{db} {n}", "warn",
+                      f"source {src.get(n, 'unset')}, target"
+                      f" {dst.get(n, 'unset')}",
+                      fix_hint=("ALTER DATABASE ... CONFIGURE ZONE USING"
+                                " ... as the source's" if n == "zone" else
+                                f"SET CLUSTER SETTING {n} = <the source's>"))
+               for n in sorted(set(src) | set(dst))
+               if src.get(n) != dst.get(n)]
+        return out or [Result("params", db, "ok",
+                              f"{len(src)} settings alike")]
+
+    # ---- accounts (`users`) ----------------------------------------------
+
+    #: the cluster's own roles, never carried
+    OWN_ROLES = frozenset({"root", "admin", "public", "node"})
+    ACCOUNT_PASSWORDS = ("read as the cluster keeps them (`system.users`)"
+                         " and set again as that hash, which CockroachDB"
+                         " takes as given")
+
+    def accounts(self, side):
+        """The roles of `side` in `Engine.accounts`' shape: a role that
+        signs in (no `NOLOGIN`) a user, its password's hash as kept, the
+        roles it is a member of and its grants on the hop's tables."""
+        dbs = list(self.hop.databases or [])
+        if not dbs:
+            return {}
+        first, out = dbs[0], {}
+        nologin = {str(u) for (u,) in self._rows(
+            side, first, "select username from system.role_options where"
+                         " option = 'NOLOGIN'")}
+        for name, hashed in self._rows(side, first, 'select username,'
+                                                    ' "hashedPassword" from'
+                                                    ' system.users'):
+            name = str(name)
+            if name in self.OWN_ROLES:
+                continue
+            login = name not in nologin
+            out[f"{'user' if login else 'role'}:{name}"] = {
+                "login": login, "roles": [], "grants": [],
+                "hash": bytes(hashed).decode() if hashed else None,
+                "attrs": {}}
+
+        def key_of(n):
+            return f"user:{n}" if f"user:{n}" in out else f"role:{n}"
+        for role, member in self._rows(side, first, "select role, member"
+                                                    " from"
+                                                    " system.role_members"):
+            if key_of(str(member)) in out and str(role) not in \
+                    self.OWN_ROLES:
+                out[key_of(str(member))]["roles"].append(str(role))
+        for db in dbs:
+            for who, sch, table, priv in self._rows(
+                    side, db, "select grantee, table_schema, table_name,"
+                              " privilege_type from"
+                              " information_schema.table_privileges where"
+                              " table_catalog = current_database()"):
+                t = f"{sch}.{table}"
+                if sch in self.SYSTEM_SCHEMAS or key_of(str(who)) not in out \
+                        or not self.in_scope(db, t):
+                    continue
+                out[key_of(str(who))]["grants"].append(
+                    f"{str(priv).upper()} ON {db}.{t}")
+        for a in out.values():
+            a["roles"], a["grants"] = (sorted(set(a["roles"])),
+                                       sorted(set(a["grants"])))
+        return out
+
+    def account_steps(self, src, dst, passwords):
+        """A role made with `NOLOGIN`, a user with its password - the
+        passwords file's, else the hash the source keeps - its memberships
+        and its grants; a user with neither is skipped, said."""
+        q = self._q
+
+        def make(name, a, secret):
+            if not a.get("login"):
+                return (f"create role {q(name)} with nologin",
+                        f"drop role {q(name)}", False, None)
+            word = secret or a.get("hash")
+            if not word:
+                return None
+            lit = str(word).replace("'", "''")
+            return (f"create role {q(name)} with login password '{lit}'",
+                    f"drop role {q(name)}", bool(secret),
+                    f"create role {q(name)} with login password ***")
+
+        def member(r, name):
+            return (f"grant {q(r)} to {q(name)}",
+                    f"revoke {q(r)} from {q(name)}")
+
+        def grant(priv, where, table, name):
+            obj = self._qualified("dst", where, table)
+            return (f"grant {priv.lower()} on table {obj} to {q(name)}",
+                    f"revoke {priv.lower()} on table {obj} from {q(name)}")
+        return account_steps_by(src, dst, passwords, make, member, grant,
+                                "it signs in, and its password is neither"
+                                " read nor in the passwords file")
+
+    def account_run(self, what):
+        self._alone("dst", (self.hop.databases or ["defaultdb"])[0], what)
+
+    # ---- the target's state before a repair or a cutover -----------------
+
+    def snapshot_state(self, db, state_dir, kind="all"):
+        """The cluster's own time the target stands at - a rollback reads
+        it back `AS OF SYSTEM TIME` that mark while the zone keeps old
+        versions - and, unless only counters are repaired, each table's
+        definition as the cluster gives it."""
+        mark = self._rows("dst", db, "select"
+                                     " cluster_logical_timestamp()::string")
+        (state_dir / "dst-mark.txt").write_text(f"{mark[0][0]}\n")
+        if kind == "sequences":
+            return
+        defs = []
+        for t in self.neutral_tables("dst", db):
+            got = self._rows("dst", db, "show create table "
+                                        + self._qualified("dst", db, t))
+            defs.append(f"{got[0][-1]};" if got else f"-- {t}: not shown")
+        (state_dir / "dst-schema.sql").write_text("\n\n".join(defs) + "\n")
+
+    # ---- the bulk way (`bulk-move`) --------------------------------------
+
+    def native_bulk(self, db, tables, go, log, shape_only=()):
+        """Each table by the way climbed for it (`decide.crdb_bulk_ways`):
+        exported by the source into the stage and imported by the target,
+        else by the table copier. The check that follows compares them."""
+        steps = [f"{t}: exported into the stage and imported by the"
+                 " clusters, or copied by key ranges" for t in tables]
+        if not go:
+            return steps
+        from .. import tableway
+        from ..decide import Facts, crdb_bulk_ways
+        self._as_pair().create_missing(db, log)
+        stage = str(self.hop.target.options.get("stage") or "")
+        held = []
+
+        def run(way, t):
+            if way == "import":
+                return self._imported(db, t, stage, log)
+            return self.copy_by_copier(db, t, log, held)
+
+        def facts(t):
+            return Facts(stage=stage, same=self.hop.engine == "cockroachdb",
+                         key=lambda: bool(self.neutral_key("src", db, t)),
+                         empty=lambda: not self._rows(
+                             "dst", db, "select 1 from "
+                             + self._qualified("dst", db, t) + " limit 1"))
+        tableway.each(self, db, tables, crdb_bulk_ways(), facts, run, log)
+        return steps
+
+    def _imported(self, db, table, stage, log):
+        """One table exported by the source as CSV into a place of its own
+        in the stage and imported by the target from there: the rows the
+        import says it took. NULL is written as `\\N` both ways, so an
+        empty string stays one."""
+        import uuid
+        base, _, auth = stage.partition("?")
+        place = f"{base.rstrip('/')}/{self.hop.name}/{db}/{uuid.uuid4().hex}"
+        auth = f"?{auth}" if auth else ""
+        names = ", ".join(self._q(c) for c, _ in
+                          self.neutral_columns("src", db, table))
+        self._alone("src", db, f"export into csv '{place}{auth}' with"
+                               " nullas = '\\N' from select " + names
+                    + " from " + self._qualified("src", db, table))
+        got = self._alone("dst", db, "import into "
+                          + self._qualified("dst", db, table)
+                          + f" ({names}) csv data ('{place}/*.csv{auth}')"
+                          " with nullif = '\\N'")
+        rows = int(got[0][3]) if got and len(got[0]) > 3 else 0
+        log(f"{table}: {rows:,} rows imported from the stage")
+        return rows
 
     #: `ALTER TABLE ... VALIDATE CONSTRAINT` checks the rows already there
     VALIDATE_HINT = "ALTER TABLE ... VALIDATE CONSTRAINT <name>"

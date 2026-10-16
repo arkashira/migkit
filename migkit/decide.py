@@ -5537,3 +5537,110 @@ def transform_place(facts, costs=None):
                       " copy (transform: on_target: true), which holds the"
                       " values as read there until it is rewritten")))),
         f, costs=costs or None, prove=False)
+
+# ---- the change-topic engines' bulk ways (ER4, ER5) ------------------------
+#
+# Each is a table's ladder (`tableway.each`): the engine's own bulk way
+# where its facts hold, the table copier always after it, so a table no
+# bulk way may take is still carried, and a bulk way that fails on a table
+# is undone (`cleanup`) before the copier starts it again from nothing.
+# Built on fakes only; each engine's module says on which server they
+# were not run (`UNPROVED_ON`).
+
+def _empty_target(word):
+    return Need("the target's table empty",
+                lambda f: f.get("empty") is True,
+                lambda f: f"the target's table holds rows: {word} only adds,"
+                          " and a row it holds already would stop it")
+
+
+def _bulk_copier(said="the table copier, by key ranges"):
+    return Rung("copier", said, native_copier=True,
+                because="every row read and written as the neutral contract"
+                        " reads it, resumable by its key")
+
+
+def crdb_bulk_ways(cleanup=None):
+    """A CockroachDB table: the source's `EXPORT` into the stage and the
+    target's `IMPORT INTO` from it, where a stage both clusters reach is
+    given, the source is CockroachDB, the table has a key (a keyless one's
+    hidden row ids are no other cluster's) and the target's is empty; else
+    the table copier."""
+    return (
+        Rung("import", "the clusters' own export into the stage and"
+             " import from it",
+             needs=(Need("a stage", lambda f: bool(f.get("stage")),
+                         "no stage is given (the target's `stage`: a store"
+                         " both clusters reach)"),
+                    Need("a CockroachDB source", lambda f: bool(f.get("same")),
+                         "the source is not CockroachDB: it cannot export"
+                         " into the stage"),
+                    Need("a key", lambda f: bool(f.get("key")),
+                         "the table has no key: its hidden row ids are no"
+                         " other cluster's"),
+                    _empty_target("an import")),
+             because="every value in the clusters' own form and no row"
+                     " through migkit; an import that fails is taken back"
+                     " by the cluster itself",
+             leaves="the exported files in the stage", cleanup=cleanup),
+        _bulk_copier())
+
+
+def tidb_bulk_ways(cleanup=None):
+    """A TiDB table: the whole source read in one pass into the server's
+    own bulk load (`load data local`, pinned to the rows sent) where the
+    target's table is empty; else the table copier. TiDB's own importer is
+    no rung: it is a program run beside the cluster reading files on its
+    hosts, not a client's way."""
+    return (
+        Rung("load", "the server's own bulk load, the source read in one"
+             " pass", needs=(_empty_target("a load"),),
+             because="a batch a statement parsed by the server in bulk, and"
+                     " no key range read twice",
+             leaves="nothing", cleanup=cleanup),
+        _bulk_copier())
+
+
+def couchbase_bulk_ways(cleanup=None):
+    """A Couchbase collection: the server's own bulk importer, from the
+    documents written as JSON lines, where it is installed; else the SDK's
+    batched upserts by key ranges. An upsert lands on itself, so a load
+    that failed half way is written again over, never doubled."""
+    return (
+        Rung("loader", "the server's own bulk importer, from the documents"
+             " as JSON lines",
+             needs=(Need("its programs installed",
+                         lambda f: bool(f.get("loader")),
+                         programs=("cbimport",)),),
+             because="the documents sent by the importer's own parallel"
+                     " writers, every vBucket at once",
+             leaves="the documents' file, removed when it ends",
+             external=True, cleanup=cleanup),
+        _bulk_copier("the SDK's batched upserts, by key ranges"))
+
+
+def cosmos_bulk_ways(cleanup=None):
+    """A Cosmos DB container: the source read in pages cut by bytes and
+    each page's items written as the service's bulk writes - every
+    partition key value's items in transactional batches at once - where
+    the target's partition key is read; else the table copier."""
+    return (
+        Rung("bulk", "the service's bulk writes, every partition key's items"
+             " in batches at once",
+             needs=(Need("the target's partition key read",
+                         lambda f: bool(f.get("pk")),
+                         "the target container's partition key cannot be"
+                         " read"),),
+             because="an item written by its id and partition key lands on"
+                     " itself: a page written again replaces, never doubles",
+             leaves="nothing", cleanup=cleanup),
+        _bulk_copier())
+
+
+# large values on CockroachDB and DSQL: their PostgreSQL-wire expressions
+# read a value past what a row carries in pieces by its key, whole, never
+# under a sampled maximum (`pieces.ReadPlan`); run on fakes only
+WAYS["large values"].update({
+    "cockroachdb": ("yes", "@LARGE_VALUES"),
+    "dsql": ("yes", "@LARGE_VALUES"),
+})
