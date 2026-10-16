@@ -2848,19 +2848,13 @@ class MySQLEngine(Engine):
 
     def _json_in_sql(self, side, db, table, columns):
         """The JSON columns of `columns` the server renders as canon's text
-        itself (`canon.json_on_server`: their declared types and the
+        itself (`canon.json_columns`: their declared types and the
         server's version), or None where it cannot render them all."""
         from .. import canon
-        wanted = [n for n, c in columns if canon.folded_here(c)]
-        if not wanted:
-            return []
-        if any(c != "json" for _, c in columns if canon.folded_here(c)):
-            return None
-        declared = dict(self.neutral_columns(side, db, table))
-        ok, _ = canon.json_on_server(
-            "mysql", [str(declared.get(n, "")) for n in wanted],
-            version=self.json_version(side))
-        return wanted if ok else None
+        return canon.json_columns(
+            "mysql", columns,
+            lambda: dict(self.neutral_columns(side, db, table)),
+            version=lambda: self.json_version(side))
 
     def neutral_digest(self, side, db, table, columns, where=None,
                        computed=None, way="md5"):

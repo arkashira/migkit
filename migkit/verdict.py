@@ -207,6 +207,7 @@ def decide(records, hop=None, coverage=None):
     notes = _notes(hop, records)
     sev = []
     bad, diff, stale, warn, reused, skip, ok = [], [], [], [], [], [], []
+    sampled = []
     for r in records:
         st = r.get("status")
         if st not in STATUSES:
@@ -228,6 +229,8 @@ def decide(records, hop=None, coverage=None):
             warn.append(r)
         elif st == "skip":
             skip.append(r)
+        elif st == "ok" and r.get("sampled"):
+            sampled.append(r)
         else:
             ok.append(r)
             if r.get("reused_from") and not r.get("reuse_held"):
@@ -277,6 +280,13 @@ def decide(records, hop=None, coverage=None):
             " earlier run and the source may have changed since:"
             f" {_named(reused)}", tuple(sev),
             f"run {again} without `--resume` to take fresh answers")
+    if sampled:
+        n = sum(int(r["sampled"].get("rows") or 0) for r in sampled)
+        return Decision(
+            "incomplete", f"sampled: no difference in the sample of {n:,}"
+            f" rows - a row outside it was not compared: {_named(sampled)}",
+            tuple(sev), f"run {again} for the full keyed check, which"
+            " compares every row")
     if not ok:
         return Decision(
             "incomplete", "every answer was skipped - nothing was"

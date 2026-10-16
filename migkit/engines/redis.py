@@ -2325,6 +2325,22 @@ class RedisEngine(Engine):
         got.update(facts or {})
         return decide.redis_live(got)
 
+    def change_depths(self):
+        """{db<n>: (depth, the statement that raises it or "")}
+        (`changedepth.redis`): from the live way the source's facts choose
+        (`live_way`) and why the replica stream was passed over. Read-only;
+        None where the source's facts could not be read."""
+        from .. import changedepth
+        try:
+            way = self.live_way()
+        except Exception:  # noqa: BLE001 - unread: no depth guessed
+            return None
+        name = way.rung.name if way.rung is not None else None
+        why = next((w for r, w in way.passed if r.name == "replica stream"),
+                   "")
+        return {f"db{db}": changedepth.redis(name, why)
+                for db in self.databases()}
+
     def _key_spec(self, client):
         """`spec(argv) -> [keys]` from the source's own command table, each
         command asked once; a command whose keys move with its arguments is

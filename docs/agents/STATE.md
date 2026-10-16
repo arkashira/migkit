@@ -272,7 +272,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Source layout
 
-384 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+385 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
 Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 3422 ordered pairs of 59 engines; 32 shape lacks, 44 capability lacks, 2510 depth lacks in all; fewest kinesis -> postgres (6), most yugabytedb -> synapse (162).
 

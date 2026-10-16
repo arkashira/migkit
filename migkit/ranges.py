@@ -1895,3 +1895,60 @@ def refine(st, keep=()):
 if __name__ == "__main__":
     _child()
 
+
+
+def sampled(eng, db, table, columns, key, size, seed=None, dst=None,
+            dst_db=None, dst_table=None, page=None):
+    """A check of `size` rows drawn at random from the source's keys and
+    read by key on both sides (`Engine.neutral_rows_by_key`) - migkit's
+    own keyed reader, no second program. The keys are walked page by page
+    (`neutral_read` of the key columns only, `page` keys a page: the
+    reader's own size where not given) and drawn by reservoir, so every
+    key is as likely; `seed` makes the draw again. A record for
+    `verdict.decide`: `diff` naming the keys that differ, else `ok` with
+    `sampled` - which the verdict says as "no difference in the sample",
+    never as the table's "same": a row outside the sample is not seen.
+    `dst` is the target's engine where it is another (cross-engine)."""
+    import random
+
+    from . import canon
+    dst = dst or eng
+    dst_db, dst_table = dst_db or db, dst_table or table
+    names = [n for n, _ in columns]
+    key = list(key)
+    kcols = [(n, c) for n, c in columns if n in key]
+    rnd = random.Random(seed)
+    drawn, seen, after = [], 0, None
+    while size > 0:
+        rows, after = eng.neutral_read("src", db, table, kcols, after=after,
+                                       limit=page or 1000)
+        for r in rows:
+            seen += 1
+            if len(drawn) < size:
+                drawn.append(tuple(r))
+            else:
+                j = rnd.randrange(seen)
+                if j < size:
+                    drawn[j] = tuple(r)
+        if not rows or after is None:
+            break
+    mine = eng.neutral_rows_by_key("src", db, table, columns, key, drawn)
+    theirs = dst.neutral_rows_by_key("dst", dst_db, dst_table, columns, key,
+                                     drawn)
+    classes = [c for _, c in columns]
+
+    def text(row):
+        return canon.fold_rows(classes, [row]) if row is not None else None
+    differ = sorted(k for k in set(mine) | set(theirs)
+                    if text(mine.get(k)) != text(theirs.get(k)))
+    out = {"scope": f"{db}.{table}", "check": "sampled rows",
+           "sampled": {"rows": len(drawn), "of": seen, "seed": seed,
+                       "columns": names}}
+    if differ:
+        out.update(status="diff", detail=f"{len(differ)} of {len(drawn)}"
+                   " sampled rows differ: " + ", ".join(map(str,
+                                                           differ[:5])))
+    else:
+        out.update(status="ok", detail=f"no difference in a sample of"
+                   f" {len(drawn):,} of {seen:,} rows")
+    return out

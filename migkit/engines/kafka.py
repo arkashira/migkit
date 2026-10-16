@@ -1680,6 +1680,27 @@ class KafkaEngine(Engine):
             return None
         return out
 
+    def change_depths(self):
+        """{topic: (depth, the statement that raises it or "")}
+        (`changedepth.kafka`) of the topics the hop takes, from each one's
+        `cleanup.policy`; None where the broker would not describe them."""
+        from .. import changedepth
+        consumer = self._consumer("src")
+        try:
+            topics = self._topics(consumer)
+        finally:
+            consumer.close()
+        got = self._topic_configs("src", topics)
+        if got is None:
+            return None
+        out = {}
+        for t in topics:
+            depth = changedepth.kafka(
+                t, (got.get(t) or {}).get("cleanup.policy"))
+            if depth is not None:
+                out[t] = depth
+        return out
+
     #: broker settings that change what a message or a topic means, rather
     #: than how fast the broker serves it; a difference in any of these
     #: fails the check

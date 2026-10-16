@@ -2375,6 +2375,28 @@ class CassandraEngine(NeutralCopier, Engine):
                     " the saved position is older")
         return None
 
+    def change_depths(self):
+        """{keyspace.table: (depth, the statement that raises it or "")}
+        (`changedepth.cassandra`): from whether the server keeps a change
+        log per table (ScyllaDB's), each table's log options, and whether
+        it holds counters. Read-only."""
+        from .. import changedepth
+        scylla = self._scylla("src")
+        s = self._session("src")
+        out = {}
+        for db in self.databases():
+            cdc = {}
+            if scylla:
+                cdc = {r.table_name: r.cdc for r in s.execute(
+                    "select table_name, cdc from system_schema.scylla_tables"
+                    " where keyspace_name = %s", (db,))}
+            for t in self.neutral_tables("src", db):
+                counters = any(str(c.type) == "counter"
+                               for c in self._columns("src", db, t))
+                out[f"{db}.{t}"] = changedepth.cassandra(
+                    scylla, cdc.get(t), counters, f"{db}.{t}")
+        return out
+
     def _generations(self):
         """[(start in ms, [stream ids])] of the source's change log, oldest
         first: each generation's streams carry what was written from its

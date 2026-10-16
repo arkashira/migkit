@@ -142,3 +142,56 @@ def lines(table_depths, shown=5, goal=None, follows=None):
             + (f" - to follow changes later: {fix}" if fix and unread
                else f" - to raise it: {fix}" if fix else "")))
     return out
+
+
+_REPLICATE = ("ACL SETUSER <account> +psync +replconf +ping (let the"
+              " account replicate)")
+
+
+def redis(way, why=""):
+    """(depth, the statement that raises it or "") of one Redis database,
+    from the live way `decide.redis_live` chose (`way`, its rung's name or
+    None) and why the replica stream was passed over (`why`). The replica
+    stream carries every write in the source's order with its key and
+    what it wrote, never the value it replaced (D3); the idle-time sweep
+    finds the keys touched since its last round and reads their values
+    again (D2); with neither, only a digest diff of everything (D0)."""
+    if way == "replica stream":
+        return "D3", ""
+    if way == "idle-time sweep":
+        return "D2", _REPLICATE if "replicate" in str(why) else ""
+    return "D0", _REPLICATE if "replicate" in str(why) else ""
+
+
+def kafka(topic, cleanup_policy):
+    """The same for one topic, from its `cleanup.policy` (None where the
+    broker would not say: no depth is guessed). A topic's records are its
+    changes, each whole, read in its partitions' order and nothing read
+    again (D4) - while the topic deletes by time only; one compacted by
+    key keeps the latest record of each key, the records between it
+    removed (D3)."""
+    if cleanup_policy is None:
+        return None
+    if "compact" in str(cleanup_policy).lower():
+        return "D3", (f"set cleanup.policy=delete on topic {topic} (records"
+                      " kept by time instead of the latest of each key)")
+    return "D4", ""
+
+
+def cassandra(scylla, cdc, counters, table=""):
+    """The same for one table: `scylla` whether the server keeps the
+    change log migkit follows (ScyllaDB's per table), `cdc` the table's
+    log options (`system_schema.scylla_tables.cdc`), `counters` whether it
+    holds counters (only ever added to, which no log carries once). The
+    delta log holds the key and the changed columns (D3); with the
+    pre- and post-images on, every change with both (D4)."""
+    on = {str(k): str(v).lower() for k, v in dict(cdc or {}).items()}
+    if not scylla or counters:
+        return "D0", ""
+    if on.get("enabled") != "true":
+        return "D0", f"ALTER TABLE {table} WITH cdc = {{'enabled': true}}"
+    if on.get("preimage") not in ("true", "full") \
+            or on.get("postimage") != "true":
+        return "D3", (f"ALTER TABLE {table} WITH cdc = {{'enabled': true,"
+                      " 'preimage': true, 'postimage': true}")
+    return "D4", ""

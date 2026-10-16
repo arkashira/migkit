@@ -2369,6 +2369,25 @@ def json_on_server(engine, declared, encoding=None, version=None):
     return True, None
 
 
+def json_columns(engine, columns, declared, encoding=None, version=None):
+    """The JSON columns of `columns` ((name, class) pairs) the engine's
+    server writes as canon's text itself (`json_on_server`: their declared
+    types, `declared()` -> {name: type} read only where one is folded here,
+    and the database's encoding or the server's version), [] where none
+    is, None where it cannot write them all - the one reading every
+    engine's `_json_in_sql` asks."""
+    wanted = [n for n, c in columns if folded_here(c)]
+    if not wanted:
+        return []
+    if any(c != "json" for _, c in columns if folded_here(c)):
+        return None
+    types = declared()
+    ok, _ = json_on_server(engine, [str(types.get(n, "")) for n in wanted],
+                           encoding() if callable(encoding) else encoding,
+                           version() if callable(version) else version)
+    return wanted if ok else None
+
+
 def ddl_type(engine, cls, numbers=(), key=False, bounds=None):
     """The column type to create for a class on this engine - for a column
     of the table's key where `key`.

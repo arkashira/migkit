@@ -4805,24 +4805,22 @@ select json_build_object(
 
     def _json_in_sql(self, side, db, table, columns):
         """The JSON columns of `columns` the server can render as canon's
-        text itself (`canon.json_on_server`: their declared types and the
+        text itself (`canon.json_columns`: their declared types and the
         database's encoding - one not in UTF-8 orders an object's keys by
         other bytes than canon's), or None where it cannot render them
         all."""
         from .. import canon
-        wanted = [n for n, c in columns if canon.folded_here(c)]
-        if not wanted:
-            return []
-        if any(c != "json" for _, c in columns if canon.folded_here(c)):
-            return None
-        declared = dict(self.neutral_columns(side, db, table))
         codes = self.__dict__.setdefault("_encodings", {})
         at = (side, self._d(side, db))
-        if at not in codes:
-            codes[at] = self._psql(side, db, "show server_encoding").strip()
-        ok, _ = canon.json_on_server(
-            "postgres", [declared.get(n, "") for n in wanted], codes[at])
-        return wanted if ok else None
+
+        def encoding():
+            if at not in codes:
+                codes[at] = self._psql(side, db,
+                                       "show server_encoding").strip()
+            return codes[at]
+        return canon.json_columns(
+            "postgres", columns,
+            lambda: dict(self.neutral_columns(side, db, table)), encoding)
 
     #: `neutral_digest` takes columns computed in the server's SQL in place
     #: of the table's own (`computed`: a masked column as its transform)

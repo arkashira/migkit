@@ -6230,3 +6230,40 @@ def rows_container(facts, costs=None):
         Rung("pickled rows", "each batch's rows pickled as the source's"
              " reader hands them over", because="the first way that holds")),
         f, costs=costs or None, prove=False)
+
+
+def check_sample(facts, costs=None):
+    """Whether a table is first held to a sample of its rows read by
+    migkit's own keyed reader (`ranges.sampled`), on `facts`: `asked` (the
+    operator asked for a quick signal), `first pass` (a sample read before
+    the full keyed check), `rows` (the table's count), `rate` (rows a
+    second the keyed reader was measured at on this pair) and `seconds`
+    (the time the quick signal may take). The size is what the measured
+    reader reads in that time, never past the table. A sample never
+    stands for the full check: its answer is said as a sample
+    (`verdict.decide`), and the full check stays the outcome."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    rows = int(f.get("rows") or 0)
+    rate, seconds = float(f.get("rate") or 0), float(f.get("seconds") or 0)
+    size = min(rows, int(rate * seconds))
+    f.setdefault("sample size", size)
+    return climb("whether a table is held to a sample first", (
+        Rung("sample", f"{size:,} rows drawn at random and read by key on"
+             " both sides, said as a sample",
+             needs=(Need("a quick signal asked or a first pass",
+                         lambda x: bool(x.get("asked")
+                                        or x.get("first pass")),
+                         "no quick signal was asked"),
+                    Need("the reader's rate measured",
+                         lambda x: bool(rate and seconds),
+                         "the keyed reader's rate on this pair is not"
+                         " measured yet, so no sample size is known"),
+                    Need("a sample smaller than the table",
+                         lambda x: 0 < size < rows,
+                         "the sample would be the whole table: the full"
+                         " check reads it")),
+             because="a quick first signal; the full check still decides"),
+        Rung("full", "every row compared by the keyed check",
+             because="only every row compared can say the two are the"
+                     " same")),
+        f, costs=costs or None, prove=False)
