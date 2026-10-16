@@ -361,6 +361,199 @@ class QdrantEngine(NeutralCopier, Engine):
         out += self.check_recall(db)
         return out or [Result("deep", db, "ok", "no collections in scope")]
 
+    # ---- the settings of both servers ---------------------------------------
+
+    #: what a setting changes, by the name the server reports it under; a
+    #: setting it reports that is not here is kept in params.json and counted,
+    #: not said as a finding
+    SETTING_EFFECTS = {
+        **dict.fromkeys(("distance", "size", "m", "ef_construct", "payload_m",
+                         "multivector_config", "ef"), ("recall",)),
+        **dict.fromkeys(("quantization_config", "scalar", "product", "binary",
+                         "datatype"), ("recall", "size")),
+        **dict.fromkeys(("on_disk", "on_disk_payload", "always_ram"),
+                        ("size",)),
+        **dict.fromkeys((
+            "shard_number", "replication_factor", "write_consistency_factor",
+            "full_scan_threshold", "max_indexing_threads",
+            "indexing_threshold", "memmap_threshold", "flush_interval_sec",
+            "default_segment_number", "max_segment_size",
+            "max_optimization_threads", "deleted_threshold",
+            "vacuum_min_vector_number", "wal_capacity_mb",
+            "wal_segments_ahead", "shards", "unhealthy_shards", "peers",
+            "status"), ("throughput",)),
+    }
+
+    @classmethod
+    def _flat(cls, value, path=()):
+        """A nested reading as {dotted name: leaf}."""
+        if isinstance(value, dict):
+            out = {}
+            for k, v in value.items():
+                out.update(cls._flat(v, path + (str(k),)))
+            return out or {".".join(path): {}}
+        return {".".join(path): value}
+
+    @classmethod
+    def _effects(cls, name):
+        """What the setting `name` (dotted) changes: its last word, or the
+        word before it where that names a kind (`quantization_config.
+        scalar.type`)."""
+        for word in reversed(name.split(".")):
+            if word in cls.SETTING_EFFECTS:
+                return cls.SETTING_EFFECTS[word]
+        return ()
+
+    def _side_reading(self, side, path):
+        """The `result` of a read, or why the server did not give it."""
+        try:
+            return self._call(side, "GET", path), None
+        except (RuntimeError, OSError) as e:
+            return None, str(e).splitlines()[0][:100]
+
+    def _settings_facts(self, db):
+        """What the depth of the comparison is chosen from, measured on both
+        servers now: the collections and shards they report, whether they
+        are a cluster, the round trip, and whether each deeper endpoint
+        answers."""
+        from .. import decide
+        names = sorted(set(self.neutral_tables("src", db))
+                       | set(self.neutral_tables("dst", db)))
+        t0 = time.monotonic()
+        self._call("src", "GET", "/collections")
+        rtt = time.monotonic() - t0
+        infos = {}
+        for side in ("src", "dst"):
+            for t in names:
+                got, why = self._side_reading(side, f"/collections/{t}")
+                if got is not None:
+                    infos[side, t] = got
+        shards = sum(int((i.get("config") or {}).get("params", {}).get(
+            "shard_number") or 1) for i in infos.values())
+        peers, cluster_answer = 1, None
+        clusters = {}
+        for side in ("src", "dst"):
+            got, why = self._side_reading(side, "/cluster")
+            if got is None:
+                cluster_answer = cluster_answer or why
+                continue
+            clusters[side] = got
+            if got.get("status") == "enabled":
+                peers = max(peers, len(got.get("peers") or {}) or 2)
+        shards_answer = None
+        if names:
+            for side in ("src", "dst"):
+                found = [t for t in names if (side, t) in infos]
+                if found and shards_answer is None:
+                    _, shards_answer = self._side_reading(
+                        side, f"/collections/{found[0]}/cluster")
+        return decide.Facts({
+            "collections": len(names), "shards": shards, "peers": peers,
+            "rtt": rtt, "names": names, "infos": infos,
+            "clusters": clusters, "shards_answer": shards_answer,
+            "cluster_answer": cluster_answer,
+            "timeout": float(self.hop.source.options.get("timeout") or 120)})
+
+    def settings_depth(self, db):
+        """The `Choice` of how far the two servers' settings are read,
+        costed from the collections and shards measured."""
+        from .. import decide
+        facts = self._settings_facts(db)
+        return decide.settings_depth(facts), facts
+
+    def check_params(self, db):
+        """Each collection's configuration on both servers - vectors,
+        distance, the HNSW graph, quantization, where payload and vectors
+        live, the shards and replication - and, where the depth chosen
+        reads on, each shard and the cluster, every difference that
+        changes recall, size or throughput said with both values.
+
+        Which settings are compared is what the servers report, not a
+        list kept here; what each changes is told by its name
+        (`SETTING_EFFECTS`)."""
+        try:
+            choice, facts = self.settings_depth(db)
+        except (RuntimeError, OSError) as e:
+            return [Result("params", f"{db} params", "error",
+                           "the servers' settings could not be read: "
+                           f"{str(e).splitlines()[0][:100]}", "",
+                           "give migkit a key that can read the collections"
+                           " on both servers, then re-run")]
+        self.__dict__.setdefault("_depth_choices", {})[db] = choice
+        depth = {"collections": 0, "shards": 1, "cluster": 2}[choice.path]
+        readings = {}
+        for t in facts["names"]:
+            src, dst = facts["infos"].get(("src", t)), \
+                facts["infos"].get(("dst", t))
+            if src is None or dst is None:
+                continue
+            readings[t] = (self._flat(src.get("config") or {}),
+                           self._flat(dst.get("config") or {}))
+            if depth >= 1:
+                a, b = (self._shard_reading(s, t) for s in ("src", "dst"))
+                readings[t][0].update(a)
+                readings[t][1].update(b)
+        if depth >= 2:
+            readings[""] = tuple(self._cluster_reading(s, facts)
+                                 for s in ("src", "dst"))
+        return self._settings_results(db, readings, choice, facts)
+
+    def _shard_reading(self, side, table):
+        got, _ = self._side_reading(side, f"/collections/{table}/cluster")
+        if not got:
+            return {}
+        local, remote = got.get("local_shards") or [], \
+            got.get("remote_shards") or []
+        return {"layout.shards": len(local) + len(remote),
+                "layout.unhealthy_shards": sorted(
+                    str(s.get("state")) for s in local + remote
+                    if str(s.get("state")) != "Active")}
+
+    def _cluster_reading(self, side, facts):
+        got = facts["clusters"].get(side) or {}
+        return {"cluster.status": got.get("status"),
+                "cluster.peers": len(got.get("peers") or {})}
+
+    def _settings_results(self, db, readings, choice, facts):
+        inv, found, other = {}, [], 0
+        for t, (a, b) in readings.items():
+            for name in sorted(set(a) | set(b)):
+                inv[f"{t} {name}".strip()] = {"src": a.get(name),
+                                              "dst": b.get(name)}
+                if a.get(name) == b.get(name):
+                    continue
+                effects = self._effects(name)
+                if effects:
+                    found.append((t, name, effects, a.get(name), b.get(name)))
+                else:
+                    other += 1
+        out_file = self.hop.report_dir(db) / "params.json"
+        out_file.write_text(json.dumps(inv, indent=1, default=str))
+        said = (f"read at {choice.said}: {facts['collections']} collections,"
+                f" {facts['shards']} shards")
+        res = [Result(
+            "params", f"{db} {t or 'cluster'} {name}",
+            "diff" if "recall" in effects else "warn",
+            f"changes {' and '.join(effects)}: source {a!r}, target {b!r}",
+            str(out_file), "make the target collection again with the"
+            " source's setting" if t else
+            "bring the target cluster to the source's layout", table=t)
+            for t, name, effects, a, b in found]
+        passed = [f"{r.said}: {why}" for r, why in choice.passed
+                  if "not read" in str(why)]
+        if passed:
+            res.append(Result("params", f"{db} params depth", "skip",
+                              "; ".join(passed) + f" (compared at {said})",
+                              str(out_file)))
+        if not found:
+            note = f"; {other} others differ but none changes recall," \
+                   " size or throughput (params.json)" if other else ""
+            res.append(Result(
+                "params", f"{db} params", "ok",
+                f"{len(inv)} settings, all that matter equal both sides"
+                f" ({said}){note}", str(out_file)))
+        return res
+
     @staticmethod
     def _holds(src, dst):
         """Whether the target holds every setting the source states: a

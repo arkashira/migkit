@@ -8151,6 +8151,22 @@ out of the comparison - a wrong vector would pass. So:
   are proved by their decision and not run against a server (no sandbox
   start); sparse-only collections have no recall check; the depth cells
   for these ways are not yet named in `capabilities.py` (W13M).
+* **b, c settings (W16G, 2026-10-16) - PARTLY**: Qdrant compares both
+  servers' collection configuration (vectors, distance, HNSW, quantization,
+  where payload and vectors live, shards, replication) and says every
+  difference that changes recall, size or throughput with both values; how
+  far it reads (the collections, their shards, the cluster) is
+  `decide.settings_depth`, costed from the collections and shards measured
+  and the round trip; a server without an endpoint is said as a gap. Neo4j
+  compares the memory, transaction, import, cypher and statistics settings
+  the server lists, and after a load brings the target's indexes online and
+  refreshes their statistics, the way (resample every index, the outdated
+  ones, only wait) being `decide.settle_way` from the indexes and rows
+  loaded. Proved: `tests/test_qdrant_compares_its_settings_on_a_server.py`,
+  `tests/test_neo4j_compares_settings_and_settles_statistics_on_a_server.py`.
+  Left: Qdrant bulk-move and snapshot; Neo4j users, confirm, bulk-move and
+  snapshot; the scope/verify/assess ways listed in `UNPROVED` for these two
+  engines.
 
 ### R17. The path between the databases, and what it carries (a, b and
 c done 2026-09-27; d begun: the read beside the source)

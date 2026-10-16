@@ -41,7 +41,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | mongodb | 16/16 | 11/12 | 12 | missing grant |
 | mssql | 16/16 | 12/12 | 38 | - |
 | mysql | 16/16 | 12/12 | 4 | - |
-| neo4j | 10/16 | 5/12 | 54 | params, bulk-move, confirm, users, statistics, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
+| neo4j | 12/16 | 5/12 | 54 | bulk-move, confirm, users, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
 | neptune | 16/16 | 11/12 | 43 | large values |
 | oceanbase | 15/16 | 11/12 | 66 | bulk-move, large values |
 | oceanbase-oracle | 11/16 | 10/12 | 69 | bulk-move, stream, fence, confirm, delta, large values, partitioned |
@@ -51,7 +51,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | polardbx | 15/16 | 11/12 | 67 | bulk-move, large values |
 | postgres | 16/16 | 12/12 | 2 | - |
 | pubsub | 16/16 | 12/12 | 4 | - |
-| qdrant | 13/16 | 5/12 | 36 | params, bulk-move, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
+| qdrant | 14/16 | 5/12 | 36 | bulk-move, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
 | redis | 16/16 | 12/12 | 11 | - |
 | redshift | 6/16 | 12/12 | 52 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
 | saas | 16/16 | 12/12 | 22 | - |

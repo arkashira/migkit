@@ -673,6 +673,141 @@ class Neo4jEngine(NeutralCopier, Engine):
                 f"create the source's {what} on the target before cutover"))
         return out
 
+    # ---- the server's settings, and the statistics after a load ----------------
+
+    #: the settings that bear on a move, by what each kind holds: the
+    #: server lists its settings by name, and a name under one of these
+    #: prefixes is compared (paths, ports and hostnames are the server's own
+    #: and always differ)
+    SETTING_KINDS = (
+        ("memory", ("server.memory.", "dbms.memory.")),
+        ("transaction", ("db.transaction.", "dbms.transaction.",
+                         "db.tx_log.", "db.lock.", "db.checkpoint.")),
+        ("import", ("db.import.", "dbms.import.", "server.import.",
+                    "dbms.security.allow_csv_import_from_file_urls")),
+        ("cypher", ("dbms.cypher.", "db.cypher.", "server.cypher.")),
+        ("statistics", ("db.index_sampling.", "db.stats.")),
+        ("storage", ("db.format", "db.recovery.")),
+    )
+
+    @classmethod
+    def _setting_kind(cls, name):
+        for kind, prefixes in cls.SETTING_KINDS:
+            if any(name.startswith(p) for p in prefixes):
+                return kind
+        return ""
+
+    def _settings(self, side, db):
+        """The settings of the kinds that bear on a move, as the server
+        lists them, by name."""
+        listed = ("SHOW SETTINGS YIELD name, value RETURN name, value"
+                  if self._major(side, db) >= 5 else
+                  "CALL dbms.listConfig() YIELD name, value RETURN name,"
+                  " value")
+        return {r["name"]: r["value"] for r in self._run(side, "system",
+                                                        listed)
+                if self._setting_kind(r["name"])}
+
+    def check_params(self, db):
+        def pull(side):
+            try:
+                return self._settings(side, db)
+            except (RuntimeError, SystemExit) as e:
+                return {self.UNREADABLE: str(e).splitlines()[-1][:80]}
+        src, dst = pull("src"), pull("dst")
+        return self._param_result(
+            db, src, dst, tuple(set(src) | set(dst)),
+            "set the target's memory, transaction, import and cypher"
+            " settings to the source's, or to what the graph needs")
+
+    def _index_states(self, db):
+        """(name, state) of every index of the target a copy may have
+        waited on: the lookup indexes the server keeps are not."""
+        return [(r["name"], r["state"]) for r in self._run(
+            "dst", db, "SHOW INDEXES YIELD name, state, type WHERE type <>"
+            " 'LOOKUP' RETURN name, state")]
+
+    def _settle_facts(self, db, from_source):
+        """What the way to refresh the statistics is chosen from, read from
+        the target and the server it is on now."""
+        def listed(statement, column):
+            try:
+                return [r[column] for r in self._run("dst", db, statement)]
+            except RuntimeError:
+                return []
+        rows = sum(self._count("dst", db, t) for t in TABLES)
+        loaded = rows
+        if from_source:
+            loaded = min(rows, sum(self._count("src", db, t)
+                                   for t in TABLES))
+        sampling = None
+        for r in self._run(
+                "dst", "system",
+                "SHOW SETTINGS YIELD name, value WHERE name ="
+                " 'db.index_sampling.update_percentage' RETURN value"
+                if self._major("dst", db) >= 5 else
+                "CALL dbms.listConfig('db.index_sampling.update_percentage')"
+                " YIELD value RETURN value"):
+            try:
+                sampling = float(r["value"])
+            except (TypeError, ValueError):
+                sampling = None
+        from .. import decide
+        return decide.Facts({
+            "indexes": len(self._index_states(db)), "rows": rows,
+            "loaded": loaded, "sampling": sampling,
+            "procedures": listed(
+                "SHOW PROCEDURES YIELD name WHERE name STARTS WITH"
+                " 'db.resample' OR name = 'db.prepareForReplanning'"
+                " RETURN name", "name")})
+
+    def settle_choice(self, db):
+        """The last refresh's `Choice`, or None before one."""
+        return self.__dict__.get("_settled", {}).get(db)
+
+    def settle_target(self, db, from_source=True):
+        """Bring the target's indexes online and refresh their statistics
+        after a load.
+
+        The server samples an index on its own once more than its
+        `db.index_sampling.update_percentage` of it changed; a load changes
+        far more at once, and the planner then picks plans on a sample of a
+        graph that was empty. How far to go - resample every index, the ones
+        the server finds outdated, or only wait for them to come online - is
+        `decide.settle_way`'s, from the indexes and the rows loaded."""
+        from .. import decide
+        ddb = self._d("dst", db)
+        timeout = int(float(self.hop.target.options.get("timeout") or 120))
+        try:
+            facts = self._settle_facts(db, from_source)
+            choice = decide.settle_way(facts)
+            self.__dict__.setdefault("_settled", {})[db] = choice
+            if not facts["indexes"]:
+                return None
+            self._run("dst", db, "CALL db.awaitIndexes($t)", t=timeout)
+            if choice.path == "resample":
+                if "db.prepareForReplanning" in facts["procedures"]:
+                    self._run("dst", db, "CALL db.prepareForReplanning()")
+                else:
+                    for name, _ in self._index_states(db):
+                        self._run("dst", db, "CALL db.resampleIndex($n)",
+                                  n=name)
+            elif choice.path == "outdated":
+                self._run("dst", db, "CALL db.resampleOutdatedIndexes()")
+            states = self._index_states(db)
+        except (RuntimeError, SystemExit) as e:
+            return (f"could not refresh the statistics of {ddb}:"
+                    f" {str(e).splitlines()[-1][:80]}")
+        down = sorted(n for n, st in states if st != "ONLINE")
+        said = (f"{choice.said} after {facts['loaded']:,} of"
+                f" {facts['rows']:,} elements loaded")
+        if down:
+            return (f"{len(down)} of {len(states)} indexes of {ddb} not"
+                    f" online ({', '.join(down[:5])}); the statistics wait"
+                    f" for them ({said})")
+        return (f"refreshed the target's statistics: {len(states)} indexes"
+                f" online, {said}")
+
     # ---- who it is -------------------------------------------------------------
 
     def server_identity(self, side, db):

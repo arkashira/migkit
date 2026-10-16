@@ -3863,3 +3863,115 @@ def range_stall(facts):
              because=said),
         Rung("wait", "wait on the range", because=said))
     return climb("a range whose session was read", rungs, f)
+
+
+# ---- how far two servers' settings are read, and how a loaded graph's
+# ---- statistics are refreshed (backlog R16b, R16c) --------------------------
+
+def settings_depth(facts):
+    """How far a comparison of two vector servers' settings reads.
+
+    `facts`: `collections` (those in scope on either side), `shards` (the
+    shards the collections report, both sides together), `peers` (the most
+    nodes either server reports in its cluster), `rtt` and `timeout` (the
+    round trip measured and the longest a call may take), `shards_answer`
+    and `cluster_answer` (None where the server answered, else why it did
+    not). A deeper reading is taken where there is more to see - a
+    collection split in shards, servers that are a cluster - the server
+    answers for it, and its requests, counted from the collections and
+    shards measured and priced at the round trip, fit the call's time."""
+    def requests(depth):
+        n = 2 * facts["collections"]
+        if depth >= 1:
+            n += 2 * facts["collections"]
+        if depth >= 2:
+            n += 2 * facts["collections"] + 4
+        return n
+
+    def fits(depth):
+        return Need(
+            "a reading that fits the time a call may take",
+            lambda f: requests(depth) * f["rtt"] <= f["timeout"],
+            lambda f: f"{requests(depth)} requests at about {f['rtt']:.3f}s"
+                      f" would pass the {f['timeout']:.0f}s a call may take")
+    rungs = (
+        Rung("cluster", "every collection, every shard and the cluster",
+             needs=(Need("servers that are a cluster",
+                         lambda f: f["peers"] > 1,
+                         "the servers run alone: there is no cluster to read"),
+                    Need("a server that answers for its cluster",
+                         lambda f: f["cluster_answer"] is None,
+                         lambda f: "the cluster is not read:"
+                                   f" {f['cluster_answer']}"),
+                    Need("a server that answers for its shards",
+                         lambda f: f["shards_answer"] is None,
+                         lambda f: "the shards are not read:"
+                                   f" {f['shards_answer']}"),
+                    fits(2)),
+             because="the servers are a cluster, and where each shard lives"
+                     " changes what a search and a write cost"),
+        Rung("shards", "every collection and each of its shards",
+             needs=(Need("a collection split in shards",
+                         lambda f: f["shards"] > 2 * f["collections"],
+                         "every collection is one shard: its configuration"
+                         " says it all"),
+                    Need("a server that answers for its shards",
+                         lambda f: f["shards_answer"] is None,
+                         lambda f: "the shards are not read:"
+                                   f" {f['shards_answer']}"),
+                    fits(1)),
+             because="a collection split in shards is searched and written"
+                     " shard by shard"),
+        Rung("collections", "each collection's configuration",
+             because="a collection's configuration holds every setting that"
+                     " changes its recall, size and speed"))
+    return climb("the settings of two servers compared", rungs, facts)
+
+
+def settle_way(facts):
+    """How the statistics of a graph just loaded are refreshed.
+
+    `facts`: `indexes` (how many the target holds), `rows` (the elements
+    in it), `loaded` (those this run wrote), `sampling` (the share of an
+    index that must change before the server resamples it by itself, or
+    None where it could not be read) and `procedures` (the refreshes the
+    server lists). Every way waits for the indexes to come online first;
+    the server resamples what it finds changed past `sampling` on its own
+    schedule, so a load that changed more than that is resampled now."""
+    def share(f):
+        return 100.0 * f["loaded"] / f["rows"] if f["rows"] else 0.0
+    some = Need("an index to resample", lambda f: f["indexes"] > 0,
+                "the target holds no index: there are no statistics to"
+                " refresh")
+    rungs = (
+        Rung("resample", "resample every index now",
+             needs=(some,
+                    Need("a refresh that resamples every index",
+                         lambda f: bool({"db.prepareForReplanning",
+                                         "db.resampleIndex"}
+                                        & set(f["procedures"])),
+                         "the server lists no refresh of every index"),
+                    Need("a load that changed more than the server's own"
+                         " sampling follows",
+                         lambda f: f["sampling"] is None
+                         or share(f) >= f["sampling"],
+                         lambda f: f"the load changed {share(f):.0f}% of the"
+                                   f" graph, under the {f['sampling']}% the"
+                                   " server resamples by itself")),
+             because="the load changed most of the graph, and the server"
+                     " samples what it changed only later"),
+        Rung("outdated", "resample the indexes the server finds outdated",
+             needs=(some,
+                    Need("a refresh of the outdated indexes",
+                         lambda f: "db.resampleOutdatedIndexes"
+                         in f["procedures"],
+                         "the server lists no refresh of the outdated"
+                         " indexes"),
+                    Need("rows loaded", lambda f: f["loaded"] > 0,
+                         "nothing was loaded: nothing is outdated")),
+             because="a part of the graph changed, and only the indexes the"
+                     " server finds outdated need a new sample"),
+        Rung("wait", "wait for the indexes to come online",
+             because="the server resamples by itself what a small load"
+                     " changed"))
+    return climb("the statistics of a loaded graph refreshed", rungs, facts)

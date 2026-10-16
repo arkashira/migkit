@@ -732,7 +732,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/kafka.py:887` engines -> workflows (`tailctl`)
 - `migkit/engines/mongodb.py:2506` engines -> workflows (`tailctl`)
 - `migkit/engines/mysql.py:2100` engines -> workflows (`tailctl`)
-- `migkit/engines/neo4j.py:825` engines -> workflows (`tailctl`)
+- `migkit/engines/neo4j.py:960` engines -> workflows (`tailctl`)
 - `migkit/engines/opensearch.py:1874` engines -> workflows (`tailctl`)
 - `migkit/engines/postgres.py:3486` engines -> workflows (`tailctl`)
 - `migkit/engines/redis.py:2980` engines -> workflows (`tailctl`)

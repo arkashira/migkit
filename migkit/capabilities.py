@@ -3153,7 +3153,6 @@ GAPS["qdrant"] = {
        for cap in ("stream", "fence", "confirm", "delta")},
     "bulk-move": (NOT_YET, "R16b"),
     "snapshot": (NOT_YET, "R16b"),
-    "params": (NOT_YET, "R16b"),
     "statistics": (NOT_APPLICABLE, _NO_PLANNER),
 }
 GAPS["neo4j"] = {
@@ -3162,8 +3161,6 @@ GAPS["neo4j"] = {
     "confirm": (NOT_YET, "R16c"),
     "bulk-move": (NOT_YET, "R16c"),
     "snapshot": (NOT_YET, "R16c"),
-    "params": (NOT_YET, "R16c"),
-    "statistics": (NOT_YET, "R16c"),
 }
 #: the ways their code has whose test is owed: a server of each in the
 #: sandbox (`tests/servers.py`) is not there yet
