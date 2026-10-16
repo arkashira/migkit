@@ -8,7 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .. import fencing
+from .. import diagnostics, fencing
 from ..config import MIGKIT_OWN, REPORTS
 from ..decide import Need, Rung
 from ..tableway import Way
@@ -3280,12 +3280,16 @@ select json_build_object(
         if ask is None:
             def ask(sql):
                 return self._psql(side, db, sql)
-        got = ask("select plugin from pg_replication_slots"
-                  f" where slot_name = {_literal(name)}").strip()
+        got = diagnostics.probed(
+            self.hop, "slot", diagnostics.where(db, side, name),
+            lambda: ask("select plugin from pg_replication_slots"
+                        f" where slot_name = {_literal(name)}").strip())
         if not got and below:
             # `below`: a reader that follows the WAL's physical records
             # where no slot can be made takes None (`FOLLOW_WAYS`)
-            level = ask("show wal_level").strip()
+            level = diagnostics.probed(
+                self.hop, "setting", diagnostics.where(db, side, "wal_level"),
+                lambda: ask("show wal_level").strip())
             if level != "logical" and self.follow_way(
                     db, side, level).path != "logical slot":
                 return None
@@ -3297,7 +3301,9 @@ select json_build_object(
                 " from now would skip them without a trace. Move again with"
                 " --mode full+cdc, which makes the slot before it copies")
         if not got:
-            level = ask("show wal_level").strip()
+            level = diagnostics.probed(
+                self.hop, "setting", diagnostics.where(db, side, "wal_level"),
+                lambda: ask("show wal_level").strip())
             if level != "logical":
                 from .. import sourcechange
                 raise SystemExit(
@@ -3446,12 +3452,15 @@ select json_build_object(
                                  "LogicalReplicationConnection")
             except ImportError:
                 client = False
-            got = self._slot_rows(
-                side, db, "select r.rolreplication or exists (select 1"
-                " from pg_roles g where g.rolname = 'rds_replication' and"
-                " pg_has_role(current_user, g.oid, 'member')) from"
-                " pg_roles r where r.rolname = current_user")
-            granted = bool(got and got[0][0])
+            granted = diagnostics.probed(
+                self.hop, "grant", diagnostics.where(db, side, "replication"),
+                lambda: self._slot_rows(
+                    side, db, "select r.rolreplication or exists (select 1"
+                    " from pg_roles g where g.rolname = 'rds_replication' and"
+                    " pg_has_role(current_user, g.oid, 'member')) from"
+                    " pg_roles r where r.rolname = current_user"),
+                keep=lambda got: bool(got and got[0][0]))
+            granted = bool(granted and granted[0][0])
             costs = self._read_costs(side, db, slot, token) \
                 if client and granted and slot else None
             held[(side, db)] = decide.change_read(
@@ -3981,8 +3990,12 @@ select json_build_object(
             return shutil.which(str(opts.get("wal_program") or "pg_waldump"))
 
         facts = cached[(side, db)] = Facts(known, **{
-            "wal_level": lambda: str(one("show wal_level")),
-            "version": lambda: int(one("show server_version_num")),
+            "wal_level": lambda: diagnostics.probed(
+                self.hop, "setting", diagnostics.where(db, side, "wal_level"),
+                lambda: str(one("show wal_level"))),
+            "version": lambda: diagnostics.probed(
+                self.hop, "version", diagnostics.where(db, side),
+                lambda: int(one("show server_version_num"))),
             "wal functions": functions, "wal read granted": granted,
             "wal kept": kept, "wal dirs": dirs, "wal program": program,
             "no key": lambda: False,
@@ -11468,11 +11481,14 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         one sender per database in scope, on top of what is already used."""
         out = []
         dbs = len(self.databases())
-        got = self._psql("src", "postgres",
-                         "select (select count(*) from pg_replication_slots)"
-                         "||'|'||current_setting('max_replication_slots')"
-                         "||'|'||(select count(*) from pg_stat_replication)"
-                         "||'|'||current_setting('max_wal_senders')").strip()
+        got = diagnostics.probed(
+            self.hop, "slot", diagnostics.where("postgres", "src", "room"),
+            lambda: self._psql(
+                "src", "postgres",
+                "select (select count(*) from pg_replication_slots)"
+                "||'|'||current_setting('max_replication_slots')"
+                "||'|'||(select count(*) from pg_stat_replication)"
+                "||'|'||current_setting('max_wal_senders')").strip())
         used, slots, senders, max_senders = (int(x) for x in got.split("|"))
         for what, have, busy in (("max_replication_slots", slots, used),
                                  ("max_wal_senders", max_senders, senders)):
@@ -13080,7 +13096,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         if way is not None:
             way.took(sent.n, time.monotonic() - began)
         if proved is not None:
-            proved()
+            proved(sent.n)
         return sent
 
     def _passed(self, db, qt, cols, where, pre_sql, what, log, way, proved,
@@ -13179,7 +13195,7 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                     ctx.durable(lsn)
                 way.took(rows, time.monotonic() - began)
                 if proved is not None:
-                    proved()
+                    proved(rows)
                 return
             def held(choice):
                 if choice.path == way.name:
@@ -13977,6 +13993,11 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                                self._rows_of("src", db, key), log)
         pk = self._int_pk(db, sch, tbl)
         st["key"] = pk
+        if not pk:
+            # a key of any other type is copied by its own ranges
+            # (`_copy_keyed`), the same key on every resume
+            st.setdefault("keyed_by", list(
+                self.neutral_key("src", db, f"{sch}.{tbl}") or ()))
         cols = self._copy_cols(db, sch, tbl)
         from .. import tableway
         tableway.carry(self, tableway.job(
@@ -14008,6 +14029,8 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         qt, pk, cols, rf, chunk, later = (job.qt, job.pk, job.cols, job.rf,
                                           job.chunk, job.later)
         if not pk:
+            if self._copy_keyed(job):
+                return True
             if self._copy_in_spans(db, key, qt, cols, rf, st, ck, log):
                 return True
             log(f"{key}: no single int pk, single-shot copy")
@@ -14081,8 +14104,10 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
                 pred = f"({pred}) and ({rf})"
             what = f"{key} {pk} {after + 1:,} to {upto:,}"
 
-            def proved():
-                ranges.finished(st, after, ck.save)
+            def proved(rows=None):
+                # the rows it held weigh the ranges not yet taken
+                # (`ranges.refine`)
+                ranges.finished(st, after, ck.save, rows=rows)
                 log(f"{key}: {pk} {after + 1:,} to {upto:,} copied"
                     f" ({len(st['ranges_done'])} of {len(st['ranges'])}"
                     " ranges)")
@@ -14103,20 +14128,96 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
             # the rows it moved, for the move's pace
             return self._copy_checked(db, qt, cols, pred, pre, what, log,
                                       way=way, proved=proved)
+        self._each_range(slots, todo, one, ways)
+        sweep()
+        st["done"] = True
+        ck.save()
+        return True
+
+    @staticmethod
+    def _each_range(slots, todo, one, ways):
+        """`one` of every range in `todo` on the copy's slots; the ranges
+        copied before a failure are kept once proved, then it is raised."""
         failed = None
         try:
             slots.each(todo, one)
         except BaseException as e:  # noqa: BLE001 - raised once all is kept
             failed = e
         if ways is not None:
-            # the ranges copied before a failure are kept once proved
             try:
                 ways.wait()
             except BaseException as e:  # noqa: BLE001 - the first is raised
                 failed = failed or e
         if failed is not None:
             raise failed
-        sweep()
+
+    def _copy_keyed(self, job):
+        """A table whose key is not one whole number - text, a date, a
+        uuid, a composite - by ranges of that key: edges cut the way the
+        table's statistics, a sample or the key in order give them
+        (`ranges.cut`), planned once with no minimum or maximum and kept in
+        the checkpoint (`ranges.plan`), each range replaced on the target
+        under `ranges.pred` and proved as it lands. The first range is open
+        below and the last above, so every key is in one and no row of the
+        target lies outside them. False where the table has no key, its
+        checkpoint holds a plan of another kind, or an edge cannot be
+        written into a statement: then by where its rows are stored."""
+        from .. import ranges
+        db, key, st, ck, log = job.db, job.key, job.st, job.ck, job.log
+        qt, cols, rf, chunk = job.qt, job.cols, job.rf, job.chunk
+        names = list(st.get("keyed_by") or ())
+        if not names or ("ranges" in st and not st.get("keyed")):
+            return False
+        k = names[0] if len(names) == 1 else names
+        slots = ranges.active
+
+        def edges():
+            rows = int((self.table_facts("src", db).get(key) or {}).get(
+                "rows") or self._psql(
+                    "src", db, "select greatest(reltuples, 0)::bigint from"
+                    f" pg_class where oid = {_literal(qt)}::regclass")
+                or 0)
+            every = ranges.step(rows, chunk, slots.workers)
+            if rows <= every:
+                return []
+            return ranges.cut(
+                lambda sql: self.run_rule("src", db, sql), "postgresql",
+                self._quote_ident, qt, k, rows, every, where=rf, into=st,
+                log=log, label=key)
+        try:
+            todo = ranges.plan(st, None, None, edges, ck.save, table=key)
+        except ValueError as e:
+            log(f"{key}: not copied by ranges of its key ({e})")
+            return False
+        ways = self._copy_ways(db, key, qt, cols, log) if todo else None
+        if ways is not None:
+            job.later.callback(ways.close)
+        whole = not rf and len(todo) == 1 and len(st["ranges"]) == 1
+
+        def one(rng):
+            if ways is not None:
+                ways.ctx.raise_failed()
+            pred = ranges.pred(self._quote_ident, k, rng, rf)
+            what = f"{key} " + ranges.describe(k, rng)
+
+            def proved(rows=None):
+                ranges.finished(st, rng[0], ck.save, rows=rows)
+                log(f"{what} copied ({len(st['ranges_done'])} of"
+                    f" {len(st['ranges'])} ranges)")
+
+            def begin(mark):
+                ranges.started(st, rng[0], mark, ck.save)
+            pre = f"delete from {qt} where {pred}"
+            if ways is None:
+                begin(self.snapshot_mark("src", db))
+                way = None
+            else:
+                way = ways.pick(begin)
+                if whole and way.passes and self._truncatable(db, qt):
+                    pre = f"truncate {qt}"
+            return self._copy_checked(db, qt, cols, pred, pre, what, log,
+                                      way=way, proved=proved)
+        self._each_range(slots, todo, one, ways)
         st["done"] = True
         ck.save()
         return True
@@ -14500,11 +14601,14 @@ select g.who||chr(31)||acl.k||chr(31)||acl.o||chr(31)||acl.col||chr(31)
         except Exception:  # noqa: BLE001 - not known, and said so
             return None
         try:
-            with conn.cursor() as cur:
-                cur.execute("select current_setting('server_version_num')"
-                            "::int")
-                known[side] = cur.fetchone()[0]
-                return known[side]
+            def measure():
+                with conn.cursor() as cur:
+                    cur.execute("select current_setting("
+                                "'server_version_num')::int")
+                    return cur.fetchone()[0]
+            known[side] = diagnostics.probed(
+                self.hop, "version", diagnostics.where(db, side), measure)
+            return known[side]
         except Exception:  # noqa: BLE001
             return None
         finally:

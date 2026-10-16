@@ -199,6 +199,28 @@ class Reading:
     moves: list = field(default_factory=list)
     reads: int = 1
     reused: int = 0
+    #: how long the fact itself can hold, from how fast it can change
+    #: (`HOLDS`): None until it is changed on purpose (a grant until it
+    #: is revoked, a version until an upgrade), 0 for one read (a lag)
+    holds: object = None
+
+
+#: how long a probe of each kind holds by what it measures: a grant, a
+#: version, a server setting, a feature switched on (change data capture,
+#: a publication) hold until someone changes them, and that change ends
+#: them through a witness or a consumer's own bound; a lag, a slot's
+#: position, a service's running state hold for the read that took them.
+#: The keys are (kind, `where(db, side, name)`), the shape the cutover's
+#: own readings have ("open-work" of "db:side").
+HOLDS = {"grant": None, "version": None, "setting": None, "feature": None,
+         "publication": None, "slot": 0.0, "service": 0.0, "lag": 0.0}
+
+
+def where(db, side, name=""):
+    """The scope of a probe of one database on one side, and of what in it
+    (`HOLDS`): "db:side" or "db:side:name" - one spelling for every owner
+    that records or reads it."""
+    return f"{db}:{side}" + (f":{name}" if name else "")
 
 
 class ProbeAccumulator:
@@ -221,20 +243,27 @@ class ProbeAccumulator:
         self._seen = {}
 
     def record(self, kind, scope, value=None, took=0.0, ok=True, why="",
-               witness=None):
-        """Keeps one answer, with the time it was taken; returns it."""
+               witness=None, holds=..., paced=False):
+        """Keeps one answer, with the time it was taken; returns it.
+        `paced`: the answer was measured just now (`read`, `probed`), so a
+        change from the last one is a measured pace of the fact - never
+        shorter than one read of it. An answer handed in (`paced` False)
+        is kept without one: two records close together say how often it
+        was written here, not how fast it changes."""
         now = self._clock()
         with self._lock:
             before = self._seen.get((kind, scope))
             moves = list(before.moves) if before else []
             reads = before.reads + 1 if before else 1
-            if before and before.ok and ok and (
+            if holds is ...:
+                holds = before.holds if before else None
+            if paced and before and before.ok and ok and (
                     before.value != value or before.witness != witness):
-                moves.append(max(now - before.taken, 0.0))
+                moves.append(max(now - before.taken, took, before.took))
             got = Reading(kind, scope, value, now, took, ok,
                           str(why).strip().splitlines()[-1][:160]
                           if str(why).strip() else "", witness, moves, reads,
-                          before.reused if before else 0)
+                          before.reused if before else 0, holds)
             self._seen[(kind, scope)] = got
             return got
 
@@ -252,11 +281,15 @@ class ProbeAccumulator:
 
     def allowed_age(self, got, max_age=None):
         """How old `got` may be and still be used: the consumer's own
-        bound, cut to half the shortest interval this probe was seen to
-        change in. None where nothing bounds it (then only its witness
-        and a failed read end it)."""
+        bound, cut to half the shortest interval this probe was measured
+        to change in and to how long the fact holds (`HOLDS`) - neither
+        below the time the probe took to read. None where nothing bounds
+        it (then only its witness and a failed read end it)."""
         pace = min((m for m in got.moves if m > 0), default=None)
-        bounds = [b for b in (max_age, pace / 2 if pace else None)
+        bounds = [b for b in (max_age,
+                              max(pace / 2, got.took) if pace else None,
+                              max(got.holds, got.took)
+                              if got.holds is not None else None)
                   if b is not None]
         return min(bounds) if bounds else None
 
@@ -289,10 +322,32 @@ class ProbeAccumulator:
             value = measure()
         except Exception as e:  # noqa: BLE001 - kept as the reason
             self.record(kind, scope, None, self._clock() - began, False,
-                        str(e) or type(e).__name__, witness)
+                        str(e) or type(e).__name__, witness,
+                        paced=True)
             return None
         self.record(kind, scope, value, self._clock() - began, True, "",
-                    witness)
+                    witness, paced=True)
+        return value
+
+    def probed(self, kind, scope, measure, witness=None, holds=...,
+               keep=None):
+        """`measure()` run now, its answer kept as a measured reading
+        held as long as its kind holds (`HOLDS`), and handed back as it
+        came; one that raises is kept failed, with why, and raised on - an
+        owner's probe behaves as it did, and the next owner that needs the
+        fact asks `read` before the server. `keep` turns the raw answer
+        into the fact kept, so two owners that ask the same thing in
+        different shapes keep one."""
+        holds = HOLDS.get(kind) if holds is ... else holds
+        began = self._clock()
+        try:
+            value = measure()
+        except Exception as e:
+            self.record(kind, scope, None, self._clock() - began, False,
+                        str(e) or type(e).__name__, witness, holds, True)
+            raise
+        self.record(kind, scope, keep(value) if keep else value,
+                    self._clock() - began, True, "", witness, holds, True)
         return value
 
     def refusals(self, needs, max_age=None):
@@ -355,6 +410,14 @@ def accumulator(hop):
         if got is None:
             got = _ACCUMULATORS[name] = ProbeAccumulator()
         return got
+
+
+def probed(hop, kind, scope, measure, witness=None, holds=..., keep=None):
+    """`ProbeAccumulator.probed` on the hop's own accumulator; a probe with
+    no hop to keep it in (an engine built bare) is only run."""
+    if hop is None or not getattr(hop, "name", None):
+        return measure()
+    return accumulator(hop).probed(kind, scope, measure, witness, holds, keep)
 
 
 def forget(hop):

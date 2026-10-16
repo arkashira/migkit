@@ -1,7 +1,7 @@
 import re
 import time
 
-from .. import canon, commercial, decide, pieces
+from .. import canon, commercial, decide, diagnostics, pieces
 from .base import Engine, RepairAction, Result, clauses, rows_counted
 from .dbapi import MARK, DbapiRows
 
@@ -62,6 +62,11 @@ def _listed(unread, bad):
     return ("; ".join(f"{k} ({v})" for k, v in list(unread.items())[:5])
             + (f"; and {len(bad)} differ: " + "; ".join(bad[:3])
                if bad else ""))
+
+
+def _tracking_on(rows):
+    """Change Tracking on for a database, from either reader's answer."""
+    return bool(rows and int(rows[0][0] or 0))
 
 class MSSQLEngine(DbapiRows, Engine):
     checks = ("schema", "counts", "autoinc", "data")
@@ -962,8 +967,6 @@ class MSSQLEngine(DbapiRows, Engine):
                               + said,
                               tables=outcomes,
                               table=str(table) if table else ""))
-        for t in masked:
-            res += self.columns_pair().check_data(db, t, stream)
         return res
 
     #: CLR types a row hash reads through their own rendering: `FOR JSON`
@@ -2164,9 +2167,12 @@ class MSSQLEngine(DbapiRows, Engine):
         """(source, target) `ProductVersion` - `16.0.4135.4` - as each
         server reports it, held to each other by `assess`."""
         def one(side):
-            got = self._rows(side, "master",
-                             "select cast(serverproperty('ProductVersion')"
-                             " as nvarchar(128))")
+            got = diagnostics.probed(
+                self.hop, "version", diagnostics.where("master", side),
+                lambda: self._rows(side, "master",
+                                   "select cast(serverproperty("
+                                   "'ProductVersion') as nvarchar(128))"),
+                keep=lambda r: str(r[0][0]) if r and r[0][0] else None)
             return str(got[0][0]) if got and got[0][0] else None
         return one("src"), one("dst")
 
@@ -2232,9 +2238,14 @@ class MSSQLEngine(DbapiRows, Engine):
         """Change Tracking is the feed a tail reads here: on for the
         database, and on for each table the hop moves."""
         from .. import sourcechange as sc
-        on = self._rows("src", db,
-                        "select count(*) from sys.change_tracking_databases"
-                        " where database_id = db_id()")
+        on = diagnostics.probed(
+            self.hop, "feature", diagnostics.where(db, "src",
+                                                   "change tracking"),
+            lambda: self._rows("src", db,
+                               "select count(*) from"
+                               " sys.change_tracking_databases"
+                               " where database_id = db_id()"),
+            keep=_tracking_on)
         if not on or not int(on[0][0] or 0):
             return [{"level": "warn", "scope": db, "item": "change tracking",
                      "detail": sc.requirement("change_tracking", "off",
@@ -2913,8 +2924,13 @@ class MSSQLEngine(DbapiRows, Engine):
         advance the version only on a clean cycle. Requires CT enabled."""
         import json
         state = self.hop.report_dir(db) / "delta-ctver.json"
-        on = self._cmd("src", db, "select count(*) from"
-                     " sys.change_tracking_databases where database_id = db_id()")
+        on = diagnostics.probed(
+            self.hop, "feature", diagnostics.where(db, "src",
+                                                   "change tracking"),
+            lambda: self._cmd("src", db, "select count(*) from"
+                              " sys.change_tracking_databases where"
+                              " database_id = db_id()"),
+            keep=_tracking_on)
         if not on or on[0][0] != "1":
             from .. import sourcechange as sc
             # the same words as the DBA's script and every other refusal

@@ -66,9 +66,9 @@ def test_a_witness_that_moved_ends_a_reading_whatever_its_age():
 
 def test_a_probe_seen_to_change_is_held_to_half_its_pace():
     acc, clock = _acc()
-    acc.record("rate", "src", 10)
+    acc.record("rate", "src", 10, paced=True)
     clock.now += 8
-    acc.record("rate", "src", 20)
+    acc.record("rate", "src", 20, paced=True)
     got = acc.get("rate", "src")
     assert got.moves == [8.0]
     assert acc.allowed_age(got, max_age=60) == 4.0
