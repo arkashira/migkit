@@ -3630,7 +3630,6 @@ def two_site_rule(facts):
              " both wrote held and logged", footprint=1)), f)
 
 
-<<<<<<< HEAD
 # --- a tail batch applied as typed columns or as change records (R19.9) ----
 
 _TAIL_HOLDS = {"consistent": "as of one moment", "idempotent": "converges",
@@ -3722,8 +3721,6 @@ def orphan_ways():
     from .engines import NAMES
     return [(s, e) for s, ways in WAYS.items() for e in ways
             if s not in SHAPES or (e != "*" and e not in NAMES)]
-||||||| 8581f2a4
-=======
 def redis_seed(facts):
     """The `Choice` of how a Redis tail's full start fills the target.
 
@@ -3763,4 +3760,3 @@ def redis_seed(facts):
                      " offset, and no key is read from the source"),
         Rung("scan", "every key read again from the source and written",
              footprint=1)), f)
->>>>>>> w13b
