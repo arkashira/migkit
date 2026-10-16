@@ -83,7 +83,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/failpoint.py` - Failure on purpose, at the places a move keeps what it has done.
 - `migkit/faults.py` - What can go wrong in a migration, how each is told by its effect, and what is done about it (backlog P0-RESILIENCE-ALL). Classes: Fault, Told, Breaker, Owned, Injected.
 - `migkit/fencing.py` - A mover's token, carried into every transaction it writes, so that a mover which lost its hold is refused by the target itself (backlog W1). Classes: Fenced, Token.
-- `migkit/fleet.py` - One table's ranges across machines, as the machine that takes a hop over finds them, and the proof once the table is done that every range w Classes: Account.
+- `migkit/fleet.py` - One table's ranges across machines, as the machine that takes a hop over finds them, and the proof once the table is done that every range w Classes: Departed, Account.
 - `migkit/freeze.py` - Keep the application from writing to the target until cutover - and, at the cutover of a hop that asks for it, from writing to the source. Classes: Hold, GroupHold, PostgresHold, MySQLHold, TiDBHold, MongoHold.
 - `migkit/fromsnapshot.py` - An OpenSearch or Elasticsearch index copied from the source's own snapshot by the snapshot reader of OpenSearch's migration project (backlog
 - `migkit/geo.py` - A shape - a geometry or a geography - as its SRID and its well-known binary, with x the longitude and y the latitude. Classes: Shape.
@@ -103,7 +103,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/kafkaclient.py` - The stream client a Kafka target is written through, and the codec its messages go in (backlog R18.7). Classes: StreamError, Refused, Sent, NativeProducer, Handle, Stepping.
 - `migkit/kept.py` - The proof kept up as the data moves (backlog R20.8; incremental multiset hashing, docs/research/diff-algorithms-2026-09-28.md section 8). Classes: Store, Table, Keeper.
 - `migkit/lacks.py` - What the source uses that the target does not have, asked of both servers (backlog P0-SCENARIOS: a version down, a fork, an edition). Classes: Side, Feature.
-- `migkit/lease.py` - A write operation's hold on a hop, as a lease with a heartbeat (backlog 30). Classes: Held, Lost, Lease.
+- `migkit/lease.py` - A write operation's hold on a hop, as a lease with a heartbeat (backlog 30). Classes: Jitter, Held, Lost, Lease.
 - `migkit/leaves.py` - A table's digest as a tree, every leaf of it in one scan a side, and the rows that differ read only from the leaves that differ (backlog R20 Classes: Spec, Side, Hasher, Tree, Found, Localized.
 - `migkit/leftovers.py` - What a mover added to the source and never took away. Classes: Named.
 - `migkit/legs.py` - The fewest legs the rows can take, and where migkit should stand (backlog R22, item 4). Classes: Footprint.

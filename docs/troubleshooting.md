@@ -2171,6 +2171,16 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: <...>, and start the tail again
 
+* <...>: the hops of one topology say different things - <...>
+
+* <...>: the key space of <...> written by <...> differs from what another hop from the same source says
+
+* <...>: <...> of <...> is not a key space (range, stride or values)
+
+* <...>: <...> <...> differs from what another hop of the topology says
+
+* <...>: <...> sends <...> to <...>, another hop to <...>
+
 * `<...>` is not a transform: null, constant <text>, hash or truncate <n>
 
 * a random value cannot be held to anything after the load, and a second run writes another

@@ -311,6 +311,9 @@ class Holding:
         self.accounts = {}
         #: {(db, key): [finding]} of the last audit of the shared tables
         self.audited = {}
+        #: {db: the last holder's ledgers} as its saved record kept them
+        #: (`fleet.kept`), read when the hop is taken over
+        self.left = {}
         self.previous = {}
         self._push_lock = threading.Lock()
         self._stop = threading.Event()
@@ -414,20 +417,42 @@ class Holding:
     def _take_ranges_over(self, eng):
         """The ranges the stopped holder's movers held put back at once,
         not after their own term (`fleet.take_hop_over`), read with what
-        its ledger left open where this machine has that ledger."""
-        from . import attempts, claims
+        its ledger left open: the ledger it saved in the machines' store
+        (`fleet.kept`), wherever it ran, joined with this machine's own.
+        Where the ledger and the machines' record disagree on a range the
+        record stands and the conflict is kept in the changelog."""
+        from . import attempts, audit, claims
         was = self.lease.took_over
         if not was or not claims.shared_ranges(self.hop):
             return
+        left = fleet.Departed.of(*self.left.values())
+        if left.empty():
+            self.say("the stopped holder's ledger was not in the machines'"
+                     " store; the ranges it held are read from the"
+                     " machines' record alone")
+        if left.unread:
+            self.say(f"the stopped holder's ledger could not be read"
+                     f" ({', '.join(sorted(set(left.unread)))}); the"
+                     " machines' record alone says what is done")
+        view = left.joined(attempts.ledger_of(
+            getattr(eng, "src_engine", None) or eng))
         try:
             self.accounts = fleet.take_hop_over(
-                self.hop, was, self.store, self.say,
-                attempts.ledger_of(getattr(eng, "src_engine", None) or eng),
-                self.dbs)
+                self.hop, was, self.store, self.say, view, self.dbs)
         except Exception as e:  # noqa: BLE001 - claims lapse by their own term
             self.say(f"the stopped holder's ranges were not read"
                      f" ({_first(e)}); each is claimable once its term"
                      " lapses")
+            return
+        found = [f"{key}: {c}" for (_, key), acc in
+                 sorted(self.accounts.items()) for c in acc.conflicts]
+        if found:
+            try:
+                audit.append(self.hop.report_dir() / "changelog.jsonl",
+                             {"op": "ledger-conflict", "findings": found})
+            except Exception as e:  # noqa: BLE001 - said by the account above
+                self.say(f"the ledger conflicts were not written to the"
+                         f" changelog ({_first(e)})")
 
     def _audit(self):
         """The shared tables' records read for a range copied twice or
@@ -493,6 +518,7 @@ class Holding:
         self.previous[db] = []
         files = have.get("files") or {}
         place(where, files, have.get("blobs") or {}, self.store)
+        self.left[db] = have.get("ledgers")
         self.stamps[db] = self._stamps(where)
         taken = have.get("epoch") or {}
         self.took_over = taken or self.took_over
@@ -530,7 +556,9 @@ class Holding:
 
     def _stamps(self, where):
         return tuple((n, _stamp(where / n))
-                     for n in _text_files(where) + _blob_files(where))
+                     for n in _text_files(where) + _blob_files(where)) \
+            + tuple((p.name, _stamp(p)) for p in
+                    fleet.ledger_files(self.hop.report_dir()))
 
     def _record(self, db, blobs_before):
         where = self.hop.report_dir(db)
@@ -543,6 +571,7 @@ class Holding:
         return {"fence": self.token.number, "by": self.lease.me,
                 "host": socket.gethostname(), "pid": os.getpid(),
                 "at": time.time(), "files": files, "blobs": blobs,
+                "ledgers": fleet.kept(self.hop.report_dir()),
                 "previous": self.previous.get(db) or [],
                 "epoch": dict(epoch)}
 
@@ -654,7 +683,11 @@ def lock(hop, say):
                     + (f" process {have.get('pid')}" if have.get("pid")
                        else "")
                     + f" holds {hop.name}; this machine takes it over"
-                      f" within {term():.0f}s of its last renewal")
+                      f" within {term():.0f}s of its last renewal"
+                      + (f", {_lease.lapse(have) - have['expires']:.1f}s"
+                         " more for the holder's measured jitter"
+                         if _lease.lapse(have) > have.get("expires", 0)
+                         else ""))
                 said = who
             try:
                 beat(hop, store, "standing by")

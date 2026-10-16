@@ -21,7 +21,16 @@ adds is what the taker does with the ranges of the one it took over from:
                 ledger left open (`attempts.Ledger`, read only): each
                 range done (kept - done is accepted only from the claim
                 that held it, after the range was read back), taken back,
-                held by a machine still in its term, or left to copy
+                held by a machine still in its term, or left to copy. The
+                machines' record stays the truth: where the ledger says a
+                range closed and the record does not hold it done, the
+                record stands, the range is copied again and the conflict
+                is said and audited
+    kept        a mover's ledger, the part a taker needs - its range units
+                and the operations it left uncertain - put in the machines'
+                store with the hop's saved position (`ha`), so the machine
+                that takes the hop over reads the ledger of the one that
+                stopped, wherever that ran, not only its own (`Departed`)
     audit       the record of a table said done, read for what would
                 mean a range copied twice or lost: spans that leave a gap
                 or overlap, a range with no state or a state with no
@@ -34,6 +43,9 @@ import re
 import time
 
 from . import claims
+
+#: the files a mover keeps its ledger in, beside the hop's reports
+LEDGER_FILES = "attempts*.json"
 
 
 def mover_of(took_over):
@@ -58,12 +70,13 @@ def parse_unit(name):
 
 def opened(ledger, table):
     """{after or name: the unit's record} of the ranges of `table` the
-    ledger has open - begun and never closed - and the operations it
-    keeps uncertain that name the table. Read only."""
+    ledger has open - begun and never closed - or closed failing (owed
+    again), and the operations it keeps uncertain that name the table.
+    Read only."""
     out = {}
     for name, rec in dict(ledger.records).items():
         if rec.get("level") != "range" or rec.get("parent") != table \
-                or rec.get("state") != "open":
+                or rec.get("state") not in ("open", "failed"):
             continue
         got = parse_unit(name)
         out[got[1] if got and got[0] == table else name] = dict(rec)
@@ -73,6 +86,96 @@ def opened(ledger, table):
             out.setdefault(int(after) if after is not None else key,
                            dict(rec))
     return out
+
+
+def ledger_files(where):
+    """The ledger files a mover keeps in the report directory `where`."""
+    from pathlib import Path
+    where = Path(where)
+    return sorted(where.glob(LEDGER_FILES)) if where.is_dir() else []
+
+
+def kept(where):
+    """{"at", "ledgers": {file: {"units": the range units, "operations":
+    the uncertain ones}}, "unread": [files]} of the ledgers in `where`:
+    what a taker of the hop needs of them, small enough to ride in the
+    record of the hop's saved position. A ledger that cannot be read
+    (torn, with no snapshot) is named in `unread`, not left out."""
+    from . import attempts
+    from .durable import Torn
+    out, unread = {}, []
+    for path in ledger_files(where):
+        try:
+            led = attempts.Ledger(path)
+        except (Torn, OSError, ValueError):
+            unread.append(path.name)
+            continue
+        out[path.name] = {
+            "units": {n: dict(r) for n, r in dict(led.records).items()
+                      if r.get("level") == "range"},
+            "operations": led.uncertain()}
+    return {"at": time.time(), "ledgers": out, "unread": unread}
+
+
+class Departed:
+    """A mover's ledger as the machines' store kept it (`kept`), read the
+    way `opened` and `conflicts` read a ledger: `records`, `uncertain()`
+    and `range_units(table)`. Read only; the unit a later opening made
+    wins where two files name one."""
+
+    def __init__(self, units=None, operations=None, unread=(), at=None):
+        self.records = dict(units or {})
+        self.operations = dict(operations or {})
+        self.unread = tuple(unread)
+        self.at = at
+
+    @classmethod
+    def of(cls, *saved):
+        """The ledgers of every `kept` given (None and a record that holds
+        none are skipped), joined."""
+        out = cls()
+        for got in saved:
+            if not isinstance(got, dict):
+                continue
+            out.unread += tuple(got.get("unread") or ())
+            out.at = max(filter(None, (out.at, got.get("at"))), default=None)
+            for led in (got.get("ledgers") or {}).values():
+                out._take(led.get("units"), led.get("operations"))
+        return out
+
+    def _take(self, units, operations):
+        for name, rec in dict(units or {}).items():
+            old = self.records.get(name)
+            if old is None or float(rec.get("started") or 0) >= \
+                    float(old.get("started") or 0):
+                self.records[name] = dict(rec)
+        for key, rec in dict(operations or {}).items():
+            self.operations.setdefault(key, dict(rec))
+
+    def joined(self, ledger):
+        """This view and `ledger` (an `attempts.Ledger`, or None), the one
+        a taker reads: what the stopped mover kept and what this machine's
+        own ledger holds."""
+        out = Departed(self.records, self.operations, self.unread, self.at)
+        if ledger is not None:
+            out._take(getattr(ledger, "records", None),
+                      ledger.uncertain() if hasattr(ledger, "uncertain")
+                      else None)
+        return out
+
+    def empty(self):
+        return not self.records and not self.operations
+
+    def uncertain(self):
+        return {k: dict(v) for k, v in self.operations.items()}
+
+    def range_units(self, table):
+        out = {}
+        for name, rec in dict(self.records).items():
+            got = parse_unit(name)
+            if got and got[0] == table and rec.get("level") == "range":
+                out[got[1]] = dict(rec)
+        return out
 
 
 def departed(rec, gone, now):
@@ -104,6 +207,8 @@ class Account:
     todo: list
     #: ranges (or units) the departed mover's ledger had open
     uncertain: dict
+    #: where the ledger and the machines' record disagree on a range
+    conflicts: list = dataclasses.field(default_factory=list)
 
     def lines(self, table):
         out = [f"{table}: {len(self.done)} ranges done and kept,"
@@ -121,13 +226,43 @@ class Account:
             out.append(f"{table}: work the stopped mover left open names no"
                        f" range ({', '.join(loose)}); every range not done"
                        " is copied again from an emptied span")
+        out += [f"{table}: {c}" for c in self.conflicts]
         return out
 
 
-def reconcile(rec, uncertain, now, lapsed_from=None):
+def conflicts(rec, ledger, table):
+    """What the machines' record `rec` of `table` and the ledger of the
+    mover that stopped say differently of a range: the ledger closed it
+    done and the record does not hold it done, or the ledger names a range
+    the record has none of. The record stands in both - the range is copied
+    again from an emptied span - and each is said so it is audited."""
+    units = getattr(ledger, "range_units", None)
+    if not callable(units) or not rec or rec.get("ranges") is None:
+        return []
+    out = []
+    state = rec.get("state") or {}
+    for after, unit in sorted(units(table).items()):
+        if unit.get("state") != "done":
+            continue
+        have = state.get(str(after))
+        if have is None:
+            out.append(f"the stopped mover's ledger closed the range after"
+                       f" {after} done, which the machines' record has no"
+                       " range for: the record stands")
+        elif have["state"] != claims.DONE:
+            out.append(f"the stopped mover's ledger closed the range after"
+                       f" {after} done, but the machines' record holds it"
+                       f" {have['state']}: the record stands, the range is"
+                       " copied again from an emptied span")
+    return out
+
+
+def reconcile(rec, uncertain, now, lapsed_from=None, ledger=None,
+              table=None):
     """The `Account` of the table's record at `now`; `uncertain` is what
     `opened` read of the departed mover's ledger, `lapsed_from` the
-    claims `departed` just put back (their afters)."""
+    claims `departed` just put back (their afters), `ledger` the departed
+    mover's ledger the record is also held against (`conflicts`)."""
     done, back, held, todo = [], [], [], []
     taken = set(lapsed_from or ())
     for a, _ in rec["ranges"]:
@@ -141,7 +276,9 @@ def reconcile(rec, uncertain, now, lapsed_from=None):
             back.append(a)
         else:
             todo.append(a)
-    return Account(done, back, held, todo, dict(uncertain))
+    return Account(done, back, held, todo, dict(uncertain),
+                   conflicts(rec, ledger, table) if ledger is not None
+                   else [])
 
 
 def take_over(table, took_over, ledger=None, name=None):
@@ -163,7 +300,7 @@ def take_over(table, took_over, ledger=None, name=None):
             and before["state"][str(a)].get("by") == gone]
     name = name or before.get("key") or ""
     return reconcile(rec, opened(ledger, name) if ledger else {},
-                     now, back)
+                     now, back, ledger, name)
 
 
 def audit(rec):

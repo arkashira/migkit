@@ -26,7 +26,17 @@ last one's. The number is what the target holds a writer to
 target refuse one that no longer may. Such a holder also knows how long
 ago it last renewed (`fresh`): past two thirds of the term it cannot be
 sure it still holds, and writes nothing until a renewal says it does.
+
+A holder measures its own heartbeat (`Jitter`): how much later than its
+third of the term each renewal came, and how long the write took. What
+the worst of the recent ones shows rides in its record (`jitter`), and a
+taker waits that long past the term (`lapse`) before it calls the lease
+lapsed - a holder whose renewals run late is not taken over while it is
+only late, and one whose heartbeat is steady is taken over at its term.
+The allowance is bounded by the holder's own term, so a record that
+claims more can not keep the hop from being taken.
 """
+import collections
 import fcntl
 import json
 import os
@@ -40,6 +50,46 @@ def term():
         return max(float(os.environ.get("MIGKIT_LEASE_SECONDS", "60")), 1.0)
     except ValueError:
         raise SystemExit("MIGKIT_LEASE_SECONDS is not a number of seconds")
+
+
+def lapse(have):
+    """The moment (epoch seconds) from which the lease `have` may be taken
+    over: its expiry and the jitter its holder measured of its own
+    renewals, no more than one term of it."""
+    expires = float(have.get("expires") or 0)
+    if not expires:
+        return 0.0
+    try:
+        late = float(have.get("jitter") or 0)
+    except (TypeError, ValueError):
+        late = 0.0
+    term = max(expires - float(have.get("renewed") or expires), 0.0)
+    return expires + (min(late, term) if late > 0 else 0.0)
+
+
+class Jitter:
+    """How late a holder's renewals ran: for each one, the seconds past
+    the interval it was due and the seconds its write took, the recent ones
+    kept. `allowance` is the worst of them - what a taker should add to
+    the term before it takes the lease from a holder that is only late."""
+
+    #: the renewals whose timing is kept
+    KEPT = 32
+
+    def __init__(self):
+        self._late = collections.deque(maxlen=self.KEPT)
+        self._lock = threading.Lock()
+
+    def beat(self, gap, due, wrote):
+        """One renewal that came `gap` seconds after the one before, due
+        every `due` seconds, its write taking `wrote`."""
+        with self._lock:
+            self._late.append(max(float(gap) - float(due), 0.0)
+                              + max(float(wrote), 0.0))
+
+    def allowance(self):
+        with self._lock:
+            return round(max(self._late, default=0.0), 3)
 
 
 class Held(SystemExit):
@@ -186,8 +236,7 @@ def liveness(have, now=None):
         got = _pid_alive(have.get("pid"))
         if got is not None:
             return got
-    return float(have.get("expires") or 0) > (time.time() if now is None
-                                              else now)
+    return lapse(have) > (time.time() if now is None else now)
 
 
 def holder(path, remote=None, legacy=None):
@@ -200,7 +249,7 @@ def holder(path, remote=None, legacy=None):
             have = None
     else:
         have = _FileRecord(path, legacy).read()
-    if not liveness(have) or have.get("expires", 0) <= time.time():
+    if not liveness(have) or lapse(have) <= time.time():
         return None
     return have
 
@@ -226,6 +275,9 @@ class Lease:
         #: what the record held when this holder found it was not its any
         #: more
         self.lost = None
+        #: how late this holder's renewals run (`Jitter`), written to its
+        #: record so a taker waits for it
+        self.jitter = Jitter()
         self._stop = threading.Event()
         self._beat = None
         self._renewing = threading.Lock()
@@ -238,7 +290,7 @@ class Lease:
             now = time.time()
             self.took_over = self.unheld = None
             if have and have.get("holder") and have.get("holder") != self.me:
-                if have.get("expires", 0) > now and not self._dead(have):
+                if lapse(have) > now and not self._dead(have):
                     raise Held(
                         f"another migkit {have.get('what', 'operation')} is"
                         f" running on this hop ({have.get('host')}, process"
@@ -246,7 +298,7 @@ class Lease:
                         f" {time.strftime('%H:%M:%S', time.localtime(have.get('since', now)))});"
                         " its lease is renewed while it runs, so wait for it"
                         f" - or, if it is gone, for the lease to lapse"
-                        f" ({int(have['expires'] - now)}s)")
+                        f" ({int(lapse(have) - now)}s)")
                 self.took_over = have
                 heard = have.get("renewed") or have.get("since")
                 self.unheld = max(0.0, now - float(heard)) if heard else None
@@ -289,7 +341,8 @@ class Lease:
                 lost.append(have)
                 return KEEP
             now = time.time()
-            return {**have, "renewed": now, "expires": now + self.term()}
+            return {**have, "renewed": now, "expires": now + self.term(),
+                    "jitter": self.jitter.allowance()}
         with self._renewing:
             if self.lost is not None:
                 return False
@@ -298,6 +351,9 @@ class Lease:
             if lost:
                 self.lost = lost[0] or {}
                 return False
+            if self.renewed is not None:
+                self.jitter.beat(began - self.renewed, self.term() / 3,
+                                 time.monotonic() - began)
             self.renewed = began
             return True
 

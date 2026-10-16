@@ -5685,6 +5685,20 @@ the gaps nothing above covers yet, now items of their own.
   ledger on another machine is not read (only this machine's ledger; the
   machines' record stays the truth), and `capabilities` text for fleet and
   topology (W12F's file).
+  *Closed 2026-10-16 (W13N, tests written, `test_takeover_reads_the_departed_ledger.py`):*
+  each push of the hop's saved position carries the holder's range units and
+  uncertain operations (`fleet.kept`, `ha.Holding._record`; the ledger's
+  stamp is in the push test), and the taker reads them
+  (`fleet.Departed`, joined with its own ledger) so ranges resume from the
+  departed machine's units; the machines' record stays the truth, and where
+  the ledger closed a range the record does not hold done the conflict is
+  said, put in the changelog (`ledger-conflict`) and the range copied again.
+  The lease waits for its holder's measured heartbeat jitter past the term
+  (`lease.Jitter`, `lease.lapse`), bounded by the holder's own term.
+  *Not done:* a ledger unit is only as fresh as the last push (two seconds,
+  or the next batch); the topology keys are read by the names
+  `key_spaces`, `conflict_rule` and `routing` (`topology.SPACES_KEY` and the
+  two beside it) and are inert until `hopkeys` declares them (W13H).
 * **W2. The estate, not the hop.** Discovery of every database on a
   network or account, target sizing from the source's performance
   history (Azure's SKU recommendations, Fleet Advisor), cost of the
@@ -7130,6 +7144,11 @@ researched:
   after each hop, the next not begun on a failed one. Not done: the
   servers' own facts (key spaces, the conflict rule) are still passed in,
   the facts are not yet a hop key, a docker run of each shape.
+  *Read from the hop 2026-10-16 (W13N):* `topology.facts_of` reads each
+  source's key space, the conflict rule and the fan-out's routing from the
+  hops' own keys (hops that say different things are refused by name; what
+  is passed in stands over them) and carries the measured link rates and
+  the unmeasured links in the facts.
 * Tested in docker: pairs of mysql:8.4 and mariadb:11, both directions
   writing, echoes counted (must be 0), both sides hashed equal.
 

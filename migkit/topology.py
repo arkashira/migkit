@@ -360,18 +360,117 @@ def layout(hops, speed=None):
     return Layout(sites, links, len(hops), shape(links), rates)
 
 
+#: the hop options the topology reads by name (declared in `hopkeys`):
+#: {table: key space} of the hop's source, the conflict rule where sources
+#: meet, and the fan-out's routing rule
+SPACES_KEY, CONFLICT_KEY, ROUTING_KEY = "key_spaces", "conflict_rule", \
+    "routing"
+
+
+def _said(hop, name):
+    """What the hop says under `name`, as `hopkeys` reads it; None where
+    the hop says nothing or the key is not one a hop can carry."""
+    from . import hopkeys
+    options = getattr(hop, "options", None)
+    if not isinstance(options, dict) or name not in hopkeys.HOP_OPTIONS:
+        return None
+    return hopkeys.opt(options, name)
+
+
+def _agreed(hops, name, what):
+    """The one value every hop that names `name` gives; a refusal naming
+    the hops where two of them give different ones - a topology decided on
+    one of two rules would silently ignore the other's."""
+    seen = {}
+    for h in hops:
+        got = _said(h, name)
+        if got not in (None, "", {}):
+            seen.setdefault(repr(got), (got, []))[1].append(h.name)
+    if len(seen) > 1:
+        raise SystemExit(
+            f"{what}: the hops of one topology say different things - "
+            + "; ".join(f"{', '.join(names)}: {got!r}"
+                        for got, names in seen.values()))
+    return next(iter(seen.values()))[0] if seen else None
+
+
+def spaces_of(hops):
+    """{site: {table: spec}} of the key spaces the hops say their sources
+    write (`key_spaces`); two hops from one source that give a table two
+    spaces are refused."""
+    out = {}
+    for h in hops:
+        got = _said(h, SPACES_KEY)
+        if not got:
+            continue
+        mine = out.setdefault(site(h.source), {})
+        for table, spec in dict(got).items():
+            try:
+                KeySpace.of(spec)
+            except (TypeError, ValueError):
+                raise SystemExit(
+                    f"{h.name}: {SPACES_KEY} of {table} is not a key space"
+                    " (range, stride or values)") from None
+            if table in mine and mine[table] != spec:
+                raise SystemExit(
+                    f"{h.name}: the key space of {table} written by"
+                    f" {site(h.source)} differs from what another hop from"
+                    " the same source says")
+            mine[table] = spec
+    return out
+
+
+def route_of(hops):
+    """The fan-out's routing rule the hops say (`routing`), their tables
+    joined: {"by", "tables", "bounds"} or {} where none says one. Hops that
+    name different rules, bounds or a table's target twice differ."""
+    out = {}
+    for h in hops:
+        got = _said(h, ROUTING_KEY)
+        if not got:
+            continue
+        got = dict(got)
+        for k in ("by", "bounds"):
+            if got.get(k) and out.get(k) not in (None, got[k]):
+                raise SystemExit(f"{h.name}: {ROUTING_KEY} {k} differs from"
+                                 " what another hop of the topology says")
+            if got.get(k):
+                out[k] = got[k]
+        for table, target in dict(got.get("tables") or {}).items():
+            tables = out.setdefault("tables", {})
+            if tables.setdefault(table, target) != target:
+                raise SystemExit(f"{h.name}: {ROUTING_KEY} sends {table} to"
+                                 f" {target}, another hop to"
+                                 f" {tables[table]}")
+    return out
+
+
 def facts_of(hops, tables, spaces=None, conflict=None, route=None,
              marks=None, speed=None):
     """(the topology's decision facts, its `Layout`) read from the hops:
-    kind, sources, targets and links come from the hops' endpoints; what
-    only the operator knows - the tables' keys, each source's key space,
-    the conflict rule, a fan-out's routing - is passed in."""
+    kind, sources, targets and links come from the hops' endpoints; each
+    source's key space, the conflict rule and a fan-out's routing come from
+    the hops' own keys (`key_spaces`, `conflict_rule`, `routing`), what is
+    passed in standing over what they say; each link's rate is the
+    measured one (`Layout.speeds`) and rides in the facts, with the links
+    that have none. Only the tables' keys, and which nodes mark migkit's
+    writes, are not in the hops."""
     from . import scenarios
+    hops = list(hops)
     lay = layout(hops, speed)
     sources = sorted({a for a, _ in lay.links})
     targets = sorted({b for _, b in lay.links})
     if lay.kind == "mesh":
         sources = targets = list(lay.sites)
-    return scenarios.topology_facts(
-        lay.kind, sources, targets, tables, spaces, conflict, route, marks,
-        lay.links), lay
+    said = spaces_of(hops)
+    for src, mine in dict(spaces or {}).items():
+        said[src] = {**said.get(src, {}), **dict(mine or {})}
+    facts = scenarios.topology_facts(
+        lay.kind, sources, targets, tables, said,
+        conflict or _agreed(hops, CONFLICT_KEY, "conflict_rule"),
+        route or route_of(hops), marks, lay.links)
+    facts["speeds"] = {k: v for k, v in sorted(lay.speeds.items())
+                       if v is not None}
+    facts["unmeasured"] = tuple(k for k in lay.links
+                                if lay.speeds.get(k) is None)
+    return facts, lay
