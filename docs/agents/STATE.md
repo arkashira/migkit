@@ -20,7 +20,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | cosmosdb | 16/16 | 12/12 | 20 | - |
 | couchbase | 16/16 | 12/12 | 48 | - |
 | databricks | 16/16 | 5/12 | 74 | keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
-| datastore | 16/16 | 11/12 | 37 | large values |
+| datastore | 16/16 | 12/12 | 37 | - |
 | db2 | 16/16 | 12/12 | 66 | - |
 | db2i | 16/16 | 12/12 | 69 | - |
 | db2zos | 16/16 | 12/12 | 61 | - |
@@ -30,7 +30,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | duckdb | 16/16 | 12/12 | 46 | - |
 | dynamodb | 16/16 | 12/12 | 7 | - |
 | exasol | 16/16 | 5/12 | 74 | keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
-| firestore | 16/16 | 11/12 | 42 | large values |
+| firestore | 16/16 | 12/12 | 42 | - |
 | gaussdb | 16/16 | 12/12 | 67 | - |
 | geminidb-cassandra | 16/16 | 12/12 | 48 | - |
 | geminidb-mongo | 16/16 | 12/12 | 49 | - |
@@ -66,7 +66,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | sapodp | 16/16 | 12/12 | 22 | - |
 | singlestore | 16/16 | 12/12 | 74 | - |
 | snowflake | 16/16 | 12/12 | 56 | - |
-| spanner | 16/16 | 11/12 | 58 | large values |
+| spanner | 16/16 | 12/12 | 58 | - |
 | sqlite | 16/16 | 12/12 | 43 | - |
 | synapse | 11/16 | 8/12 | 74 | sequences, params, users, statistics, snapshot, large values, partitioned, read-only target, writes held |
 | teradata | 16/16 | 12/12 | 32 | - |
@@ -77,7 +77,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1234, claimed 4, n/a 1470, not yet 1836, test owed 300, yes 964. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 1234, n/a 1474, not yet 1836, test owed 300, yes 964. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -93,7 +93,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | cosmosdb | 6/9 | 14/21 | 4/5 | 2/6 | 1/3 | 3/5 | 1/3 | 1/1 | 1/1 | 0/1 | 33/55 |
 | couchbase | 0/9 | 1/23 | 1/5 | 1/7 | 1/4 | 1/6 | 2/6 | 1/1 | 0/1 | 0/1 | 8/63 |
 | databricks | 0/10 | 0/39 | 0/6 | 0/7 | 0/6 | 0/6 | 0/6 | 0/1 | 0/1 | 0/1 | 0/83 |
-| datastore | 0/8 | 0/17 | - | 0/6 | 0/2 | 2/5 | 0/2 | 1/1 | 1/1 | 0/1 | 4/43 |
+| datastore | 0/8 | 0/17 | - | 0/6 | 0/2 | 2/4 | 0/2 | 1/1 | 1/1 | 0/1 | 4/42 |
 | db2 | 1/10 | 0/37 | 0/6 | 0/7 | 1/6 | 3/7 | 1/7 | 0/1 | 1/1 | 0/1 | 7/83 |
 | db2i | 0/10 | 1/37 | 0/6 | 0/7 | 0/6 | 0/7 | 0/6 | 1/1 | 0/1 | 0/1 | 2/82 |
 | db2zos | 0/9 | 0/34 | - | 1/7 | 0/6 | 0/7 | 0/4 | 0/1 | 0/1 | 0/1 | 1/70 |
@@ -101,9 +101,9 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | delta | 0/9 | 0/24 | 0/6 | 0/5 | 1/2 | 2/6 | 0/3 | 1/1 | 0/1 | 0/1 | 4/58 |
 | dsql | 5/10 | 21/32 | 1/6 | 3/7 | 5/6 | 3/5 | 2/5 | 1/1 | 1/1 | 0/1 | 42/74 |
 | duckdb | 1/9 | 2/24 | - | 0/7 | 1/6 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 11/57 |
-| dynamodb | 6/8 | 12/14 | 4/5 | 5/6 | 2/2 | 4/5 | 4/4 | 1/1 | 1/1 | 0/1 | 39/47 |
+| dynamodb | 6/8 | 12/14 | 4/5 | 5/6 | 2/2 | 4/4 | 4/4 | 1/1 | 1/1 | 0/1 | 39/46 |
 | exasol | 0/10 | 0/39 | 0/6 | 0/7 | 0/6 | 0/6 | 0/6 | 0/1 | 0/1 | 0/1 | 0/83 |
-| firestore | 0/9 | 2/21 | 1/5 | 0/6 | 0/2 | 2/5 | 2/3 | 1/1 | 1/1 | 0/1 | 9/54 |
+| firestore | 0/9 | 2/21 | 1/5 | 0/6 | 0/2 | 2/4 | 2/3 | 1/1 | 1/1 | 0/1 | 9/53 |
 | gaussdb | 0/10 | 3/39 | 1/6 | 0/7 | 1/6 | 2/7 | 3/7 | 1/1 | 1/1 | 0/1 | 12/85 |
 | geminidb-cassandra | 0/9 | 1/22 | 0/1 | 0/7 | 0/4 | 0/5 | 0/5 | 1/1 | 1/1 | 0/1 | 3/56 |
 | geminidb-mongo | 0/9 | 1/24 | 0/6 | 0/7 | 0/3 | 0/5 | 0/5 | 1/1 | 1/1 | 0/1 | 3/62 |
@@ -139,7 +139,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | sapodp | 0/6 | 0/3 | 0/5 | 0/5 | 0/1 | 0/1 | 1/1 | 1/1 | 0/1 | - | 2/24 |
 | singlestore | 0/10 | 0/40 | 0/6 | 0/7 | 0/6 | 0/6 | 0/8 | 0/1 | 0/1 | 0/1 | 0/86 |
 | snowflake | 4/10 | 0/33 | 0/6 | 3/7 | 1/6 | 0/4 | 2/7 | 1/1 | 0/1 | 0/1 | 11/76 |
-| spanner | 0/10 | 2/31 | 1/6 | 0/6 | 1/6 | 2/6 | 3/4 | 1/1 | 1/1 | 0/1 | 11/72 |
+| spanner | 0/10 | 2/31 | 1/6 | 0/6 | 1/6 | 2/5 | 3/4 | 1/1 | 1/1 | 0/1 | 11/71 |
 | sqlite | 2/9 | 4/28 | - | 2/7 | 2/5 | 4/6 | 2/2 | 1/1 | 0/1 | 0/1 | 17/60 |
 | synapse | 0/10 | 0/37 | 0/5 | 0/7 | 0/6 | 0/6 | 0/8 | 0/1 | 0/1 | 0/1 | 0/82 |
 | teradata | 6/8 | 12/30 | - | 2/7 | 3/6 | 2/6 | 3/4 | 1/1 | 1/1 | 0/1 | 30/64 |
@@ -277,7 +277,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | schema.routines | mssql mysql oracle postgres | mongodb | analyticdb-mysql bigquery cockroachdb dcdb geminidb-mongo oceanbase polardbx singlestore | the rest (33) | bigtable copybook datastore delta dynamodb firestore hetero iceberg kafka keyspaces kinesis neptune parquet pubsub qdrant saas sapodp sqlite tidb timestream |
 | move.table-copy | the rest (38) | neo4j timestream | analyticdb-mysql analyticdb-postgres bigquery databricks db2i db2zos dcdb exasol geminidb-cassandra geminidb-mongo informix lindorm netezza oceanbase-oracle polardbx progress saphana singlestore snowflake synapse vertica yugabytedb | - | kinesis pubsub saas sapodp |
 | move.bulk | bigtable cassandra clickhouse copybook datastore duckdb dynamodb firestore gaussdb kafka mongodb mssql mysql neptune opensearch oracle parquet postgres redis spanner sqlite timestream | hetero | ase bigquery cockroachdb cosmosdb couchbase db2 db2i db2zos geminidb-cassandra geminidb-mongo keyspaces tidb | dcdb delta iceberg neo4j oceanbase oceanbase-oracle polardbx qdrant | the rest (23) |
-| move.large-values | the rest (19) | teradata | analyticdb-mysql bigquery cockroachdb couchbase db2i db2zos dcdb dsql gaussdb geminidb-mongo geminidb-redis oceanbase oceanbase-oracle polardbx singlestore snowflake | analyticdb-postgres bigtable databricks exasol informix lindorm neo4j neptune netezza progress qdrant saphana synapse timestream vertica yugabytedb | cassandra copybook cosmosdb geminidb-cassandra keyspaces kinesis pubsub redshift saas sapodp |
+| move.large-values | the rest (19) | teradata | analyticdb-mysql bigquery cockroachdb couchbase db2i db2zos dcdb dsql gaussdb geminidb-mongo geminidb-redis oceanbase oceanbase-oracle polardbx singlestore snowflake | analyticdb-postgres bigtable databricks exasol informix lindorm neo4j neptune netezza progress qdrant saphana synapse timestream vertica yugabytedb | cassandra copybook cosmosdb datastore dynamodb firestore geminidb-cassandra keyspaces kinesis pubsub redshift saas sapodp spanner |
 | move.partitioned | clickhouse generic kafka mysql postgres tidb | oracle parquet teradata | analyticdb-mysql bigquery db2 db2i db2zos dcdb gaussdb mssql oceanbase oceanbase-oracle polardbx singlestore | analyticdb-postgres ase databricks delta exasol hetero iceberg informix lindorm neo4j netezza progress qdrant saphana synapse vertica yugabytedb | the rest (28) |
 | move.spread | hetero postgres | cassandra mongodb mysql | - | - | the rest (61) |
 | move.sized | ase bigquery clickhouse cosmosdb db2 dsql duckdb dynamodb hetero kafka mongodb mssql mysql opensearch postgres redis sqlite tidb | cassandra oracle teradata | analyticdb-mysql analyticdb-postgres cockroachdb db2i db2zos dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm oceanbase oceanbase-oracle polardbx redshift singlestore snowflake synapse yugabytedb | the rest (23) | kinesis pubsub |
@@ -297,9 +297,9 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Source layout
 
-386 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+385 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
-Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 81 shape lacks, 44 capability lacks, 3027 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (164).
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 78 shape lacks, 44 capability lacks, 3027 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (164).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

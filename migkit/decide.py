@@ -1299,10 +1299,12 @@ def climb(work, rungs, facts=None, need=(), costs=None, keep=None,
             reason = (f"{r.said} never ran here: its one trial, on a small"
                       f" unit and boxed in {trial[1]:,.0f}s, before the"
                       " ranking holds it below the copier")
-        elif above:
-            reason = _joined(above)
         else:
-            reason = r.because or f"{r.said}: the first way that holds"
+            # why the ways above gave way, then how this one won among
+            # the ways timed: a refusal above is not the whole reason
+            # where the ranking, not the order, chose
+            reason = (_joined(above) if above
+                      else r.because or f"{r.said}: the first way that holds")
             timed = [o for o in ranked if _measured(priced.get(o.name))]
             mine = priced.get(r.name)
             if len(timed) > 1 and r in timed:
@@ -2408,10 +2410,18 @@ WAYS = {
             "oceanbase", "oceanbase-oracle", "polardbx", "dcdb",
             "gaussdb", "lindorm", "geminidb-redis", "geminidb-mongo",
             "keyspaces", "geminidb-cassandra", "cockroachdb", "dsql",
-            "spanner", "bigtable", "firestore", "datastore",
-            "neptune", "timestream")},
+            "bigtable", "neptune", "timestream")},
         "dynamodb": (NOT_APPLICABLE, "an item is 400 KB at most, whole"
                                      " under the 1 MB a scan page returns"),
+        # proved whole on each emulator (tests/test_large_values_on_google_
+        # and_aws_native_services.py): the service's own bound keeps a
+        # value under a piece, so nothing is read apart
+        "firestore": (NOT_APPLICABLE, "a document is 1 MiB at most, read"
+                                      " whole in the service's answer"),
+        "datastore": (NOT_APPLICABLE, "an entity is 1 MiB at most, read"
+                                      " whole in the service's answer"),
+        "spanner": (NOT_APPLICABLE, "a column value is 10 MB at most, read"
+                                    " whole in the row the service returns"),
         "cosmosdb": (NOT_APPLICABLE, "an item is 2 MB at most, less than"
                                      " a piece: read whole in batches cut"
                                      " by bytes and written in"
@@ -6766,6 +6776,36 @@ def _seed_meets(secs, f):
     return deadline is None or secs is None or secs <= deadline
 
 
+def _seed_took(secs):
+    from .machine import _took
+    return _took(secs)
+
+
+#: the copy over the link and the seed on media the hop names: the rungs
+#: `ship.SEEDS` climbs, owned here so the seed's carrier is one decision
+SEED_NETWORK = Rung(
+    "network", "the copy over the link",
+    needs=(Need("the copy over the link within the deadline",
+                lambda f: _seed_meets(f.get("network"), f),
+                lambda f: f"it takes about {_seed_took(f.get('network'))},"
+                          f" past the deadline of"
+                          f" {_seed_took(f.get('deadline'))}"),),
+    because="the link carries it within what the hop asks")
+
+SEED_MEDIA = Rung(
+    "media", "a seed shipped on media",
+    needs=(Need("a carrier the hop names",
+                lambda f: bool(f.get("ship")),
+                "the hop names no carrier (options ship:)"),
+           Need("the seed within the deadline",
+                lambda f: _seed_meets(f.get("media"), f),
+                lambda f: f"it takes about {_seed_took(f.get('media'))},"
+                          f" past the deadline of"
+                          f" {_seed_took(f.get('deadline'))}")),
+    footprint=1,
+    because="the hop names a carrier")
+
+
 #: the seed carried as a volume snapshot's changed blocks (`blockseed`):
 #: a rung of the seed's carriers (`ship.SEEDS["blocks"]`)
 SEED_BLOCKS = Rung(
@@ -6788,21 +6828,21 @@ def seed_carrier(facts, costs=None):
     """How the seed reaches the target: the changed blocks of a volume
     snapshot whose parent the target holds (`blockseed`), the seed on media
     the hop names, or the copy over the link (`ship.SEEDS`) - each held to
-    the deadline and ranked by the seconds measured for it. `facts`:
+    the deadline and ranked by the seconds measured for it (`ship.choose`
+    reads the hop's and the measured times into them). `facts`:
     `blocks ok` (True, or why no block seed can be carried), `blocks` (its
     changed blocks' seconds at the measured rate), `ship` (the hop names a
     carrier), `media`, `network` (seconds; None where nothing measured)
     and `deadline`. Where nothing is measured the block seed, carrying
     least, goes first, then the carrier the hop names, then the link."""
-    from . import ship
     f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
     for k in ("ship", "network", "media", "deadline", "blocks ok",
               "blocks"):
         f.setdefault(k, None)
-    rungs = (ship.SEEDS["blocks"], ship.SEEDS["media"],
-             ship.SEEDS["network"]) if f.get("ship") else (
-        ship.SEEDS["blocks"], ship.SEEDS["network"], ship.SEEDS["media"])
+    rungs = (SEED_BLOCKS, SEED_MEDIA, SEED_NETWORK) if f.get("ship") else (
+        SEED_BLOCKS, SEED_NETWORK, SEED_MEDIA)
     got = {k: f.get(k) for k in ("blocks", "media", "network")}
     measured = {k: v for k, v in got.items() if v is not None}
     return climb("the seed's carrier", rungs, f,
-                 costs=dict(costs or measured) or None, prove=False)
+                 costs=dict(costs if costs is not None else measured) or None,
+                 prove=False)

@@ -22,13 +22,12 @@ from migkit.config import Endpoint, Hop
 from tests import emulators
 from tests.conftest import needs_docker
 
-#: what this module proves, item by engine (`capabilities.proofs`): the
-#: cases below that ran to their end on their emulator. Bigtable's does not
-#: yet (its reason is on it), so its cell is not claimed
-PROVES = [("move.large-values", "firestore"),
-          ("move.large-values", "datastore"),
-          ("move.large-values", "spanner"),
-          ("move.large-values", "dynamodb")]
+#: what this module proves, item by engine (`capabilities.proofs`): none
+#: as a way - each service's own bound keeps a value under a piece, so the
+#: cell is not applicable (`decide.WAYS["large values"]`) and the cases
+#: below prove the value arrives whole at that bound. Bigtable's does not
+#: run to its end yet (its reason is on it)
+PROVES = []
 
 pytestmark = needs_docker
 

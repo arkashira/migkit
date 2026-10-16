@@ -542,46 +542,63 @@ def _meets(secs, f):
 
 
 SEEDS = {
-    "network": decide.Rung(
-        "network", "the copy over the link",
-        needs=(_need("the copy over the link within the deadline",
-                     lambda f: _meets(f["network"], f),
-                     lambda f: f"it takes about {_took(f['network'])}, past"
-                               f" the deadline of {_took(f['deadline'])}"),),
-        because="the link carries it within what the hop asks"),
-    "media": decide.Rung(
-        "media", "a seed shipped on media",
-        needs=(_need("a carrier the hop names",
-                     lambda f: f["ship"],
-                     "the hop names no carrier (options ship:)"),
-               _need("the seed within the deadline",
-                     lambda f: _meets(f["media"], f),
-                     lambda f: f"it takes about {_took(f['media'])}, past"
-                               f" the deadline of {_took(f['deadline'])}")),
-        footprint=1,
-        because="the hop names a carrier"),
+    "network": decide.SEED_NETWORK,
+    "media": decide.SEED_MEDIA,
     "blocks": decide.SEED_BLOCKS,
 }
 
 
+def snapshot(hop):
+    """The block seed the hop names (`seed_snapshot`, the manifest of the
+    source volume's snapshot, and `seed_snapshot_parent`, the manifest of
+    the snapshot the target holds; both written by `blockseed.manifest`)
+    as (snapshot, parent), or (None, why) where it names none or a
+    manifest cannot be read."""
+    import json
+    opts = hop.options or {}
+    paths = (opts.get("seed_snapshot"), opts.get("seed_snapshot_parent"))
+    if not paths[0] or not paths[1]:
+        return None, ("no snapshot of the source's volume is named (options"
+                      " seed_snapshot: and seed_snapshot_parent:)")
+    out = []
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8") as fh:
+                out.append(json.load(fh))
+        except (OSError, ValueError) as e:
+            return None, f"the snapshot manifest {p} cannot be read: {e}"
+    return out[0], out[1]
+
+
+def _block_facts(hop, t):
+    """What the block seed adds to the seed's facts: `blockseed.facts` of
+    the snapshot the hop names at the link's measured rate, or why none."""
+    from . import blockseed
+    snap, parent = snapshot(hop)
+    if snap is None:
+        return {"blocks ok": parent, "blocks": None}
+    return blockseed.facts(snap, parent, t.link_rate)
+
+
 def choose(hop, t):
-    """The `decide.Choice` between the copy over the link and the seed on
-    media for times `t`: each held to the deadline, the one measured faster
-    first, and where nothing is measured the carrier the hop names before
-    the link."""
+    """The `decide.Choice` (`decide.seed_carrier`) between the changed
+    blocks of a volume snapshot the hop names, the seed on media and the
+    copy over the link for times `t`: each held to the deadline, the one
+    measured faster first, and where nothing is measured the block seed,
+    then the carrier the hop names, then the link."""
     ship = settings(hop) is not None
-    rungs = ((SEEDS["media"], SEEDS["network"]) if ship
-             else (SEEDS["network"], SEEDS["media"]))
     facts = decide.Facts({"ship": ship, "network": t.network,
-                          "media": t.media, "deadline": t.deadline})
+                          "media": t.media, "deadline": t.deadline,
+                          **_block_facts(hop, t)})
     # the seed's time is a floor where the export or the load is not
     # measured: it ranks as a time only where even the floor says it
     media = t.media if t.media is not None and (
         t.media_complete or (t.network is not None
                              and t.media >= t.network)) else None
-    costs = {k: v for k, v in (("network", t.network), ("media", media))
+    costs = {k: v for k, v in (("network", t.network), ("media", media),
+                               ("blocks", facts.get("blocks")))
              if v is not None}
-    return decide.climb("the seed", rungs, facts, costs=costs)
+    return decide.seed_carrier(facts, costs=costs)
 
 
 def said(t, choice=None, ship=True):

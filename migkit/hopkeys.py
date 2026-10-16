@@ -848,6 +848,13 @@ HOP_OPTIONS = {
                           " and takes it off again), no or dba - for every"
                           " change, or by its name (clone_plugin: yes)",
                           "str|dict|bool"),
+    "seed_snapshot": Key("the manifest of the source volume's snapshot a"
+                         " block seed is carried from (written by"
+                         " `blockseed.manifest`): with `seed_snapshot_parent`"
+                         " only the blocks changed between the two travel",
+                         "str"),
+    "seed_snapshot_parent": Key("the manifest of the snapshot of the same"
+                                " volume the target already holds", "str"),
     "shards": Key("a created stream's shards", "int", ("kinesis",)),
     "snapshot_limit": Key("how old a snapshot may get", "number",
                           ("postgres",)),
