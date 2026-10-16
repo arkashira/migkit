@@ -426,9 +426,9 @@ def _all_rows(engine, side, db, table, columns, key):
                 yield rows
             if not rows or after is None:
                 return
-    from . import decide
-    yield from engine.neutral_batches(side, db, table, columns,
-                                      decide.page_given(None))
+    # the batch's size is the engine's decision (`neutral_batches` asks it
+    # where no caller names one): nothing is named here
+    yield from engine.neutral_batches(side, db, table, columns)
 
 
 def table_digest(engine, side, db, table, columns):

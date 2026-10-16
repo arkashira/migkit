@@ -2743,6 +2743,7 @@ class MongoEngine(Engine):
         """How far migkit's own tail has applied, from the position it
         saved - either tail's - or None when no tail has saved one."""
         from .. import tailctl
+        from .. import tailwhere
         try:
             token = tailctl.saved(tailctl.token_path(self.hop, db))
         except SystemExit:
@@ -2757,6 +2758,7 @@ class MongoEngine(Engine):
         position - so the caller falls back rather than waiting blind.
         """
         from .. import tailctl
+        from .. import tailwhere
         if at is None or self._tail_position(db) is None:
             return None
         end = time.time() + timeout
@@ -4308,6 +4310,7 @@ class MongoEngine(Engine):
         takes longer than the oplog keeps it (`token_age`). True where
         nothing is saved or nothing was measured."""
         from .. import tailctl
+        from .. import tailwhere
         from ..decide import HopCosts
         from . import enterprise_connectors as ec
         path = tailctl.token_path(self.hop, db)
@@ -4353,6 +4356,7 @@ class MongoEngine(Engine):
         the two left the file without: the follow goes on from it, and
         with `go` the file is brought up to it."""
         from .. import tailctl
+        from .. import tailwhere
         env = tailctl.position(token_path)
         rec = self.attempts().ledger.owned(self.FOLLOW_KEY.format(db=db))
         mine = env is not None and rec.get("id") == env.get("id")
@@ -4494,6 +4498,7 @@ class MongoEngine(Engine):
         from the source (`_reseed`), then followed from that position by
         the way that holds now (`tail_apply`)."""
         from .. import tailctl
+        from .. import tailwhere
         names = [n for n in self._client("src")[db].list_collection_names()
                  if not n.startswith("system.") and self.in_scope(db, n)]
         gone = self._gone_from_source(db, names, log)
@@ -4569,6 +4574,7 @@ class MongoEngine(Engine):
         from pymongo.errors import PyMongoError
 
         from .. import tailctl
+        from .. import tailwhere
         ts = oplog_ts(token)
         out = {"at": f"{ts.time}:{ts.inc}" if ts is not None else ""}
         try:
@@ -4591,7 +4597,7 @@ class MongoEngine(Engine):
         except (PyMongoError, KeyError):
             wrote = None
         memo = self.__dict__.setdefault("_tail_moved", {}).setdefault(db, {})
-        out.update(moved=tailctl.log_moved(memo, token, wrote),
+        out.update(moved=tailwhere.log_moved(memo, token, wrote),
                    moved_unit="writes")
         if ts is not None and oldest and oldest["ts"] > ts:
             out.update(attached=False, why_detached=(
@@ -4700,6 +4706,7 @@ class MongoEngine(Engine):
         carried at is kept for what following costs (`_follow_costs`)."""
         from ..decide import HopCosts
         from .. import tailctl
+        from .. import tailwhere
         if go and tailctl.position(token_path) is None:
             tailctl.begin(self, db, token_path,
                           oplog_token(self._majority_ts("src")))
@@ -4891,6 +4898,7 @@ class MongoEngine(Engine):
         that found nothing to carry, so a fence waits until the target is
         level with no write between."""
         from .. import tailctl
+        from .. import tailwhere
         if go and tailctl.position(token_path) is None:
             tailctl.begin(self, db, token_path, self._sweep_point("src"))
 
@@ -5281,6 +5289,7 @@ class MongoEngine(Engine):
     def tail_seed(self, db, token_path, point):
         """Start the tail from `point`, a resume token taken earlier."""
         from .. import tailctl
+        from .. import tailwhere
         tailctl.begin(self, db, token_path, point if isinstance(point, dict)
                       else {"_data": point})
 

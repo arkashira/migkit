@@ -1105,13 +1105,13 @@ class DialectEngine(GenericEngine):
     DIALECT = ""
 
     def tail_where(self, db, token):
-        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        """What the tail's quiet line stands on (`tailwhere.where_from`): the
         tail's position and the source's now (`log_position`). The tail reads the tables'
         changes by a column it keeps, not a log: the source keeps no count
         of its writes to read and no reader of the tail's to list - both
         are said unread, never assumed."""
-        from .. import tailctl
-        return tailctl.where_from(self, db, token)
+        from .. import tailwhere
+        return tailwhere.where_from(self, db, token)
 
     def _dialect(self):
         return DIALECTS[self.DIALECT]

@@ -5896,7 +5896,7 @@ class Engine:
                 how.append(f"{t}: settled after {settle}s (no fence visible)")
         return still, healed, how
 
-    def neutral_batches(self, side, db, table, columns, size=1000,
+    def neutral_batches(self, side, db, table, columns, size=None,
                         where=None):
         """The whole table in one pass, `size` rows at a time: for a table
         with no key to resume from, which `neutral_read` answers in one

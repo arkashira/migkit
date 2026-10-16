@@ -185,12 +185,13 @@ class KafkaEngine(Engine):
     MECHANISMS = ("PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512", "AWS_MSK_IAM")
 
     def tail_where(self, db, token):
-        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        """What the tail's quiet line stands on (`tailwhere.where_from`): the
         tail's position and the source's now (`log_position`). The server keeps no
         count of its writes the tail could read in one bounded round, and lists
         no reader of the tail's: both are said unread, never assumed."""
         from .. import tailctl
-        return tailctl.where_from(self, db, token)
+        from .. import tailwhere
+        return tailwhere.where_from(self, db, token)
 
     def _connection(self, side):
         """What every client of a side is given: where the cluster is, and
@@ -1479,6 +1480,7 @@ class KafkaEngine(Engine):
         """Each source partition's end now, where a tail is running to
         reach it; None where none is."""
         from .. import tailctl
+        from .. import tailwhere
         if not tailctl.alive(self.hop.report_dir(db), self.hop):
             return None
         return self.log_position("src", db)
@@ -1488,6 +1490,7 @@ class KafkaEngine(Engine):
         partition. True when it has, False on timeout, None where there is
         nothing to wait on."""
         from .. import tailctl
+        from .. import tailwhere
         if not at:
             return None
         path = tailctl.token_path(self.hop, db)
@@ -1517,6 +1520,7 @@ class KafkaEngine(Engine):
         TopicPartition = self._partition("src")
 
         from .. import tailctl
+        from .. import tailwhere
         try:
             state = tailctl.saved(tailctl.token_path(self.hop, db))
         except SystemExit:
@@ -2089,6 +2093,7 @@ class KafkaEngine(Engine):
         as far as its own files say: the copy's checkpoint and the tail's
         position - 0 where neither is there."""
         from .. import tailctl
+        from .. import tailwhere
         last = 0.0
         for path in (self.hop.report_dir(db) / "move.json",
                      tailctl.token_path(self.hop, db)):

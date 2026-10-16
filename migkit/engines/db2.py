@@ -322,17 +322,17 @@ class Db2Engine(CatalogChecks, FoldsToCapitals, DbapiRows, Engine):
                       " from table(mon_get_transaction_log(-2))")
 
     def tail_where(self, db, token):
-        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        """What the tail's quiet line stands on (`tailwhere.where_from`): the
         tail's position, the source's now (`log_position`) and the counter
         `TAIL_WROTE_SQL` read since the hop's last carried change, in one
         statement - unread where the server refuses it. The source lists
         no reader of the tail's to ask: attached is said unread."""
-        from .. import tailctl
+        from .. import tailwhere
 
         def wrote():
             got = self._rows("src", db, self.TAIL_WROTE_SQL)
             return got[0][0] if got else None
-        return tailctl.where_from(self, db, token, wrote, "log pages")
+        return tailwhere.where_from(self, db, token, wrote, "log pages")
 
     def _nanos_text(self, quoted, declared):
         """A `TIMESTAMP(p)` of more than six digits as the server writes

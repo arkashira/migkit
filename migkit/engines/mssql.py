@@ -4232,6 +4232,7 @@ class MSSQLEngine(DbapiRows, Engine):
         the position cannot be read (False, and why) - never assumed."""
         import pymssql
         from .. import tailctl
+        from .. import tailwhere
         at = (token.get("cdc") or token.get("lsn")
               if isinstance(token, dict) else token)
         out = {"at": "" if at is None else str(at)}
@@ -4256,7 +4257,7 @@ class MSSQLEngine(DbapiRows, Engine):
         except pymssql.Error:
             wrote = None  # no VIEW SERVER STATE: the log's move is unread
         memo = self.__dict__.setdefault("_tail_moved", {}).setdefault(db, {})
-        out["moved"] = tailctl.log_moved(memo, token, wrote)
+        out["moved"] = tailwhere.log_moved(memo, token, wrote)
         return out
 
     def log_position(self, side, db):

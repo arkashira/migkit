@@ -88,12 +88,13 @@ class Neo4jEngine(NeutralCopier, Engine):
     READS_AHEAD = False
 
     def tail_where(self, db, token):
-        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        """What the tail's quiet line stands on (`tailwhere.where_from`): the
         tail's position and the source's now (`log_position`). The server keeps no
         count of its writes the tail could read in one bounded round, and lists
         no reader of the tail's: both are said unread, never assumed."""
         from .. import tailctl
-        return tailctl.where_from(self, db, token)
+        from .. import tailwhere
+        return tailwhere.where_from(self, db, token)
 
     def _ep(self, side):
         return self.hop.source if side == "src" else self.hop.target
@@ -966,6 +967,7 @@ class Neo4jEngine(NeutralCopier, Engine):
         change id `db.cdc.current()` names, for `fence_wait` to count
         from."""
         from .. import tailctl
+        from .. import tailwhere
         if not tailctl.alive(self.hop.report_dir(db), self.hop):
             return None
         try:
@@ -1002,6 +1004,7 @@ class Neo4jEngine(NeutralCopier, Engine):
         the source, so the next one waits at least twice as long as the
         last count took."""
         from .. import tailctl
+        from .. import tailwhere
         if lsn is None:
             return None
         path = tailctl.token_path(self.hop, db)

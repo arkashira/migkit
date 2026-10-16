@@ -14,18 +14,19 @@ class RedisEngine(Engine):
     ENGINE_FAMILY = "redis"
 
     def tail_where(self, db, token):
-        """What the tail's quiet line stands on (`tailctl.where_from`): the
+        """What the tail's quiet line stands on (`tailwhere.where_from`): the
         tail's position, the source's replication stream now
         (`log_position`) and the bytes it wrote since the hop's last
         carried change (`master_repl_offset`, every write in it, on the
         hop's keys or not) - read in one round, unread where refused. The
         source lists no reader of the tail's to ask: said unread."""
         from .. import tailctl
+        from .. import tailwhere
 
         def wrote():
             got = self._client("src").info("replication")
             return got.get("master_repl_offset")
-        return tailctl.where_from(self, db, token, wrote,
+        return tailwhere.where_from(self, db, token, wrote,
                                   "bytes of its replication stream")
 
     def _client(self, side, db=0, decode=True, no_touch=False):
@@ -3097,6 +3098,7 @@ class RedisEngine(Engine):
         `copied_at`, so a full start where no snapshot is kept reads again
         only the keys touched since."""
         from .. import tailctl
+        from .. import tailwhere
         sec = int(self._client("src").time()[0])
         tailctl.moved(token_path, tailctl.new_stream(self, None),
                       {"copied_at": sec})
@@ -3466,6 +3468,7 @@ class _LandingPace:
 
     def __init__(self, clock=None):
         from .. import tailctl
+        from .. import tailwhere
         self.pace = tailctl.Pace(0.0, tailctl.IDLE_MOST, clock=clock)
         self.took = 0.0
 

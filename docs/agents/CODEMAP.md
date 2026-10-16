@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (177 modules)
+## `migkit/` (178 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -171,6 +171,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/tableway.py` - How each table gets to the target: one ladder an engine, one cost model a database, one climb a table. Classes: Way, Pick, Failed.
 - `migkit/tailctl.py` - A running change tail as the rest of migkit sees it, and the one loop every tail runs. Classes: Running, Pace.
 - `migkit/tailtables.py` - A running tail's tables, each in a state of its own (backlog L1, L4, L5, L6; research: leapfrog live tail 2026-09-28, section 1.3). Classes: Store, Spool, TableSet.
+- `migkit/tailwhere.py` - Where a quiet tail stands, from what a following engine's server answers in one bounded round: the helpers an engine's `tail_where` is built
 - `migkit/tally.py` - Rows counted and fingerprinted as they pass through a copy. Classes: Tally.
 - `migkit/telemetry.py` - Product telemetry: what migkit did, never what it carried (backlog P0-PRODUCT-TELEMETRY). Classes: Rejected, Run, Decision, Progress, Resources, Recovery.
 - `migkit/throttle.py` - Keep verification from becoming the outage it went looking for. Classes: Health, Throttle.

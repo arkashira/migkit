@@ -534,7 +534,8 @@ _BY_NAME = {
                 " bulkways ready cloud_readiness dba handwork rehearsal"
                 " faults model"
                 " machine topology waysaid workload advisors",
-    "engines": "catalog pgslot binlog_marks binlog_payload logddl standby",
+    "engines": "catalog pgslot binlog_marks binlog_payload logddl standby"
+               " tailwhere",
     "integrations": "tools tooluse toolversion cloudapi cloudseed"
                     " huawei_sdk imports integrations workflow_exporter"
                     " assist mirror redisshake dsbulk ddbexport"

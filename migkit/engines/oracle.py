@@ -2415,6 +2415,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         rounds, so `attached` is otherwise unread, never assumed."""
         import oracledb
         from .. import tailctl
+        from .. import tailwhere
         at = token.get("scn") if isinstance(token, dict) else token
         at = int(at) if str(at).isdigit() else None
         out = {"at": f"SCN {at}" if at is not None else ""}
@@ -2431,7 +2432,7 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         except oracledb.Error:
             wrote = None  # no grant on v$sysstat: the redo's move is unread
         memo = self.__dict__.setdefault("_tail_moved", {}).setdefault(db, {})
-        out["moved"] = tailctl.log_moved(memo, token, wrote)
+        out["moved"] = tailwhere.log_moved(memo, token, wrote)
         try:
             got = self._rows("src", db, (
                 "select least(nvl((select min(first_change#) from"
