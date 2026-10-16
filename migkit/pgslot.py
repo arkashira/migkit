@@ -39,6 +39,8 @@ old tuple **omits the columns that were NULL**. A parser that treated a
 missing column as "this column does not exist" would build a key out of
 whatever happened to be non-null in that row.
 """
+import json
+
 
 # What the plugin prints for a value that is not there. Unquoted, which is
 # what tells it apart from the string.
@@ -376,7 +378,8 @@ class Stream:
     confirmed position, which re-sends what was not confirmed - the
     appliers converge on it by key."""
 
-    def __init__(self, connect, slot, start=None, options=None):
+    def __init__(self, connect, slot, start=None, options=None, pace=None):
+        self.pace, self.said = pace, None
         self.conn = connect()
         self.cur = self.conn.cursor()
         self.cur.start_replication(
@@ -390,6 +393,19 @@ class Stream:
             self.cur.send_feedback(flush_lsn=lsn_int(lsn), reply=True)
             self.confirmed = lsn
 
+    def beat(self, now):
+        """The standby status sent again - the confirmed position, nothing
+        read past it - once the pace's heartbeat (`tailctl.Pace`) has gone
+        by since the last: a busy source hears it as often as a batch
+        lands, a quiet one once in the tail's longest wait."""
+        if self.pace is None:
+            return
+        if self.said is not None and now - self.said < self.pace.heartbeat():
+            return
+        self.said = now
+        self.cur.send_feedback(flush_lsn=lsn_int(self.confirmed)
+                               if self.confirmed else 0, reply=False)
+
     def rows(self, limit, wait, wait_for=None):
         """Up to `limit` lines, a batch cut only where a transaction ends;
         waits `wait` seconds for the first and none once one transaction
@@ -402,6 +418,7 @@ class Stream:
         while True:
             msg = self.cur.read_message()
             if msg is None:
+                self.beat(time.monotonic())
                 said = getattr(self.cur, "wal_end", 0) or 0
                 if said:
                     self.end = lsn_text(said)
@@ -429,23 +446,41 @@ class Stream:
             pass
 
 
-def columnar(changes, compiled=None):
+def _values(c):
+    return c.get("values") if "values" in c else c.get("row")
+
+
+def columnar(changes, compiled=None, ordered=False):
     """A batch of `canon.change` records as Arrow record batches, one per
     (table, op, columns): the key and row values as typed columns, the
     types taken from the values canon gave them. The compiled builder
     (Arrow's own, from Python objects in one call) where the library has
     it and `compiled` is not False; the pure one - column lists built
     here, each turned into an array - otherwise. The two are equal batch
-    for batch (`test_the_tail_streams_and_decodes_in_batches`)."""
+    for batch (`test_the_tail_streams_and_decodes_in_batches`).
+
+    `ordered` is the batch as an applier takes it: runs of changes next to
+    each other, a run ended by another table, op or set of columns, or by
+    a key seen again in it - so the batches applied one after another make
+    the changes' own order, a row's insert before its delete."""
     import pyarrow as pa
-    groups = {}
+    groups, run, keys = {}, None, set()
     for c in changes:
         row = {**{f"key.{k}": v for k, v in (c.get("key") or {}).items()},
-               **{f"row.{k}": v for k, v in (c.get("row") or {}).items()}}
-        groups.setdefault((c["table"], c["op"], tuple(row)), []).append(row)
+               **{f"row.{k}": v for k, v in (_values(c) or {}).items()}}
+        shape = (c["table"], c["op"], tuple(row))
+        if ordered:
+            ident = json.dumps(sorted((c.get("key") or {}).items()),
+                               default=repr)
+            if run is None or run[0] != shape or ident in keys:
+                run, keys = (shape, len(groups)), set()
+            keys.add(ident)
+            shape = run
+        groups.setdefault(shape, []).append(row)
     fast = compiled is not False and hasattr(pa.RecordBatch, "from_pylist")
     out = []
-    for (table, op, names), rows in groups.items():
+    for shape, rows in groups.items():
+        (table, op, names) = shape[0] if ordered else shape
         if fast:
             batch = pa.RecordBatch.from_pylist(rows)
         else:
@@ -454,3 +489,44 @@ def columnar(changes, compiled=None):
                 names=list(names))
         out.append((table, op, batch))
     return out
+
+
+def _same(a, b):
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, float) and a != a:
+        return b != b
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(map(_same, a, b))
+    return a == b
+
+
+def exact(changes, batches):
+    """None where the ordered batches (`columnar`) give back every change
+    of `changes` - in order, each value of the same type and equal, the
+    key never moved - else why not: a value Arrow types as another (an
+    integer past 64 bits, text and numbers in one column, a value canon
+    marks as untouched) goes as the change records it came as."""
+    at = iter(changes)
+    for table, op, batch in batches:
+        cols = {n: batch.column(i).to_pylist()
+                for i, n in enumerate(batch.schema.names)}
+        for i in range(batch.num_rows):
+            c = next(at, None)
+            if c is None or (c["table"], c["op"]) != (table, op):
+                return "the columns do not follow the changes' order"
+            if c.get("before") is not None and any(
+                    k in c["before"] and not _same(c["before"][k], v)
+                    for k, v in (c.get("key") or {}).items()):
+                return f"a change to {table} moved a row's key"
+            for prefix, part in (("key.", c.get("key")),
+                                 ("row.", _values(c))):
+                for k, v in (part or {}).items():
+                    if not _same(v, cols[prefix + k][i]):
+                        return (f"a value of {table}.{k} is not typed"
+                                " exactly as columns")
+    if next(at, None) is not None:
+        return "the columns hold fewer changes than the batch"
+    return None

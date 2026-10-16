@@ -3628,3 +3628,60 @@ def two_site_rule(facts):
                          "{rung} needs the two clocks' skew measured"),)),
         Rung("merged, else held", "counters and sets merged, any other key"
              " both wrote held and logged", footprint=1)), f)
+
+
+# --- a tail batch applied as typed columns or as change records (R19.9) ----
+
+_TAIL_HOLDS = {"consistent": "as of one moment", "idempotent": "converges",
+               "resumable": "goes on"}
+
+TAIL_APPLIES = (
+    Rung("columns", "the batch as typed columns, written by the target's"
+         " column writer",
+         needs=(Need("a target that writes columns",
+                     lambda f: f.get("writer") is True,
+                     "the target has no writer of typed columns"),
+                Need("every value typed exactly as columns",
+                     lambda f: f.get("typed") is True,
+                     lambda f: str(f.get("typed why")
+                                   or "the batch's values were not typed")),
+                Need("one lane",
+                     lambda f: f.get("one lane") is True,
+                     "the batch is long enough to go in lanes side by side,"
+                     " which the change records do")),
+         holds=_TAIL_HOLDS,
+         because="one run of columns a table and op, in the changes' order,"
+                 " each value of the type it came as",
+         leaves="nothing"),
+    Rung("records", "the batch as change records", holds=_TAIL_HOLDS,
+         because="each change applied by key, in order, as the target's"
+                 " own applier collapses them",
+         leaves="nothing"))
+
+
+def tail_apply(facts):
+    """The ranked ways a tail batch is applied (`TAIL_APPLIES`), for
+    `attempt`: the columns where the target writes them and every value
+    went into them exactly, the change records as the fallback."""
+    return TAIL_APPLIES
+
+
+COLUMN_WRITES = (
+    Rung("copy", "the batch's columns copied into a stage and moved on in"
+         " one statement", footprint=1,
+         because="one copy for the rows, whatever their number: two round"
+                 " trips, and the rows at the copy's rate"),
+    Rung("statements", "the batch's columns as multi-row statements sent"
+         " without waiting",
+         because="no stage to fill and empty: one round trip piped, and"
+                 " the rows at the statements' rate"))
+
+
+def column_write(facts, costs=None):
+    """The `Choice` of how a batch of columns is written (`COLUMN_WRITES`):
+    `costs` the seconds each way is forecast to take for this batch - its
+    round trips at the target's measured latency and its bytes at the
+    rate the way measured here; a way not yet measured is forecast at
+    nothing, so each is tried once before the forecasts decide."""
+    return climb("writing a batch's columns", COLUMN_WRITES, facts,
+                 costs=costs)

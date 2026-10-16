@@ -2550,7 +2550,10 @@ select json_build_object(
     def _apply_upsert(self, side, db, table, key, values):
         self._apply_upserts(side, db, table, [(key, values)])
 
-    def _apply_upserts(self, side, db, table, rows):
+    def _apply_upserts(self, side, db, table, rows, way=None):
+        """`rows` (key, values) as upserts: staged (`_staged`) or as
+        statements, `way` where the batch's columns chose it
+        (`apply_columns`), else whichever measured cheaper here."""
         from .. import canon
         table = self.local_table(table)
         sch, tbl = self._split(table)
@@ -2571,7 +2574,10 @@ select json_build_object(
                    for n in names] for r in full]
         with self._writer(side, db) as conn:
             key = None
-            if len(values) >= self.STAGE_FROM:
+            if way == "copy" and self._staged(conn, sch, tbl, names, values,
+                                              into, tail):
+                return
+            if way is None and len(values) >= self.STAGE_FROM:
                 # staged or as statements, whichever did a row in less
                 # time here: piped, the statements wait for nothing, and
                 # on a long link that can outweigh the stage's own waits
@@ -2761,6 +2767,87 @@ select json_build_object(
                                       f" ({cols}) in (", ")",
                                 [[canon.sql_value(k[n]) for n in names]
                                  for k in keys])
+
+    def apply_columns(self, side, db, batches):
+        """A tail batch as typed columns (`pgslot.columnar`, ordered), in
+        one transaction: each run's columns read off whole, its rows
+        upserted or deleted by key in the batch's order. An upsert run is
+        copied through the stage or sent as statements, as
+        `decide.column_write` forecasts from the run's width - its rows and
+        bytes - and the target's measured round trip (`_latency`), each
+        way's rate measured on the runs it wrote (`_column_took`)."""
+        n = 0
+        with self._apply_session(side, db):
+            for table, op, batch in batches:
+                names = batch.schema.names
+                cols = [batch.column(i).to_pylist()
+                        for i in range(len(names))]
+                keys = [(at, nm[4:]) for at, nm in enumerate(names)
+                        if nm.startswith("key.")]
+                vals = [(at, nm[4:]) for at, nm in enumerate(names)
+                        if nm.startswith("row.")]
+                rows = [({k: cols[at][i] for at, k in keys},
+                         {k: cols[at][i] for at, k in vals})
+                        for i in range(batch.num_rows)]
+                if op == "delete":
+                    self._apply_deletes(side, db, table,
+                                        [k for k, _ in rows])
+                else:
+                    way = self._column_way(side, db, table, batch)
+                    began = time.monotonic()
+                    self._apply_upserts(side, db, table, rows, way=way)
+                    self._answered()
+                    self._column_took(side, db, table, way, batch,
+                                      time.monotonic() - began)
+                self.named_write(db, table, "change", "tail batch",
+                                 batch.num_rows)
+                n += batch.num_rows
+        return n
+
+    #: round trips each way of writing columns waits for: the stage's copy
+    #: and its move on; the statements piped, answered once
+    COLUMN_TRIPS = {"copy": 2, "statements": 1}
+
+    def _column_way(self, side, db, table, batch):
+        """`decide.column_write` for one run of columns: each way's forecast
+        is its round trips at the measured latency plus the run's bytes at
+        the seconds a byte that way measured on this table - nothing for a
+        way not measured yet, so each is tried once first."""
+        from .. import decide
+        rtt = self._latency(side, db)
+        rates = self.__dict__.setdefault("_column_rates", {}).get(
+            (side, db, table), {})
+        costs = {way: (trips * rtt + batch.nbytes * rates[way]
+                       if way in rates else 0.0)
+                 for way, trips in self.COLUMN_TRIPS.items()}
+        return decide.column_write(
+            {"rows": batch.num_rows, "bytes": batch.nbytes,
+             "latency": rtt}, costs=costs).path
+
+    def _column_took(self, side, db, table, way, batch, seconds):
+        """The seconds a byte `way` took on this run, its round trips
+        taken off - what the next run's forecast reads."""
+        spent = max(seconds - self.COLUMN_TRIPS[way]
+                    * self._latency(side, db), 0.0)
+        self.__dict__.setdefault("_column_rates", {}).setdefault(
+            (side, db, table), {})[way] = spent / max(batch.nbytes, 1)
+
+    def _latency(self, side, db, samples=3):
+        """The target's round trip, measured once a run on the batch's
+        connection: the least of `samples` empty statements' answers."""
+        held = self.__dict__.setdefault("_latencies", {})
+        if (side, db) not in held:
+            conn = getattr(self._apply_held(), "conn", None)
+            took = []
+            if conn is not None:
+                with conn.cursor() as cur:
+                    for _ in range(samples):
+                        began = time.monotonic()
+                        cur.execute("select 1")
+                        cur.fetchall()
+                        took.append(time.monotonic() - began)
+            held[(side, db)] = min(took) if took else 0.0
+        return held[(side, db)]
 
     def _open_writer(self, side, db):
         self._target_only(side, "apply changes")
@@ -3343,11 +3430,13 @@ select json_build_object(
         for stream in self.__dict__.pop("_slot_streams", {}).values():
             stream.close()
 
-    def _change_read(self, side, db):
+    def _change_read(self, side, db, slot=None, token=None):
         """`decide.change_read` for the slot's database, asked once a run:
         streamed where the user may open a replication connection
         (`rolreplication`, or a managed service's replication role), else
-        peeked at the tail's measured pace."""
+        peeked at the tail's measured pace. Where both are open to it, the
+        two are timed on the slot first (`_read_costs`) and the one that
+        gave a change sooner is taken."""
         held = self.__dict__.setdefault("_change_reads", {})
         if (side, db) not in held:
             from .. import decide
@@ -3363,13 +3452,54 @@ select json_build_object(
                 " pg_has_role(current_user, g.oid, 'member')) from"
                 " pg_roles r where r.rolname = current_user")
             granted = bool(got and got[0][0])
+            costs = self._read_costs(side, db, slot, token) \
+                if client and granted and slot else None
             held[(side, db)] = decide.change_read(
                 {"stream client": client, "stream granted": granted,
                  "stream why": "the source's user has neither REPLICATION"
                                " nor a replication role, so its log is"
                                " peeked instead - grant REPLICATION to"
-                               " stream it"})
+                               " stream it"}, costs=costs)
         return held[(side, db)]
+
+    def _read_costs(self, side, db, slot, token, limit=100):
+        """{"poll": s, "stream": s}: the seconds a change each way gave on
+        the slot, measured once - one peek, then the stream opened at the
+        same position read for its first transactions, waited for no
+        longer than the tail's longest idle wait. Neither moves the slot:
+        the peek reads, the stream is closed unconfirmed, and what it read
+        is sent again to the stream the tail reads. None where either read
+        nothing in that window - an idle log tells the two apart by
+        nothing - or the stream could not be opened."""
+        import psycopg2.extras
+
+        from .. import pgslot, tailctl
+        began = time.monotonic()
+        peeked = self._slot_rows(
+            side, db, "select lsn::text from pg_logical_slot_peek_changes("
+                      "%s, NULL, %s)", (slot, int(limit)))
+        poll = time.monotonic() - began
+        if not peeked:
+            return None
+        try:
+            stream = pgslot.Stream(
+                lambda: connect(self.hop.source if side == "src"
+                                else self.hop.target, self._d(side, db),
+                                session=False,
+                                connection_factory=psycopg2.extras
+                                .LogicalReplicationConnection),
+                slot, token)
+        except Exception:  # noqa: BLE001 - the decision then stands on grants
+            return None
+        try:
+            began = time.monotonic()
+            streamed = stream.rows(int(limit), tailctl.IDLE_MOST)
+            took = time.monotonic() - began
+        finally:
+            stream.close()
+        if not streamed:
+            return None
+        return {"poll": poll / len(peeked), "stream": took / len(streamed)}
 
     def _streamed(self, side, db, slot, token, limit, ask):
         """`neutral_changes` read off the slot's stream (`pgslot.Stream`):
@@ -3381,6 +3511,10 @@ select json_build_object(
         two_way = bool((self.hop.options or {}).get("two_way"))
         streams = self.__dict__.setdefault("_slot_streams", {})
         stream = streams.get((side, db))
+        # how long a read waits for the first change, and how often the
+        # stream says where it stands: the measured change pace
+        pace = self.__dict__.setdefault("_stream_paces", {}).setdefault(
+            (side, db), tailctl.Pace())
         try:
             if stream is None:
                 _, local = self._log_end(ask, self._d(side, db), two_way)
@@ -3391,10 +3525,11 @@ select json_build_object(
                                     .LogicalReplicationConnection),
                     slot, token, {"include-timestamp": "true",
                                   **({"only-local": "true"} if local
-                                     else {})})
+                                     else {})}, pace=pace)
                 streams[(side, db)] = stream
             stream.confirm(token)
-            rows = stream.rows(int(limit), tailctl.IDLE_MOST)
+            rows = stream.rows(int(limit), pace.wait())
+            pace.saw(len(rows))
         except Exception:
             streams.pop((side, db), None)
             if stream is not None:
@@ -3608,7 +3743,8 @@ select json_build_object(
             return self._wal_changes(side, db, token, limit,
                                      self.follow_way(db, side))
         standby = bool((self.hop.options or {}).get("standby"))
-        if not standby and self._change_read(side, db).path == "stream":
+        if not standby and self._change_read(
+                side, db, name, token).path == "stream":
             return self._streamed(side, db, name, token, limit, ask)
         rows_of = self._slot_rows_waited if standby else self._slot_rows
         if token and standby:

@@ -683,6 +683,13 @@ class Pace:
             return self.most
         return min(self.most, max(self.least, self.batch / self.rate))
 
+    def heartbeat(self):
+        """How often a stream says it is alive and where it stands: the
+        time the measured rate takes to fill a batch, as `wait`, so a busy
+        source hears the applied position as often as a batch lands and a
+        quiet one no more than once in `most`."""
+        return self.wait()
+
 
 def apply_unit(eng, db, at, changes, apply, log=None):
     """One tail batch applied as a unit of its own: the target's write
@@ -692,21 +699,83 @@ def apply_unit(eng, db, at, changes, apply, log=None):
     never ended reconciles it before it runs again. Every change of it
     names its row by key, so applying it again converges: what a fault
     mid-batch left is overwritten, never doubled. A batch with a change
-    that names no row cannot be told landed or not and stops instead."""
-    from . import faults
+    that names no row cannot be told landed or not and stops instead.
+
+    The batch goes to the target as typed columns (`pgslot.columnar`, in
+    the changes' order) where the target has a column writer
+    (`apply_columns`) and every value went into the columns exactly
+    (`pgslot.exact`), the change records `apply` takes otherwise
+    (`decide.tail_apply`): a column writer that cannot take the batch
+    switches to the records before anything of it is written. The
+    position is the caller's to save once this returns - after the
+    target committed and the ledger closed the unit, never between."""
+    from . import decide, failpoint, faults
     fn = getattr(eng, "attempts", None)
     ledger = getattr(fn(), "ledger", None) if callable(fn) else None
     keyed = all(c.get("key") for c in changes)
     owned = faults.Owned("dst", "tail batch", str(db),
                          json.dumps(at, sort_keys=True, default=str))
+    columns = _columns(eng, changes)
 
     def check():
         return (faults.NOTHING, None) if keyed else (None, None)
-    return faults.retried(lambda: apply(changes), side="dst",
+
+    def run(choice):
+        if choice.rung.name == "columns":
+            n = eng.apply_columns("dst", db, columns[0])
+        else:
+            n = apply(changes)
+        # the target committed; the ledger closes the unit after this
+        failpoint.hit("tail.unit_applied")
+        return n
+
+    def applied():
+        return decide.attempt(
+            "applying a tail batch", decide.tail_apply(columns[1]), run,
+            decide.Facts(columns[1]), log=log,
+            switch=lambda e: isinstance(e, NotColumns))[1]
+    return faults.retried(applied, side="dst",
                           operation="tail batch", writes=True, check=check,
                           log=log, label=f"{db}: a tail batch",
                           ledger=ledger,
                           owned=owned if ledger is not None else None)
+
+
+def _not_columns():
+    from .decide import Blocked
+
+    class NotColumns(Blocked):
+        """A column writer refused a batch before writing any of it: the
+        batch goes as change records instead (`apply_unit`)."""
+    return NotColumns
+
+
+NotColumns = _not_columns()
+
+
+def _columns(eng, changes):
+    """(the ordered Arrow batches or None, the facts `decide.tail_apply`
+    reads): built once a batch, checked value by value against the
+    changes before any is written."""
+    facts = {"writer": callable(getattr(eng, "apply_columns", None)),
+             "one lane": len(changes) < getattr(eng, "LANES_FROM",
+                                                float("inf"))}
+    if not facts["writer"] or not changes:
+        return None, {**facts, "typed": False,
+                      "typed why": "nothing to put in columns"}
+    from . import pgslot
+    try:
+        batches = pgslot.columnar(changes, ordered=True)
+    except ImportError:
+        return None, {**facts, "typed": False,
+                      "typed why": "this machine has no columnar library"}
+    except (TypeError, ValueError, OverflowError, KeyError,
+            NotImplementedError) as e:
+        return None, {**facts, "typed": False,
+                      "typed why": "the batch's values do not fit typed"
+                                   f" columns ({type(e).__name__})"}
+    why = pgslot.exact(changes, batches)
+    return batches, {**facts, "typed": why is None, "typed why": why}
 
 
 def follow(eng, db, go, token_path, log, noun, look, behind, every=1.0):
