@@ -22,7 +22,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - [`docs/agents/INVENTORY.md`](INVENTORY.md) - every file of `migkit/` and `tools/`: its responsibility package, owner domain, size, importers, the packages it reaches, the programs it wraps and the tests that reach it
 - [`docs/agents/LAYERS.md`](LAYERS.md) - the layering rule (a package imports its own rank and below) and every upward import still listed, with its reason
 
-## `migkit/` (176 modules)
+## `migkit/` (177 modules)
 
 - `migkit/__init__.py` - (no docstring)
 - `migkit/addresses.py` - A hop from two addresses (backlog R21).
@@ -41,6 +41,7 @@ Written by `tools/gen_codemap.py` from the code; the pre-commit hook stops a com
 - `migkit/barriers.py` - Barriers, tombstones, and neutral write markers across engines (BAR-1, BAR-2, BAR-3, P0-DEPTH.tombstones, P0-DE.3). Classes: Tombstone, TombstoneLedger, NeutralMark, SequenceTag, BatchSequenceLedger, TargetWriteAttribution.
 - `migkit/binlog_marks.py` - The binlog events a two-way tail's marks travel in, as migkit reads them (`marks`): MySQL's tagged GTID, which the binlog reader does not kn
 - `migkit/binlog_payload.py` - MySQL's compressed transactions, read rather than stopped on (backlog 6). Classes: TransactionPayloadEvent, Unreadable, MariadbCompressedEvent.
+- `migkit/blockseed.py` - A seed carried as the blocks of a volume snapshot (backlog LT.P2). Classes: Refused, Carried.
 - `migkit/bsontype.py` - A MongoDB value compared as its BSON type and its value, both.
 - `migkit/bulkways.py` - The whole-database ways of the keyed engines, ranked by what each has measured on the hop (backlog F7.rshake, F7.mm2).
 - `migkit/canon.py` - One text rendering of a value that two different engines both produce. Classes: Added, Kept, Limits.

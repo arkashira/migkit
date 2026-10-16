@@ -192,12 +192,15 @@ Built, unproved - a way the code has on an engine no sandbox here can run; the e
 - azure: built; not run against a real Azure account (managed.sign-in, managed.forwarder, managed.readiness, managed.egress-gate)
 - azure-synapse: built; not run on a real Synapse dedicated SQL pool (managed.readiness, managed.brand-api)
 - documentdb: built; not run against a real DocumentDB cluster (brand.told, preflight.change-streams, preflight.retention, tail.ddl-snapshot)
+- ebs: built on fakes; not run against a real EBS snapshot (seed.blocks, seed.changed-list, seed.fast-forward)
 - gcp: built; not run against a real Google Cloud account (managed.sign-in, managed.forwarder, managed.readiness, managed.egress-gate)
+- lvm: built on fakes; not run against a real LVM thin volume (seed.blocks, seed.changed-list, seed.fast-forward)
 - msk: built; not run against a real MSK cluster (brand.told, sign-in.iam, sign-in.mechanisms)
 - redis-enterprise: built; not run against a real Redis Enterprise (brand.told)
 - singlestore-helios: built; not run on a real SingleStore Helios workspace (managed.readiness, managed.brand-api)
 - windows: built; not run on Windows (bundle.install, bundle.source-build, bundle.platform-markers)
 - yugabyte-aeon: built; not run on a real YugabyteDB Aeon cluster (managed.readiness, managed.brand-api)
+- zfs: built on fakes; not run against a real ZFS dataset (seed.blocks, seed.changed-list, seed.fast-forward)
 
 Per item: the engines in each state - "test owed" is a way in the code whose test on that engine is not written (`UNPROVED`); "built, unproved" is one whose engine module declares it was not run on a real server.
 
@@ -294,17 +297,17 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 ## Source layout
 
-385 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
+386 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
 Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 4290 ordered pairs of 66 engines; 81 shape lacks, 44 capability lacks, 3027 depth lacks in all; fewest kinesis -> postgres (6), most vertica -> synapse (164).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 
-DONE 357 - PARTLY 87 - IN PROGRESS 4 - OPEN 30 - BLOCKED 19 - NOT PURSUED 9
+DONE 357 - PARTLY 89 - IN PROGRESS 4 - OPEN 28 - BLOCKED 19 - NOT PURSUED 9
 
 | area | DONE | PARTLY | IN PROGRESS | OPEN | BLOCKED | NOT PURSUED |
 |---|---|---|---|---|---|---|
-| change follow | 45 | 7 | 0 | 6 | 5 | 0 |
+| change follow | 45 | 8 | 0 | 5 | 5 | 0 |
 | conversion | 29 | 2 | 0 | 0 | 0 | 0 |
 | correctness | 3 | 0 | 0 | 0 | 0 | 0 |
 | correctness/operations | 1 | 1 | 0 | 0 | 0 | 0 |
@@ -313,7 +316,7 @@ DONE 357 - PARTLY 87 - IN PROGRESS 4 - OPEN 30 - BLOCKED 19 - NOT PURSUED 9
 | ease of use | 34 | 6 | 0 | 0 | 1 | 1 |
 | engines | 32 | 14 | 1 | 4 | 5 | 1 |
 | maintainability | 1 | 2 | 0 | 2 | 0 | 0 |
-| move | 31 | 15 | 2 | 4 | 0 | 2 |
+| move | 31 | 16 | 2 | 3 | 0 | 2 |
 | operations/scale | 43 | 15 | 0 | 8 | 5 | 3 |
 | operations/verify | 0 | 1 | 0 | 0 | 0 | 0 |
 | security | 10 | 6 | 0 | 0 | 2 | 1 |

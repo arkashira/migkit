@@ -6760,3 +6760,49 @@ def version_seen(facts):
                          " never run against it")),
              because="the version-keyed choices were run on it")),
         f, prove=False)
+
+def _seed_meets(secs, f):
+    deadline = f.get("deadline")
+    return deadline is None or secs is None or secs <= deadline
+
+
+#: the seed carried as a volume snapshot's changed blocks (`blockseed`):
+#: a rung of the seed's carriers (`ship.SEEDS["blocks"]`)
+SEED_BLOCKS = Rung(
+    "blocks", "the changed blocks of a volume snapshot",
+    needs=(Need("a snapshot whose parent the target holds",
+                lambda f: f.get("blocks ok") is True,
+                lambda f: str(f.get("blocks ok") or "no snapshot of the"
+                              " source's volume is named")),
+           Need("the changed blocks within the deadline",
+                lambda f: _seed_meets(f.get("blocks"), f),
+                lambda f: f"its changed blocks take about"
+                          f" {round(f.get('blocks') or 0)}s, past the"
+                          f" deadline of {round(f.get('deadline') or 0)}s")),
+    footprint=1,
+    because="only the blocks changed since the target's snapshot travel,"
+            " and the follow starts from the position recorded at it")
+
+
+def seed_carrier(facts, costs=None):
+    """How the seed reaches the target: the changed blocks of a volume
+    snapshot whose parent the target holds (`blockseed`), the seed on media
+    the hop names, or the copy over the link (`ship.SEEDS`) - each held to
+    the deadline and ranked by the seconds measured for it. `facts`:
+    `blocks ok` (True, or why no block seed can be carried), `blocks` (its
+    changed blocks' seconds at the measured rate), `ship` (the hop names a
+    carrier), `media`, `network` (seconds; None where nothing measured)
+    and `deadline`. Where nothing is measured the block seed, carrying
+    least, goes first, then the carrier the hop names, then the link."""
+    from . import ship
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    for k in ("ship", "network", "media", "deadline", "blocks ok",
+              "blocks"):
+        f.setdefault(k, None)
+    rungs = (ship.SEEDS["blocks"], ship.SEEDS["media"],
+             ship.SEEDS["network"]) if f.get("ship") else (
+        ship.SEEDS["blocks"], ship.SEEDS["network"], ship.SEEDS["media"])
+    got = {k: f.get(k) for k in ("blocks", "media", "network")}
+    measured = {k: v for k, v in got.items() if v is not None}
+    return climb("the seed's carrier", rungs, f,
+                 costs=dict(costs or measured) or None, prove=False)

@@ -539,7 +539,7 @@ _BY_NAME = {
                     " huawei_sdk imports integrations workflow_exporter"
                     " assist mirror redisshake dsbulk ddbexport"
                     " fromsnapshot kafkaclient registry avrostream"
-                    " seedtools carriers ship backupseed",
+                    " seedtools carriers ship backupseed blockseed",
     "workflows": "movers cutover tailtables topicstates tailctl verifiers"
                  " autonomous upgrade indexes appversions drift crossmove"
                  " physical ha jobs users split consolidate reshard subset"

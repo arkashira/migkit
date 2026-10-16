@@ -560,6 +560,7 @@ SEEDS = {
                                f" the deadline of {_took(f['deadline'])}")),
         footprint=1,
         because="the hop names a carrier"),
+    "blocks": decide.SEED_BLOCKS,
 }
 
 

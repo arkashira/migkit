@@ -4116,7 +4116,11 @@ select json_build_object(
 
     def _wal_read(self, side, db, way, start, end, limit):
         """The WAL records from `start` to `end`, `limit` at most, oldest
-        first (`wal_record`), the way `way` reads them."""
+        first (`wal_record`), the way `way` reads them. Nothing written
+        since `start` is no record, not a WAL gone: the server finds no
+        record past its own end and says so as it would of a removed one."""
+        if _lsn_int(start) >= _lsn_int(end):
+            return []
         facts = self._follow_facts(side, db)
         if way.path == "wal inspect":
             import psycopg2

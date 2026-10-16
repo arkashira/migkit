@@ -5627,12 +5627,21 @@ real account (`cosmosdb.UNPROVED_ON`). Left: both run on a real account.
   (walminer 4 is paid). R9 built 2026-10-16 (`PostgresEngine.FOLLOW_WAYS`:
   slot, then the server's WAL functions, then the WAL files read here;
   D2 per keyed table, `_wal_changes`, tests in
-  `test_a_postgres_replica_wal_is_followed_by_its_records.py`). Not done:
-  the keys held per block live in memory only, so a follow resumed by a
-  new process refuses any row removed before it began holding them;
-  a table without a key is refused, not handed to a digest diff; a
-  partition's changes are its leaf's name, not its root's; no sandbox
-  run against a replica-level server yet. R2: SQL Server without CT/CDC - restore the
+  `test_a_postgres_replica_wal_is_followed_by_its_records.py`). Proved
+  2026-10-16 in the sandbox on PostgreSQL 16 and 17 at
+  `wal_level=replica` (`pg_get_wal_records_info`, from 15 on; 16 adds
+  `pg_get_wal_block_info`, not read: the records' block references are
+  enough), `test_postgres_changes_are_read_from_its_wal_at_replica_level.py`:
+  inserts, updates and deletes arrive, a table out of scope is never read,
+  an open transaction holds the position and then arrives whole, and a
+  follow started again in a new process from its saved position and its
+  kept keys applies nothing it applied before. Found by that run: a source
+  with nothing written since the position stopped the follow as "WAL
+  gone" (the server finds no record past its end) - an empty range now
+  reads as no records. Not done: a partition's changes are its leaf's
+  name, not its root's; the WAL files read on this machine (`wal dump`)
+  and a server before 15 not run in the sandbox; a trigger capture below
+  both is not a rung of this ladder. R2: SQL Server without CT/CDC - restore the
   source's log-backup chain onto a SQL Server migkit owns and read the
   log there: no privilege and no setting on the source (`sp_replcmds`
   needs a published database - not a way round). R4/R5: Oracle without
@@ -5799,6 +5808,20 @@ real account (`cosmosdb.UNPROVED_ON`). Left: both run on a real account.
   moving only changed blocks, then fast-forwarded; a zero-ETL-like
   continuous hop for any source and warehouse, keyless tables and
   additive DDL without a resync.
+  P2 built 2026-10-16 on fakes, unproved on a real snapshot (LT.P2):
+  `blockseed` - a snapshot's manifest (every block digested, the
+  position recorded at it), the blocks that differ from the parent the
+  target holds (a kind's own changed-block list checked against them and
+  refused where it misses one), each block held to its digest on read and
+  read-back and checkpointed only then, a resume writing again only what
+  was not checkpointed, the whole target held to the snapshot before the
+  follow starts at its position; a carrier rung (`ship.SEEDS["blocks"]`)
+  placed by `decide.seed_carrier` against the media and the link,
+  `test_a_seed_from_a_block_snapshot_carries_only_changed_blocks.py`. Not
+  done: reading a real ZFS send, LVM thin delta or EBS changed-block list
+  (`blockseed.UNPROVED_ON`); no hop key names a snapshot and `ship.carry`
+  does not yet ask `seed_carrier`; the position recorded at a snapshot is
+  taken as given, not read from the snapshot's own WAL or log.
   Not done (W12B): AWS's integration is made and waited for; Azure's MI link and Google's AlloyDB stream are registered and refused as not yet run; `decide.warehouse_feed` is not yet asked by the flow.
   Not done (W12B): the landing sizes the tail and late rows are dropped by `hop.versions`, but each warehouse still lands through its own device rather than switching way by the choice; the zero-ETL lag is documented, not yet read from the target; capabilities declare neither rung (owned elsewhere); none of it has run on a real account.
   Not done (W13C): each warehouse now lands through the way `decide.warehouse_landing` chose (an untimed way probed at two sizes, bounded; a switch at a batch boundary only past the tie); the tail's first read asks `decide.warehouse_feed`, the provider's lag measured by a marker's round trip once its integration runs; Azure's MI link and Google's AlloyDB stream are made, watched and refused by the grant or API they lack. Left: the provider's win stops the tail and asks for `migkit check` rather than running it; the marker needs a source drainmark writes (postgres, mysql, mongodb); the rungs are not in `capabilities`; nothing has run on a real account.
