@@ -283,16 +283,54 @@ def holds(hop, dbs=None):
     return out
 
 
+def _age(since, now):
+    """Seconds since a record's `since` (local time, as `freeze` writes
+    it), None where it cannot be read."""
+    import time
+    try:
+        return now - time.mktime(time.strptime(str(since),
+                                               "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def longest_step(hop):
+    """Seconds the longest step of the hop's last kept run took
+    (`autonomous.Workflow`), None where none was kept."""
+    from . import durable
+    path = hop.report_dir() / "workflow.json"
+    try:
+        kept = durable.read_state(path, "state") if path.exists() else None
+    except Exception:  # noqa: BLE001 - no run kept, nothing measured
+        return None
+    took = [u.get("took") for u in ((kept or {}).get("units") or {}).values()
+            if isinstance(u, dict) and isinstance(u.get("took"),
+                                                  (int, float))]
+    return max(took) if took else None
+
+
+def decided(hop, dbs=None, now=None):
+    """[(hold, `decide.lift_hold` Choice)] of every hold `holds` finds."""
+    import time
+    from . import decide
+    now = time.time() if now is None else now
+    step = longest_step(hop)
+    return [(h, decide.lift_hold({
+        "holder gone": h["gone"], "age": _age(h["since"], now),
+        "longest step": step, "side": h["side"]})) for h in holds(hop, dbs)]
+
+
 def lift(hop, eng, say, dbs=None, force=False):
     """Every hold `holds` finds left behind given back, exactly as its
     record took it (`freeze.thaw_source`, `freeze.thaw`). A hold whose
     process still runs, or whose record names none, is left as it is
-    unless `force`: it may be a cutover in progress. Returns the holds
+    unless `force`: it may be a cutover in progress - the choice is
+    `decide.lift_hold`'s (`decided`). Returns the holds
     lifted and those left, each as `holds` lists them."""
     from . import freeze
-    found = holds(hop, dbs)
-    lifted = [h for h in found if h["gone"] or force]
-    left = [h for h in found if not (h["gone"] or force)]
+    chosen = decided(hop, dbs)
+    lifted = [h for h, c in chosen if force or c.path == "lift"]
+    left = [h for h, c in chosen if not (force or c.path == "lift")]
     src = [h["db"] for h in lifted if h["side"] == "src" and h["db"]]
     if any(h["side"] == "src" for h in lifted):
         freeze.thaw_source(hop, eng, src, say)

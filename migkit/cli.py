@@ -980,12 +980,63 @@ def doctor(install):
             for line in lines:
                 console.print(line)
             failed = failed or bad
+        for name, hop in hops.items():
+            for line in _holds_said(name, hop):
+                console.print(line)
     if failed:
         from .verdict import EXIT
         # a side that did not answer, or a connection that is not what the
         # hop asks for: said above, and the command ends as a stop - it
         # ended 0 whatever doctor found
         raise SystemExit(EXIT["failed"])
+
+
+def _holds_said(name, hop, chosen=None):
+    """A line for each hold of writes a run of `name` left on a side
+    (`leftovers.decided`), with what `decide.lift_hold` chose and why."""
+    from . import leftovers as _left
+    try:
+        chosen = _left.decided(hop) if chosen is None else chosen
+    except Exception:  # noqa: BLE001 - no record read: nothing listed
+        return []
+    out = []
+    for h, c in chosen:
+        where = f"{h['db']} on the {_SIDE[h['side']]}" if h["db"] else \
+            f"the {_SIDE[h['side']]}"
+        out.append(f"{_esc(name)}: writes held on {_esc(where)} since"
+                   f" {h['since']} ({h['way']}): {c.said} - {c.reason}"
+                   + (f"; migkit leftovers {_esc(name)} gives it back"
+                      if c.path == "lift" else ""))
+    return out
+
+
+_SIDE = {"src": "source", "dst": "target"}
+
+
+@main.command("leftovers")
+@click.argument("hop_name")
+@click.option("--db", default="", help="single database")
+@click.option("--list", "only_list", is_flag=True,
+              help="say each hold and what would be done, give none back")
+def leftovers_cmd(hop_name, db, only_list):
+    """Give back the writes a run held on a side and left behind: each
+    exactly as its record took it, where its holder is gone; one whose
+    holder still runs is left, with why."""
+    from . import leftovers as _left
+    hop = get_hop(hop_name)
+    dbs = [db] if db else None
+    chosen = _left.decided(hop, dbs)
+    for line in _holds_said(hop_name, hop, chosen):
+        console.print(line)
+    if not chosen:
+        console.print(f"{_esc(hop_name)}: no writes held on either side")
+        return
+    if only_list or not any(c.path == "lift" for _, c in chosen):
+        return
+    lifted, left = _left.lift(hop, get_engine(hop),
+                              lambda m: console.print(f"  {_esc(m)}"), dbs)
+    console.print(f"{len(lifted)} hold(s) given back, {len(left)} left as"
+                  " they are")
 
 
 def _doctor_side(name, hop, eng, side, ep):
@@ -3135,6 +3186,110 @@ class _Steps:
     def progress(self, db):
         return _move_said(self.hop, db)
 
+    def pair(self):
+        """(source engine, target engine), whose gaps (`autonomous.gaps`)
+        the flow says before any costly step."""
+        from .engines import ALIASES
+        one = ALIASES.get(self.hop.engine, self.hop.engine)
+
+        def named(side):
+            e = getattr(self.eng, f"{side}_engine", None)
+            got = getattr(getattr(e, "hop", None), "engine", None)
+            return ALIASES.get(got, got) if isinstance(got, str) else one
+        return named("src"), named("dst")
+
+    def order(self, db):
+        """The dependency facts the order of `db`'s phases is chosen from
+        (`decide.phase_order`) - handed in, never chosen here: the
+        source's foreign keys, whether they close a cycle, the tables
+        parents first, whether the target checks keys while it loads
+        (`LOAD_SKIPS_KEYS`) and whether the engine's own schema way
+        carries them. What could not be read stays None, never taken as
+        none."""
+        dst = getattr(self.eng, "dst_engine", None) or self.eng
+        out = {"foreign keys": None, "fk cycle": None,
+               "parents first": None, "target keys": None,
+               "schema carries keys": (False if self._apart() else None)}
+        try:
+            keys = list(self.eng.foreign_keys(db))
+        except Exception:  # noqa: BLE001 - not read: no cycle ruled out
+            return out
+        edges = [(str(k[0]), str(k[2])) for k in keys if k[0] != k[2]]
+        first, cycle = _parents_first(edges)
+        out.update({"foreign keys": [f"{c} -> {p}" for c, p in edges],
+                    "fk cycle": cycle, "parents first": first,
+                    "target keys": not getattr(dst, "LOAD_SKIPS_KEYS",
+                                               False)})
+        return out
+
+    def _apart(self):
+        """True where the engine's own ways make the tables before the copy
+        (`Engine.create_missing`: the definitions without their keys) and
+        their keys, indexes and constraints once the rows are in
+        (`Engine.finish_created`), on the one record the copy reads
+        (`movers._pg_created_path`); elsewhere the copy carries both."""
+        from .engines import ALIASES
+        return (ALIASES.get(self.hop.engine, self.hop.engine) == "postgres"
+                and callable(getattr(self.eng, "create_missing", None))
+                and callable(getattr(self.eng, "finish_created", None)))
+
+    @property
+    def schema(self):
+        """The schema phase apart from the copy, where the engine has one."""
+        return self._schema if self._apart() else None
+
+    @property
+    def constraints(self):
+        """The keys-and-constraints phase after the copy, where the engine
+        has one."""
+        return self._constraints if self._apart() else None
+
+    def _records(self, db):
+        from . import movers
+        rec = movers._pg_created_path(self.hop, db)
+        return rec, rec.with_name("created-tables.flow.json")
+
+    def _schema(self, db):
+        """The tables the target lacks made from the source's definitions.
+        Their keys are owed to the constraints phase: the record of what
+        was made is kept under the flow's own name, so the copy that
+        follows carries rows only and does not put them on itself."""
+        rec, aside = self._records(db)
+        self.eng.create_missing(db, lambda m: console.print(f"  {_esc(m)}"))
+        if rec.exists():
+            rec.replace(aside)
+        made = json.loads(aside.read_text()) if aside.exists() else {}
+        return {"tables made": len(made.get("tables") or ())}
+
+    def _constraints(self, db):
+        """The keys, indexes and constraints of the tables the schema phase
+        made, put on once the copy is in; nothing where it made none."""
+        rec, aside = self._records(db)
+        if aside.exists():
+            aside.replace(rec)
+        if not rec.exists():
+            return {"tables finished": 0}
+        n = len(json.loads(rec.read_text()).get("tables") or ())
+        self.eng.finish_created(db, lambda m: console.print(f"  {_esc(m)}"))
+        if rec.exists():
+            raise SystemExit(f"the keys and constraints of {db} were not all"
+                             " put on; migkit migrate runs this phase again")
+        return {"tables finished": n}
+
+
+def _parents_first(edges):
+    """([table, ...] each parent before the tables that refer to it,
+    whether the keys close a cycle) of the (child, parent) `edges`."""
+    nodes = list(dict.fromkeys(t for e in edges for t in reversed(e)))
+    owed = {t: {p for c, p in edges if c == t} for t in nodes}
+    first = []
+    while True:
+        free = [t for t in nodes if t not in first and not owed[t] - set(first)]
+        if not free:
+            break
+        first += free
+    return first, len(first) < len(nodes)
+
 
 #: the workers `migrate`'s flow handed the copy it runs (`_flow_sized`)
 _FLOW_WORKERS = contextvars.ContextVar("flow_workers", default=None)
@@ -3351,6 +3506,8 @@ def _joint_lines(hop, eng, m, facts, tables, d, phases=()):
         out += [f"  plan: {line}" for line in jointplan.lines(jp)]
         decide.record(hop, {
             "work": f"the move of {d}", "plan": jp.as_evidence(),
+            "snapshot": {d: _snapshot_of(
+                getattr(eng, "src_engine", None) or eng, d)},
             "facts": jointplan.account(hop, m, facts, jp)},
             lambda line: out.append(f"  {line}"),
             way="the tables planned as one",
@@ -3508,6 +3665,8 @@ def _joint_for_move(hop, eng, m, d, names, most, log):
         log(f"plan: {line}")
     decide.record(hop, {
         "work": f"the move of {d}", "plan": jp.as_evidence(),
+        "snapshot": {d: _snapshot_of(
+            getattr(eng, "src_engine", None) or eng, d)},
         "facts": jointplan.account(hop, m, facts, jp)}, log,
         way="the tables planned as one" if jp.admitted else "stop",
         reason=jp.refused or "; ".join(jointplan.lines(jp)))
@@ -3518,6 +3677,23 @@ def _joint_for_move(hop, eng, m, d, names, most, log):
             d, "the tables as planned do not keep what the move must keep:"
             f" {jp.refused}", hop.name))
     return jp
+
+
+def _snapshot_of(src, d):
+    """How `d`'s copy readers share one moment, as the source says it
+    (`Engine.shared_snapshot`), read once a database and kept on the
+    engine: the plan's evidence and the copy's schedule say the same."""
+    seen = getattr(src, "_snapshot_said", None)
+    if not isinstance(seen, dict):
+        seen = {}
+        try:
+            src._snapshot_said = seen
+        except AttributeError:
+            pass
+    if d not in seen:
+        fn = getattr(src, "shared_snapshot", None)
+        seen[d] = fn(d) if callable(fn) else ""
+    return seen[d]
 
 
 def _copy_admitted(hop, eng, d, jp, at_once, followed, log):
@@ -3534,7 +3710,7 @@ def _copy_admitted(hop, eng, d, jp, at_once, followed, log):
     src = getattr(eng, "src_engine", None) or eng
     dst = getattr(eng, "dst_engine", None) or eng
     sched = guarantees.copy_schedule(
-        at_once, getattr(src, "SHARED_SNAPSHOT", False), followed,
+        at_once, _snapshot_of(src, d), followed,
         getattr(dst, "RANGE_MARK", "after durable"))
     ok, why = decide.admit(sched, sem, "the copy's ranges side by side")
     if ok:

@@ -26,7 +26,11 @@ A package imports its own rank and the ranks below it, never one above. A rank o
 
 Outside the rule: `tools` (the generators, the full suite and the checks run by the maintainers; they import migkit and migkit never imports them); `data` (the files migkit ships as resources).
 
-## Upward imports still listed: 406
+## Upward imports still listed: 407
+
+### (not listed)
+
+- `migkit/leftovers.py:315` safety -> decision (`decide`)
 
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
 

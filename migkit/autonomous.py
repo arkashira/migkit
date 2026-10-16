@@ -136,11 +136,17 @@ def compose(goal, dbs, can=(), facts=None):
                  independent=tuple(f"each check of {d}" for d in dbs))
     out = [root]
     for d in dbs:
-        c = decide.phase_order((facts or {}).get(d) or {})
+        f = (facts or {}).get(d) or {}
+        c = decide.phase_order(f)
         choices[d] = c
         seq = ["schema"] if "schema" in can else []
         seq.append("move")
-        if c.path == "constraints-after" and "constraints" in can:
+        # the keys come after the rows where the order says so, or where
+        # the engine's own schema way leaves them for after (a fact of the
+        # engine, handed in with the dependencies)
+        if "constraints" in can and (
+                c.path == "constraints-after" or "schema" in can
+                and f.get("schema carries keys") is False):
             seq.append("constraints")
         seq += [s for s in FLOWS[goal][1] if s != "move"]
         before, others = root, [o for o in dbs if o != d]
@@ -609,16 +615,22 @@ def run(goal, ops, say, path=None, wait=time.sleep, now=time.time,
     for line in told:
         say(line)
     order = getattr(ops, "order", None)
+    handed = {d: order(d) for d in dbs} if callable(order) else None
     choices, phases = compose(
         goal, dbs, [s for s in OWN_STEPS if callable(getattr(ops, s, None))],
-        {d: order(d) for d in dbs} if callable(order) else None)
+        handed)
     wf = Workflow.load(path, goal, dbs, phases)
     hop = Unit("assess")
     if told:
         wf.decided(hop, "gaps", f"{len(told)} things the pair lacks said"
                    " before any step", gaps=told)
     for d, c in choices.items():
-        wf.decided(hop, "order", f"{d}: {c.said} - {c.reason}", c.path)
+        # the dependency facts the order stood on, kept with it
+        f = (handed or {}).get(d) or {}
+        wf.decided(hop, "order", f"{d}: {c.said} - {c.reason}", c.path,
+                   facts={k: f.get(k) for k in c.asked},
+                   keys=f.get("foreign keys"),
+                   first=f.get("parents first"))
     unknown = [u for u in wf.units if u.state == "failed-unknown"]
     if unknown:
         from . import attempts

@@ -277,6 +277,8 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the move's checkpoint kept changing under migkit while it saved it. Check which machines still own this move and reconcile their state before retrying; once the contention is resolved, rerun the original move command
 
+* the keys and constraints of <...> were not all put on; migkit migrate runs this phase again
+
 ## Planning: the ways, the machine and the limits
 
 * <...>: <...> failed (<...>), and what it began could not be undone (<...>) - no other way is tried over it
