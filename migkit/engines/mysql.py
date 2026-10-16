@@ -1,3 +1,4 @@
+import contextlib
 import difflib
 import json
 import queue
@@ -757,7 +758,13 @@ class MySQLEngine(Engine):
                      where=None):
         sql, args, key, names = self._read_query(side, db, table, columns,
                                                  after, limit, where)
-        rows = [list(r) for r in self._q(side, sql, args)]
+        held = self._moment_source(db) if side == "src" else None
+        if held is not None:
+            with held.cursor() as cur:
+                cur.execute(sql, args)
+                rows = [list(r) for r in cur.fetchall()]
+        else:
+            rows = [list(r) for r in self._q(side, sql, args)]
         if not rows or not key:
             return (rows, None)
         idx = [names.index(k) for k in key if k in names]
@@ -2367,6 +2374,129 @@ class MySQLEngine(Engine):
                 if now == tag and int(lo) <= n <= int(hi or lo):
                     return True
         return False
+
+    def export_moment(self, db, tables=(), readers=1):
+        """(token, close) of the one moment the range readers of `tables`
+        start at. MySQL shares no snapshot between sessions, so the moment
+        is made: the tables held still by a read lock on a session of its
+        own (every server-wide write where no table is named), the executed
+        GTIDs and the binlog position read once under it, and the lock kept
+        until each of the `readers` has begun its own consistent snapshot
+        and proved the lock still held after it began (`_moment_source`) -
+        so each reads the tables as that position left them. The lock goes
+        once every reader is in, or once the link's stall bound has passed
+        (`stall.seconds`): writers wait on it, and a reader later than that
+        reads as of its own mark, saying so."""
+        import uuid
+        from ..stall import seconds
+        readers = max(int(readers or 1), 1)
+        sdb = self._d("src", db)
+        conn = self._conn("src")
+        name = f"migkit-moment-{uuid.uuid4().hex[:20]}"
+        try:
+            with conn.cursor() as cur:
+                if tables:
+                    cur.execute("lock tables " + ", ".join(
+                        f"`{sdb}`.`{str(t).split('.')[-1]}` read"
+                        for t in tables))
+                else:
+                    cur.execute("flush tables with read lock")
+                cur.execute("select connection_id(), get_lock(%s, 0)",
+                            (name,))
+                cid, got = cur.fetchone()
+            if got != 1:
+                raise RuntimeError("the moment's lock was not taken")
+            try:
+                pos = self.change_point("src", db)
+            except SystemExit:
+                pos = None
+            mark = self.snapshot_mark("src", db)
+        except BaseException:
+            conn.close()
+            raise
+        token = json.dumps({"lock": name, "holder": int(cid), "mark": mark,
+                            "pos": pos, "readers": readers})
+        guard, gone = threading.Lock(), threading.Event()
+
+        def release():
+            with guard:
+                if gone.is_set():
+                    return
+                gone.set()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("select release_lock(%s)", (name,))
+                        cur.execute("unlock tables")
+                except Exception:  # noqa: BLE001 - closing gives it back
+                    conn.close()
+
+        def watch():
+            began, bound = time.monotonic(), seconds()
+            while not gone.wait(0.05):
+                if (self._moment_readers(name, readers) >= readers
+                        or time.monotonic() - began > bound):
+                    break
+            release()
+        threading.Thread(target=watch, daemon=True).start()
+
+        def close():
+            release()
+            conn.close()
+            _moment_done(token)
+        return token, close
+
+    def _moment_readers(self, name, readers):
+        """How many readers have begun their snapshot at the moment: the
+        named locks they took (`_moment_source`) held now."""
+        got = self._q("src", "select " + ", ".join(
+            ["is_used_lock(%s)"] * readers),
+            tuple(f"{name}-{i}" for i in range(readers)))
+        return sum(1 for v in (got[0] if got else ()) if v is not None)
+
+    def _moment_source(self, db):
+        """The source connection this thread reads `db` on at the moment
+        it adopted (`adopt_moment`), or None - none adopted, or its snapshot
+        not proved to begin while the moment's lock was held, so the read
+        is as of its own mark."""
+        token = (self.__dict__.get("_moment") or {}).get(db)
+        if not token:
+            return None
+        at = (token, threading.get_ident())
+        if at in _MOMENTS:
+            return _MOMENTS[at] or None
+        asked = json.loads(token)
+        conn = self._conn("src")
+        proved = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute("start transaction with consistent snapshot")
+                cur.execute("select is_used_lock(%s)", (asked["lock"],))
+                row = cur.fetchone()
+                proved = bool(row) and row[0] is not None \
+                    and int(row[0]) == int(asked["holder"])
+                for i in range(int(asked.get("readers") or 1)
+                               if proved else 0):
+                    cur.execute("select get_lock(%s, 0)",
+                                (f"{asked['lock']}-{i}",))
+                    if cur.fetchone()[0] == 1:
+                        break
+        except Exception:  # noqa: BLE001 - read as of its own mark
+            proved = False
+        if not proved:
+            conn.close()
+            _MOMENTS[at] = None
+            return None
+        _MOMENTS[at] = conn
+        return conn
+
+    @staticmethod
+    def moment_mark(token):
+        """The executed GTIDs read under the moment's lock: what every range
+        read at it has seen, for `ranges.started`; None where none."""
+        try:
+            return json.loads(token).get("mark") if token else None
+        except (TypeError, ValueError):
+            return None
 
     def change_point(self, side, db):
         """Where the binlog is now, as the token `neutral_changes` resumes
@@ -8670,10 +8800,10 @@ class MySQLEngine(Engine):
             def one(rng):
                 after, upto = rng
                 if not hasattr(local, "conns"):
-                    local.conns = (self._conn("src"), self._conn("dst"))
+                    local.conns = (self._moment_source(db)
+                                   or self._conn("src"), self._conn("dst"))
                     opened.append(local.conns)
-                ranges.started(st, after, self.snapshot_mark("src", db),
-                               ck.save)
+                ranges.started(st, after, mark(), ck.save)
                 rng_sql = (f"`{intpk}` > {int(after)} and `{intpk}` <="
                            f" {int(upto)}")
                 where = f"({rng_sql}) and ({rf})" if rf else rng_sql
@@ -8712,6 +8842,23 @@ class MySQLEngine(Engine):
             # threads; the rows' own way is the driver's and Python's
             hop = (self._picklable_hop() if slots.workers > 1
                    and ctx is None else None)
+            # the ranges read here start at one binlog position where more
+            # than one reads at once (`export_moment`); a pass-through
+            # range is read by the target, not here
+            moment = (self.read_moment(db, log, tables=[t],
+                                       readers=slots.workers)
+                      if ctx is None and len(todo) > 1
+                      and slots.workers > 1 else contextlib.nullcontext())
+            token = moment.__enter__()
+            self.adopt_moment(db, token)
+            at_moment = self.moment_mark(token)
+
+            def mark():
+                # the moment's GTIDs where the ranges start at one: no
+                # later than any range's read, so the tail leaves out only
+                # what every read has seen
+                return (at_moment if at_moment is not None
+                        else self.snapshot_mark("src", db))
             try:
                 if hop is not None and len(todo) > 1:
                     # a process a range: the copier's work per row is the
@@ -8727,17 +8874,19 @@ class MySQLEngine(Engine):
                             f" copied ({len(st['ranges_done'])} of"
                             f" {len(st['ranges'])} ranges)")
                     slots.each_process(
-                        [(hop, db, t, intpk, a, u, rf, key) for a, u in todo],
+                        [(hop, db, t, intpk, a, u, rf, key, token)
+                         for a, u in todo],
                         _copy_my_range, done,
                         lambda item: ranges.started(
-                            st, item[4], self.snapshot_mark("src", db),
-                            ck.save))
+                            st, item[4], mark(), ck.save))
                 else:
                     slots.each(todo, one)
             finally:
                 for a, b in opened:
                     a.close()
                     b.close()
+                self.adopt_moment(db, None)
+                moment.__exit__(None, None, None)
             sweep()
             st["done"] = True
             ck.save()
@@ -9289,7 +9438,12 @@ class MySQLEngine(Engine):
         ddb = self._d("dst", db)
         rfp = f" and ({rf.replace('%', '%%')})" if rf else ""
         rng_sql = f"`{intpk}` > {int(after)} and `{intpk}` <= {int(upto)}"
-        sconn, dconn = self._conn("src"), self._conn("dst")
+        # the moment's connection is the process's, kept for its next range
+        held = self._moment_source(db)
+        sconn, dconn = held or self._conn("src"), self._conn("dst")
+        if held is None and (self.__dict__.get("_moment") or {}).get(db):
+            log(f"{key}: {intpk} {after + 1:,} to {upto:,} read as of its"
+                " own mark - its snapshot began after the moment's lock went")
         try:
             return self._range_checked(
                 sconn, dconn, db, t, collist, ph,
@@ -9300,7 +9454,8 @@ class MySQLEngine(Engine):
                 f"({rng_sql}) and ({rf})" if rf else rng_sql,
                 f"{key} {intpk} {after + 1:,} to {upto:,}", log).n
         finally:
-            sconn.close()
+            if sconn is not held:
+                sconn.close()
             dconn.close()
 
     @staticmethod
@@ -10296,11 +10451,28 @@ class MySQLEngine(Engine):
 def _copy_my_range(item):
     """What a process of the table copier runs: one range, from a hop
     handed over whole; what it said comes back with the rows it copied."""
-    hop, db, t, intpk, after, upto, rf, key = item
+    hop, db, t, intpk, after, upto, rf, key, moment = item
     said = []
-    moved = MySQLEngine(hop).copy_range(db, t, intpk, after, upto, rf, key,
-                                        said.append)
+    eng = MySQLEngine(hop)
+    eng.adopt_moment(db, moment)
+    moved = eng.copy_range(db, t, intpk, after, upto, rf, key, said.append)
     return moved, said
+
+
+#: {(moment, thread): the source connection reading at it, or None where
+#: its snapshot was not proved to begin at it} - kept for every range the
+#: thread or worker process reads at that moment
+_MOMENTS = {}
+
+
+def _moment_done(token):
+    for at in [at for at in _MOMENTS if at[0] == token]:
+        conn = _MOMENTS.pop(at)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - already gone
+                continue
 
 
 def _batch_for(rows, most, budget):

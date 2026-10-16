@@ -2428,9 +2428,10 @@ class HeteroEngine(Engine):
         if shared:
             return claims.copy(
                 self, db, key, src_t, k, ck, lo, hi, edges, log, _copy_range,
-                lambda a, u, token: (hop, db, src_t, dst_t, a, u,
-                                     {"token": token}),
-                outside)
+                lambda a, u, token, hold=None, moment=None: (
+                    hop, db, src_t, dst_t, a, u,
+                    {"token": token, "hold": hold, "moment": moment}),
+                outside, dst_t=dst_t)
         way = crossmove.TableWay(self, db, src_t, dst_t, log, key)
         todo = ranges.plan(st, lo, hi, edges, ck.save, table=src_t)
         st["key"] = k
@@ -2468,7 +2469,8 @@ class HeteroEngine(Engine):
         # one rule for the table's triggers and keys and one moment for its
         # reads, taken once here for every range's process
         with dst.table_hold(db, dst_t, log) as held, \
-                src.read_moment(db, log) as moment:
+                src.read_moment(db, log, tables=[src_t],
+                                readers=slots.workers) as moment:
             slots.each_process(
                 [(hop, db, src_t, dst_t, a, u,
                   {"token": plain, "hold": held, "moment": moment})
@@ -2517,19 +2519,45 @@ class HeteroEngine(Engine):
         point, moved = None, 0
         unit = f"{label} {after}..{upto}"
         while True:
-            rows, last = src.neutral_read("src", db, src_t, src_cols, point,
-                                          chunk, where=where)
+            try:
+                rows, last = src.neutral_read("src", db, src_t, src_cols,
+                                              point, chunk, where=where)
+            except Exception as e:
+                self._refused("src", "reading rows", db, src_t, "SELECT", e)
+                raise
             if not rows:
                 break
             rows, _ = self._flatten_absent(rows)
-            self._write_sized(db, label, dst_t, dst_cols, plan, [k], rows,
-                              retune, unit)
+            try:
+                self._write_sized(db, label, dst_t, dst_cols, plan, [k], rows,
+                                  retune, unit)
+            except Exception as e:
+                self._refused("dst", "copying rows in", db, dst_t,
+                              "INSERT, UPDATE, DELETE, SELECT", e)
+                raise
             dst.named_write(db, dst_t, "copy", unit, len(rows))
             moved += len(rows)
             if last is None:
                 break
             point = last
         return moved, way, fell
+
+    def _refused(self, side, action, db, table, privilege, e):
+        """Stop on `e` where the side's server refused `action` on `table`
+        for want of a grant, naming the side that refused, the grant and
+        the statement to run there; returns where `e` is anything else."""
+        from . import enterprise_connectors as ec
+        eng = self.src_engine if side == "src" else self.dst_engine
+        name = eng.CANON_ENGINE or getattr(eng.hop, "engine", "")
+        if isinstance(e, ec.MissingGrant) or not ec.is_grant_error(name, e):
+            return
+        grant = eng.account_grant(side, privilege, db, table)
+        on = grant.split(" ON ", 1)[1]
+        there = "the source" if side == "src" else "the target"
+        raise ec.MissingGrant(
+            f"{name} ({there})", action,
+            f"{privilege} on {on}; run on {there}: "
+            + eng.grant_statement(side, privilege, on), e)
 
     def _row_width(self, db, src_t):
         """The table's bytes a row as the source counts them, or None."""
@@ -2551,8 +2579,12 @@ class HeteroEngine(Engine):
 
         def write():
             s = retune.settings()
-            for part in pieces.by_bytes(rows, s["bytes"],
-                                        max(1, s["rows"] // s["parts"]),
+            # a large value's way (`tuning.payload_way`) writes a row a
+            # statement - in pieces or streamed by the target's write, as
+            # `tuning.apply` cuts it - and whole rows go many a statement
+            most = (max(1, s["rows"] // s["parts"])
+                    if s.get("way", "whole") == "whole" else 1)
+            for part in pieces.by_bytes(rows, s["bytes"], most,
                                         pieces.row_bytes):
                 self._write_checked(db, key, dst_t, dst_cols, plan,
                                     resumable, list(part), lambda m: None)

@@ -7266,12 +7266,25 @@ class Engine:
             if a in self.SESSION_HOLDS:
                 self.__dict__.setdefault(a, set()).update(names)
 
-    def table_hold(self, db, table, log=None):
+    def table_hold(self, db, table, log=None, before=None):
         """The one rule for triggers and deferred keys while `table` of the
         target is written (`TableHold`): taken once for the table however
         many range workers write it, given back after the last, and read
-        back as it was before."""
-        return TableHold(self, db, table, log)
+        back as it was before - as `before` says where the machines
+        sharing the table read that once between them (`claims.copy`)."""
+        return TableHold(self, db, table, log, before)
+
+    def grant_statement(self, side, privilege, on):
+        """The statement that gives the side's user `privilege` on `on`, in
+        the standard's words; the user named where the address names one."""
+        who = getattr(self, "_user", None)
+        try:
+            user = who(side) if callable(who) else None
+        except Exception:  # noqa: BLE001 - the address names no user
+            user = None
+        return (f"GRANT {privilege} ON {on} TO "
+                + (user or f"the {'source' if side == 'src' else 'target'}"
+                   "'s user"))
 
     # --- the one moment a table's ranges are read at --------------------
 
@@ -7290,12 +7303,16 @@ class Engine:
         else:
             moments.pop(db, None)
 
-    def read_moment(self, db, log=None):
+    def read_moment(self, db, log=None, tables=None, readers=None):
         """The moment every range reader of a table of `db` adopts, as a
         context manager yielding its token: one snapshot the source exports
         where it exports one, else None - each range is then read as of its
         own mark (`ranges.started`), which the source says. An export the
-        server refuses falls to that, said in the log."""
+        server refuses falls to that, said in the log. `tables` and
+        `readers` - what is read and by how many sessions at once - go to
+        a source whose export makes the moment for them (`export_moment`
+        taking them)."""
+        import inspect
         from .. import decide
         exports = type(self).export_moment is not Engine.export_moment
         rungs = (
@@ -7316,8 +7333,12 @@ class Engine:
             if got.rung is None or got.rung.name != "exported":
                 yield None
                 return
+            takes = inspect.signature(self.export_moment).parameters
+            extra = {k: v for k, v in (("tables", tables),
+                                       ("readers", readers))
+                     if k in takes and v is not None}
             try:
-                token, close = self.export_moment(db)
+                token, close = self.export_moment(db, **extra)
             except Exception as e:  # noqa: BLE001 - each range's own mark
                 if log:
                     log(f"{db}: no snapshot shared between the range"
@@ -7402,10 +7423,14 @@ class TableHold:
     _held = {}
     _lock = threading.RLock()
 
-    def __init__(self, eng, db, table, log=None):
+    def __init__(self, eng, db, table, log=None, before=None):
         self.eng, self.db, self.table, self.log = eng, db, table, log
         self.key = (id(eng), str(db), str(table))
         self.restored = None
+        # what the table was before, read once where machines share it;
+        # and whether this hold is the one to read it back - the last of
+        # the machines to give the table back is (`claims.copy`)
+        self.before, self.check = before, True
 
     def __enter__(self):
         with self._lock:
@@ -7413,7 +7438,8 @@ class TableHold:
             if got is not None:
                 got["users"] += 1
                 return got["session"]
-            before = self.eng.write_states("dst", self.db, self.table)
+            before = (self.before if self.before is not None
+                      else self.eng.write_states("dst", self.db, self.table))
             window = self.eng.load_window(self.db, self.log, [self.table])
             window.__enter__()
             session = self.eng.session_hold(self.db)
@@ -7431,7 +7457,7 @@ class TableHold:
             got["window"].__exit__(*exc)
             before = got["before"]
             after = self.eng.write_states("dst", self.db, self.table)
-        if before is None:
+        if before is None or not self.check:
             return False
         apart = sorted(k for k in set(before) | set(after or {})
                        if before.get(k) != (after or {}).get(k))

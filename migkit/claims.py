@@ -245,6 +245,12 @@ class Table:
     def finish(self):
         return self._do(lambda rec: finish(rec, self.me, time.time()))
 
+    def held_in(self, states):
+        return self._do(lambda rec: held_in(rec, self.me, states))
+
+    def held_out(self):
+        return self._do(lambda rec: held_out(rec, self.me))
+
 
 def way_of(hop, db, key):
     """"ranges" or "whole": how the hop's machines share the table, as
@@ -392,7 +398,7 @@ def size(pair, db, units, n, model=None, sides=None):
 
 
 def copy(pair, db, key, src_t, k, ck, lo, hi, edges, log, fn, item,
-         outside):
+         outside, dst_t=None):
     """A large table copied by every machine of the hop at once, this
     machine taking ranges while any is left (the module's words):
     `fn(item(after, upto, token))` copies one range in a process of its
@@ -400,8 +406,15 @@ def copy(pair, db, key, src_t, k, ck, lo, hi, edges, log, fn, item,
     checkpoint entry is left to the machine that finishes the table;
     `outside()` - the target's rows outside the source's whole range
     removed - is run by that machine alone. Returns True: the table is
-    this path's, wherever its ranges were copied."""
-    from . import attempts, ha, ranges, sizing
+    this path's, wherever its ranges were copied.
+
+    The target table's triggers and keys are held while it is written
+    (`Engine.table_hold`), read as they were once between the machines -
+    the first to hold it records them (`held_in`) - and read back by the
+    last to give it back (`held_out`); and this machine's ranges read at
+    one moment of the source (`Engine.read_moment`), as one machine's
+    workers do. `item(after, upto, token, hold, moment)` carries both."""
+    from . import ha, ranges, sizing
     from . import model as resource_model
     hop = pair.hop
     store = shared.store_for(hop, log)
@@ -439,6 +452,48 @@ def copy(pair, db, key, src_t, k, ck, lo, hi, edges, log, fn, item,
     resize(table.renew({}, most))
     log(f"{key}: {units} ranges, shared by every machine of the hop; this"
         f" one copies up to {allowed['n']} at once")
+    dst = pair.dst_engine
+    hold_for = dst_t or src_t
+    _, before = table.held_in(dst.write_states("dst", db, hold_for))
+    hold = dst.table_hold(db, hold_for, log, before=before)
+    with hold as session, src.read_moment(db, log, tables=[src_t],
+                                          readers=most) as moment:
+        try:
+            return _copied(table, rec, key, src_t, k, ck, hi, units, most, allowed,
+                           resize, src, db, hop, me, store, term, log, fn,
+                           lambda a, u, tok: item(a, u, tok, session,
+                                                  moment),
+                           outside, reload)
+        finally:
+            hold.check = table.held_out()[1]
+
+
+def held_in(rec, me, states):
+    """(the record, the table's write states before any machine held it):
+    this machine counted among those holding the table, the states it read
+    recorded where none were."""
+    rec = _copy.deepcopy(rec or {})
+    rec.setdefault("write_states", states)
+    holding = set(rec.get("holding") or ())
+    holding.add(me)
+    rec["holding"] = sorted(holding)
+    return rec, rec["write_states"]
+
+
+def held_out(rec, me):
+    """(the record, whether this machine was the last holding the table):
+    the last reads the table's write states back."""
+    rec = _copy.deepcopy(rec or {})
+    holding = set(rec.get("holding") or ()) - {me}
+    rec["holding"] = sorted(holding)
+    return rec, not holding
+
+
+def _copied(table, rec, key, src_t, k, ck, hi, units, most, allowed, resize, src,
+            db, hop, me, store, term, log, fn, item, outside, reload):
+    """`copy`'s ranges claimed and copied by this machine's workers, under
+    the table's hold and moment `copy` took."""
+    from . import attempts, ranges
     held = {}
     cv = threading.Condition()
     stop = threading.Event()

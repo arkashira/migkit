@@ -2516,6 +2516,26 @@ class MSSQLEngine(DbapiRows, Engine):
 
     # --- the target kept free of what a load would trip over ---------------
 
+    #: the table's triggers, foreign keys and check constraints, each on
+    #: (and a key trusted) or not - read before a load and after it
+    WRITE_STATES_SQL = (
+        "select 'trigger ' + tr.name, case when tr.is_disabled = 0 then 1"
+        " else 0 end from sys.triggers tr join sys.tables t on"
+        " t.object_id = tr.parent_id join sys.schemas s on"
+        " s.schema_id = t.schema_id where s.name = {schema}"
+        " and t.name = {table}"
+        " union all select 'key ' + k.name, case when k.is_disabled = 0"
+        " and k.is_not_trusted = 0 then 1 else 0 end from sys.foreign_keys k"
+        " join sys.tables t on t.object_id = k.parent_object_id"
+        " join sys.schemas s on s.schema_id = t.schema_id"
+        " where s.name = {schema} and t.name = {table}"
+        " union all select 'check ' + c.name, case when c.is_disabled = 0"
+        " and c.is_not_trusted = 0 then 1 else 0 end"
+        " from sys.check_constraints c join sys.tables t on"
+        " t.object_id = c.parent_object_id join sys.schemas s on"
+        " s.schema_id = t.schema_id where s.name = {schema}"
+        " and t.name = {table}")
+
     def load_window(self, db, log=None, tables=None):
         """The target's triggers, switched off for the load and on again
         after (`_LoadWindow`)."""
