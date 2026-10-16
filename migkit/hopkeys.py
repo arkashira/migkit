@@ -131,6 +131,16 @@ def normalised(registry, mapping):
     rather than as two-way by one and refused by the next (audit
     2026-10-01, K20)."""
     out = dict(mapping or {})
+    if registry is HOP_OPTIONS and isinstance(out.get("transform"), dict):
+        # a column's transform statement is one more rule of the hop's
+        # masking, read by every way that carries the table (`Hop.masks`)
+        said = dict(out.get("mask_on_write") or {}) \
+            if isinstance(out.get("mask_on_write") or {}, dict) else None
+        if said is not None:
+            for col, expr in out["transform"].items():
+                if "." in str(col):
+                    said.setdefault(str(col), f"sql {expr}")
+            out["mask_on_write"] = said
     for k, v in out.items():
         key = registry.get(k)
         if key is None or not key.fold or isinstance(v, (dict, list, bool)) \
@@ -594,6 +604,12 @@ HOP_OPTIONS = {
                          " written so into the target by every way that"
                          " carries the table, and proved as written",
                          "dict"),
+    "transform": Key("[db.][schema.]table.column -> an expression of the"
+                     " column's value in the analytic SQL (lower(email)),"
+                     " run over each batch as it passes and over the source"
+                     " by the check; on_target: true lets the target"
+                     " rewrite it after the copy where that is cheaper",
+                     "dict"),
     "mask_key": Key("the key a hash in mask_on_write is taken with - a"
                     " reference to a secret (env:, file:, vault:, ...);"
                     " the same value gives the same digest on every run",
@@ -2610,6 +2626,43 @@ def _mask_problems(where, opts):
     return out
 
 
+def _transform_problems(where, opts):
+    """`transform` said wrong, before anything is written: an entry that
+    names no table, a statement that is not an expression of the column's
+    value alone (`transforms.statement`), a column also masked otherwise,
+    and an `on_target` that is not true or false."""
+    from . import transforms
+    got = opts.get("transform")
+    if got is None:
+        return []
+    if not isinstance(got, dict):
+        return [Problem("error", f"{where}.options.transform",
+                        "is not a mapping of table.column to an expression")]
+    out = []
+    masks = opts.get("mask_on_write") or {}
+    for col, expr in got.items():
+        at = f"{where}.options.transform.{col}"
+        if col == "on_target":
+            if not isinstance(expr, bool):
+                out.append(Problem("error", at, "true or false"))
+            continue
+        table, _, column = str(col).rpartition(".")
+        if not table or not column:
+            out.append(Problem("error", at, "names no table - write"
+                               " table.column, or a pattern for the table"))
+            continue
+        try:
+            transforms.statement(expr)
+        except SystemExit as e:
+            out.append(Problem("error", at, str(e)))
+            continue
+        if isinstance(masks, dict) and str(masks.get(col, "")).strip() \
+                not in ("", f"sql {expr}"):
+            out.append(Problem("error", at, "the column is masked by"
+                               " mask_on_write too: one rule a column"))
+    return out
+
+
 def _names_problems(where, mapping):
     """`mapping.names` said wrong: a level that is not one, a rule that
     is not one, a case that is neither lower nor upper."""
@@ -2790,6 +2843,7 @@ def _contradictions(where, raw, opts, goal, engine):
     if raw.get("goal") != "consolidate":
         out += _collision_problems(where, raw, engine, opts)
     out += _mask_problems(where, opts)
+    out += _transform_problems(where, opts)
     out += _where_problems(where, mapping, opts.get("source_engine")
                            if engine == "hetero" else engine)
     if goal in GOALS and not GOALS[goal]["writes"]:

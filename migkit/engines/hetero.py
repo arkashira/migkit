@@ -119,14 +119,9 @@ class _Masks:
         from .. import transforms
         if not at:
             return rows
-        key = self.hop.mask_key()
-        out = []
-        for row in rows:
-            got = list(row)
-            for i, rule in at:
-                got[i] = transforms.apply(rule, got[i], key)
-            out.append(got if isinstance(row, list) else tuple(got))
-        return out
+        # a hop's transform statement once over the batch, the rest
+        # value by value (`transforms.apply_rows`)
+        return transforms.apply_rows(at, rows, self.hop.mask_key())
 
     def neutral_read(self, side, db, table, columns, *args, **kw):
         if side != "src" or self._inside():
@@ -1053,7 +1048,10 @@ class HeteroEngine(Engine):
                            salt=salt.get("salt"),
                            engine=getattr(eng, "CANON_ENGINE", None),
                            columns=cols, where=where, way=way)
-            return got
+            # a sum folded here is a number, a server's often its text:
+            # held to each other as text, never unequal by their type
+            return (got[0], None if got[1] is None else str(got[1]),
+                    *got[2:])
         return (one(src, "src", src_t, src_cols, wheres[0]),
                 one(dst, "dst", dst_t, dst_cols, wheres[1]))
 

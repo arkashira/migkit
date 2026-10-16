@@ -2283,4 +2283,18 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * the key does not open this token: it is not the key the token was made under
 
+* sql `<...>` is not an expression of one value
+
+* sql `<...>` is not an expression: <...>
+
+* sql `<...>` aggregates or windows over rows: a batch would give another value than the table
+
+* sql `<...>` reads every column: name the one it is written on
+
+* sql `<...>` names <...> column(s): it names the column it is written on, and only that one
+
+* sql `<...>` calls <...>: it reads outside the batch | its value is not the same on another run, so nothing could be proved of it
+
+* the transform <...> cannot run over these values: <...>. Nothing was written of them
+
 * MIGKIT_UI_USER_HEADER names the header a signing-in proxy puts who it let in into, and anything that reaches the view can send that header: set MIGKIT_UI_PROXY_SECRET too - the value the proxy sends in <...> - and the view believes only the proxy

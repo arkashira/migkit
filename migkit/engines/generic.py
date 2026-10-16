@@ -2059,14 +2059,8 @@ class GenericEngine(Engine):
               if c.lower() in lower]
         if not at:
             return rows
-        key = self.hop.mask_key()
-        out = []
-        for r in rows:
-            r = list(r)
-            for i, rule in at:
-                r[i] = transforms.apply(rule, r[i], key)
-            out.append(r)
-        return out
+        return [list(r) for r in transforms.apply_rows(
+            at, rows, self.hop.mask_key())]
 
     def _copy_columns(self, table):
         src = self._side_columns("src", table)

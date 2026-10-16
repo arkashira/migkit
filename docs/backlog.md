@@ -5932,6 +5932,21 @@ the gaps nothing above covers yet, now items of their own.
   and format-preserving encryption / tokenization (Informatica, Delphix)
   beside the keyed HMAC of R5 - as hop rules under the same verify, which
   then compares the transformed source with the target.
+  W4.a - PARTLY (W18C): a hop's `transform:` (table.column -> an
+  expression of the column's value) is one more masking rule (`sql`,
+  `transforms.statement`): one statement a batch over Arrow in the
+  embedded analytic engine (`transforms.apply_rows`, shut off from files
+  and the network), the same statement over the source by the check, a key
+  refused (`movers.mask_refused`), proved on pg and mysql
+  (tests/test_a_transform_in_flight_is_verified_as_transformed.py). Left:
+  whole-row statements (filters, joins to reference tables, windows and
+  state between batches), the tail's changes in batches (taken value by
+  value today), warehouses as targets (same code; test owed). W4.b
+  (placement) - PARTLY: `decide.transform_place` ranks in flight / on the
+  target / refused on the statement's cost measured over the first
+  batches (`transforms.place`); left: the move asking it before the copy
+  and the on-target rewrite itself (owed: a table it places there is not
+  yet written that way).
 * **W5. Sources the paid tools read and migkit does not:** mainframe
   and legacy (Db2 for z/OS and IBM i, IMS, VSAM with COBOL copybooks,
   EBCDIC and packed decimals), Teradata, Netezza, SAP (HANA, and SAP

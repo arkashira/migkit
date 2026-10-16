@@ -5477,3 +5477,63 @@ def estate_price(facts, costs=None):
                 best = (got, region)
         ends.append(best)
     return choice, tuple(ends)
+
+# --- where a hop's transform statement runs (W18C, W4.b) ---------------------
+
+def transform_place(facts, costs=None):
+    """`Choice` of where a hop's `transform:` statement runs for a table:
+    `in_flight` (over each batch between the read and the write, once a
+    batch) or `on_target` (the copy writes the values as read and the
+    target's own SQL rewrites them after it) - or no rung, which refuses
+    the table before anything is written. Read from `statement` (its
+    words), `measured` (it ran over the first batches), `in_flight_s`
+    (its seconds a row there, for the table's `rows`), `copy_s` (the
+    copy's own measured seconds for the table, which a rewrite on the
+    target costs again: every row written once more), `budget_s` (the
+    time the hop allows the table, where it says one), `target_runs` (the
+    target's SQL says the statement) and `authorized` (the hop lets the
+    target be changed after the copy, holding the values as read
+    meanwhile).
+
+    In flight holds while the statement keeps up: within what the budget
+    leaves after the copy, or - with no budget - within the copy's own
+    time, so the copy is not slowed past twice its measured length. The
+    costs rank what holds; nothing is chosen from a default."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def room(x):
+        copy = float(x.get("copy_s") or 0)
+        budget = x.get("budget_s")
+        return (float(budget) - copy) if budget is not None else copy
+
+    def pace(x):
+        return float(x.get("in_flight_s") or 0) <= room(x)
+    said = (f"`{f.get('statement') or '(no statement)'}` measured over"
+            f" {int(f.get('sampled') or 0):,} rows of the first batches:"
+            f" {float(f.get('in_flight_s') or 0):,.1f}s for"
+            f" {int(f.get('rows') or 0):,} rows beside the copy's"
+            f" {float(f.get('copy_s') or 0):,.1f}s")
+    return climb("where the hop's transform runs", (
+        Rung("in_flight", "over each batch as it passes, once a batch",
+             because=said, needs=(
+                 Need("the statement run over the first batches",
+                      lambda x: bool(x.get("measured")),
+                      "it was not run over any of the source's rows yet:"
+                      " nothing is measured to place it by"),
+                 Need("the statement keeping up with the copy", pace,
+                      lambda x: f"{float(x.get('in_flight_s') or 0):,.1f}s"
+                      f" in flight against {room(x):,.1f}s "
+                      + ("the budget leaves after the copy"
+                         if x.get("budget_s") is not None else
+                         "the copy itself takes")))),
+        Rung("on_target", "on the target by its own SQL after the copy",
+             footprint=1, because=said, needs=(
+                 Need("the target's SQL saying the statement",
+                      lambda x: bool(x.get("target_runs")),
+                      "the target's SQL has no form of the statement"),
+                 Need("the hop letting the target be changed after the copy",
+                      lambda x: bool(x.get("authorized")),
+                      "the hop does not let the target be changed after the"
+                      " copy (transform: on_target: true), which holds the"
+                      " values as read there until it is rewritten")))),
+        f, costs=costs or None, prove=False)

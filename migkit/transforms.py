@@ -36,6 +36,21 @@ it with the target's, so a masked column is compared, not skipped.
                       value sealed under the key, and only the key's
                       holder gets it back (`reverse`). A domain keeps one
                       kind of value apart from another
+    sql <expression>  the column's value through an expression of the
+                      analytic SQL the batches pass through (`lower(email)`,
+                      `regexp_replace(phone, '[0-9]', '#', 'g')`), naming
+                      the column it is written on and nothing else: one
+                      value out for one value in, never an aggregate, a
+                      window, a query or a clock or random value, so the
+                      check runs the same statement over the source and
+                      the copy, the tail and a repair write what it says.
+                      A batch is taken through one statement over all its
+                      columns so written (`apply_rows`), a lone value (a
+                      change the tail carries) through the same one; the
+                      statement reads no file and no network. Written in
+                      the hop as `transform:` (`hopkeys`); where it runs -
+                      in flight, on the target after the copy, or refused -
+                      is `decide.transform_place`'s (`place`)
 
 Which of mask, fpe and token a column takes is `decide.hide_column`'s, on
 the column's facts (`choose`). Never on a key (`movers.mask_plan` holds that), never random (nothing
@@ -46,10 +61,16 @@ form of it is held to `apply` on the same values by the tests.
 """
 import hashlib
 import hmac
+import threading
+import time
 
 #: the transforms, and whether a check can prove the value written
 KINDS = {"null": True, "constant": True, "hash": True, "truncate": True,
-         "fpe": True, "token": True, "random": False}
+         "fpe": True, "token": True, "sql": True, "random": False}
+
+#: how often a statement ran, by how (`apply_rows` once a batch, `apply`
+#: once a lone value): what the tests hold the batch way to
+RUNS = {"batch": 0, "row": 0}
 
 #: the alphabets `fpe` names; any other argument is the characters
 ALPHABETS = {"digits": "0123456789", "lower": "abcdefghijklmnopqrstuvwxyz",
@@ -92,6 +113,9 @@ def parse(rule):
         return kind, arg
     if kind == "token":
         return kind, arg
+    if kind == "sql":
+        statement(arg)
+        return kind, arg
     if kind == "truncate":
         if not arg.strip().isdigit() or int(arg) < 1:
             raise SystemExit("truncate takes how many characters to keep,"
@@ -109,6 +133,8 @@ def apply(rule, value, key=None):
     kind, arg = parse(rule) if isinstance(rule, str) else rule
     if kind == "constant":
         return arg
+    if kind == "sql":
+        return _run_sql(arg, [[value]])[0]
     if value is None or kind == "null":
         return None
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -152,8 +178,10 @@ def sql(rule, column, dialect, key=None):
     None where its SQL cannot compute it alike - the value is then taken
     in Python (`apply`) by whichever reader holds it."""
     kind, arg = parse(rule) if isinstance(rule, str) else rule
-    if kind in ("fpe", "token"):
-        return None  # a cipher and a vault the server does not hold
+    if kind in ("fpe", "token", "sql"):
+        # a cipher and a vault the server does not hold; a statement of
+        # the analytic SQL, run over the source as it is over the batches
+        return None
     if kind == "null":
         # a NULL of the column's own type, which every rendering of the
         # column's class takes as it takes the column
@@ -404,3 +432,226 @@ def choose(facts):
     if got.path == "fpe":
         return ("fpe " + str(facts.get("alphabet") or "digits")).strip(), got
     return got.path, got
+
+
+# --- a statement over the batches as they pass (backlog W4.a, W4.b) --------
+
+#: what a statement over a value may not call: what gives another value on
+#: another run, or reads or writes outside the batch
+_UNSTABLE = {"random", "rand", "uuid", "gen_random_uuid", "uuidv4", "now",
+             "current_timestamp", "current_date", "current_time", "today",
+             "get_current_time", "get_current_timestamp", "localtimestamp",
+             "nextval", "currval", "setseed", "read_csv", "read_csv_auto",
+             "read_parquet", "read_json", "read_json_auto", "read_text",
+             "read_blob", "getenv", "current_setting"}
+
+
+def _tree(expression):
+    import sqlglot
+    from sqlglot import exp
+    text = str(expression or "").strip()
+    try:
+        tree = sqlglot.parse_one(text, read="duckdb")
+    except Exception as e:  # noqa: BLE001 - its own words, said below
+        raise SystemExit(f"sql `{text}` is not an expression: {e}") from None
+    if not text or isinstance(tree, (exp.Query, exp.Command)) \
+            or tree.find(exp.Query, exp.Subquery) is not None:
+        raise SystemExit(f"sql `{text}` is not an expression of one value")
+    return tree
+
+
+def statement(expression):
+    """The one column `expression` reads (its name as written); SystemExit
+    for one that is not an expression of that column's value alone - one
+    naming no column or two, an aggregate or a window (a batch would give
+    another value than the whole table), a query, a star, or a function of
+    the clock, of chance or of a file or setting."""
+    from sqlglot import exp
+    tree = _tree(expression)
+    text = str(expression).strip()
+    if tree.find(exp.AggFunc, exp.Window) is not None:
+        raise SystemExit(f"sql `{text}` aggregates or windows over rows: a"
+                         " batch would give another value than the table")
+    if tree.find(exp.Star) is not None:
+        raise SystemExit(f"sql `{text}` reads every column: name the one"
+                         " it is written on")
+    for f in tree.find_all(exp.Func):
+        name = (f.name if isinstance(f, exp.Anonymous)
+                else f.sql_name()).lower()
+        if name in _UNSTABLE or isinstance(
+                f, (exp.Rand, exp.CurrentTimestamp, exp.CurrentDate,
+                    exp.CurrentTime)):
+            raise SystemExit(f"sql `{text}` calls {name}: "
+                             + ("it reads outside the batch" if name.startswith(
+                                 ("read_", "getenv", "current_setting"))
+                                else "its value is not the same on another"
+                                " run, so nothing could be proved of it"))
+    names = {c.name for c in tree.find_all(exp.Column)}
+    if len(names) != 1:
+        raise SystemExit(f"sql `{text}` names {len(names) or 'no'}"
+                         " column(s): it names the column it is written on,"
+                         " and only that one")
+    return names.pop()
+
+
+def _bound(expression, name):
+    """`expression` in the analytic SQL with its column read as `name`."""
+    from sqlglot import exp
+    tree = _tree(expression)
+    for c in list(tree.find_all(exp.Column)):
+        c.replace(exp.column(name, quoted=True))
+    return tree.sql(dialect="duckdb")
+
+
+_local = threading.local()
+
+
+def _engine():
+    """This thread's analytic engine, in memory and shut off from files,
+    the network and its own settings once made."""
+    con = getattr(_local, "con", None)
+    if con is None:
+        import duckdb
+        con = duckdb.connect(":memory:")
+        con.execute("set enable_external_access = false")
+        con.execute("set lock_configuration = true")
+        _local.con = con
+    return con
+
+
+def _plain(v):
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        # a text column a driver hands over as its bytes: its text, as
+        # every other transform reads it
+        return bytes(v).decode("utf-8")
+    return v
+
+
+def _run_sql(expressions, columns):
+    """The values of each of `expressions` (one, or a list beside
+    `columns`) over `columns` ([[value of each row]] per expression): one
+    statement over the batch, its rows in the order given."""
+    import pyarrow as pa
+    one = isinstance(expressions, str)
+    exprs = [expressions] if one else list(expressions)
+    n = len(columns[0]) if columns else 0
+    arrays = {"__n": pa.array(range(n), type=pa.int64())}
+    for i, values in enumerate(columns):
+        values = [_plain(v) for v in values]
+        try:
+            arrays[f"c{i}"] = pa.array(values)
+        except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
+            # values of more than one type in a column: their text, as a
+            # driver that hands them so would
+            arrays[f"c{i}"] = pa.array(
+                [None if v is None else str(v) for v in values])
+    batch = pa.table(arrays)
+    sel = ", ".join(f"{_bound(e, f'c{i}')} as \"o{i}\""
+                    for i, e in enumerate(exprs))
+    con = _engine()
+    RUNS["row" if one and n == 1 else "batch"] += 1
+    try:
+        con.register("batch", batch)
+        try:
+            got = con.execute(f"select {sel} from batch order by __n"
+                              ).fetchall()
+        finally:
+            con.unregister("batch")
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 - the engine's words, said
+        raise SystemExit(f"the transform {', '.join(exprs)} cannot run over"
+                         f" these values: {e}. Nothing was written of"
+                         " them") from None
+    if one:
+        return [r[0] for r in got]
+    return got
+
+
+def apply_rows(at, rows, key=None):
+    """`rows` as the target is to hold them under `at` ([(position,
+    rule)]): every `sql` rule through one statement over the whole batch
+    (`RUNS["batch"]`), each other rule value by value (`apply`). Rows come
+    back in their order, lists or tuples as they came."""
+    if not at or not rows:
+        return rows
+    at = [(i, parse(r) if isinstance(r, str) else r) for i, r in at]
+    by_sql = [(i, r[1]) for i, r in at if r[0] == "sql"]
+    rest = [(i, r) for i, r in at if r[0] != "sql"]
+    rows = list(rows)
+    out = [list(r) for r in rows]
+    if by_sql:
+        got = _run_sql([e for _, e in by_sql],
+                       [[r[i] for r in rows] for i, _ in by_sql])
+        for row, values in zip(out, got):
+            for (i, _), v in zip(by_sql, values):
+                row[i] = v
+    for row, orig in zip(out, rows):
+        for i, rule in rest:
+            row[i] = apply(rule, orig[i], key)
+    return [o if isinstance(r, list) else tuple(o)
+            for o, r in zip(out, rows)]
+
+
+def measure(at, rows):
+    """Seconds a row the `sql` rules of `at` take over `rows` (the first
+    batches read, at the copy's own batch size, so what a batch costs
+    besides its rows is spread as the copy spreads it), through the batch
+    way the copy takes - 0.0 where
+    `rows` holds none to measure. SystemExit where the statement cannot
+    run over them, which refuses the hop before anything is written."""
+    sql_at = [(i, r) for i, r in at
+              if (parse(r) if isinstance(r, str) else r)[0] == "sql"]
+    if not sql_at or not rows:
+        return 0.0
+    _engine()  # made once a thread, which the copy's batches do not pay
+    began = time.perf_counter()
+    apply_rows(sql_at, rows)
+    return (time.perf_counter() - began) / len(rows)
+
+
+def on_target(expression, column, dialect):
+    """`expression` in the target's own SQL over `column` (already
+    quoted), or None where it does not translate - the target cannot then
+    run it itself."""
+    import sqlglot
+    from sqlglot import exp
+    try:
+        tree = _tree(expression)
+        for c in list(tree.find_all(exp.Column)):
+            c.replace(sqlglot.parse_one(column, read=dialect))
+        return tree.sql(dialect=dialect, unsupported_level="raise")
+    except Exception:  # noqa: BLE001 - a form the target has not
+        return None
+
+
+def authorized(hop):
+    """Whether the hop lets the target be rewritten after the copy
+    (`transform: on_target: true`), holding the values as read there
+    until the rewrite: what `place` asks before the target may take it."""
+    from . import hopkeys
+    said = hopkeys.opt(hop, "transform") or {}
+    return isinstance(said, dict) and said.get("on_target") is True
+
+
+def place(rules, sample, rows, copy_s, dialect, authorized, budget_s=None):
+    """The `decide.transform_place` `Choice` for one table's `sql` rules
+    `rules` ([(position, rule, quoted column)]): their cost measured over
+    `sample` (the first batches' rows), for the table's `rows`, beside the
+    copy's own measured seconds `copy_s` and the hop's time budget where
+    it says one; whether the target's SQL (`dialect`) can run each itself
+    and whether the hop lets the target be changed after the copy
+    (`authorized`)."""
+    from . import decide
+    at = [(i, r) for i, r, _ in rules]
+    per_row = measure(at, sample)
+    said = [(parse(r) if isinstance(r, str) else r)[1] for _, r, _ in rules]
+    there = [on_target(e, q, dialect) for e, (_, _, q) in zip(said, rules)]
+    in_flight = per_row * (rows or 0)
+    return decide.transform_place(
+        {"statement": ", ".join(said), "measured": bool(sample),
+         "sampled": len(sample or ()), "rows": rows or 0,
+         "in_flight_s": in_flight, "copy_s": copy_s, "budget_s": budget_s,
+         "target_runs": all(t is not None for t in there),
+         "authorized": bool(authorized)},
+        costs={"in_flight": in_flight, "on_target": copy_s})
