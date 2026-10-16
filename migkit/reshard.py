@@ -91,9 +91,10 @@ BYS = ("auto", "hash", "range", "list", "lookup", "target")
 #: by its own hop, and followed here
 KINDS = ("reshard", "split", "consolidate")
 EXAMPLES = 3
-#: changes a read of the follow asks for, and the most it grows to while
-#: it is behind - the tail's own (`HeteroEngine.TAIL_BATCH`)
-BATCH, BATCH_MOST = 1000, 16000
+#: changes the follow's first read of a source asks for, before anything
+#: of it was measured; every read after it is decided from its measured
+#: rate (`decide.reshard_read`)
+BATCH = 1000
 #: what a function places a row of a table every target takes whole on
 ALL = -1
 #: a row the source no longer holds when it is asked where it goes now
@@ -966,6 +967,47 @@ def rows(hop, eng, db):
     return out
 
 
+def disagreements(g):
+    """Lines of the plan where a target's own distribution and the
+    group's function disagree (R3.topo): each target asked of its own
+    catalogue how it spreads each table over nodes of its own
+    (`Engine.distribution`) - a target that spreads a table by other
+    columns than the function places it by takes every row the function
+    gives it, and spreads them again over its nodes by its own column, so
+    the shards the function makes are not its nodes. A target that could
+    not say is said, never taken as one that spreads nothing."""
+    out = []
+    db = g.sources[0].db
+    for t, home in sorted(_tables(g).items()):
+        fn, _ = function(g, t, home)
+        if fn is None or fn.way in ("whole", "owned"):
+            continue
+        key = [str(c).lower() for c in fn.key or []]
+        for j, tgt in enumerate(g.targets):
+            pair = g.pair(home, j)
+            try:
+                sp = pair.dst_engine.distribution(
+                    "dst", db, _target_table(pair, db, t))
+            except Exception as e:  # noqa: BLE001 - said, never assumed
+                out.append(f"  {t}: {tgt.name} could not say how it spreads"
+                           f" the table ({_last(e)}): the plan cannot tell"
+                           " whether its own distribution agrees with the"
+                           " function's")
+                continue
+            if sp is None or sp.reference:
+                continue
+            cols = [str(c).lower() for c in sp.columns or []]
+            if cols != key:
+                out.append(
+                    f"  {t}: {tgt.name} spreads it by {', '.join(cols)}"
+                    f" ({sp.said}), the function places it by"
+                    f" {', '.join(key) or 'its key'} - the function and the"
+                    " target's distribution disagree: every row lands on"
+                    " the shard the function names, and that target spreads"
+                    " its rows again over its nodes by its own column")
+    return out
+
+
 def plan_lines(hop, eng, db):
     """The plan's lines of a reshard, or []."""
     got = settings(hop)
@@ -982,7 +1024,16 @@ def plan_lines(hop, eng, db):
             f" {got['by']} of its shard key, counted before the move,"
             " followed change by change - a key that moves its row removed"
             " from one target before it is written on the other - and"
-            " proved on every target and across them at the cutover"]
+            " proved on every target and across them at the cutover"] \
+        + _disagreed(g)
+
+
+def _disagreed(g):
+    try:
+        return disagreements(g)
+    except Exception as e:  # noqa: BLE001 - the plan says it, never fails
+        return [f"  the targets' own distribution could not be read:"
+                f" {_last(e)}"]
 
 
 def follow_lines(hop, db):
@@ -1882,6 +1933,25 @@ def _change_targets(g, t, kinds, within, log):
         " then move again (--mode full+cdc)")
 
 
+def _next_read(g, st, i, rounds):
+    """How many changes source `i` is read next (`decide.reshard_read`),
+    from its measured rate and the round's time; a way taken that differs
+    from its last is recorded."""
+    from . import decide
+    choice, size = decide.reshard_read({
+        "rate": st["rate"][i], "before": st["before"][i],
+        "round": rounds if st["rate"][i] else None,
+        "last": st["limit"][i], "full": st["full"][i], "first": BATCH})
+    if choice.path != st["way"][i]:
+        st["way"][i] = choice.path
+        decide.record(g.lead, choice)
+    if not st["full"][i]:
+        # a short read measures the batch's overhead, not the targets: the
+        # next full read starts a fresh comparison
+        st["before"][i] = None
+    return size
+
+
 def follow(g, go, log):
     """Every source's changes onto the targets, by the same function, on
     the one follow loop (`tailctl.run_loop`) until it is stopped - ctrl-c,
@@ -1893,7 +1963,7 @@ def follow(g, go, log):
     import contextlib
     import secrets
 
-    from . import marks, tailctl, twoway
+    from . import decide, marks, tailctl, twoway
     from .engines.hetero import HeteroEngine
     where = g.report_dir()
     if go and tailctl.alive(where, g.lead):
@@ -1970,7 +2040,9 @@ def follow(g, go, log):
           "read_at": [e.get("token") for e in envs],
           "carried": [[] for _ in range(n_src)], "limit": [BATCH] * n_src,
           "fence": [None] * n_src, "moved": 0, "held": [None] * n_src,
-          "said": set()}
+          "said": set(), "rate": [None] * n_src, "before": [None] * n_src,
+          "took": [None] * n_src, "full": [False] * n_src,
+          "way": [None] * n_src, "order": list(range(n_src))}
     cut_ok = [bool(getattr(g.reader(i), "READ_ENDS_INSIDE_TRANSACTIONS",
                            False)) for i in range(n_src)]
 
@@ -2038,16 +2110,21 @@ def follow(g, go, log):
 
     def look(token):
         went, settled = 0, True
-        for i, s in enumerate(g.sources):
+        began = time.monotonic()
+        _, order = decide.reshard_order({"took": st["took"],
+                                         "full": st["full"]})
+        st["order"] = order
+        for i in order:
+            s = g.sources[i]
             if st["held"][i] is not None:
                 settled = False
                 continue
             reader = g.reader(i)
+            at_start = time.monotonic()
             got, read_to = reader.neutral_changes(
                 "src", s.db, st["read_at"][i], limit=st["limit"][i])
             fewer = len(got) < st["limit"][i]
-            st["limit"][i] = (BATCH if fewer
-                              else min(st["limit"][i] * 2, BATCH_MOST))
+            st["full"][i] = not fewer
             changes, st["carried"][i] = st["carried"][i] + got, []
             st["read_at"][i] = at = read_to
             cut = HeteroEngine._commit_cut(changes) if cut_ok[i] else None
@@ -2055,10 +2132,18 @@ def follow(g, go, log):
                 changes, st["carried"][i] = changes[:cut], changes[cut:]
                 at = changes[-1]["txn_at"]
             applied, m = run_part(i, changes, at)
+            took = time.monotonic() - at_start
+            if got:
+                st["took"][i] = took
+                st["before"][i], st["rate"][i] = (
+                    st["rate"][i], len(got) / max(took, 1e-6))
             went += applied
             st["moved"] += m
             settled = settled and fewer and not st["carried"][i]
         went += coordinate()
+        rounds = time.monotonic() - began
+        for i in range(n_src):
+            st["limit"][i] = _next_read(g, st, i, rounds)
         if went:
             log(f"{went:,} changes"
                 + (f", {st['moved']:,} rows moved across targets so far"

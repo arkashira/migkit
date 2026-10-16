@@ -651,7 +651,8 @@ def test_one_database_onto_three_by_a_hash_followed_and_proved(
         assert _sql(DST[0], "select count(*) from countries", db) == "2"
     # changes: a customer that moves a row to another shard, rows added,
     # rows removed - followed until caught up
-    moved = [o for o, c in shards["shop_a"].items()][:5]
+    # rows the delete below leaves, so each is there to be found moved
+    moved = [o for o in shards["shop_a"] if not 10 <= o <= 20][:5]
     for oid in moved:
         cust = next(c for c in range(17)
                     if reshard.hash_place((str(c),), 3) == 2)
@@ -759,3 +760,87 @@ def test_the_whole_group_is_cut_over_at_once(pair, tmp_path, monkeypatch):
     tailctl.stop(g.report_dir())
     tailctl.resume(g.report_dir())
     follow.join(timeout=60)
+
+
+# --- the follow's sizes and order, and the targets' own distribution ----------------
+
+def test_how_much_of_a_source_is_read_is_decided_from_its_measured_rate():
+    from migkit import decide
+    # nothing read yet: the reader's first read
+    got, size = decide.reshard_read({"first": 1000})
+    assert (got.path, size) == ("as-asked", 1000)
+    # behind, a larger read gaining: twice the last
+    got, size = decide.reshard_read({"full": True, "last": 1000,
+                                     "rate": 900.0, "before": 400.0,
+                                     "round": 2.0, "first": 1000})
+    assert (got.path, size) == ("grow", 2000)
+    # the measured rate flipped - the larger read applied no faster - and
+    # it is read as much as its rate applies in the round's time
+    got, size = decide.reshard_read({"full": True, "last": 2000,
+                                     "rate": 300.0, "before": 900.0,
+                                     "round": 2.5, "first": 1000})
+    assert (got.path, size) == ("paced", 750)
+    assert "no more than" in dict(
+        (r.name, why) for r, why in got.passed)["grow"]
+    # a rate off a short read is the batch's overhead: not taken
+    got, size = decide.reshard_read({"full": False, "last": 750,
+                                     "rate": 3.0, "round": 0.01,
+                                     "first": 1000})
+    assert (got.path, size) == ("as-asked", 750)
+
+
+def test_the_order_sources_are_read_and_drained_in_follows_the_skew():
+    from migkit import decide
+    got, order = decide.reshard_order({"took": [None, None],
+                                       "full": [False, False]})
+    assert (got.path, order) == ("as-named", [0, 1])
+    got, order = decide.reshard_order({"took": [0.2, 0.2],
+                                       "full": [False, False]})
+    assert (got.path, order) == ("as-named", [0, 1])
+    # the second source behind: read first
+    got, order = decide.reshard_order({"took": [0.2, 0.9, 0.5],
+                                       "full": [False, True, False]})
+    assert (got.path, order) == ("most-behind-first", [1, 2, 0])
+    # its measured batch flipped shorter and the first source behind
+    got, order = decide.reshard_order({"took": [0.9, 0.1, 0.5],
+                                       "full": [True, False, False]})
+    assert order == [0, 2, 1]
+
+
+def test_the_plan_says_where_a_target_spreads_a_table_by_another_column(
+        monkeypatch):
+    from types import SimpleNamespace
+
+    from migkit.engines.base import Spread
+    hops = {n: _hop(n, {"with": ["a", "b"], "by": "hash",
+                        "key": {"orders": "customer_id"}},
+                    target=f"10.0.0.{9 + k}")
+            for k, n in enumerate("ab")}
+    g = reshard.group(hops["a"], "shop", hops)
+    spreads = {0: Spread(["id"], "a hash of id", [], None),
+               1: Spread(["customer_id"], "a hash of customer_id", [], None)}
+
+    class Dst:
+        def __init__(self, j):
+            self.j = j
+
+        def distribution(self, side, db, table):
+            if self.j == 2:
+                raise RuntimeError("permission denied for pg_dist_partition")
+            return spreads.get(self.j)
+    for j in range(len(g.targets)):
+        g._pairs[(0, j)] = SimpleNamespace(dst_engine=Dst(j))
+    monkeypatch.setattr(reshard, "_tables", lambda g: {"public.orders": 0})
+    monkeypatch.setattr(reshard, "_target_table", lambda p, db, t: t)
+    monkeypatch.setattr(reshard, "function", lambda g, t, home: (
+        _fn(key=["customer_id"]), None))
+    got = reshard.disagreements(g)
+    # the first target spreads by id: said; the second agrees: nothing
+    assert len(got) == 1, got
+    assert "a spreads it by id" in got[0] and "by customer_id" in got[0] \
+        and "disagree" in got[0], got
+    # a target that cannot say is said, never taken as one that spreads
+    # nothing
+    g._pairs[(0, 1)] = SimpleNamespace(dst_engine=Dst(2))
+    got = reshard.disagreements(g)
+    assert any("b could not say how it spreads" in x for x in got), got

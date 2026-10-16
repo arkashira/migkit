@@ -5644,3 +5644,101 @@ WAYS["large values"].update({
     "cockroachdb": ("yes", "@LARGE_VALUES"),
     "dsql": ("yes", "@LARGE_VALUES"),
 })
+
+# ---- a reshard's follow: how much of a source is read, and in what order (W7)
+
+def reshard_read(facts):
+    """(the `Choice` of how many changes a reshard's follow reads of one
+    source next, that number). `facts`: `rate` (changes a second its last
+    batch was read and applied onto the targets at, measured; None before
+    any), `before` (the rate measured at the read before it), `round`
+    (seconds the last round over every source took, measured), `last`
+    (what its last read asked for), `full` (the last read came back as
+    full as asked: the source is behind), `first` (the reader's own first
+    read, taken only where nothing was read).
+
+    Behind and gaining - the last larger read applied faster a change than
+    the one before it, or nothing before to compare - it is read twice as
+    much, and stops growing the round a larger read gains nothing. Measured
+    on a full read and not gaining, it is read as much as the targets apply
+    in one round's time: a busy source not held to the others' batches,
+    nor the others waiting behind its own. Not behind: what it was read by
+    last (the reader's first read before any), a bound the changes fill
+    as they come."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+
+    def measured(x):
+        # a rate read off a short read is the batch's overhead, not what
+        # the targets take: only a full read measures it
+        return bool(x.get("full")) and (x.get("rate") or 0) > 0 and (
+            x.get("round") or 0) > 0
+
+    def gaining(x):
+        return x.get("before") is None or (x.get("rate") or 0) > (
+            x.get("before") or 0)
+    choice = climb("how many changes a source of a reshard is read next", (
+        Rung("grow", "twice the last read", needs=(
+            Need("the last read full", lambda x: bool(x.get("full"))
+                 and (x.get("last") or 0) > 0,
+                 "its last read came back short: the source is not"
+                 " behind"),
+            Need("a larger read gaining", gaining,
+                 lambda x: f"the last read applied {x.get('rate') or 0:,.0f}"
+                           " changes a second, no more than the"
+                           f" {x.get('before') or 0:,.0f} of the smaller one"
+                           " before it")),
+             because="the source is behind and a larger read was applied"
+                     " faster a change"),
+        Rung("paced", "the changes the targets apply in one round's time",
+             footprint=1, needs=(
+                 Need("a rate measured on a full read", measured,
+                      "no full read of the source has been applied and"
+                      " timed yet"),),
+             because="read as much as its measured rate applies while the"
+                     " round over every source runs once"),
+        Rung("as-asked", "what it was read by last, or the reader's first"
+             " read", footprint=2,
+             because="the source is not behind: a read is a bound, taken"
+                     " as the changes come")), f)
+    if choice.path == "grow":
+        size = 2 * int(f["last"])
+    elif choice.path == "paced":
+        size = math.ceil(float(f["rate"]) * float(f["round"]))
+    else:
+        size = int(f.get("last") or f.get("first") or 1)
+    return choice, max(1, size)
+
+
+def reshard_order(facts):
+    """(the `Choice` of the order a reshard's follow reads its sources in
+    a round - and so drains them at the cutover - that order). `facts`:
+    `took` [seconds each source's last batch took, measured; None where
+    not yet], `full` [its last read came back full: behind]. Skewed and
+    measured: the sources behind first, the longest batch first among
+    them, so the source with the most still to drain starts first and the
+    round ends soonest. Nothing measured: the order the group names
+    them."""
+    f = facts if isinstance(facts, Facts) else Facts(dict(facts or {}))
+    took, full = list(f.get("took") or []), list(f.get("full") or [])
+    n = len(took)
+    choice = climb("the order a reshard's sources are read in", (
+        Rung("most-behind-first", "the sources behind first, the longest"
+             " batch first", needs=(
+                 Need("every source's batch timed",
+                      lambda x: n > 0 and all(t is not None for t in took),
+                      "a source's batch has not been timed yet"),
+                 Need("the sources skewed",
+                      lambda x: len({(bool(full[i]) if i < len(full)
+                                      else False, took[i])
+                                     for i in range(n)}) > 1,
+                      "every source is as far behind as the others")),
+             because="the source with the most still to read starts first,"
+                     " so the round over them all ends soonest"),
+        Rung("as-named", "the order the group names them", footprint=1,
+             because="nothing measured tells the sources apart")), f)
+    if choice.path == "most-behind-first":
+        order = sorted(range(n), key=lambda i: (
+            not (full[i] if i < len(full) else False), -float(took[i]), i))
+    else:
+        order = list(range(n))
+    return choice, order
