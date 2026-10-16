@@ -1296,7 +1296,18 @@ KNOWN_UPWARD = {
      "is read through a contract below reporting"): (
         "migkit/export.py migkit.tooluse",
         "migkit/notify.py migkit.tooluse",
+        "migkit/telemetry.py migkit.tooluse",
         "migkit/traces.py migkit.tooluse",
+    ),
+    ("the hop's sign-in and the readiness audit ask the cloud provider's "
+     "own API (`cloudapi`); the provider calls move to a contract below "
+     "configuration and decision"): (
+        "migkit/cloud_readiness.py migkit.cloudapi",
+        "migkit/config.py migkit.cloudapi",
+    ),
+    ("a forwarder asks the decision engine (`decide.cloud_forwarder`) "
+     "which way in to take; the choice is handed in as a fact"): (
+        "migkit/tunnel.py migkit.decide",
     ),
     ("a report reads `autonomous` for the state of the running "
      "workflow; the state moves below reporting"): (

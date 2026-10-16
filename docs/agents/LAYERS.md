@@ -28,13 +28,6 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ## Upward imports still listed: 369
 
-### (not listed)
-
-- `migkit/cloud_readiness.py:208` decision -> integrations (`cloudapi`)
-- `migkit/config.py:882` configuration -> integrations (`cloudapi`)
-- `migkit/telemetry.py:1642` reporting -> integrations (`tooluse`)
-- `migkit/tunnel.py:442` execution -> decision (`decide`)
-
 ### a conversion asks the decision engine (`decide`) which way to take; the choice is handed in as a fact
 
 - `migkit/charsets.py:1245` conversion -> decision (`decide`)
@@ -187,6 +180,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a durable write goes through safety's `redact`; the order of the ranks is to be settled with the safety package
 
 - `migkit/anchor.py:219` persistence -> safety (`redact`)
+
+### a forwarder asks the decision engine (`decide.cloud_forwarder`) which way in to take; the choice is handed in as a fact
+
+- `migkit/tunnel.py:442` execution -> decision (`decide`)
 
 ### a hop is checked against the engines (`engines.base`) it names; ends when the engine registry is read through a contract
 
@@ -382,6 +379,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/export.py:96` reporting -> integrations (`tooluse`)
 - `migkit/notify.py:644` reporting -> integrations (`tooluse`)
+- `migkit/telemetry.py:1642` reporting -> integrations (`tooluse`)
 - `migkit/traces.py:287` reporting -> integrations (`tooluse`)
 
 ### a report reads `autonomous` for the state of the running workflow; the state moves below reporting
@@ -1012,6 +1010,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/machine.py:923` decision -> engines (`engines`)
 - `migkit/tableway.py:132` decision -> engines (`engines`)
 - `migkit/waysaid.py:71` decision -> engines (`engines`)
+
+### the hop's sign-in and the readiness audit ask the cloud provider's own API (`cloudapi`); the provider calls move to a contract below configuration and decision
+
+- `migkit/cloud_readiness.py:208` decision -> integrations (`cloudapi`)
+- `migkit/config.py:882` configuration -> integrations (`cloudapi`)
 
 ### workflows reaches `cli` (cli); the shared piece moves below both, or the call is inverted
 
