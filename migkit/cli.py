@@ -4841,7 +4841,94 @@ def move(hop_name, db, table, mode, chunk, do_drop, go):
     if _given("chunk") and mode == "cdc":
         raise Usage("--chunk sizes the ranges of a copy; --mode cdc copies"
                     " nothing")
-    return _move_run(hop_name, db, table, mode, chunk, do_drop, go)
+    return _move_hop(hop_name, db, table, mode, chunk, do_drop, go)
+
+
+def _move_hop(hop_name, db, table, mode, chunk, do_drop, go):
+    """`move` through `planner.move_topology`, the one door a hop's move
+    goes through: a hop whose `nodes:` names a topology the hops sharing a
+    site with it draw moves every hop of it, each by `_move_run` and the
+    nodes' rows proved after each before the next begins; any other hop,
+    a plan, one table and a stream's teardown by `_move_run` alone, as
+    before."""
+    from . import hopkeys, planner, topology
+    from .verdict import Usage
+    hop = get_hop(hop_name)
+    out, ran = {}, []
+    if not go or do_drop or table or not hopkeys.opt(hop, "nodes"):
+        planner.move_topology(hop, [hop], {}, lambda h, spec: out.update(
+            {h.name: _move_run(h.name, db, table, mode, chunk, do_drop,
+                               go)}), dict)
+        return out.get(hop.name)
+    eng = get_engine(hop)
+    dbs = [db] if db else list(eng.databases())
+    if len(dbs) != 1:
+        raise Usage("a topology is moved and proved one database at a time:"
+                    f" migkit move {hop_name} --db <name> --go")
+    d = dbs[0]
+    tables = {t: {"key": list(eng.neutral_key("source", d, t)),
+                  "columns": [n for n, _ in eng.neutral_columns(
+                      "source", d, t)]}
+              for t in eng.neutral_tables("source", d)}
+
+    def run_hop(h, spec):
+        ran.append(h)
+        out[h.name] = _move_run(h.name, d, "", mode, chunk, False, True)
+
+    def read_rows():
+        held = {}
+        for h in ran:
+            e = get_engine(h)
+            for side, ep in (("source", h.source), ("target", h.target)):
+                if topology.site(ep) not in held:
+                    held[topology.site(ep)] = _keyed_digests(e, side, d,
+                                                             tables)
+        first = ran[0] if ran else hop
+        return {"sources": {topology.site(h.source):
+                            held[topology.site(h.source)] for h in ran},
+                "target": held.get(topology.site(first.target), {}),
+                "source": held.get(topology.site(first.source), {}),
+                "targets": {topology.site(h.target):
+                            held[topology.site(h.target)] for h in ran},
+                "nodes": held}
+    got = planner.move_topology(hop, list(load_hops().values()), tables,
+                                run_hop, read_rows)
+    if got is None:
+        return out.get(hop.name)
+    for line in got.lines:
+        console.print(f"  {_esc(line)}")
+    if got.stopped or got.final is None or not got.final.ok:
+        at, why = got.stopped or ("the whole", "its proof failed")
+        raise SystemExit(f"the topology's move stopped at {at}: {why}."
+                         f" migkit check {hop_name} says what differs; the"
+                         " same command goes on from the hops that finished.")
+    console.print(f"[green]topology moved[/green] - {len(got.done)} hops,"
+                  " the parts proved equal to the whole")
+    return got
+
+
+def _keyed_digests(eng, side, db, tables):
+    """{table: {key: digest}} of one node, each row folded as the deep
+    check folds it (`canon.fold_rows`, its engine's classes): the rows a
+    topology's proof holds the nodes to."""
+    from . import canon, interlock
+    from .attempts import engine_name
+    name = engine_name(interlock.side_engine(
+        eng, "src" if side == "source" else "dst"))
+    out = {}
+    for t, spec in tables.items():
+        cols = eng.neutral_columns(side, db, t)
+        classes = [canon.fold_class(name, c, n) for n, c in cols]
+        names = [n for n, _ in cols]
+        at = [names.index(k) for k in spec["key"]]
+        got = {}
+        for batch in eng.neutral_batches(side, db, t, cols, 5000):
+            for row in batch:
+                k = tuple(row[i] for i in at)
+                got[k[0] if len(k) == 1 else k] = \
+                    canon.fold_rows(classes, [row])[1]
+        out[t] = got
+    return out
 
 
 def _move_run(hop_name, db, table, mode, chunk, do_drop, go):

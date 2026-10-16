@@ -417,11 +417,14 @@ def transformed(tree, hop, db, columns_of):
     only writes is not one of them - the application's value lands as it
     is on both sides."""
     from ..movers import mask_rules
-    rules = {_leaf(t): cols for t, cols in mask_rules(hop, db).items()}
+    read = list(tree.find_all(exp.Table))
+    asked = dict.fromkeys(".".join(p for p in (t.db, t.name) if p)
+                          for t in read)
+    rules = {_leaf(t): cols
+             for t, cols in mask_rules(hop, db, list(asked)).items()}
     if not rules:
         return []
-    tables = {str(t.alias_or_name).lower(): t.name
-              for t in tree.find_all(exp.Table)}
+    tables = {str(t.alias_or_name).lower(): t.name for t in read}
     named = list(dict.fromkeys(tables.values()))
     written = set()
     for node in tree.find_all(exp.Update):

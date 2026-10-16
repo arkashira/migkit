@@ -7261,12 +7261,15 @@ researched:
   topology and whose hops sharing a site draw one runs every hop of it by
   `run_topology` on `topology.facts_of`'s facts and per-link rates; any
   other hop runs alone as before (`test_landings_keep_pace_order_and_memory.py`).
-  UNPROVED: the command's own move does not call it yet - the call site is
-  `cli.move` (migkit/cli.py, `def move(hop_name, db, table, mode, chunk,
-  do_drop, go)`), which moves one named hop; it should hand the hop, the
-  configuration's hops, the tables' keys and a `read_rows` reading each
-  node's rows to `planner.move_topology`, with its own body as `run_hop`.
-  `cli.py` lies outside this ticket's files.
+  *The command's door 2026-10-16 (W14X):* `cli.move` hands a hop whose
+  `nodes:` is set, with `--go`, to `planner.move_topology` (the
+  configuration's hops, the source's tables and keys, each node's rows
+  folded per key for the proof after each hop); a plain hop, a plan, one
+  table and a teardown move as before
+  (`test_every_engine_is_titled_and_its_hop_is_named.py`). Not done: the
+  changes' applied order is not read at the command, so the order and
+  echo proofs see none; target table renames are not applied to the
+  node reads; a docker run of each shape.
 * Tested in docker: pairs of mysql:8.4 and mariadb:11, both directions
   writing, echoes counted (must be 0), both sides hashed equal.
 

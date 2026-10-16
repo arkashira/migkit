@@ -233,6 +233,10 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * --chunk sizes the ranges of a copy; --mode cdc copies nothing
 
+* a topology is moved and proved one database at a time: migkit move <...> --db <name> --go
+
+* the topology's move stopped at <...>: <...>. migkit check <...> says what differs; the same command goes on from the hops that finished.
+
 * <...> <...> | <...>Nothing past the last finished table is marked as moved. The commands that ran are in the run's commands.log.
 
 * the move stopped: no space left on this machine for <...>. Free space there and move again; the checkpoint is as it was before the write that did not fit, and the next run goes on from it.
@@ -1543,13 +1547,13 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>: GeminiDB's Cassandra API keeps no change log a client can read, so its changes cannot be followed. Stop writes on the source and move it, then prove it with migkit check
 
-## qdrant
+## Qdrant
 
 * <...>: a row filter is SQL, and a collection takes none
 
 * <...>: a collection is made from the source's vectors, and the source has no collection of that name
 
-## neo4j
+## Neo4j
 
 * <...> <...>: the server answered <...> <...>
 

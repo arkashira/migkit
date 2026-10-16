@@ -381,9 +381,12 @@ def key_ways():
                      " in the one column"),
         Rung("apart", "the keys as they are",
              frozenset({"keys apart"}),
-             needs=(Need("no key two sources hold",
+             needs=(Need("keys: refuse", lambda f: f["rule"] == "refuse",
+                         "the hop's rule changes the keys and this table's"
+                         " cannot be changed so"),
+                    Need("no key two sources hold",
                          lambda f: not f["clash"],
-                         "sources hold the same keys in it"),),
+                         "sources hold the same keys in it")),
              footprint=2,
              because="no two sources hold one key"))
 

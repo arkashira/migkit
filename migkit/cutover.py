@@ -720,8 +720,12 @@ def _verify_rows(hop, conf, gate, window):
 def recheck(hop, eng, dbs, leg, conf, marked=False):
     """The gate again after the approvals, before anything is written:
     lag, the verify verdict and every probe's freshness. A probe older
-    than `fresh_window` is measured again here; the facts that stop the
-    cutover come back one by one, each named. []: it may start."""
+    than `fresh_window` is measured again here; the engine's probes the
+    preflight recorded of these databases that hold until changed
+    (`diagnostics.HOLDS`: a grant, a version, a setting, a feature, a
+    publication) are read as recorded, never asked again, a failed one a
+    fact; a one-read kind (the lag) is measured again. The facts that stop
+    the cutover come back one by one, each named. []: it may start."""
     window = fresh_window(conf)
     taken = diagnostics.accumulator(hop)
     out = []
@@ -741,6 +745,11 @@ def recheck(hop, eng, dbs, leg, conf, marked=False):
     facts = [w for lvl, w in out if lvl == "fail"]
     facts += [f"probe {w}" for w in taken.refusals(
         taken.scopes("lag", "open-work", "verify"), window)]
+    held = [k for k in diagnostics.HOLDS
+            if diagnostics.HOLDS[k] is None]
+    facts += [f"probe {w}" for w in taken.refusals(
+        [(k, at) for k, at in taken.scopes(*held)
+         if at.split(":")[0] in dbs])]
     return facts
 
 

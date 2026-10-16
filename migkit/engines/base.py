@@ -1217,7 +1217,8 @@ class Engine:
         lines = list(scheme)
         for table in sorted(tables):
             s, d = tables[table]
-            lines += verdict.partition_differences(table, s, d)
+            lines += verdict.partition_differences(table, s, d,
+                                                    hop=self.hop.name)
         path = self.hop.report_dir(db) / "deep-partitions.diff"
         parts = sum(len(s) for s, _ in tables.values())
         if not tables and not scheme:

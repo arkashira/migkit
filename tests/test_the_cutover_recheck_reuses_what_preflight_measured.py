@@ -101,3 +101,37 @@ def test_a_missing_verdict_names_the_hop_and_not_a_path(gate, tmp_path):
     got = "; ".join(cutover.recheck(hop, None, ["app"], leg,
                                     dict(cutover.DEFAULTS)))
     assert "recheck-reuse" in got and str(tmp_path) not in got, got
+
+
+def test_a_grant_recorded_at_preflight_is_not_asked_again_at_the_flip(
+        gate, tmp_path):
+    hop, leg, calls = gate
+    _verdict(tmp_path)
+    conf = dict(cutover.DEFAULTS)
+    taken = diagnostics.accumulator(hop)
+    asked = []
+
+    def grant():
+        asked.append("grant")
+        return {"select": True}
+    at = diagnostics.where("app", "dst", "migkit")
+    taken.probed("grant", at, grant)
+    taken.probed("version", diagnostics.where("app", "src"),
+                 lambda: asked.append("version") or "16.4")
+    assert asked == ["grant", "version"]
+    assert cutover.recheck(hop, None, ["app"], leg, conf) == []
+    # held until changed: read as the preflight recorded it, never again
+    assert asked == ["grant", "version"]
+    assert taken.get("grant", at).reads == 1
+    # the lag, one read, was measured at the flip
+    assert calls["probes"] == 1
+    # a grant the preflight found missing stops the cutover by name
+    taken.record("grant", at, ok=False, why="no select on orders")
+    got = cutover.recheck(hop, None, ["app"], leg, conf)
+    assert any(w.startswith("probe grant of app:dst:migkit")
+               and "no select on orders" in w for w in got), got
+    # another database's probes are not this cutover's
+    diagnostics.forget(hop)
+    diagnostics.accumulator(hop).record("grant", "other:dst", ok=False,
+                                        why="no select")
+    assert cutover.recheck(hop, None, ["app"], leg, conf) == []

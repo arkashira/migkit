@@ -144,6 +144,24 @@ def test_a_column_written_transformed_is_not_held_to_the_source():
                                   lambda t: ["id", "email"]) == []
 
 
+def test_a_masked_column_is_found_by_the_tables_the_statement_reads():
+    # the rules are asked of the tables the statement names, its schema
+    # with them: a key written for one schema leaves another's alone
+    hop = Hop(name="m", engine="hetero", source=Endpoint(),
+              target=Endpoint(),
+              options={"mask_on_write": {"crm.users.email": "constant x"}})
+    tree = parse("select u.id, u.email from crm.users u", "mysql")
+    assert statements.transformed(tree, hop, "shop",
+                                  lambda t: ["id", "email"]) \
+        == [("users", "email", "constant x")]
+    tree = parse("select id, email from billing.users", "mysql")
+    assert statements.transformed(tree, hop, "shop",
+                                  lambda t: ["id", "email"]) == []
+    # a statement reading no masked table asks nothing of the rules
+    tree = parse("select id from orders", "mysql")
+    assert statements.transformed(tree, hop, "shop", lambda t: ["id"]) == []
+
+
 # ---- the prover on two in-memory databases ----------------------------------
 
 
