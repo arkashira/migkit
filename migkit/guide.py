@@ -274,7 +274,8 @@ def _address(question, say, given, text, side, knocked=None):
                 raise
             say(f"[yellow]{e}[/yellow]")
             got = ""
-    raise SystemExit(f"no {side} address migkit could read")
+    from . import report
+    raise SystemExit(report.address_unreadable(side))
 
 
 def _who(raw_side, side):
@@ -316,7 +317,8 @@ def survey(hop, say, imported=None):
         raise
     except Exception as e:  # noqa: BLE001 - said, and the config written
         out["reached"] = False
-        say(f"[red]could not reach the source[/red]: {dba._last(e)}")
+        from . import report
+        say("[red]" + report.source_unreachable(dba._last(e)) + "[/red]")
         return out
     out["dbs"] = dbs
     out["eng"] = eng

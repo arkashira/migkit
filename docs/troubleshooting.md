@@ -79,8 +79,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * this machine has no keychain migkit can use; keep the passwords in environment variables instead (MIGKIT_SECRETS=env)
 
-* no <...> address migkit could read
-
 * no <...> address: set MIGKIT_<...> or run `migkit init` in a terminal
 
 * <...> holds <...>, which migkit reads nothing from beside `hops` and <...> - add the hop by hand, or use --force to write a new file (which leaves nothing of the old one)
@@ -161,8 +159,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...> masks columns on the way, and a repair of rows on this engine writes the source's values as they are, unmasked: --kind sequences or --kind schema repairs the rest. Nothing has been started
 
-* <...>: <...>: the hop asks to mask <...>. Nothing has been started
-
 * <...>: <...> not configured yet fill host/user/password in conf/hops.yaml, then: migkit doctor
 
 * <...> already exists (use --force to overwrite)
@@ -172,8 +168,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: no stream of this hop reads a position, so there is nothing to drain to. Its cutover proves the drain by a mark
 
 * --convert is for hetero hops, same-engine hops use migkit schema HOP
-
-* <...> could not be created on the target; nothing else was either - the schema is created in one transaction, whole or not at all | <...>: <...>
 
 * --migration supports postgres and mysql hops
 
@@ -219,15 +213,9 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * <...>'s goal is <...>: migrate runs <...>
 
-* <...>: not started - the tables as planned do not keep what the move must keep: <...>
-
-* <...>: not started - <...>
-
 * <...> reported success and <...> is still empty on the target: <...> ... | <...>. Nothing has been marked as moved - look at the copy's output above, and at the target server's log
 
 * the bulk copy finished and <...> of <...>'s tables do not hold what the source does: <...> ... | <...>. Nothing has been marked as moved. A source written to while it was copied differs by what changed - move with --mode full+cdc for that; otherwise `migkit sync` puts the rows right
-
-* topology: two_way - <...>. Nothing was set up.
 
 * the hop maps or masks columns or renames tables (mapping.columns, mask_on_write, mapping.tables), and the server's own replication carries whole rows under the source's names, as the source holds them. Nothing was set up. `migkit move --mode cdc` follows this hop with migkit's own change tail, which applies the mapping.
 
@@ -279,11 +267,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * which hop? reports exist for: <...>
 
-* no saved states, run migkit sync --go first
-
 * no state matching '<...>', have: <...>
-
-* state <...> not retrievable from <...>
 
 * the move's checkpoint <...> kept changing while it was written; nothing past the last save is lost. Check which machines still own this move and reconcile their state; the checkpoint is kept, and once the contention is resolved the original move command goes on from it
 

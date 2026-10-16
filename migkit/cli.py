@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import advisors, capabilities
+from . import report as _words
 from .config import get_hop, load_hops
 from .engines import get_engine
 from .util import without_secret, Timer, human_int, human_secs, which
@@ -365,9 +366,7 @@ def _refuse_unmasked(hop, eng, dbs, stream):
     for d in dbs:
         refused = eng.masks_refused(d)
         if refused:
-            raise Refused(f"{hop.name}: {d}: the hop asks to mask "
-                          + "; ".join(f"{n} ({why})" for n, why in refused)
-                          + ". Nothing has been started")
+            raise Refused(_words.mask_refused(hop.name, d, refused))
 
 
 def _guard_write(hop, eng, what, dbs, go, mode="", drop=False, step=None,
@@ -1215,7 +1214,8 @@ def _doctor_config():
     try:
         data = _config.read_yaml(path.read_text())
     except yaml.YAMLError as e:
-        console.print(f"[red]{path} is not YAML migkit can read[/red]: {e}")
+        console.print("[red]" + _esc(_words.config_unreadable(path, e))
+                      + "[/red]")
         return {}, {}
     try:
         hops = load_hops()
@@ -1276,8 +1276,7 @@ def _doctor_setup(name, hop, eng, say=None):
     for side, p in written.items():
         say(f"  what the DBA must run on the {side}: {_esc(p)}")
     for n in (x for x in found if x.ok is None):
-        say(f"{name} {n.side}: {_esc(n.what)} - could not be asked"
-            f" ({_esc(n.now)})")
+        say(_esc(_words.probe_unasked(name, n.side, n.what, n.now)))
 
 
 def _placement_said(rtt, hop=None):
@@ -1317,9 +1316,9 @@ def _leg_said(eng, side, db, ep):
     except Exception:  # noqa: BLE001 - a probe never fails doctor
         pos = None
     if pos and pos["state"] in ("unverified", "plain"):
-        return (f"[red]FAIL[/red] connection NOT"
-                f" {'verified' if pos['state'] == 'unverified' else 'encrypted'}"
-                f": {pos['detail']}")
+        return "[red]FAIL[/red] " + _esc(_words.transport_failed(
+            "source" if side == "src" else "target", pos["state"],
+            pos["detail"]))
     try:
         got = eng.leg_encryption(side, db)
     except Exception:  # noqa: BLE001 - a probe never fails doctor
@@ -1400,7 +1399,7 @@ def _link_line(got, name):
                 " safe) or clamp TCP MSS on it. A copy over this link"
                 " hangs")
     if got.get("tcp"):
-        return f"[red]link: its port does not answer[/red] ({got['tcp']})"
+        return "[red]" + _esc(_words.port_silent(name, got["tcp"])) + "[/red]"
     parts = []
     if got.get("rtt_ms") is not None:
         parts.append(f"{got['rtt_ms']} ms round trip")
@@ -1634,11 +1633,8 @@ def _convert_schema(hop_name, db, do_apply):
                 console.print(f"  already on the target, left as they are:"
                               f" {_esc(', '.join(kept))}")
             if failed:
-                raise SystemExit(
-                    f"{len(failed)} could not be created on the target"
-                    + ("; nothing else was either - the schema is created"
-                       " in one transaction, whole or not at all" if whole
-                       else "") + ":\n  " + "\n  ".join(failed))
+                raise SystemExit(_words.schema_failed(
+                    len(failed), whole, failed, hop_name))
     if not do_apply:
         console.print("\ndry-run, review the file then add --apply")
 
@@ -2249,9 +2245,8 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
         from . import sizing
         sizing.fit(hop, eng, dbs[0], lambda m: console.print(f"  {_esc(m)}"))
     else:
-        console.print("[yellow]the source lists no database this hop"
-                      " covers, so nothing is compared - the user migkit"
-                      " signs in as may not see them[/yellow]")
+        console.print("[yellow]" + _esc(_words.scope_empty(hop_name))
+                      + "[/yellow]")
     workers = hop.workers
     summary_path = hop.report_dir() / "summary.json"
     prev, prev_at = {}, None
@@ -2384,6 +2379,11 @@ def _check(hop, db, table, only, do_deep, consistent, workers, resume,
             console.print(said, markup=False)
     from .report import write_report
     report_path = write_report(hop, results, decided=decided)
+    try:
+        _words.check_ended(hop, results, decided.severity, timer.elapsed(),
+                           coverage or None)
+    except (OSError, SystemExit, ValueError) as e:
+        _sheet_not_written(hop, e)
     notes = [r for r, s in zip(results, decided.severity)
              if s == "note" and not r.get("kept_by_hop")]
     kept = [r for r in results if r.get("kept_by_hop")]
@@ -2651,7 +2651,7 @@ def _apply_actions(hop, eng, db, actions, do_apply, undo_dir, state=None):
         if said:
             console.print(f"  {_esc(said)}")
         if not usable:
-            raise SystemExit(f"{db}: {said}")
+            raise SystemExit(_words.repair_stopped(db, said, hop.name))
         ts = time.strftime("%Y%m%d-%H%M%S")
         if a.undo:
             undo_file = undo_dir / f"{ts}-{a.kind}-{i}.sql"
@@ -3276,13 +3276,27 @@ def _record_run(hop, eng, d, via, rows, began, spent, narrowed=()):
     for line in rehearsal.held_to(hop, d, "copy", took):
         console.print(f"  {line}")
     # and the change sheet's copy steps written back as the phase ends
-    try:
-        report.step_ended(hop, d, "copy", "done", took,
-                          "the copy ended; the check proves it", rows=rows)
-    except (OSError, SystemExit, ValueError) as e:
-        console.print(f"  the change sheet was not written back: "
-                      f"{_esc(_clean(e, raw=True))}")
+    _sheet_ended(hop, d, "copy", "done", took,
+                 "the copy ended; the check proves it", rows=rows)
 
+
+
+def _sheet_ended(hop, d, phase, status, took, proof, rows=None):
+    """A phase's end written back to the change sheet; a sheet that cannot
+    be written is said, with what to do, and never stops the run."""
+    try:
+        return _words.step_ended(hop, d, phase, status, took, proof,
+                                 rows=rows)
+    except (OSError, SystemExit, ValueError) as e:
+        _sheet_not_written(hop, e)
+        return []
+
+
+def _sheet_not_written(hop, e):
+    console.print(f"  the change sheet was not written back: "
+                  f"{_esc(_clean(e, raw=True))}. Write it back with"
+                  f" `migkit change-sheet {_esc(hop.name)} --back <step>`"
+                  " once it can be written")
 
 
 def _resource_plan(hop, eng, d, via, facts=None, tables=None, go=False):
@@ -3500,8 +3514,9 @@ def _joint_for_move(hop, eng, m, d, names, most, log):
     if not jp.admitted:
         # a plan that breaks what the move must keep is not run in part:
         # the move stops before its first row, with what to do next
-        raise SystemExit(f"{d}: not started - the tables as planned do not"
-                         f" keep what the move must keep: {jp.refused}")
+        raise SystemExit(_words.copy_not_started(
+            d, "the tables as planned do not keep what the move must keep:"
+            f" {jp.refused}", hop.name))
     return jp
 
 
@@ -3525,7 +3540,7 @@ def _copy_admitted(hop, eng, d, jp, at_once, followed, log):
     if ok:
         return at_once
     if sched.checkpoint == "before durable":
-        raise SystemExit(f"{d}: not started - {why}")
+        raise SystemExit(_words.copy_not_started(d, why, hop.name))
     log(f"plan: tables copied one at a time - {why}")
     decide.record(hop, {"work": f"the copy of {d}", "refused": why,
                         "tables_at_once": at_once}, log,
@@ -3579,7 +3594,7 @@ def _copy_tables(hop, eng, d, tables, chunk, ck, followed=False):
     m = resource_model.for_move(hop, eng, d, tables=names, log=log)
     short = m.too_wide(sizing._memory())
     if short:
-        raise SystemExit(f"{d}: not started - {short}")
+        raise SystemExit(_words.copy_not_started(d, short, hop.name))
     plan = _flow_sized(hop, sizing.fit(hop, eng, d, log,
                                        units=_units(eng, d, tables),
                                        model=m), m)
@@ -3625,6 +3640,7 @@ def _copy_tables(hop, eng, d, tables, chunk, ck, followed=False):
         # end of this one - whichever tables it copies
         window = getattr(target, "table_index_window", None)
         from . import movers
+        indexing = time.monotonic()
         with (window(d, None, log) if window
               else contextlib.nullcontext()):
             # a finished table's indexes are built while the next copies
@@ -3636,6 +3652,9 @@ def _copy_tables(hop, eng, d, tables, chunk, ck, followed=False):
                 at_once = max(1, min(at_once, joint.tables))
             with movers.builds_beside(log):
                 _copy_tables_in(hop, eng, d, tables, chunk, ck, at_once)
+        _sheet_ended(hop, d, "index", "done", time.monotonic() - indexing,
+                     "the indexes were built at the end of the copy; the"
+                     " check proves they match")
         # the copy found done holds its estimates to when it ended
         try:
             eta(pace.limit)
@@ -4214,8 +4233,7 @@ def _replicate(hop, eng, db, copy_data, do_drop, go):
     if two_way and hasattr(eng, "loops_prevented"):
         why = eng.loops_prevented(db or (eng.databases() or [""])[0])
         if why:
-            raise SystemExit(f"topology: two_way - {why}. Nothing was set"
-                             " up.")
+            raise SystemExit(_words.two_way_refused(why, hop.name))
     if two_way:
         eng.loop_safe = True
     _replicate_one(hop, eng, db, copy_data, do_drop, go)
@@ -4380,8 +4398,9 @@ def _replicate_one(hop, eng, db, copy_data, do_drop, go, left=None,
                     " carry only what changes in them. Move the database"
                     " again with --mode full+cdc")
             if go:
-                raise SystemExit(said)
-            console.print(f"  with --go this stops: {_esc(said)}")
+                raise SystemExit(_words.replication_refused(said, hop.name))
+            console.print("  with --go this stops: "
+                          + _esc(_words.replication_refused(said, hop.name)))
         sql = eng.replicate_sql(d, copy_data=copy_data, secret=secret,
                                 copied=copied)
         console.print(f"[bold]{d}[/bold]")
@@ -5916,9 +5935,8 @@ def _hop_again(hop_name, hop, eng, db, dbs):
     try:
         now = get_hop(hop_name)
     except (Exception, SystemExit) as e:  # noqa: BLE001 - kept, said
-        console.print(f"[yellow]the hop could not be read again"
-                      f" ({_esc(_clean(e, raw=True))}); this cycle goes by"
-                      " the one read before[/yellow]")
+        console.print("[yellow]" + _esc(_words.hop_not_reread(
+            _clean(e, raw=True), hop_name)) + "[/yellow]")
         return hop, eng, dbs, False
 
     def scope(h):
@@ -6542,8 +6560,8 @@ def history(hop_name, db, show_ts):
         for line in cl.read_text().splitlines()[-15:]:
             say_raw(f"  {line}")
         if broken:
-            console.print(f"[red]the record has been changed:"
-                          f" {_esc(broken)}[/red]")
+            console.print("[red]" + _esc(_words.record_changed(
+                broken, hop_name)) + "[/red]")
         else:
             console.print(f"  {chained} of {n} entries chained, and the"
                           " chain is whole"
@@ -6660,7 +6678,7 @@ def _restore_target(hop, eng, db, state_ts, do_apply, required,
                       " left as they are")
         return
     if not states:
-        raise SystemExit("no saved states, run migkit sync --go first")
+        raise SystemExit(_words.no_saved_states(hop.name))
     matches = [x for x in states if state_ts in x] if state_ts else states
     if not matches:
         raise SystemExit(f"no state matching '{state_ts}',"
@@ -6668,7 +6686,8 @@ def _restore_target(hop, eng, db, state_ts, do_apply, required,
     ts = matches[-1]
     state = store.fetch(db, ts)  # pulls from s3/tar mirror if not local
     if state is None:
-        raise SystemExit(f"state {ts} not retrievable from {store.kind}")
+        raise SystemExit(_words.restore_unreachable(ts, store.kind,
+                                                    hop.name))
     stmts = []
     seqf = state / "dst-sequences.txt"
     aif = state / "dst-autoinc.txt"

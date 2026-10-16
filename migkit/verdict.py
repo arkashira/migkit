@@ -648,7 +648,7 @@ def hold(hop, records):
     return records
 
 
-def partition_differences(table, src, dst):
+def partition_differences(table, src, dst, hop=None):
     """What differs between one partitioned table's partitions, a line each.
 
     `src` and `dst` are `{partition: {"rows", "digest", "bound",
@@ -659,9 +659,12 @@ def partition_differences(table, src, dst):
     Measured on a DTS leg: the current month's partitions arrived empty
     while the parents' totals looked plausible, the rows sitting in the
     catch-all or nowhere. A partition is paired by name, and one renamed on
-    the way by its bound.
+    the way by its bound. `hop` names the hop in the next step a missing
+    partition's line gives.
     """
     lines = []
+    plan = f"`migkit schema {hop}`" if hop else "`migkit schema`"
+    recheck = f"`migkit check {hop}`" if hop else "`migkit check`"
     only_src = {n: p for n, p in src.items() if n not in dst}
     only_dst = {n: p for n, p in dst.items() if n not in src}
     pairs = [(n, n) for n in sorted(set(src) & set(dst))]
@@ -681,8 +684,8 @@ def partition_differences(table, src, dst):
         lines.append((0, f"{table} partition {n}: missing on target"
                          + (f", the source's holds {_rows(rows)}. Resolve the"
                             " partition definition with the database owner,"
-                            " then review the schema plan and check the"
-                            " affected rows again" if rows
+                            f" then review the schema plan ({plan}) and check"
+                            f" the affected rows again ({recheck})" if rows
                             else " (empty on the source)")))
     for n in sorted(only_dst):
         rows = int(only_dst[n].get("rows") or 0)

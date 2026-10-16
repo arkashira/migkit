@@ -582,6 +582,177 @@ def step_ended(hop, db, phase, status, seconds, proof, rows=None):
     return out
 
 
+def check_ended(hop, results, severity, took, coverage=None):
+    """The check's end written back to the change sheet's check steps, one
+    database at a time (`step_ended`): `done` where every answer of that
+    database held, `failed` where one did not, and `partial` where the run
+    was narrowed (`coverage`) so that the whole check was not taken. The
+    proof says which, and the one next step. Returns the ids written; a
+    sheet that cannot be written is said by the caller."""
+    from . import verdict
+    held = ("same", "note")
+    by_db = {}
+    for r, sev in zip(results, severity):
+        by_db.setdefault(verdict.db_of(r.get("scope", "")), []).append(sev)
+    out = []
+    for d, sevs in sorted(by_db.items()):
+        bad = sum(1 for x in sevs if x not in held)
+        if bad:
+            status = "failed"
+            proof = (f"{bad} of {len(sevs)} answers did not hold or were not compared; open the"
+                     " check report and fix what it lists, then check again")
+        elif coverage:
+            status = "partial"
+            proof = ("every answer taken held, but the run was narrowed to "
+                     + ", ".join(sorted(str(k) for k in coverage))
+                     + "; check again without narrowing to prove the whole"
+                     " hop")
+        else:
+            status = "done"
+            proof = f"all {len(sevs)} answers held"
+        out += step_ended(hop, d, "check", status, took, proof)
+    return out
+
+
+# What an operator is told where a command stops or finds a fault: what
+# happened, what it means and the one next step. Said here once, so that
+# every site of the CLI words it the same way.
+
+def _t(x):
+    return str(x).strip().rstrip(".")
+
+
+def restore_unreachable(ts, backend, hop):
+    return (f"state {ts} not retrievable from {backend}: the saved state"
+            " could not be fetched, so nothing was put back. Check access"
+            " to that backend and that the saved files are still there,"
+            f" then run `migkit rollback {hop} --state {ts}` again; do not"
+            " apply another state by guess")
+
+
+def record_changed(entry, hop):
+    return (f"the record has been changed: {_t(entry)}. Keep this record and"
+            " the saved run logs as they are and look into the change"
+            f" (`migkit history {hop}`) before relying on this history for"
+            " a rollback or an audit; do not rewrite the record to clear"
+            " this warning")
+
+
+def no_saved_states(hop):
+    return ("no saved states: there is no saved state of the counters to"
+            f" put back. Run `migkit history {hop}` to see what recovery"
+            " evidence there is; if none fits, stop this rollback and get"
+            " an approved recovery plan, and save a state with"
+            f" `migkit sync {hop} --go` before the next repair")
+
+
+def schema_failed(count, whole, failed, hop):
+    return (f"{count} could not be created on the target"
+            + ("; nothing else was either - the schema is created in one"
+               " transaction, whole or not at all" if whole else
+               "; what was created stays on the target")
+            + ":\n  " + "\n  ".join(failed)
+            + f"\nRead the statements above and the target's permissions,"
+            " put right what they name, then run"
+            f" `migkit schema {hop} --convert` again to review what is"
+            " left before applying it")
+
+
+def mask_refused(hop, db, refused):
+    return (f"{hop}: {db}: the hop asks to mask "
+            + "; ".join(f"{n} ({_t(why)})" for n, why in refused)
+            + ". Nothing has been started. Correct the mapping or column"
+            f" types of the named columns, then run `migkit move {hop}`"
+            " again without --go to review the plan; the move stays"
+            " blocked until every masked column is supported")
+
+
+def two_way_refused(why, hop):
+    return (f"topology: two_way - {_t(why)}. Nothing was set up. Put right"
+            " what that names so changes cannot loop between the sides,"
+            f" then run `migkit doctor` and `migkit move {hop}` without"
+            " --go to review the plan before replication is authorised")
+
+
+def replication_refused(said, hop):
+    return (f"{_t(said)}. Nothing was set up. Put right what that names, then"
+            f" run `migkit doctor` and run `migkit move {hop}` again"
+            " without --go to review the plan before it is carried out")
+
+
+def copy_not_started(db, why, hop):
+    return (f"{db}: not started - {_t(why)}. Nothing was copied. Put right"
+            f" what that names, run `migkit doctor`, then run"
+            f" `migkit move {hop}` again without --go to review the copy"
+            " plan")
+
+
+def repair_stopped(db, said, hop):
+    return (f"{db}: {_t(said)}. The repair was stopped before any statement"
+            " was run. Put right what that names, then run"
+            f" `migkit sync {hop}` again without --apply to review the"
+            " plan; compare the target with the saved repair journal"
+            " first if an earlier try may have written part of it")
+
+
+def scope_empty(hop):
+    return ("the source lists no database this hop covers, so nothing is"
+            " compared - the user migkit signs in as may not see them."
+            " Check the database names and the include and exclude rules,"
+            " ask the database owner to confirm that this login can list"
+            f" and read them, run `migkit doctor`, then `migkit check {hop}`")
+
+
+def config_unreadable(path, err):
+    return (f"{path} is not YAML migkit can read: {_t(err)}. Correct the"
+            " place it names without removing the hops already in the"
+            " file, then run `migkit doctor` again")
+
+
+def probe_unasked(hop, side, what, now):
+    return (f"{hop} {side}: {what} - could not be asked ({now}). Nothing"
+            " is known about it yet: ask the database owner to put right"
+            " the error or the missing permission, then run"
+            " `migkit doctor` again to ask it afresh")
+
+
+def transport_failed(side, state, detail):
+    what = "verified" if state == "unverified" else "encrypted"
+    return (f"connection NOT {what}: {_t(detail)}. Data on this connection"
+            f" can be read or changed on its way. Set up TLS with"
+            f" certificate checking for the {side}'s endpoint (or the"
+            " protected tunnel the hop supports), then run"
+            " `migkit doctor` again and move no data until this passes")
+
+
+def port_silent(side, tcp):
+    return (f"link: the {side}'s port does not answer ({_t(tcp)}). Nothing"
+            " can be read or written there. Check the host and port in"
+            " the hop, the network route, the firewall and that the"
+            " database is listening, then run `migkit doctor` again")
+
+
+def hop_not_reread(err, hop):
+    return (f"the hop could not be read again ({_t(err)}); this cycle goes by"
+            " the one read before, so a scope or setting changed since is"
+            " not seen. Put right the file or its read access; do not"
+            " approve a scope change or a cutover on this cycle, and"
+            f" confirm that the next cycle of `{hop}` reads it again")
+
+
+def address_unreadable(side):
+    return (f"no {side} address migkit could read. Give it as"
+            f" MIGKIT_{side.upper()}=<engine>://<user>@<host>:<port>/<db>"
+            " (for example postgres://app@db1:5432/shop), or run"
+            " `migkit init` in a terminal and enter it again")
+
+
+def source_unreachable(err):
+    return (f"could not reach the source: {_t(err)}. Nothing about the source"
+            " is verified yet. Check its address, the network route, the"
+            " login and its read permission, then run `migkit init` again")
+
+
 #: what a way's `leaves` words name on a server, and which side it is on
 #: ("" is the side(s) the way loads)
 SERVER_OBJECTS = (
