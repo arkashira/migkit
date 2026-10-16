@@ -4829,6 +4829,7 @@ class Engine:
                 dst_engine.neutral_write("dst", db, dst_t, dst_cols,
                                          list(rows.values()))
                 record.applied(writes)
+                dst_engine.named_batch(db, dst_t, "repair", len(rows))
             # a key part of a class with a form of its own on the target
             # (an ObjectId kept in a `jsonb` key) addresses the row in that
             # form
@@ -4840,6 +4841,7 @@ class Engine:
                     if k in into else v
                     for k, v in zip(key, values(key_text))})
                 record.applied(first_delete + i)
+            dst_engine.named_batch(db, dst_t, "repair", len(drop))
 
     def _kept_by_hop(self, db, table):
         """The kinds of row (`missing`, `extra`, `changed`) the hop keeps
@@ -6550,7 +6552,7 @@ class Engine:
                     c.get("table") if isinstance(c, dict) else None)
                 each[t] = each.get(t, 0) + 1
             for t, rows in each.items():
-                self.named_write(db, t, "change", "tail batch", rows)
+                self.named_batch(db, t, "change", rows)
             return n
 
         def undo(rung, error):
@@ -7456,6 +7458,33 @@ class Engine:
             return False
         from .. import freeze
         return freeze.name_write(hop, db, table, kind, unit, rows)
+
+    def named_batch(self, db, table, kind, rows):
+        """One batch migkit wrote into `table` of `db` named as its own
+        unit (`named_write`): the table, the batch's ordinal among that
+        table's batches of this kind, and its rows - so the ledger and a
+        kept target's audit read units, not one name for every batch. The
+        ordinal goes on from what the hop named before, so a resumed run
+        numbers on where the last one stopped; nothing is counted where
+        the hop does not name its target's writes."""
+        hop = getattr(self, "hop", None)
+        if hop is None or not rows:
+            return False
+        import threading
+
+        from .. import freeze
+        if not freeze.names_writes(hop, db):
+            return False
+        lock = self.__dict__.setdefault("_batch_lock", threading.Lock())
+        with lock:
+            seen = self.__dict__.setdefault("_batches_named", {})
+            k = (str(db), str(table or ""), str(kind))
+            if k not in seen:
+                seen[k] = sum(1 for w in freeze.named(hop, db)
+                              if (w.get("table"), w.get("kind")) == k[1:])
+            seen[k] += 1
+            unit = f"{kind} {k[1] or '?'} #{seen[k]} ({int(rows)} rows)"
+        return self.named_write(db, table, kind, unit, rows)
 
 
 def tuning_blocked():

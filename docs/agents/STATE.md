@@ -41,7 +41,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | mongodb | 16/16 | 11/12 | 11 | missing grant |
 | mssql | 16/16 | 12/12 | 38 | - |
 | mysql | 16/16 | 12/12 | 4 | - |
-| neo4j | 12/16 | 5/12 | 54 | bulk-move, confirm, users, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
+| neo4j | 12/16 | 7/12 | 54 | bulk-move, confirm, users, snapshot, keyless, no unique index, wide key, large values, partitioned |
 | neptune | 16/16 | 11/12 | 43 | large values |
 | oceanbase | 15/16 | 11/12 | 66 | bulk-move, large values |
 | oceanbase-oracle | 11/16 | 10/12 | 69 | bulk-move, stream, fence, confirm, delta, large values, partitioned |
@@ -51,7 +51,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | polardbx | 15/16 | 11/12 | 67 | bulk-move, large values |
 | postgres | 16/16 | 12/12 | 2 | - |
 | pubsub | 16/16 | 12/12 | 4 | - |
-| qdrant | 14/16 | 5/12 | 36 | bulk-move, snapshot, keyless, no unique index, wide key, large values, partitioned, read-only target, writes held |
+| qdrant | 14/16 | 7/12 | 36 | bulk-move, snapshot, keyless, no unique index, wide key, large values, partitioned |
 | redis | 16/16 | 12/12 | 10 | - |
 | redshift | 6/16 | 12/12 | 52 | sequences, params, bulk-move, stream, fence, confirm, delta, users, statistics, snapshot |
 | saas | 16/16 | 12/12 | 22 | - |
@@ -65,7 +65,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 
 ## Depth by engine
 
-88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 150, n/a 1408, not yet 1329, test owed 912, yes 953. A cell below is the ways proved of the items that apply.
+88 items in 10 areas (`capabilities.depth()`, backlog P0-PARITY), each read off the code an engine runs; a way counts once a test proves it on that engine (`PROVES` in the test module). Cells: built, unproved 150, n/a 1412, not yet 1325, test owed 912, yes 953. A cell below is the ways proved of the items that apply.
 
 | engine | scope | verify | tail | assess | schema | move | cutover | security | managed | operations | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -102,7 +102,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | mongodb | 8/9 | 21/24 | 4/6 | 6/7 | 1/3 | 4/6 | 4/5 | 1/1 | 1/1 | 0/1 | 50/63 |
 | mssql | 7/10 | 18/35 | 3/6 | 0/7 | 4/6 | 4/7 | 5/7 | 0/1 | 1/1 | 0/1 | 42/81 |
 | mysql | 9/10 | 29/32 | 6/6 | 7/7 | 6/6 | 7/8 | 8/8 | 1/1 | 1/1 | 1/1 | 75/80 |
-| neo4j | 0/9 | 0/25 | 1/5 | 0/7 | 0/4 | 0/7 | 0/6 | 0/1 | 0/1 | 0/1 | 1/66 |
+| neo4j | 0/9 | 0/25 | 1/5 | 0/7 | 0/4 | 0/7 | 0/4 | 0/1 | 0/1 | 0/1 | 1/64 |
 | neptune | 0/8 | 0/20 | 1/5 | 0/7 | 0/3 | 2/4 | 0/3 | 1/1 | 1/1 | 0/1 | 5/53 |
 | oceanbase | 0/10 | 1/36 | 0/6 | 0/7 | 1/6 | 1/7 | 0/7 | 1/1 | 1/1 | 0/1 | 5/82 |
 | oceanbase-oracle | 0/10 | 1/38 | 0/6 | 0/7 | 0/6 | 0/7 | 2/7 | 1/1 | 1/1 | 0/1 | 5/84 |
@@ -112,7 +112,7 @@ Written by `tools/gen_codemap.py` from `capabilities.matrix()`, `decide.coverage
 | polardbx | 0/10 | 1/36 | 0/6 | 0/7 | 0/6 | 0/7 | 1/7 | 1/1 | 1/1 | 0/1 | 4/82 |
 | postgres | 9/10 | 38/38 | 5/6 | 7/7 | 6/6 | 8/8 | 8/8 | 1/1 | 1/1 | 1/1 | 84/86 |
 | pubsub | 0/1 | - | - | 0/2 | - | - | - | 1/1 | 1/1 | 0/1 | 2/6 |
-| qdrant | 0/7 | 1/15 | - | 0/7 | 1/2 | 1/7 | 0/4 | 0/1 | 0/1 | 0/1 | 3/45 |
+| qdrant | 0/7 | 1/15 | - | 0/7 | 1/2 | 1/7 | 0/2 | 0/1 | 0/1 | 0/1 | 3/43 |
 | redis | 5/8 | 12/12 | 2/6 | 7/7 | 0/1 | 4/4 | 5/6 | 1/1 | 1/1 | 0/1 | 37/47 |
 | redshift | 5/10 | 0/32 | 0/6 | 3/7 | 1/5 | 1/4 | 2/7 | 1/1 | 1/1 | 0/1 | 14/74 |
 | saas | 0/6 | 0/3 | 0/5 | 1/5 | - | 0/1 | 0/1 | 0/1 | 0/1 | - | 1/23 |
@@ -212,8 +212,8 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 | move.sized | the rest (18) | cassandra cockroachdb dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm oceanbase oceanbase-oracle oracle polardbx redshift snowflake teradata | db2i db2zos | bigtable copybook couchbase datastore delta firestore generic iceberg neo4j neptune parquet qdrant saas sapodp spanner timestream | kinesis pubsub |
 | move.load-window | hetero mysql opensearch oracle postgres | cassandra clickhouse dcdb geminidb-cassandra geminidb-mongo keyspaces mongodb mssql oceanbase polardbx teradata | - | the rest (20) | bigquery bigtable copybook delta dynamodb geminidb-redis iceberg kafka kinesis neptune parquet pubsub redis redshift saas sapodp snowflake timestream |
 | move.create-missing | cosmosdb dsql dynamodb hetero mysql opensearch oracle postgres teradata tidb | bigquery cassandra clickhouse cockroachdb dcdb gaussdb geminidb-cassandra kafka keyspaces mssql oceanbase polardbx redshift snowflake | - | the rest (19) | datastore firestore geminidb-mongo geminidb-redis kinesis mongodb neptune pubsub redis saas sapodp |
-| cutover.freeze | cassandra clickhouse cockroachdb kafka mongodb mssql mysql opensearch postgres redis redshift snowflake teradata tidb | couchbase dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis hetero oceanbase oceanbase-oracle oracle polardbx | ase db2 | neo4j qdrant | the rest (25) |
-| cutover.read-only-target | the rest (22) | dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis hetero oceanbase oceanbase-oracle polardbx | db2i db2zos | neo4j qdrant | bigtable copybook cosmosdb datastore delta duckdb firestore generic iceberg keyspaces kinesis neptune parquet pubsub saas sapodp spanner sqlite timestream |
+| cutover.freeze | cassandra clickhouse cockroachdb kafka mongodb mssql mysql opensearch postgres redis redshift snowflake teradata tidb | couchbase dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis hetero oceanbase oceanbase-oracle oracle polardbx | ase db2 | - | the rest (27) |
+| cutover.read-only-target | the rest (22) | dcdb gaussdb geminidb-cassandra geminidb-mongo geminidb-redis hetero oceanbase oceanbase-oracle polardbx | db2i db2zos | - | bigtable copybook cosmosdb datastore delta duckdb firestore generic iceberg keyspaces kinesis neo4j neptune parquet pubsub qdrant saas sapodp spanner sqlite timestream |
 | cutover.counters | dcdb duckdb gaussdb hetero mssql mysql oceanbase-oracle oracle polardbx postgres spanner sqlite tidb | cockroachdb dsql oceanbase | db2 db2i db2zos | ase redshift snowflake | the rest (32) |
 | cutover.rollback | the rest (20) | bigquery bigtable copybook datastore geminidb-cassandra geminidb-mongo geminidb-redis keyspaces lindorm mongodb neptune oceanbase polardbx | db2 db2i db2zos | ase cockroachdb cosmosdb couchbase delta dsql iceberg neo4j qdrant redshift snowflake tidb | generic kinesis pubsub saas sapodp teradata |
 | cutover.drain | the rest (21) | bigquery bigtable geminidb-cassandra geminidb-mongo geminidb-redis keyspaces neptune oceanbase polardbx saas | db2 db2i | ase delta generic hetero iceberg lindorm neo4j oceanbase-oracle redshift snowflake | copybook datastore db2zos duckdb kinesis parquet pubsub qdrant sqlite teradata timestream |
@@ -228,7 +228,7 @@ Per item: the engines in each state - "test owed" is a way in the code whose tes
 
 365 upward imports still listed (`docs/agents/LAYERS.md`; the list only shrinks); 0 files no package claims (`docs/agents/INVENTORY.md`).
 
-Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 41 shape lacks, 81 capability lacks, 2150 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> ase (153).
+Gaps per pair (`autonomous.gaps`: a pair lacks what its two engines lack): 2862 ordered pairs of 54 engines; 37 shape lacks, 81 capability lacks, 2150 depth lacks in all; fewest kinesis -> postgres (6), most oceanbase-oracle -> ase (153).
 
 ## Backlog (506 items, `docs/backlog-index.md`)
 

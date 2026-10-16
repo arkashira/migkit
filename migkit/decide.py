@@ -4313,3 +4313,31 @@ def db2_delta_way(facts):
         Rung("none", "not verified by change", footprint=2,
              because="nothing here names the rows changed: the full check"
                      " compares every row")), f)
+
+# The two engines no hold of migkit's covers yet, said rather than left
+# open (W16J). Qdrant lets a write through on the server's API keys, set
+# when the server starts, and its one switch that refuses writes refuses
+# them on every collection and from every account, migkit's included - so
+# it cannot keep a target migkit writes into, and a source is held by its
+# operator. Neo4j holds writes by role on its enterprise edition only;
+# migkit has no hold of it, so its operator holds them, and the cutover
+# proves the hold (`freeze: operator`).
+WAYS["read-only target"]["qdrant"] = (
+    NOT_APPLICABLE, "its writes are let through by the API keys the server"
+    " starts with, and its one switch that refuses writes refuses them on"
+    " every collection and from every account, migkit's own included, so"
+    " nothing keeps a target from the application and leaves migkit"
+    " writing")
+WAYS["writes held"]["qdrant"] = (
+    NOT_APPLICABLE, "its writes are let through by the API keys the server"
+    " starts with, which migkit cannot take from one application, so a"
+    " source's writes are stopped by its operator (freeze: operator) and"
+    " proved by migkit")
+WAYS["read-only target"]["neo4j"] = (
+    NOT_APPLICABLE, "its writes are held by role only on its enterprise"
+    " edition, through roles migkit does not change, so a target is kept"
+    " by its operator; migkit's final check catches a row written there")
+WAYS["writes held"]["neo4j"] = (
+    NOT_APPLICABLE, "its writes are held by role only on its enterprise"
+    " edition, through roles migkit does not change, so a source's writes"
+    " are stopped by its operator (freeze: operator) and proved by migkit")

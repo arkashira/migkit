@@ -382,7 +382,11 @@ PROFILES = {p.key: p for p in (
             env=(("MAX_HEAP_SIZE", "384M"), ("HEAP_NEWSIZE", "64M")),
             start_s=300),
     Profile("clickhouse", "clickhouse", "clickhouse/clickhouse-server:24.8",
-            8123, 27, mb=350, env=(("CLICKHOUSE_PASSWORD", PASSWORD),),
+            8123, 27, mb=350, env=(("CLICKHOUSE_PASSWORD", PASSWORD),
+                                   # the default user manages users, so a
+                                   # hold of rights can be taken and lifted
+                                   ("CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT",
+                                    "1")),
             options=("--ulimit", "nofile=262144:262144"), user="default",
             start_s=120),
     Profile("opensearch", "opensearch", "opensearchproject/opensearch:2.19.1",

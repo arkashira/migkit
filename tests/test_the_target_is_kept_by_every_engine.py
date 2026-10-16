@@ -854,3 +854,33 @@ def test_bigquery_makes_the_writers_readers_and_gives_back_exactly(
     assert {(e.role, e.entity_type, e.entity_id)
             for e in client.ds.access_entries} == {
         (e.role, e.entity_type, e.entity_id) for e in start + [late]}
+
+
+# --- the way is the decision engine's, from the privilege read ---------------
+
+def _ch(granted):
+    """A ClickHouse target whose answers say whether migkit's account has
+    access management, and that the server holds the hop's database
+    alone."""
+    def rows(side, db, sql, args=None):
+        if "ACCESS MANAGEMENT" in sql:
+            return [[1, 0]] if granted else [[1, 1]]
+        if "system.databases" in sql:
+            return [["app"], ["system"], ["default"],
+                    ["INFORMATION_SCHEMA"], ["information_schema"]]
+        return []
+    return _Eng("clickhouse", _rows=rows, _q=lambda n: f"`{n}`")
+
+
+def test_the_way_a_target_is_kept_is_the_decisions_from_the_privilege_read(
+        tmp_path):
+    hop = _hop(tmp_path, "clickhouse", protect_target=True)
+    got = freeze.keeping(hop, _ch(True), ["app"])
+    assert isinstance(got, decide.Choice) and got.rung.name == "ch_grants"
+    refused = freeze.keeping(hop, _ch(False), ["app"])
+    assert refused.rung is None
+    assert "may not manage the server's users and their rights" in \
+        refused.reason, refused.reason
+    # the same fact holds a source back from the way of rights
+    src = freeze.choose(hop, _ch(False), ["app"], "database", side="dst")
+    assert src.rung is None and "manage access" in src.reason

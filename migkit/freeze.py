@@ -640,6 +640,7 @@ SCOPE = {"pg_server": "server", "pg_database": "database",
          "td_grants": "database", "rs_grants": "database",
          "sf_grants": "database", "cb_roles": "database",
          "ddb_policy": "database", "bq_access": "database",
+         "lindorm_grants": "database",
          # a group's sides, each held its own way (`GroupHold`)
          "group_server": "server", "group_database": "database",
          "group_kept": "database"}
@@ -1238,6 +1239,14 @@ def protect(hop, eng, db, say, ask=None):
             # stays, and the read back says what it does not
             say(f"{db}: {why} - what was kept before stays kept")
             return before
+        if from_goal(hop) and type(h) is Hold:
+            # an engine with no hold at all (a file, a lake table): no
+            # writer of it can be held or told from migkit's, and nothing
+            # counts its writes, so naming migkit's would prove nothing -
+            # said, moved into as before, and no record left to lift
+            say(f"{db}: {why} - moved into as before; the final check is"
+                " what catches a row written there")
+            return None
         if from_goal(hop):
             # nothing keeps it: every write migkit makes is named instead,
             # and a write the names do not account for is a finding
@@ -4349,21 +4358,48 @@ class _Grants(Hold):
             return ()
         return (Rung(self.WAY, f"{self.SAID}; on a source, {self.ENDS}",
                      gives=frozenset(KEEP),
-                     needs=self.needs() + _source_needs(),
+                     needs=self.needs() + self.grant_needs() + _source_needs(),
                      because="per account"),)
 
     def keep_rungs(self):
         from .decide import Rung
         return (Rung(self.WAY, self.SAID, gives=frozenset(KEEP),
-                     needs=self.needs(), because="per account"),)
+                     needs=self.needs() + self.grant_needs(),
+                     because="per account"),)
+
+    def may_grant(self, db):
+        """Whether migkit's account may take and give back the
+        application's rights here, read off the server; an engine whose
+        hold reads it says so (`grant_needs`), one that does not leaves
+        the way's own refusal to say it."""
+        return None
+
+    def grant_needs(self):
+        """The privilege a way of rights stands on, as a need of the
+        decision (`decide.climb`): read off the server where the engine
+        can (`may_grant`), never assumed from the engine's name."""
+        from .decide import Need
+        if type(self).may_grant is _Grants.may_grant:
+            return ()
+        return (Need("migkit's account may take and give back the"
+                     " application's rights",
+                     lambda f: f.get("grants") is True,
+                     lambda f: "migkit's account may not manage the"
+                     " server's users and their rights (the privilege to"
+                     " manage access is not granted to it)"
+                     if f.get("grants") is not None else "whether migkit's"
+                     " account may manage the server's users and their"
+                     " rights could not be read"),)
 
     def needs(self):
         return ()
 
     def readers(self, dbs):
+        got = {"grants": _read(lambda: self.may_grant(dbs[0]))} \
+            if self.grant_needs() else {}
         if self.side != "src":
-            return {}
-        return {"ends": _read(lambda: self.may_end(dbs[0])),
+            return got
+        return {**got, "ends": _read(lambda: self.may_end(dbs[0])),
                 "sees": _read(lambda: self.may_see(dbs[0]))}
 
     def name(self, db):
@@ -4920,6 +4956,20 @@ class ClickHouseHold(_Grants):
                 out.append((f"the role {r} writes here and migkit's own"
                             " account holds it: it is not taken", True))
         return out
+
+    def may_grant(self, db):
+        """Access management granted to migkit's account, directly or by
+        a role, and not taken back by a partial revoke: what revoking the
+        application's rights and granting them back needs."""
+        got = self.rows(None, "select countIf(access_type in ('ALL',"
+                              " 'ACCESS MANAGEMENT') and is_partial_revoke"
+                              " = 0), countIf(access_type in ('ACCESS"
+                              " MANAGEMENT', 'ROLE ADMIN') and"
+                              " is_partial_revoke = 1) from system.grants"
+                              " where user_name = currentUser() or role_name"
+                              " in (select role_name from"
+                              " system.current_roles)")
+        return bool(got) and int(got[0][0]) > 0 and int(got[0][1]) == 0
 
     def may_end(self, db):
         got = self.rows(None, "select count() from system.grants where"

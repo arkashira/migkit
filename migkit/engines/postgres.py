@@ -2799,8 +2799,7 @@ select json_build_object(
                     self._answered()
                     self._column_took(side, db, table, way, batch,
                                       time.monotonic() - began)
-                self.named_write(db, table, "change", "tail batch",
-                                 batch.num_rows)
+                self.named_batch(db, table, "change", batch.num_rows)
                 n += batch.num_rows
         return n
 
