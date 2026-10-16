@@ -51,23 +51,23 @@ The cells below are the run of 2026-10-16 (docker sandbox: the pg pair, postgres
 
 | Scenario | Engine | Inputs | Interventions | Completed | Recovered | Retry waste | Seconds | Forecast error | Workers | Questions | Managed service |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| healthy | MySQL | 6 | 0 | yes | none needed | 0 | 24.18 | no forecast said | not said | 0 | to be measured |
-| healthy | PostgreSQL | 6 | 0 | yes | none needed | 0 | 13.81 | no forecast said | not said | 0 | to be measured |
-| baseline, workers pinned to 1 | MySQL | 6 | 0 | no | none needed | 0 | 497.04 | no forecast said | not said | 0 | to be measured |
-| baseline, workers pinned to 1 | PostgreSQL | 6 | 0 | no | none needed | 0 | 515.31 | no forecast said | not said | 0 | to be measured |
-| fault mid-copy, recovered in the run | MySQL | 6 | 0 | yes | none needed | 0 | 58.49 | no forecast said | not said | 0 | to be measured |
-| fault mid-copy, recovered in the run | PostgreSQL | 6 | 0 | yes | none needed | 0 | 58.3 | no forecast said | not said | 0 | to be measured |
-| crash mid-copy, run again | MySQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| crash mid-copy, run again | PostgreSQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| interrupted three times, run again | MySQL | 6 | 3 | yes | none needed | 0 | 63.37 | no forecast said | not said | 0 | to be measured |
-| interrupted three times, run again | PostgreSQL | 6 | 3 | yes | none needed | 0 | 60.57 | no forecast said | not said | 0 | to be measured |
-| a value above the target's packet size | MySQL | 6 | 0 | no | none needed | 0 | 23.35 | no forecast said | not said | 0 | to be measured |
-| a value above the target's packet size | PostgreSQL | 6 | 0 | yes | none needed | 0 | 41.82 | no forecast said | not said | 0 | to be measured |
+| healthy | MySQL | 6 | 0 | yes | none needed | 0 | 20.96 | 0.267 | 1 | 0 | to be measured |
+| healthy | PostgreSQL | 6 | 0 | yes | none needed | 0 | 15.66 | 0.317 | 1 | 0 | to be measured |
+| baseline, workers pinned to 1 | MySQL | 6 | 0 | yes | none needed | 0 | 35.36 | 0.339 | 1 | 0 | to be measured |
+| baseline, workers pinned to 1 | PostgreSQL | 6 | 0 | yes | none needed | 0 | 22.75 | 0.443 | 1 | 0 | to be measured |
+| fault mid-copy, recovered in the run | MySQL | 6 | 0 | yes | none needed | 0 | 22.09 | 0.287 | 1 | 0 | to be measured |
+| fault mid-copy, recovered in the run | PostgreSQL | 6 | 0 | yes | none needed | 0 | 24.91 | 0.384 | 1 | 0 | to be measured |
+| crash mid-copy, run again | MySQL | 6 | 1 | yes | none needed | 0 | 28.75 | no forecast said | 1 | 0 | to be measured |
+| crash mid-copy, run again | PostgreSQL | 6 | 1 | yes | none needed | 0 | 22.86 | 0.525 | 1 | 0 | to be measured |
+| interrupted three times, run again | MySQL | 6 | 3 | yes | none needed | 0 | 70.85 | 0.452 | 1 | 0 | to be measured |
+| interrupted three times, run again | PostgreSQL | 6 | 3 | yes | none needed | 0 | 27.35 | 0.414 | 1 | 0 | to be measured |
+| a value above the target's packet size | MySQL | 6 | 0 | no | none needed | 0 | 30.91 | no forecast said | 1 | 0 | to be measured |
+| a value above the target's packet size | PostgreSQL | 6 | 0 | yes | none needed | 0 | 17.1 | 0.381 | 1 | 0 | to be measured |
 | injected defects, then the check | MySQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
 | injected defects, then the check | PostgreSQL | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured | to be measured |
-| refused target (unrecoverable) | MySQL | 6 | 0 | no | none needed | 0 | 24.93 | no forecast said | not said | 0 | to be measured |
-| refused target (unrecoverable) | PostgreSQL | 6 | 0 | no | 0% | 1 | 7.01 | no forecast said | not said | 0 | to be measured |
-| target capped below its source | PostgreSQL | 6 | 0 | yes | none needed | 0 | 46.21 | no forecast said | not said | 0 | to be measured |
+| refused target (unrecoverable) | MySQL | 6 | 0 | no | none needed | 0 | 11.65 | no forecast said | not said | 0 | to be measured |
+| refused target (unrecoverable) | PostgreSQL | 6 | 0 | no | 0% | 1 | 9.52 | no forecast said | not said | 0 | to be measured |
+| target capped below its source | PostgreSQL | 6 | 0 | yes | none needed | 0 | 32.7 | 0.421 | 1 | 0 | to be measured |
 
 The recovery choices themselves are proved on fakes in
 `tests/test_autonomous_workflow.py`: reconcile before a repeat, a write

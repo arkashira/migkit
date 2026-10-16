@@ -267,6 +267,22 @@ def _shut(conn):
         sock.shutdown(socket.SHUT_RDWR)
 
 
+
+_COUNTER_ONLY = re.compile(r"(?im)^(?:--[^\n]*\n)?alter table\s+"
+                           r"(?:`[^`]+`\.)?`[^`]+`\s+auto_increment\s*=?"
+                           r"\s*\d+\s*;[ \t]*\n?")
+_COUNTER_CLAUSE = re.compile(r"(?i),\s*auto_increment\s*=?\s*\d+(?=\s*;)")
+
+
+def _without_counters(text):
+    """The schema comparison's DDL without a table's AUTO_INCREMENT: the
+    counter is the counter check's (`check_autoinc`, read fresh and raised
+    by the repair), while the comparison reads the server's cached table
+    statistics, so after the repair raised it the cached 1 still read as a
+    difference and the proof ended 'different after its repair'. A
+    statement left with nothing else is dropped with its comment line."""
+    return _COUNTER_CLAUSE.sub("", _COUNTER_ONLY.sub("", text)).strip()
+
 class MySQLEngine(Engine):
     ENGINE_FAMILY = "mysql"
     checks = ("schema", "counts", "autoinc", "data")
@@ -3446,7 +3462,7 @@ class MySQLEngine(Engine):
             return None
         if p.returncode != 0:
             return None
-        text = p.stdout.strip()
+        text = _without_counters(p.stdout.strip())
         if not text or "Schemas are synced" in text:
             # both files, not just the fix: an undo left behind after the
             # schemas converged is a rollback for changes nobody made
@@ -3467,7 +3483,8 @@ class MySQLEngine(Engine):
         rev = self.hop.report_dir(db) / "schema-fix.revert.sql"
         try:
             rp = schema_diff(su, tu, excludes)
-            rtext = rp.stdout.strip() if rp.returncode == 0 else ""
+            rtext = (_without_counters(rp.stdout.strip())
+                     if rp.returncode == 0 else "")
         except Exception:
             rtext = ""
         body = _revert.script(text, rtext, "schema-fix.sql")

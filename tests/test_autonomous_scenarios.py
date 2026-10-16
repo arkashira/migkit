@@ -172,20 +172,24 @@ def _minimal(conf):
 #: (the slowest whole case measured took under a minute)
 HANG = 600
 DEFECTS = ("W16N-DEFECTS: the copy before the defects are injected does not"
-           " complete when the source also holds a sequence, a role and its"
-           " grant. PostgreSQL: the structural schema check (engines/"
-           "postgres.py check_structural_diff) errors 'keys must be str, int,"
-           " float, bool or None, not tuple' with privileges compared, so the"
-           " proof is held - raised before the diff's record is taken, the"
-           " exact call not yet traced. MySQL: the proof ends 'w9c is"
-           " different after its repair' (the differing finding not read)")
-LOB_MYSQL = ("W16N-LOB: on MySQL the 8 MiB value does not arrive whole on a"
-             " target holding a 4 MiB packet: the readiness check now passes"
-             " it to the copier that writes in pieces (decide."
-             "written_in_pieces), but the move step stops - 'copy stopped:"
-             " nothing past the last finished table is marked as moved' -"
-             " the table not yet carried by that copier (movers.py's table"
-             " split, step: move)")
+           " complete when the source also holds a role and its grant: the"
+           " account a grant names is not on the target, and neither the"
+           " copy nor its repair creates it - MySQL's grants check says"
+           " 'app_reader@% ... do not exist on target', PostgreSQL's"
+           " structural diff keeps '1 to add' (the grant) after the repair."
+           " The two causes before it are fixed (the privilege record's"
+           " tuple keys, postgres._diff_metadata; the counter read stale by"
+           " the MySQL schema comparison, mysql._without_counters); owner of"
+           " what is left: the accounts carried with the copy (users create)")
+LOB_MYSQL = ("W16N-LOB: on MySQL a value past the target's max_allowed_packet"
+             " cannot be held by any statement - measured on 8.4, appending"
+             " the pieces stops at the packet with error 1301 'Result of"
+             " concat() was larger than max_allowed_packet', and a JSON"
+             " column has no append at all - so the piece-writing copier"
+             " carries a row only up to the packet, and the 8 MiB row loses"
+             " the connection. Arriving whole needs the target's packet"
+             " raised (an external setting: the lead's decision whether the"
+             " move may set it) or the copy refused before it starts")
 
 _LEFT = re.compile(r"~([\d.,]+)\s*(s|min|h)\b[^;\n]*\bleft")
 _BAND = re.compile(r"([\d.,]+)\s*(?:-|to)\s*([\d.,]+)\s*(s|min|h)\b[^;\n]*"
@@ -538,7 +542,6 @@ def test_a_refused_target_stops_safely_and_claims_nothing(any_side,
     assert "migrate --hop t --why" in r.stdout
 
 
-@pytest.mark.xfail(strict=True, reason=PG16)
 def test_the_evidence_is_on_demand(pg_pair, tmp_path):
     got = {s.role: s for s in servers.servers_of("pg")}
     side = _pg(got["src"], got["dst"])

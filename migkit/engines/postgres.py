@@ -509,6 +509,64 @@ def user_tables_where(kinds="logical", own=False):
     return out
 
 
+
+def _str_key(k):
+    if k is None or isinstance(k, (str, int, float, bool)):
+        return k
+    return ".".join(map(str, k)) if isinstance(k, tuple) else str(k)
+
+
+def _str_keys(obj):
+    """`obj` with every mapping key a string: the comparison library keys a
+    privilege by a tuple (its object, its grantee), which no JSON holds."""
+    if isinstance(obj, dict):
+        return {_str_key(k): _str_keys(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_str_keys(v) for v in obj]
+    return obj
+
+
+def _diff_metadata(m, options):
+    """The structural diff's record (the shape of the comparison library's
+    `result_metadata`), read here once: its fingerprint is taken over the
+    schema with string keys (`_str_keys`), since the library's own JSON
+    stops on the tuple keys of the privileges it compared."""
+    import hashlib
+    import results
+    from results.dbdiff.util import differences
+    source = m.changes.i_from.as_definition()
+    target = m.changes.i_target.as_definition()
+
+    def fingerprint(d):
+        payload = {"schema": _str_keys(d.to_dict()), "options": options}
+        return hashlib.sha256(json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+    counts, totals = {}, {"added": 0, "removed": 0, "modified": 0}
+    for category in source.CATEGORIES:
+        added, removed, modified, _ = differences(
+            getattr(m.changes.i_from, category, {}),
+            getattr(m.changes.i_target, category, {}))
+        got = {"added": len(added), "removed": len(removed),
+               "modified": len(modified)}
+        if any(got.values()):
+            counts[category] = got
+        for k in totals:
+            totals[k] += got[k]
+    return {"format_version": 1, "differ_version": results.__version__,
+            "direction": "a_to_b",
+            "status": "different" if m.sql else "same",
+            "has_differences": bool(m.sql), "object_counts": counts,
+            "totals": totals,
+            "source": {"postgresql_version": source.pg_version,
+                       "fingerprint": fingerprint(source)},
+            "target": {"postgresql_version": target.pg_version,
+                       "fingerprint": fingerprint(target)},
+            "options": dict(options),
+            "normalization": {"rules": [
+                "legacy_character_varying_array_to_text_array"]},
+            "sql": m.sql}
+
 class PostgresEngine(Engine):
     ENGINE_FAMILY = "postgres"
     checks = ("schema", "counts", "autoinc", "data")
@@ -5117,7 +5175,7 @@ select json_build_object(
             self._leave_out_of_diff(db, m)
             m.add_all_changes_ordered(privileges=True)
             sql = m.sql
-            meta = m.result_metadata(options={"privileges": True})
+            meta = _diff_metadata(m, {"privileges": True})
             # The same comparison in the opposite direction is the undo of
             # exactly these statements. It has to be taken here, from the same
             # two snapshots: after the fix is applied the target no longer
