@@ -24,7 +24,6 @@ the source's database, schema and table - and matched to migkit's
 answers by database and table, the schema too where both name one.
 """
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,7 +64,8 @@ class Claims:
 def path_of(hop):
     """The report a run holds its answers against: `MIGKIT_COMPARE_WITH`,
     else the hop's `compare_with` option, else none."""
-    got = os.environ.get("MIGKIT_COMPARE_WITH") or \
+    from . import envkeys
+    got = envkeys.text("MIGKIT_COMPARE_WITH") or \
         (getattr(hop, "options", None) or {}).get("compare_with")
     return str(got) if got else ""
 

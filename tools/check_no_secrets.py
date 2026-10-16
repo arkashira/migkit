@@ -11,6 +11,9 @@ Exit 1 with the offending file:line if anything matches.
 """
 import re, subprocess, sys, pathlib
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from migkit import envkeys  # noqa: E402
+
 PATTERNS = [
     (r"\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "private IP address"),
     (r"[a-z0-9-]+\.(?:rds|docdb)\.amazonaws\.com", "real RDS/DocDB endpoint"),
@@ -25,9 +28,7 @@ SKIP_FILES = {"check_no_secrets.py"}
 #: services - one word or phrase a line, kept on this machine only (never
 #: in the repo, where the list would itself be the leak); a word matches
 #: case-insensitively as a whole word
-DENY_FILE = pathlib.Path(
-    __import__("os").environ.get("MIGKIT_DENY_WORDS_FILE")
-    or pathlib.Path.home() / ".config" / "migkit" / "deny-words.txt")
+DENY_FILE = pathlib.Path(envkeys.text("MIGKIT_DENY_WORDS_FILE")).expanduser()
 
 
 def deny_words():

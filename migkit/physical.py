@@ -118,11 +118,11 @@ The option:
                                             # ahead of the offer
 """
 import json
-import os
 import shlex
 import subprocess
 import time
 
+from . import envkeys
 from . import decide, sourcechange
 
 #: the programs a physical copy runs, hidden from what an operator reads
@@ -1478,7 +1478,8 @@ def _pg_copy(hop, eng, opts, version, log):
 
 
 def _wait_for(ask, what, most=None):
-    most = most or int(os.environ.get("MIGKIT_SEED_START_WAIT", START_WAIT))
+    most = most or int(envkeys.number("MIGKIT_SEED_START_WAIT",
+                                      default=START_WAIT))
     end, last = time.time() + most, None
     while time.time() < end:
         try:

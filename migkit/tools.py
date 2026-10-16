@@ -36,6 +36,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import envkeys
 from .util import which
 
 
@@ -520,9 +521,7 @@ def accept_terms(programs, ask=None, log=print):
     shows the licence and where to read it. Nothing is accepted without one
     of the three: with no terminal and no variable, each is declined and
     the open build or path is said instead."""
-    import os
-    said = {s.strip().lower() for s in
-            os.environ.get("MIGKIT_ACCEPT_TERMS", "").split(",") if s.strip()}
+    said = {s.lower() for s in envkeys.items("MIGKIT_ACCEPT_TERMS")}
     out = {}
     for program in dict.fromkeys(programs):
         terms = TERMS.get(program)
@@ -653,7 +652,7 @@ def install_ibm(component, log=print):
     other file, then put where the package manager reads it."""
     import os
     if component == DB2_CONNECT:
-        path = os.environ.get("MIGKIT_DB2_CONNECT_LICENSE", "")
+        path = envkeys.text("MIGKIT_DB2_CONNECT_LICENSE")
         if not path:
             log("  no licence file named: MIGKIT_DB2_CONNECT_LICENSE=<its"
                 " db2consv_*.lic> migkit doctor --install puts it in place"
@@ -812,10 +811,8 @@ public:
 
 def tools_home():
     """Where migkit keeps the programs it builds for itself."""
-    import os
     from pathlib import Path
-    return Path(os.environ.get("MIGKIT_TOOLS") or
-                Path.home() / ".migkit" / "tools")
+    return Path(envkeys.text("MIGKIT_TOOLS")).expanduser()
 
 
 def built_program(name):

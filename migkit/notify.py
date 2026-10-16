@@ -71,7 +71,7 @@ answer is its own, not the delivery of it.
 """
 import json
 import logging
-import os
+from . import envkeys
 import re
 import time
 import urllib.error
@@ -119,7 +119,7 @@ def settings(hop):
     if isinstance(got, str):
         got = [got]
     out = []
-    for r in list(got or []) + os.environ.get("MIGKIT_NOTIFY", "").split(","):
+    for r in list(got or []) + envkeys.items("MIGKIT_NOTIFY"):
         r = str(r).strip()
         if r and r not in out:
             out.append(r)

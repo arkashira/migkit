@@ -91,6 +91,7 @@ import hashlib
 import time
 from dataclasses import dataclass, field
 
+from . import envkeys
 from . import canon, decide, render, rowtext
 
 HEX = canon.DIGEST_HEX
@@ -956,11 +957,9 @@ GENERATION_SECONDS = 2.0
 
 
 def most_generations():
-    import os
     try:
-        return max(0, int(os.environ.get("MIGKIT_GENERATIONS", "")
-                          or GENERATIONS))
-    except ValueError:
+        return envkeys.number("MIGKIT_GENERATIONS", default=GENERATIONS)
+    except envkeys.Bad:
         return GENERATIONS
 
 

@@ -2427,8 +2427,8 @@ def get_hop(name):
     hops = data.get("hops") or {}
     key = next((k for k in hops if str(k) == str(name)), None)
     if key is None:
-        src = os.environ.get("MIGKIT_SOURCE")
-        dst = os.environ.get("MIGKIT_TARGET")
+        src = envkeys.text("MIGKIT_SOURCE")
+        dst = envkeys.text("MIGKIT_TARGET")
         if src and dst:
             s_eng, s_ep, s_dbs = addresses.parse(src, "source")
             t_eng, t_ep, t_dbs = addresses.parse(dst, "target")

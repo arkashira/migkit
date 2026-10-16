@@ -24,6 +24,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from . import envkeys
 from . import config as _config
 
 
@@ -125,7 +126,7 @@ def _key(salt):
 
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-    phrase = os.environ.get("MIGKIT_STATE_KEY", "")
+    phrase = envkeys.secret("MIGKIT_STATE_KEY")
     kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt,
                      iterations=390_000)
     return base64.urlsafe_b64encode(kdf.derive(phrase.encode()))
@@ -143,7 +144,7 @@ def _seal(data, often=False):
     encrypted before it leaves the working directory; without it, as
     before. `often` reuses one salt for the process's run state, which is
     written after every chunk; a restore point gets a salt of its own."""
-    phrase = os.environ.get("MIGKIT_STATE_KEY")
+    phrase = envkeys.secret("MIGKIT_STATE_KEY")
     if not phrase:
         return data
     from cryptography.fernet import Fernet
@@ -164,7 +165,7 @@ def _unseal(data):
         return evidence._open(data)
     if not data.startswith(SEALED):
         return data
-    if not os.environ.get("MIGKIT_STATE_KEY"):
+    if not envkeys.secret("MIGKIT_STATE_KEY"):
         raise SystemExit("this restore point is encrypted: set"
                          " MIGKIT_STATE_KEY to the passphrase it was written"
                          " with")

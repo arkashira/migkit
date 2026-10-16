@@ -125,7 +125,8 @@ def append(path, entry):
             lines.append(entry)
             # a run started from the web view: the person who started it,
             # beside the machine's user it runs as
-            actor = os.environ.get("MIGKIT_ACTOR", "").strip()
+            from . import envkeys
+            actor = envkeys.text("MIGKIT_ACTOR")
             out = []
             for one in lines:
                 body = {"at": time.strftime("%F %T"), "who": who,

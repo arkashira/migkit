@@ -7,8 +7,11 @@ registry lacks would be called unknown - and a variable the registry
 holds that nothing reads would be offered as a "did you mean" and do
 nothing. This reads every string in the code - docstrings too: a
 variable the manual's text names is one an operator will set - and fails
-on a `MIGKIT_*` name the registry does not declare. Names built in
-pieces are listed in `DYNAMIC`, with what they stand for.
+on a `MIGKIT_*` name the registry does not declare. A name built in
+pieces (`f"MIGKIT_{side}..."`, `"MIGKIT_" + x`) is refused outright - it is
+built by `envkeys.prefixed`, which holds it to the registry - and a prefix
+named as such (`MIGKIT_*` in a docstring, `startswith("MIGKIT_WEB_")`)
+must begin some declared name.
 """
 import ast
 import pathlib
@@ -22,28 +25,49 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 NAME = re.compile(r"MIGKIT_[A-Z0-9_]*")
 
 #: strings that hold `MIGKIT_` and are not a variable: a type the driver
-#: registers, a C header's guard, and names of Python objects the
-#: docstrings mention
+#: registers, a C header's guard, migkit's own table on Oracle, and names
+#: of Python objects the docstrings mention
 NOT_VARIABLES = {"MIGKIT_FLOAT4", "MIGKIT_FLOAT4_ARRAY",
-                 "MIGKIT_SQLINES_LICENSE_H", "MIGKIT_OWN", "MIGKIT_MARKS"}
+                 "MIGKIT_SQLINES_LICENSE_H", "MIGKIT_ORIGIN", "MIGKIT_OWN",
+                 "MIGKIT_MARKS"}
 
-#: a name built from pieces, where it is built, and a name it stands for
-#: that must be declared
-DYNAMIC = {
-    # `MIGKIT_<HOP>_<SIDE>_PASSWORD`, `MIGKIT_<SIDE>_PASSWORD`
-    ("guide.py", "MIGKIT_"): "MIGKIT_APP_SOURCE_PASSWORD",
-    # the copy in a process of its own: `MIGKIT_<SIDE>_PASSWORD`
-    ("movers.py", "MIGKIT_"): "MIGKIT_SOURCE_PASSWORD",
-}
+#: what follows a prefix inside a string that builds a name from it: a
+#: format's field, or the code of a program held as text
+BUILT_IN_TEXT = re.compile(r"\{|%|[\"'] *\+")
+
+
+def _built(tree):
+    """The string constants a name is built from: a part of an f-string
+    with a value after it, or a side of `+`."""
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            for a, b in zip(node.values, node.values[1:]):
+                if isinstance(a, ast.Constant) and isinstance(
+                        b, ast.FormattedValue):
+                    out.add(id(a))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            for side in (node.left, node.right):
+                if isinstance(side, ast.Constant):
+                    out.add(id(side))
+    return out
 
 
 def names_in(src, where="x.py"):
-    """[(name, line)] of every `MIGKIT_*` in a module's strings."""
+    """[(name, line)] of every `MIGKIT_*` in a module's strings; a prefix
+    a name is built from is given as `MIGKIT_...+`."""
     out = []
-    for node in ast.walk(ast.parse(src)):
+    tree = ast.parse(src)
+    built = _built(tree)
+    for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             for m in NAME.finditer(node.value):
-                out.append((m.group(0), node.lineno))
+                name = m.group(0)
+                if name.endswith("_") and (
+                        (id(node) in built and m.end() == len(node.value))
+                        or BUILT_IN_TEXT.match(node.value, m.end())):
+                    name += "+"
+                out.append((name, node.lineno))
             # a setting of migkit's own without the prefix, named whole
             if not NAME.fullmatch(node.value) and node.value in envkeys.VARS:
                 out.append((node.value, node.lineno))
@@ -56,9 +80,13 @@ def undeclared(src, where="x.py"):
     for name, line in names_in(src, where):
         if name in NOT_VARIABLES:
             continue
-        if name.endswith("_") or name == "MIGKIT_":
-            stands = DYNAMIC.get((where, name))
-            if stands is None or envkeys.declared(stands) is None:
+        if name.endswith("+"):
+            # built in pieces: `envkeys.prefixed` builds it, checked
+            bad.append((name[:-1], line))
+            continue
+        if name.endswith("_"):
+            # a prefix named as such begins some declared name
+            if not any(n.startswith(name) for n in envkeys.VARS):
                 bad.append((name, line))
             continue
         if envkeys.declared(name) is None:
@@ -89,6 +117,16 @@ def test_the_scan_would_notice_one_that_is_not():
     assert undeclared(planted) == [("MIGKIT_WORKRS", 1)]
     built = 'x = os.environ.get("MIGKIT_" + side + "_TOKEN")\n'
     assert [n for n, _ in undeclared(built, "new.py")] == ["MIGKIT_"]
+    # an f-string, `%` and the code of a program held as text build too
+    for one in ('x = f"MIGKIT_{side}_PASSWORD"\n',
+                'x = "MIGKIT_%s_PASSWORD" % side\n',
+                'RUN = \'\'\'p = os.environ["MIGKIT_" + side]\'\'\'\n'):
+        assert [n for n, _ in undeclared(one)] == ["MIGKIT_"], one
+    # a prefix named, not built, is one some declared name begins with
+    assert undeclared('"""every `MIGKIT_*` variable"""\n') == []
+    assert undeclared('n.startswith("MIGKIT_WEB_")\n') == []
+    assert undeclared('n.startswith("MIGKIT_WBE_")\n') == [
+        ("MIGKIT_WBE_", 1)]
     assert undeclared('"MIGKIT_REPORTS"') == []
     found = [n for _, src in _sources() for n, _ in names_in(src)]
     assert len(set(found)) > 50, sorted(set(found))
@@ -98,7 +136,8 @@ def test_every_declared_name_is_read_somewhere():
     """A declaration nothing reads would be accepted and do nothing."""
     code = {n for _, src in _sources() for n, _ in names_in(src)}
     tests = set()
-    for path in (ROOT / "tests").glob("*.py"):
+    for path in [*(ROOT / "tests").glob("*.py"), *(ROOT / "tools").glob(
+            "*.py")]:
         if path.name == pathlib.Path(__file__).name:
             continue
         tests |= set(NAME.findall(path.read_text()))
@@ -199,7 +238,7 @@ FOREIGN = {
     'OCI_CLI_CONFIG_FILE', 'OCI_CLI_PROFILE',
     'OTEL_EXPORTER_OTLP_ENDPOINT',
     'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_SDK_DISABLED',
-    'OTEL_SERVICE_NAME', 'REMOTE_ADDR', 'TCCLI_PROFILE',
+    'OTEL_SERVICE_NAME', 'PYTHONPATH', 'REMOTE_ADDR', 'TCCLI_PROFILE',
     'TENCENTCLOUD_REGION', 'TENCENTCLOUD_ROLE_ARN',
     'TENCENTCLOUD_ROLE_SESSION_NAME', 'TENCENTCLOUD_SECRET_ID',
     'TENCENTCLOUD_SECRET_KEY', 'TENCENTCLOUD_SESSION_TOKEN',
@@ -207,62 +246,6 @@ FOREIGN = {
     'VAULT_NAMESPACE', 'VAULT_TOKEN', 'XDG_CACHE_HOME',
     'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME',
 }
-
-#: declared variables still read raw beside the registry, by module: row
-#: 559 AUD-Z.env-raw moves each onto `envkeys`; one moved leaves this list,
-#: and no read may join it
-OWED_RAW = {
-    ('approvals.py', 'MIGKIT_ACTOR'),
-    ('approvals.py', 'MIGKIT_IDENTITY'),
-    ('assist.py', 'MIGKIT_AI'),
-    ('assist.py', 'MIGKIT_AI_KEY'),
-    ('assist.py', 'MIGKIT_AI_MODEL'),
-    ('assist.py', 'MIGKIT_AI_SHARE'),
-    ('assist.py', 'MIGKIT_AI_URL'),
-    ('audit.py', 'MIGKIT_ACTOR'),
-    ('bulkways.py', 'MIGKIT_MOVER'),
-    ('cli.py', 'MIGKIT_DIAGNOSE'),
-    ('cli.py', 'MIGKIT_SOURCE'),
-    ('cloudapi.py', 'MIGKIT_CLOUD_POLL'),
-    ('cloudapi.py', 'MIGKIT_CLOUD_WAIT'),
-    ('config.py', 'MIGKIT_SOURCE'),
-    ('config.py', 'MIGKIT_TARGET'),
-    ('costmodel.py', 'MIGKIT_KNOWLEDGE'),
-    ('crossmove.py', 'MIGKIT_TABLE_COPY'),
-    ('cutover.py', 'MIGKIT_CUTOVER'),
-    ('decide.py', 'MIGKIT_EXPLAIN'),
-    ('engines/base.py', 'MIGKIT_REPAIR_TEXT'),
-    ('engines/hetero.py', 'MIGKIT_TAIL_APPLY_ALL'),
-    ('engines/mysql.py', 'MIGKIT_READ_TIMEOUT'),
-    ('engines/oracle.py', 'MIGKIT_ORACLE_WRITE'),
-    ('engines/oracle_redo.py', 'MIGKIT_ORACLE_READER'),
-    ('estate.py', 'MIGKIT_SOURCE_PASSWORD'),
-    ('evidence.py', 'MIGKIT_IDENTITY'),
-    ('export.py', 'MIGKIT_EVIDENCE_KEY'),
-    ('failpoint.py', 'MIGKIT_FAILPOINT'),
-    ('lease.py', 'MIGKIT_LEASE_SECONDS'),
-    ('leaves.py', 'MIGKIT_GENERATIONS'),
-    ('machine.py', 'MIGKIT_CATALOG_REFRESH'),
-    ('machine.py', 'MIGKIT_INSTANCES'),
-    ('model.py', 'MIGKIT_PROBE_FROM'),
-    ('model.py', 'MIGKIT_PROBE_SECONDS'),
-    ('movers.py', 'MIGKIT_CDC'),
-    ('movers.py', 'MIGKIT_FOLLOW_TIMEOUT'),
-    ('movers.py', 'MIGKIT_MOVER'),
-    ('notify.py', 'MIGKIT_NOTIFY'),
-    ('physical.py', 'MIGKIT_SEED_START_WAIT'),
-    ('ready.py', 'MIGKIT_PREFLIGHT'),
-    ('second_reader.py', 'MIGKIT_SECOND_READER_PYTHON'),
-    ('servicecheck.py', 'MIGKIT_COMPARE_WITH'),
-    ('session.py', 'MIGKIT_RUN_ID'),
-    ('shared.py', 'MIGKIT_STATE_KEY'),
-    ('state.py', 'MIGKIT_STATE_KEY'),
-    ('tools.py', 'MIGKIT_ACCEPT_TERMS'),
-    ('tools.py', 'MIGKIT_DB2_CONNECT_LICENSE'),
-    ('tools.py', 'MIGKIT_TOOLS'),
-    ('util.py', 'MIGKIT_TOOLS'),
-}
-
 
 def raw_reads(src):
     """[(name, line)] of every variable a module reads by a literal name
@@ -284,9 +267,14 @@ def raw_reads(src):
 
 
 def _raw_everywhere():
-    for path in sorted((ROOT / "migkit").rglob("*.py")):
+    """The raw reads of migkit's modules and of the repository's tools."""
+    paths = [*sorted((ROOT / "migkit").rglob("*.py")),
+             *sorted((ROOT / "tools").glob("*.py"))]
+    for path in paths:
         if path.name != "envkeys.py":
-            rel = str(path.relative_to(ROOT / "migkit"))
+            rel = str(path.relative_to(ROOT / "migkit")) \
+                if path.is_relative_to(ROOT / "migkit") else \
+                str(path.relative_to(ROOT))
             for name, line in raw_reads(path.read_text()):
                 yield rel, name, line
 
@@ -301,13 +289,12 @@ def test_a_setting_of_migkits_own_is_declared_whatever_its_name():
 
 
 def test_a_declared_variable_is_read_through_the_registry():
-    got = {(w, n) for w, n, _ in _raw_everywhere()
-           if envkeys.declared(n) is not None}
-    new = sorted(got - OWED_RAW)
-    assert not new, "read it through migkit.envkeys: %s" % new
-    gone = sorted(OWED_RAW - got)
-    assert not gone, "read through envkeys now - take it off OWED_RAW: %s" \
-        % gone
+    """Row 559 (AUD-Z.env-raw): no declared variable is read raw beside
+    the registry, in migkit or in the repository's tools - its kind, its
+    default and the error for a value it cannot be are said once."""
+    got = sorted(f"{w}:{ln} {n}" for w, n, ln in _raw_everywhere()
+                 if envkeys.declared(n) is not None)
+    assert not got, "read it through migkit.envkeys:\n" + "\n".join(got)
 
 
 def test_the_raw_scan_would_notice_one():
@@ -318,4 +305,64 @@ def test_the_raw_scan_would_notice_one():
                                   ("GRANTS_IGNORE_ROLES", 2)]
     assert envkeys.declared("SEQUENCE_BUFFER") is None
     assert "SEQUENCE_BUFFER" not in FOREIGN
-    assert ("engines/postgres.py", "GRANTS_IGNORE_ROLES") not in OWED_RAW
+    assert [n for _, n, _ in _raw_everywhere()
+            if envkeys.declared(n) is not None] == []
+
+
+def test_a_name_built_in_pieces_is_held_to_the_registry():
+    assert envkeys.prefixed("source") == "MIGKIT_SOURCE"
+    assert envkeys.prefixed("target", "password") == "MIGKIT_TARGET_PASSWORD"
+    # a hop's name, its runs of anything else one `_` - as `init` writes it
+    assert envkeys.prefixed("my-shop.eu", "source", "password") == \
+        "MIGKIT_MY_SHOP_EU_SOURCE_PASSWORD"
+    with pytest.raises(KeyError):
+        envkeys.prefixed("sourse")
+
+
+def test_a_secret_is_read_whole():
+    env = {"MIGKIT_STATE_KEY": "  two words  "}
+    assert envkeys.secret("MIGKIT_STATE_KEY", env) == "  two words  "
+    assert envkeys.secret("MIGKIT_STATE_KEY", {}) == ""
+    # the text reader strips, which a passphrase must not be
+    assert envkeys.text("MIGKIT_STATE_KEY", env) == "two words"
+    with pytest.raises(KeyError):
+        envkeys.secret("MIGKIT_NOT_A_KEY", {})
+
+
+def test_the_moved_reads_keep_their_defaults(monkeypatch):
+    """Each read moved onto the registry gives what it gave raw where
+    nothing is set (row 559: no behaviour change)."""
+    assert envkeys.number("MIGKIT_READ_TIMEOUT", {}) == 3600
+    assert envkeys.number("MIGKIT_LEASE_SECONDS", {}) == 60
+    assert envkeys.number("MIGKIT_FOLLOW_TIMEOUT", {}) == 1800
+    assert envkeys.number("MIGKIT_PROBE_SECONDS", {}) == 1.5
+    assert envkeys.number("MIGKIT_PROBE_FROM", {}) == 256 * 2 ** 20
+    assert envkeys.number("MIGKIT_GENERATIONS", {}, default=5) == 5
+    assert envkeys.number("MIGKIT_GENERATIONS",
+                          {"MIGKIT_GENERATIONS": "-2"}) == 0
+    assert envkeys.text("MIGKIT_PROBE_FROM", {}, default="") == ""
+    assert envkeys.text("MIGKIT_IDENTITY", {}) == "~/.ssh/id_ed25519"
+    assert envkeys.text("MIGKIT_TOOLS", {}) == "~/.migkit/tools"
+    assert envkeys.text("MIGKIT_DENY_WORDS_FILE", {}) == \
+        "~/.config/migkit/deny-words.txt"
+    for name in ("MIGKIT_EXPLAIN", "MIGKIT_REPAIR_TEXT",
+                 "MIGKIT_TAIL_APPLY_ALL", "MIGKIT_CATALOG_REFRESH"):
+        assert envkeys.flag(name, {}) is False, name
+    assert envkeys.items("MIGKIT_NOTIFY", {"MIGKIT_NOTIFY": "a@x, ,b@x"}) \
+        == ["a@x", "b@x"]
+    from migkit import decide, lease, leaves, tools, util
+    import os
+    for name in ("MIGKIT_TOOLS", "MIGKIT_LEASE_SECONDS", "MIGKIT_GENERATIONS",
+                 "MIGKIT_EXPLAIN"):
+        monkeypatch.delenv(name, raising=False)
+    assert str(tools.tools_home()) == os.path.expanduser("~/.migkit/tools")
+    assert util._pinned_bin() == os.path.expanduser("~/.migkit/tools/bin")
+    assert lease.term() == 60.0 and leaves.most_generations() == 5
+    assert decide.explaining() is False
+    # set, each module reads what the registry reads
+    monkeypatch.setenv("MIGKIT_LEASE_SECONDS", "0.5")
+    monkeypatch.setenv("MIGKIT_GENERATIONS", "not a number")
+    monkeypatch.setenv("MIGKIT_EXPLAIN", "on")
+    assert lease.term() == 1.0          # raised to the least it may be
+    assert leaves.most_generations() == 5   # as it was: unreadable, default
+    assert decide.explaining() is True

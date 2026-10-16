@@ -30,7 +30,8 @@ def reset():
 
 def hit(name):
     """A place a move keeps what it has done has been reached."""
-    spec = os.environ.get("MIGKIT_FAILPOINT")
+    from . import envkeys
+    spec = envkeys.text("MIGKIT_FAILPOINT")
     if not spec:
         return
     mine = [one.strip().split(":") for one in spec.split(",")]

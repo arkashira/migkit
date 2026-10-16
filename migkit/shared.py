@@ -46,6 +46,7 @@ import hashlib
 import json
 import os
 import threading
+from . import envkeys
 import time
 from pathlib import Path
 
@@ -68,7 +69,7 @@ def together(hop):
 
 def _encode(record, sealed):
     body = json.dumps(record, default=str)
-    if sealed and os.environ.get("MIGKIT_STATE_KEY"):
+    if sealed and envkeys.secret("MIGKIT_STATE_KEY"):
         return "sealed:" + base64.b64encode(
             _seal(body.encode(), often=True)).decode()
     return body

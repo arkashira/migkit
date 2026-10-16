@@ -12,6 +12,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from . import envkeys
 from . import advisors, capabilities
 from . import report as _words
 from .config import get_hop, load_hops
@@ -954,13 +955,12 @@ def init(here, force):
     so migkit writes the template itself. Mode 600, because what goes in it
     next can be a secret's reference.
     """
-    import os
     import sys
 
     from .config import user_config_path
     path = (Path.cwd() / "conf" / "hops.yaml") if here else user_config_path()
     tty = sys.stdin.isatty() and sys.stdout.isatty()
-    if tty or os.environ.get("MIGKIT_SOURCE"):
+    if tty or envkeys.text("MIGKIT_SOURCE"):
         from . import guide
         guide.run(_ask if tty else None, console.print, path, force)
         if not here:
@@ -1021,10 +1021,9 @@ def doctor(install):
     Every check/repair/move step migkit runs is a wrapper over a proven
     external program; `--install` pulls whichever are missing so any machine
     or teammate is one command from a full toolchain."""
-    import os
 
     from . import tools as _tools
-    bundle = os.environ.get("MIGKIT_DIAGNOSE", "").strip()
+    bundle = envkeys.text("MIGKIT_DIAGNOSE")
     if bundle:
         # a problem reported with this carries nothing to hand over
         # (`migkit.diagnostics`)

@@ -1294,7 +1294,8 @@ class OracleEngine(OracleCatalog, OracleDeep, FoldsToCapitals, DbapiRows,
         from ..decide import climb, prune
         facts = {"rows": n, "from": self.DIRECT_FROM, "big": big,
                  "stageable": all(b.stageable for b in binds)}
-        forced = os.environ.get("MIGKIT_ORACLE_WRITE", "")
+        from .. import envkeys
+        forced = envkeys.text("MIGKIT_ORACLE_WRITE")
         if forced in {r.name for r in WRITE_WAYS}:
             return climb(str(table), sorted(WRITE_WAYS, key=lambda r:
                                             r.name != forced), facts)

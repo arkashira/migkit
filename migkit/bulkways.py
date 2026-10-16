@@ -20,7 +20,6 @@ passed over with the reason, whatever it measured; a copy the copier
 stopped part way goes on by the copier, which is the one that resumes.
 """
 import dataclasses
-import os
 
 #: the engines climbed here, each with its ways out of `movers._ladder`
 WAYS = {"redis": ("riotx", "redisshake", "builtin"),
@@ -44,8 +43,8 @@ GIVES = {
 def measured(engine):
     """Whether `engine`'s whole-database way is climbed here: one of
     `MEASURED`, and not forced by `MIGKIT_MOVER` for debugging."""
-    return engine in MEASURED and not os.environ.get("MIGKIT_MOVER",
-                                                     "").strip()
+    from . import envkeys
+    return engine in MEASURED and not envkeys.text("MIGKIT_MOVER")
 
 
 def _unfinished(hop):

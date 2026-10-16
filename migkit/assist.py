@@ -35,7 +35,7 @@ refused - the model is not asked - unless it is this machine's own
 crossed.
 """
 import json
-import os
+from . import envkeys
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -48,7 +48,7 @@ BASE = {"openai": "https://api.openai.com/v1",
 
 
 def provider():
-    got = os.environ.get("MIGKIT_AI", "").strip().lower()
+    got = envkeys.text("MIGKIT_AI").lower()
     if got and got not in BASE:
         raise SystemExit(f"MIGKIT_AI={got} is not one of"
                          f" {', '.join(sorted(BASE))}")
@@ -61,10 +61,10 @@ def _request(kind, prompt, endpoint=None):
     key is always the environment's."""
     endpoint = endpoint or {}
     base = (str(endpoint.get("url") or "") or
-            os.environ.get("MIGKIT_AI_URL", "")).rstrip("/") or BASE[kind]
-    key = os.environ.get("MIGKIT_AI_KEY", "")
+            envkeys.text("MIGKIT_AI_URL")).rstrip("/") or BASE[kind]
+    key = envkeys.secret("MIGKIT_AI_KEY")
     model = str(endpoint.get("model") or "") or \
-        os.environ.get("MIGKIT_AI_MODEL", "") or DEFAULT_MODEL.get(kind)
+        envkeys.text("MIGKIT_AI_MODEL") or DEFAULT_MODEL.get(kind)
     if not model:
         raise SystemExit(f"MIGKIT_AI={kind} needs MIGKIT_AI_MODEL: migkit"
                          " does not choose a model for this provider")
@@ -153,8 +153,7 @@ def ask(prompt, endpoint=None, hop=None):
 
 def shares(what):
     """Whether `MIGKIT_AI_SHARE` lets `what` go to the provider."""
-    got = {w.strip() for w in
-           os.environ.get("MIGKIT_AI_SHARE", "").split(",") if w.strip()}
+    got = set(envkeys.items("MIGKIT_AI_SHARE"))
     return what in got
 
 

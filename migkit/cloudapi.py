@@ -36,6 +36,7 @@ real instance holds.
 import datetime
 import json
 import os
+from . import envkeys
 import re
 import time
 from dataclasses import dataclass, field
@@ -62,8 +63,9 @@ POLL, WAIT = 20, 6 * 3600
 def until(ask, what, log, poll=None, most=None):
     """Ask until `ask()` answers something other than None; the answer."""
     poll = poll if poll is not None else float(
-        os.environ.get("MIGKIT_CLOUD_POLL", POLL))
-    most = most or float(os.environ.get("MIGKIT_CLOUD_WAIT", WAIT))
+        envkeys.number("MIGKIT_CLOUD_POLL", default=POLL))
+    most = most or float(envkeys.number("MIGKIT_CLOUD_WAIT",
+                                          default=WAIT))
     end, said = time.time() + most, 0.0
     while True:
         got = ask()

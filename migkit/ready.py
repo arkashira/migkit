@@ -53,7 +53,7 @@ its fix, all at once - one run for all of them, not one per failure.
 disk too small for the tables with their indexes, a catch-up the probes
 say may never end, a path not rehearsed - is said, and does not stop it.
 """
-import os
+from . import envkeys
 from dataclasses import dataclass
 
 BEFORE = "before the move"
@@ -717,7 +717,7 @@ def gate(hop, eng, dbs, mode, do_drop, log):
     if not got:
         return []
     said = "; ".join(str(i) for i in got)
-    if os.environ.get("MIGKIT_PREFLIGHT", "").lower() == "warn":
+    if envkeys.text("MIGKIT_PREFLIGHT").lower() == "warn":
         for i in got:
             log(f"[yellow]known before the move, gone on from"
                 f" (MIGKIT_PREFLIGHT=warn):[/yellow] {i}")

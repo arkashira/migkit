@@ -58,8 +58,8 @@ def _recipient(text):
 
 def _identity():
     import pyrage
-    path = os.environ.get("MIGKIT_IDENTITY") or os.path.expanduser(
-        "~/.ssh/id_ed25519")
+    from . import envkeys
+    path = os.path.expanduser(envkeys.text("MIGKIT_IDENTITY"))
     try:
         raw = pathlib.Path(path).read_bytes()
     except OSError:

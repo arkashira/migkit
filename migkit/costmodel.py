@@ -389,7 +389,8 @@ def seeds():
 def knowledge_path():
     """Where the machine's knowledge is kept: `MIGKIT_KNOWLEDGE`, or the
     user's data directory. Never sent anywhere."""
-    got = os.environ.get("MIGKIT_KNOWLEDGE")
+    from . import envkeys
+    got = envkeys.text("MIGKIT_KNOWLEDGE", default="")
     if got:
         return os.path.expanduser(got)
     base = os.environ.get("XDG_DATA_HOME") or os.path.join(

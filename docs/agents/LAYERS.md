@@ -317,7 +317,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a record is written in the shape `ha` gives it; the shape moves below persistence
 
 - `migkit/claims.py:200` persistence -> workflows (`ha`)
-- `migkit/state.py:612` persistence -> workflows (`ha`)
+- `migkit/state.py:613` persistence -> workflows (`ha`)
 
 ### a record is written in the shape `indexes` gives it; the shape moves below persistence
 
@@ -331,7 +331,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/kept.py:843` persistence -> workflows (`tailctl`)
 - `migkit/setaside.py:87` persistence -> workflows (`tailctl`)
-- `migkit/state.py:616` persistence -> workflows (`tailctl`)
+- `migkit/state.py:617` persistence -> workflows (`tailctl`)
 
 ### a record is written in the shape `twoway` gives it; the shape moves below persistence
 
@@ -340,7 +340,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a record keeps what the decision engine (`decide`) measured; the fact is handed down
 
 - `migkit/session.py:159` persistence -> decision (`decide`)
-- `migkit/shared.py:344` persistence -> decision (`decide`)
+- `migkit/shared.py:345` persistence -> decision (`decide`)
 
 ### a record keeps what the decision engine (`model`) measured; the fact is handed down
 
@@ -375,7 +375,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report asks an engine (`engines`) for a name or a fact; the engine contract moves below reporting
 
 - `migkit/export.py:97` reporting -> engines (`engines`)
-- `migkit/report.py:872` reporting -> engines (`engines`)
+- `migkit/report.py:874` reporting -> engines (`engines`)
 - `migkit/telemetry.py:146` reporting -> engines (`engines`)
 - `migkit/troubleshooting.py:62` reporting -> engines (`engines`)
 
@@ -405,7 +405,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report reads `movers` for the state of the running workflow; the state moves below reporting
 
 - `migkit/export.py:129` reporting -> workflows (`movers`)
-- `migkit/report.py:871` reporting -> workflows (`movers`)
+- `migkit/report.py:873` reporting -> workflows (`movers`)
 
 ### a report reads `physical` for the state of the running workflow; the state moves below reporting
 
@@ -422,11 +422,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### a report states what the decision engine (`capabilities`) chose; the choice is handed down as a fact
 
 - `migkit/diagnostics.py:107` reporting -> decision (`capabilities`)
-- `migkit/report.py:871` reporting -> decision (`capabilities`)
+- `migkit/report.py:873` reporting -> decision (`capabilities`)
 
 ### a report states what the decision engine (`decide`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:871` reporting -> decision (`decide`)
+- `migkit/report.py:873` reporting -> decision (`decide`)
 - `migkit/telemetry.py:180` reporting -> decision (`decide`)
 
 ### a report states what the decision engine (`faults`) chose; the choice is handed down as a fact
@@ -439,11 +439,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a report states what the decision engine (`sizing`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:907` reporting -> decision (`sizing`)
+- `migkit/report.py:909` reporting -> decision (`sizing`)
 
 ### a report states what the decision engine (`waysaid`) chose; the choice is handed down as a fact
 
-- `migkit/report.py:871` reporting -> decision (`waysaid`)
+- `migkit/report.py:873` reporting -> decision (`waysaid`)
 
 ### a report states what the decision engine (`workload`) chose; the choice is handed down as a fact
 
@@ -478,10 +478,10 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung or plan reads `movers` for what the workflow can do; ends when the workflow publishes its abilities below decision
 
-- `migkit/bulkways.py:73` decision -> workflows (`movers`)
+- `migkit/bulkways.py:72` decision -> workflows (`movers`)
 - `migkit/capabilities.py:630` decision -> workflows (`movers`)
 - `migkit/legs.py:182` decision -> workflows (`movers`)
-- `migkit/machine.py:466` decision -> workflows (`movers`)
+- `migkit/machine.py:467` decision -> workflows (`movers`)
 - `migkit/planner.py:64` decision -> workflows (`movers`)
 - `migkit/repairways.py:463` decision -> workflows (`movers`)
 - `migkit/waysaid.py:22` decision -> workflows (`movers`)
@@ -523,15 +523,15 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a rung reads a wrapped tool's surface (`mirror`); the surface is a fact handed down
 
-- `migkit/bulkways.py:73` decision -> integrations (`mirror`)
+- `migkit/bulkways.py:72` decision -> integrations (`mirror`)
 
 ### a rung reads a wrapped tool's surface (`redisshake`); the surface is a fact handed down
 
-- `migkit/bulkways.py:73` decision -> integrations (`redisshake`)
+- `migkit/bulkways.py:72` decision -> integrations (`redisshake`)
 
 ### a rung reads a wrapped tool's surface (`ship`); the surface is a fact handed down
 
-- `migkit/machine.py:986` decision -> integrations (`ship`)
+- `migkit/machine.py:987` decision -> integrations (`ship`)
 
 ### a safety check reads `barriers` for the step it guards; the step reports its own state down
 
@@ -539,16 +539,16 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a safety check reads `cutover` for the step it guards; the step reports its own state down
 
-- `migkit/approvals.py:245` safety -> workflows (`cutover`)
+- `migkit/approvals.py:246` safety -> workflows (`cutover`)
 - `migkit/freeze.py:1002` safety -> workflows (`cutover`)
 
 ### a safety check reads `fleet` for the step it guards; the step reports its own state down
 
-- `migkit/lease.py:203` safety -> workflows (`fleet`)
+- `migkit/lease.py:201` safety -> workflows (`fleet`)
 
 ### a safety check reads `tailctl` for the step it guards; the step reports its own state down
 
-- `migkit/approvals.py:245` safety -> workflows (`tailctl`)
+- `migkit/approvals.py:246` safety -> workflows (`tailctl`)
 - `migkit/freeze.py:3254` safety -> workflows (`tailctl`)
 
 ### a safety check reads `users` for the step it guards; the step reports its own state down
@@ -565,11 +565,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a safety refusal is said by reporting's `notify`; the wording moves below safety
 
-- `migkit/approvals.py:326` safety -> reporting (`notify`)
+- `migkit/approvals.py:327` safety -> reporting (`notify`)
 
 ### a safety refusal is said by reporting's `verdict`; the wording moves below safety
 
-- `migkit/approvals.py:217` safety -> reporting (`verdict`)
+- `migkit/approvals.py:218` safety -> reporting (`verdict`)
 
 ### a safety refusal is said by reporting's `wording`; the wording moves below safety
 
@@ -593,7 +593,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a wrapper reports through `crossmove`, the workflow that drives it; the shared piece moves below both
 
-- `migkit/tools.py:562` integrations -> workflows (`crossmove`)
+- `migkit/tools.py:561` integrations -> workflows (`crossmove`)
 
 ### a wrapper reports through `editions`, the workflow that drives it; the shared piece moves below both
 
@@ -620,7 +620,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### a wrapper reports through `second_reader`, the workflow that drives it; the shared piece moves below both
 
-- `migkit/tools.py:551` integrations -> workflows (`second_reader`)
+- `migkit/tools.py:550` integrations -> workflows (`second_reader`)
 
 ### a wrapper reports through `tailtables`, the workflow that drives it; the shared piece moves below both
 
@@ -637,11 +637,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `applyway` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:7145` engines -> workflows (`applyway`)
+- `migkit/engines/base.py:7144` engines -> workflows (`applyway`)
 
 ### an engine calls `appversions` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2020` engines -> workflows (`appversions`)
+- `migkit/engines/base.py:2019` engines -> workflows (`appversions`)
 - `migkit/engines/mysql.py:3669` engines -> workflows (`appversions`)
 - `migkit/engines/postgres.py:5192` engines -> workflows (`appversions`)
 
@@ -673,7 +673,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `leaves` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:4533` engines -> workflows (`leaves`)
+- `migkit/engines/base.py:4532` engines -> workflows (`leaves`)
 - `migkit/engines/hetero.py:780` engines -> workflows (`leaves`)
 - `migkit/engines/mongodb.py:242` engines -> workflows (`leaves`)
 
@@ -690,7 +690,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `movers` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2052` engines -> workflows (`movers`)
+- `migkit/engines/base.py:2051` engines -> workflows (`movers`)
 - `migkit/engines/cassandra.py:1988` engines -> workflows (`movers`)
 - `migkit/engines/generic.py:2052` engines -> workflows (`movers`)
 - `migkit/engines/hetero.py:223` engines -> workflows (`movers`)
@@ -709,11 +709,11 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `rules` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2541` engines -> workflows (`rules`)
+- `migkit/engines/base.py:2540` engines -> workflows (`rules`)
 
 ### an engine calls `second_reader` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2542` engines -> workflows (`second_reader`)
+- `migkit/engines/base.py:2541` engines -> workflows (`second_reader`)
 - `migkit/engines/hetero.py:3398` engines -> workflows (`second_reader`)
 - `migkit/engines/mysql.py:11338` engines -> workflows (`second_reader`)
 - `migkit/engines/postgres.py:7341` engines -> workflows (`second_reader`)
@@ -724,13 +724,13 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `tableengine` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2492` engines -> workflows (`tableengine`)
+- `migkit/engines/base.py:2491` engines -> workflows (`tableengine`)
 - `migkit/engines/mysql.py:512` engines -> workflows (`tableengine`)
 - `migkit/engines/postgres.py:1234` engines -> workflows (`tableengine`)
 
 ### an engine calls `tailctl` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:2333` engines -> workflows (`tailctl`)
+- `migkit/engines/base.py:2332` engines -> workflows (`tailctl`)
 - `migkit/engines/cassandra.py:2853` engines -> workflows (`tailctl`)
 - `migkit/engines/generic.py:2349` engines -> workflows (`tailctl`)
 - `migkit/engines/hetero.py:3417` engines -> workflows (`tailctl`)
@@ -739,7 +739,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/engines/mssql.py:4235` engines -> workflows (`tailctl`)
 - `migkit/engines/mysql.py:2220` engines -> workflows (`tailctl`)
 - `migkit/engines/neo4j.py:95` engines -> workflows (`tailctl`)
-- `migkit/engines/oracle.py:2419` engines -> workflows (`tailctl`)
+- `migkit/engines/oracle.py:2420` engines -> workflows (`tailctl`)
 - `migkit/engines/postgres.py:3583` engines -> workflows (`tailctl`)
 - `migkit/engines/redis.py:24` engines -> workflows (`tailctl`)
 
@@ -755,7 +755,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### an engine calls `twoway` for a step it cannot do itself; the engine split gives that step a contract below the engines
 
-- `migkit/engines/base.py:6710` engines -> workflows (`twoway`)
+- `migkit/engines/base.py:6709` engines -> workflows (`twoway`)
 - `migkit/engines/dynamodb.py:933` engines -> workflows (`twoway`)
 - `migkit/engines/hetero.py:4030` engines -> workflows (`twoway`)
 - `migkit/engines/mysql.py:1568` engines -> workflows (`twoway`)
@@ -799,12 +799,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/attempts.py:786` execution -> decision (`decide`)
 - `migkit/ranges.py:1098` execution -> decision (`decide`)
 - `migkit/runner.py:55` execution -> decision (`decide`)
-- `migkit/util.py:664` execution -> decision (`decide`)
+- `migkit/util.py:663` execution -> decision (`decide`)
 
 ### an executor asks the decision engine (`faults`) how many or how fast; the call becomes a fact handed down
 
-- `migkit/failpoint.py:52` execution -> decision (`faults`)
-- `migkit/util.py:179` execution -> decision (`faults`)
+- `migkit/failpoint.py:53` execution -> decision (`faults`)
+- `migkit/util.py:178` execution -> decision (`faults`)
 
 ### an executor asks the decision engine (`sizing`) how many or how fast; the call becomes a fact handed down
 
@@ -839,7 +839,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 ### an executor says its progress through `wording`; the notice goes through an event below execution
 
 - `migkit/runner.py:122` execution -> reporting (`wording`)
-- `migkit/util.py:282` execution -> reporting (`wording`)
+- `migkit/util.py:281` execution -> reporting (`wording`)
 
 ### configuration reaches `audit` (persistence); the shared piece moves below both, or the call is inverted
 
@@ -892,7 +892,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### engines reaches `cli` (cli); the shared piece moves below both, or the call is inverted
 
-- `migkit/engines/base.py:7926` engines -> cli (`cli`)
+- `migkit/engines/base.py:7925` engines -> cli (`cli`)
 - `migkit/engines/oracle_pump.py:227` engines -> cli (`cli`)
 
 ### every provider call waits on the egress gate (`cloudapi.gate`, `egress.decide`) before its client is made; the gate moves to a contract below persistence
@@ -900,15 +900,15 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/anchor.py:130` persistence -> integrations (`cloudapi`)
 - `migkit/dba.py:1141` decision -> integrations (`cloudapi`)
 - `migkit/freeze.py:6390` safety -> integrations (`cloudapi`)
-- `migkit/machine.py:619` decision -> integrations (`cloudapi`)
-- `migkit/state.py:332` persistence -> integrations (`cloudapi`)
+- `migkit/machine.py:620` decision -> integrations (`cloudapi`)
+- `migkit/state.py:333` persistence -> integrations (`cloudapi`)
 - `migkit/variants.py:503` configuration -> integrations (`cloudapi`)
 - `migkit/variants.py:503` configuration -> safety (`egress`)
 
 ### execution reaches `engines` (engines); the shared piece moves below both, or the call is inverted
 
 - `migkit/attempts.py:221` execution -> engines (`engines`)
-- `migkit/util.py:1267` execution -> engines (`engines`)
+- `migkit/util.py:1266` execution -> engines (`engines`)
 
 ### execution reaches `tools` (integrations); the shared piece moves below both, or the call is inverted
 
@@ -933,12 +933,12 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### persistence reaches `engines` (engines); the shared piece moves below both, or the call is inverted
 
-- `migkit/shared.py:322` persistence -> engines (`engines`)
+- `migkit/shared.py:323` persistence -> engines (`engines`)
 
 ### persistence reaches `tooluse` (integrations); the shared piece moves below both, or the call is inverted
 
 - `migkit/anchor.py:712` persistence -> integrations (`tooluse`)
-- `migkit/shared.py:512` persistence -> integrations (`tooluse`)
+- `migkit/shared.py:513` persistence -> integrations (`tooluse`)
 
 ### reporting reaches `cli` (cli); the shared piece moves below both, or the call is inverted
 
@@ -962,7 +962,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### safety reaches `web.approve` (web); the shared piece moves below both, or the call is inverted
 
-- `migkit/approvals.py:314` safety -> web (`web.approve`)
+- `migkit/approvals.py:315` safety -> web (`web.approve`)
 
 ### scope reaches `interlock` (safety); the shared piece moves below both, or the call is inverted
 
@@ -992,7 +992,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 - `migkit/capabilities.py:34` decision -> engines (`engines.base`)
 - `migkit/decide.py:2746` decision -> engines (`engines.base`)
-- `migkit/model.py:1110` decision -> engines (`engines.base`)
+- `migkit/model.py:1111` decision -> engines (`engines.base`)
 - `migkit/scenarios.py:505` decision -> engines (`engines.base`)
 - `migkit/workload.py:133` decision -> engines (`engines.base`)
 
@@ -1020,7 +1020,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 
 ### the decision engine asks an engine (`engines.pg_pass`) what it can do; ends when the engine contract is a package below decision
 
-- `migkit/model.py:319` decision -> engines (`engines.pg_pass`)
+- `migkit/model.py:320` decision -> engines (`engines.pg_pass`)
 
 ### the decision engine asks an engine (`engines.postgres`) what it can do; ends when the engine contract is a package below decision
 
@@ -1035,7 +1035,7 @@ Outside the rule: `tools` (the generators, the full suite and the checks run by 
 - `migkit/capabilities.py:33` decision -> engines (`engines`)
 - `migkit/dba.py:311` decision -> engines (`engines`)
 - `migkit/decide.py:2745` decision -> engines (`engines`)
-- `migkit/machine.py:946` decision -> engines (`engines`)
+- `migkit/machine.py:947` decision -> engines (`engines`)
 - `migkit/tableway.py:132` decision -> engines (`engines`)
 - `migkit/waysaid.py:71` decision -> engines (`engines`)
 

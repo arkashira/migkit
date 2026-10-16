@@ -46,10 +46,8 @@ import time
 
 
 def term():
-    try:
-        return max(float(os.environ.get("MIGKIT_LEASE_SECONDS", "60")), 1.0)
-    except ValueError:
-        raise SystemExit("MIGKIT_LEASE_SECONDS is not a number of seconds")
+    from . import envkeys
+    return float(envkeys.number("MIGKIT_LEASE_SECONDS"))
 
 
 def lapse(have):

@@ -56,6 +56,7 @@ numbers and why.
 import json
 import math
 import os
+from . import envkeys
 import re
 import time
 from dataclasses import dataclass, field
@@ -73,7 +74,7 @@ def _refreshed_path():
     """Where a catalog refreshed from a provider's API is kept: beside
     the operator's other migkit files, never inside the installed
     package."""
-    override = os.environ.get("MIGKIT_INSTANCES")
+    override = envkeys.text("MIGKIT_INSTANCES", default="")
     if override:
         return Path(override).expanduser()
     base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
@@ -735,7 +736,7 @@ def maybe_refresh(cloud, region, log=None):
     `REFRESH_DAYS`; said in a line, never a reason to stop."""
     from .cloudapi import gate
     gate(None)
-    if cloud != "aws" or os.environ.get("MIGKIT_CATALOG_REFRESH") != "1":
+    if cloud != "aws" or not envkeys.flag("MIGKIT_CATALOG_REFRESH"):
         return ""
     try:
         extra = json.loads(_refreshed_path().read_text())

@@ -28,6 +28,8 @@ import re
 import threading
 from urllib.parse import quote, unquote
 
+from .. import envkeys
+
 #: a hop's name as the page takes it
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 #: the most of an address, a user and a password the page takes
@@ -162,7 +164,7 @@ def create(values, path):
     kept = False
     for side in ("source", "target"):
         if values[f"{side}_password"]:
-            env[f"MIGKIT_{side.upper()}_PASSWORD"] = values[
+            env[envkeys.prefixed(side, "password")] = values[
                 f"{side}_password"]
             kept = True
     if kept:

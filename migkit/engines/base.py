@@ -1714,9 +1714,8 @@ class Engine:
         reconcile loop that quietly rewrote text would leave a target that
         can never check clean again, with nobody having decided that.
         """
-        import os
-        return os.environ.get("MIGKIT_REPAIR_TEXT", "").strip().lower() \
-            in ("1", "true", "yes", "on")
+        from .. import envkeys
+        return envkeys.flag("MIGKIT_REPAIR_TEXT")
 
     def _mojibake_updates(self, db, table, key, columns, rows):
         """Statements that repair only the values `_double_encoded` confirms.

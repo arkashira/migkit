@@ -77,7 +77,6 @@ it measures.
 `MIGKIT_TABLE_COPY` names the one way every unit takes where it holds -
 for measuring, like `MIGKIT_MOVER`, never needed to move.
 """
-import os
 import threading
 import time
 
@@ -309,7 +308,8 @@ def _rungs():
     it where it holds, the table copier where it does not or has been
     given up on."""
     rungs = ways()
-    forced = os.environ.get("MIGKIT_TABLE_COPY", "").strip()
+    from . import envkeys
+    forced = envkeys.text("MIGKIT_TABLE_COPY")
     if not forced:
         return rungs
     if forced not in [r.name for r in rungs]:

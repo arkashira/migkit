@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 
 import click
 
+from . import envkeys
 from . import decide, engineat
 from .cli import main
 from .diagnostics import ProbeAccumulator
@@ -347,7 +348,7 @@ def estate(addresses, accounts, user, to, cloud, region):
             notes.append(f"{spec}: {why}")
     probes = ProbeAccumulator()
     found = discover(addresses, rows, user,
-                     os.environ.get("MIGKIT_SOURCE_PASSWORD"), probes)
+                     envkeys.secret("MIGKIT_SOURCE_PASSWORD") or None, probes)
     priced = _priced(cloud or None, region or None)
     for f in found:
         size(f, to or None, priced=priced)

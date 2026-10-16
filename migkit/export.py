@@ -1114,7 +1114,8 @@ def table_rows(doc):
 def _signing_key(hop):
     got = (hop.options or {}).get("evidence") or {}
     key = got.get("sign") if isinstance(got, dict) else None
-    key = key or os.environ.get("MIGKIT_EVIDENCE_KEY")
+    from . import envkeys
+    key = key or envkeys.text("MIGKIT_EVIDENCE_KEY")
     return os.path.expanduser(str(key)) if key else None
 
 

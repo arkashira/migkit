@@ -57,6 +57,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import with_docker_lock as lock  # noqa: E402
+from migkit import envkeys  # noqa: E402
 from tests import servers  # noqa: E402
 
 PY = sys.executable
@@ -701,7 +702,8 @@ def main(argv=None):
                     help="phases: unit, docker, vm (comma separated)")
     ap.add_argument("-m", dest="mark", default="",
                     help="a pytest mark expression every phase adds")
-    ap.add_argument("--lanes", default=os.environ.get("MIGKIT_TEST_LANES"),
+    ap.add_argument("--lanes",
+                    default=envkeys.text("MIGKIT_TEST_LANES") or None,
                     help="lanes per daemon, e.g. colima=1,migkit=2")
     ap.add_argument("--plan", action="store_true",
                     help="lay the lanes out and print them; run nothing")

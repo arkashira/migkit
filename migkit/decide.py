@@ -2146,8 +2146,8 @@ def _strategy_why_not(a, b, mine, other):
 
 def explaining():
     """Whether the console shows the decision record as well."""
-    return os.environ.get("MIGKIT_EXPLAIN", "").strip().lower() in (
-        "1", "yes", "true", "on")
+    from . import envkeys
+    return envkeys.flag("MIGKIT_EXPLAIN")
 
 
 def _record_path(hop):

@@ -17,6 +17,9 @@ does, and read through `flag`, `number` or `text`: one rule for "on"
 error naming the variable), one error for a number that is not one.
 `unknown` finds a `MIGKIT_*` in the environment nothing reads, with the
 closest name that is read; `reference` is the table the manual prints.
+A name built from pieces (`MIGKIT_<SIDE>_PASSWORD`) is built by
+`prefixed`, which refuses one nothing declares; a secret is read whole by
+`secret` - a passphrase is its exact characters, spaces too.
 `tests/test_every_env_var_is_declared.py` reads the code and fails on a
 name it reads that is not declared here, so the list cannot fall behind
 the code.
@@ -34,9 +37,10 @@ class Var:
     by commas), `path` or `secret` - its default, and the least a number
     may be (a smaller one is raised to it). `internal`: set by migkit for
     a process it starts, never by the operator. `tests`: read by the test
-    suite only. `named_for_a_program`: its own name is a program's, so
-    it is neither offered back as a "did you mean" nor printed in the
-    reference (programs are not named in what migkit says)."""
+    suite and the repository's own tools only. `named_for_a_program`:
+    its own name is a program's, so it is neither offered back as a "did
+    you mean" nor printed in the reference (programs are not named in
+    what migkit says)."""
     what: str
     kind: str = "text"
     default: object = None
@@ -330,7 +334,29 @@ VARS = {
     "MIGKIT_TERADATA_HOST": Var("the Teradata system the tests against a"
                                 " server reach", tests=True),
     "MIGKIT_TERADATA_USER": Var("the user they sign in as", tests=True),
+    "MIGKIT_MEASURE_OUT": Var("the file the scenario harness writes one"
+                              " JSON line a measured case to", "path",
+                              tests=True),
+    "MIGKIT_TEST_STRICT": Var("what a missing server, program or module"
+                              " fails rather than skips: 1 for all, or"
+                              " some of server, program, module", "text",
+                              tests=True),
+    "MIGKIT_TEST_LANES": Var("the lanes each docker daemon runs for the"
+                             " final run, e.g. colima=1,migkit=2", "text",
+                             tests=True),
+    "MIGKIT_TEST_LANE": Var("the lane a test process's shared servers are"
+                            " in, 0-9", "whole", 0, tests=True),
+    "MIGKIT_TEST_RUN": Var("the id of the final run a test process is"
+                           " part of", "text", tests=True),
+    "MIGKIT_DENY_WORDS_FILE": Var("the file of one's own organisation's"
+                                  " names the pre-commit check refuses,"
+                                  " kept on this machine only", "path",
+                                  "~/.config/migkit/deny-words.txt",
+                                  tests=True),
 }
+
+#: what every variable of migkit's own begins with
+PREFIX = "MIGKIT_"
 
 #: names read by a pattern rather than one by one: a hop's password
 #: references (`env:MIGKIT_<HOP>_<SIDE>_PASSWORD`, as `init` writes them)
@@ -410,6 +436,25 @@ def text(name, environ=None, default=None):
         return raw
     got = var.default if default is None else default
     return "" if got is None else str(got)
+
+
+def secret(name, environ=None):
+    """A secret's value whole - not stripped, a passphrase's spaces are
+    its own; "" where it is unset."""
+    _var(name)
+    env = os.environ if environ is None else environ
+    return str(env.get(name) or "")
+
+
+def prefixed(*parts):
+    """The name `MIGKIT_<PART>_<PART>...` built from pieces - a hop's
+    name, a side - upper case, each run of anything but a letter or a
+    digit one `_`. A name nothing declares is a KeyError: one built in
+    pieces is held to the registry as one written whole."""
+    name = re.sub(r"[^A-Z0-9]+", "_",
+                  (PREFIX + "_".join(str(p) for p in parts)).upper())
+    _var(name)
+    return name
 
 
 def items(name, environ=None):

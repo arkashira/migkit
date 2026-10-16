@@ -32,7 +32,6 @@ executed from it; the file is kept beside the run's other evidence
 (`BATCH`).
 """
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +61,8 @@ def interpreter():
     builds, one beside a source checkout's own, or the reader's program
     wherever the path finds it, read for the Python its first line names.
     """
-    named = os.environ.get("MIGKIT_SECOND_READER_PYTHON")
+    from . import envkeys
+    named = envkeys.text("MIGKIT_SECOND_READER_PYTHON")
     if named:
         return named if Path(named).exists() else None
     from .util import _BASE, which

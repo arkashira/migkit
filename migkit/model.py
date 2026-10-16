@@ -48,6 +48,7 @@ own. None of them names the resource that binds before the move.
 import json
 import math
 import os
+from . import envkeys
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -63,13 +64,13 @@ TRUTHS = (MEASURED, EARLIER, REHEARSED, CATALOGUED, ASSUMED)
 
 #: seconds each probe may take; the probes of a move take about six of
 #: these
-PROBE_SECONDS = float(os.environ.get("MIGKIT_PROBE_SECONDS") or 1.5)
+PROBE_SECONDS = float(envkeys.number("MIGKIT_PROBE_SECONDS"))
 #: bytes one probe stream reads at most
 PROBE_BYTES = 32 * 2 ** 20
 #: a database carrying less than this is planned from the catalogue and
 #: earlier runs, without the probes: its move takes about as long as they
 #: would
-PROBE_FROM = int(os.environ.get("MIGKIT_PROBE_FROM") or 256 * 2 ** 20)
+PROBE_FROM = envkeys.number("MIGKIT_PROBE_FROM")
 #: streams the probes run side by side to see how a resource scales
 PROBE_STREAMS = 4
 #: streams side by side reaching this share of that many times one
@@ -708,7 +709,7 @@ def probe_floor(hop=None):
     `MIGKIT_PROBE_FROM` where the operator sets it, else `PROBE_FROM` as
     this machine's and this hop's moves have tuned it (`tuning`: the bytes
     a move carried in the time its probes took)."""
-    if os.environ.get("MIGKIT_PROBE_FROM"):
+    if envkeys.text("MIGKIT_PROBE_FROM", default=""):
         return PROBE_FROM
     from . import tuning
     try:

@@ -4,6 +4,8 @@ import re
 import time
 from pathlib import Path
 
+from . import envkeys
+
 CHECK_ORDER = ["schema", "counts", "autoinc", "data", "deep", "delta"]
 CHECK_LABEL = {"schema": "schema", "counts": "rows", "autoinc": "autoinc",
                "data": "data", "deep": "deep", "delta": "delta"}
@@ -809,7 +811,7 @@ def hop_not_reread(err, hop):
 
 def address_unreadable(side):
     return (f"no {side} address migkit could read. Give it as"
-            f" MIGKIT_{side.upper()}=<engine>://<user>@<host>:<port>/<db>"
+            f" {envkeys.prefixed(side)}=<engine>://<user>@<host>:<port>/<db>"
             " (for example postgres://app@db1:5432/shop), or run"
             " `migkit init` in a terminal and enter it again")
 

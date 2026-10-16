@@ -257,8 +257,7 @@ def chosen(engine, table="", hop=None, go=False):
     overrides it for debugging - deliberately an environment variable and not
     a flag, so it stays out of the command surface.
     """
-    import os
-    forced = os.environ.get("MIGKIT_MOVER", "").strip()
+    forced = envkeys.text("MIGKIT_MOVER")
     if forced:
         if forced not in VIAS:
             raise SystemExit(f"MIGKIT_MOVER={forced} is not one of"
@@ -276,10 +275,9 @@ def for_hop(hop, engine, table="", go=False):
     only where the hop allows them, and otherwise the choice is `chosen`'s
     exactly as it always was - one call for the move, `assess`, `doctor`
     and the plan."""
-    import os
 
     from . import legs
-    if legs.allowed(hop) and not os.environ.get("MIGKIT_MOVER", "").strip():
+    if legs.allowed(hop) and not envkeys.text("MIGKIT_MOVER"):
         got = choice(engine, table, hop, go)
         return got.path, got.reason
     return chosen(engine, table), ""
@@ -4203,7 +4201,8 @@ spec = json.loads(os.environ["MIGKIT_SPEC"])
 
 def side(name):
     ep = dict(spec[name])
-    ep["password"] = os.environ.get("MIGKIT_" + name.upper() + "_PASSWORD",
+    ep["password"] = os.environ.get({"source": "MIGKIT_SOURCE_PASSWORD",
+                                     "target": "MIGKIT_TARGET_PASSWORD"}[name],
                                     "")
     return ep
 
@@ -6769,8 +6768,7 @@ def follow_selected():
     same changes - but about which one this network allows. Unset keeps the
     path every existing hop already takes.
     """
-    import os
-    want = os.environ.get("MIGKIT_CDC", "").strip().lower()
+    want = envkeys.text("MIGKIT_CDC").lower()
     if not want:
         return ""
     if want not in ("native", "follow"):
@@ -7038,7 +7036,6 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     Where the seed cannot be gone on from this way, `follow_from` refuses
     with the reason.
     """
-    import os
 
     from . import physical
     from .engines.postgres import PostgresEngine
@@ -7135,7 +7132,7 @@ def pgcopydb_follow(hop, db, go, log=None, timeout=None):
     with out.open("ab") as fh:
         proc = runner.start(argv, env, stdin=subprocess.DEVNULL, stdout=fh,
                             stderr=fh, secrets=(s.password, t.password))
-    limit = timeout or int(os.environ.get("MIGKIT_FOLLOW_TIMEOUT", "1800"))
+    limit = timeout or int(envkeys.number("MIGKIT_FOLLOW_TIMEOUT"))
     with runner.stopping(), proc:
         try:
             _follow_sentinel(d, env, proc, log, end=not running)

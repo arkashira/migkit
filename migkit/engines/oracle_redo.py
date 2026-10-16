@@ -236,7 +236,8 @@ def choice(eng, side, db):
     from ..decide import Facts, climb
     ep = eng._endpoint(side)
     rungs = readers()
-    forced = os.environ.get("MIGKIT_ORACLE_READER", "").strip()
+    from .. import envkeys
+    forced = envkeys.text("MIGKIT_ORACLE_READER")
     if forced:
         if forced not in (RUNG, LOGMINER):
             raise SystemExit(f"MIGKIT_ORACLE_READER={forced} is not one of"

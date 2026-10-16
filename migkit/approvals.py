@@ -64,7 +64,8 @@ def rules(hop):
 def _requester():
     """Who asks: the person a run started from the web view was started
     by, the machine's user otherwise."""
-    actor = os.environ.get("MIGKIT_ACTOR", "").strip()
+    from . import envkeys
+    actor = envkeys.text("MIGKIT_ACTOR")
     if actor:
         return actor
     try:
@@ -76,8 +77,8 @@ def _requester():
 def _identity():
     """The requester's own private key: `MIGKIT_IDENTITY`, as the
     evidence's is, or the default SSH key; None where there is none."""
-    path = os.environ.get("MIGKIT_IDENTITY") or os.path.expanduser(
-        "~/.ssh/id_ed25519")
+    from . import envkeys
+    path = os.path.expanduser(envkeys.text("MIGKIT_IDENTITY"))
     return path if os.path.isfile(path) else None
 
 

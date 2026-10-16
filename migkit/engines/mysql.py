@@ -334,8 +334,8 @@ class MySQLEngine(Engine):
         # read_timeout + TCP keepalive: without them a network blip on a
         # cross-cloud link leaves the socket open forever and a long scan
         # (count on a hundred-GB table) hangs the whole run with no error.
-        import os
-        rt = int(os.environ.get("MIGKIT_READ_TIMEOUT", "3600"))
+        from .. import envkeys
+        rt = envkeys.number("MIGKIT_READ_TIMEOUT")
 
         def _open():
             # the greeting is read under the read timeout, so a server that

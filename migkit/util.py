@@ -28,9 +28,8 @@ def _pinned_bin():
     """Where `doctor --install` links the builds it pins (`tools.
     tools_home()/bin`): this user's, so nothing is written where only root
     may, and first, so a pinned build is the one that runs."""
-    import os
-    return str(Path(os.environ.get("MIGKIT_TOOLS")
-                    or Path.home() / ".migkit" / "tools") / "bin")
+    from . import envkeys
+    return str(Path(envkeys.text("MIGKIT_TOOLS")).expanduser() / "bin")
 
 
 # the builds migkit pinned first, migkit's own environment next, then a

@@ -93,6 +93,7 @@ import subprocess
 import threading
 import time
 
+from . import envkeys
 from . import diagnostics, failpoint
 from .hopkeys import opt
 
@@ -1252,7 +1253,7 @@ def _run(hop, eng, dbs, go, leg, say, approve):
             + (f" ({len(failed)} of the checks above stop it)"
                if failed else ""))
         return None
-    unproven = not conf and os.environ.get("MIGKIT_CUTOVER") == "unproven"
+    unproven = not conf and envkeys.text("MIGKIT_CUTOVER") == "unproven"
     if failed and not unproven:
         raise SystemExit(
             "the cutover did not start, nothing was written: "

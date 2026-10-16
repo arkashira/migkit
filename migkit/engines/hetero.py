@@ -5432,12 +5432,11 @@ class _CopiedRanges:
     RETIRE_AFTER = 1000
 
     def __init__(self, eng, db, where):
-        import os
 
         from .. import twoway
         self.eng, self.db, self.where = eng, db, where
-        self.off = os.environ.get("MIGKIT_TAIL_APPLY_ALL", "") not in ("",
-                                                                     "0")
+        from .. import envkeys
+        self.off = envkeys.flag("MIGKIT_TAIL_APPLY_ALL")
         self.said, self.tables = None, {}
         # {(entry, its plan): True} once retired; {entry: changes in a row
         # its newest mark did not cover}

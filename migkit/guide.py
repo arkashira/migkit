@@ -39,6 +39,7 @@ two addresses); two files are 2 questions and 3 lines. The template
 the engine, the ports, the playbook and a worker count.
 """
 import os
+from . import envkeys
 import re
 from pathlib import Path
 
@@ -78,8 +79,7 @@ def _hop_name(raw, taken):
 
 
 def _env_var(name, side):
-    return re.sub(r"[^A-Z0-9]+", "_",
-                  f"MIGKIT_{name}_{side}_PASSWORD".upper())
+    return envkeys.prefixed(name, side, "password")
 
 
 def _with_reference(text, ref):
@@ -175,7 +175,7 @@ def run(ask, say, path, force=False, env=None):
     for side, e in (("source", src_e), ("target", dst_e)):
         if not _sign_in(e) or _has_password(raw[side]):
             continue
-        var = f"MIGKIT_{side.upper()}_PASSWORD"
+        var = envkeys.prefixed(side, "password")
         if env.get(var) is not None:
             typed[side] = (env[var], var)
         elif ask is not None:
@@ -258,9 +258,9 @@ def _address(question, say, given, text, side, knocked=None):
         if not got and question is not None:
             got = question(text).strip()
         if not got:
-            raise SystemExit(f"no {side} address: set MIGKIT_"
-                             f"{side.upper()} or run `migkit init` in a"
-                             " terminal")
+            raise SystemExit(f"no {side} address: set"
+                             f" {envkeys.prefixed(side)} or run `migkit"
+                             " init` in a terminal")
         try:
             if "://" not in got:
                 from . import engineat

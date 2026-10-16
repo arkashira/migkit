@@ -79,7 +79,7 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 
 * this machine has no keychain migkit can use; keep the passwords in environment variables instead (MIGKIT_SECRETS=env)
 
-* no <...> address: set MIGKIT_<...> or run `migkit init` in a terminal
+* no <...> address: set <...> or run `migkit init` in a terminal
 
 * <...> holds <...>, which migkit reads nothing from beside `hops` and <...> - add the hop by hand, or use --force to write a new file (which leaves nothing of the old one)
 
@@ -686,8 +686,6 @@ Each entry is the message as migkit prints it, with the parts filled in at run t
 * <...>: <...>. Nothing was written. Use target_rows: replace, or empty them
 
 * <...>: <...> was not done - it <...> and cannot be taken back, and no plan showed it | the plan that showed it was for another target. Show the plan first (the same command without --go), then run it with --go against the target it names.
-
-* MIGKIT_LEASE_SECONDS is not a number of seconds
 
 * the hop's lease kept changing under migkit while it tried to write it; another machine is taking it over and back - stop the other runs
 
